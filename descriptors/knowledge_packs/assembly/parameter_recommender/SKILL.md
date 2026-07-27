@@ -36,4 +36,4 @@ For missing input, binary, permission, environment, or invalid-wrapper failures,
 
 ## Response
 
-Return `parameters` and optionally `summary`. `parameters` is the exact mapping shown to the reviewer and consumed by command construction after approval. Do not return compatibility aliases, rich per-parameter wrappers, or copied evidence IDs. On retry also return `retry_disposition` (`retry`, `stop`, or `expert_review`).
+Return `parameters` and optionally `summary`. `parameters` is the exact attempt-local sparse mapping shown to the reviewer and consumed by command construction after approval; it may be empty. Do not return compatibility aliases, rich per-parameter wrappers, copied evidence IDs, or retry-routing fields. On retry, use prior attempts only as chronological evidence and do not copy or complete their mappings.

@@ -5,72 +5,69 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from app.domains.assembly.profile_paths import lookup_mapping_path as _lookup
-from app.domains.assembly.selection import parameter_case_read_type
+from app.schemas.artifacts import ParameterAttemptTask
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalRecommendationFacts,
+)
 
 
 def build_hifiasm_retrieval_query(
-    prompt_profile: dict[str, Any],
-    *,
+    facts: CanonicalRecommendationFacts,
+    context: AssemblyRecommendationContext,
     method_id: str,
-    task: str,
+    task: ParameterAttemptTask,
 ) -> dict[str, Any]:
-    """Normalize initial-profile paths and units before deterministic retrieval."""
+    """Build a typed retrieval query from canonical facts and stage context."""
 
     if task != "recommend_initial":
-        raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
+        raise ValueError(
+            "hifiasm numeric retrieval only supports task='recommend_initial'"
+        )
 
-    return _build_query(prompt_profile, method_id=method_id, task=task)
+    genome_fact = facts.genome.effective_genome_size
+    genome_size_bp = genome_fact.value if genome_fact is not None else None
 
+    coverage_fact = facts.sequencing.raw_coverage
+    coverage = coverage_fact.value if coverage_fact is not None else None
 
-def _build_query(
-    prompt_profile: dict[str, Any], *, method_id: str, task: str
-) -> dict[str, Any]:
+    n50_fact = facts.reads.read_n50
+    read_n50_bp = n50_fact.value if n50_fact is not None else None
 
-    genome_size_bp = _lookup(prompt_profile, "genome_survey.estimated_genome_size")
-    read_n50_bp = _lookup(prompt_profile, "read_qc.read_n50")
-    coverage, coverage_ref = _first_number_with_ref(
-        (
-            _lookup(prompt_profile, "read_qc.effective_coverage_1kb"),
-            "prompt_profile.read_qc.effective_coverage_1kb",
-        ),
-        (
-            _lookup(prompt_profile, "read_qc.effective_coverage_5kb"),
-            "prompt_profile.read_qc.effective_coverage_5kb",
-        ),
-        (
-            _lookup(prompt_profile, "genome_survey.kmer_peak_coverage"),
-            "prompt_profile.genome_survey.kmer_peak_coverage",
-        ),
-    )
-    query = {
+    het_fact = facts.genome.heterozygosity
+    heterozygosity = het_fact.value if het_fact is not None else None
+
+    ploidy_fact = facts.species.ploidy
+    ploidy = ploidy_fact.value if ploidy_fact is not None else None
+
+    return {
         "method_id": method_id,
         "task": task,
-        "read_type": parameter_case_read_type(
-            _lookup(prompt_profile, "assets.read_type")
-        ),
+        "read_type": context.read_type,
         "numeric_features": {
             "genome_size_mb": _number_record(
                 _scale(genome_size_bp, 1_000_000),
-                "prompt_profile.genome_survey.estimated_genome_size",
+                "facts.genome.effective_genome_size",
             ),
-            "coverage": _number_record(coverage, coverage_ref),
+            "coverage": _number_record(
+                coverage,
+                "facts.sequencing.raw_coverage",
+            ),
             "read_n50_kb": _number_record(
                 _scale(read_n50_bp, 1_000),
-                "prompt_profile.read_qc.read_n50",
+                "facts.reads.read_n50",
             ),
             "heterozygosity": _number_record(
-                _lookup(prompt_profile, "genome_survey.heterozygosity"),
-                "prompt_profile.genome_survey.heterozygosity",
+                heterozygosity,
+                "facts.genome.heterozygosity",
             ),
             "ploidy": _number_record(
-                _lookup(prompt_profile, "sample.ploidy"),
-                "prompt_profile.sample.ploidy",
+                ploidy,
+                "facts.species.ploidy",
             ),
         },
-        "categorical_context": {"clade": _lookup(prompt_profile, "sample.clade")},
+        "categorical_context": {"clade": facts.species.clade},
     }
-    return query
 
 
 def _number_record(value: Any, source_ref: str | None) -> dict[str, float | str | None]:
@@ -82,13 +79,6 @@ def _number_record(value: Any, source_ref: str | None) -> dict[str, float | str 
 
 def _scale(value: Any, denominator: float) -> float | None:
     return float(value) / denominator if _is_number(value) else None
-
-
-def _first_number_with_ref(*values: tuple[Any, str]) -> tuple[float | None, str | None]:
-    for value, source_ref in values:
-        if _is_number(value):
-            return float(value), source_ref
-    return None, None
 
 
 def _is_number(value: Any) -> bool:

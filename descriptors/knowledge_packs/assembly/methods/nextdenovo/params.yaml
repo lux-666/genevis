@@ -1,86 +1,93 @@
-method_id: nextdenovo
+catalog_id: nextdenovo
+method_id: assembly.candidate.nextdenovo
 tool: nextDenovo
-read_type: ont
 description: "NextDenovo long-read assembly catalog for Phase11 typed parameter attempts."
 
 parameters:
   read_type:
-    cli: null
-    level: 0
-    source: run_config
     value_type: string
+    application:
+      kind: config_key
+      key: read_type
+    required_for_execution: true
     allowed_values: ["ont", "clr", "hifi"]
-    source_priority:
-      - assembly.nextdenovo_parameters.read_type
-      - assembly.read_type_prior.nextdenovo
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_method_read_type
     description: "NextDenovo read type used in run.cfg."
+
   input_fofn:
-    cli: null
-    level: 0
-    source: executor
     value_type: path
-    source_priority:
-      - execution.input_fofn
+    application:
+      kind: config_key
+      key: input_fofn
+    required_for_execution: true
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_input_reads
     description: "Input FOFN path used in run.cfg."
+
   work_dir:
-    cli: null
-    level: 0
-    source: executor
     value_type: path
-    source_priority:
-      - execution.work_dir
+    application:
+      kind: config_key
+      key: workdir
+    required_for_execution: true
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_output_dir
     description: "NextDenovo work directory."
+
   genome_size:
-    cli: null
-    level: 0
-    source: run_config
     value_type: int
+    application:
+      kind: config_key
+      key: genome_size
+    required_for_execution: true
     min: 1
-    source_priority:
-      - assembly.resolved_genome_size.value_bp
+    layers:
+      l1:
+        fact: effective_genome_size_bp
+        transform: identity
     description: "Estimated genome size in bases."
+
   threads:
-    cli: null
-    level: 0
-    source: run_config
     value_type: int
-    default: 32
+    application:
+      kind: config_key
+      key: threads
     min: 1
-    source_priority:
-      - assembly.nextdenovo_parameters.threads
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_threads
+        required: false
+        materialized_default: 32
     description: "Number of CPU threads."
 
-  read_n50:
-    cli: null
-    level: 1
-    source: read_qc
-    value_type: int
-    min: 1
-    source_priority:
-      - read_qc.summary.n50
-    description: "Readonly read N50 context."
-  estimated_coverage:
-    cli: null
-    level: 1
-    source: read_qc
-    value_type: float
-    min: 0
-    description: "Readonly sequencing coverage context; omitted until a producer publishes this field."
-
   read_cutoff:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: config_key
+      key: read_cutoff
     min: 1
     max: 100000
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum read length cutoff written to run.cfg."
 
   nextgraph_a:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: config_key
+      key: nextgraph_a
     min: 1
     max: 10
+    layers:
+      l2:
+        adjustable: true
     description: "NextGraph -a assembly graph option written to run.cfg."

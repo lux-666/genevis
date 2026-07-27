@@ -10,8 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.schemas.state import initial_state
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.state import initial_state
 from app.stages.preflight import (
     check_stage_prerequisites,
     validate_execution_plan,
@@ -101,9 +101,7 @@ class PreflightCheckTests(unittest.TestCase):
                 data_dir=tmpdir,
             )
             state["asset_registry_ref"] = str(registry)
-            state["stage_outputs"] = {
-                "assembly_review": {"status": "completed"}
-            }
+            state["stage_outputs"] = {"assembly_review": {"status": "completed"}}
             state["resource_refs"]["assembly"] = ResourceRef(
                 resource_type="assembly",
                 paths=[str(assembly_path)],
@@ -143,11 +141,13 @@ class PreflightCheckTests(unittest.TestCase):
             check = check_stage_prerequisites(state, "gene_annotation")
 
             self.assertFalse(check.can_run)
-            self.assertEqual([res.resource_name for res in check.missing], ["masked assembly"])
+            self.assertEqual(
+                [res.resource_name for res in check.missing], ["masked assembly"]
+            )
             self.assertIn("repeat_annotation", check.suggestions[0])
 
     def test_gene_annotation_allows_explicit_unmasked_fallback_reason(self):
-        """Gene annotation may use unmasked assembly only with an explicit fallback reason."""
+        """Allow unmasked assembly only with an explicit fallback reason."""
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly_path = Path(tmpdir) / "assembly.fa"
             assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
@@ -170,7 +170,9 @@ class PreflightCheckTests(unittest.TestCase):
             )
             state["asset_registry_ref"] = str(registry)
             state["stage_outputs"] = {}
-            state["skip_reasons"] = {"repeat_annotation": "repeat_annotation_skipped_by_user"}
+            state["skip_reasons"] = {
+                "repeat_annotation": "repeat_annotation_skipped_by_user"
+            }
 
             check = check_stage_prerequisites(state, "gene_annotation")
 
@@ -321,7 +323,7 @@ class PreflightValidationTests(unittest.TestCase):
             self.assertTrue(validation.checks["hic_scaffolding"].can_run)
 
     def test_validate_execution_plan_repeat_satisfies_gene_softmask(self):
-        """repeat_annotation in the same plan should satisfy gene_annotation's softmask requirement."""
+        """A planned repeat stage satisfies the gene softmask requirement."""
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly_path = Path(tmpdir) / "assembly.fa"
             assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
@@ -355,7 +357,7 @@ class PreflightValidationTests(unittest.TestCase):
             self.assertTrue(validation.checks["gene_annotation"].can_run)
 
     def test_validate_execution_plan_function_annotation_requires_gene_proteins(self):
-        """function_annotation alone should fail before runtime when proteins are missing."""
+        """Fail before runtime when function-stage proteins are missing."""
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
 
@@ -374,10 +376,13 @@ class PreflightValidationTests(unittest.TestCase):
 
             self.assertFalse(validation.valid)
             self.assertEqual(validation.first_blocker, "function_annotation")
-            self.assertEqual(validation.checks["function_annotation"].missing[0].resource_name, "predicted proteins")
+            self.assertEqual(
+                validation.checks["function_annotation"].missing[0].resource_name,
+                "predicted proteins",
+            )
 
     def test_validate_execution_plan_gene_satisfies_function_proteins(self):
-        """gene_annotation in the same plan should satisfy function_annotation's protein input."""
+        """A planned gene stage satisfies the function protein input."""
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly_path = Path(tmpdir) / "assembly.fa"
             assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
@@ -403,7 +408,11 @@ class PreflightValidationTests(unittest.TestCase):
 
             validation = validate_execution_plan(
                 state,
-                requested_stages=["repeat_annotation", "gene_annotation", "function_annotation"],
+                requested_stages=[
+                    "repeat_annotation",
+                    "gene_annotation",
+                    "function_annotation",
+                ],
             )
 
             self.assertTrue(validation.valid)

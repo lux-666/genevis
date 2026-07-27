@@ -9,25 +9,31 @@ from unittest.mock import patch
 import pytest
 
 from app.control.lifecycle import resume_review_state
-from app.storage.artifacts import read_artifact_records
+from app.integrity import sha256_file
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_COMMAND,
+    ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
 )
-from app.integrity import sha256_file
 from app.schemas.state import initial_state
+from app.stages.assembly.method_application.hifiasm_ont import (
+    freeze_hifiasm_ont_attempt,
+)
+from app.stages.assembly.nodes import plan_candidate_attempts
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
-    load_recommendation_bundle,
-    recover_recommendation_json_artifact,
+    recover_artifact as recover_recommendation_json_artifact,
 )
 from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
+from app.storage.artifacts import read_artifact_records
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
+    load_parameter_recommendation_chain_v3,
     publish_parameter_file,
     publish_parameter_json,
     read_parameter_json,
@@ -71,7 +77,11 @@ class _FailingModel:
 def _response(**overrides: int) -> dict:
     catalog = load_parameter_catalog("assembly.candidate.hifiasm_ont")
     assert set(overrides).issubset(
-        {name for name, spec in catalog.parameters.items() if spec.level == 2}
+        {
+            name
+            for name, spec in catalog.parameters.items()
+            if spec.layers.l2 is not None
+        }
     )
     return {
         "parameters": dict(overrides),
@@ -79,7 +89,7 @@ def _response(**overrides: int) -> dict:
     }
 
 
-def _state(tmp_path: Path) -> dict:
+def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
     paths = SessionPaths(tmp_path, "s1")
     ensure_run_layout(paths)
     state = initial_state(
@@ -91,10 +101,39 @@ def _state(tmp_path: Path) -> dict:
         "organism": "Example species",
         "target_level": "draft",
     }
+    read_qc_summary = {"n50": 30_000, "total_bases": 42_000_000_000}
+    genome_survey_result = {
+        "estimates": {"genome_size": genome_size, "heterozygosity": 0.01},
+        "estimate_sources": {"genome_size": "survey"},
+    }
+    read_qc_ref = publish_parameter_json(
+        state,
+        stage="read_qc",
+        scope="recommendation",
+        identifier=0,
+        filename="summary.json",
+        payload={"schema_version": 2, **read_qc_summary},
+        artifact_type="read_qc.summary",
+        method_name="read_qc.test_fixture",
+    )
+    genome_survey_ref = publish_parameter_json(
+        state,
+        stage="genome_survey",
+        scope="recommendation",
+        identifier=0,
+        filename="result.json",
+        payload={"schema_version": 2, **genome_survey_result},
+        artifact_type="genome_survey.result",
+        method_name="genome_survey.test_fixture",
+    )
     state["stage_outputs"] = {
-        "read_qc": {"summary": {"n50": 30_000, "effective_coverage_5kb": 42}},
+        "read_qc": {
+            "summary": read_qc_summary,
+            "summary_artifact_ref": read_qc_ref.model_dump(mode="json"),
+        },
         "genome_survey": {
-            "estimates": {"genome_size": 1_000_000_000, "heterozygosity": "medium"}
+            **genome_survey_result,
+            "result_artifact_ref": genome_survey_ref.model_dump(mode="json"),
         },
         "assembly": {
             "status": "selected",
@@ -102,6 +141,7 @@ def _state(tmp_path: Path) -> dict:
             "primary_method": "assembly.candidate.hifiasm_ont",
             "selected_route": "ont",
             "assembly_route": "ont",
+            "target_level": "draft",
             "input_ref": "reads.fastq",
             "input_type": "clean_long_reads",
             "input_profile": {
@@ -110,7 +150,7 @@ def _state(tmp_path: Path) -> dict:
                 "has_hifi": False,
             },
             "assembly_selection": {
-                "read_type": "ont",
+                "read_type": "ont_raw",
                 "primary_method": "assembly.candidate.hifiasm_ont",
                 "source": "recommendation",
                 "rationale": "test",
@@ -170,14 +210,16 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
     cursor = ParameterRecommendationCursor.model_validate(
         assembly["current_parameter_recommendation"]
     )
-    bundle = load_recommendation_bundle(
+    chain = load_parameter_recommendation_chain_v3(
         {**state, "stage_outputs": update["stage_outputs"]},
-        cursor.manifest_ref,
+        manifest_ref=cursor.manifest_ref,
+        expected_stage="assembly",
+        expected_method_id="assembly.candidate.hifiasm_ont",
     )
-    model_request = bundle["model_request"]
+    model_request = chain.model_request
     assert model_request["messages"] == model.messages
     assert "request_id" not in model_request
-    assert model_request["parameter_request_schema_version"] == 2
+    assert model_request["parameter_request_schema_version"] == 3
     assert "context_projection_schema_version" not in model_request
     user_message = model_request["messages"][1]["content"]
     assert user_message == json.dumps(
@@ -193,7 +235,7 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
         "payload_hash",
     ):
         assert internal_field not in user_message
-    assert bundle["recommendation"]["recommendation"]["parameters"] == {
+    assert chain.recommendation["recommendation"]["parameters"] == {
         "purge_level": 1,
         "read_length_cutoff": 3000,
     }
@@ -207,7 +249,7 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
     )
     types = {record["artifact_type"] for record in records}
     assert {
-        "assembly.parameter.input_profile",
+        "assembly.parameter_recommendation.input_snapshot",
         "assembly.parameter.model_request",
         "assembly.parameter.model_response",
         "assembly.parameter.recommendation",
@@ -266,6 +308,76 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
     )
 
 
+def test_freeze_uses_approved_snapshot_after_mutable_genome_state_changes(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path, genome_size=1_000_000)
+    reads = tmp_path / "reads.fastq"
+    reads.write_text("@read\nACGT\n+\nIIII\n", encoding="utf-8")
+    assembly = state["stage_outputs"]["assembly"]
+    assembly.update(
+        {
+            "input_ref": str(reads.resolve()),
+            "selected_methods": ["assembly.candidate.hifiasm_ont"],
+            "hifiasm_ont_parameters": {"threads": 4},
+        }
+    )
+
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        return_value=_Model(_response()),
+    ):
+        recommendation_update = recommend_assembly_parameters(state)
+    blocked = _blocked_state(state, recommendation_update)
+    approval_update = resume_review_state(
+        blocked,
+        _decision_request(blocked, "approve_parameters"),
+    )
+    approved_state = {
+        **blocked,
+        **approval_update,
+        "stage_outputs": approval_update["stage_outputs"],
+    }
+
+    approved_state["stage_outputs"]["genome_survey"]["estimates"]["genome_size"] = (
+        2_000_000
+    )
+    plan_update = plan_candidate_attempts(approved_state)
+    planned_state = {
+        **approved_state,
+        **plan_update,
+        "stage_outputs": plan_update["stage_outputs"],
+    }
+    with patch(
+        "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+        return_value=(None, [], None),
+    ):
+        freeze_update = freeze_hifiasm_ont_attempt(planned_state)
+    frozen_state = {
+        **planned_state,
+        **freeze_update,
+        "stage_outputs": freeze_update["stage_outputs"],
+    }
+    frozen_output = frozen_state["stage_outputs"]["assembly"]
+    assert frozen_output["status"] == "hifiasm_ont_frozen"
+    attempt = ParameterAttempt.model_validate(frozen_output["parameter_attempts"][0])
+
+    frozen_parameters = read_parameter_json(
+        frozen_state,
+        attempt.frozen_parameters_ref,
+        expected_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+    )
+    command = read_parameter_json(
+        frozen_state,
+        attempt.command_ref,
+        expected_type=ASSEMBLY_PARAMETER_COMMAND,
+    )
+    assert frozen_parameters["l1_facts"]["hg_size"] == "1m"
+    assert frozen_parameters["effective_parameters"]["hg_size"] == "1m"
+    hg_size_index = command["argv"].index("--hg-size")
+    assert command["argv"][hg_size_index + 1] == "1m"
+
+
 def test_model_request_is_durable_before_invoke_failure(tmp_path: Path) -> None:
     state = _state(tmp_path)
     with patch(
@@ -279,12 +391,14 @@ def test_model_request_is_durable_before_invoke_failure(tmp_path: Path) -> None:
     cursor = ParameterRecommendationCursor.model_validate(
         assembly["current_parameter_recommendation"]
     )
-    bundle = load_recommendation_bundle(
+    chain = load_parameter_recommendation_chain_v3(
         {**state, "stage_outputs": update["stage_outputs"]},
-        cursor.manifest_ref,
+        manifest_ref=cursor.manifest_ref,
+        expected_stage="assembly",
+        expected_method_id="assembly.candidate.hifiasm_ont",
     )
-    assert bundle["model_response"]["validity"] == "invalid"
-    assert "model unavailable" in bundle["model_response"]["error"]
+    assert chain.model_response["validity"] == "invalid"
+    assert "model unavailable" in chain.model_response["error"]
 
 
 def test_stale_checkpoint_reuses_persisted_model_response(tmp_path: Path) -> None:

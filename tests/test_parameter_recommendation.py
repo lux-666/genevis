@@ -31,7 +31,6 @@ def test_exact_parameter_mapping_is_the_only_model_contract() -> None:
     assert result == {
         "parameters": {"purge_level": 1},
         "summary": "Use conservative purging.",
-        "retry_disposition": None,
     }
 
 
@@ -85,21 +84,21 @@ def test_rich_parameter_wrappers_are_rejected() -> None:
         )
 
 
-def test_retry_requires_the_model_to_state_its_disposition() -> None:
-    with pytest.raises(ValueError, match="requires retry_disposition"):
-        normalize_parameter_recommendation(
-            {"parameters": {"purge_level": 1}},
-            _request(task="retry_after_execution_failure"),
-        )
-
+def test_retry_uses_the_same_sparse_shape_without_model_routing() -> None:
     result = normalize_parameter_recommendation(
-        {
-            "parameters": {"purge_level": 1},
-            "retry_disposition": "retry",
-        },
+        {"parameters": {"purge_level": 1}},
         _request(task="retry_after_execution_failure"),
     )
-    assert result["retry_disposition"] == "retry"
+    assert result == {"parameters": {"purge_level": 1}, "summary": None}
+
+    with pytest.raises(ValueError, match="unsupported fields"):
+        normalize_parameter_recommendation(
+            {
+                "parameters": {"purge_level": 1},
+                "retry_disposition": "stop",
+            },
+            _request(task="retry_after_execution_failure"),
+        )
 
 
 def test_summary_is_optional_but_never_synthesized() -> None:

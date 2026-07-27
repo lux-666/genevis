@@ -28,6 +28,7 @@ class CheckpointerFactoryTests(unittest.TestCase):
             try:
                 self.assertTrue(checkpoint_db_path(run_dir).exists())
                 from langgraph.checkpoint.sqlite import SqliteSaver
+
                 self.assertIsInstance(saver, StateBudgetCheckpointer)
                 self.assertIsInstance(saver.inner, SqliteSaver)
             finally:
@@ -62,8 +63,7 @@ class CheckpointerFactoryTests(unittest.TestCase):
         delegated_names = (
             name
             for name in BaseCheckpointSaver.__dict__
-            if not name.startswith("_")
-            and name not in StateBudgetCheckpointer.__dict__
+            if not name.startswith("_") and name not in StateBudgetCheckpointer.__dict__
         )
         for name in delegated_names:
             with self.subTest(name=name):
@@ -177,9 +177,7 @@ class CheckpointerAsyncBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["session_id"], "s1")
-        snapshot = await compiled.aget_state(
-            {"configurable": {"thread_id": "s1"}}
-        )
+        snapshot = await compiled.aget_state({"configurable": {"thread_id": "s1"}})
         self.assertEqual(snapshot.values["session_id"], "s1")
 
 

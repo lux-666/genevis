@@ -48,7 +48,8 @@ def _fake_diamond_bin(tmpdir: str, *, fail: bool = False) -> str:
             "  shift\n"
             "done\n"
             'if [ -n "$out" ]; then\n'
-            '  printf "prot1\\tsp|P12345\\t100.0\\t300\\t0\\t0\\t1\\t300\\t1\\t300\\t0.0\\t600\\n" > "$out"\n'
+            '  printf "prot1\\tsp|P12345\\t100.0\\t300\\t0\\t0\\t1\\t300'
+            '\\t1\\t300\\t0.0\\t600\\n" > "$out"\n'
             "fi\n",
             encoding="utf-8",
         )
@@ -301,9 +302,9 @@ class DiamondCollectTests(unittest.TestCase):
             ran_state = {**state, "stage_outputs": run_result["stage_outputs"]}
             attempt = load_frozen_attempt(
                 ran_state,
-                _execution_cursor(
-                    run_result["stage_outputs"]["function_annotation"]
-                )["frozen_attempt_ref"],
+                _execution_cursor(run_result["stage_outputs"]["function_annotation"])[
+                    "frozen_attempt_ref"
+                ],
                 expected_stage="function_annotation",
                 expected_method_name="function_annotation.candidate.diamond",
             )

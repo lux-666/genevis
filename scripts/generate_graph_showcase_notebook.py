@@ -11,7 +11,6 @@ from textwrap import dedent
 
 import nbformat as nbf
 
-
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_PATH = ROOT / "app" / "entrypoints" / "graph_showcase.ipynb"
 
@@ -73,25 +72,34 @@ def build_notebook() -> nbf.NotebookNode:
                 build_flye_graph,
                 build_nextdenovo_graph,
             )
-            from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
-            from app.stages.function_annotation.builder import build_stage as build_function_annotation_stage
-            from app.stages.gene_annotation.builder import build_stage as build_gene_annotation_stage
-            from app.stages.genome_survey.builder import build_stage as build_genome_survey_stage
-            from app.stages.hic_scaffolding.builder import build_stage as build_hic_scaffolding_stage
+            from app.stages.assembly_review.builder import build_stage """
+            """as build_assembly_review_stage
+            from app.stages.function_annotation.builder import build_stage """
+            """as build_function_annotation_stage
+            from app.stages.gene_annotation.builder import build_stage """
+            """as build_gene_annotation_stage
+            from app.stages.genome_survey.builder import build_stage """
+            """as build_genome_survey_stage
+            from app.stages.hic_scaffolding.builder import build_stage """
+            """as build_hic_scaffolding_stage
             from app.stages.hic_scaffolding.method_application import (
                 build_autohic_graph,
             )
-            from app.stages.inventory.builder import build_stage as build_inventory_stage
+            from app.stages.inventory.builder import build_stage """
+            """as build_inventory_stage
             from app.stages.read_qc.builder import build_stage as build_read_qc_stage
-            from app.stages.repeat_annotation.builder import build_stage as build_repeat_annotation_stage
+            from app.stages.repeat_annotation.builder import build_stage """
+            """as build_repeat_annotation_stage
             """
         ),
         markdown_cell(
             """
             ## 2. 渲染 helper
 
-            `render_graph()` 优先使用 LangGraph 的 `draw_mermaid_png()` 展示图片；如果当前环境缺少
-            PNG 渲染能力，会自动退回到 Mermaid 源码，仍然可以复制到 Mermaid Live Editor 或 Markdown
+            `render_graph()` 优先使用 LangGraph 的 `draw_mermaid_png()` 展示"""
+            """图片；如果当前环境缺少
+            PNG 渲染能力，会自动退回到 Mermaid 源码，仍然可以复制到 """
+            """Mermaid Live Editor 或 Markdown
             渲染器里查看。
             """
         ),
@@ -107,11 +115,14 @@ def build_notebook() -> nbf.NotebookNode:
             def render_graph(title: str, compiled_graph, *, xray: bool = False) -> None:
                 graph = compiled_graph.get_graph(xray=xray)
                 display(Markdown(f"### {title}"))
-                display(Markdown(f"Nodes: `{len(graph.nodes)}` · Edges: `{len(graph.edges)}` · xray: `{xray}`"))
+                display(Markdown(f"Nodes: `{len(graph.nodes)}` · """
+            """Edges: `{len(graph.edges)}` · xray: `{xray}`"))
                 try:
                     display(Image(data=graph.draw_mermaid_png()))
-                except Exception as exc:  # pragma: no cover - notebook display fallback
-                    display(Markdown(f"PNG render unavailable: `{type(exc).__name__}: {exc}`"))
+                except Exception as exc:  # pragma: no cover - """
+            """notebook display fallback
+                    display(Markdown(f"PNG render unavailable: """
+            """`{type(exc).__name__}: {exc}`"))
                     display(Markdown("```mermaid\\n" + graph.draw_mermaid() + "\\n```"))
 
 
@@ -145,7 +156,8 @@ def build_notebook() -> nbf.NotebookNode:
             ## 3. 系统父图
 
             父图保持很薄：`route_controller` 根据 `current_stage` 调度固定 stage，
-            每个 stage 返回后再回到 `route_controller`。父图不做生信方法选择，也不执行工具。
+            每个 stage 返回后再回到 `route_controller`。父图不做生信方法"""
+            """选择，也不执行工具。
             """
         ),
         code_cell(
@@ -157,7 +169,8 @@ def build_notebook() -> nbf.NotebookNode:
             """
             ## 4. Stage subgraphs
 
-            每个 stage subgraph 拥有本阶段的输入校验、计划、执行候选、review/commit/fail/block 路径。
+            每个 stage subgraph 拥有本阶段的输入校验、计划、执行候选、"""
+            """review/commit/fail/block 路径。
             """
         ),
         code_cell(
@@ -171,8 +184,10 @@ def build_notebook() -> nbf.NotebookNode:
             """
             ## 5. Method-application subgraphs
 
-            目前可执行方法的公共形态是 `freeze -> run -> collect -> done`。这些 method subgraph
-            被 stage subgraph 当作普通节点调用，用来隔离具体工具执行和 artifact 收集逻辑。
+            目前可执行方法的公共形态是 `freeze -> run -> collect -> done`。"""
+            """这些 method subgraph
+            被 stage subgraph 当作普通节点调用，用来隔离具体工具执行和 """
+            """artifact 收集逻辑。
             """
         ),
         code_cell(
@@ -187,9 +202,12 @@ def build_notebook() -> nbf.NotebookNode:
             ## 6. 讲解要点
 
             - **Parent graph**：只做 stage 调度和 terminal 状态处理，保持薄。
-            - **Stage subgraph**：承载阶段内的业务边界，例如 assembly 的候选方法规划、Hi-C 的 skip/scaffold 分支。
-            - **Method subgraph**：承载具体可执行方法的冻结参数、运行、收集 artifact 生命周期。
-            - **State 原则**：LangGraph state 保存小型控制事实；大文件、日志、指标表通过 ledger / artifact registry 引用。
+            - **Stage subgraph**：承载阶段内的业务边界，例如 assembly """
+            """的候选方法规划、Hi-C 的 skip/scaffold 分支。
+            - **Method subgraph**：承载具体可执行方法的冻结参数、运行、"""
+            """收集 artifact 生命周期。
+            - **State 原则**：LangGraph state 保存小型控制事实；大文件、"""
+            """日志、指标表通过 ledger / artifact registry 引用。
             """
         ),
     ]

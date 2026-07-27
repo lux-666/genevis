@@ -25,8 +25,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "local_exec": ["read_qc", "assembly", "assembly_review"],
                 "assembly": {
                     "flye_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 2_000_000,
                         "threads": 4,
                     }
                 },
@@ -36,8 +34,6 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.local_exec, ["read_qc", "assembly", "assembly_review"])
         assert config.assembly is not None
         assert config.assembly.flye_parameters is not None
-        self.assertEqual(config.assembly.flye_parameters.read_type, "nano-raw")
-        self.assertEqual(config.assembly.flye_parameters.estimated_genome_size, 2_000_000)
         self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
     def test_valid_config_with_nextdenovo_parameters(self):
@@ -47,10 +43,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "assembly": {
                     "assembly_method": "nextdenovo",
                     "nextdenovo_parameters": {
-                        "read_type": "ont",
-                        "genome_size": 2_000_000,
                         "threads": 4,
-                        "read_cutoff": 1000,
                     },
                 },
             }
@@ -59,9 +52,29 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly is not None
         self.assertEqual(config.assembly.assembly_method, "nextdenovo")
         assert config.assembly.nextdenovo_parameters is not None
-        self.assertEqual(config.assembly.nextdenovo_parameters.read_type, "ont")
-        self.assertEqual(config.assembly.nextdenovo_parameters.genome_size, 2_000_000)
         self.assertEqual(config.assembly.nextdenovo_parameters.threads, 4)
+
+    def test_legacy_method_fact_and_l2_fields_are_rejected(self):
+        cases = (
+            ("flye_parameters", {"threads": 4, "estimated_genome_size": 2_000_000}),
+            ("flye_parameters", {"threads": 4, "read_type": "nano-raw"}),
+            ("nextdenovo_parameters", {"threads": 4, "genome_size": 2_000_000}),
+            ("nextdenovo_parameters", {"threads": 4, "read_type": "ont"}),
+            ("nextdenovo_parameters", {"threads": 4, "read_cutoff": 1000}),
+            ("hifiasm_parameters", {"threads": 4, "read_type": "hifi"}),
+            ("hifiasm_ont_parameters", {"threads": 4, "read_type": "ont"}),
+        )
+
+        for parameter_key, parameters in cases:
+            with self.subTest(parameter_key=parameter_key, parameters=parameters):
+                with self.assertRaises(ValidationError):
+                    RunConfig.model_validate(
+                        {
+                            "assembly": {
+                                parameter_key: parameters,
+                            }
+                        }
+                    )
 
     def test_valid_config_with_hifiasm_parameters(self):
         config = RunConfig.model_validate(
@@ -70,7 +83,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "assembly": {
                     "assembly_method": "hifiasm",
                     "hifiasm_parameters": {
-                        "read_type": "hifi",
                         "threads": 4,
                     },
                 },
@@ -80,7 +92,6 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly is not None
         self.assertEqual(config.assembly.assembly_method, "hifiasm")
         assert config.assembly.hifiasm_parameters is not None
-        self.assertEqual(config.assembly.hifiasm_parameters.read_type, "hifi")
         self.assertEqual(config.assembly.hifiasm_parameters.threads, 4)
 
     def test_valid_config_with_hifiasm_ont_parameters(self):
@@ -90,7 +101,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "assembly": {
                     "assembly_method": "hifiasm_ont",
                     "hifiasm_ont_parameters": {
-                        "read_type": "ont",
                         "threads": 4,
                     },
                 },
@@ -100,8 +110,29 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly is not None
         self.assertEqual(config.assembly.assembly_method, "hifiasm_ont")
         assert config.assembly.hifiasm_ont_parameters is not None
-        self.assertEqual(config.assembly.hifiasm_ont_parameters.read_type, "ont")
         self.assertEqual(config.assembly.hifiasm_ont_parameters.threads, 4)
+
+    def test_empty_assembly_parameter_blocks_do_not_materialize_threads(self):
+        cases = (
+            ("flye", "flye_parameters"),
+            ("nextdenovo", "nextdenovo_parameters"),
+            ("hifiasm", "hifiasm_parameters"),
+            ("hifiasm_ont", "hifiasm_ont_parameters"),
+        )
+
+        for method, parameter_key in cases:
+            payload = {
+                "local_exec": ["assembly"],
+                "assembly": {
+                    "assembly_method": method,
+                    parameter_key: {},
+                },
+            }
+            with self.subTest(method=method):
+                config = RunConfig.model_validate(payload)
+                parameters = getattr(config.assembly, parameter_key)
+                self.assertIsNotNone(parameters)
+                self.assertIsNone(parameters.threads)
 
     def test_local_hifiasm_method_requires_hifiasm_parameters(self):
         with self.assertRaises(ValidationError) as ctx:
@@ -211,7 +242,11 @@ class RunConfigSchemaTests(unittest.TestCase):
                 }
             )
 
-        self.assertIn("implies read_type 'cyclone' and is incompatible with assembly_method 'hifiasm'", str(ctx.exception))
+        self.assertIn(
+            "implies read_type 'cyclone' and is incompatible with "
+            "assembly_method 'hifiasm'",
+            str(ctx.exception),
+        )
 
     def test_local_assembly_accepts_shared_parameters_with_flye_threads_only(self):
         config = RunConfig.model_validate(
@@ -220,7 +255,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "shared_parameters": {
                     "platform": "ont",
                     "read_type": "ont_raw",
-                    "estimated_genome_size": 2_000_000,
                 },
                 "assembly": {
                     "flye_parameters": {
@@ -235,9 +269,19 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly.flye_parameters is not None
         self.assertEqual(config.shared_parameters.platform, "ont")
         self.assertEqual(config.shared_parameters.read_type, "ont_raw")
-        self.assertIsNone(config.assembly.flye_parameters.read_type)
-        self.assertIsNone(config.assembly.flye_parameters.estimated_genome_size)
         self.assertEqual(config.assembly.flye_parameters.threads, 4)
+
+    def test_run_config_rejects_manifest_owned_genome_size(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "shared_parameters": {
+                        "estimated_genome_size": 2_000_000,
+                    },
+                }
+            )
+
+        self.assertIn("estimated_genome_size", str(ctx.exception))
 
     def test_read_qc_length_filter_choice_is_accepted(self):
         config = RunConfig.model_validate(
@@ -255,7 +299,9 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         assert config.read_qc is not None
         assert config.read_qc.length_filter is not None
-        self.assertEqual(config.read_qc.length_filter.method, "read_qc.length_filter.seqkit_seq")
+        self.assertEqual(
+            config.read_qc.length_filter.method, "read_qc.length_filter.seqkit_seq"
+        )
         self.assertEqual(config.read_qc.length_filter.thresholds, {"min_len": 1000})
 
     def test_genome_survey_parameters_are_accepted_without_read_length(self):
@@ -366,7 +412,9 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertIn("not_a_real_stage", str(ctx.exception))
 
     def test_gene_annotation_and_function_annotation_accepted_in_local_exec(self):
-        config = RunConfig.model_validate({"local_exec": ["gene_annotation", "function_annotation"]})
+        config = RunConfig.model_validate(
+            {"local_exec": ["gene_annotation", "function_annotation"]}
+        )
         self.assertIn("gene_annotation", config.local_exec)
         self.assertIn("function_annotation", config.local_exec)
 
@@ -382,8 +430,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 {
                     "assembly": {
                         "flye_parameters": {
-                            "read_type": "nano-raw",
-                            "estimated_genome_size": 2_000_000,
                             "threads": 4,
                         },
                         "canu_parameters": {},
@@ -399,8 +445,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 {
                     "assembly": {
                         "flye_parameters": {
-                            "read_type": "nano-raw",
-                            "estimated_genome_size": 2_000_000,
                             "threads": 4,
                             "min_overlap": 1000,
                         }
@@ -441,7 +485,7 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("nextdenovo_parameters", str(ctx.exception))
 
-    def test_flye_read_type_and_genome_size_are_optional_when_threads_present(self):
+    def test_flye_method_block_contains_only_executor_threads(self):
         config = RunConfig.model_validate(
             {
                 "local_exec": ["assembly"],
@@ -465,7 +509,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "assembly": {
                         "flye_parameters": {
                             "read_type": "hifi",
-                            "estimated_genome_size": 2_000_000,
                             "threads": 4,
                         }
                     },
@@ -474,14 +517,13 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("read_type", str(ctx.exception))
 
-    def test_non_positive_genome_size_is_rejected(self):
+    def test_legacy_method_genome_size_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
                 {
                     "local_exec": ["assembly"],
                     "assembly": {
                         "flye_parameters": {
-                            "read_type": "nano-raw",
                             "estimated_genome_size": 0,
                             "threads": 4,
                         }
@@ -498,8 +540,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "local_exec": ["assembly"],
                     "assembly": {
                         "flye_parameters": {
-                            "read_type": "nano-raw",
-                            "estimated_genome_size": 2_000_000,
                             "threads": 0,
                         }
                     },
@@ -514,8 +554,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "local_exec": ["read_qc"],
                 "assembly": {
                     "flye_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 2_000_000,
                         "threads": 4,
                     }
                 },
@@ -534,7 +572,10 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "max_blocked_seconds": 0,
                     "stages": {
                         "assembly": {"mode": "strict"},
-                        "hic_scaffolding": {"mode": "strict", "max_blocked_seconds": 3600}
+                        "hic_scaffolding": {
+                            "mode": "strict",
+                            "max_blocked_seconds": 3600,
+                        },
                     },
                 }
             }
@@ -562,29 +603,40 @@ class RunConfigSchemaTests(unittest.TestCase):
 
     def test_review_policy_rejects_negative_timeout(self):
         with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate({"review_policy": {"mode": "strict", "max_blocked_seconds": -1}})
+            RunConfig.model_validate(
+                {"review_policy": {"mode": "strict", "max_blocked_seconds": -1}}
+            )
 
         self.assertIn("max_blocked_seconds", str(ctx.exception))
 
     def test_review_policy_rejects_unknown_stage_override(self):
         with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate({"review_policy": {"mode": "auto", "stages": {"gene_annotation": {"mode": "strict"}}}})
+            RunConfig.model_validate(
+                {
+                    "review_policy": {
+                        "mode": "auto",
+                        "stages": {"gene_annotation": {"mode": "strict"}},
+                    }
+                }
+            )
 
         self.assertIn("gene_annotation", str(ctx.exception))
 
     def test_assembly_review_busco_parameters_accepted(self):
-        cfg = RunConfig.model_validate({
-            "local_exec": ["assembly_review"],
-            "assembly_review": {
-                "busco": {
-                    "lineage_path": "/data/busco/embryophyta_odb10",
-                    "lineage_name": "embryophyta_odb10",
-                    "lineage_version": "odb10",
-                    "lineage_source": "operator_offline_cache",
-                    "threads": 16,
-                }
-            },
-        })
+        cfg = RunConfig.model_validate(
+            {
+                "local_exec": ["assembly_review"],
+                "assembly_review": {
+                    "busco": {
+                        "lineage_path": "/data/busco/embryophyta_odb10",
+                        "lineage_name": "embryophyta_odb10",
+                        "lineage_version": "odb10",
+                        "lineage_source": "operator_offline_cache",
+                        "threads": 16,
+                    }
+                },
+            }
+        )
 
         assert cfg.assembly_review is not None
         assert cfg.assembly_review.busco is not None
@@ -593,7 +645,9 @@ class RunConfigSchemaTests(unittest.TestCase):
 
     def test_assembly_review_busco_unknown_field_rejected(self):
         with self.assertRaises(ValidationError):
-            RunConfig.model_validate({"assembly_review": {"busco": {"lineage_path": "/x", "unknown": "x"}}})
+            RunConfig.model_validate(
+                {"assembly_review": {"busco": {"lineage_path": "/x", "unknown": "x"}}}
+            )
 
     def test_assembly_review_max_reruns_accepted(self):
         cfg = RunConfig.model_validate({"assembly_review": {"max_reruns": 5}})
@@ -601,9 +655,13 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(cfg.assembly_review.max_reruns, 5)
 
     def test_assembly_review_related_species_reference_dir_accepted(self):
-        cfg = RunConfig.model_validate({"assembly_review": {"related_species_reference_dir": "/ref/ncbi_metazoa"}})
+        cfg = RunConfig.model_validate(
+            {"assembly_review": {"related_species_reference_dir": "/ref/ncbi_metazoa"}}
+        )
         assert cfg.assembly_review is not None
-        self.assertEqual(cfg.assembly_review.related_species_reference_dir, "/ref/ncbi_metazoa")
+        self.assertEqual(
+            cfg.assembly_review.related_species_reference_dir, "/ref/ncbi_metazoa"
+        )
 
     def test_assembly_review_max_reruns_default(self):
         cfg = RunConfig.model_validate({"assembly_review": {}})
@@ -617,46 +675,54 @@ class RunConfigSchemaTests(unittest.TestCase):
             RunConfig.model_validate({"assembly_review": {"max_reruns": 11}})
 
     def test_function_annotation_database_provenance_accepts_diamond(self):
-        cfg = RunConfig.model_validate({
-            "function_annotation": {
-                "database_provenance": [
-                    {
-                        "method_name": "function_annotation.candidate.diamond",
-                        "database_name": "UniProt",
-                        "database_version": "2026_02",
-                        "snapshot_date": "2026-05-16",
-                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
-                        "descriptor_version": "diamond.yaml",
-                        "input_proteins_ref": "/data/proteins.fa",
-                    }
-                ]
+        cfg = RunConfig.model_validate(
+            {
+                "function_annotation": {
+                    "database_provenance": [
+                        {
+                            "method_name": "function_annotation.candidate.diamond",
+                            "database_name": "UniProt",
+                            "database_version": "2026_02",
+                            "snapshot_date": "2026-05-16",
+                            "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                            "descriptor_version": "diamond.yaml",
+                            "input_proteins_ref": "/data/proteins.fa",
+                        }
+                    ]
+                }
             }
-        })
+        )
         assert cfg.function_annotation is not None
         assert len(cfg.function_annotation.database_provenance) == 1
         assert cfg.function_annotation.database_provenance[0].database_name == "UniProt"
 
     def test_function_annotation_rejects_deleted_provenance_methods(self):
         with self.assertRaises(ValidationError):
-            RunConfig.model_validate({
-                "function_annotation": {
-                    "database_provenance": [
-                        {
-                            "method_name": "function_annotation.candidate.interproscan",
-                            "database_name": "InterPro",
-                            "database_version": "99.0",
-                            "snapshot_date": "2026-05-16",
-                            "database_source_ref": "/db/interpro/99.0",
-                            "descriptor_version": "interproscan.yaml",
-                            "input_proteins_ref": "/data/proteins.fa",
-                        }
-                    ]
+            RunConfig.model_validate(
+                {
+                    "function_annotation": {
+                        "database_provenance": [
+                            {
+                                "method_name": (
+                                    "function_annotation.candidate.interproscan"
+                                ),
+                                "database_name": "InterPro",
+                                "database_version": "99.0",
+                                "snapshot_date": "2026-05-16",
+                                "database_source_ref": "/db/interpro/99.0",
+                                "descriptor_version": "interproscan.yaml",
+                                "input_proteins_ref": "/data/proteins.fa",
+                            }
+                        ]
+                    }
                 }
-            })
+            )
 
     def test_function_annotation_empty_database_provenance_rejected_by_run_config(self):
         with self.assertRaises(ValidationError):
-            RunConfig.model_validate({"function_annotation": {"database_provenance": []}})
+            RunConfig.model_validate(
+                {"function_annotation": {"database_provenance": []}}
+            )
 
     def test_function_annotation_unknown_field_rejected(self):
         with self.assertRaises(ValidationError):
@@ -756,7 +822,6 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.read_qc.length_filter is not None
         self.assertFalse(config.read_qc.length_filter.approved)
 
-
     def test_autohic_parameters_are_accepted(self):
         config = RunConfig.model_validate(
             {
@@ -765,7 +830,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "autohic_parameters": {
                         "restriction_enzyme": "MboI",
                         "threads": 40,
-                        "debris_adjust": True,
                     },
                 },
             }
@@ -776,21 +840,43 @@ class RunConfigSchemaTests(unittest.TestCase):
             "MboI",
         )
         self.assertEqual(config.hic_scaffolding.autohic_parameters.threads, 40)
-        self.assertTrue(config.hic_scaffolding.autohic_parameters.debris_adjust)
 
-    def test_autohic_rejects_inverted_error_length_window(self):
-        with self.assertRaises(ValidationError):
-            RunConfig.model_validate(
-                {
-                    "hic_scaffolding": {
-                        "autohic_parameters": {
-                            "restriction_enzyme": "DpnII",
-                            "error_min_len": 20_000,
-                            "error_max_len": 10_000,
+        defaulted = RunConfig.model_validate(
+            {"hic_scaffolding": {"autohic_parameters": {}}}
+        )
+        assert defaulted.hic_scaffolding.autohic_parameters is not None
+        self.assertIsNone(defaulted.hic_scaffolding.autohic_parameters.threads)
+        self.assertEqual(
+            defaulted.hic_scaffolding.autohic_parameters.python_command,
+            "python3.9",
+        )
+
+    def test_t2t_run_config_does_not_materialize_catalog_owned_mode(self):
+        config = RunConfig.model_validate({"local_exec": ["t2t"], "t2t": {}})
+
+        self.assertIsNotNone(config.t2t)
+        self.assertIsNone(config.t2t.mode)
+
+    def test_autohic_run_config_rejects_catalog_owned_parameters(self):
+        for name, value in (
+            ("number_of_edit_rounds", 3),
+            ("translocation_adjust", False),
+            ("inversion_adjust", False),
+            ("debris_adjust", True),
+            ("error_max_epoch", 10),
+            ("error_min_len", 20_000),
+            ("error_max_len", 10_000_000),
+            ("error_filter_score", 0.8),
+            ("error_filter_iou_score", 0.7),
+        ):
+            with self.subTest(name=name), self.assertRaises(ValidationError):
+                RunConfig.model_validate(
+                    {
+                        "hic_scaffolding": {
+                            "autohic_parameters": {name: value},
                         }
                     }
-                }
-            )
+                )
 
     def test_local_hic_execution_needs_no_method_or_enzyme_choice(self):
         config = RunConfig.model_validate(
@@ -825,8 +911,6 @@ class RunConfigLoaderTests(unittest.TestCase):
                         "local_exec": ["read_qc", "assembly", "assembly_review"],
                         "assembly": {
                             "flye_parameters": {
-                                "read_type": "nano-hq",
-                                "estimated_genome_size": 2_000_000,
                                 "threads": 4,
                             }
                         },
@@ -840,7 +924,7 @@ class RunConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config.local_exec, ["read_qc", "assembly", "assembly_review"])
         assert config.assembly is not None
         assert config.assembly.flye_parameters is not None
-        self.assertEqual(config.assembly.flye_parameters.read_type, "nano-hq")
+        self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
     def test_load_run_config_missing_file_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

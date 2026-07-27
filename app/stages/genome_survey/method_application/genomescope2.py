@@ -5,6 +5,8 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+from langgraph.graph.state import CompiledStateGraph
+
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
@@ -14,13 +16,13 @@ from app.execution.lifecycle import (
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import GENOME_SURVEY_MODEL_SUMMARY
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.genome_survey.method_application.support import (
     attempt_artifacts,
-    genome_survey_output,
     record_attempt_success,
-    update_genome_survey_output,
+    survey_output,
+    update_survey_output,
 )
 
 METHOD_NAME = "genome_survey.model.genomescope2"
@@ -36,7 +38,9 @@ LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_genomescope2_graph():
+def build_genomescope2_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         LIFECYCLE,
         freeze_genomescope2_attempt,
@@ -44,16 +48,16 @@ def build_genomescope2_graph():
     )
 
 
-def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
+def freeze_genomescope2_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze the GenomeScope2 model attempt."""
-    output = genome_survey_output(state)
+    output = survey_output(state)
     if output.get("status") != "jellyfish_collected":
         return {}
 
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, blocked = resolve_method_env(
-        output,
+        dict(output),
         stage="genome_survey",
         method_name=METHOD_NAME,
         session_id=session_id,
@@ -61,12 +65,12 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
-        return update_genome_survey_output(state, blocked)
+        return update_survey_output(state, blocked)
 
     working_dir = stage_work_dir(state, "genome_survey", "genomescope2")
     working_dir.mkdir(parents=True, exist_ok=True)
 
-    params = dict(output["survey_parameters"])
+    params = output["survey_parameters"]
     output_dir = working_dir / "output"
     summary_path = output_dir / "summary.txt"
     script_path = working_dir / "run_genomescope2.sh"
@@ -106,9 +110,9 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_genomescope2_artifacts(state: TopLevelState) -> dict:
+def collect_genomescope2_artifacts(state: TopLevelState) -> StateUpdate:
     """Collect the GenomeScope2 summary output."""
-    output = genome_survey_output(state)
+    output = survey_output(state)
     if output.get("status") != RAN_STATUS:
         return {}
 
@@ -125,14 +129,15 @@ def collect_genomescope2_artifacts(state: TopLevelState) -> dict:
     summary_ref = str(artifacts[0].file_path)
 
     substeps = dict(output.get("substeps") or {})
+    genome_model = substeps.get("genome_model") or {}
     substeps["genome_model"] = {
-        **dict(substeps.get("genome_model") or {}),
+        **genome_model,
         "name": "genome_model",
         "status": "executed",
         "method_name": attempt.method_name,
         "summary_ref": summary_ref,
     }
-    return update_genome_survey_output(
+    return update_survey_output(
         state,
         {
             "status": COLLECTED_STATUS,

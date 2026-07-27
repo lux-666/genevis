@@ -12,11 +12,12 @@ from app.control.lifecycle import resume_review_state
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.state import initial_state
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.state import initial_state
 from app.stages.gene_annotation.builder import build_stage
 from app.stages.gene_annotation.nodes import (
     GENE_REVIEW_GATES,
+    _review_triggers,
     apply_candidate_evidence_review_decision,
     apply_merge_review_decision,
     block_candidate_evidence_review,
@@ -25,7 +26,6 @@ from app.stages.gene_annotation.nodes import (
     build_candidate_evidence_review_payload,
     build_final_gene_set_review_payload,
     build_merge_review_payload,
-    _review_triggers,
 )
 from tests.data_v2 import v2_run_dir
 
@@ -41,8 +41,7 @@ def _fake_gene_method_bins(tmpdir: str) -> Path:
         bin_path = bin_dir / name
         if not bin_path.exists():
             bin_path.write_text(
-                "#!/bin/sh\n"
-                f"printf '##gff-version 3\\n{gff_line}'\n",
+                f"#!/bin/sh\nprintf '##gff-version 3\\n{gff_line}'\n",
                 encoding="utf-8",
             )
             bin_path.chmod(0o755)
@@ -51,17 +50,17 @@ def _fake_gene_method_bins(tmpdir: str) -> Path:
     if not gffread.exists():
         gffread.write_text(
             "#!/bin/sh\n"
-            "prot=\"\"; cds=\"\"\n"
+            'prot=""; cds=""\n'
             "while [ $# -gt 0 ]; do\n"
-            "  case \"$1\" in\n"
-            "    -y) prot=\"$2\"; shift 2;;\n"
-            "    -x) cds=\"$2\"; shift 2;;\n"
+            '  case "$1" in\n'
+            '    -y) prot="$2"; shift 2;;\n'
+            '    -x) cds="$2"; shift 2;;\n'
             "    -g) shift 2;;\n"
             "    *) shift;;\n"
             "  esac\n"
             "done\n"
-            "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
-            "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+            '[ -n "$prot" ] && printf \'>g1\\nMKT\\n\' > "$prot"\n'
+            '[ -n "$cds" ] && printf \'>g1\\nATGAAAACC\\n\' > "$cds"\n',
             encoding="utf-8",
         )
         gffread.chmod(0o755)
@@ -125,9 +124,15 @@ class GeneAnnotationStageTests(unittest.TestCase):
         )
         state["current_stage"] = "gene_annotation"
         state["asset_registry_ref"] = registry_ref
-        state["requested_stages"] = ["assembly_review", "gene_annotation", "function_annotation"]
+        state["requested_stages"] = [
+            "assembly_review",
+            "gene_annotation",
+            "function_annotation",
+        ]
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
         }
         return state
 
@@ -155,19 +160,39 @@ class GeneAnnotationStageTests(unittest.TestCase):
         }
         return state
 
-    def _provided_annotation_assets(self, tmpdir: str, *, transcripts: bool = True, extra: list[dict] | None = None) -> tuple[list[dict], Path, Path, Path | None]:
+    def _provided_annotation_assets(
+        self, tmpdir: str, *, transcripts: bool = True, extra: list[dict] | None = None
+    ) -> tuple[list[dict], Path, Path, Path | None]:
         genes = Path(tmpdir) / "provided_genes.gff3"
         proteins = Path(tmpdir) / "provided_proteins.fa"
-        transcript_ref = Path(tmpdir) / "provided_transcripts.fa" if transcripts else None
-        genes.write_text("##gff-version 3\nctg1\tsrc\tgene\t1\t4\t.\t+\t.\tID=g1\n", encoding="utf-8")
+        transcript_ref = (
+            Path(tmpdir) / "provided_transcripts.fa" if transcripts else None
+        )
+        genes.write_text(
+            "##gff-version 3\nctg1\tsrc\tgene\t1\t4\t.\t+\t.\tID=g1\n", encoding="utf-8"
+        )
         proteins.write_text(">p1\nMKT\n", encoding="utf-8")
         assets = [
-            {"asset_id": "s1:gene_models:provided", "asset_type": "gene_models", "path": str(genes)},
-            {"asset_id": "s1:predicted_proteins:provided", "asset_type": "predicted_proteins", "path": str(proteins)},
+            {
+                "asset_id": "s1:gene_models:provided",
+                "asset_type": "gene_models",
+                "path": str(genes),
+            },
+            {
+                "asset_id": "s1:predicted_proteins:provided",
+                "asset_type": "predicted_proteins",
+                "path": str(proteins),
+            },
         ]
         if transcript_ref:
             transcript_ref.write_text(">t1\nAUG\n", encoding="utf-8")
-            assets.append({"asset_id": "s1:transcripts_fasta:provided", "asset_type": "transcripts_fasta", "path": str(transcript_ref)})
+            assets.append(
+                {
+                    "asset_id": "s1:transcripts_fasta:provided",
+                    "asset_type": "transcripts_fasta",
+                    "path": str(transcript_ref),
+                }
+            )
         if extra:
             assets.extend(extra)
         return assets, genes, proteins, transcript_ref
@@ -191,19 +216,27 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertEqual(gene["status"], "completed")
             self.assertEqual(gene["genome_input_source"], "softmasked_genome")
             self.assertEqual(gene["evidence_profile"], "no_evidence")
-            self.assertIn("gene_annotation.candidate.augustus", gene["candidate_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.augustus", gene["candidate_methods"]
+            )
             self.assertNotIn("primary_method", gene)
             self.assertTrue(gene["method_selection_required"])
-            self.assertIn("species_or_training_policy_required", gene["review_triggers"])
+            self.assertIn(
+                "species_or_training_policy_required", gene["review_triggers"]
+            )
             self.assertTrue(gene["predicted_proteins_ref"].endswith("proteins.fa"))
             self.assertTrue(Path(gene["plan_artifact_ref"]).exists())
             self.assertTrue(Path(gene["bundle_artifact_ref"]).exists())
-            plan = json.loads(Path(gene["plan_artifact_ref"]).read_text(encoding="utf-8"))
+            plan = json.loads(
+                Path(gene["plan_artifact_ref"]).read_text(encoding="utf-8")
+            )
             self.assertTrue(plan["metadata"]["execution_enabled"])
 
     def test_provided_gene_annotation_adopts_real_artifacts_without_planned_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assets, genes, proteins, transcripts = self._provided_annotation_assets(tmpdir)
+            assets, genes, proteins, transcripts = self._provided_annotation_assets(
+                tmpdir
+            )
             registry = self._write_registry(tmpdir, assets=assets)
             result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
 
@@ -220,21 +253,31 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertFalse(gene["method_selection_required"])
             self.assertEqual(gene["candidate_methods"], [])
             self.assertNotIn("expected_outputs", gene)
-            bundle = json.loads(Path(gene["bundle_artifact_ref"]).read_text(encoding="utf-8"))
+            bundle = json.loads(
+                Path(gene["bundle_artifact_ref"]).read_text(encoding="utf-8")
+            )
             self.assertEqual(bundle["status"], "adopted_existing_annotation")
             self.assertEqual(bundle["predicted_proteins_ref"], str(proteins))
             artifact_types = [
                 json.loads(line)["artifact_type"]
-                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text(encoding="utf-8").splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
             ]
             self.assertIn("gene_annotation.bundle", artifact_types)
             self.assertNotIn("gene_annotation.provided_gene_models", artifact_types)
-            self.assertNotIn("gene_annotation.provided_predicted_proteins", artifact_types)
-            self.assertNotIn("gene_annotation.provided_transcripts_fasta", artifact_types)
+            self.assertNotIn(
+                "gene_annotation.provided_predicted_proteins", artifact_types
+            )
+            self.assertNotIn(
+                "gene_annotation.provided_transcripts_fasta", artifact_types
+            )
 
     def test_provided_gene_annotation_without_transcripts_is_valid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assets, _genes, proteins, _transcripts = self._provided_annotation_assets(tmpdir, transcripts=False)
+            assets, _genes, proteins, _transcripts = self._provided_annotation_assets(
+                tmpdir, transcripts=False
+            )
             registry = self._write_registry(tmpdir, assets=assets)
             result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
 
@@ -242,7 +285,9 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertEqual(gene["bundle_status"], "adopted_existing_annotation")
             self.assertIsNone(gene.get("transcripts_fasta_ref"))
             self.assertEqual(gene["proteins_fasta_ref"], str(proteins))
-            bundle = json.loads(Path(gene["bundle_artifact_ref"]).read_text(encoding="utf-8"))
+            bundle = json.loads(
+                Path(gene["bundle_artifact_ref"]).read_text(encoding="utf-8")
+            )
             self.assertIsNone(bundle["transcripts_fasta_ref"])
 
     def test_incomplete_provided_gene_annotation_assets_fail(self):
@@ -254,31 +299,71 @@ class GeneAnnotationStageTests(unittest.TestCase):
             proteins.write_text(">p1\nMKT\n", encoding="utf-8")
             transcripts.write_text(">t1\nAUG\n", encoding="utf-8")
             cases = [
-                ([{"asset_id": "genes", "asset_type": "gene_models", "path": str(genes)}], "predicted_proteins"),
-                ([{"asset_id": "proteins", "asset_type": "predicted_proteins", "path": str(proteins)}], "gene_models"),
-                ([{"asset_id": "transcripts", "asset_type": "transcripts_fasta", "path": str(transcripts)}], "gene_models"),
+                (
+                    [
+                        {
+                            "asset_id": "genes",
+                            "asset_type": "gene_models",
+                            "path": str(genes),
+                        }
+                    ],
+                    "predicted_proteins",
+                ),
+                (
+                    [
+                        {
+                            "asset_id": "proteins",
+                            "asset_type": "predicted_proteins",
+                            "path": str(proteins),
+                        }
+                    ],
+                    "gene_models",
+                ),
+                (
+                    [
+                        {
+                            "asset_id": "transcripts",
+                            "asset_type": "transcripts_fasta",
+                            "path": str(transcripts),
+                        }
+                    ],
+                    "gene_models",
+                ),
             ]
             for assets, expected_missing in cases:
                 with self.subTest(expected_missing=expected_missing):
                     registry = self._write_registry(tmpdir, assets=assets)
-                    result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
+                    result = build_stage().invoke(
+                        self._softmasked_state(tmpdir, str(registry))
+                    )
                     self.assertEqual(result["supervision_state"], "failed_terminal")
                     self.assertIn(expected_missing, result["last_error"])
 
-    def test_provided_gene_annotation_with_extra_evidence_records_review_trigger_only(self):
+    def test_provided_gene_annotation_with_extra_evidence_records_review_trigger_only(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             rnaseq = Path(tmpdir) / "rna.fq"
             rnaseq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             assets, _genes, _proteins, _transcripts = self._provided_annotation_assets(
                 tmpdir,
-                extra=[{"asset_id": "s1:raw_rnaseq_reads:rna", "asset_type": "raw_rnaseq_reads", "path": str(rnaseq)}],
+                extra=[
+                    {
+                        "asset_id": "s1:raw_rnaseq_reads:rna",
+                        "asset_type": "raw_rnaseq_reads",
+                        "path": str(rnaseq),
+                    }
+                ],
             )
             registry = self._write_registry(tmpdir, assets=assets)
             result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertTrue(gene["review_required"])
-            self.assertIn("provided_annotation_with_additional_evidence_review", gene["review_triggers"])
+            self.assertIn(
+                "provided_annotation_with_additional_evidence_review",
+                gene["review_triggers"],
+            )
             self.assertNotIn("merge_policy", gene)
             self.assertNotIn("primary_method", gene)
 
@@ -288,7 +373,13 @@ class GeneAnnotationStageTests(unittest.TestCase):
             rnaseq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             registry = self._write_registry(
                 tmpdir,
-                assets=[{"asset_id": "s1:clean_rnaseq_reads:rna", "asset_type": "clean_rnaseq_reads", "path": str(rnaseq)}],
+                assets=[
+                    {
+                        "asset_id": "s1:clean_rnaseq_reads:rna",
+                        "asset_type": "clean_rnaseq_reads",
+                        "path": str(rnaseq),
+                    }
+                ],
             )
 
             result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
@@ -296,7 +387,9 @@ class GeneAnnotationStageTests(unittest.TestCase):
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["evidence_profile"], "rnaseq")
             self.assertEqual(gene["helper_methods"], [])
-            self.assertIn("gene_annotation.candidate.augustus", gene["candidate_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.augustus", gene["candidate_methods"]
+            )
 
     def test_long_rna_evidence_adds_isoquant(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -304,7 +397,13 @@ class GeneAnnotationStageTests(unittest.TestCase):
             long_rna.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             registry = self._write_registry(
                 tmpdir,
-                assets=[{"asset_id": "s1:clean_isoseq_reads:isoseq", "asset_type": "clean_isoseq_reads", "path": str(long_rna)}],
+                assets=[
+                    {
+                        "asset_id": "s1:clean_isoseq_reads:isoseq",
+                        "asset_type": "clean_isoseq_reads",
+                        "path": str(long_rna),
+                    }
+                ],
             )
 
             result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
@@ -312,7 +411,9 @@ class GeneAnnotationStageTests(unittest.TestCase):
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["evidence_profile"], "long_rna")
             self.assertEqual(gene["helper_methods"], [])
-            self.assertIn("gene_annotation.candidate.augustus", gene["candidate_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.augustus", gene["candidate_methods"]
+            )
 
     def test_genome_long_reads_do_not_enable_isoquant(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -342,18 +443,30 @@ class GeneAnnotationStageTests(unittest.TestCase):
             proteins.write_text(">p1\nMKK\n", encoding="utf-8")
             registry = self._write_registry(
                 tmpdir,
-                assets=[{"asset_id": "s1:reference_proteins:ref", "asset_type": "reference_proteins", "path": str(proteins)}],
+                assets=[
+                    {
+                        "asset_id": "s1:reference_proteins:ref",
+                        "asset_type": "reference_proteins",
+                        "path": str(proteins),
+                    }
+                ],
             )
 
             result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["evidence_profile"], "protein")
-            self.assertIn("gene_annotation.candidate.miniprot", gene["candidate_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.miniprot", gene["candidate_methods"]
+            )
             # gemoma is now a deferred candidate, not an auto-added helper.
-            self.assertNotIn("gene_annotation.helper.gemoma", gene.get("helper_methods", []))
+            self.assertNotIn(
+                "gene_annotation.helper.gemoma", gene.get("helper_methods", [])
+            )
 
-    def test_mixed_evidence_records_review_triggers_without_inventing_merge_policy(self):
+    def test_mixed_evidence_records_review_triggers_without_inventing_merge_policy(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             rnaseq = Path(tmpdir) / "rna.fq.gz"
             proteins = Path(tmpdir) / "ref_proteins.fa"
@@ -362,8 +475,16 @@ class GeneAnnotationStageTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
-                    {"asset_id": "s1:raw_rnaseq_reads:rna", "asset_type": "raw_rnaseq_reads", "path": str(rnaseq)},
-                    {"asset_id": "s1:reference_proteins:ref", "asset_type": "reference_proteins", "path": str(proteins)},
+                    {
+                        "asset_id": "s1:raw_rnaseq_reads:rna",
+                        "asset_type": "raw_rnaseq_reads",
+                        "path": str(rnaseq),
+                    },
+                    {
+                        "asset_id": "s1:reference_proteins:ref",
+                        "asset_type": "reference_proteins",
+                        "path": str(proteins),
+                    },
                 ],
             )
 
@@ -373,7 +494,9 @@ class GeneAnnotationStageTests(unittest.TestCase):
             # planning gate is not auto-decidable and blocks for human selection.
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(result["active_interrupt"]["gate_id"], "gene_method_planning_review")
+            self.assertEqual(
+                result["active_interrupt"]["gate_id"], "gene_method_planning_review"
+            )
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["evidence_profile"], "mixed_evidence")
             triggers = _review_triggers(gene)
@@ -388,8 +511,12 @@ class GeneAnnotationStageTests(unittest.TestCase):
             assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
-            state["skip_reasons"] = {"repeat_annotation": "repeat_annotation_skipped_by_user"}
-            state["stage_outputs"]["hic_scaffolding"] = {"output_assembly_ref": str(assembly)}
+            state["skip_reasons"] = {
+                "repeat_annotation": "repeat_annotation_skipped_by_user"
+            }
+            state["stage_outputs"]["hic_scaffolding"] = {
+                "output_assembly_ref": str(assembly)
+            }
             state["resource_refs"]["assembly"] = ResourceRef(
                 resource_type="assembly",
                 paths=[str(assembly)],
@@ -406,8 +533,12 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "function_annotation")
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["genome_input_source"], "assembly")
-            self.assertEqual(gene["unmasked_fallback_reason"], "repeat_annotation_skipped_by_user")
-            self.assertIn("unmasked_genome_fallback_requires_review", gene["review_triggers"])
+            self.assertEqual(
+                gene["unmasked_fallback_reason"], "repeat_annotation_skipped_by_user"
+            )
+            self.assertIn(
+                "unmasked_genome_fallback_requires_review", gene["review_triggers"]
+            )
 
     def test_gene_annotation_routes_to_function_annotation_and_publishes_proteins(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -425,7 +556,10 @@ class GeneAnnotationStageTests(unittest.TestCase):
 class GeneAnnotationReviewChainTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
-        path.write_text(json.dumps({"session_id": "s1", "assets": assets}, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            encoding="utf-8",
+        )
         return path
 
     def _state(self, tmpdir: str, registry_ref: str | None):
@@ -436,9 +570,15 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         )
         state["current_stage"] = "gene_annotation"
         state["asset_registry_ref"] = registry_ref
-        state["requested_stages"] = ["assembly_review", "gene_annotation", "function_annotation"]
+        state["requested_stages"] = [
+            "assembly_review",
+            "gene_annotation",
+            "function_annotation",
+        ]
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
         }
         return state
 
@@ -459,7 +599,10 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             source_stage="repeat_annotation",
             metadata={"repeat_annotation_ref": str(repeats)},
         ).to_dict()
-        state["stage_outputs"]["hic_scaffolding"] = {"status": "completed", "output_assembly_ref": str(softmasked)}
+        state["stage_outputs"]["hic_scaffolding"] = {
+            "status": "completed",
+            "output_assembly_ref": str(softmasked),
+        }
         bin_dir = _fake_gene_method_bins(tmpdir)
         state["stage_outputs"]["gene_annotation"] = {
             "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -505,7 +648,11 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "completed")
             trace = result["route_trace"]
-            ordered = [node for node in trace if node in GENE_REVIEW_GATES or node == "gene_annotation_stage"]
+            ordered = [
+                node
+                for node in trace
+                if node in GENE_REVIEW_GATES or node == "gene_annotation_stage"
+            ]
             self.assertEqual(
                 ordered,
                 [
@@ -521,12 +668,16 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             state = self._softmasked_state(tmpdir, str(registry))
-            state["stage_outputs"]["gene_annotation"]["review_policy"] = {"mode": "strict"}
+            state["stage_outputs"]["gene_annotation"]["review_policy"] = {
+                "mode": "strict"
+            }
 
             blocked = build_stage().invoke(state)
 
             self.assertEqual(blocked["supervision_state"], "blocked_human")
-            self.assertEqual(blocked["active_interrupt"]["gate_id"], "gene_method_planning_review")
+            self.assertEqual(
+                blocked["active_interrupt"]["gate_id"], "gene_method_planning_review"
+            )
 
             resume_state = {**state, **blocked}
             request = ResumeReviewRequest(
@@ -539,15 +690,26 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
             update = resume_review_state(resume_state, request)
-            self.assertEqual(update["stage_outputs"]["gene_annotation"]["status"], "methods_confirmed")
-            self.assertEqual(update["stage_outputs"]["gene_annotation"]["confirmed_methods"], ["gene_annotation.candidate.augustus"])
+            self.assertEqual(
+                update["stage_outputs"]["gene_annotation"]["status"],
+                "methods_confirmed",
+            )
+            self.assertEqual(
+                update["stage_outputs"]["gene_annotation"]["confirmed_methods"],
+                ["gene_annotation.candidate.augustus"],
+            )
             # Re-invoke the graph so routing prepares executable methods.
             merged = {**resume_state, **update, "supervision_state": "running_stage"}
             result = build_stage().invoke(merged)
             gene = result["stage_outputs"]["gene_annotation"]
-            self.assertEqual(list(gene["candidate_refs"].keys()), ["gene_annotation.candidate.augustus"])
+            self.assertEqual(
+                list(gene["candidate_refs"].keys()),
+                ["gene_annotation.candidate.augustus"],
+            )
 
-    def test_confirmed_non_executable_gene_method_fails_instead_of_planning_candidate(self):
+    def test_confirmed_non_executable_gene_method_fails_instead_of_planning_candidate(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._softmasked_state(tmpdir, None)
             state["stage_outputs"]["gene_annotation"] = {
@@ -569,7 +731,9 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 "available_evidence": ["rnaseq", "protein"],
                 "genome_input_ref": str(Path(tmpdir) / "softmasked.fa"),
                 "genome_input_source": "softmasked_genome",
-                "candidate_refs": {"gene_annotation.candidate.braker3": "/tmp/braker3.gff3"},
+                "candidate_refs": {
+                    "gene_annotation.candidate.braker3": "/tmp/braker3.gff3"
+                },
                 "candidate_gene_counts": {"gene_annotation.candidate.braker3": 0},
                 "candidate_methods": ["gene_annotation.candidate.braker3"],
                 "expected_outputs": {
@@ -732,21 +896,29 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 review_request_id=blocked["active_interrupt"]["review_request_id"],
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
-            from app.stages.gene_annotation.nodes import apply_final_gene_set_review_decision
+            from app.stages.gene_annotation.nodes import (
+                apply_final_gene_set_review_decision,
+            )
 
             update = apply_final_gene_set_review_decision(blocked, request)
-            self.assertEqual(update["stage_outputs"]["gene_annotation"]["status"], "review_passed")
+            self.assertEqual(
+                update["stage_outputs"]["gene_annotation"]["status"], "review_passed"
+            )
             # Re-invoke the graph; routing sends review_passed → commit.
             merged = {**state, **update}
             result = build_stage().invoke(merged)
             self.assertEqual(result["current_stage"], "function_annotation")
-            self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "completed")
+            self.assertEqual(
+                result["stage_outputs"]["gene_annotation"]["status"], "completed"
+            )
 
     def test_durable_block_does_not_modify_upstream_stage_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             state = self._softmasked_state(tmpdir, str(registry))
-            state["stage_outputs"]["gene_annotation"]["review_policy"] = {"mode": "strict"}
+            state["stage_outputs"]["gene_annotation"]["review_policy"] = {
+                "mode": "strict"
+            }
             repeat_before = dict(state["stage_outputs"]["repeat_annotation"])
             hic_before = dict(state["stage_outputs"]["hic_scaffolding"])
 
@@ -762,7 +934,9 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
             update = resume_review_state(resume_state, request)
-            self.assertEqual(update["stage_outputs"]["repeat_annotation"], repeat_before)
+            self.assertEqual(
+                update["stage_outputs"]["repeat_annotation"], repeat_before
+            )
             self.assertEqual(update["stage_outputs"]["hic_scaffolding"], hic_before)
 
     def test_augustus_without_species_model_blocks_method_planning_readiness(self):

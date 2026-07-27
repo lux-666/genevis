@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.assembly.method_application import (
@@ -41,7 +42,12 @@ from app.stages.assembly.routing import (
 )
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the assembly candidate-planning subgraph."""
     graph = StateGraph(TopLevelState)
 
@@ -66,7 +72,11 @@ def build_stage():
     graph.add_conditional_edges(
         "enter",
         route_after_enter,
-        {"resolve": "resolve_extended_inputs", "recommend": "recommend_parameters", "plan": "plan_candidate_attempts"},
+        {
+            "resolve": "resolve_extended_inputs",
+            "recommend": "recommend_parameters",
+            "plan": "plan_candidate_attempts",
+        },
     )
     graph.add_conditional_edges(
         "resolve_extended_inputs",
@@ -101,7 +111,14 @@ def build_stage():
     graph.add_conditional_edges(
         "plan_candidate_attempts",
         route_after_plan,
-        {"flye": "flye", "nextdenovo": "nextdenovo", "hifiasm": "hifiasm", "hifiasm_ont": "hifiasm_ont", "commit": "commit", "fail": "fail"},
+        {
+            "flye": "flye",
+            "nextdenovo": "nextdenovo",
+            "hifiasm": "hifiasm",
+            "hifiasm_ont": "hifiasm_ont",
+            "commit": "commit",
+            "fail": "fail",
+        },
     )
     graph.add_conditional_edges(
         "flye",

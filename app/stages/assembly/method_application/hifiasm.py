@@ -3,37 +3,45 @@
 from __future__ import annotations
 
 import shlex
-from typing import Any
+from typing import cast
 
 from app.configuration import load_descriptor_registry
 from app.domains.assembly.constants import HIFIASM_METHOD
-from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
-from app.execution.env_dispatch import resolve_method_env
+from app.domains.read_inputs import (
+    AssemblyInputError,
+    AssemblyReadInputType,
+    resolve_assembly_read_paths,
+)
 from app.execution.attempt_owners import ParameterAttemptOwner
+from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
+    CompiledMethodGraph,
     MethodExecutionLifecycle,
     build_method_graph,
     load_method_executions,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly.command_builder import (
     ParameterCommandError,
-    build_command,
-    build_parameter_sources,
+    parameter_sources_payload,
+    render_assembly_cli,
+    resolve_assembly_parameters,
 )
 from app.stages.assembly.method_application.support import (
-    blocked_parameters,
+    approved_assembly_read_type,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
+    load_assembly_execution_contract,
     load_current_approved_recommendation,
-    positive_int,
 )
-from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.assembly.state import (
+    assembly_stage_output,
+    update_assembly_stage_output,
+    validated_assembly_stage_payload,
+)
+from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
-
-HIFIASM_READ_TYPE_FLAGS = {"hifi": ""}
 
 LIFECYCLE = MethodExecutionLifecycle(
     stage="assembly",
@@ -45,31 +53,38 @@ LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_hifiasm_graph():
-    return build_method_graph(LIFECYCLE, freeze_hifiasm_attempt, collect_hifiasm_artifacts)
+def build_hifiasm_graph() -> CompiledMethodGraph:
+    return build_method_graph(
+        LIFECYCLE, freeze_hifiasm_attempt, collect_hifiasm_artifacts
+    )
 
 
-
-
-def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
+def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze a local hifiasm attempt for the selected primary candidate."""
-    output = stage_output(state, "assembly")
+    output = assembly_stage_output(state)
     if output.get("status") != "hifiasm_execution_planned":
         return {}
     if HIFIASM_METHOD not in load_descriptor_registry().methods:
         return fail_update(state, f"assembly descriptors missing: [{HIFIASM_METHOD!r}]")
 
-    params, blocked = _parameters(output)
-    if blocked:
-        return update_stage_output(state, "assembly", blocked)
     try:
-        read_paths = resolve_assembly_read_paths(output.get("input_ref"), output.get("input_type"))
+        read_paths = resolve_assembly_read_paths(
+            output.get("input_ref"),
+            cast(AssemblyReadInputType | None, output.get("input_type")),
+        )
     except AssemblyInputError as exc:
         return fail_update(state, f"Hifiasm local execution {exc}")
+    try:
+        execution_contract = load_assembly_execution_contract(
+            output,
+            method_id=HIFIASM_METHOD,
+        )
+    except ValueError as exc:
+        return fail_update(state, f"Hifiasm execution contract is invalid: {exc}")
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, env_blocked = resolve_method_env(
-        output,
+        {"env": execution_contract.environment.values},
         stage="assembly",
         method_name=HIFIASM_METHOD,
         session_id=session_id,
@@ -77,24 +92,27 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if env_blocked is not None:
-        return update_stage_output(state, "assembly", env_blocked)
-
-    catalog, catalog_error = _load_catalog()
-    if catalog_error:
-        return fail_update(state, catalog_error)
-    approved_attempt, recommended_params, recommendation_error = (
-        load_current_approved_recommendation(
-            state,
-            output,
-            method_id=HIFIASM_METHOD,
-            label="Hifiasm",
+        return update_assembly_stage_output(
+            state, validated_assembly_stage_payload(env_blocked)
         )
+
+    approved_bundle, recommendation_error = load_current_approved_recommendation(
+        state,
+        output,
+        method_id=HIFIASM_METHOD,
+        label="Hifiasm",
     )
-    if recommendation_error or approved_attempt is None:
+    if recommendation_error or approved_bundle is None:
         return fail_update(
             state,
             recommendation_error or "Hifiasm approved parameter attempt is missing",
         )
+    try:
+        read_type = approved_assembly_read_type(approved_bundle)
+    except ValueError as exc:
+        return fail_update(state, f"Hifiasm approved read type is invalid: {exc}")
+    thread_binding = execution_contract.l0_executor_values()
+    approved_attempt = approved_bundle.attempt
     parameter_attempt_id = approved_attempt.attempt_id
     paths = SessionPaths.from_run_dir(data_dir)
     attempt_scope = f"{parameter_attempt_id:03d}"
@@ -112,19 +130,19 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
     fallback_gfa = output_dir / "hifiasm.p_ctg.gfa"
     script = working_dir / "run_hifiasm.sh"
     try:
-        parameter_sources = build_parameter_sources(
-            method_id=HIFIASM_METHOD,
+        catalog = approved_bundle.chain.catalog
+        resolved = resolve_assembly_parameters(
             catalog=catalog,
-            state=state,
-            assembly_out=output,
-            attempt_id=parameter_attempt_id,
-            recommended_params=recommended_params,
-            execution_context={
-                "output_prefix": str(prefix),
-                "input_reads": [str(path) for path in read_paths],
+            snapshot=approved_bundle.chain.input_snapshot,
+            approved_l2=approved_bundle.approved_l2,
+            l0_executor_values={
+                "assembly_output_prefix": str(prefix),
+                "assembly_input_reads": [str(path) for path in read_paths],
+                **thread_binding,
             },
         )
-        argv = build_command(method_id=HIFIASM_METHOD, catalog=catalog, parameter_sources=parameter_sources)
+        argv = render_assembly_cli(catalog, resolved)
+        parameter_sources = parameter_sources_payload(resolved)
     except ParameterCommandError as exc:
         return fail_update(state, f"Hifiasm parameter sources are invalid: {exc}")
     command = " ".join(shlex.quote(arg) for arg in argv)
@@ -132,17 +150,18 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
         "set -e\n"
         f"{command}\n"
         f"if [ -f {shlex.quote(str(gfa))} ]; then gfa={shlex.quote(str(gfa))};"
-        f" elif [ -f {shlex.quote(str(fallback_gfa))} ]; then gfa={shlex.quote(str(fallback_gfa))};"
+        f" elif [ -f {shlex.quote(str(fallback_gfa))} ];"
+        f" then gfa={shlex.quote(str(fallback_gfa))};"
         " else echo 'expected hifiasm primary contig GFA missing' >&2; exit 1; fi\n"
-        f"awk '/^S/{{print \">\"$2\"\\n\"$3}}' \"$gfa\" > {shlex.quote(str(draft))}\n",
+        f'awk \'/^S/{{print ">"$2"\\n"$3}}\' "$gfa" > {shlex.quote(str(draft))}\n',
         encoding="utf-8",
     )
     script.chmod(0o755)
     return freeze_parameterized_attempt(
         state,
-        output,
         LIFECYCLE,
         label="Hifiasm",
+        execution_contract=execution_contract,
         approved_attempt=approved_attempt,
         script_path=script,
         working_dir=working_dir,
@@ -164,8 +183,8 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
             "input_ref": output.get("input_ref"),
             "input_type": output.get("input_type"),
             "read_paths": [str(path) for path in read_paths],
-            "read_profile": params["read_type"],
-            "threads": params["threads"],
+            "read_profile": read_type,
+            "threads": resolved.effective_parameters["threads"],
             "parameter_sources": parameter_sources,
             "argv": argv,
             "hifiasm_output_dir": str(output_dir),
@@ -178,7 +197,7 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_hifiasm_artifacts(state: TopLevelState) -> dict:
+def collect_hifiasm_artifacts(state: TopLevelState) -> StateUpdate:
     [execution] = load_method_executions(state, LIFECYCLE)
     attempt = execution.attempt
     metadata = dict(attempt.metadata or {})
@@ -194,41 +213,3 @@ def collect_hifiasm_artifacts(state: TopLevelState) -> dict:
             "threads": metadata.get("threads"),
         },
     )
-
-
-def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Extract and validate hifiasm parameters (Level 0: from config/priors, not from L2 recommendations)."""
-    # read_type and threads are Level 0 parameters, not Level 2
-    # They come from read_type_prior and hifiasm_parameters, not from recommended_params
-    missing: list[str] = []
-    invalid: list[dict[str, Any]] = []
-
-    # Get read_type from read_type_prior (set by input resolution) or fallback to hifiasm_parameters
-    read_type = dict(output.get("read_type_prior") or {}).get("hifiasm")
-    if not read_type:
-        # Fallback for tests that don't set read_type_prior
-        params = dict(output.get("hifiasm_parameters") or {})
-        read_type = params.get("read_type")
-    if not read_type:
-        missing.append("read_type (from read_type_prior.hifiasm or hifiasm_parameters.read_type)")
-    elif read_type not in HIFIASM_READ_TYPE_FLAGS:
-        invalid.append({"param": "read_type", "value": read_type, "accepted": sorted(HIFIASM_READ_TYPE_FLAGS)})
-
-    # Get threads from hifiasm_parameters (run config) or use catalog default (32)
-    params = dict(output.get("hifiasm_parameters") or {})
-    threads = params.get("threads")
-    if threads is None:
-        threads = 32  # Catalog default
-    else:
-        threads = positive_int(threads, "hifiasm_parameters.threads", missing, invalid)
-
-    if missing or invalid:
-        return {}, blocked_parameters("hifiasm level-0 parameters", HIFIASM_METHOD, missing, invalid)
-    return {"read_type": str(read_type), "threads": threads}, None
-
-
-def _load_catalog():
-    try:
-        return load_parameter_catalog(HIFIASM_METHOD), None
-    except (FileNotFoundError, ValueError) as exc:
-        return None, f"Hifiasm parameter catalog is not usable: {exc}"

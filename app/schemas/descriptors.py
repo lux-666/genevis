@@ -39,7 +39,9 @@ class PlannerMetadata(BaseModel):
     """Planner-facing method metadata declared by method descriptors."""
 
     required_parameters: list[str] = Field(default_factory=list)
-    conditional_required_parameters: list[PlannerConditionalRequirement] = Field(default_factory=list)
+    conditional_required_parameters: list[PlannerConditionalRequirement] = Field(
+        default_factory=list
+    )
     parameter_defaults: dict[str, Any] = Field(default_factory=dict)
     selection_role: str | None = None
     display_name: str | None = None
@@ -107,7 +109,9 @@ class FrozenAttemptSpec(BaseModel):
     @model_validator(mode="after")
     def _conda_env_and_prefix_are_exclusive(self) -> "FrozenAttemptSpec":
         if self.conda_env and self.conda_prefix:
-            raise ValueError("FrozenAttemptSpec.conda_env and .conda_prefix are mutually exclusive")
+            raise ValueError(
+                "FrozenAttemptSpec.conda_env and .conda_prefix are mutually exclusive"
+            )
         return self
 
 
@@ -149,14 +153,22 @@ class DescriptorRegistry(BaseModel):
         for stage, method_names in by_stage.items():
             for method_name in method_names or []:
                 if method_name not in methods:
-                    raise ValueError(f"Stage {stage!r} references unknown method {method_name!r}")
+                    raise ValueError(
+                        f"Stage {stage!r} references unknown method {method_name!r}"
+                    )
                 if methods[method_name].stage != stage:
-                    raise ValueError(f"Method {method_name!r} is not a {stage!r} method")
+                    raise ValueError(
+                        f"Method {method_name!r} is not a {stage!r} method"
+                    )
 
-        return cls(root_dir=root_dir, packages=packages, methods=methods, by_stage=by_stage)
+        return cls(
+            root_dir=root_dir, packages=packages, methods=methods, by_stage=by_stage
+        )
 
 
-def _load_descriptors(root_dir: Path, refs: dict[str, str], model: type[BaseModel]) -> dict[str, Any]:
+def _load_descriptors(
+    root_dir: Path, refs: dict[str, str], model: type[BaseModel]
+) -> dict[str, Any]:
     loaded = {}
     for name, rel_path in refs.items():
         path = root_dir / rel_path

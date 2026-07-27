@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping
 
 from pydantic import BaseModel
 
 from app.llm.factory import build_chat_model
+from app.llm.json_response import parse_json_object, response_text
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 from app.llm.parameters.assembly.response import normalize_parameter_recommendation
 
@@ -43,10 +43,10 @@ def recommend_assembly_parameters(
             error=f"{type(exc).__name__}: {exc}",
         )
 
-    raw_content = _response_text(response)
+    raw_content = response_text(response)
     try:
         parsed = normalize_parameter_recommendation(
-            _parse_json_object(raw_content),
+            parse_json_object(raw_content),
             dict(request_dto),
         )
     except Exception as exc:
@@ -89,7 +89,7 @@ def restore_assembly_parameter_decision(
             model_id=model_id,
         )
     parsed = normalize_parameter_recommendation(
-        _parse_json_object(raw_response),
+        parse_json_object(raw_response),
         dict(request_dto),
     )
     return AssemblyParameterDecision(
@@ -99,28 +99,3 @@ def restore_assembly_parameter_decision(
         error=error,
         model_id=model_id,
     )
-
-
-def _response_text(response: Any) -> str:
-    content = getattr(response, "content", response)
-    if isinstance(content, list):
-        content = "".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    return str(content).strip()
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-    parsed = json.loads(cleaned)
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM response JSON must be an object")
-    return parsed

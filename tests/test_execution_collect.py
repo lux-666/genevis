@@ -89,9 +89,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 input_manifest_ref="control/manifest.yaml",
                 data_dir=str(run_dir),
             )
-            state["stage_outputs"] = {
-                "genome_survey": {"status": "jellyfish_ran"}
-            }
+            state["stage_outputs"] = {"genome_survey": {"status": "jellyfish_ran"}}
 
             def broken_collect(_state):
                 raise ValueError("collect callback contract bug")

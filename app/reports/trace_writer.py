@@ -6,14 +6,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.storage.ledger import Ledger
 from app.control.lifecycle import inspect_session
-from app.storage.artifacts import read_artifact_records
 from app.reports._projection import atomic_write_text, source_watermark
 from app.reports.review_report import _pending_confirmations
 from app.review.records import counts_by_origin
-from app.workflow import STAGE_ORDER
+from app.storage.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from app.workflow import STAGE_ORDER
 
 # Stable stage-status vocabulary. Keep this small and durable; the trace
 # JSON and any downstream tooling depend on these exact strings.
@@ -58,11 +58,15 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
     artifacts = read_artifact_records(paths.run_dir, session_id)
     summary = inspect_session(session_id, paths.run_dir)
 
-    decisions = [event for event in events if event.get("event_type") == "review_decision"]
+    decisions = [
+        event for event in events if event.get("event_type") == "review_decision"
+    ]
     stages = _build_stage_records(events, artifacts, summary)
     gaps = _build_gaps(session, events, decisions)
     route = _route_records(events)
-    observed_path = [record["stage"] for record in route if record["event_type"] == "stage_entered"]
+    observed_path = [
+        record["stage"] for record in route if record["event_type"] == "stage_entered"
+    ]
     if not observed_path:
         observed_path = [
             stage["stage"]
@@ -155,7 +159,10 @@ def _methods_by_stage(events: list[dict[str, Any]]) -> dict[str, list[dict[str, 
         event_type = event.get("event_type")
         if event_type not in {"attempt_started", "attempt_succeeded", "attempt_failed"}:
             continue
-        attempt_id = event.get("attempt_id") or f"{event.get('stage')}:{event.get('method_name')}"
+        attempt_id = (
+            event.get("attempt_id")
+            or f"{event.get('stage')}:{event.get('method_name')}"
+        )
         record = attempts.get(attempt_id)
         if record is None:
             record = {
@@ -187,7 +194,9 @@ def _methods_by_stage(events: list[dict[str, Any]]) -> dict[str, list[dict[str, 
     return by_stage
 
 
-def _artifact_refs_by_stage(artifacts: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _artifact_refs_by_stage(
+    artifacts: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     by_stage: dict[str, list[dict[str, Any]]] = {}
     for artifact in artifacts:
         artifact_type = str(artifact.get("artifact_type", ""))
@@ -204,9 +213,14 @@ def _artifact_refs_by_stage(artifacts: list[dict[str, Any]]) -> dict[str, list[d
     return by_stage
 
 
-def _stage_artifacts_for_trace(stage_artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _stage_artifacts_for_trace(
+    stage_artifacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     selected = list(stage_artifacts[:5])
-    if any(artifact.get("artifact_type") == _ANNOTATION_INTAKE_ARTIFACT_TYPE for artifact in selected):
+    if any(
+        artifact.get("artifact_type") == _ANNOTATION_INTAKE_ARTIFACT_TYPE
+        for artifact in selected
+    ):
         return selected
     intake = next(
         (
@@ -221,7 +235,9 @@ def _stage_artifacts_for_trace(stage_artifacts: list[dict[str, Any]]) -> list[di
     return selected
 
 
-def _candidate_methods_by_stage(artifacts: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _candidate_methods_by_stage(
+    artifacts: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     by_stage: dict[str, list[dict[str, Any]]] = {}
     for artifact in artifacts:
         if artifact.get("artifact_type") != "draft_assembly.candidate":
@@ -246,7 +262,9 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
         stage = str(event.get("stage", ""))
         if not stage:
             continue
-        request_id = str(event.get("review_request_id") or event.get("subject_id") or "")
+        request_id = str(
+            event.get("review_request_id") or event.get("subject_id") or ""
+        )
         if event_type == "review_requested":
             entry = requests.setdefault(request_id, {"stage": stage})
             if request_id not in order:
@@ -254,12 +272,18 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
             entry["review_request_id"] = request_id
             entry["requested_at"] = event.get("timestamp")
             entry["reason"] = event.get("reason")
-            entry["review_request_artifact_ref"] = event.get("review_request_artifact_ref")
+            entry["review_request_artifact_ref"] = event.get(
+                "review_request_artifact_ref"
+            )
             entry["auto_decidable"] = event.get("auto_decidable")
             entry["policy_mode"] = event.get("policy_mode")
-            entry["pending_human_confirmation"] = event.get("pending_human_confirmation")
+            entry["pending_human_confirmation"] = event.get(
+                "pending_human_confirmation"
+            )
         elif event_type == "review_decision":
-            entry = requests.setdefault(request_id, {"stage": stage, "review_request_id": request_id})
+            entry = requests.setdefault(
+                request_id, {"stage": stage, "review_request_id": request_id}
+            )
             if request_id not in order:
                 order.append(request_id)
             entry["decided_at"] = event.get("timestamp")
@@ -276,10 +300,16 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
     return by_stage
 
 
-def _stage_lifecycle_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _stage_lifecycle_by_stage(
+    events: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     by_stage: dict[str, dict[str, Any]] = {}
     for event in events:
-        if event.get("event_type") not in {"stage_entered", "stage_skipped", "stage_completed"}:
+        if event.get("event_type") not in {
+            "stage_entered",
+            "stage_skipped",
+            "stage_completed",
+        }:
             continue
         stage = str(event.get("stage") or "")
         if not stage:
@@ -330,8 +360,16 @@ def _stage_timing(
     review: dict[str, Any] | None,
     lifecycle: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    timestamps = [method.get("started_at") for method in methods if method.get("started_at")]
-    finished = [method.get("finished_at") for method in methods if method.get("finished_at")]
+    timestamps = [
+        value
+        for method in methods
+        if isinstance(value := method.get("started_at"), str) and value
+    ]
+    finished = [
+        value
+        for method in methods
+        if isinstance(value := method.get("finished_at"), str) and value
+    ]
     timing: dict[str, Any] = {}
     if timestamps:
         timing["started_at"] = min(timestamps)
@@ -350,7 +388,8 @@ def _stage_timing(
 
 def _decision_record(decision: dict[str, Any]) -> dict[str, Any]:
     return {
-        "review_request_id": decision.get("review_request_id") or decision.get("subject_id"),
+        "review_request_id": decision.get("review_request_id")
+        or decision.get("subject_id"),
         "stage": decision.get("stage"),
         "gate_id": decision.get("gate_id"),
         "decision": decision.get("decision"),
@@ -453,7 +492,9 @@ def _failed_stage(events: list[dict[str, Any]], summary: dict[str, Any]) -> str 
     return None
 
 
-def _final_or_current_stage(stages: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any]:
+def _final_or_current_stage(
+    stages: list[dict[str, Any]], summary: dict[str, Any]
+) -> dict[str, Any]:
     if summary.get("current_stage"):
         return {"stage": summary["current_stage"], "source": "ledger"}
     last_active = None
@@ -482,14 +523,18 @@ def _build_gaps(
     route_events = [
         event
         for event in events
-        if event.get("event_type") in {"stage_entered", "stage_skipped", "stage_completed"}
+        if event.get("event_type")
+        in {"stage_entered", "stage_skipped", "stage_completed"}
     ]
     if session is not None and len(events) > 1 and not route_events:
         gaps.append(
             {
                 "field": "route",
                 "kind": GAP_UNAVAILABLE,
-                "detail": "No explicit stage_entered/stage_skipped/stage_completed events were recorded.",
+                "detail": (
+                    "No explicit stage_entered/stage_skipped/stage_completed events "
+                    "were recorded."
+                ),
             }
         )
     request_ids = {
@@ -500,14 +545,18 @@ def _build_gaps(
     orphan_decisions = [
         decision
         for decision in decisions
-        if str(decision.get("review_request_id") or decision.get("subject_id")) not in request_ids
+        if str(decision.get("review_request_id") or decision.get("subject_id"))
+        not in request_ids
     ]
     if orphan_decisions:
         gaps.append(
             {
                 "field": "review_bindings",
                 "kind": GAP_UNAVAILABLE,
-                "detail": f"{len(orphan_decisions)} review decision event(s) have no matching request ID.",
+                "detail": (
+                    f"{len(orphan_decisions)} review decision event(s) have no "
+                    "matching request ID."
+                ),
             }
         )
     return gaps
@@ -516,7 +565,11 @@ def _build_gaps(
 def _route_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     route: list[dict[str, Any]] = []
     for event in events:
-        if event.get("event_type") not in {"stage_entered", "stage_skipped", "stage_completed"}:
+        if event.get("event_type") not in {
+            "stage_entered",
+            "stage_skipped",
+            "stage_completed",
+        }:
             continue
         record = {
             "sequence": event.get("sequence"),
@@ -556,11 +609,17 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
         lines.append("")
     lines.append(f"- supervision_state: {trace.get('supervision_state')}")
     final_stage = trace.get("final_or_current_stage") or {}
-    lines.append(f"- final_or_current_stage: {final_stage.get('stage')} (source: {final_stage.get('source')})")
+    lines.append(
+        f"- final_or_current_stage: {final_stage.get('stage')} "
+        f"(source: {final_stage.get('source')})"
+    )
     lines.append(f"- manifest: {trace.get('input_manifest_ref')}")
     lines.append(f"- checkpoint_persistence: {trace.get('checkpoint_persistence')}")
     lines.append(f"- created_at: {trace.get('created_at')}")
-    lines.append(f"- ledger_events: {trace.get('ledger_event_count')}, artifacts: {trace.get('artifact_count')}")
+    lines.append(
+        f"- ledger_events: {trace.get('ledger_event_count')}, "
+        f"artifacts: {trace.get('artifact_count')}"
+    )
     by_origin = trace.get("decisions_by_origin") or {}
     lines.append(f"- decisions_by_origin: {by_origin}")
     watermark = trace.get("source_watermark") or {}
@@ -580,28 +639,47 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
             span = " ".join(f"{key}={value}" for key, value in timing.items())
             lines.append(f"- timing: {span}")
         for method in stage.get("methods", []):
-            suffix = f" (rc={method['return_code']})" if method.get("return_code") is not None else ""
-            line = f"- method {method.get('method_name')}: {method.get('outcome')}{suffix}"
+            suffix = (
+                f" (rc={method['return_code']})"
+                if method.get("return_code") is not None
+                else ""
+            )
+            line = (
+                f"- method {method.get('method_name')}: {method.get('outcome')}{suffix}"
+            )
             if method.get("error"):
                 line += f" — {method['error']}"
             lines.append(line)
         for candidate in stage.get("candidate_methods", []):
             enabled = candidate.get("execution_enabled")
-            lines.append(f"- candidate {candidate.get('method_name')}: execution_enabled={enabled}")
+            lines.append(
+                f"- candidate {candidate.get('method_name')}: "
+                f"execution_enabled={enabled}"
+            )
         review = stage.get("review")
         if review:
             if review.get("decision"):
                 lines.append(
                     f"- review: {review.get('decision')} by {review.get('decided_by')}"
-                    + (f" (candidate {review['candidate_id']})" if review.get("candidate_id") else "")
+                    + (
+                        f" (candidate {review['candidate_id']})"
+                        if review.get("candidate_id")
+                        else ""
+                    )
                 )
             elif review.get("reason"):
                 lines.append(f"- review: requested ({review.get('reason')})")
-            for ref_key in ("review_request_artifact_ref", "rationale_artifact_ref", "decision_artifact_ref"):
+            for ref_key in (
+                "review_request_artifact_ref",
+                "rationale_artifact_ref",
+                "decision_artifact_ref",
+            ):
                 if review.get(ref_key):
                     lines.append(f"  - {ref_key}: {review[ref_key]}")
         for ref in stage.get("artifact_refs", []):
-            lines.append(f"- artifact {ref.get('artifact_type')}: {ref.get('path_ref')}")
+            lines.append(
+                f"- artifact {ref.get('artifact_type')}: {ref.get('path_ref')}"
+            )
         lines.append("")
 
     blocked = trace.get("blocked")
@@ -624,7 +702,9 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
         lines.append("")
         for failure in failures:
             detail = failure.get("error") or failure.get("detail") or ""
-            lines.append(f"- {failure.get('stage')} / {failure.get('method_name')}: {detail}")
+            lines.append(
+                f"- {failure.get('stage')} / {failure.get('method_name')}: {detail}"
+            )
         lines.append("")
 
     open_first = trace.get("open_first") or []
@@ -632,7 +712,9 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
         lines.append("## Open First")
         lines.append("")
         for artifact in open_first:
-            lines.append(f"- {artifact.get('artifact_type')}: {artifact.get('path_ref')}")
+            lines.append(
+                f"- {artifact.get('artifact_type')}: {artifact.get('path_ref')}"
+            )
         lines.append("")
 
     gaps = trace.get("gaps") or []
@@ -640,7 +722,9 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
         lines.append("## Durable-Record Gaps")
         lines.append("")
         for gap in gaps:
-            lines.append(f"- {gap.get('field')} [{gap.get('kind')}]: {gap.get('detail')}")
+            lines.append(
+                f"- {gap.get('field')} [{gap.get('kind')}]: {gap.get('detail')}"
+            )
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

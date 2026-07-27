@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 
 from app.schemas.execution import ExecutionFailureStatus
+from app.schemas.state import DomainStage
 
-
-STAGE_ORDER = [
+STAGE_ORDER: list[DomainStage] = [
     "inventory",
     "read_qc",
     "genome_survey",
@@ -21,7 +21,7 @@ STAGE_ORDER = [
     "function_annotation",
 ]
 
-TERMINAL_STAGE = "done"
+TERMINAL_STAGE: DomainStage = "done"
 TERMINAL_FAILURE_STATUSES: frozenset[ExecutionFailureStatus] = frozenset(
     {"failed", "blocked_env", "missing_tool"}
 )
@@ -37,7 +37,10 @@ def is_terminal_failure(
     return status in TERMINAL_FAILURE_STATUSES or status in extra_statuses
 
 
-def next_requested_stage(current_stage: str, requested: list[str]) -> str:
+def next_requested_stage(
+    current_stage: str,
+    requested: Sequence[str],
+) -> DomainStage:
     """Find the next requested stage in workflow order, or the terminal stage."""
     if current_stage not in STAGE_ORDER:
         return TERMINAL_STAGE
@@ -50,24 +53,22 @@ def next_requested_stage(current_stage: str, requested: list[str]) -> str:
 
 def skipped_stages_until_next(
     current_stage: str,
-    requested_stages: list[str] | None,
+    requested_stages: Sequence[str] | None,
 ) -> list[str]:
     """Return unrequested stages bypassed by an immediate resume handoff."""
     if not requested_stages or current_stage not in STAGE_ORDER:
         return []
     next_stage = next_requested_stage(current_stage, requested_stages)
     start = STAGE_ORDER.index(current_stage) + 1
-    stop = STAGE_ORDER.index(next_stage) if next_stage in STAGE_ORDER else len(STAGE_ORDER)
-    return [
-        stage
-        for stage in STAGE_ORDER[start:stop]
-        if stage not in requested_stages
-    ]
+    stop = (
+        STAGE_ORDER.index(next_stage) if next_stage in STAGE_ORDER else len(STAGE_ORDER)
+    )
+    return [stage for stage in STAGE_ORDER[start:stop] if stage not in requested_stages]
 
 
 def unrequested_stages_from_current(
     current_stage: str,
-    requested_stages: list[str] | None,
+    requested_stages: Sequence[str] | None,
 ) -> list[str]:
     """Return the current unrequested stage and any following skipped stages."""
 
@@ -75,18 +76,16 @@ def unrequested_stages_from_current(
         return []
     next_stage = next_requested_stage(current_stage, requested_stages)
     start = STAGE_ORDER.index(current_stage)
-    stop = STAGE_ORDER.index(next_stage) if next_stage in STAGE_ORDER else len(STAGE_ORDER)
-    return [
-        stage
-        for stage in STAGE_ORDER[start:stop]
-        if stage not in requested_stages
-    ]
+    stop = (
+        STAGE_ORDER.index(next_stage) if next_stage in STAGE_ORDER else len(STAGE_ORDER)
+    )
+    return [stage for stage in STAGE_ORDER[start:stop] if stage not in requested_stages]
 
 
 def next_stage_name(
     current_stage: str,
-    requested_stages: list[str] | None = None,
-) -> str:
+    requested_stages: Sequence[str] | None = None,
+) -> DomainStage:
     """Return the next applicable domain stage, or the terminal stage."""
     if requested_stages:
         return next_requested_stage(current_stage, requested_stages)

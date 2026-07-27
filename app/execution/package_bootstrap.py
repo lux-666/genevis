@@ -12,11 +12,17 @@ into scripts/common/).
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.execution.env_resolver import EnvResolver, PackagePreflightResult, PackageSpec, package_preflight
+from app.execution.env_resolver import (
+    EnvResolver,
+    PackagePreflightResult,
+    PackageSpec,
+    package_preflight,
+)
 
 
 @dataclass
@@ -32,6 +38,8 @@ class ConformanceResult:
 def conform_juicer(
     juicer_spec: PackageSpec,
     juicer_tools_spec: PackageSpec | None,
+    *,
+    apply: bool = True,
 ) -> ConformanceResult:
     """Conform a Juicer installation to the expected layout.
 
@@ -45,7 +53,7 @@ def conform_juicer(
     is a no-op.
     """
     juicer_root = Path(juicer_spec.install_root)
-    actions = []
+    actions: list[str] = []
 
     # Step 1: scripts -> CPU symlink
     scripts_dir = juicer_root / "scripts"
@@ -59,30 +67,48 @@ def conform_juicer(
             detail=f"CPU/ directory not found at {cpu_dir}",
         )
 
-    if scripts_dir.exists():
+    if scripts_dir.exists() or scripts_dir.is_symlink():
         if scripts_dir.is_symlink():
             target = scripts_dir.resolve()
             if target == cpu_dir.resolve():
-                actions.append(f"scripts -> CPU symlink already exists")
+                actions.append("scripts -> CPU symlink already exists")
             else:
                 return ConformanceResult(
                     package_name="juicer",
                     status="error",
                     actions_taken=actions,
-                    detail=f"scripts/ exists but points to {target}, expected {cpu_dir}",
+                    detail=(
+                        f"scripts/ exists but points to {target}, expected {cpu_dir}"
+                    ),
                 )
         else:
             return ConformanceResult(
                 package_name="juicer",
                 status="error",
                 actions_taken=actions,
-                detail=f"scripts/ exists as a real directory, not a symlink. Please remove or rename it.",
+                detail=(
+                    "scripts/ exists as a real directory, not a symlink. Please "
+                    "remove or rename it."
+                ),
             )
     else:
-        scripts_dir.symlink_to("CPU", target_is_directory=True)
-        actions.append(f"Created symlink: scripts -> CPU")
+        if apply:
+            scripts_dir.symlink_to("CPU", target_is_directory=True)
+            actions.append("Created symlink: scripts -> CPU")
+        else:
+            actions.append("Would create symlink: scripts -> CPU")
 
     # Step 2: jar symlink (if jar_root_ref is provided)
+    if juicer_spec.jar_root_ref and juicer_tools_spec is None:
+        return ConformanceResult(
+            package_name="juicer",
+            status="error",
+            actions_taken=actions,
+            detail=(
+                "referenced jar package is not configured: "
+                f"{juicer_spec.jar_root_ref}"
+            ),
+        )
     if juicer_tools_spec:
         jar_target_dir = juicer_root / "scripts" / "common"
         jar_target = jar_target_dir / "juicer_tools.jar"
@@ -96,31 +122,50 @@ def conform_juicer(
                 detail=f"juicer_tools.jar not found at {jar_source}",
             )
 
-        if not jar_target_dir.exists():
+        effective_target_dir = (
+            jar_target_dir if scripts_dir.exists() else cpu_dir / "common"
+        )
+        effective_target = effective_target_dir / "juicer_tools.jar"
+        if not effective_target_dir.exists():
             return ConformanceResult(
                 package_name="juicer",
                 status="error",
                 actions_taken=actions,
-                detail=f"scripts/common/ directory not found at {jar_target_dir}",
+                detail=(
+                    "scripts/common/ source directory not found at "
+                    f"{effective_target_dir}"
+                ),
             )
 
-        if jar_target.exists():
-            if jar_target.is_symlink():
-                target = jar_target.resolve()
+        if effective_target.exists():
+            if effective_target.is_symlink():
+                target = effective_target.resolve()
                 if target == jar_source.resolve():
-                    actions.append(f"juicer_tools.jar symlink already exists")
+                    actions.append("juicer_tools.jar symlink already exists")
                 else:
                     return ConformanceResult(
                         package_name="juicer",
                         status="error",
                         actions_taken=actions,
-                        detail=f"juicer_tools.jar exists but points to {target}, expected {jar_source}",
+                        detail=(
+                            f"juicer_tools.jar exists but points to {target}, "
+                            f"expected {jar_source}"
+                        ),
                     )
             else:
-                actions.append(f"juicer_tools.jar already exists (real file)")
+                actions.append("juicer_tools.jar already exists (real file)")
         else:
-            jar_target.symlink_to(jar_source)
-            actions.append(f"Created symlink: scripts/common/juicer_tools.jar -> {jar_source}")
+            if apply:
+                jar_target.symlink_to(jar_source)
+                actions.append(
+                    "Created symlink: scripts/common/juicer_tools.jar -> "
+                    f"{jar_source}"
+                )
+            else:
+                actions.append(
+                    "Would create symlink: scripts/common/juicer_tools.jar -> "
+                    f"{jar_source}"
+                )
 
     return ConformanceResult(
         package_name="juicer",
@@ -142,7 +187,12 @@ def preflight_all(resolver: EnvResolver) -> list[tuple[str, PackagePreflightResu
     return results
 
 
-def verify_envs_yaml(config_path: Path) -> list[str]:
+def verify_envs_yaml(
+    config_path: Path,
+    *,
+    config_data: Mapping[str, Any] | None = None,
+    conformance_packages: Collection[str] = (),
+) -> list[str]:
     """Verify that envs.yaml exists and is properly configured.
 
     Returns a list of issues (empty if valid). Checks:
@@ -152,12 +202,12 @@ def verify_envs_yaml(config_path: Path) -> list[str]:
     """
     issues = []
 
-    if not config_path.exists():
+    if config_data is None and not config_path.exists():
         issues.append(f"Configuration file not found: {config_path}")
         return issues
 
     try:
-        resolver = EnvResolver(config_path)
+        resolver = EnvResolver(config_path, config_data=config_data)
     except Exception as e:
         issues.append(f"Failed to load configuration: {e}")
         return issues
@@ -172,15 +222,53 @@ def verify_envs_yaml(config_path: Path) -> list[str]:
     elif fallback_env and "your_tool_env" in str(fallback_env):
         issues.append(f"default.fallback_env is still a placeholder: {fallback_env}")
     elif fallback_prefix and "/path/to/" in str(fallback_prefix):
-        issues.append(f"default.fallback_prefix is still a placeholder: {fallback_prefix}")
+        issues.append(
+            f"default.fallback_prefix is still a placeholder: {fallback_prefix}"
+        )
 
-    # Check package install_root paths
+    # Check package install_root paths, models, and declared canaries.
     for package_name, package_spec in resolver.packages.items():
         install_root = package_spec.install_root
         if "/path/to/" in install_root:
-            issues.append(f"packages.{package_name}.install_root is still a placeholder: {install_root}")
+            issues.append(
+                f"packages.{package_name}.install_root is still a placeholder: "
+                f"{install_root}"
+            )
         elif not Path(install_root).exists():
-            issues.append(f"packages.{package_name}.install_root does not exist: {install_root}")
+            issues.append(
+                f"packages.{package_name}.install_root does not exist: {install_root}"
+            )
+
+    allowed_missing: dict[str, set[str]] = {}
+    if "juicer" in conformance_packages:
+        juicer = resolver.packages.get("juicer")
+        if juicer is not None and juicer.conform_on_bootstrap:
+            jar_spec = (
+                resolver.packages.get(juicer.jar_root_ref)
+                if juicer.jar_root_ref
+                else None
+            )
+            conformance_result = conform_juicer(juicer, jar_spec, apply=False)
+            if conformance_result.status != "ok":
+                issues.append(
+                    f"packages.juicer conformance: {conformance_result.detail}"
+                )
+            elif jar_spec is not None:
+                allowed_missing["juicer"] = {
+                    "scripts/common/juicer_tools.jar"
+                }
+
+    for package_name, package_spec in resolver.packages.items():
+        preflight_result = package_preflight(package_spec)
+        missing = [
+            path
+            for path in preflight_result.missing_paths
+            if path not in allowed_missing.get(package_name, set())
+        ]
+        if preflight_result.status != "ok" and missing:
+            issues.append(
+                f"packages.{package_name} failed preflight: " + ", ".join(missing)
+            )
 
     autohic = resolver.packages.get("autohic")
     if autohic is not None:

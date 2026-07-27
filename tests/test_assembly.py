@@ -11,15 +11,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.control.lifecycle import resume_review_state
-from app.storage.artifacts import resolve_artifact_ref
-from app.review.base import ResumeReviewRequest
-from app.schemas.descriptors import DescriptorRegistry
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
 )
-from app.schemas.state import initial_state
+from app.review.base import ResumeReviewRequest
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.state import initial_state
 from app.stages.assembly.builder import build_stage
 from app.stages.assembly.method_application import flye as flye_graph
 from app.stages.assembly.method_application import hifiasm as hifiasm_graph
@@ -28,7 +27,7 @@ from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
 from app.stages.assembly.nodes import infer_input_profile
-from app.stages.assembly.parameters.profile import build_full_parameter_profile
+from app.storage.artifacts import resolve_artifact_ref
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -113,11 +112,19 @@ class AssemblyDescriptorTests(unittest.TestCase):
             self.assertIn(method_name, registry.methods)
             self.assertEqual(registry.methods[method_name].stage, "assembly")
             self.assertEqual(registry.methods[method_name].package_ref, package_name)
+            self.assertEqual(
+                registry.methods[method_name].planner.required_parameters, []
+            )
+            self.assertEqual(
+                registry.methods[method_name].planner.parameter_defaults, {}
+            )
             self.assertIn(method_name, registry.by_stage["assembly"])
         hifiasm = registry.methods["assembly.candidate.hifiasm"]
         self.assertIn("assembly candidate", hifiasm.goal)
         self.assertIn("compatibility_route_explicitly_requested", hifiasm.review_rules)
-        self.assertIn("explicit_hifi_or_non_ont_route_required", hifiasm.human_review_triggers)
+        self.assertIn(
+            "explicit_hifi_or_non_ont_route_required", hifiasm.human_review_triggers
+        )
 
     def test_shared_read_type_mapping_covers_manifest_platforms_and_methods(self):
         self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["cyclone"], "cyclone")
@@ -240,7 +247,9 @@ class AssemblyStageTests(unittest.TestCase):
         state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
         return state
 
-    def _fake_flye_bin(self, tmpdir: str, *, fail: bool = False, marker: Path | None = None) -> Path:
+    def _fake_flye_bin(
+        self, tmpdir: str, *, fail: bool = False, marker: Path | None = None
+    ) -> Path:
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir()
         flye = bin_dir / "flye"
@@ -256,15 +265,15 @@ class AssemblyStageTests(unittest.TestCase):
             flye.write_text(
                 "#!/bin/sh\n"
                 f"{f'echo flye-called > {marker!s}' if marker else ':'}\n"
-                "outdir=\"\"\n"
+                'outdir=""\n'
                 "while [ $# -gt 0 ]; do\n"
-                "  if [ \"$1\" = \"--out-dir\" ]; then\n"
+                '  if [ "$1" = "--out-dir" ]; then\n'
                 "    shift\n"
-                "    outdir=\"$1\"\n"
+                '    outdir="$1"\n'
                 "  fi\n"
                 "  shift\n"
                 "done\n"
-                "mkdir -p \"$outdir\"\n"
+                'mkdir -p "$outdir"\n'
                 "printf '>contig1\\nACGTACGT\\n' > \"$outdir/assembly.fasta\"\n"
                 "printf 'fake flye log\\n' > \"$outdir/flye.log\"\n"
                 "printf 'fake flye stdout\\n'\n",
@@ -273,7 +282,9 @@ class AssemblyStageTests(unittest.TestCase):
         flye.chmod(0o755)
         return bin_dir
 
-    def _fake_nextdenovo_bin(self, tmpdir: str, *, fail: bool = False, marker: Path | None = None) -> Path:
+    def _fake_nextdenovo_bin(
+        self, tmpdir: str, *, fail: bool = False, marker: Path | None = None
+    ) -> Path:
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir(exist_ok=True)
         nextdenovo = bin_dir / "nextDenovo"
@@ -289,17 +300,21 @@ class AssemblyStageTests(unittest.TestCase):
             nextdenovo.write_text(
                 "#!/bin/sh\n"
                 f"{f'echo nextdenovo-called > {marker!s}' if marker else ':'}\n"
-                "cfg=\"$1\"\n"
-                "workdir=$(awk -F= '/^workdir[[:space:]]*=/{gsub(/^[ \\t]+|[ \\t]+$/, \"\", $2); print $2}' \"$cfg\")\n"
-                "mkdir -p \"$workdir/03.ctg_graph\"\n"
-                "printf '>nd_contig1\\nACGTACGT\\n' > \"$workdir/03.ctg_graph/nd.asm.fasta\"\n"
+                'cfg="$1"\n'
+                "workdir=$(awk -F= '/^workdir[[:space:]]*=/"
+                '{gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2}\' "$cfg")\n'
+                'mkdir -p "$workdir/03.ctg_graph"\n'
+                "printf '>nd_contig1\\nACGTACGT\\n' > "
+                '"$workdir/03.ctg_graph/nd.asm.fasta"\n'
                 "printf 'fake nextDenovo stdout\\n'\n",
                 encoding="utf-8",
             )
         nextdenovo.chmod(0o755)
         return bin_dir
 
-    def _fake_hifiasm_bin(self, tmpdir: str, *, fail: bool = False, marker: Path | None = None) -> Path:
+    def _fake_hifiasm_bin(
+        self, tmpdir: str, *, fail: bool = False, marker: Path | None = None
+    ) -> Path:
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir(exist_ok=True)
         hifiasm = bin_dir / "hifiasm"
@@ -315,9 +330,9 @@ class AssemblyStageTests(unittest.TestCase):
             hifiasm.write_text(
                 "#!/bin/sh\n"
                 f"{f'echo hifiasm-called > {marker!s}' if marker else ':'}\n"
-                "prefix=\"\"\n"
+                'prefix=""\n'
                 "while [ $# -gt 0 ]; do\n"
-                "  if [ \"$1\" = \"-o\" ]; then shift; prefix=\"$1\"; fi\n"
+                '  if [ "$1" = "-o" ]; then shift; prefix="$1"; fi\n'
                 "  shift\n"
                 "done\n"
                 "printf 'S\\tcontig1\\tACGTACGT\\n' > \"$prefix.bp.p_ctg.gfa\"\n"
@@ -348,7 +363,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("assembly requires long reads", result["last_error"])
 
-    def test_rnaseq_registry_signal_reaches_typed_parameter_profile(self):
+    def test_rnaseq_registry_signal_reaches_assembly_route_profile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             long_reads = Path(tmpdir) / "long.fastq"
             rnaseq = Path(tmpdir) / "rna.fastq"
@@ -383,8 +398,6 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = update["stage_outputs"]["assembly"]
 
             self.assertTrue(assembly["input_profile"]["has_rnaseq"])
-            profile = build_full_parameter_profile(state, assembly_out=assembly)
-            self.assertTrue(profile["assets"]["has_rnaseq"])
 
     def test_plans_primary_and_one_fallback_from_fofn_and_genome_size_prior(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -400,7 +413,9 @@ class AssemblyStageTests(unittest.TestCase):
                     "genome_size_prior": 2_000_000,
                     "genome_size_source": "survey",
                     "estimates": {"genome_size": 2_000_000},
-                    "result_artifact_ref": str(Path(tmpdir) / "genome_survey_result.json"),
+                    "result_artifact_ref": str(
+                        Path(tmpdir) / "genome_survey_result.json"
+                    ),
                 },
                 "assembly": {
                     "assembly_route": "cyclone",
@@ -419,7 +434,9 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "planned")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
-            self.assertEqual(assembly["fallback_method"], "assembly.candidate.nextdenovo")
+            self.assertEqual(
+                assembly["fallback_method"], "assembly.candidate.nextdenovo"
+            )
             self.assertEqual(len(assembly["selected_candidate_refs"]), 2)
             self.assertLessEqual(len(assembly["selected_candidate_refs"]), 2)
             for candidate_ref in assembly["selected_candidate_refs"]:
@@ -428,7 +445,11 @@ class AssemblyStageTests(unittest.TestCase):
                 self.assertEqual(candidate["input_ref"], str(reads))
                 self.assertEqual(candidate["genome_size_prior"], 2_000_000)
                 self.assertEqual(candidate["artifact_type"], "draft_assembly.candidate")
-                self.assertTrue(candidate["expected_outputs"]["draft_assembly_fasta"].endswith(".fasta"))
+                self.assertTrue(
+                    candidate["expected_outputs"]["draft_assembly_fasta"].endswith(
+                        ".fasta"
+                    )
+                )
 
     def test_missing_genome_size_rejects_methods_that_require_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -456,10 +477,16 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(interrupt["stage"], "assembly")
             self.assertIn("genome_size_required", interrupt["reason"])
             rejected = result["stage_outputs"]["assembly"]["rejected_candidates"]
-            self.assertEqual(rejected["assembly.candidate.flye"], "genome_size_required")
-            self.assertEqual(rejected["assembly.candidate.nextdenovo"], "genome_size_required")
+            self.assertEqual(
+                rejected["assembly.candidate.flye"], "genome_size_required"
+            )
+            self.assertEqual(
+                rejected["assembly.candidate.nextdenovo"], "genome_size_required"
+            )
 
-    def test_auto_planning_without_human_decision_selects_no_more_than_primary_and_fallback(self):
+    def test_auto_planning_limits_selection_to_primary_and_fallback(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
             clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -482,7 +509,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "genome_size_prior": 2_000_000,
                     "genome_size_source": "survey",
                     "estimates": {"genome_size": 2_000_000},
-                }
+                },
             }
 
             result = self._invoke_with_parameter_approvals(state)
@@ -491,12 +518,19 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(len(assembly["selected_candidate_refs"]), 2)
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
-            self.assertEqual(assembly["fallback_method"], "assembly.candidate.nextdenovo")
-            self.assertNotIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
-            self.assertEqual(set(assembly["candidate_methods"]), {
-                "assembly.candidate.flye",
-                "assembly.candidate.nextdenovo",
-            })
+            self.assertEqual(
+                assembly["fallback_method"], "assembly.candidate.nextdenovo"
+            )
+            self.assertNotIn(
+                "assembly.candidate.hifiasm", assembly["candidate_methods"]
+            )
+            self.assertEqual(
+                set(assembly["candidate_methods"]),
+                {
+                    "assembly.candidate.flye",
+                    "assembly.candidate.nextdenovo",
+                },
+            )
 
     def test_explicit_hifiasm_selection_is_allowed_for_hifi_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -618,7 +652,9 @@ class AssemblyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly": {
                     "assembly_route": "cyclone",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                 }
             }
             state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
@@ -630,11 +666,16 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "planned")
             self.assertNotIn("draft_assembly_ref", assembly)
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             self.assertEqual(candidate["status"], "planned")
             self.assertFalse(candidate["metadata"]["execution_enabled"])
             self.assertNotIn("execution_mode", candidate["metadata"])
-            self.assertEqual(candidate["metadata"]["draft_assembly_ref_status"], "planned_path_not_materialized")
+            self.assertEqual(
+                candidate["metadata"]["draft_assembly_ref_status"],
+                "planned_path_not_materialized",
+            )
 
     def test_local_flye_rejects_invalid_threads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -653,16 +694,22 @@ class AssemblyStageTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
             state["stage_outputs"] = {
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "flye_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 2_000_000,
-                        "threads": 0,
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                     },
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.flye",
+                    ),
+                    "flye_parameters": {"threads": 0},
                 }
             }
 
@@ -672,7 +719,9 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "blocked_param")
-            invalid_params = {item["param"] for item in assembly.get("invalid_params") or []}
+            invalid_params = {
+                item["param"] for item in assembly.get("invalid_params") or []
+            }
             self.assertIn("flye_parameters.threads", invalid_params)
             self.assertIn("flye_parameters.threads", result["last_error"])
 
@@ -693,16 +742,22 @@ class AssemblyStageTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
             state["stage_outputs"] = {
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "flye_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 2_000_000,
-                        "threads": 1,
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                     },
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.flye",
+                    ),
+                    "flye_parameters": {"threads": 1},
                 }
             }
 
@@ -725,21 +780,35 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertNotIn("flye_frozen_attempt", assembly)
             self.assertNotIn("flye_execution_result", assembly)
             self.assertNotIn("env", assembly)
-            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.flye")
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["method_id"],
+                "assembly.candidate.flye",
+            )
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
 
-            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             self.assertEqual(candidate["status"], "executed")
-            self.assertTrue(Path(candidate["expected_outputs"]["draft_assembly_fasta"]).exists())
+            self.assertTrue(
+                Path(candidate["expected_outputs"]["draft_assembly_fasta"]).exists()
+            )
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertNotIn("execution_mode", candidate["metadata"])
-            self.assertEqual(candidate["metadata"]["draft_assembly_ref_status"], "materialized")
-            self.assertEqual(len(assembly["candidate_artifact_refs"]), len(set(assembly["candidate_artifact_refs"])))
+            self.assertEqual(
+                candidate["metadata"]["draft_assembly_ref_status"], "materialized"
+            )
+            self.assertEqual(
+                len(assembly["candidate_artifact_refs"]),
+                len(set(assembly["candidate_artifact_refs"])),
+            )
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
+                .read_text()
+                .splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("assembly.draft_assembly", artifact_types)
@@ -750,7 +819,9 @@ class AssemblyStageTests(unittest.TestCase):
 
             ledger_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text()
+                .splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_started", event_types)
@@ -766,17 +837,19 @@ class AssemblyStageTests(unittest.TestCase):
             fake_bin = self._fake_flye_bin(tmpdir)
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
             state["stage_outputs"] = {
                 "read_qc": {"status": "completed"},
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "flye_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 2_000_000,
-                        "threads": 1,
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                     },
+                    "flye_parameters": {"threads": 1},
                 },
             }
             _set_long_reads(state, reads)
@@ -787,7 +860,9 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["input_type"], "clean_long_reads")
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
-            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             self.assertEqual(candidate["status"], "executed")
 
     def test_local_flye_execution_from_multi_line_read_qc_fofn(self):
@@ -801,17 +876,19 @@ class AssemblyStageTests(unittest.TestCase):
             fake_bin = self._fake_flye_bin(tmpdir)
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
             state["stage_outputs"] = {
                 "read_qc": {"status": "completed"},
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "flye_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 2_000_000,
-                        "threads": 1,
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                     },
+                    "flye_parameters": {"threads": 1},
                 },
             }
             _set_long_reads(state, reads_1, reads_2)
@@ -844,17 +921,17 @@ class AssemblyStageTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
             state["stage_outputs"] = {
-                "genome_survey": {
-                    "status": "completed",
-                    "genome_size_prior": 2_000_000,
-                    "genome_size_source": "survey",
-                    "estimates": {"genome_size": 2_000_000},
-                },
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "assembly_selection": _assembly_selection(
                         read_type="cyclone",
                         primary_method="assembly.candidate.flye",
@@ -863,11 +940,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "parameter_recommendation": {
                         "max_execution_retries": 0,
                     },
-                    "flye_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 2_000_000,
-                        "threads": 1,
-                    },
+                    "flye_parameters": {"threads": 1},
                 },
             }
 
@@ -877,10 +950,17 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertEqual(result["last_error"], "execution_retry_budget_exhausted")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.flye")
-            self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["method_id"],
+                "assembly.candidate.flye",
+            )
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["status"], "execution_failed"
+            )
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
-            execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
+            execution = _attempt_execution(result, assembly["parameter_attempts"][0])[
+                "result"
+            ]
             stderr_path = resolve_artifact_ref(
                 result["data_dir"], result["session_id"], execution["stderr_ref"]
             )
@@ -891,11 +971,16 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("stdout_ref", execution)
             self.assertIn("stderr_ref", execution)
             artifact_index = Path(result["data_dir"]) / "artifacts" / "index.jsonl"
-            artifact_types = {json.loads(line)["artifact_type"] for line in artifact_index.read_text().splitlines()}
+            artifact_types = {
+                json.loads(line)["artifact_type"]
+                for line in artifact_index.read_text().splitlines()
+            }
             self.assertNotIn("assembly.draft_assembly", artifact_types)
             ledger_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text()
+                .splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_started", event_types)
@@ -925,7 +1010,9 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {
                     "assembly_route": "hifi",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                 }
             }
 
@@ -936,18 +1023,25 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
-            self.assertEqual(assembly["substeps"]["hifiasm_assembly"]["status"], "executed")
+            self.assertEqual(
+                assembly["substeps"]["hifiasm_assembly"]["status"], "executed"
+            )
             draft = Path(assembly["draft_assembly_ref"])
             self.assertTrue(draft.exists())
             self.assertTrue(draft.read_text(encoding="utf-8").startswith(">contig1"))
             self.assertNotIn("hifiasm_frozen_attempt", assembly)
             self.assertNotIn("hifiasm_execution_result", assembly)
 
-            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
-            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm")
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["method_id"],
+                "assembly.candidate.hifiasm",
+            )
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
 
@@ -973,8 +1067,9 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {
                     "assembly_route": "ont",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "hifiasm_ont_parameters": {"read_type": "ont"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                 },
             }
             _set_long_reads(state, reads, platform="ont")
@@ -983,8 +1078,13 @@ class AssemblyStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm_ont")
-            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(
+                assembly["primary_method"], "assembly.candidate.hifiasm_ont"
+            )
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["method_id"],
+                "assembly.candidate.hifiasm_ont",
+            )
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             command = _attempt_command(result, assembly["parameter_attempts"][0])
@@ -1012,12 +1112,14 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {
                     "assembly_route": "hifi",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "assembly_selection": _assembly_selection(
                         read_type="pacbio_hifi",
                         primary_method="assembly.candidate.hifiasm",
                     ),
-                    "hifiasm_parameters": {"read_type": "hifi", "threads": 0},
+                    "hifiasm_parameters": {"threads": 0},
                 }
             }
 
@@ -1048,7 +1150,9 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {
                     "assembly_route": "hifi",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "parameter_recommendation": {
                         "max_execution_retries": 0,
                     },
@@ -1059,15 +1163,26 @@ class AssemblyStageTests(unittest.TestCase):
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["status"], "execution_parameter_retries_exhausted")
-            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm")
-            self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
+            self.assertEqual(
+                assembly["status"], "execution_parameter_retries_exhausted"
+            )
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["method_id"],
+                "assembly.candidate.hifiasm",
+            )
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["status"], "execution_failed"
+            )
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
-            execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
+            execution = _attempt_execution(result, assembly["parameter_attempts"][0])[
+                "result"
+            ]
             stderr_path = resolve_artifact_ref(
                 result["data_dir"], result["session_id"], execution["stderr_ref"]
             )
-            self.assertIn("fake hifiasm failed", stderr_path.read_text(encoding="utf-8"))
+            self.assertIn(
+                "fake hifiasm failed", stderr_path.read_text(encoding="utf-8")
+            )
             self.assertNotIn("stdout_path", execution)
             self.assertNotIn("stderr_path", execution)
             self.assertNotIn("output_paths", execution)
@@ -1100,26 +1215,22 @@ class AssemblyStageTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
             state["stage_outputs"] = {
-                "genome_survey": {
-                    "status": "completed",
-                    "genome_size_prior": 2_000_000,
-                    "genome_size_source": "survey",
-                    "estimates": {"genome_size": 2_000_000},
-                },
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "assembly_selection": _assembly_selection(
                         read_type="cyclone",
                         primary_method="assembly.candidate.nextdenovo",
                     ),
-                    "nextdenovo_parameters": {
-                        "read_type": "ont",
-                        "genome_size": 2_000_000,
-                        "threads": 1,
-                    },
+                    "nextdenovo_parameters": {"threads": 1},
                 },
             }
 
@@ -1129,18 +1240,29 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertTrue(called_marker.exists())
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
-            self.assertEqual(assembly["primary_method"], "assembly.candidate.nextdenovo")
-            self.assertEqual(assembly["substeps"]["nextdenovo_assembly"]["status"], "executed")
-            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.nextdenovo")
+            self.assertEqual(
+                assembly["primary_method"], "assembly.candidate.nextdenovo"
+            )
+            self.assertEqual(
+                assembly["substeps"]["nextdenovo_assembly"]["status"], "executed"
+            )
+            self.assertEqual(
+                assembly["parameter_attempts"][0]["method_id"],
+                "assembly.candidate.nextdenovo",
+            )
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
 
-            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertTrue(candidate["metadata"]["method_graph_requested"])
-            self.assertEqual(candidate["metadata"]["draft_assembly_ref_status"], "materialized")
+            self.assertEqual(
+                candidate["metadata"]["draft_assembly_ref_status"], "materialized"
+            )
             run_cfg = Path(candidate["logs"]["run_cfg"])
             self.assertTrue(run_cfg.exists())
             run_cfg_text = run_cfg.read_text(encoding="utf-8")
@@ -1174,25 +1296,21 @@ class AssemblyStageTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
             state["stage_outputs"] = {
-                "genome_survey": {
-                    "status": "completed",
-                    "genome_size_prior": 2_000_000,
-                    "genome_size_source": "survey",
-                    "estimates": {"genome_size": 2_000_000},
-                },
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "assembly_selection": _assembly_selection(
                         read_type="cyclone",
                         primary_method="assembly.candidate.nextdenovo",
                     ),
-                    "nextdenovo_parameters": {
-                        "read_type": "ont",
-                        "genome_size": 2_000_000,
-                    },
                 },
             }
 
@@ -1202,19 +1320,32 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             attempt = assembly["parameter_attempts"][0]
             command_payload = _attempt_command(result, attempt)
-            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             run_cfg = Path(candidate["logs"]["run_cfg"])
             run_cfg_text = run_cfg.read_text(encoding="utf-8")
             self.assertIn("read_cutoff = 1000", run_cfg_text)
             self.assertIn("parallel_jobs = 32", run_cfg_text)
             self.assertIn("sort_options = -m 1g -t 32", run_cfg_text)
             self.assertIn("nextgraph_options = -a 1", run_cfg_text)
-            self.assertEqual(command_payload["parameter_sources"]["l0_fixed"]["threads"], 32)
-            self.assertNotIn("read_cutoff", command_payload["parameter_sources"]["l0_fixed"])
-            self.assertEqual(sorted(command_payload["parameter_sources"]), ["l0_fixed", "l1_readonly", "l2_recommended"])
-            self.assertEqual(command_payload["rendered_parameters"]["read_cutoff"], 1000)
-            self.assertEqual(command_payload["rendered_parameters"]["nextgraph_a"], 1)
-            self.assertEqual(command_payload["rendered_parameters"]["nextgraph_a"], 1)
+            sources = command_payload["parameter_sources"]
+            self.assertEqual(
+                set(sources),
+                {
+                    "l0_executor",
+                    "l1_facts",
+                    "l2_approved",
+                    "effective_parameters",
+                    "effective_source_by_parameter",
+                    "applications",
+                },
+            )
+            self.assertEqual(sources["l0_executor"]["threads"], 32)
+            self.assertNotIn("read_cutoff", sources["l0_executor"])
+            self.assertEqual(sources["l2_approved"]["read_cutoff"], 1000)
+            self.assertEqual(sources["effective_parameters"]["read_cutoff"], 1000)
+            self.assertEqual(sources["effective_parameters"]["nextgraph_a"], 1)
 
 
 class Phase4FlyeParameterTests(unittest.TestCase):
@@ -1250,15 +1381,15 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         flye.write_text(
             "#!/bin/sh\n"
             f"{f'echo flye-called > {marker!s}' if marker else ':'}\n"
-            "outdir=\"\"\n"
+            'outdir=""\n'
             "while [ $# -gt 0 ]; do\n"
-            "  if [ \"$1\" = \"--out-dir\" ]; then\n"
+            '  if [ "$1" = "--out-dir" ]; then\n'
             "    shift\n"
-            "    outdir=\"$1\"\n"
+            '    outdir="$1"\n'
             "  fi\n"
             "  shift\n"
             "done\n"
-            "mkdir -p \"$outdir\"\n"
+            'mkdir -p "$outdir"\n'
             "printf '>contig1\\nACGTACGT\\n' > \"$outdir/assembly.fasta\"\n"
             "printf 'fake flye log\\n' > \"$outdir/flye.log\"\n"
             "printf 'fake flye stdout\\n'\n",
@@ -1267,7 +1398,15 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         flye.chmod(0o755)
         return bin_dir
 
-    def _local_state_with_flye(self, tmpdir: str, *, flye_parameters: dict | None, marker: Path | None = None) -> dict:
+    def _local_state_with_flye(
+        self,
+        tmpdir: str,
+        *,
+        flye_parameters: dict | None,
+        marker: Path | None = None,
+        shared_read_type: str = "ont_hq",
+        genome_size: int | None = 2_000_000,
+    ) -> dict:
         clean_reads = Path(tmpdir) / "clean.fastq"
         clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         fake_bin = self._fake_flye_bin(tmpdir, marker=marker)
@@ -1283,20 +1422,33 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             ],
         )
         state = self._state(tmpdir, str(registry))
+        route = "hifi" if shared_read_type == "pacbio_hifi" else "ont"
         assembly_out: dict = {
-            "assembly_route": "cyclone",
+            "assembly_route": route,
             "execution_mode": "local",
             "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            "assembly_selection": _assembly_selection(
+                read_type=shared_read_type,
+                primary_method="assembly.candidate.flye",
+            ),
         }
         if flye_parameters is not None:
             assembly_out["flye_parameters"] = flye_parameters
         state["stage_outputs"] = {"assembly": assembly_out}
+        state["shared_parameters"] = {"read_type": shared_read_type}
+        if genome_size is not None:
+            state["shared_parameters"]["estimated_genome_size"] = genome_size
         return state
 
     def test_missing_flye_genome_size_is_rejected_before_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             marker = Path(tmpdir) / "flye-called"
-            state = self._local_state_with_flye(tmpdir, flye_parameters=None, marker=marker)
+            state = self._local_state_with_flye(
+                tmpdir,
+                flye_parameters=None,
+                marker=marker,
+                genome_size=None,
+            )
 
             result = self._invoke_with_parameter_approvals(state)
 
@@ -1305,18 +1457,20 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "blocked_human")
-            self.assertEqual(assembly["rejected_candidates"]["assembly.candidate.flye"], "genome_size_required")
-            self.assertEqual(assembly["read_type_prior"]["source"], "manifest_platform")
-            self.assertEqual(assembly["read_type_prior"]["flye"], "nano-raw")
+            self.assertEqual(
+                assembly["rejected_candidates"]["assembly.candidate.flye"],
+                "genome_size_required",
+            )
+            self.assertEqual(
+                assembly["read_type_prior"]["source"], "assembly_selection"
+            )
+            self.assertEqual(assembly["read_type_prior"]["flye"], "nano-hq")
 
     def test_flye_omitted_threads_uses_catalog_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters={
-                    "read_type": "nano-hq",
-                    "estimated_genome_size": 2_000_000,
-                },
+                flye_parameters={},
             )
 
             result = self._invoke_with_parameter_approvals(state)
@@ -1328,16 +1482,18 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             flye_script = Path(command["script_path"])
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--threads 32", script_text)
-            self.assertEqual(command["parameter_sources"]["l0_fixed"]["threads"], 32)
-            self.assertEqual(command["argv"][command["argv"].index("--threads") + 1], "32")
+            self.assertEqual(command["parameter_sources"]["l0_executor"]["threads"], 32)
+            self.assertEqual(
+                command["argv"][command["argv"].index("--threads") + 1], "32"
+            )
 
     def test_shared_parameters_fill_flye_read_type_and_genome_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
                 flye_parameters={"threads": 1},
+                shared_read_type="pacbio_hifi",
             )
-            state["shared_parameters"] = {"read_type": "pacbio_hifi", "estimated_genome_size": 2_000_000}
 
             result = self._invoke_with_parameter_approvals(state)
 
@@ -1348,18 +1504,19 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--pacbio-hifi", script_text)
             self.assertIn("--genome-size 2000000", script_text)
-            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             self.assertEqual(candidate["metadata"]["read_profile"], "pacbio-hifi")
             self.assertEqual(candidate["metadata"]["estimated_genome_size"], 2_000_000)
 
-    def test_unknown_read_type_is_reported_as_invalid_param(self):
+    def test_obsolete_method_read_type_cannot_override_approved_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             marker = Path(tmpdir) / "flye-called"
             state = self._local_state_with_flye(
                 tmpdir,
                 flye_parameters={
                     "read_type": "foo",
-                    "estimated_genome_size": 2_000_000,
                     "threads": 1,
                 },
                 marker=marker,
@@ -1367,24 +1524,18 @@ class Phase4FlyeParameterTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertFalse(marker.exists())
+            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertTrue(marker.exists())
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["status"], "blocked_param")
-            invalid_by_param = {item["param"]: item for item in assembly["invalid_params"]}
-            self.assertIn("flye_parameters.read_type", invalid_by_param)
-            self.assertEqual(invalid_by_param["flye_parameters.read_type"]["value"], "foo")
-            self.assertIn("nano-raw", invalid_by_param["flye_parameters.read_type"]["accepted"])
+            command = _attempt_command(result, assembly["parameter_attempts"][0])
+            self.assertIn("--nano-hq", command["argv"])
+            self.assertNotIn("foo", command["argv"])
 
     def test_validated_params_are_passed_to_flye_command_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters={
-                    "read_type": "nano-hq",
-                    "estimated_genome_size": 2_000_000,
-                    "threads": 1,
-                },
+                flye_parameters={"threads": 1},
             )
 
             result = self._invoke_with_parameter_approvals(state)
@@ -1401,7 +1552,9 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             # pre-commit stage state still holds the rich metadata until commit
             # strips it; the executed Flye candidate bundle carries execution
             # provenance.
-            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(
+                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+            )
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertNotIn("execution_mode", candidate["metadata"])
             # The executed bundle metadata must reflect the validated
@@ -1414,15 +1567,8 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters={
-                    "read_type": "nano-hq",
-                    "estimated_genome_size": 2_000_000,
-                    "threads": 1,
-                },
+                flye_parameters={"threads": 1},
             )
-            state["stage_outputs"]["read_qc"] = {
-                "summary": {"n50": 10000},
-            }
 
             result = self._invoke_with_parameter_approvals(state)
 
@@ -1435,8 +1581,13 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertEqual(argv[read_flag_index + 1], assembly["input_ref"])
             self.assertIn("--out-dir", argv[read_flag_index + 2 :])
             self.assertNotIn("10000", argv)
-            self.assertEqual(command_payload["parameter_sources"]["l1_readonly"]["read_n50"], 10000)
-            self.assertNotIn("estimated_coverage", command_payload["parameter_sources"]["l1_readonly"])
+            sources = command_payload["parameter_sources"]
+            self.assertEqual(sources["l1_facts"]["genome_size"], 2_000_000)
+            self.assertEqual(
+                sources["effective_source_by_parameter"]["genome_size"],
+                "l1",
+            )
+            self.assertNotIn("read_n50", sources["effective_parameters"])
             self.assertEqual(command_payload["argv"], argv)
             self.assertNotIn("10000", command_payload["command"])
             self.assertNotIn("35.5", command_payload["command"])

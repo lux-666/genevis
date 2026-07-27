@@ -33,6 +33,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.4",
     "mypy>=1.10",
+    "types-PyYAML>=6.0",
 ]
 tui = [
     "questionary>=2.0",

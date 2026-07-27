@@ -2,52 +2,60 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_output
+from app.stages.assembly.state import AssemblyStageCursor, assembly_stage_output
+from app.workflow import is_terminal_failure
 
 EXTRA_FAIL_STATUSES = frozenset({"blocked_param"})
 
 
-def route_after_resolve(state: TopLevelState) -> str:
+def route_after_resolve(state: TopLevelState) -> Literal["fail", "infer_profile"]:
     """Route after resolving assembly inputs."""
     return (
         "fail"
         if is_terminal_failure(
-            stage_output(state, "assembly").get("status"),
+            assembly_stage_output(state).get("status"),
             extra_statuses=EXTRA_FAIL_STATUSES,
         )
         else "infer_profile"
     )
 
 
-def route_after_enter(state: TopLevelState) -> str:
+def route_after_enter(
+    state: TopLevelState,
+) -> Literal["resolve", "recommend", "plan"]:
     """Route retry states directly back into parameter recommendation."""
-    if stage_output(state, "assembly").get("status") in {
+    if assembly_stage_output(state).get("status") in {
         "retry_parameters_after_execution_failure",
         "retry_parameters_after_review_failure",
     }:
         return "recommend"
-    if stage_output(state, "assembly").get("status") == "parameters_approved":
+    if assembly_stage_output(state).get("status") == "parameters_approved":
         return "plan"
     return "resolve"
 
 
-def route_after_infer_profile(state: TopLevelState) -> str:
+def route_after_infer_profile(
+    state: TopLevelState,
+) -> Literal["fail", "select_route"]:
     """Route after writing the input profile."""
-    status = stage_output(state, "assembly").get("status")
+    status = assembly_stage_output(state).get("status")
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "fail"
     return "select_route"
 
 
-def route_after_select_route(state: TopLevelState) -> str:
+def route_after_select_route(
+    state: TopLevelState,
+) -> Literal["block", "fail", "build"]:
     """Route after confirming or blocking on route selection."""
-    status = stage_output(state, "assembly").get("status")
+    status = assembly_stage_output(state).get("status")
     if status == "blocked_human":
         return "block"
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
@@ -55,21 +63,23 @@ def route_after_select_route(state: TopLevelState) -> str:
     return "build"
 
 
-def route_after_candidate_set(state: TopLevelState) -> str:
+def route_after_candidate_set(state: TopLevelState) -> Literal["fail", "select"]:
     """Route after building candidate compatibility records."""
     return (
         "fail"
         if is_terminal_failure(
-            stage_output(state, "assembly").get("status"),
+            assembly_stage_output(state).get("status"),
             extra_statuses=EXTRA_FAIL_STATUSES,
         )
         else "select"
     )
 
 
-def route_after_select(state: TopLevelState) -> str:
+def route_after_select(
+    state: TopLevelState,
+) -> Literal["block", "fail", "recommend"]:
     """Route after selecting primary/fallback candidates."""
-    status = stage_output(state, "assembly").get("status")
+    status = assembly_stage_output(state).get("status")
     if status == "blocked_human":
         return "block"
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
@@ -77,13 +87,13 @@ def route_after_select(state: TopLevelState) -> str:
     return "recommend"
 
 
-def route_after_parameter_recommendation(state: TopLevelState) -> str:
+def route_after_parameter_recommendation(
+    state: TopLevelState,
+) -> Literal["block", "fail", "plan"]:
     """Route after Phase10 parameter recommendation."""
-    status = stage_output(state, "assembly").get("status")
+    status = assembly_stage_output(state).get("status")
     if status == "blocked_human":
         return "block"
-    if status in {"parameter_retry_stopped", "parameter_retry_expert_review"}:
-        return "fail"
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES) or status in {
         "parameter_response_invalid",
         "parameter_recommendation_failed",
@@ -92,9 +102,11 @@ def route_after_parameter_recommendation(state: TopLevelState) -> str:
     return "plan"
 
 
-def route_after_plan(state: TopLevelState) -> str:
+def route_after_plan(
+    state: TopLevelState,
+) -> Literal["fail", "flye", "nextdenovo", "hifiasm", "hifiasm_ont", "commit"]:
     """Route after writing planned candidate bundles."""
-    status = stage_output(state, "assembly").get("status")
+    status = assembly_stage_output(state).get("status")
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "fail"
     if status == "flye_execution_planned":
@@ -108,18 +120,22 @@ def route_after_plan(state: TopLevelState) -> str:
     return "commit"
 
 
-def route_after_method_subgraph(state: TopLevelState) -> str:
+def route_after_method_subgraph(
+    state: TopLevelState,
+) -> Literal["retry_gate", "fail", "commit"]:
     """Route after a method-specific assembly subgraph returns."""
-    output = stage_output(state, "assembly")
+    output = assembly_stage_output(state)
     status = output.get("status")
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "retry_gate" if _current_attempt_has_execution_result(output) else "fail"
     return "commit"
 
 
-def route_after_execution_retry_gate(state: TopLevelState) -> str:
+def route_after_execution_retry_gate(
+    state: TopLevelState,
+) -> Literal["recommend", "commit", "fail"]:
     """Route after checking whether a failed executable attempt can retry."""
-    status = stage_output(state, "assembly").get("status")
+    status = assembly_stage_output(state).get("status")
     if status == "retry_parameters_after_execution_failure":
         return "recommend"
     if status == "draft_ready":
@@ -127,7 +143,7 @@ def route_after_execution_retry_gate(state: TopLevelState) -> str:
     return "fail"
 
 
-def _current_attempt_has_execution_result(output: dict) -> bool:
+def _current_attempt_has_execution_result(output: AssemblyStageCursor) -> bool:
     try:
         attempt = current_parameter_attempt(
             output,

@@ -2,24 +2,40 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.control.lifecycle import resume_review_state
 from app.execution.evidence import load_frozen_attempt
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.repeat_annotation.nodes import resolve_repeat_inputs
 from app.stages.t2t.builder import build_stage
-from app.stages.t2t.nodes import build_t2t_candidates, scan_read_telomeres
+from app.stages.t2t.nodes import (
+    _CANDIDATE_FIELDS,
+    _candidate_rows,
+    _materialize_t2t_patches,
+    build_t2t_candidates,
+    scan_read_telomeres,
+)
+from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
+from app.stages.t2t.parameters.execution import (
+    T2TExecutionThresholds,
+    T2TFrozenExecutionInputs,
+)
+from app.storage.artifacts import publish_artifact_record
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -30,44 +46,228 @@ class T2TDescriptorTests(unittest.TestCase):
         method = registry.methods["t2t.alignment.minimap2"]
         self.assertEqual(method.stage, "t2t")
         self.assertEqual(method.package_ref, "minimap2")
+        self.assertEqual(method.planner.required_parameters, [])
+        self.assertEqual(method.planner.parameter_defaults, {})
         self.assertIn(method.method_name, registry.by_stage["t2t"])
+        catalog = load_t2t_parameter_catalog()
+        self.assertEqual(catalog.catalog_id, "minimap2")
+        self.assertEqual(catalog.method_id, method.method_name)
 
-    def test_run_config_accepts_default_auto_patch(self):
+    def test_run_config_leaves_catalog_owned_mode_unset(self):
         config = RunConfig.model_validate({"local_exec": ["t2t"], "t2t": {}})
-        self.assertEqual(config.t2t.mode, "auto_patch")
-        self.assertEqual(config.t2t.thresholds.min_supporting_reads, 1)
+        self.assertIsNone(config.t2t.mode)
+        self.assertFalse(hasattr(config.t2t, "thresholds"))
+        self.assertFalse(hasattr(config.t2t, "telomere_motif"))
+
+    def test_run_config_rejects_legacy_telomere_motif(self):
+        with self.assertRaises(ValueError):
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["t2t"],
+                    "t2t": {"telomere_motif": "TTAGGG"},
+                }
+            )
+
+    def test_run_config_rejects_legacy_threshold_overlay(self):
+        with self.assertRaises(ValueError):
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["t2t"],
+                    "t2t": {"thresholds": {"min_mapq": 30}},
+                }
+            )
 
 
 class T2TStageTests(unittest.TestCase):
+    def _publish_assembly_input(
+        self, state: dict, source_path: Path, *, label: str = "assembly"
+    ) -> Path:
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        staged = paths.work_path("inventory", f"{label}{source_path.suffix}")
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(source_path.read_bytes())
+        artifact = ArtifactMeta.from_file(
+            staged,
+            stage="inventory",
+            method_name="test.input_registry",
+            artifact_type="input.assembly_fasta",
+        )
+        return publish_artifact_record(
+            state["data_dir"], state["session_id"], artifact
+        ).path
+
+    def _publish_ont_input(
+        self,
+        state: dict,
+        source_path: Path,
+        *,
+        label: str,
+    ) -> Path:
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        staged = paths.work_path("inventory", f"{label}{source_path.suffix}")
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(source_path.read_bytes())
+        artifact = ArtifactMeta.from_file(
+            staged,
+            stage="inventory",
+            method_name="test.input_registry",
+            artifact_type="input.ont_reads",
+        )
+        return publish_artifact_record(
+            state["data_dir"], state["session_id"], artifact
+        ).path
+
+    def _invoke_with_parameter_approval(
+        self,
+        state: dict,
+        *,
+        recommended_parameters: dict | None = None,
+    ) -> dict:
+        """Run T2T while approving only its mandatory parameter gate."""
+
+        graph = build_stage()
+        current = state
+        for _ in range(3):
+            with (
+                patch("app.llm.parameters.t2t.motif.build_chat_model") as motif_model,
+                patch(
+                    "app.llm.parameters.base.build_chat_model"
+                ) as build_model,
+            ):
+                motif_model.return_value.invoke.return_value = SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "status": "resolved",
+                            "telomere_motif": "TTAGGG",
+                            "summary": "Test species uses the canonical repeat.",
+                        }
+                    )
+                )
+                build_model.return_value.invoke.return_value = SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "parameters": recommended_parameters or {},
+                            "summary": "Use executor-owned defaults.",
+                        }
+                    )
+                )
+                result = graph.invoke(current)
+            interrupt = result.get("active_interrupt") or {}
+            if not (
+                result.get("supervision_state") == "blocked_human"
+                and interrupt.get("gate_id") == "parameter_approval"
+            ):
+                return result
+            metadata_keys = (
+                "attempt_id",
+                "task",
+                "previous_attempt_id",
+                "recommendation_hash",
+            )
+            update = resume_review_state(
+                result,
+                ResumeReviewRequest(
+                    session_id=result["session_id"],
+                    stage="t2t",
+                    gate_id="parameter_approval",
+                    decision="approve_parameters",
+                    review_request_id=interrupt["review_request_id"],
+                    review_request_hash=interrupt["request_hash"],
+                    metadata={key: interrupt[key] for key in metadata_keys},
+                ),
+            )
+            current = {**result, **update}
+        self.fail("T2T exceeded the bounded parameter-approval loop")
+
     def _state(self, tmpdir: str, assembly: Path, reads: Path | None = None):
-        state = initial_state(session_id="s1", input_manifest_ref="control/manifest.yaml", data_dir=str(v2_run_dir(tmpdir, "s1")))
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
+        )
         state["current_stage"] = "t2t"
+        published_assembly = self._publish_assembly_input(state, assembly)
         assets = []
         if reads:
-            assets.append({"asset_id": "s1:clean_long_reads:reads.fq", "asset_type": "clean_long_reads", "path": str(reads)})
+            published_reads = self._publish_ont_input(
+                state, reads, label="clean_long_reads_0000"
+            )
+            assets.append(
+                {
+                    "asset_id": "s1:clean_long_reads:reads.fq",
+                    "asset_type": "clean_long_reads",
+                    "path": str(published_reads),
+                }
+            )
         registry = Path(tmpdir) / "registry.json"
-        registry.write_text(json.dumps({"session_id": "s1", "assets": assets}), encoding="utf-8")
+        registry.write_text(
+            json.dumps({"session_id": "s1", "assets": assets}), encoding="utf-8"
+        )
         state["asset_registry_ref"] = str(registry)
-        state["stage_outputs"] = {"assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)}}
+        state["stage_outputs"] = {
+            "assembly_review": {
+                "status": "completed",
+                "final_assembly_ref": str(published_assembly),
+            }
+        }
         state["resource_refs"]["assembly"] = ResourceRef(
             resource_type="assembly",
-            paths=[str(assembly)],
+            paths=[str(published_assembly)],
             source_stage="assembly_review",
         ).to_dict()
+        state["shared_parameters"] = {
+            "species_facts": {"scientific_name": "Homo sapiens", "taxon_id": 9606}
+        }
         return state
 
-    def _fake_minimap2(self, tmpdir: str, *, support_count: int = 2) -> Path:
+    def _fake_minimap2(
+        self,
+        tmpdir: str,
+        *,
+        support_count: int = 2,
+        paf_output: str | None = None,
+    ) -> Path:
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         script = bin_dir / "minimap2"
+        paf_writer = (
+            f"sys.stdout.write({paf_output!r})\n"
+            if paf_output is not None
+            else "for name, seq in records[:" + repr(support_count) + "]:\n"
+            "    print(f'{name}\\t{len(seq)}\\t0\\t{target_len}\\t+\\t"
+            "{target}\\t{target_len}\\t0\\t{target_len}\\t{target_len}\\t"
+            "{target_len}\\t60')\n"
+        )
         script.write_text(
-            "#!/usr/bin/env python3\n"
-            "import sys\n"
-            "assembly = sys.argv[-2]\n"
-            "seq = ''.join(line.strip() for line in open(assembly) if not line.startswith('>'))\n"
-            "for index in range(" + repr(support_count) + "):\n"
-            "    qlen = len(seq) + 24\n"
-            "    print(f'r{index + 1}\\t{qlen}\\t0\\t{len(seq)}\\t+\\tchr1\\t{len(seq)}\\t0\\t{len(seq)}\\t{len(seq)}\\t{len(seq)}\\t60')\n",
+            (
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "assembly = sys.argv[-2]\n"
+                "reads = sys.argv[-1]\n"
+                "target = None\n"
+                "target_seq = []\n"
+                "for line in open(assembly):\n"
+                "    if line.startswith('>'):\n"
+                "        if target is None:\n"
+                "            target = line[1:].strip().split()[0]\n"
+                "        continue\n"
+                "    target_seq.append(line.strip())\n"
+                "target_len = len(''.join(target_seq))\n"
+                "records = []\n"
+                "name = None\n"
+                "sequence = []\n"
+                "for line in open(reads):\n"
+                "    if line.startswith('>'):\n"
+                "        if name is not None:\n"
+                "            records.append((name, ''.join(sequence)))\n"
+                "        name = line[1:].strip().split()[0]\n"
+                "        sequence = []\n"
+                "    else:\n"
+                "        sequence.append(line.strip())\n"
+                "if name is not None:\n"
+                "    records.append((name, ''.join(sequence)))\n"
+            )
+            + paf_writer,
             encoding="utf-8",
         )
         script.chmod(0o755)
@@ -79,7 +279,10 @@ class T2TStageTests(unittest.TestCase):
         assembly.write_text(f">chr1\n{core}\n", encoding="utf-8")
         reads = Path(tmpdir) / "reads.fq"
         reads.write_text(
-            "".join(f"@r{i}\n{core}{'TTAGGG' * 4}\n+\n{'I' * (len(core) + 24)}\n" for i in range(1, 3)),
+            "".join(
+                f"@r{i}\n{core}{'TTAGGG' * 4}\n+\n{'I' * (len(core) + 24)}\n"
+                for i in range(1, 3)
+            ),
             encoding="utf-8",
         )
         return assembly, reads
@@ -89,9 +292,16 @@ class T2TStageTests(unittest.TestCase):
             assembly, reads = self._write_inputs(tmpdir)
             original = assembly.read_text(encoding="utf-8")
             state = self._state(tmpdir, assembly, reads)
-            state["stage_outputs"]["t2t"] = {"execution_mode": "local", "env": {"PATH": str(self._fake_minimap2(tmpdir)) + os.pathsep + os.environ["PATH"]}}
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
+            }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(state)
 
             self.assertEqual(result["current_stage"], "repeat_annotation")
             t2t = result["stage_outputs"]["t2t"]
@@ -101,39 +311,67 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(assembly.read_text(encoding="utf-8"), original)
             self.assertIn("TTAGGG" * 4, patched.read_text(encoding="utf-8"))
             self.assertEqual(t2t["output_assembly_ref"], str(patched))
+            self.assertEqual(
+                t2t["alignment_paf_artifact_ref"]["artifact_type"],
+                "t2t.read_alignment_paf",
+            )
+            with Path(t2t["telomere_extension_candidates_ref"]).open(
+                encoding="utf-8"
+            ) as handle:
+                candidate_rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertTrue(candidate_rows[0]["frozen_attempt_ref"])
+            self.assertTrue(candidate_rows[0]["execution_ref"])
+            self.assertTrue(candidate_rows[0]["alignment_paf_ref"])
+            event_types = [
+                event["event_type"]
+                for event in Ledger(result["data_dir"]).read_events("s1")
+            ]
+            self.assertIn("attempt_succeeded", event_types)
 
             downstream = resolve_repeat_inputs(result)
-            self.assertEqual(downstream["stage_outputs"]["repeat_annotation"]["input_assembly_ref"], str(patched))
+            self.assertEqual(
+                downstream["stage_outputs"]["repeat_annotation"]["input_assembly_ref"],
+                str(patched),
+            )
 
     def test_execution_is_plan_only_without_local_exec(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
-            result = build_stage().invoke(self._state(tmpdir, assembly, reads))
+            state = self._state(tmpdir, assembly, reads)
+            expected_assembly = state["resource_refs"]["assembly"]["paths"][0]
+            result = self._invoke_with_parameter_approval(state)
 
             self.assertEqual(result["current_stage"], "repeat_annotation")
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "skipped")
-            self.assertEqual(t2t["output_assembly_ref"], str(assembly))
+            self.assertEqual(t2t["output_assembly_ref"], expected_assembly)
             self.assertTrue(Path(t2t["t2t_finishing_report_ref"]).exists())
 
     def test_hic_final_assembly_has_priority_over_assembly_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             review_assembly, reads = self._write_inputs(tmpdir)
             hic_assembly = Path(tmpdir) / "hic_final.fa"
-            hic_assembly.write_text(">chrH\n" + "TTAGGG" * 4 + "A" * 10_050 + "\n", encoding="utf-8")
+            hic_assembly.write_text(
+                ">chrH\n" + "TTAGGG" * 4 + "A" * 10_050 + "\n", encoding="utf-8"
+            )
             state = self._state(tmpdir, review_assembly, reads)
-            state["stage_outputs"]["hic_scaffolding"] = {"output_assembly_ref": str(hic_assembly)}
+            published_hic = self._publish_assembly_input(
+                state, hic_assembly, label="hic_assembly"
+            )
+            state["stage_outputs"]["hic_scaffolding"] = {
+                "output_assembly_ref": str(published_hic)
+            }
             state["resource_refs"]["assembly"] = ResourceRef(
                 resource_type="assembly",
-                paths=[str(hic_assembly)],
+                paths=[str(published_hic)],
                 source_stage="hic_scaffolding",
             ).to_dict()
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(state)
 
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["source_stage"], "hic_scaffolding")
-            self.assertEqual(t2t["input_assembly_ref"], str(hic_assembly))
+            self.assertEqual(t2t["input_assembly_ref"], str(published_hic))
 
     def test_invalid_assembly_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -151,31 +389,45 @@ class T2TStageTests(unittest.TestCase):
             state = self._state(tmpdir, assembly, reads)
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
-                "env": {"PATH": str(self._fake_minimap2(tmpdir, support_count=1)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir, support_count=1))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(state)
 
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed")
             self.assertTrue(Path(t2t["patched_assembly_ref"]).exists())
-            candidate_rows = Path(t2t["telomere_extension_candidates_ref"]).read_text(encoding="utf-8")
+            candidate_rows = Path(t2t["telomere_extension_candidates_ref"]).read_text(
+                encoding="utf-8"
+            )
             self.assertIn("auto_patch", candidate_rows)
 
-    def test_configured_two_read_threshold_still_blocks_single_read_evidence(self):
+    def test_approved_two_read_threshold_still_blocks_single_read_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly, reads)
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
-                "thresholds": {"min_supporting_reads": 2},
-                "env": {"PATH": str(self._fake_minimap2(tmpdir, support_count=1)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir, support_count=1))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(
+                state,
+                recommended_parameters={"min_supporting_reads": 2},
+            )
 
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed_with_warnings")
             self.assertNotIn("patched_assembly_ref", t2t)
-            candidate_rows = Path(t2t["telomere_extension_candidates_ref"]).read_text(encoding="utf-8")
+            candidate_rows = Path(t2t["telomere_extension_candidates_ref"]).read_text(
+                encoding="utf-8"
+            )
             self.assertIn("insufficient_or_conflicting_read_support", candidate_rows)
 
     def test_build_candidates_reentry_preserves_existing_candidate_artifact(self):
@@ -189,7 +441,11 @@ class T2TStageTests(unittest.TestCase):
                 "chr1:right\tchr1\tright\tr1\tright\t+\t60\t1000\t0\t24\t0\t1000\tr1,r2\tproposed\tconservative_multi_read_support\n"
             )
             candidates.write_text(original, encoding="utf-8")
-            state = initial_state(session_id="s1", input_manifest_ref="control/manifest.yaml", data_dir=str(v2_run_dir(tmpdir, "s1")))
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
+            )
             state["stage_outputs"] = {
                 "t2t": {
                     "status": "candidates_built",
@@ -204,6 +460,123 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(update, {})
             self.assertEqual(candidates.read_text(encoding="utf-8"), original)
 
+    def test_collect_replay_recovers_published_paf_after_work_file_is_moved(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
+            }
+
+            completed = self._invoke_with_parameter_approval(state)
+            original = completed["stage_outputs"]["t2t"]
+            paf_work_path = Path(original["work_dir"]) / "ont_to_assembly.paf"
+            self.assertFalse(paf_work_path.exists())
+
+            replay_t2t = dict(original)
+            replay_t2t["status"] = "alignment_ran"
+            for key in (
+                "alignment_paf_ref",
+                "alignment_paf_artifact_ref",
+                "telomere_extension_candidates_ref",
+                "telomere_extension_candidates_artifact_ref",
+                "candidate_count",
+                "selected_patch_count",
+                "proposed_candidate_count",
+            ):
+                replay_t2t.pop(key, None)
+            replay_state = {
+                **completed,
+                "stage_outputs": {
+                    **completed["stage_outputs"],
+                    "t2t": replay_t2t,
+                },
+            }
+
+            replay = build_t2t_candidates(replay_state)
+            replay_output = replay["stage_outputs"]["t2t"]
+            self.assertEqual(
+                replay_output["alignment_paf_artifact_ref"],
+                original["alignment_paf_artifact_ref"],
+            )
+            self.assertEqual(
+                replay_output["telomere_extension_candidates_artifact_ref"],
+                original["telomere_extension_candidates_artifact_ref"],
+            )
+
+    def test_malformed_paf_fails_collect_without_recording_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "env": {
+                    "PATH": str(
+                        self._fake_minimap2(tmpdir, paf_output="malformed paf row\\n")
+                    )
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
+            }
+
+            result = self._invoke_with_parameter_approval(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("malformed PAF line 1", result["last_error"])
+            event_types = [
+                event["event_type"]
+                for event in Ledger(result["data_dir"]).read_events("s1")
+            ]
+            self.assertNotIn("attempt_succeeded", event_types)
+
+    def test_malformed_clean_registry_member_blocks_without_falling_back_to_raw(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            raw_reads = Path(tmpdir) / "raw.fq"
+            raw_reads.write_text(reads.read_text(encoding="utf-8"), encoding="utf-8")
+            state = self._state(tmpdir, assembly)
+            Path(state["asset_registry_ref"]).write_text(
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "assets": [
+                            {
+                                "asset_id": "clean-valid",
+                                "asset_type": "clean_long_reads",
+                                "path": str(reads),
+                            },
+                            {
+                                "asset_id": "clean-missing-path",
+                                "asset_type": "clean_long_reads",
+                            },
+                            {
+                                "asset_id": "raw-valid",
+                                "asset_type": "raw_long_reads",
+                                "path": str(raw_reads),
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+
+            with patch(
+                "app.llm.parameters.base.build_chat_model",
+                side_effect=AssertionError(
+                    "malformed registry input must fail before the model"
+                ),
+            ):
+                result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("clean-missing-path", result["last_error"])
+
     def test_manual_review_blocks_only_when_proposed_candidates_exist(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
@@ -211,10 +584,14 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
                 "mode": "manual_review",
-                "env": {"PATH": str(self._fake_minimap2(tmpdir)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(state)
 
             self.assertEqual(result["current_stage"], "t2t")
             self.assertEqual(result["supervision_state"], "blocked_human")
@@ -226,10 +603,17 @@ class T2TStageTests(unittest.TestCase):
             )["payload"]
             self.assertEqual(
                 request_payload["decisions_allowed"],
-                ["accept_selected_candidates", "continue_without_patch", "stop_pipeline"],
+                [
+                    "accept_selected_candidates",
+                    "continue_without_patch",
+                    "stop_pipeline",
+                ],
             )
             self.assertEqual(
-                [candidate["candidate_id"] for candidate in request_payload["candidates"]],
+                [
+                    candidate["candidate_id"]
+                    for candidate in request_payload["candidates"]
+                ],
                 ["chr1:right"],
             )
 
@@ -240,15 +624,23 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
                 "mode": "manual_review",
-                "thresholds": {"min_supporting_reads": 2},
-                "env": {"PATH": str(self._fake_minimap2(tmpdir, support_count=1)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir, support_count=1))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(
+                state,
+                recommended_parameters={"min_supporting_reads": 2},
+            )
 
             self.assertEqual(result["current_stage"], "repeat_annotation")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(result["stage_outputs"]["t2t"]["status"], "completed_with_warnings")
+            self.assertEqual(
+                result["stage_outputs"]["t2t"]["status"], "completed_with_warnings"
+            )
 
     def test_manual_review_resume_accepts_explicit_selected_candidate_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -257,9 +649,13 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
                 "mode": "manual_review",
-                "env": {"PATH": str(self._fake_minimap2(tmpdir)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
-            blocked = build_stage().invoke(state)
+            blocked = self._invoke_with_parameter_approval(state)
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="t2t",
@@ -285,12 +681,17 @@ class T2TStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly, reads)
+            expected_assembly = state["resource_refs"]["assembly"]["paths"][0]
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
                 "mode": "manual_review",
-                "env": {"PATH": str(self._fake_minimap2(tmpdir)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
-            blocked = build_stage().invoke(state)
+            blocked = self._invoke_with_parameter_approval(state)
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="t2t",
@@ -305,7 +706,7 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(resumed["current_stage"], "repeat_annotation")
             t2t = resumed["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed")
-            self.assertEqual(t2t["output_assembly_ref"], str(assembly))
+            self.assertEqual(t2t["output_assembly_ref"], expected_assembly)
             self.assertIsNone(t2t["patched_assembly_ref"])
 
     def test_manual_review_resume_stop_pipeline_does_not_enter_downstream(self):
@@ -315,9 +716,13 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
                 "mode": "manual_review",
-                "env": {"PATH": str(self._fake_minimap2(tmpdir)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
-            blocked = build_stage().invoke(state)
+            blocked = self._invoke_with_parameter_approval(state)
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="t2t",
@@ -340,35 +745,47 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
                 "mode": "propose_only",
-                "env": {"PATH": str(self._fake_minimap2(tmpdir)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(state)
 
             self.assertEqual(result["current_stage"], "repeat_annotation")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(result["stage_outputs"]["t2t"]["status"], "completed_with_warnings")
+            self.assertEqual(
+                result["stage_outputs"]["t2t"]["status"], "completed_with_warnings"
+            )
             self.assertIsNone(result.get("active_interrupt"))
 
     def test_alignment_uses_filtered_telomeric_reads_fasta(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             with reads.open("a", encoding="utf-8") as handle:
-                handle.write("@not_telomeric\n" + "C" * 2000 + "\n+\n" + "I" * 2000 + "\n")
+                handle.write(
+                    "@not_telomeric\n" + "C" * 2000 + "\n+\n" + "I" * 2000 + "\n"
+                )
             state = self._state(tmpdir, assembly, reads)
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
-                "env": {"PATH": str(self._fake_minimap2(tmpdir)) + os.pathsep + os.environ["PATH"]},
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approval(state)
 
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["read_count"], 3)
             self.assertEqual(t2t["telomeric_read_count"], 2)
             attempt = load_frozen_attempt(
                 result,
-                t2t["execution_attempts"][0]["frozen_attempt_ref"],
+                t2t["parameter_attempts"][0]["frozen_attempt_ref"],
                 expected_stage="t2t",
                 expected_method_name="t2t.alignment.minimap2",
             )
@@ -376,7 +793,10 @@ class T2TStageTests(unittest.TestCase):
                 attempt.metadata["reads_ref"],
                 t2t["telomeric_reads_fasta_ref"],
             )
-            self.assertNotIn("not_telomeric", Path(t2t["telomeric_reads_fasta_ref"]).read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "not_telomeric",
+                Path(t2t["telomeric_reads_fasta_ref"]).read_text(encoding="utf-8"),
+            )
 
     def test_scan_read_telomeres_streams_outputs_without_bulk_tsv_writes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -388,21 +808,51 @@ class T2TStageTests(unittest.TestCase):
             work_dir.mkdir(parents=True)
             state["stage_outputs"]["t2t"] = {
                 "status": "reads_prepared",
-                "ont_reads_path": str(reads),
+                "ont_read_inputs": [
+                    {
+                        "asset_id": "s1:clean_long_reads:reads.fq",
+                        "path": str(reads),
+                    }
+                ],
                 "out_dir": str(out_dir),
                 "work_dir": str(work_dir),
-                "telomere_motif": "TTAGGG",
-                "thresholds": {
-                    "min_motif_copies": 4,
-                    "terminal_window_bp": 10_000,
-                    "min_mapq": 20,
-                    "max_target_terminal_distance_bp": 1_000,
-                    "min_overlap_bp": 500,
-                    "min_supporting_reads": 2,
-                },
             }
+            frozen_inputs = T2TFrozenExecutionInputs(
+                resolved_telomere_motif="TTAGGG",
+                motif_source="provided_species_fact",
+                mode="auto_patch",
+                input_assembly_ref=str(assembly),
+                ont_read_inputs=(
+                    {
+                        "asset_id": "s1:clean_long_reads:reads.fq",
+                        "path": str(reads),
+                    },
+                ),
+                chromosome_list_ref=None,
+                work_dir=str(work_dir),
+                execution_enabled=True,
+                thresholds=T2TExecutionThresholds.model_validate(
+                    {
+                        "min_motif_copies": 4,
+                        "terminal_window_bp": 10_000,
+                        "min_mapq": 20,
+                        "max_target_terminal_distance_bp": 1_000,
+                        "min_overlap_bp": 500,
+                        "min_supporting_reads": 2,
+                    }
+                ),
+            )
 
-            with patch("app.stages.t2t.nodes._write_tsv", side_effect=AssertionError("bulk TSV write called")):
+            with (
+                patch(
+                    "app.stages.t2t.nodes.load_t2t_frozen_execution_inputs",
+                    return_value=frozen_inputs,
+                ),
+                patch(
+                    "app.stages.t2t.nodes._write_tsv",
+                    side_effect=AssertionError("bulk TSV write called"),
+                ),
+            ):
                 update = scan_read_telomeres(state)
 
             t2t = update["stage_outputs"]["t2t"]
@@ -411,3 +861,348 @@ class T2TStageTests(unittest.TestCase):
             self.assertTrue(Path(t2t["reads_telomere_scan_ref"]).exists())
             self.assertTrue(Path(t2t["telomeric_reads_ref"]).exists())
             self.assertTrue(Path(t2t["telomeric_reads_fasta_ref"]).exists())
+
+    def test_all_clean_read_files_are_scanned_before_raw_and_ids_are_namespaced(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, _ = self._write_inputs(tmpdir)
+            clean_a = Path(tmpdir) / "clean_a.fq"
+            clean_b = Path(tmpdir) / "clean_b.fq"
+            raw = Path(tmpdir) / "raw.fq"
+            sequence = "A" * 700 + "TTAGGG" * 4
+            for path in (clean_a, clean_b, raw):
+                path.write_text(
+                    f"@duplicate\n{sequence}\n+\n{'I' * len(sequence)}\n",
+                    encoding="utf-8",
+                )
+            state = self._state(tmpdir, assembly)
+            published_clean_a = self._publish_ont_input(
+                state, clean_a, label="clean_long_reads_0000"
+            )
+            published_clean_b = self._publish_ont_input(
+                state, clean_b, label="clean_long_reads_0001"
+            )
+            published_raw = self._publish_ont_input(
+                state, raw, label="raw_long_reads_0000"
+            )
+            Path(state["asset_registry_ref"]).write_text(
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "assets": [
+                            {
+                                "asset_id": "clean-a",
+                                "asset_type": "clean_long_reads",
+                                "path": str(published_clean_a),
+                            },
+                            {
+                                "asset_id": "raw-a",
+                                "asset_type": "raw_long_reads",
+                                "path": str(published_raw),
+                            },
+                            {
+                                "asset_id": "clean-b",
+                                "asset_type": "clean_long_reads",
+                                "path": str(published_clean_b),
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
+            }
+
+            result = self._invoke_with_parameter_approval(state)
+            t2t = result["stage_outputs"]["t2t"]
+
+            self.assertEqual(
+                t2t["ont_read_refs"],
+                [str(published_clean_a), str(published_clean_b)],
+            )
+            self.assertEqual(t2t["read_count"], 2)
+            with Path(t2t["reads_telomere_scan_ref"]).open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual(
+                [row["read_id"] for row in rows],
+                ["clean-a::duplicate", "clean-b::duplicate"],
+            )
+            self.assertEqual(
+                [row["source_asset_id"] for row in rows], ["clean-a", "clean-b"]
+            )
+
+    def test_no_read_path_publishes_empty_tables_without_invoking_model(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, _ = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly)
+            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+
+            with patch(
+                "app.llm.parameters.base.build_chat_model",
+                side_effect=AssertionError("no-read T2T must not invoke the model"),
+            ):
+                result = build_stage().invoke(state)
+
+            t2t = result["stage_outputs"]["t2t"]
+            self.assertEqual(t2t["status"], "skipped_no_long_reads")
+            for key in (
+                "reads_telomere_scan_ref",
+                "telomeric_reads_ref",
+                "telomere_extension_candidates_ref",
+            ):
+                self.assertTrue(Path(t2t[key]).is_file())
+                self.assertIn("/artifacts/t2t/", t2t[key])
+
+    def test_malformed_nonempty_read_input_fails_before_parameter_recommendation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, _ = self._write_inputs(tmpdir)
+            malformed = Path(tmpdir) / "malformed.fq"
+            malformed.write_text("not fasta or fastq\n", encoding="utf-8")
+            state = self._state(tmpdir, assembly, malformed)
+            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+
+            with patch(
+                "app.llm.parameters.base.build_chat_model",
+                side_effect=AssertionError(
+                    "malformed input must fail before the model"
+                ),
+            ):
+                result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("invalid t2t ONT input", result["last_error"])
+            self.assertIsNone(result.get("active_interrupt"))
+
+    def test_one_key_sparse_recommendation_is_preserved_in_approval_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+            with (
+                patch("app.llm.parameters.t2t.motif.build_chat_model") as motif_model,
+                patch(
+                    "app.llm.parameters.base.build_chat_model"
+                ) as build_model,
+            ):
+                motif_model.return_value.invoke.return_value = SimpleNamespace(
+                    content=json.dumps(
+                        {"status": "resolved", "telomere_motif": "TTAGGG"}
+                    )
+                )
+                build_model.return_value.invoke.return_value = SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "parameters": {"min_supporting_reads": 2},
+                            "summary": "Require two supporting reads.",
+                        }
+                    )
+                )
+                blocked = build_stage().invoke(state)
+
+            request = load_review_request(
+                blocked["data_dir"], blocked["active_interrupt"]["request_ref"]
+            )
+            self.assertEqual(
+                request["payload"]["parameters"], {"min_supporting_reads": 2}
+            )
+            serialized = json.dumps(request["payload"], sort_keys=True)
+            self.assertNotIn("omitted_parameters", serialized)
+            self.assertNotIn("terminal_window_bp", request["payload"]["parameters"])
+
+    def test_reverse_strand_tail_is_selected_in_target_forward_orientation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oriented = "A" * 80 + "TTAGGG" * 4
+            source = oriented.translate(str.maketrans("ACGT", "TGCA"))[::-1]
+            read_id = "clean-a::reverse"
+            paf = Path(tmpdir) / "alignment.paf"
+            paf.write_text(
+                f"{read_id}\t104\t24\t104\t-\tchr1\t100\t0\t90\t80\t80\t60\n",
+                encoding="utf-8",
+            )
+            rows = _candidate_rows(
+                paf,
+                {
+                    "chr1": {
+                        "left_has_signal": "true",
+                        "right_has_signal": "false",
+                    }
+                },
+                {
+                    read_id: {
+                        "left_has_signal": "true",
+                        "right_has_signal": "false",
+                        "source_asset_id": "clean-a",
+                        "source_read_id": "reverse",
+                    }
+                },
+                {read_id: source},
+                {
+                    "min_motif_copies": 4,
+                    "min_mapq": 20,
+                    "min_overlap_bp": 50,
+                    "max_target_terminal_distance_bp": 20,
+                    "min_supporting_reads": 1,
+                },
+                "TTAGGG",
+                None,
+                "auto_patch",
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["target_end"], "right")
+            self.assertEqual(rows[0]["read_end"], "left")
+            self.assertEqual(rows[0]["strand"], "-")
+            self.assertEqual(rows[0]["oriented_query_end"], "80")
+            self.assertEqual(rows[0]["extension_length"], "24")
+
+    def test_junction_trimming_and_conflicting_two_end_patches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "assembly.fa"
+            original = "A" * 100
+            assembly.write_text(f">chr1\n{original}\n", encoding="utf-8")
+            reads = Path(tmpdir) / "telomeric.fa"
+            reads.write_text(
+                ">left\nTTAGGGAAAA\n>right\nAAAAATTAGGG\n",
+                encoding="utf-8",
+            )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
+            )
+            work = SessionPaths.from_run_dir(state["data_dir"]).work_path(
+                "t2t", "t2t_finishing"
+            )
+            work.mkdir(parents=True)
+            candidates = work / "candidates.tsv"
+
+            def write_candidates(left_cut: int, right_cut: int) -> None:
+                rows = [
+                    {
+                        "candidate_id": "chr1:left",
+                        "target": "chr1",
+                        "target_end": "left",
+                        "junction_coordinate": str(left_cut),
+                        "read_id": "left",
+                        "source_asset_id": "clean-a",
+                        "source_read_id": "left",
+                        "strand": "+",
+                        "oriented_query_start": "6",
+                        "oriented_query_end": "10",
+                        "supporting_reads": "left",
+                        "mapq": "60",
+                        "overlap_bp": "4",
+                        "decision": "auto_patch",
+                    },
+                    {
+                        "candidate_id": "chr1:right",
+                        "target": "chr1",
+                        "target_end": "right",
+                        "junction_coordinate": str(right_cut),
+                        "read_id": "right",
+                        "source_asset_id": "clean-a",
+                        "source_read_id": "right",
+                        "strand": "+",
+                        "oriented_query_start": "0",
+                        "oriented_query_end": "5",
+                        "supporting_reads": "right",
+                        "mapq": "60",
+                        "overlap_bp": "5",
+                        "decision": "auto_patch",
+                    },
+                ]
+                with candidates.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(
+                        handle, fieldnames=_CANDIDATE_FIELDS, delimiter="\t"
+                    )
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+            out = {
+                "work_dir": str(work),
+                "input_assembly_ref": str(assembly),
+                "telomeric_reads_fasta_ref": str(reads),
+                "telomere_extension_candidates_ref": str(candidates),
+            }
+            execution_inputs = T2TFrozenExecutionInputs(
+                thresholds=T2TExecutionThresholds(
+                    min_motif_copies=4,
+                    terminal_window_bp=10_000,
+                    min_mapq=20,
+                    max_target_terminal_distance_bp=1_000,
+                    min_overlap_bp=500,
+                    min_supporting_reads=1,
+                ),
+                resolved_telomere_motif="TTAGGG",
+                motif_source="provided_species_fact",
+                mode="auto_patch",
+                input_assembly_ref=str(assembly),
+                ont_read_inputs=(),
+                chromosome_list_ref=None,
+                work_dir=str(work),
+                execution_enabled=True,
+            )
+            write_candidates(10, 90)
+            materialized = _materialize_t2t_patches(
+                state,
+                out,
+                execution_inputs=execution_inputs,
+                allowed_decisions={"auto_patch"},
+            )
+            self.assertIsNotNone(materialized)
+            patched = "".join(
+                line.strip()
+                for line in Path(materialized["patched_assembly_ref"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if not line.startswith(">")
+            )
+            self.assertEqual(patched, "TTAGGG" + original[10:90] + "TTAGGG")
+            self.assertEqual(
+                assembly.read_text(encoding="utf-8"), f">chr1\n{original}\n"
+            )
+
+            other_tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(other_tmp.cleanup)
+            conflict_state = initial_state(
+                session_id="s2",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(v2_run_dir(other_tmp.name, "s2")),
+            )
+            conflict_work = SessionPaths.from_run_dir(
+                conflict_state["data_dir"]
+            ).work_path("t2t", "t2t_finishing")
+            conflict_work.mkdir(parents=True)
+            conflict_candidates = conflict_work / "candidates.tsv"
+            candidates.replace(conflict_candidates)
+            with conflict_candidates.open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            rows[0]["junction_coordinate"] = "70"
+            rows[1]["junction_coordinate"] = "30"
+            with conflict_candidates.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle, fieldnames=_CANDIDATE_FIELDS, delimiter="\t"
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            conflict = _materialize_t2t_patches(
+                conflict_state,
+                {
+                    "work_dir": str(conflict_work),
+                    "input_assembly_ref": str(assembly),
+                    "telomeric_reads_fasta_ref": str(reads),
+                    "telomere_extension_candidates_ref": str(conflict_candidates),
+                },
+                execution_inputs=execution_inputs.model_copy(
+                    update={"work_dir": str(conflict_work)}
+                ),
+                allowed_decisions={"auto_patch"},
+            )
+            self.assertIn("conflicting_junctions", conflict["error"])
+            self.assertNotIn("patched_assembly_ref", conflict)
+            self.assertTrue(Path(conflict["patch_records_ref"]).is_file())

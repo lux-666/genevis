@@ -1,720 +1,1018 @@
-method_id: hifiasm_ont
+catalog_id: hifiasm_ont
+method_id: assembly.candidate.hifiasm_ont
 tool: hifiasm
-read_type: ont
 description: "ONT simplex assembly mode using hifiasm >=0.21.0; --ont is fixed by the route."
 
 parameters:
   output_prefix:
-    cli: "-o"
-    level: 0
-    source: executor
     value_type: path
-    source_priority:
-      - execution.output_prefix
+    application:
+      kind: cli_option
+      flag: "-o"
+      order: 0
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_output_prefix
     description: "Output file prefix."
+
   threads:
-    cli: "-t"
-    level: 0
-    source: run_config
     value_type: int
-    default: 32
+    application:
+      kind: cli_option
+      flag: "-t"
+      order: 1
     min: 1
-    source_priority:
-      - assembly.hifiasm_ont_parameters.threads
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_threads
+        required: false
+        materialized_default: 32
     description: "Number of CPU threads."
+
   input_reads:
-    cli: null
-    level: 0
-    source: executor
     value_type: path_list
-    source_priority:
-      - execution.input_reads
+    application:
+      kind: positional
+      position: 0
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_input_reads
     description: "Input ONT read files; FASTQ required for ONT mode."
+
   help:
-    cli: "-h"
-    level: 0
-    source: executor
     value_type: boolean
-    fixed_value: false
+    application:
+      kind: cli_switch
+      flag: "-h"
+      order: 2
+    layers:
+      l0:
+        kind: fixed
+        value: false
     description: "Show help information."
+
   version:
-    cli: "--version"
-    level: 0
-    source: executor
     value_type: boolean
-    fixed_value: false
+    application:
+      kind: cli_switch
+      flag: "--version"
+      order: 3
+    layers:
+      l0:
+        kind: fixed
+        value: false
     description: "Show version number."
+
   ont_mode:
-    cli: "--ont"
-    level: 0
-    source: route_selector
     value_type: boolean
-    fixed_value: true
+    application:
+      kind: cli_switch
+      flag: "--ont"
+      order: 4
+    layers:
+      l0:
+        kind: fixed
+        value: true
     description: "Fixed ONT mode flag."
+
   ignore_cached_overlaps:
-    cli: "-i"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "-i"
+      order: 5
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Ignore saved read correction and overlaps."
+
   write_paf:
-    cli: "--write-paf"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--write-paf"
+      order: 6
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Dump overlaps in PAF; output/audit mechanic."
+
   write_ec:
-    cli: "--write-ec"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--write-ec"
+      order: 7
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Dump error-corrected reads; output/audit mechanic."
+
   dbg_gfa:
-    cli: "--dbg-gfa"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--dbg-gfa"
+      order: 8
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Debug GFA output."
+
   dbg_het_cnt:
-    cli: "--dbg-het-cnt"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--dbg-het-cnt"
+      order: 9
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Debug heterozygous k-mer count output."
+
   dbg_ovec:
-    cli: "--dbg-ovec"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--dbg-ovec"
+      order: 10
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Debug overlap error correction output."
+
   prt_raw:
-    cli: "--prt-raw"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--prt-raw"
+      order: 11
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Print raw/debug output."
+
   bin_only:
-    cli: "--bin-only"
-    level: 0
-    source: executor
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--bin-only"
+      order: 12
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
     description: "Internal/debug binary-only mode."
-  primary_mode:
-    cli: "--primary"
-    level: 0
-    source: route_selector
-    value_type: boolean
-    default: false
-    description: "Output primary and alternate contigs; route/output contract."
-  hap1_yak:
-    cli: "-1"
-    level: 0
-    source: route_selector
-    value_type: path
-    description: "Paternal/haplotype1 yak k-mer dump for trio route."
-  hap2_yak:
-    cli: "-2"
-    level: 0
-    source: route_selector
-    value_type: path
-    description: "Maternal/haplotype2 yak k-mer dump for trio route."
-  hap1_read_names:
-    cli: "-3"
-    level: 0
-    source: route_selector
-    value_type: path
-    description: "Haplotype1 read-name list for trio route."
-  hap2_read_names:
-    cli: "-4"
-    level: 0
-    source: route_selector
-    value_type: path
-    description: "Haplotype2 read-name list for trio route."
-  hic_r1:
-    cli: "--h1"
-    level: 0
-    source: route_selector
-    value_type: path_list
-    description: "Hi-C R1 input files."
-  hic_r2:
-    cli: "--h2"
-    level: 0
-    source: route_selector
-    value_type: path_list
-    description: "Hi-C R2 input files."
-  hic_enzyme:
-    cli: "--enzyme"
-    level: 0
-    source: route_selector
-    value_type: string
-    description: "Hi-C restriction enzyme route input."
-  ul_reads:
-    cli: "--ul"
-    level: 0
-    source: route_selector
-    value_type: path_list
-    description: "Ultra-long read inputs for hybrid route."
-  secondary_input:
-    cli: "--sec-in"
-    level: 0
-    source: route_selector
-    value_type: path
-    description: "Secondary input route file."
+
   seed:
-    cli: "--seed"
-    level: 0
-    source: executor
     value_type: int
-    default: 11
+    application:
+      kind: cli_option
+      flag: "--seed"
+      order: 23
     min: 0
+    layers:
+      l0:
+        kind: materialized_default
+        value: 11
     description: "RNG seed for reproducibility."
 
   hg_size:
-    cli: "--hg-size"
-    level: 1
-    source: genome_survey
     value_type: string
-    source_priority:
-      - assembly.resolved_genome_size.value_bp
+    application:
+      kind: cli_option
+      flag: "--hg-size"
+      order: 100
+    layers:
+      l1:
+        fact: effective_genome_size_bp
+        transform: hifiasm_hg_size
     description: "Estimated haploid genome size, e.g. 100m or 3g."
+
   hom_cov:
-    cli: "--hom-cov"
-    level: 1
-    source: genome_survey
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--hom-cov"
+      order: 101
     min: 1
-    description: "Homozygous read coverage; omitted until a producer publishes this measurement."
+    layers:
+      l2:
+        adjustable: true
+    description: "Homozygous read coverage; no producer measures this — must come from model recommendation."
+
   n_hap:
-    cli: "--n-hap"
-    level: 1
-    source: manifest
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--n-hap"
+      order: 102
     allowed_values: [1, 2, 3, 4, 5, 6, 8]
-    default: 2
+    layers:
+      l0:
+        kind: materialized_default
+        value: 2
     description: "Assumed haplotype count; omitted unless a future typed producer is added."
 
   kmer_length:
-    cli: "-k"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 51
+    application:
+      kind: cli_option
+      flag: "-k"
+      order: 200
     min: 11
     max: 63
+    layers:
+      l2:
+        adjustable: true
     description: "K-mer length; hifiasm requires <64."
+
   minimizer_window:
-    cli: "-w"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 51
+    application:
+      kind: cli_option
+      flag: "-w"
+      order: 201
     min: 1
     max: 500
+    layers:
+      l2:
+        adjustable: true
     description: "Minimizer window size."
+
   bloom_filter_bits:
-    cli: "-f"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 37
+    application:
+      kind: cli_option
+      flag: "-f"
+      order: 202
     min: 0
     max: 45
+    layers:
+      l2:
+        adjustable: true
     description: "Number of bits for the bloom filter; 0 disables it."
+
   high_freq_kmer_drop:
-    cli: "-D"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 5.0
+    application:
+      kind: cli_option
+      flag: "-D"
+      order: 203
     min: 0
     max: 100
+    layers:
+      l2:
+        adjustable: true
     description: "Drop k-mers occurring above FLOAT*coverage."
+
   max_overlaps_per_read:
-    cli: "-N"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "-N"
+      order: 204
     min: 1
     max: 1000000
+    layers:
+      l2:
+        adjustable: true
     description: "Consider up to max(-D*coverage, -N) overlaps per oriented read."
+
   correction_rounds:
-    cli: "-r"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 3
+    application:
+      kind: cli_option
+      flag: "-r"
+      order: 205
     min: 0
     max: 20
+    layers:
+      l2:
+        adjustable: true
     description: "Rounds of haplotype-aware error correction."
+
   adapter_trim_length:
-    cli: "-z"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 0
+    application:
+      kind: cli_option
+      flag: "-z"
+      order: 206
     min: 0
     max: 1000
+    layers:
+      l2:
+        adjustable: true
     description: "Trim this many bases from both ends of reads."
+
   max_kmer_occurrence:
-    cli: "--max-kocc"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 2000
+    application:
+      kind: cli_option
+      flag: "--max-kocc"
+      order: 207
     min: 1
     max: 10000000
+    layers:
+      l2:
+        adjustable: true
     description: "Rescue repetitive overlaps with k-mers below this occurrence count."
+
   min_hist_count:
-    cli: "--min-hist-cnt"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 5
+    application:
+      kind: cli_option
+      flag: "--min-hist-cnt"
+      order: 208
     min: 0
     max: 1000
+    layers:
+      l2:
+        adjustable: true
     description: "Ignore k-mer spectrum counts below this value."
+
   max_overlap_diff_ec:
-    cli: "--max-od-ec"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.04
+    application:
+      kind: cli_option
+      flag: "--max-od-ec"
+      order: 209
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Maximum overlap difference during error correction."
+
   max_overlap_diff_final:
-    cli: "--max-od-final"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.03
+    application:
+      kind: cli_option
+      flag: "--max-od-final"
+      order: 210
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Maximum overlap difference during final overlap filtering."
+
   exact_list:
-    cli: "--ex-list"
-    level: 2
-    source: parameter_recommender
     value_type: path
+    application:
+      kind: cli_option
+      flag: "--ex-list"
+      order: 211
+    layers:
+      l2:
+        adjustable: true
     description: "Exact/exception list used by hifiasm internals."
+
   exact_iterations:
-    cli: "--ex-iter"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--ex-iter"
+      order: 212
     min: 0
     max: 100
+    layers:
+      l2:
+        adjustable: true
     description: "Iteration count for exact/exception handling."
+
   skip_triobin:
-    cli: "--skip-triobin"
-    level: 2
-    source: parameter_recommender
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--skip-triobin"
+      order: 213
+    layers:
+      l2:
+        adjustable: true
     description: "Skip trio binning behavior."
+
   fast_mode:
-    cli: "--fast"
-    level: 2
-    source: parameter_recommender
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--fast"
+      order: 214
+    layers:
+      l2:
+        adjustable: true
     description: "Fast assembly mode."
+
   dp_error_rate:
-    cli: "--dp-er"
-    level: 2
-    source: parameter_recommender
     value_type: float
+    application:
+      kind: cli_option
+      flag: "--dp-er"
+      order: 215
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Dynamic-programming error-rate parameter."
+
   unskew:
-    cli: "--unskew"
-    level: 2
-    source: parameter_recommender
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--unskew"
+      order: 216
+    layers:
+      l2:
+        adjustable: true
     description: "Enable unskew behavior."
+
   kpt_rate:
-    cli: "--kpt-rate"
-    level: 2
-    source: parameter_recommender
     value_type: float
+    application:
+      kind: cli_option
+      flag: "--kpt-rate"
+      order: 217
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Keep-rate parameter."
+
   low_heterozygosity_mode:
-    cli: "--low-het"
-    level: 2
-    source: parameter_recommender
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--low-het"
+      order: 218
+    layers:
+      l2:
+        adjustable: true
     description: "Enable mode for very low heterozygosity genomes."
+
   integer_correct:
-    cli: "--integer-correct"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--integer-correct"
+      order: 219
     min: 0
     max: 10
+    layers:
+      l2:
+        adjustable: true
     description: "Integer correction mode parameter."
 
   assembly_cleaning_rounds:
-    cli: "-a"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 4
+    application:
+      kind: cli_option
+      flag: "-a"
+      order: 220
     min: 0
     max: 50
+    layers:
+      l2:
+        adjustable: true
     description: "Rounds of assembly graph cleaning."
+
   contig_bubble_pop_distance:
-    cli: "-m"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 10000000
+    application:
+      kind: cli_option
+      flag: "-m"
+      order: 221
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Pop bubbles below this size in contig graphs."
+
   unitig_bubble_pop_distance:
-    cli: "-p"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 0
+    application:
+      kind: cli_option
+      flag: "-p"
+      order: 222
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Pop bubbles below this size in unitig graphs."
+
   short_unitig_read_count:
-    cli: "-n"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 3
+    application:
+      kind: cli_option
+      flag: "-n"
+      order: 223
     min: 0
     max: 1000
+    layers:
+      l2:
+        adjustable: true
     description: "Remove tip unitigs composed of <=INT reads."
+
   max_overlap_drop_ratio:
-    cli: "-x"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.8
+    application:
+      kind: cli_option
+      flag: "-x"
+      order: 224
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Max overlap drop ratio."
+
   min_overlap_drop_ratio:
-    cli: "-y"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.2
+    application:
+      kind: cli_option
+      flag: "-y"
+      order: 225
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Min overlap drop ratio."
+
   post_join:
-    cli: "-u"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "-u"
+      order: 226
     allowed_values: [0, 1]
+    layers:
+      l2:
+        adjustable: true
     description: "Post-join step switch."
+
   primary_coverage_range:
-    cli: "--pri-range"
-    level: 2
-    source: parameter_recommender
     value_type: string
+    application:
+      kind: cli_option
+      flag: "--pri-range"
+      order: 227
+    layers:
+      l2:
+        adjustable: true
     description: "Min,max coverage cutoff for primary contigs."
+
   low_quality_bed_threshold:
-    cli: "--lowQ"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 70
+    application:
+      kind: cli_option
+      flag: "--lowQ"
+      order: 228
     min: 0
     max: 100
+    layers:
+      l2:
+        adjustable: true
     description: "Output contig regions with >=INT percent inconsistency; 0 disables."
+
   break_low_coverage:
-    cli: "--b-cov"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--b-cov"
+      order: 229
     min: -1
+    layers:
+      l2:
+        adjustable: true
     description: "Break contigs at low-coverage positions; works with --m-rate."
+
   break_high_coverage:
-    cli: "--h-cov"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--h-cov"
+      order: 230
     min: -1
+    layers:
+      l2:
+        adjustable: true
     description: "Break contigs at high-coverage positions; works with --m-rate."
+
   break_overlap_rate:
-    cli: "--m-rate"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.75
+    application:
+      kind: cli_option
+      flag: "--m-rate"
+      order: 231
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Break contigs with <=FLOAT*coverage exact overlaps."
+
   contig_tip_read_count:
-    cli: "--ctg-n"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 3
+    application:
+      kind: cli_option
+      flag: "--ctg-n"
+      order: 232
     min: 0
     max: 1000
+    layers:
+      l2:
+        adjustable: true
     description: "Remove tip contigs composed of <=INT reads."
 
   trio_lower_frequency:
-    cli: "-c"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 2
+    application:
+      kind: cli_option
+      flag: "-c"
+      order: 233
     min: 0
     max: 1000000
+    layers:
+      l2:
+        adjustable: true
     description: "Lower bound of binned k-mer frequency."
+
   trio_upper_frequency:
-    cli: "-d"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 5
+    application:
+      kind: cli_option
+      flag: "-d"
+      order: 234
     min: 0
     max: 1000000
+    layers:
+      l2:
+        adjustable: true
     description: "Upper bound of binned k-mer frequency."
+
   trio_unexpected_occurrence:
-    cli: "--t-occ"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 60
+    application:
+      kind: cli_option
+      flag: "--t-occ"
+      order: 235
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Remove unitigs with unexpected haplotype-specific reads."
+
   trio_dual:
-    cli: "--trio-dual"
-    level: 2
-    source: parameter_recommender
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--trio-dual"
+      order: 236
+    layers:
+      l2:
+        adjustable: true
     description: "Use homology information to correct trio phasing errors."
 
   purge_level:
-    cli: "-l"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "-l"
+      order: 237
     allowed_values: [0, 1, 2, 3]
-    default: 3
+    layers:
+      l2:
+        adjustable: true
     description: "Purge duplication level."
+
   purge_similarity:
-    cli: "-s"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.75
+    application:
+      kind: cli_option
+      flag: "-s"
+      order: 238
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Similarity threshold for duplicate haplotig purging."
+
   duplicate_overlap_min_reads:
-    cli: "-O"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 1
+    application:
+      kind: cli_option
+      flag: "-O"
+      order: 239
     min: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum overlapped reads for duplicate haplotigs."
+
   purge_max:
-    cli: "--purge-max"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--purge-max"
+      order: 240
     min: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Coverage upper bound of Purge-dups."
 
   homology_base_similarity:
-    cli: "--s-base"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.5
+    application:
+      kind: cli_option
+      flag: "--s-base"
+      order: 241
     min: -1
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Similarity threshold for homology detection in base-level."
+
   hic_weight_rounds:
-    cli: "--n-weight"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 3
+    application:
+      kind: cli_option
+      flag: "--n-weight"
+      order: 242
     min: 0
     max: 1000
+    layers:
+      l2:
+        adjustable: true
     description: "Rounds of reweighting Hi-C links."
+
   hic_perturb_rounds:
-    cli: "--n-perturb"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 10000
+    application:
+      kind: cli_option
+      flag: "--n-perturb"
+      order: 243
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Rounds of Hi-C perturbation."
+
   hic_flip_fraction:
-    cli: "--f-perturb"
-    level: 2
-    source: parameter_recommender
     value_type: float
-    default: 0.1
+    application:
+      kind: cli_option
+      flag: "--f-perturb"
+      order: 244
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Fraction to flip for perturbation."
+
   hic_misjoin_length:
-    cli: "--l-msjoin"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 500000
+    application:
+      kind: cli_option
+      flag: "--l-msjoin"
+      order: 245
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Detect misjoined unitigs of >=INT bases; 0 disables."
 
   ul_error_rate:
-    cli: "--ul-rate"
-    level: 2
-    source: parameter_recommender
     value_type: float
+    application:
+      kind: cli_option
+      flag: "--ul-rate"
+      order: 246
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Error rate of ultra-long reads."
+
   ul_tip_read_count:
-    cli: "--ul-tip"
-    level: 2
-    source: parameter_recommender
     value_type: int
-    default: 6
+    application:
+      kind: cli_option
+      flag: "--ul-tip"
+      order: 247
     min: 0
     max: 1000
+    layers:
+      l2:
+        adjustable: true
     description: "Remove tip unitigs composed of <=INT reads for UL assembly."
+
   ul_rounds:
-    cli: "--ul-round"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--ul-round"
+      order: 248
     min: 0
     max: 100
+    layers:
+      l2:
+        adjustable: true
     description: "Ultra-long assembly round count."
+
   ul_cut:
-    cli: "--ul-cut"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--ul-cut"
+      order: 249
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Filter out ultra-long reads shorter than INT."
+
   ul_mode:
-    cli: "--ul-m"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--ul-m"
+      order: 250
     allowed_values: [0, 1]
+    layers:
+      l2:
+        adjustable: true
     description: "Hybrid ultra-long assembly mode."
+
   path_max_drop_ratio:
-    cli: "--path-max"
-    level: 2
-    source: parameter_recommender
     value_type: float
+    application:
+      kind: cli_option
+      flag: "--path-max"
+      order: 251
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Maximum path drop ratio."
+
   path_min_drop_ratio:
-    cli: "--path-min"
-    level: 2
-    source: parameter_recommender
     value_type: float
+    application:
+      kind: cli_option
+      flag: "--path-min"
+      order: 252
     min: 0
     max: 1
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum path drop ratio."
+
   dual_scaffold:
-    cli: "--dual-scaf"
-    level: 2
-    source: parameter_recommender
     value_type: boolean
-    default: false
+    application:
+      kind: cli_switch
+      flag: "--dual-scaf"
+      order: 253
+    layers:
+      l2:
+        adjustable: true
     description: "Output self-scaffolding."
+
   scaffold_gap:
-    cli: "--scaf-gap"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--scaf-gap"
+      order: 254
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Maximum gap size for scaffolding."
 
   somatic_coverage:
-    cli: "--somatic-cov"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--somatic-cov"
+      order: 255
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Somatic coverage parameter."
+
   telomere_motif:
-    cli: "--telo-m"
-    level: 2
-    source: parameter_recommender
     value_type: string
+    application:
+      kind: cli_option
+      flag: "--telo-m"
+      order: 256
+    layers:
+      l2:
+        adjustable: true
     description: "Telomere motif at 5-prime end."
+
   telomere_penalty:
-    cli: "--telo-p"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--telo-p"
+      order: 257
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Non-telomeric penalty."
+
   telomere_drop:
-    cli: "--telo-d"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--telo-d"
+      order: 258
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Telomere max drop."
+
   telomere_min_score:
-    cli: "--telo-s"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--telo-s"
+      order: 259
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum score for telomere reads."
 
   chimeric_support:
-    cli: "--chem-c"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--chem-c"
+      order: 260
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Chimeric read detection support threshold."
+
   chimeric_flank:
-    cli: "--chem-f"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--chem-f"
+      order: 261
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Chimeric read detection flanking length."
+
   read_length_cutoff:
-    cli: "--rl-cut"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--rl-cut"
+      order: 262
     min: 0
+    layers:
+      l2:
+        adjustable: true
     description: "Filter out ONT simplex reads shorter than INT."
+
   score_cutoff:
-    cli: "--sc-cut"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--sc-cut"
+      order: 263
     min: 0
     max: 60
+    layers:
+      l2:
+        adjustable: true
     description: "Filter out ONT simplex reads with mean base quality below INT."

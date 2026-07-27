@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.gene_annotation.nodes import (
@@ -42,7 +43,9 @@ from app.stages.gene_annotation.routing import (
 )
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     """Build the gene annotation subgraph with its review chain.
 
     Review decisions and merge preparation remain stage-owned. Executable
@@ -54,7 +57,9 @@ def build_stage():
     graph.add_node("resolve_gene_annotation_inputs", resolve_gene_annotation_inputs)
     graph.add_node("select_evidence_profile", select_evidence_profile)
     graph.add_node("plan_gene_methods", plan_gene_methods)
-    graph.add_node("block_gene_method_planning_review", block_gene_method_planning_review)
+    graph.add_node(
+        "block_gene_method_planning_review", block_gene_method_planning_review
+    )
     graph.add_node("prepare_gene_method_execution", prepare_gene_method_execution)
     graph.add_node("miniprot", build_miniprot_graph())
     graph.add_node("augustus", build_augustus_graph())
@@ -152,7 +157,12 @@ def build_stage():
     graph.add_conditional_edges(
         "block_candidate_evidence_review",
         route_after_candidate_gate,
-        {"merge_prep": "plan_evidence_merge_or_review", "run_methods": "prepare_gene_method_execution", "end": END, "fail": "fail"},
+        {
+            "merge_prep": "plan_evidence_merge_or_review",
+            "run_methods": "prepare_gene_method_execution",
+            "end": END,
+            "fail": "fail",
+        },
     )
     graph.add_conditional_edges(
         "plan_evidence_merge_or_review",
@@ -162,12 +172,22 @@ def build_stage():
     graph.add_conditional_edges(
         "block_merge_review",
         route_after_merge_gate,
-        {"evm": "evm", "block_final": "block_final_gene_set_review", "end": END, "fail": "fail"},
+        {
+            "evm": "evm",
+            "block_final": "block_final_gene_set_review",
+            "end": END,
+            "fail": "fail",
+        },
     )
     graph.add_conditional_edges(
         "block_final_gene_set_review",
         route_after_final_gate,
-        {"commit": "commit", "merge_prep": "plan_evidence_merge_or_review", "end": END, "fail": "fail"},
+        {
+            "commit": "commit",
+            "merge_prep": "plan_evidence_merge_or_review",
+            "end": END,
+            "fail": "fail",
+        },
     )
     graph.add_edge("commit", END)
     graph.add_edge("fail", END)

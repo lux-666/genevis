@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.limits import ROUTE_TRACE_LIMIT
+from app.storage.artifacts import read_artifact_records
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
 LEDGER_SCHEMA_VERSION = 2
@@ -185,8 +186,7 @@ class Ledger:
         already succeeded, so one attempt never carries both terminal facts.
         """
         return any(
-            row["event_type"] == "attempt_succeeded"
-            and row["subject_id"] == attempt_id
+            row["event_type"] == "attempt_succeeded" and row["subject_id"] == attempt_id
             for row in self.read_event_rows(session_id)
         )
 
@@ -538,7 +538,8 @@ class Ledger:
                         continue
                     if _semantic_body(existing) != semantic:
                         raise LedgerConflictError(
-                            f"idempotency key {key!r} already owns a different ledger fact"
+                            f"idempotency key {key!r} already owns a different "
+                            "ledger fact"
                         )
                     return existing
 
@@ -611,7 +612,8 @@ class Ledger:
             raise LedgerFormatError(f"malformed v2 ledger row at line {line_number}")
         if row["schema_version"] != LEDGER_SCHEMA_VERSION:
             raise LedgerFormatError(
-                f"unsupported ledger schema at line {line_number}: {row['schema_version']!r}"
+                f"unsupported ledger schema at line {line_number}: "
+                f"{row['schema_version']!r}"
             )
         if row["session_id"] != self.paths.session_id:
             raise LedgerFormatError(
@@ -657,6 +659,9 @@ class Ledger:
                     len(value) if isinstance(value, list) else 0
                 )
                 continue
+            if _is_asset_ref_key(key) and value:
+                refs.extend(self._asset_value_refs(key, value))
+                continue
             if _is_ref_key(key) and value:
                 refs.append(self._path_ref(key, value))
                 continue
@@ -675,7 +680,10 @@ class Ledger:
         if isinstance(value, Mapping):
             for key, nested in value.items():
                 role = f"{role_prefix}.{key}"
-                if isinstance(nested, (str, Path)) and _is_ref_key(str(key)):
+                key_text = str(key)
+                if _is_asset_ref_key(key_text):
+                    refs.extend(self._asset_value_refs(role, nested))
+                elif isinstance(nested, (str, Path)) and _is_ref_key(key_text):
                     try:
                         refs.append(self._path_ref(role, nested))
                     except DataLayoutError:
@@ -690,6 +698,20 @@ class Ledger:
                     self._refs_from_nested(nested, role_prefix=f"{role_prefix}.{index}")
                 )
         return refs
+
+    def _asset_value_refs(self, role: str, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, (str, Path)):
+            return [{"role": role, "value": _bounded_scalar(value)}]
+        if isinstance(value, (list, tuple)):
+            return [
+                {
+                    "role": f"{role}.{index}",
+                    "value": _bounded_scalar(nested),
+                }
+                for index, nested in enumerate(value[:MAX_REFS])
+                if isinstance(nested, (str, Path)) and nested
+            ]
+        return []
 
     def _normalize_refs(self, refs: Iterable[Any]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
@@ -736,7 +758,52 @@ class Ledger:
             normalized["path_ref"] = self._normalize_path_ref(path_value)
         elif ref.get("value") is not None:
             normalized["value"] = _bounded_scalar(ref["value"])
+        if normalized.get("role") == "artifact" and normalized.get("path_ref"):
+            normalized = self._indexed_artifact_ref(normalized)
         return normalized or None
+
+    def _indexed_artifact_ref(self, ref: dict[str, Any]) -> dict[str, Any]:
+        path_ref = str(ref["path_ref"])
+        record = next(
+            (
+                candidate
+                for candidate in read_artifact_records(
+                    self.paths.run_dir,
+                    self.paths.session_id,
+                )
+                if candidate.get("path_ref") == path_ref
+            ),
+            None,
+        )
+        if record is None:
+            return ref
+
+        supplied_id = ref.get("artifact_id")
+        if (
+            isinstance(supplied_id, str)
+            and supplied_id.startswith("art_")
+            and supplied_id != record["artifact_id"]
+        ):
+            raise DataLayoutError(
+                "canonical artifact_id conflicts with the artifact index: "
+                f"artifact_id={supplied_id}; path_ref={path_ref}; "
+                f"indexed_artifact_id={record['artifact_id']}"
+            )
+        for key in ("sha256", "size_bytes", "artifact_type"):
+            if key in ref and ref[key] != record[key]:
+                raise DataLayoutError(
+                    f"artifact {key} conflicts with the artifact index: "
+                    f"artifact_id={supplied_id}; path_ref={path_ref}; "
+                    f"expected={record[key]}; actual={ref[key]}"
+                )
+        return {
+            "role": "artifact",
+            "artifact_id": record["artifact_id"],
+            "sha256": record["sha256"],
+            "artifact_type": record["artifact_type"],
+            "size_bytes": record["size_bytes"],
+            "path_ref": record["path_ref"],
+        }
 
     def _path_ref(self, role: str, value: Any) -> dict[str, Any]:
         if hasattr(value, "model_dump"):
@@ -949,6 +1016,10 @@ def _bounded_scalar(value: Any) -> Any:
 
 def _is_ref_key(key: str) -> bool:
     return key in _REF_KEYS or key.endswith("_ref") or key.endswith("_artifact_ref")
+
+
+def _is_asset_ref_key(key: str) -> bool:
+    return key.endswith("_asset_ref") or key.endswith("_asset_refs")
 
 
 def _optional_text(value: Any) -> str | None:

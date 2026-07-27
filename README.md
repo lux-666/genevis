@@ -48,7 +48,7 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 已实现的核心能力：
 
 - **LangGraph stage orchestration**：thin parent graph 负责路由，每个生信阶段封装成独立 subgraph。
-- **Manifest / natural-language entry**：支持 `gene-agent run --manifest ...` 结构化入口，也支持 `gene-agent ask "..."` 生成 ask plan、补充澄清信息并落到同一条 run 路径。
+- **Conversational workflow entry**：正常用户从 `gene-agent tui` 描述目标、补齐样本事实、确认运行输入并启动或恢复工作流。
 - **Opt-in local execution**：只有显式批准的 stage 才会真正运行本地工具；未批准或未满足条件时输出计划、blocked state 或 review gate。
 - **Shared execution boundary**：通过 `EnvResolver`、`env_dispatch`、`LocalRunner` 统一解析 conda 环境、做 preflight、冻结命令并收集产物。
 - **Durable resume**：基于 sqlite checkpointer、ledger 和 decision file，支持跨进程恢复 `assembly_review`、`hic_scaffolding` 等人工 gate。
@@ -114,9 +114,9 @@ the parent router and makes each stage independently testable.
 
 ## How To Run It
 
-Gene Agent 有三层运行控制。实际使用时通常先用 TUI/ask 选流程，再用
-run-config 固化执行参数，最后由各 stage 按输入和目标自动决定执行、跳过或
-进入人工 gate。
+正常用户只需要启动 TUI。TUI 收集本次样本事实、确认 manifest 和 run config，
+冻结输入后调用内部执行器；各 stage 再按已确认的输入和目标决定执行、跳过或
+进入人工 gate。`bootstrap` 只是初始化或修复本机配置的辅助工具。
 
 ### 1. TUI / Plan Layer: choose stages
 
@@ -168,7 +168,7 @@ read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
 -> function_annotation
 ```
 
-TUI/ask 最终会把选择落到 run config：
+TUI 最终会把选择落到 run config：
 
 ```json
 {
@@ -216,12 +216,11 @@ TUI/ask 最终会把选择落到 run config：
   ],
   "shared_parameters": {
     "platform": "ont",
-    "read_type": "ont_raw",
-    "estimated_genome_size": 500000000
+    "read_type": "ont_raw"
   },
   "read_qc": {
     "length_filter": {
-      "method": "read_qc.filter.seqkit_seq",
+      "method": "read_qc.length_filter.seqkit_seq",
       "approved": true,
       "thresholds": {
         "min_len": 1000
@@ -237,9 +236,8 @@ TUI/ask 最终会把选择落到 run config：
   },
   "assembly": {
     "assembly_method": "flye",
+    "assembly_route": "ont",
     "flye_parameters": {
-      "read_type": "nano-raw",
-      "estimated_genome_size": 500000000,
       "threads": 16
     }
   },
@@ -258,11 +256,16 @@ TUI/ask 最终会把选择落到 run config：
 }
 ```
 
+用户提供的 genome size 属于输入样本事实，只写在 manifest 的
+`genome_size_estimate`；RunConfig 不重复保存该值。运行中由 genome survey
+得到的测量值则保留为独立的 stage output。
+
 `local_exec` 是安全阀：只有列在这里的 stage 才会尝试执行本地工具。没有列入
 `local_exec` 的 stage 仍然可以参与规划、写 artifact、进入 review gate 或作为
 下游 contract 继续传递，但不会偷偷运行昂贵命令。
 
-结构化运行命令：
+以下 `run`/`ask` 命令仅为现有自动化、HPC 集成测试和内部调用保留，不是正常
+用户工作流；新的运行应从 `gene-agent tui` 开始：
 
 ```bash
 gene-agent run \
@@ -273,7 +276,7 @@ gene-agent run \
   --checkpointer sqlite
 ```
 
-也可以用 `ask` 生成 plan/run config：
+旧自动化仍可用 `ask` 生成 plan/run config：
 
 ```bash
 gene-agent ask "assemble this ONT genome and annotate it" \

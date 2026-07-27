@@ -82,16 +82,27 @@ assert_ledger_has_method_attempt() {
     # Require a successful attempt for one exact method, rather than merely
     # finding a stage name somewhere in the JSONL ledger.
     local events="$1" method_name="$2" desc="${3:-ledger succeeded: $2}"
-    if python3 - "$events" "$method_name" <<'PY' 2>/dev/null
+    if python3 - "$events" "$method_name" <<'PY'
 import json
 import sys
 
 events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-assert any(
+method_name = sys.argv[2]
+
+def event_method(event):
+    return event.get("method_name") or (event.get("summary") or {}).get("method_name")
+
+if not any(
     event.get("event_type") == "attempt_succeeded"
-    and event.get("method_name") == sys.argv[2]
+    and event_method(event) == method_name
     for event in events
-)
+):
+    print(f"No attempt_succeeded row found for method {method_name!r}.", file=sys.stderr)
+    print("Attempt rows in ledger:", file=sys.stderr)
+    for event in events:
+        if str(event.get("event_type", "")).startswith("attempt_"):
+            print(json.dumps(event, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    raise SystemExit(1)
 PY
     then
         pass "$desc"
@@ -103,7 +114,7 @@ PY
 assert_no_duplicate_method_attempts() {
     # Replaying a blocked session must not re-run a completed method attempt.
     local events="$1" desc="${2:-no duplicate method attempts}"
-    if python3 - "$events" <<'PY' 2>/dev/null
+    if python3 - "$events" <<'PY'
 import collections
 import json
 import sys
@@ -115,10 +126,15 @@ for line in open(sys.argv[1], encoding="utf-8"):
     event = json.loads(line)
     if event.get("event_type") != "attempt_started":
         continue
-    key = (event.get("stage"), event.get("method_name"), event.get("attempt_id"))
+    summary = event.get("summary") or {}
+    method_name = event.get("method_name") or summary.get("method_name")
+    attempt_id = event.get("attempt_id") or event.get("subject_id")
+    key = (event.get("stage"), method_name, attempt_id)
     counts[key] += 1
 duplicates = {key: count for key, count in counts.items() if count > 1}
-assert not duplicates, duplicates
+if duplicates:
+    print(f"Duplicate attempt_started rows: {duplicates}", file=sys.stderr)
+    raise SystemExit(1)
 PY
     then
         pass "$desc"
@@ -306,16 +322,16 @@ write_run_config_stages() {
     # Writes a run-config JSON enabling the given stages.
     # Usage: write_run_config_stages OUTPUT_PATH STAGE1 STAGE2 ...
     local out="$1"; shift
-    local stages_json
-    stages_json=$(printf ',"%s"' "$@" | cut -c2-)
     python3 -c "
 import json, sys
 stages = [$(printf '"%s",' "$@" | sed 's/,$//')]
-rc = {'local_exec': stages}
+rc = {
+    'local_exec': stages,
+    'requested_stages': stages,
+}
 
-# Shared parameters
-genome_size_text = '''${GENOME_SIZE_ESTIMATE:-}'''.strip()
-genome_size = int(genome_size_text) if genome_size_text else None
+# Shared runtime hints. Operator-provided genome size belongs to the manifest
+# written above and must not be duplicated in run config.
 platform_to_read_type = {
     'cycloneseq': 'cyclone',
     'ont': 'ont_raw',
@@ -325,8 +341,6 @@ platform_to_read_type = {
 rc['shared_parameters'] = {
     'read_type': platform_to_read_type.get('${PLATFORM}', '${PLATFORM}'),
 }
-if genome_size is not None:
-    rc['shared_parameters']['estimated_genome_size'] = genome_size
 
 # Read QC config
 if 'read_qc' in stages:
@@ -364,32 +378,18 @@ if 'assembly' in stages:
     }
     if assembly_method == 'flye':
         rc['assembly']['flye_parameters'] = {
-            'read_type': '${FLYE_READ_TYPE}',
             'threads': ${ASSEMBLY_THREADS},
         }
-        if genome_size is not None:
-            rc['assembly']['flye_parameters']['estimated_genome_size'] = genome_size
     elif assembly_method == 'nextdenovo':
-        nextdenovo_read_type = {
-            'cycloneseq': 'ont',
-            'ont': 'ont',
-            'clr': 'clr',
-            'pacbio_hifi': 'hifi',
-        }.get('${PLATFORM}', '${PLATFORM}')
         rc['assembly']['nextdenovo_parameters'] = {
-            'read_type': nextdenovo_read_type,
             'threads': ${ASSEMBLY_THREADS},
         }
-        if genome_size is not None:
-            rc['assembly']['nextdenovo_parameters']['genome_size'] = genome_size
     elif assembly_method == 'hifiasm':
         rc['assembly']['hifiasm_parameters'] = {
-            'read_type': 'hifi',
             'threads': ${ASSEMBLY_THREADS},
         }
     elif assembly_method == 'hifiasm_ont':
         rc['assembly']['hifiasm_ont_parameters'] = {
-            'read_type': 'ont',
             'threads': ${ASSEMBLY_THREADS},
         }
 
@@ -420,7 +420,7 @@ json.dump(rc, open(sys.argv[1], 'w'), indent=2)
 }
 
 write_genome_survey_run_config() {
-    # Deliberately omits shared_parameters.estimated_genome_size so this smoke
+    # Its paired manifest deliberately omits genome_size_estimate so this smoke
     # validates the measured genome-size path without an operator override.
     local out="$1"
     python3 - "$out" <<'PY'
@@ -430,6 +430,7 @@ import sys
 json.dump(
     {
         "local_exec": ["read_qc", "genome_survey"],
+        "requested_stages": ["read_qc", "genome_survey"],
         "read_qc": {"length_filter": {"method": "skip", "approved": False, "thresholds": {}}},
         "genome_survey": {"survey_parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4}},
     },
@@ -454,13 +455,13 @@ GA() {
 }
 
 resume_configured_parameter_gates() {
-    # Resume Assembly's parameter gate only when hpc_env.sh explicitly opts
+    # Resume any stage's parameter gate only when hpc_env.sh explicitly opts
     # into unattended approval. Production defaults remain human-reviewed.
     # Return 3 when a manual approval is required.
     local session_id="$1"
     local mode="${HPC_PARAMETER_APPROVAL_MODE:-manual}"
     local max_approvals="${HPC_MAX_PARAMETER_APPROVALS:-3}"
-    local inspect_json decision_json gate supervision approval_count=0
+    local inspect_json decision_json gate stage supervision approval_count=0
     HPC_PARAMETER_APPROVALS_RESUMED=0
 
     case "$mode" in
@@ -481,7 +482,7 @@ resume_configured_parameter_gates() {
             fail "cannot inspect session while checking parameter approval: ${session_id}"
             return 1
         fi
-        read -r supervision gate < <(python3 - "$inspect_json" <<'PY'
+        IFS=$'\t' read -r supervision gate stage < <(python3 - "$inspect_json" <<'PY'
 import json
 import sys
 
@@ -491,6 +492,8 @@ interrupt = summary.get("active_interrupt") or {}
 print(
     summary.get("supervision_state") or "unknown",
     requirements.get("gate_id") or interrupt.get("gate_id") or "none",
+    requirements.get("stage") or interrupt.get("stage") or summary.get("current_stage") or "unknown",
+    sep="\t",
 )
 PY
 )
@@ -499,7 +502,7 @@ PY
         fi
 
         if [[ "$mode" == "manual" ]]; then
-            warn "session ${session_id} is waiting at Assembly parameter_approval"
+            warn "session ${session_id} is waiting at ${stage} parameter_approval"
             info "Review it in the TUI, or generate a bound decision template:"
             info "  python3 -m app.entrypoints.run inspect --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --write-decision-template ${decision_json}"
             info "  python3 -m app.entrypoints.run resume --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --decision-file ${decision_json} --checkpointer ${CHECKPOINTER}"
@@ -520,13 +523,14 @@ PY
             fail "could not generate parameter-approval decision template"
             return 1
         fi
-        if ! python3 - "$decision_json" <<'PY'
+        if ! python3 - "$decision_json" "$stage" <<'PY'
 import json
 import sys
 
 path = sys.argv[1]
+expected_stage = sys.argv[2]
 decision = json.load(open(path, encoding="utf-8"))
-assert decision.get("stage") == "assembly", decision
+assert decision.get("stage") == expected_stage, decision
 assert decision.get("gate_id") == "parameter_approval", decision
 assert decision.get("decision") == "approve_parameters", decision
 metadata = decision.get("metadata") or {}
@@ -641,21 +645,23 @@ latest_hic_scaffold() {
 #  Load config
 # -------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${SCRIPT_DIR}/hpc_env.sh" ]]; then
-    source "${SCRIPT_DIR}/hpc_env.sh"
-elif [[ -f "${SCRIPT_DIR}/hpc_env.sh.example" ]]; then
-    echo "ERROR: ${SCRIPT_DIR}/hpc_env.sh not found."
-    echo "  Copy the example and edit it:"
-    echo "    cp hpc_env.sh.example hpc_env.sh && vim hpc_env.sh"
-    exit 2
-else
-    echo "ERROR: Cannot find hpc_env.sh or hpc_env.sh.example"
-    exit 2
+if [[ "${GENE_AGENT_HPC_SKIP_CONFIG:-false}" != "true" ]]; then
+    if [[ -f "${SCRIPT_DIR}/hpc_env.sh" ]]; then
+        source "${SCRIPT_DIR}/hpc_env.sh"
+    elif [[ -f "${SCRIPT_DIR}/hpc_env.sh.example" ]]; then
+        echo "ERROR: ${SCRIPT_DIR}/hpc_env.sh not found."
+        echo "  Copy the example and edit it:"
+        echo "    cp hpc_env.sh.example hpc_env.sh && vim hpc_env.sh"
+        exit 2
+    else
+        echo "ERROR: Cannot find hpc_env.sh or hpc_env.sh.example"
+        exit 2
+    fi
+
+    export GENE_AGENT_DATA_ROOT="${TEST_DATA_ROOT}"
+    export GENE_AGENT_CHECKPOINTER="${CHECKPOINTER}"
+
+    ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
+    [[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
+    export GENE_AGENT_ENVS_CONFIG="$ENV_CONFIG"
 fi
-
-export GENE_AGENT_DATA_ROOT="${TEST_DATA_ROOT}"
-export GENE_AGENT_CHECKPOINTER="${CHECKPOINTER}"
-
-ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
-[[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
-export GENE_AGENT_ENVS_CONFIG="$ENV_CONFIG"

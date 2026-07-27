@@ -14,16 +14,20 @@ from app.control.lifecycle import (
     inspect_session,
     resume_review_state,
 )
-from app.storage.ledger import Ledger
 from app.entrypoints.review_interactive import prompt_generic_gate_decision
 from app.review.base import ResumeReviewRequest, ReviewPayload
-from app.review.gates import ReviewGateDeclaration, get_review_gate, register_review_gate
+from app.review.gates import (
+    ReviewGateDeclaration,
+    get_review_gate,
+    register_review_gate,
+)
 from app.review.persistence import (
     ReviewPersistenceError,
     load_review_request,
     persist_review_request,
 )
 from app.review.recommender import recommend_review_decision
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -81,7 +85,9 @@ class ReviewGateRegistryTests(unittest.TestCase):
         gate = get_review_gate("unit_review_gate")
 
         self.assertEqual(gate.gate_id, "unit_review_gate")
-        self.assertEqual(gate.decisions_allowed, ("accept", "defer_annotation", "stop_human_review"))
+        self.assertEqual(
+            gate.decisions_allowed, ("accept", "defer_annotation", "stop_human_review")
+        )
         self.assertEqual(gate.prompt_bundle, "review.assembly_review_recommend")
 
     def test_registered_gate_dispatches_resume_applier(self):
@@ -101,10 +107,14 @@ class ReviewGateRegistryTests(unittest.TestCase):
 
         self.assertIsNone(update["active_interrupt"])
         self.assertEqual(update["current_stage"], "done")
-        self.assertEqual(update["stage_outputs"]["unit_review_gate"]["candidate_id"], "candidate-a")
+        self.assertEqual(
+            update["stage_outputs"]["unit_review_gate"]["candidate_id"], "candidate-a"
+        )
 
     def test_registered_gate_can_use_local_decision_verb(self):
-        state = _blocked_unit_state(decisions_allowed=["defer_annotation", "stop_human_review"])
+        state = _blocked_unit_state(
+            decisions_allowed=["defer_annotation", "stop_human_review"]
+        )
         interrupt = state["active_interrupt"]
         assert interrupt is not None
         request = ResumeReviewRequest(
@@ -119,10 +129,14 @@ class ReviewGateRegistryTests(unittest.TestCase):
 
         update = resume_review_state(state, request)
 
-        self.assertEqual(update["stage_outputs"]["unit_review_gate"]["decision"], "defer_annotation")
+        self.assertEqual(
+            update["stage_outputs"]["unit_review_gate"]["decision"], "defer_annotation"
+        )
 
     def test_unknown_gate_is_rejected_by_registry_not_schema(self):
-        state = _blocked_unit_state(stage="unregistered_gate", decisions_allowed=["accept"])
+        state = _blocked_unit_state(
+            stage="unregistered_gate", decisions_allowed=["accept"]
+        )
         interrupt = state["active_interrupt"]
         assert interrupt is not None
         request = ResumeReviewRequest(
@@ -178,7 +192,9 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 decision.rationale_artifact_ref or ""
             )
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-            self.assertEqual(artifact["prompt_bundle"], "review.assembly_review_recommend")
+            self.assertEqual(
+                artifact["prompt_bundle"], "review.assembly_review_recommend"
+            )
 
     def test_recommender_uses_gate_id_when_stage_has_multiple_gates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,9 +322,16 @@ class ReviewGateRegistryTests(unittest.TestCase):
             summary = inspect_session(session_id, data_dir)
             template = build_resume_decision_template(summary)
 
-            self.assertEqual(summary["decision_requirements"]["stage"], "unit_review_gate")
-            self.assertEqual(summary["decision_requirements"]["gate_id"], "unit_review_gate")
-            self.assertEqual(summary["decision_requirements"]["decisions_allowed"], ["accept", "defer_annotation", "stop_human_review"])
+            self.assertEqual(
+                summary["decision_requirements"]["stage"], "unit_review_gate"
+            )
+            self.assertEqual(
+                summary["decision_requirements"]["gate_id"], "unit_review_gate"
+            )
+            self.assertEqual(
+                summary["decision_requirements"]["decisions_allowed"],
+                ["accept", "defer_annotation", "stop_human_review"],
+            )
             self.assertEqual(template["stage"], "unit_review_gate")
             self.assertEqual(template["gate_id"], "unit_review_gate")
             self.assertEqual(template["decision"], "accept")

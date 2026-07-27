@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,12 +19,40 @@ from app.execution.lifecycle import (
     run_method_attempts,
 )
 from app.execution.method_runner import build_frozen_attempt
-from app.schemas.artifacts import ArtifactRef, ParameterAttempt
+from app.review.persistence import persist_review_decision, persist_review_request
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_APPROVAL_DECISION,
+    ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
+    ASSEMBLY_PARAMETER_BASIS,
+    ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
+    ASSEMBLY_PARAMETER_MODEL_REQUEST,
+    ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+    ASSEMBLY_PARAMETER_RECOMMENDATION,
+    ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+    ASSEMBLY_PARAMETER_RESPONSE_PARSE,
+    ArtifactRef,
+    ParameterAttempt,
+)
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.execution import ExecutionResult
+from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalRecommendationFacts,
+    ExecutionFailureTrigger,
+    ParameterAttemptEvidenceV3,
+    ParameterRecommendationManifestV3,
+    RecommendationInputSnapshotV3,
+    RecommendationRetryContext,
+)
 from app.schemas.state import initial_state
 from app.stages.base import stage_output, update_stage_output
 from app.storage.artifacts import read_artifact_records
+from app.storage.parameter_evidence import (
+    load_approved_parameter_chain_v3,
+    load_parameter_recommendation_chain_v3,
+    publish_parameter_json,
+)
 from tests.data_v2 import v2_run_dir
 
 DIRECT_LIFECYCLE = MethodExecutionLifecycle(
@@ -186,6 +215,303 @@ def _ref(name: str, artifact_type: str) -> ArtifactRef:
     )
 
 
+@dataclass(frozen=True)
+class _V3RecommendationFixture:
+    manifest_ref: ArtifactRef
+    input_snapshot_ref: ArtifactRef
+    approval_decision_ref: ArtifactRef
+    attempt_manifest_ref: ArtifactRef | None = None
+    seal_hash: str | None = None
+
+
+def _publish_v3_parameter_record(
+    state: dict,
+    *,
+    attempt_id: int,
+    filename: str,
+    payload: dict,
+    artifact_type: str,
+    scope: str = "recommendation",
+) -> ArtifactRef:
+    return publish_parameter_json(
+        state,
+        stage="assembly",
+        scope=scope,
+        identifier=attempt_id,
+        filename=filename,
+        payload=payload,
+        artifact_type=artifact_type,
+        method_name="assembly.contract",
+    )
+
+
+def _persist_v3_recommendation_fixture(
+    state: dict,
+    *,
+    attempt_id: int,
+    task: str,
+    previous: _V3RecommendationFixture | None = None,
+    seal_for_retry: bool = False,
+) -> _V3RecommendationFixture:
+    """Publish a complete canonical-A recommendation and approval chain."""
+
+    if task == "recommend_initial":
+        if attempt_id != 0 or previous is not None:
+            raise AssertionError("initial v3 fixture cannot bind a predecessor")
+        retry = None
+        dependency_refs = {}
+    else:
+        if (
+            attempt_id != 1
+            or previous is None
+            or previous.attempt_manifest_ref is None
+            or previous.seal_hash is None
+        ):
+            raise AssertionError("retry v3 fixture requires one sealed predecessor")
+        retry = RecommendationRetryContext(
+            trigger=ExecutionFailureTrigger(
+                status="failed",
+                failure_class="fixture_failure",
+            ),
+            attempt_history=(
+                ParameterAttemptEvidenceV3(
+                    attempt_id=0,
+                    task="recommend_initial",
+                    status="execution_failed",
+                    recommended_parameters={},
+                    approved_parameters={},
+                    effective_parameters={},
+                    effective_sources={},
+                ),
+            ),
+        )
+        dependency_refs = {
+            "initial_input_snapshot_ref": previous.input_snapshot_ref,
+            "prior_attempt_manifest_refs": (previous.attempt_manifest_ref,),
+        }
+
+    snapshot = RecommendationInputSnapshotV3(
+        schema_version=3,
+        method_id="assembly.contract",
+        task=task,
+        facts=CanonicalRecommendationFacts(),
+        stage_context=AssemblyRecommendationContext(
+            stage="assembly",
+            assembly_route="hifi",
+            read_type="pacbio_hifi",
+            target_level="draft",
+            retry=retry,
+        ),
+        dependency_refs=dependency_refs,
+    )
+    catalog = MethodParameterCatalog(
+        catalog_id="contract",
+        method_id="assembly.contract",
+        tool="contract",
+        parameters={},
+    )
+    input_snapshot_ref = _publish_v3_parameter_record(
+        state,
+        attempt_id=attempt_id,
+        filename="input_snapshot.json",
+        payload=snapshot.model_dump(mode="json"),
+        artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
+    )
+    basis_snapshot_ref = _publish_v3_parameter_record(
+        state,
+        attempt_id=attempt_id,
+        filename="basis_snapshot.json",
+        payload={
+            "schema_version": 3,
+            "method_id": "assembly.contract",
+            "catalog_snapshot": catalog.model_dump(mode="json"),
+        },
+        artifact_type=ASSEMBLY_PARAMETER_BASIS,
+    )
+    model_request_ref = _publish_v3_parameter_record(
+        state,
+        attempt_id=attempt_id,
+        filename="model_request.json",
+        payload={"schema_version": 3, "messages": []},
+        artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
+    )
+    model_response_ref = _publish_v3_parameter_record(
+        state,
+        attempt_id=attempt_id,
+        filename="model_response.json",
+        payload={"schema_version": 2, "validity": "parsed"},
+        artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+    )
+    response_parse_ref = _publish_v3_parameter_record(
+        state,
+        attempt_id=attempt_id,
+        filename="response_parse.json",
+        payload={"schema_version": 1, "parsed": True},
+        artifact_type=ASSEMBLY_PARAMETER_RESPONSE_PARSE,
+    )
+    recommendation_ref = _publish_v3_parameter_record(
+        state,
+        attempt_id=attempt_id,
+        filename="recommendation.json",
+        payload={
+            "schema_version": 2,
+            "method_id": "assembly.contract",
+            "task": task,
+            "recommendation": {"parameters": {}},
+        },
+        artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION,
+    )
+    manifest = ParameterRecommendationManifestV3(
+        schema_version=3,
+        recommendation_contract="parameter_recommendation_v1",
+        stage="assembly",
+        method_id="assembly.contract",
+        task=task,
+        recommendation_id=attempt_id,
+        status="pending_approval",
+        previous_attempt_id=(0 if previous is not None else None),
+        previous_attempt_manifest_ref=(
+            previous.attempt_manifest_ref if previous is not None else None
+        ),
+        previous_attempt_seal_hash=(
+            previous.seal_hash if previous is not None else None
+        ),
+        refs={
+            "input_snapshot_ref": input_snapshot_ref,
+            "basis_snapshot_ref": basis_snapshot_ref,
+            "model_request_ref": model_request_ref,
+            "model_response_ref": model_response_ref,
+            "response_parse_ref": response_parse_ref,
+            "recommendation_ref": recommendation_ref,
+        },
+    )
+    manifest_ref = _publish_v3_parameter_record(
+        state,
+        attempt_id=attempt_id,
+        filename="recommendation_manifest.json",
+        payload=manifest.model_dump(mode="json"),
+        artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+    )
+    request = persist_review_request(
+        state,
+        stage="assembly",
+        gate_id="parameter_approval",
+        reason="execution_lifecycle_v3_fixture",
+        payload={
+            "schema_version": 2,
+            "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
+            "recommendation_manifest_hash": manifest_ref.sha256,
+            "decisions_allowed": ["approve_parameters", "reject_parameters"],
+        },
+        bindings={
+            "attempt_id": attempt_id,
+            "task": task,
+            "previous_attempt_id": 0 if previous is not None else None,
+            "recommendation_hash": manifest_ref.sha256,
+        },
+    )
+    approval_decision_ref = persist_review_decision(
+        state["data_dir"],
+        session_id=state["session_id"],
+        review_request_id=request.review_request_id,
+        stage="assembly",
+        gate_id="parameter_approval",
+        decision={
+            "schema_version": 2,
+            "decision": "approve_parameters",
+            "validated_recommendation_manifest_ref": manifest_ref.model_dump(
+                mode="json"
+            ),
+            "validated_recommendation_hash": manifest_ref.sha256,
+        },
+        request_ref=request.request_ref,
+        request_hash=request.request_hash,
+        artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
+    )
+    load_parameter_recommendation_chain_v3(
+        state,
+        manifest_ref=manifest_ref,
+        expected_stage="assembly",
+        expected_method_id="assembly.contract",
+    )
+
+    attempt_manifest_ref = None
+    seal_hash = None
+    if seal_for_retry:
+        seal_hash = "c" * 64
+        attempt_manifest_ref = _publish_v3_parameter_record(
+            state,
+            attempt_id=attempt_id,
+            filename="attempt_manifest.json",
+            payload={
+                "schema_version": 3,
+                "stage": "assembly",
+                "attempt_id": attempt_id,
+                "method_id": "assembly.contract",
+                "task": task,
+                "status": "execution_failed",
+                "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
+                "approval_decision_ref": approval_decision_ref.model_dump(mode="json"),
+                "seal_hash": seal_hash,
+            },
+            artifact_type=ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
+            scope="attempt",
+        )
+    return _V3RecommendationFixture(
+        manifest_ref=manifest_ref,
+        input_snapshot_ref=input_snapshot_ref,
+        approval_decision_ref=approval_decision_ref,
+        attempt_manifest_ref=attempt_manifest_ref,
+        seal_hash=seal_hash,
+    )
+
+
+def _v3_parameter_attempt(
+    state: dict,
+    *,
+    frozen_attempt_ref: ArtifactRef,
+    status: str = "frozen",
+    execution_ref: ArtifactRef | None = None,
+    retry: bool = False,
+) -> ParameterAttempt:
+    previous = None
+    if retry:
+        previous = _persist_v3_recommendation_fixture(
+            state,
+            attempt_id=0,
+            task="recommend_initial",
+            seal_for_retry=True,
+        )
+    attempt_id = 1 if retry else 0
+    task = "retry_after_execution_failure" if retry else "recommend_initial"
+    fixture = _persist_v3_recommendation_fixture(
+        state,
+        attempt_id=attempt_id,
+        task=task,
+        previous=previous,
+    )
+    attempt = ParameterAttempt(
+        schema_version=3,
+        attempt_id=attempt_id,
+        method_id="assembly.contract",
+        status=status,
+        task=task,
+        previous_attempt_id=0 if retry else None,
+        previous_attempt_seal_hash=previous.seal_hash if previous else None,
+        recommendation_manifest_ref=fixture.manifest_ref,
+        approval_decision_ref=fixture.approval_decision_ref,
+        frozen_attempt_ref=frozen_attempt_ref,
+        execution_ref=execution_ref,
+    )
+    load_approved_parameter_chain_v3(
+        state,
+        attempt=attempt,
+        expected_stage="assembly",
+        expected_method_id="assembly.contract",
+    )
+    return attempt
+
+
 class ExecutionLifecycleContractTests(unittest.TestCase):
     def test_direct_graph_uses_injected_runner_and_collects(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -218,6 +544,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 ),
             )
             replay_runner = FakeRunner()
+
             def fail_if_refrozen(_state: dict) -> dict:
                 raise AssertionError("ran checkpoint must bypass freeze")
 
@@ -244,6 +571,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 "execution_attempts"
             ][0]["frozen_attempt_ref"]
             runner = FakeRunner()
+
             def fail_if_refrozen(_state: dict) -> dict:
                 raise AssertionError("frozen checkpoint must bypass freeze")
 
@@ -614,17 +942,8 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             from app.execution.evidence import persist_frozen_attempt
 
             frozen_ref = persist_frozen_attempt(state, attempt)
-            parameter_attempt = ParameterAttempt(
-                attempt_id=0,
-                method_id="assembly.contract",
-                status="frozen",
-                task="recommend_initial",
-                recommendation_manifest_ref=_ref(
-                    "a", "assembly.parameter.recommendation_manifest"
-                ),
-                approval_decision_ref=_ref(
-                    "b", "assembly.parameter_approval.decision"
-                ),
+            parameter_attempt = _v3_parameter_attempt(
+                state,
                 frozen_attempt_ref=frozen_ref,
             )
             state["stage_outputs"]["assembly"] = {
@@ -670,17 +989,8 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 "status": "parameter_frozen",
                 "current_parameter_attempt_id": 0,
                 "parameter_attempts": [
-                    ParameterAttempt(
-                        attempt_id=0,
-                        method_id="assembly.contract",
-                        status="frozen",
-                        task="recommend_initial",
-                        recommendation_manifest_ref=_ref(
-                            "a", "assembly.parameter.recommendation_manifest"
-                        ),
-                        approval_decision_ref=_ref(
-                            "b", "assembly.parameter_approval.decision"
-                        ),
+                    _v3_parameter_attempt(
+                        state,
                         frozen_attempt_ref=frozen_ref,
                     ).model_dump(mode="json")
                 ],
@@ -723,17 +1033,8 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 "status": lifecycle.frozen_status,
                 "current_parameter_attempt_id": 0,
                 "parameter_attempts": [
-                    ParameterAttempt(
-                        attempt_id=0,
-                        method_id="assembly.contract",
-                        status="frozen",
-                        task="recommend_initial",
-                        recommendation_manifest_ref=_ref(
-                            "a", "assembly.parameter.recommendation_manifest"
-                        ),
-                        approval_decision_ref=_ref(
-                            "b", "assembly.parameter_approval.decision"
-                        ),
+                    _v3_parameter_attempt(
+                        state,
                         frozen_attempt_ref=frozen_ref,
                     ).model_dump(mode="json")
                 ],
@@ -778,17 +1079,8 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 "status": lifecycle.frozen_status,
                 "current_parameter_attempt_id": 0,
                 "parameter_attempts": [
-                    ParameterAttempt(
-                        attempt_id=0,
-                        method_id="assembly.contract",
-                        status="frozen",
-                        task="recommend_initial",
-                        recommendation_manifest_ref=_ref(
-                            "a", "assembly.parameter.recommendation_manifest"
-                        ),
-                        approval_decision_ref=_ref(
-                            "b", "assembly.parameter_approval.decision"
-                        ),
+                    _v3_parameter_attempt(
+                        state,
                         frozen_attempt_ref=frozen_ref,
                         execution_ref=_ref("c", "assembly.execution_result"),
                     ).model_dump(mode="json")
@@ -824,20 +1116,10 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             from app.execution.evidence import persist_frozen_attempt
 
             frozen_ref = persist_frozen_attempt(state, attempt)
-            current = ParameterAttempt(
-                attempt_id=1,
-                method_id="assembly.contract",
-                status="frozen",
-                task="retry_after_execution_failure",
-                previous_attempt_id=0,
-                previous_attempt_seal_hash="c" * 64,
-                recommendation_manifest_ref=_ref(
-                    "a", "assembly.parameter.recommendation_manifest"
-                ),
-                approval_decision_ref=_ref(
-                    "b", "assembly.parameter_approval.decision"
-                ),
+            current = _v3_parameter_attempt(
+                state,
                 frozen_attempt_ref=frozen_ref,
+                retry=True,
             )
             state["stage_outputs"]["assembly"] = {
                 "status": lifecycle.frozen_status,
@@ -882,17 +1164,8 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 "status": lifecycle.frozen_status,
                 "current_parameter_attempt_id": 0,
                 "parameter_attempts": [
-                    ParameterAttempt(
-                        attempt_id=0,
-                        method_id="assembly.contract",
-                        status="frozen",
-                        task="recommend_initial",
-                        recommendation_manifest_ref=_ref(
-                            "a", "assembly.parameter.recommendation_manifest"
-                        ),
-                        approval_decision_ref=_ref(
-                            "b", "assembly.parameter_approval.decision"
-                        ),
+                    _v3_parameter_attempt(
+                        state,
                         frozen_attempt_ref=frozen_ref,
                     ).model_dump(mode="json")
                 ],

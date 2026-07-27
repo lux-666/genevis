@@ -7,7 +7,9 @@ from typing import Any
 from app.llm.config import LLMProfile, load_llm_profile
 
 
-def build_chat_model(profile: LLMProfile | None = None, *, chat_model_cls: type | None = None) -> Any:
+def build_chat_model(
+    profile: LLMProfile | None = None, *, chat_model_cls: type | None = None
+) -> Any:
     """Build a chat model for the configured Gene Agent LLM profile."""
 
     resolved = profile or load_llm_profile()
@@ -36,5 +38,7 @@ def _load_chat_openai() -> type:
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as exc:
-        raise RuntimeError("Install langchain-openai to use OpenAI-compatible LLM profiles.") from exc
+        raise RuntimeError(
+            "Install langchain-openai to use OpenAI-compatible LLM profiles."
+        ) from exc
     return ChatOpenAI

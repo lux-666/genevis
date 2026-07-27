@@ -23,13 +23,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.ledger import Ledger
 from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
 from app.graph.checkpointer import checkpoint_db_path
 from app.review.base import ReviewPayload
 from app.review.persistence import PersistedReviewRequest, persist_review_request
 from app.schemas.state import initial_state
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -95,7 +95,9 @@ def _build_blocked_state(
                     "status": "blocked_human",
                     "candidates": candidates,
                     "rejected_candidates": {},
-                    "review_request_artifact_ref": persisted.request_ref.model_dump(mode="json"),
+                    "review_request_artifact_ref": persisted.request_ref.model_dump(
+                        mode="json"
+                    ),
                 }
             },
         }
@@ -199,19 +201,30 @@ class DurableResumeTests(unittest.TestCase):
                     for event in ledger_events
                 )
             )
-            decision_events = [e for e in ledger_events if e["event_type"] == "review_decision"]
+            decision_events = [
+                e for e in ledger_events if e["event_type"] == "review_decision"
+            ]
             self.assertTrue(decision_events, "expected review_decision ledger event")
             # The accepted assembly_review decision advances downstream into the
             # annotation chain, which records its own gate decisions; assert on
             # the assembly_review decision specifically rather than the last one.
-            assembly_decisions = [e for e in decision_events if e["stage"] == "assembly_review"]
-            self.assertTrue(assembly_decisions, "expected assembly_review review_decision ledger event")
+            assembly_decisions = [
+                e for e in decision_events if e["stage"] == "assembly_review"
+            ]
+            self.assertTrue(
+                assembly_decisions,
+                "expected assembly_review review_decision ledger event",
+            )
             self.assertEqual(assembly_decisions[-1]["decision"], "accept")
             self.assertEqual(assembly_decisions[-1]["candidate_id"], "flye")
 
             # F3: lifecycle continuation events around the resume.
-            resume_started = [e for e in ledger_events if e["event_type"] == "resume_started"]
-            resume_completed = [e for e in ledger_events if e["event_type"] == "resume_completed"]
+            resume_started = [
+                e for e in ledger_events if e["event_type"] == "resume_started"
+            ]
+            resume_completed = [
+                e for e in ledger_events if e["event_type"] == "resume_completed"
+            ]
             self.assertEqual(len(resume_started), 1)
             self.assertEqual(len(resume_completed), 1)
             self.assertEqual(resume_started[0]["source"], "cli")
@@ -224,21 +237,36 @@ class DurableResumeTests(unittest.TestCase):
             # N3: resume events should record backend + data_dir so the
             # ledger trail distinguishes between sqlite and memory runs.
             self.assertEqual(resume_started[0]["checkpointer"], "sqlite")
-            self.assertEqual(Path(resume_started[0]["data_dir"]).resolve(strict=False), run_dir.resolve(strict=False))
+            self.assertEqual(
+                Path(resume_started[0]["data_dir"]).resolve(strict=False),
+                run_dir.resolve(strict=False),
+            )
             self.assertEqual(resume_completed[0]["checkpointer"], "sqlite")
-            self.assertIn(resume_completed[0]["supervision_state"], {"running_stage", "completed", "failed_terminal", "blocked_human"})
+            self.assertIn(
+                resume_completed[0]["supervision_state"],
+                {"running_stage", "completed", "failed_terminal", "blocked_human"},
+            )
             self.assertIn("current_stage", resume_completed[0])
             # resume_started must precede review_decision and resume_completed
             event_types = [e["event_type"] for e in ledger_events]
-            self.assertLess(event_types.index("resume_started"), event_types.index("review_decision"))
-            self.assertLess(event_types.index("review_decision"), event_types.index("resume_completed"))
+            self.assertLess(
+                event_types.index("resume_started"),
+                event_types.index("review_decision"),
+            )
+            self.assertLess(
+                event_types.index("review_decision"),
+                event_types.index("resume_completed"),
+            )
 
             graph = build_graph(backend="sqlite", data_dir=str(run_dir))
             snap = graph.get_state({"configurable": {"thread_id": "s1"}})
-            advanced_past_assembly_review = snap.values["current_stage"] not in {"assembly_review"}
+            advanced_past_assembly_review = snap.values["current_stage"] not in {
+                "assembly_review"
+            }
             self.assertTrue(
                 advanced_past_assembly_review,
-                f"expected current_stage past assembly_review, got {snap.values['current_stage']!r}",
+                "expected current_stage past assembly_review, "
+                f"got {snap.values['current_stage']!r}",
             )
             if snap.values["supervision_state"] == "blocked_human":
                 active = snap.values.get("active_interrupt") or {}
@@ -295,8 +323,14 @@ class DurableResumeTests(unittest.TestCase):
                 graph.checkpointer.conn.close()
 
             ledger_events = Ledger(run_dir).read_events("s1")
-            decision_events = [e for e in ledger_events if e["event_type"] == "review_decision"]
-            self.assertEqual(decision_events, [], "no review_decision should be written for an invalid resume")
+            decision_events = [
+                e for e in ledger_events if e["event_type"] == "review_decision"
+            ]
+            self.assertEqual(
+                decision_events,
+                [],
+                "no review_decision should be written for an invalid resume",
+            )
             # F3: an invalid decision should still emit resume_started +
             # resume_failed so the audit trail records the attempt.
             started = [e for e in ledger_events if e["event_type"] == "resume_started"]

@@ -7,6 +7,13 @@ import pytest
 from app.domains.assembly import case_selector as selector_module
 from app.domains.assembly import numeric_case_retriever as retriever_module
 from app.domains.assembly.case_selector import select_evidence_cases
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalGenomeFacts,
+    CanonicalRecommendationFacts,
+    QuantityFact,
+    QuantityOrigin,
+)
 
 
 def _case(
@@ -37,6 +44,34 @@ def _case(
         "retrieval_eligible": True,
         "curation": {"status": "approved"},
     }
+
+
+def _facts(*, genome_size_bp: int | None = None) -> CanonicalRecommendationFacts:
+    return CanonicalRecommendationFacts(
+        genome=CanonicalGenomeFacts(
+            effective_genome_size=(
+                QuantityFact(
+                    value=genome_size_bp,
+                    unit="bp",
+                    origin=QuantityOrigin(
+                        kind="resolved",
+                        producer="genome_survey",
+                    ),
+                )
+                if genome_size_bp is not None
+                else None
+            )
+        )
+    )
+
+
+def _context() -> AssemblyRecommendationContext:
+    return AssemblyRecommendationContext(
+        stage="assembly",
+        assembly_route="hifi",
+        read_type="pacbio_hifi",
+        target_level="strict_t2t",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -74,16 +109,12 @@ def test_numeric_similarity_beats_method_and_read_type_metadata() -> None:
         read_type="hifi",
         source_tool="hifiasm",
     )
-    profile = {
-        "assets": {"read_type": "hifi"},
-        "genome_survey": {"effective_genome_size": 1_000_000_000},
-    }
-
     selected, metadata = select_evidence_cases(
         [far_match, close_mismatch],
         method_id="hifiasm",
         task="recommend_initial",
-        prompt_profile=profile,
+        facts=_facts(genome_size_bp=1_000_000_000),
+        context=_context(),
         max_cases=2,
     )
 
@@ -97,7 +128,8 @@ def test_method_without_paper_corpus_returns_empty_optional_selection() -> None:
         [],
         method_id="flye",
         task="recommend_initial",
-        prompt_profile={},
+        facts=_facts(),
+        context=_context(),
     )
 
     assert selected == []
@@ -111,5 +143,6 @@ def test_retry_never_reselects_literature() -> None:
             [],
             method_id="hifiasm",
             task="retry_after_review_failure",
-            prompt_profile={},
+            facts=_facts(),
+            context=_context(),
         )

@@ -7,6 +7,10 @@ from app.stages.gene_annotation.nodes import (
     GENE_EXECUTABLE_METHODS,
     GFFREAD_LIFECYCLE,
 )
+from app.stages.gene_annotation.state import (
+    GeneAnnotationCursor,
+    gene_annotation_output,
+)
 
 TERMINAL_STATES = frozenset({"blocked_human", "failed_terminal"})
 
@@ -25,8 +29,8 @@ _INTERMEDIATE_STATUSES = frozenset(
 )
 
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("gene_annotation") or {}
+def _output(state: TopLevelState) -> GeneAnnotationCursor:
+    return gene_annotation_output(state)
 
 
 def _supervision(state: TopLevelState) -> str:
@@ -42,7 +46,7 @@ def _next_pending_method(state: TopLevelState) -> str | None:
     return sorted(pending)[0] if pending else None
 
 
-def _route_method_status(status: str) -> str | None:
+def _route_method_status(status: str | None) -> str | None:
     """Map a method-specific frozen/ran status to its lifecycle subgraph."""
     for cfg in _METHOD_EXEC.values():
         if status == cfg["frozen_status"]:
@@ -109,6 +113,7 @@ def route_after_method_plan(state: TopLevelState) -> str:
 
 # --- after-gate routing (one per gate block node) -------------------------------
 
+
 def route_after_method_planning_gate(state: TopLevelState) -> str:
     """After method-planning gate: continue to executable method preparation or stop."""
     if _supervision(state) in TERMINAL_STATES:
@@ -139,7 +144,11 @@ def route_after_candidate_method(state: TopLevelState) -> str:
     status = _output(state).get("status")
     if status in {"failed", "materialization_failed"}:
         return "fail"
-    return "materialize" if status in {"miniprot_collected", "augustus_collected"} else "fail"
+    return (
+        "materialize"
+        if status in {"miniprot_collected", "augustus_collected"}
+        else "fail"
+    )
 
 
 def route_after_materialization(state: TopLevelState) -> str:

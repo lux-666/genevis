@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
-from typing import Any
+from typing import Any, TypeGuard
 
 from app.domains.assembly.evidence_case import (
     _rank_hifiasm_prompt_case,
@@ -73,7 +73,9 @@ class HifiasmNumericCaseRetriever:
             raise ValueError("hifiasm_numeric strategy must be a mapping")
         unknown = set(raw) - _CONFIG_KEYS
         if unknown:
-            raise ValueError(f"hifiasm_numeric strategy contains unknown keys: {sorted(unknown)}")
+            raise ValueError(
+                f"hifiasm_numeric strategy contains unknown keys: {sorted(unknown)}"
+            )
         return cls(
             max_cases=12 if max_cases is None else max_cases,
             weak_coverage_threshold=raw.get("weak_coverage_threshold", 0.6),
@@ -84,7 +86,11 @@ class HifiasmNumericCaseRetriever:
         )
 
     def _validate_configuration(self) -> None:
-        if not isinstance(self.max_cases, int) or isinstance(self.max_cases, bool) or self.max_cases < 1:
+        if (
+            not isinstance(self.max_cases, int)
+            or isinstance(self.max_cases, bool)
+            or self.max_cases < 1
+        ):
             raise ValueError("max_cases must be positive")
         for name, value in (
             ("weak_coverage_threshold", self.weak_coverage_threshold),
@@ -104,14 +110,16 @@ class HifiasmNumericCaseRetriever:
         if not any(weight > 0 for weight in self.weights.values()):
             raise ValueError("at least one numeric feature weight must be positive")
 
-    def select(self, cases: list[dict[str, Any]], *, query: dict[str, Any]) -> SelectionResult:
+    def select(
+        self, cases: list[dict[str, Any]], *, query: dict[str, Any]
+    ) -> SelectionResult:
         if query.get("task") != "recommend_initial":
-            raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
+            raise ValueError(
+                "hifiasm numeric retrieval only supports task='recommend_initial'"
+            )
 
         trace: list[dict[str, Any]] = []
-        ranked: list[
-            tuple[float, float, str, dict[str, Any], dict[str, Any]]
-        ] = []
+        ranked: list[tuple[float, float, str, dict[str, Any], dict[str, Any]]] = []
         for raw_case in cases:
             case = project_hifiasm_retrieval_case(raw_case)
             case_id = str(case.get("case_id") or "")
@@ -165,7 +173,9 @@ class HifiasmNumericCaseRetriever:
             }
             trace.append(trace_entry)
             if decision == "candidate":
-                selected_cases.append(_prompt_safe_case(case, numeric_match=trace_entry))
+                selected_cases.append(
+                    _prompt_safe_case(case, numeric_match=trace_entry)
+                )
 
         selected_cases.sort(
             key=lambda case: next(
@@ -181,18 +191,21 @@ class HifiasmNumericCaseRetriever:
         warnings: list[str] = []
         if not evidence_available:
             warnings.append(
-                "No eligible approved literature cases; generate the initial recommendation "
+                "No eligible approved literature cases; generate the initial "
+                "recommendation "
                 "from the current sample profile and method guidance."
             )
         else:
             if len(selected_cases) < self.max_cases:
                 warnings.append(
-                    f"Only {len(selected_cases)} of {self.max_cases} requested literature "
+                    f"Only {len(selected_cases)} of {self.max_cases} requested "
+                    "literature "
                     "cases were available."
                 )
             if weak_selected:
                 warnings.append(
-                    "Some selected literature cases share few measured biological fields "
+                    "Some selected literature cases share few measured biological "
+                    "fields "
                     "with the current sample; let the LLM assess their applicability."
                 )
         warning = " ".join(warnings) or None
@@ -209,9 +222,13 @@ class HifiasmNumericCaseRetriever:
             "query": deepcopy(query),
             "trace": trace,
         }
-        return SelectionResult(selected_cases=selected_cases, metadata=metadata, trace=trace)
+        return SelectionResult(
+            selected_cases=selected_cases, metadata=metadata, trace=trace
+        )
 
-    def _numeric_match(self, case: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
+    def _numeric_match(
+        self, case: dict[str, Any], query: dict[str, Any]
+    ) -> dict[str, Any]:
         query_features = query.get("numeric_features") or {}
         observed_facts = case.get("observed_facts") or {}
         feature_distances: dict[str, dict[str, Any]] = {}
@@ -245,7 +262,9 @@ class HifiasmNumericCaseRetriever:
                 }
                 continue
 
-            distance, comparable_case = self._feature_distance(feature, query_value, case_fact)
+            distance, comparable_case = self._feature_distance(
+                feature, query_value, case_fact
+            )
             robust_distance = min(distance, self.distance_clip)
             weighted_distance += weight * robust_distance
             present_weight += weight
@@ -258,19 +277,27 @@ class HifiasmNumericCaseRetriever:
                 "status": "compared",
             }
 
-        numeric_distance = weighted_distance / present_weight if present_weight else None
+        numeric_distance = (
+            weighted_distance / present_weight if present_weight else None
+        )
         coverage = present_weight / total_weight
         return {
             "numeric_distance": numeric_distance,
-            "numeric_similarity_display": math.exp(-numeric_distance) if numeric_distance is not None else 0.0,
+            "numeric_similarity_display": math.exp(-numeric_distance)
+            if numeric_distance is not None
+            else 0.0,
             "evidence_coverage": coverage,
             "weak_evidence": coverage < self.weak_coverage_threshold,
             "feature_distances": feature_distances,
         }
 
-    def _feature_distance(self, feature: str, query_value: float, case_fact: Any) -> tuple[float, Any]:
+    def _feature_distance(
+        self, feature: str, query_value: float, case_fact: Any
+    ) -> tuple[float, Any]:
         if feature == "ploidy":
-            case_value = float(_fact_value(case_fact))
+            case_value = _fact_value(case_fact)
+            if case_value is None:
+                raise ValueError("ploidy comparison requires a numeric case value")
             return (0.0 if query_value == case_value else 1.0), case_value
 
         comparison_value: float
@@ -281,16 +308,27 @@ class HifiasmNumericCaseRetriever:
                 return 0.0, {"min": low, "max": high}
             comparison_value = low if query_value < low else high
         else:
-            comparison_value = float(_fact_value(case_fact))
+            case_value = _fact_value(case_fact)
+            if case_value is None:
+                raise ValueError(
+                    f"{feature} comparison requires a numeric case value or interval"
+                )
+            comparison_value = case_value
 
         scale = float(self.scales[feature])
         if feature == "heterozygosity":
             if query_value < 0 or comparison_value < 0:
                 distance = self.distance_clip
             else:
-                distance = abs(
-                    math.log((query_value + self.epsilon) / (comparison_value + self.epsilon))
-                ) / scale
+                distance = (
+                    abs(
+                        math.log(
+                            (query_value + self.epsilon)
+                            / (comparison_value + self.epsilon)
+                        )
+                    )
+                    / scale
+                )
         else:
             if query_value <= 0 or comparison_value <= 0:
                 distance = self.distance_clip
@@ -326,10 +364,14 @@ def _actionability_score(case: dict[str, Any]) -> float:
         isinstance(claim, dict) and bool(claim.get("evidence_span_ids"))
         for claim in rationale_claims
     )
-    return sum((has_parameter_settings, has_parameter_quotes, has_rationale_quotes)) / 3.0
+    return (
+        sum((has_parameter_settings, has_parameter_quotes, has_rationale_quotes)) / 3.0
+    )
 
 
-def _prompt_safe_case(case: dict[str, Any], *, numeric_match: dict[str, Any]) -> dict[str, Any]:
+def _prompt_safe_case(
+    case: dict[str, Any], *, numeric_match: dict[str, Any]
+) -> dict[str, Any]:
     return _rank_hifiasm_prompt_case(
         case,
         numeric_match={
@@ -392,7 +434,7 @@ def _interval(fact: Any) -> tuple[float, float] | None:
     return float(low), float(high)
 
 
-def _is_number(value: Any) -> bool:
+def _is_number(value: Any) -> TypeGuard[int | float]:
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)

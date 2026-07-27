@@ -1,6 +1,7 @@
 method_name: t2t.alignment.minimap2
 stage: t2t
 package_ref: minimap2
+parameter_catalog: minimap2
 goal: "Map ONT long reads to the current assembly for telomere-extension evidence."
 required_inputs:
   - name: assembly_fasta
@@ -23,22 +24,3 @@ resource_hints:
   memory_gb: 32.0
   gpu_required: false
   walltime_hours: 4.0
-planner:
-  required_parameters:
-    - mode
-    - telomere_motif
-    - threshold_min_motif_copies
-    - threshold_terminal_window_bp
-    - threshold_min_mapq
-    - threshold_max_target_terminal_distance_bp
-    - threshold_min_overlap_bp
-    - threshold_min_supporting_reads
-  parameter_defaults:
-    mode: auto_patch
-    telomere_motif: TTAGGG
-    threshold_min_motif_copies: 4
-    threshold_terminal_window_bp: 10000
-    threshold_min_mapq: 20
-    threshold_max_target_terminal_distance_bp: 1000
-    threshold_min_overlap_bp: 500
-    threshold_min_supporting_reads: 1

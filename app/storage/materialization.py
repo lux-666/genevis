@@ -39,7 +39,9 @@ def _materialize_manifest(source: Path, destination: Path) -> None:
     try:
         payload = yaml.safe_load(source.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        raise RunMaterializationError(f"manifest could not be read: {source}: {exc}") from exc
+        raise RunMaterializationError(
+            f"manifest could not be read: {source}: {exc}"
+        ) from exc
     if not isinstance(payload, dict):
         raise RunMaterializationError("manifest root must be a mapping")
 
@@ -86,8 +88,8 @@ _RUN_CONFIG_PATH_FIELDS = (
     ("assembly_review", "related_species_reference_dir"),
     ("t2t", "chromosome_list_ref"),
     ("t2t", "assembly_fasta_ref"),
-    ("t2t", "ont_reads_ref"),
 )
+_RUN_CONFIG_PATH_LIST_FIELDS = (("t2t", "ont_read_refs"),)
 
 
 def _materialize_run_config(source: Path, destination: Path) -> None:
@@ -103,6 +105,8 @@ def _materialize_run_config(source: Path, destination: Path) -> None:
 
     for field_path in _RUN_CONFIG_PATH_FIELDS:
         _normalize_run_config_path(payload, field_path, source.parent)
+    for field_path in _RUN_CONFIG_PATH_LIST_FIELDS:
+        _normalize_run_config_path_list(payload, field_path, source.parent)
     destination.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -130,4 +134,43 @@ def _normalize_run_config_path(
             f"run config {'.'.join(field_path)} must be a non-empty path"
         )
     path = Path(value).expanduser()
-    parent[key] = str(path if path.is_absolute() else (source_dir / path).resolve(strict=False))
+    parent[key] = str(
+        path if path.is_absolute() else (source_dir / path).resolve(strict=False)
+    )
+
+
+def _normalize_run_config_path_list(
+    payload: dict[str, Any],
+    field_path: tuple[str, ...],
+    source_dir: Path,
+) -> None:
+    parent: Any = payload
+    for key in field_path[:-1]:
+        if not isinstance(parent, dict) or key not in parent:
+            return
+        parent = parent[key]
+    if not isinstance(parent, dict):
+        return
+    key = field_path[-1]
+    values = parent.get(key)
+    if values is None:
+        return
+    if not isinstance(values, list):
+        raise RunMaterializationError(
+            f"run config {'.'.join(field_path)} must be a list of paths"
+        )
+    normalized: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            raise RunMaterializationError(
+                f"run config {'.'.join(field_path)}[{index}] must be a non-empty path"
+            )
+        path = Path(value).expanduser()
+        normalized.append(
+            str(
+                path
+                if path.is_absolute()
+                else (source_dir / path).resolve(strict=False)
+            )
+        )
+    parent[key] = normalized

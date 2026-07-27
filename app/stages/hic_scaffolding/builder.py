@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.hic_scaffolding.method_application import build_autohic_graph
@@ -15,6 +16,7 @@ from app.stages.hic_scaffolding.nodes import (
     resolve_hic_inputs,
 )
 from app.stages.hic_scaffolding.parameters.workflow import (
+    autohic_execution_retry_gate,
     recommend_autohic_parameters,
 )
 from app.stages.hic_scaffolding.routing import (
@@ -22,11 +24,17 @@ from app.stages.hic_scaffolding.routing import (
     route_after_enter,
     route_after_recommendation,
     route_after_resolve,
+    route_after_retry_gate,
     route_after_review,
 )
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build direct AutoHiC execution with parameter and adoption gates."""
 
     graph = StateGraph(TopLevelState)
@@ -34,6 +42,7 @@ def build_stage():
     graph.add_node("resolve_hic_inputs", resolve_hic_inputs)
     graph.add_node("recommend_autohic_parameters", recommend_autohic_parameters)
     graph.add_node("autohic", build_autohic_graph())
+    graph.add_node("execution_retry_gate", autohic_execution_retry_gate)
     graph.add_node("chromosome_assembly_review", prepare_autohic_adoption_review)
     graph.add_node("block", block_hic_scaffolding)
     graph.add_node("block_requirements", block_hic_requirements)
@@ -43,7 +52,11 @@ def build_stage():
     graph.add_conditional_edges(
         "enter",
         route_after_enter,
-        {"resolve": "resolve_hic_inputs", "autohic": "autohic"},
+        {
+            "resolve": "resolve_hic_inputs",
+            "recommend": "recommend_autohic_parameters",
+            "autohic": "autohic",
+        },
     )
     graph.add_conditional_edges(
         "resolve_hic_inputs",
@@ -64,9 +77,15 @@ def build_stage():
         route_after_autohic,
         {
             "review": "chromosome_assembly_review",
+            "retry_gate": "execution_retry_gate",
             "requirements": "block_requirements",
             "fail": "fail",
         },
+    )
+    graph.add_conditional_edges(
+        "execution_retry_gate",
+        route_after_retry_gate,
+        {"recommend": "recommend_autohic_parameters", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "chromosome_assembly_review",

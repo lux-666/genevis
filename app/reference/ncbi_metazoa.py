@@ -12,8 +12,9 @@ from typing import Any
 
 from app.integrity import sha256_file
 
-
-REFERENCE_DIR = Path(__file__).resolve().parents[2] / "data" / "reference" / "ncbi_metazoa"
+REFERENCE_DIR = (
+    Path(__file__).resolve().parents[2] / "data" / "reference" / "ncbi_metazoa"
+)
 REFERENCE_MANIFEST_FILENAME = "reference_manifest.json"
 MAX_SELECTED_RECORDS = 5
 DISPLAY_COHORT_SIZE = 25
@@ -39,7 +40,14 @@ _ALTERNATE_METADATA_RE = re.compile(
     r"\b(?:alternate|maternal|paternal|hap[._ -]?[12])\b",
     re.IGNORECASE,
 )
-_SPECIES_KEYS = ("target_species", "species_name", "scientific_name", "organism", "species", "chinese_name")
+_SPECIES_KEYS = (
+    "target_species",
+    "species_name",
+    "scientific_name",
+    "organism",
+    "species",
+    "chinese_name",
+)
 
 
 def build_related_species_evidence_pack(
@@ -88,7 +96,11 @@ def build_related_species_evidence_pack(
         return base
 
     exact = _select_evidence(
-        [row for row in rows if _normalise(row.get("Organism Name")) == _normalise(canonical)]
+        [
+            row
+            for row in rows
+            if _normalise(row.get("Organism Name")) == _normalise(canonical)
+        ]
     )
     if exact["selected_records"]:
         return _complete_pack(base, "exact", exact)
@@ -102,7 +114,9 @@ def build_related_species_evidence_pack(
 
     family = target["taxonomic_hints"].get("family")
     if family:
-        same_family = _select_evidence(_rows_with_lineage_term(rows, lineage_by_taxid, family))
+        same_family = _select_evidence(
+            _rows_with_lineage_term(rows, lineage_by_taxid, family)
+        )
         if same_family["selected_records"]:
             return _complete_pack(base, "same_family", same_family)
     else:
@@ -110,7 +124,9 @@ def build_related_species_evidence_pack(
 
     order = target["taxonomic_hints"].get("order")
     if order:
-        same_order = _select_evidence(_rows_with_lineage_term(rows, lineage_by_taxid, order))
+        same_order = _select_evidence(
+            _rows_with_lineage_term(rows, lineage_by_taxid, order)
+        )
         if same_order["selected_records"]:
             return _complete_pack(base, "same_order", same_order)
     else:
@@ -171,12 +187,18 @@ def build_related_species_statistics_pack(
     seen_taxids: set[str] = set()
     tier_rows: dict[str, list[dict[str, str]]] = {}
 
-    exact_candidates = [row for row in rows if _normalise(row.get("Organism Name")) == _normalise(canonical)]
+    exact_candidates = [
+        row
+        for row in rows
+        if _normalise(row.get("Organism Name")) == _normalise(canonical)
+    ]
     tier_rows["exact"] = _unseen_rows(exact_candidates, seen_taxids)
     _remember_taxids(tier_rows["exact"], seen_taxids)
 
     genus = target["taxonomic_hints"].get("genus") or canonical.split()[0]
-    genus_candidates = [row for row in rows if _organism_genus(row) == _normalise(genus)]
+    genus_candidates = [
+        row for row in rows if _organism_genus(row) == _normalise(genus)
+    ]
     tier_rows["same_genus"] = _unseen_rows(genus_candidates, seen_taxids)
     _remember_taxids(tier_rows["same_genus"], seen_taxids)
 
@@ -198,30 +220,41 @@ def build_related_species_statistics_pack(
         tier_rows["same_order"] = []
         base["notes"].append("same_order_unavailable_without_taxonomic_hint")
 
-    tier_counts = {tier: len(tier_rows[tier]) for tier in ("exact", "same_genus", "same_family", "same_order")}
+    tier_counts = {
+        tier: len(tier_rows[tier])
+        for tier in ("exact", "same_genus", "same_family", "same_order")
+    }
 
     condensed: list[dict[str, Any]] = []
     for tier in ("exact", "same_genus", "same_family", "same_order"):
         for row in tier_rows[tier]:
             record = _condense_record(row)
-            record["assembly_level"] = _value(row, "Assembly Level", "Assembly Info Assembly Level") or None
+            record["assembly_level"] = (
+                _value(row, "Assembly Level", "Assembly Info Assembly Level") or None
+            )
             record["tier"] = tier
             condensed.append(record)
 
-    primary = _deduplicate_by_key([r for r in condensed if not r["is_alternate_haplotype"]], _statistics_sort_key)
-    alternates = _deduplicate_by_key([r for r in condensed if r["is_alternate_haplotype"]], _statistics_sort_key)
+    primary = _deduplicate_by_key(
+        [r for r in condensed if not r["is_alternate_haplotype"]], _statistics_sort_key
+    )
+    alternates = _deduplicate_by_key(
+        [r for r in condensed if r["is_alternate_haplotype"]], _statistics_sort_key
+    )
 
     analysis_records = primary[:ANALYSIS_COHORT_SIZE]
 
     notes = list(base["notes"])
     if not primary:
         notes.append("no_related_species_assemblies_found_across_any_tier")
-    notes.extend([
-        "related_species_statistics_is_comparative_only",
-        "not_an_automatic_threshold",
-        "not_an_assembly_prior",
-        "chromosome_count_is_ncbi_assembly_metadata_not_true_karyotype",
-    ])
+    notes.extend(
+        [
+            "related_species_statistics_is_comparative_only",
+            "not_an_automatic_threshold",
+            "not_an_assembly_prior",
+            "chromosome_count_is_ncbi_assembly_metadata_not_true_karyotype",
+        ]
+    )
 
     return {
         **base,
@@ -238,7 +271,9 @@ def build_related_species_statistics_pack(
             "excluded_alternate_haplotype_records": alternates[:ANALYSIS_COHORT_SIZE],
         },
         "computed_summary": _statistics_computed_summary(analysis_records),
-        "target_position": _statistics_target_position(analysis_records, target_metrics),
+        "target_position": _statistics_target_position(
+            analysis_records, target_metrics
+        ),
         "notes": notes,
     }
 
@@ -276,13 +311,17 @@ def _empty_pack(species_name: str | None, sources: dict[str, str]) -> dict[str, 
     }
 
 
-def _complete_pack(base: dict[str, Any], matching_mode: str, selection: dict[str, Any]) -> dict[str, Any]:
+def _complete_pack(
+    base: dict[str, Any], matching_mode: str, selection: dict[str, Any]
+) -> dict[str, Any]:
     return {
         **base,
         "status": "available",
         "matching_mode": matching_mode,
         "selected_records": selection["selected_records"],
-        "excluded_alternate_haplotype_records": selection["excluded_alternate_haplotype_records"],
+        "excluded_alternate_haplotype_records": selection[
+            "excluded_alternate_haplotype_records"
+        ],
         "computed_summary": _computed_summary(selection["selected_records"]),
         "notes": [
             *base["notes"],
@@ -304,7 +343,11 @@ def _reference_provenance(
 ) -> tuple[dict[str, Any], str | None]:
     """Load and verify the tracked snapshot manifest before using its data."""
     manifest_path = reference_dir / REFERENCE_MANIFEST_FILENAME
-    provenance: dict[str, Any] = {**sources, "manifest": str(manifest_path), "verification": "unverified"}
+    provenance: dict[str, Any] = {
+        **sources,
+        "manifest": str(manifest_path),
+        "verification": "unverified",
+    }
     if not manifest_path.exists():
         return provenance, "reference_version_manifest_missing"
     try:
@@ -314,21 +357,29 @@ def _reference_provenance(
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         return provenance, "reference_version_manifest_invalid"
 
-    provenance.update({
-        "dataset_id": manifest.get("dataset_id"),
-        "source_provider": manifest.get("source_provider"),
-        "source_version": manifest.get("source_version"),
-        "exported_at": manifest.get("exported_at"),
-        "files": {},
-    })
+    provenance.update(
+        {
+            "dataset_id": manifest.get("dataset_id"),
+            "source_provider": manifest.get("source_provider"),
+            "source_version": manifest.get("source_version"),
+            "exported_at": manifest.get("exported_at"),
+            "files": {},
+        }
+    )
     mismatches: list[str] = []
     for name, expected in manifest["files"].items():
         if not isinstance(expected, dict):
             return provenance, "reference_version_manifest_invalid"
         path = reference_dir / name
-        actual = {"path": str(path), "sha256": sha256_file(path) if path.exists() else None, "size_bytes": path.stat().st_size if path.exists() else None}
+        actual = {
+            "path": str(path),
+            "sha256": sha256_file(path) if path.exists() else None,
+            "size_bytes": path.stat().st_size if path.exists() else None,
+        }
         provenance["files"][name] = actual
-        if actual["sha256"] != expected.get("sha256") or actual["size_bytes"] != expected.get("size_bytes"):
+        if actual["sha256"] != expected.get("sha256") or actual[
+            "size_bytes"
+        ] != expected.get("size_bytes"):
             mismatches.append(name)
     if mismatches:
         provenance["verification"] = "mismatch"
@@ -336,6 +387,8 @@ def _reference_provenance(
         return provenance, f"reference_version_mismatch:{','.join(mismatches)}"
     provenance["verification"] = "verified"
     return provenance, None
+
+
 def _load_tsv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle, delimiter="\t")]
@@ -349,7 +402,9 @@ def _load_lineage(path: Path) -> dict[str, set[str]]:
         taxid = str(row.get("Organism Taxonomic ID") or "").strip()
         lineage = str(row.get("Lineage") or "")
         if taxid:
-            result[taxid] = {_normalise(term) for term in lineage.split(";") if term.strip()}
+            result[taxid] = {
+                _normalise(term) for term in lineage.split(";") if term.strip()
+            }
     return result
 
 
@@ -385,8 +440,12 @@ def _resolve_target(species_name: str, aliases: list[dict[str, str]]) -> dict[st
 
 def _select_evidence(rows: list[dict[str, str]]) -> dict[str, list[dict[str, Any]]]:
     condensed = [_condense_record(row) for row in rows]
-    primary = _deduplicate([record for record in condensed if not record["is_alternate_haplotype"]])
-    alternates = _deduplicate([record for record in condensed if record["is_alternate_haplotype"]])
+    primary = _deduplicate(
+        [record for record in condensed if not record["is_alternate_haplotype"]]
+    )
+    alternates = _deduplicate(
+        [record for record in condensed if record["is_alternate_haplotype"]]
+    )
     return {
         "selected_records": primary[:MAX_SELECTED_RECORDS],
         "excluded_alternate_haplotype_records": alternates[:MAX_SELECTED_RECORDS],
@@ -406,7 +465,9 @@ def _record_sort_key(record: dict[str, Any]) -> tuple[Any, ...]:
         not record["accession"].upper().startswith("GCF_"),
         -(record["scaffold_n50_bp"] or -1),
         -(record["contig_n50_bp"] or -1),
-        record["scaffold_count"] if record["scaffold_count"] is not None else float("inf"),
+        record["scaffold_count"]
+        if record["scaffold_count"] is not None
+        else float("inf"),
         record["contig_count"] if record["contig_count"] is not None else float("inf"),
         record["accession"],
     )
@@ -422,8 +483,12 @@ def _condense_record(row: dict[str, str]) -> dict[str, Any]:
         "organism_name": _value(row, "Organism Name") or None,
         "taxid": _value(row, "Organism Taxonomic ID") or None,
         "assembly_method": _value(row, "Assembly Assembly Method") or None,
-        "total_sequence_length_bp": _integer(_value(row, "Assembly Stats Total Sequence Length")),
-        "chromosome_count": _integer(_value(row, "Assembly Stats Total Number of Chromosomes")),
+        "total_sequence_length_bp": _integer(
+            _value(row, "Assembly Stats Total Sequence Length")
+        ),
+        "chromosome_count": _integer(
+            _value(row, "Assembly Stats Total Number of Chromosomes")
+        ),
         "contig_count": _integer(_value(row, "Assembly Stats Number of Contigs")),
         "scaffold_count": _integer(_value(row, "Assembly Stats Number of Scaffolds")),
         "contig_n50_bp": _integer(_value(row, "Assembly Stats Contig N50")),
@@ -450,7 +515,7 @@ def _busco(row: dict[str, str]) -> dict[str, Any] | None:
 
 
 def _alternate_haplotype_reason(row: dict[str, str], assembly_name: str) -> str | None:
-    """Return exclusion reason if this record represents an alternate haplotype assembly."""
+    "Return exclusion reason if this record represents an alternate haplotype assembly."
 
     # Check assembly name first (more reliable for alternates)
     if _ALTERNATE_NAME_RE.search(assembly_name or ""):
@@ -473,21 +538,38 @@ def _alternate_haplotype_reason(row: dict[str, str], assembly_name: str) -> str 
 def _computed_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {"selected_record_count": len(records)}
     for field in (
-        "total_sequence_length_bp", "chromosome_count", "contig_count", "scaffold_count",
-        "contig_n50_bp", "scaffold_n50_bp", "gc_percent",
+        "total_sequence_length_bp",
+        "chromosome_count",
+        "contig_count",
+        "scaffold_count",
+        "contig_n50_bp",
+        "scaffold_n50_bp",
+        "gc_percent",
     ):
         values = [record[field] for record in records if record.get(field) is not None]
         if values:
-            summary[field] = {"min": min(values), "median": median(values), "max": max(values)}
-    chromosome_values = [record["chromosome_count"] for record in records if record.get("chromosome_count") is not None]
+            summary[field] = {
+                "min": min(values),
+                "median": median(values),
+                "max": max(values),
+            }
+    chromosome_values = [
+        record["chromosome_count"]
+        for record in records
+        if record.get("chromosome_count") is not None
+    ]
     if chromosome_values:
         counts = Counter(chromosome_values)
-        summary["chromosome_count"]["mode"] = min(value for value, count in counts.items() if count == max(counts.values()))
-    busco_lineages = sorted({
-        record["busco"]["lineage"]
-        for record in records
-        if record.get("busco") and record["busco"].get("lineage")
-    })
+        summary["chromosome_count"]["mode"] = min(
+            value for value, count in counts.items() if count == max(counts.values())
+        )
+    busco_lineages = sorted(
+        {
+            record["busco"]["lineage"]
+            for record in records
+            if record.get("busco") and record["busco"].get("lineage")
+        }
+    )
     if busco_lineages:
         summary["busco_lineages"] = busco_lineages
     return summary
@@ -498,8 +580,16 @@ def _empty_statistics_pack(
     sources: dict[str, str],
     target_metrics: dict[str, float] | None,
 ) -> dict[str, Any]:
-    empty_cohort = {"size_limit": DISPLAY_COHORT_SIZE, "records": [], "excluded_alternate_haplotype_records": []}
-    analysis_cohort = {"size_limit": ANALYSIS_COHORT_SIZE, "records": [], "excluded_alternate_haplotype_records": []}
+    empty_cohort = {
+        "size_limit": DISPLAY_COHORT_SIZE,
+        "records": [],
+        "excluded_alternate_haplotype_records": [],
+    }
+    analysis_cohort = {
+        "size_limit": ANALYSIS_COHORT_SIZE,
+        "records": [],
+        "excluded_alternate_haplotype_records": [],
+    }
     return {
         "schema_version": 1,
         "status": "unavailable",
@@ -513,15 +603,22 @@ def _empty_statistics_pack(
         "tier_counts": {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0},
         "display_cohort": empty_cohort,
         "analysis_cohort": analysis_cohort,
-        "computed_summary": {"cohort": "analysis_cohort", "record_count": 0, "metrics": {}},
+        "computed_summary": {
+            "cohort": "analysis_cohort",
+            "record_count": 0,
+            "metrics": {},
+        },
         "target_position": _statistics_target_position([], target_metrics),
         "notes": [],
     }
 
 
-def _unseen_rows(rows: list[dict[str, str]], seen_taxids: set[str]) -> list[dict[str, str]]:
+def _unseen_rows(
+    rows: list[dict[str, str]], seen_taxids: set[str]
+) -> list[dict[str, str]]:
     return [
-        row for row in rows
+        row
+        for row in rows
         if str(row.get("Organism Taxonomic ID") or "").strip() not in seen_taxids
     ]
 
@@ -556,7 +653,10 @@ def _assembly_level_rank(value: str | None) -> int:
 
 def _metrics_completeness_score(record: dict[str, Any]) -> int:
     score = 0
-    if record.get("scaffold_n50_bp") is not None or record.get("contig_n50_bp") is not None:
+    if (
+        record.get("scaffold_n50_bp") is not None
+        or record.get("contig_n50_bp") is not None
+    ):
         score += 1
     if record.get("gc_percent") is not None:
         score += 1
@@ -568,7 +668,11 @@ def _metrics_completeness_score(record: dict[str, Any]) -> int:
 
 
 def _statistics_sort_key(record: dict[str, Any]) -> tuple[Any, ...]:
-    n50 = record["scaffold_n50_bp"] if record["scaffold_n50_bp"] is not None else record["contig_n50_bp"]
+    n50 = (
+        record["scaffold_n50_bp"]
+        if record["scaffold_n50_bp"] is not None
+        else record["contig_n50_bp"]
+    )
     return (
         _STATISTICS_TIER_RANK[record["tier"]],
         0 if record["accession"].upper().startswith("GCF_") else 1,
@@ -588,23 +692,44 @@ def _quartile_summary(values: list[float | int]) -> dict[str, float] | None:
     all_ints = all(isinstance(value, int) for value in values)
     ordered = sorted(values)
     q1, median_value, q3 = quantiles(ordered, n=4, method="inclusive")
-    result = {"min": min(values), "q1": q1, "median": median_value, "q3": q3, "max": max(values)}
+    result = {
+        "min": min(values),
+        "q1": q1,
+        "median": median_value,
+        "q3": q3,
+        "max": max(values),
+    }
     if all_ints:
-        return {key: value if key in ("min", "max") else round(value, 2) for key, value in result.items()}
+        return {
+            key: value if key in ("min", "max") else round(value, 2)
+            for key, value in result.items()
+        }
     return {key: round(float(value), 2) for key, value in result.items()}
 
 
-def _statistics_computed_summary(analysis_records: list[dict[str, Any]]) -> dict[str, Any]:
+def _statistics_computed_summary(
+    analysis_records: list[dict[str, Any]],
+) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
-    for field in ("total_sequence_length_bp", "contig_n50_bp", "scaffold_n50_bp", "gc_percent"):
-        values = [record[field] for record in analysis_records if record.get(field) is not None]
+    for field in (
+        "total_sequence_length_bp",
+        "contig_n50_bp",
+        "scaffold_n50_bp",
+        "gc_percent",
+    ):
+        values = [
+            record[field]
+            for record in analysis_records
+            if record.get(field) is not None
+        ]
         summary = _quartile_summary(values)
         if summary is not None:
             metrics[field] = summary
     busco_complete = [
         record["busco"]["complete"]
         for record in analysis_records
-        if record.get("busco") is not None and record["busco"].get("complete") is not None
+        if record.get("busco") is not None
+        and record["busco"].get("complete") is not None
     ]
     summary = _quartile_summary(busco_complete)
     if summary is not None:
@@ -612,23 +737,32 @@ def _statistics_computed_summary(analysis_records: list[dict[str, Any]]) -> dict
     busco_duplicated = [
         record["busco"]["duplicated"]
         for record in analysis_records
-        if record.get("busco") is not None and record["busco"].get("duplicated") is not None
+        if record.get("busco") is not None
+        and record["busco"].get("duplicated") is not None
     ]
     summary = _quartile_summary(busco_duplicated)
     if summary is not None:
         metrics["busco_duplicated_percent"] = summary
 
-    chromosome_values = [record["chromosome_count"] for record in analysis_records if record.get("chromosome_count") is not None]
+    chromosome_values = [
+        record["chromosome_count"]
+        for record in analysis_records
+        if record.get("chromosome_count") is not None
+    ]
     chromosome_count_mode = None
     if chromosome_values:
         counts = Counter(chromosome_values)
-        chromosome_count_mode = min(value for value, count in counts.items() if count == max(counts.values()))
+        chromosome_count_mode = min(
+            value for value, count in counts.items() if count == max(counts.values())
+        )
 
-    busco_lineages = sorted({
-        record["busco"]["lineage"]
-        for record in analysis_records
-        if record.get("busco") and record["busco"].get("lineage")
-    })
+    busco_lineages = sorted(
+        {
+            record["busco"]["lineage"]
+            for record in analysis_records
+            if record.get("busco") and record["busco"].get("lineage")
+        }
+    )
 
     by_tier = {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0}
     by_accession_type = {"GCF": 0, "GCA": 0}
@@ -640,7 +774,9 @@ def _statistics_computed_summary(analysis_records: list[dict[str, Any]]) -> dict
             by_accession_type["GCF"] += 1
         elif record["accession"].upper().startswith("GCA_"):
             by_accession_type["GCA"] += 1
-        by_assembly_level[level_bucket_by_rank[_assembly_level_rank(record.get("assembly_level"))]] += 1
+        by_assembly_level[
+            level_bucket_by_rank[_assembly_level_rank(record.get("assembly_level"))]
+        ] += 1
 
     return {
         "cohort": "analysis_cohort",
@@ -684,14 +820,20 @@ def _statistics_target_position(
 
     any_available = False
 
-    def _resolve(field_key: str, percentile_key: str, target_key: str, values: list[float]) -> None:
+    def _resolve(
+        field_key: str, percentile_key: str, target_key: str, values: list[float]
+    ) -> None:
         nonlocal any_available
         target_value = target_metrics.get(target_key)
         if target_value is None:
-            result["notes"].append(f"{percentile_key}_unavailable:no_target_{target_key}")
+            result["notes"].append(
+                f"{percentile_key}_unavailable:no_target_{target_key}"
+            )
             return
         if not values:
-            result["notes"].append(f"{percentile_key}_unavailable:no_cohort_{field_key}_data")
+            result["notes"].append(
+                f"{percentile_key}_unavailable:no_cohort_{field_key}_data"
+            )
             return
         result[percentile_key] = _percentile_rank(values, target_value)
         any_available = True
@@ -699,40 +841,75 @@ def _statistics_target_position(
     # Use best available N50 (scaffold preferred, contig fallback) for fair comparison
     n50_values = []
     for record in analysis_records:
-        n50 = record["scaffold_n50_bp"] if record.get("scaffold_n50_bp") is not None else record.get("contig_n50_bp")
+        n50 = (
+            record["scaffold_n50_bp"]
+            if record.get("scaffold_n50_bp") is not None
+            else record.get("contig_n50_bp")
+        )
         if n50 is not None:
             n50_values.append(n50)
     _resolve("n50_bp", "n50_percentile", "n50_bp", n50_values)
 
-    size_values = [record["total_sequence_length_bp"] for record in analysis_records if record.get("total_sequence_length_bp") is not None]
-    _resolve("total_sequence_length_bp", "assembly_size_percentile", "assembly_size_bp", size_values)
+    size_values = [
+        record["total_sequence_length_bp"]
+        for record in analysis_records
+        if record.get("total_sequence_length_bp") is not None
+    ]
+    _resolve(
+        "total_sequence_length_bp",
+        "assembly_size_percentile",
+        "assembly_size_bp",
+        size_values,
+    )
 
-    gc_values = [record["gc_percent"] for record in analysis_records if record.get("gc_percent") is not None]
+    gc_values = [
+        record["gc_percent"]
+        for record in analysis_records
+        if record.get("gc_percent") is not None
+    ]
     _resolve("gc_percent", "gc_percentile", "gc_percent", gc_values)
 
     busco_complete_values = [
         record["busco"]["complete"]
         for record in analysis_records
-        if record.get("busco") is not None and record["busco"].get("complete") is not None
+        if record.get("busco") is not None
+        and record["busco"].get("complete") is not None
     ]
-    _resolve("busco_complete_percent", "busco_complete_percentile", "busco_complete_percent", busco_complete_values)
+    _resolve(
+        "busco_complete_percent",
+        "busco_complete_percentile",
+        "busco_complete_percent",
+        busco_complete_values,
+    )
 
     busco_duplicated_values = [
         record["busco"]["duplicated"]
         for record in analysis_records
-        if record.get("busco") is not None and record["busco"].get("duplicated") is not None
+        if record.get("busco") is not None
+        and record["busco"].get("duplicated") is not None
     ]
-    _resolve("busco_duplicated_percent", "busco_duplicated_percentile", "busco_duplicated_percent", busco_duplicated_values)
+    _resolve(
+        "busco_duplicated_percent",
+        "busco_duplicated_percentile",
+        "busco_duplicated_percent",
+        busco_duplicated_values,
+    )
 
     result["available"] = any_available
     return result
 
 
-def _rows_with_lineage_term(rows: list[dict[str, str]], lineage_by_taxid: dict[str, set[str]], term: str) -> list[dict[str, str]]:
+def _rows_with_lineage_term(
+    rows: list[dict[str, str]], lineage_by_taxid: dict[str, set[str]], term: str
+) -> list[dict[str, str]]:
     wanted = _normalise(term)
     return [
-        row for row in rows
-        if wanted in lineage_by_taxid.get(str(row.get("Organism Taxonomic ID") or "").strip(), set())
+        row
+        for row in rows
+        if wanted
+        in lineage_by_taxid.get(
+            str(row.get("Organism Taxonomic ID") or "").strip(), set()
+        )
     ]
 
 

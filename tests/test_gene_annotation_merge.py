@@ -46,13 +46,18 @@ def _gene_work_path(tmpdir: str, *parts: str) -> Path:
 
 def _write_intake_plan(tmpdir: str) -> str:
     path = Path(tmpdir) / "annotation_intake_plan.json"
-    path.write_text(json.dumps({
-        "artifact_type": "annotation.intake_plan",
-        "recommended_plan": {},
-        "final_plan": {},
-        "final_requested_stages": ["gene_annotation", "function_annotation"],
-        "changed": False,
-    }), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "annotation.intake_plan",
+                "recommended_plan": {},
+                "final_plan": {},
+                "final_requested_stages": ["gene_annotation", "function_annotation"],
+                "changed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
     return str(path)
 
 
@@ -68,8 +73,12 @@ def _persist_successful_execution(
     attempt: FrozenAttemptSpec,
     output_paths: list[Path],
 ) -> dict:
-    stdout_path = Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stdout.log"
-    stderr_path = Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stderr.log"
+    stdout_path = (
+        Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stdout.log"
+    )
+    stderr_path = (
+        Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stderr.log"
+    )
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_path.write_text("", encoding="utf-8")
     stderr_path.write_text("", encoding="utf-8")
@@ -135,17 +144,17 @@ def _fake_gffread_bin(tmpdir: str) -> Path:
     gffread = bin_dir / "gffread"
     gffread.write_text(
         "#!/bin/sh\n"
-        "prot=\"\"; cds=\"\"\n"
+        'prot=""; cds=""\n'
         "while [ $# -gt 0 ]; do\n"
-        "  case \"$1\" in\n"
-        "    -y) prot=\"$2\"; shift 2;;\n"
-        "    -x) cds=\"$2\"; shift 2;;\n"
+        '  case "$1" in\n'
+        '    -y) prot="$2"; shift 2;;\n'
+        '    -x) cds="$2"; shift 2;;\n'
         "    -g) shift 2;;\n"
         "    *) shift;;\n"
         "  esac\n"
         "done\n"
-        "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
-        "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+        '[ -n "$prot" ] && printf \'>g1\\nMKT\\n\' > "$prot"\n'
+        '[ -n "$cds" ] && printf \'>g1\\nATGAAAACC\\n\' > "$cds"\n',
         encoding="utf-8",
     )
     gffread.chmod(0o755)
@@ -164,8 +173,16 @@ def _merge_accepted_state(tmpdir: str, **gene_updates):
             "status": "merge_accepted",
             "genome_input_ref": str(softmasked),
             "genome_input_source": "softmasked_genome",
-            "candidate_refs": {"gene_annotation.candidate.augustus": str(Path(tmpdir) / "augustus.gff3")},
-            "accepted_candidate_refs": {"gene_annotation.candidate.augustus": str(Path(tmpdir) / "augustus.gff3")},
+            "candidate_refs": {
+                "gene_annotation.candidate.augustus": str(
+                    Path(tmpdir) / "augustus.gff3"
+                )
+            },
+            "accepted_candidate_refs": {
+                "gene_annotation.candidate.augustus": str(
+                    Path(tmpdir) / "augustus.gff3"
+                )
+            },
             "merge_weights": {"ab_initio": 1, "rnaseq": 5, "protein": 5},
             "expected_outputs": {
                 "genes_gff3": str(Path(tmpdir) / "genes.gff3"),
@@ -193,7 +210,9 @@ class EVMFreezeTests(unittest.TestCase):
 
     def test_single_candidate_no_candidate_refs_still_passthrough(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = _merge_accepted_state(tmpdir, candidate_refs={}, accepted_candidate_refs={})
+            state = _merge_accepted_state(
+                tmpdir, candidate_refs={}, accepted_candidate_refs={}
+            )
             result = freeze_evm_attempt(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
@@ -252,19 +271,22 @@ class EVMRunTests(unittest.TestCase):
         bin_dir.mkdir(exist_ok=True)
         evm = bin_dir / "evidence_modeler.pl"
         if fail:
-            evm.write_text("#!/bin/sh\necho fake evm failed >&2\nexit 3\n", encoding="utf-8")
+            evm.write_text(
+                "#!/bin/sh\necho fake evm failed >&2\nexit 3\n", encoding="utf-8"
+            )
         else:
             evm.write_text(
                 "#!/bin/sh\n"
                 "# Parse --genome argument\n"
                 "while [ $# -gt 0 ]; do\n"
-                "  case \"$1\" in\n"
-                "    --genome) genome=\"$2\"; shift 2;;\n"
+                '  case "$1" in\n'
+                '    --genome) genome="$2"; shift 2;;\n'
                 "    *) shift;;\n"
                 "  esac\n"
                 "done\n"
                 "# Output fake EVM GFF3\n"
-                "printf '##gff-version 3\\nctg1\\tEVM\\tgene\\t1\\t1000\\t.\\t+\\t.\\tID=evm_g1\\n'\n",
+                "printf '##gff-version 3\\nctg1\\tEVM\\tgene\\t1\\t1000"
+                "\\t.\\t+\\t.\\tID=evm_g1\\n'\n",
                 encoding="utf-8",
             )
         evm.chmod(0o755)
@@ -273,21 +295,35 @@ class EVMRunTests(unittest.TestCase):
     def _run_state(self, tmpdir: str, bin_dir: Path, *, status: str = "evm_frozen"):
         output_gff3 = Path(tmpdir) / "evm_merged.gff3"
         script = Path(tmpdir) / "run_evm.sh"
-        script.write_text("#!/bin/bash\nset -e\nevidence_modeler.pl --genome genome.fa > evm_merged.gff3\ntest -f evm_merged.gff3\n", encoding="utf-8")
+        script.write_text(
+            "#!/bin/bash\nset -e\n"
+            "evidence_modeler.pl --genome genome.fa > evm_merged.gff3\n"
+            "test -f evm_merged.gff3\n",
+            encoding="utf-8",
+        )
         script.chmod(0o755)
         attempt = FrozenAttemptSpec(
             attempt_id="s1:gene_annotation:evm",
-            session_id="s1", stage="gene_annotation",
+            session_id="s1",
+            stage="gene_annotation",
             method_name="gene_annotation.merge.evm",
-            script_path=script, working_dir=Path(tmpdir),
+            script_path=script,
+            working_dir=Path(tmpdir),
             expected_outputs=[output_gff3],
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
-            metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "candidate_refs": {}, "merge_weights": {}},
+            metadata={
+                "output_gff3": str(output_gff3),
+                "genome_input_ref": str(Path(tmpdir) / "genome.fa"),
+                "candidate_refs": {},
+                "merge_weights": {},
+            },
         )
         state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
             "gene_annotation": {
                 "status": status,
                 "execution_attempts": [_execution_cursor(state, attempt)],
@@ -300,28 +336,42 @@ class EVMRunTests(unittest.TestCase):
             bin_dir = self._fake_evm_bin(tmpdir)
             state = self._run_state(tmpdir, bin_dir)
             result = run_method_attempts(state, EVM_LIFECYCLE)
-            self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "evm_ran")
+            self.assertEqual(
+                result["stage_outputs"]["gene_annotation"]["status"], "evm_ran"
+            )
 
     def test_run_failure_sets_failed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = self._fake_evm_bin(tmpdir, fail=True)
             state = self._run_state(tmpdir, bin_dir)
             result = run_method_attempts(state, EVM_LIFECYCLE)
-            self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "failed")
+            self.assertEqual(
+                result["stage_outputs"]["gene_annotation"]["status"], "failed"
+            )
 
 
 class EVMCollectTests(unittest.TestCase):
     def _collect_state(self, tmpdir: str, *, gff3_exists: bool = True):
         output_gff3 = _gene_work_path(tmpdir, "evm", "evm_merged.gff3")
         if gff3_exists:
-            output_gff3.write_text("##gff-version 3\nctg1\tEVM\tgene\t1\t1000\t.\t+\t.\tID=g1\n", encoding="utf-8")
+            output_gff3.write_text(
+                "##gff-version 3\nctg1\tEVM\tgene\t1\t1000\t.\t+\t.\tID=g1\n",
+                encoding="utf-8",
+            )
         attempt = FrozenAttemptSpec(
             attempt_id="s1:gene_annotation:evm",
-            session_id="s1", stage="gene_annotation",
+            session_id="s1",
+            stage="gene_annotation",
             method_name="gene_annotation.merge.evm",
-            script_path=Path(tmpdir) / "run_evm.sh", working_dir=Path(tmpdir),
+            script_path=Path(tmpdir) / "run_evm.sh",
+            working_dir=Path(tmpdir),
             expected_outputs=[output_gff3],
-            metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "candidate_refs": {}, "merge_weights": {}},
+            metadata={
+                "output_gff3": str(output_gff3),
+                "genome_input_ref": str(Path(tmpdir) / "genome.fa"),
+                "candidate_refs": {},
+                "merge_weights": {},
+            },
         )
         state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
@@ -329,11 +379,15 @@ class EVMCollectTests(unittest.TestCase):
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
         gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
             "gene_annotation": {
                 "status": "evm_ran",
                 "genome_input_ref": str(genome),
-                "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "env": {
+                    "PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                },
                 "execution_attempts": [
                     _execution_cursor(state, attempt, [output_gff3])
                 ],
@@ -352,7 +406,10 @@ class EVMCollectTests(unittest.TestCase):
             self.assertIn("final_gff_ref", gene)
 
             artifacts_path = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
-            artifact_types = [json.loads(line)["artifact_type"] for line in artifacts_path.read_text(encoding="utf-8").splitlines()]
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in artifacts_path.read_text(encoding="utf-8").splitlines()
+            ]
             self.assertIn("gene_annotation.final_gff", artifact_types)
 
     def test_collect_fails_when_gff3_missing(self):
@@ -378,7 +435,11 @@ class GeneBUSBOTests(unittest.TestCase):
 
     def test_freeze_skips_when_lineage_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = _merge_accepted_state(tmpdir, status="evm_collected", final_gff_ref=str(Path(tmpdir) / "final.gff3"))
+            state = _merge_accepted_state(
+                tmpdir,
+                status="evm_collected",
+                final_gff_ref=str(Path(tmpdir) / "final.gff3"),
+            )
             result = freeze_gene_busco_attempt(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
@@ -387,7 +448,9 @@ class GeneBUSBOTests(unittest.TestCase):
 
     def test_freeze_skips_when_no_final_gff_ref(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = _merge_accepted_state(tmpdir, status="evm_collected", final_gff_ref=None)
+            state = _merge_accepted_state(
+                tmpdir, status="evm_collected", final_gff_ref=None
+            )
             result = freeze_gene_busco_attempt(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
@@ -433,26 +496,39 @@ class GeneBUSBOTests(unittest.TestCase):
             bin_dir = Path(tmpdir) / "bin"
             bin_dir.mkdir(exist_ok=True)
             busco_bin = bin_dir / "busco"
-            busco_bin.write_text("#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8")
+            busco_bin.write_text(
+                "#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8"
+            )
             busco_bin.chmod(0o755)
 
             short_summary = _gene_work_path(tmpdir, "busco", "short_summary.txt")
             script = Path(tmpdir) / "run_busco.sh"
-            script.write_text("#!/bin/bash\nbusco -i input.fa -m proteins\n", encoding="utf-8")
+            script.write_text(
+                "#!/bin/bash\nbusco -i input.fa -m proteins\n", encoding="utf-8"
+            )
             script.chmod(0o755)
             attempt = FrozenAttemptSpec(
                 attempt_id="s1:gene_annotation:busco",
-                session_id="s1", stage="gene_annotation",
+                session_id="s1",
+                stage="gene_annotation",
                 method_name="gene_annotation.busco",
-                script_path=script, working_dir=Path(tmpdir),
+                script_path=script,
+                working_dir=Path(tmpdir),
                 expected_outputs=[short_summary],
                 env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
-                metadata={"short_summary_ref": str(short_summary), "busco_mode": "proteins", "busco_lineage": "/tmp/lineage", "busco_output_dir": str(tmpdir)},
+                metadata={
+                    "short_summary_ref": str(short_summary),
+                    "busco_mode": "proteins",
+                    "busco_lineage": "/tmp/lineage",
+                    "busco_output_dir": str(tmpdir),
+                },
             )
             state = _v2_state(tmpdir)
             state["current_stage"] = "gene_annotation"
             state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": {
                     "status": "busco_frozen",
                     "execution_attempts": [_execution_cursor(state, attempt)],
@@ -484,16 +560,25 @@ class GeneBUSBOTests(unittest.TestCase):
             )
             attempt = FrozenAttemptSpec(
                 attempt_id="s1:gene_annotation:busco",
-                session_id="s1", stage="gene_annotation",
+                session_id="s1",
+                stage="gene_annotation",
                 method_name="gene_annotation.busco",
-                script_path=Path(tmpdir) / "run_busco.sh", working_dir=Path(tmpdir),
+                script_path=Path(tmpdir) / "run_busco.sh",
+                working_dir=Path(tmpdir),
                 expected_outputs=[short_summary],
-                metadata={"short_summary_ref": str(short_summary), "busco_mode": "proteins", "busco_lineage": "/tmp/l", "busco_output_dir": str(tmpdir)},
+                metadata={
+                    "short_summary_ref": str(short_summary),
+                    "busco_mode": "proteins",
+                    "busco_lineage": "/tmp/l",
+                    "busco_output_dir": str(tmpdir),
+                },
             )
             state = _v2_state(tmpdir)
             state["current_stage"] = "gene_annotation"
             state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": {
                     "status": "busco_ran",
                     "execution_attempts": [
@@ -512,12 +597,15 @@ class GeneBUSBOTests(unittest.TestCase):
             self.assertEqual(gene["busco_metrics"]["missing_buscos"], 99)
 
             artifacts_path = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
-            artifact_types = [json.loads(line)["artifact_type"] for line in artifacts_path.read_text(encoding="utf-8").splitlines()]
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in artifacts_path.read_text(encoding="utf-8").splitlines()
+            ]
             self.assertIn("gene_annotation.busco_summary", artifact_types)
 
 
 class EVMBUSCOFullPathTests(unittest.TestCase):
-    """End-to-end: merge_accepted → EVM passthrough → BUSCO → merge_accepted with signals."""
+    """Exercise merge acceptance through EVM, BUSCO, and signal collection."""
 
     def test_full_path_single_candidate_passthrough_to_busco_signal(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -552,7 +640,9 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             busco_state = _v2_state(tmpdir)
             busco_state["current_stage"] = "gene_annotation"
             busco_state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": evm_result["stage_outputs"]["gene_annotation"],
             }
             busco_freeze = freeze_gene_busco_attempt(busco_state)
@@ -563,7 +653,9 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             bin_dir = Path(tmpdir) / "bin"
             bin_dir.mkdir(exist_ok=True)
             busco_bin = bin_dir / "busco"
-            busco_bin.write_text("#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8")
+            busco_bin.write_text(
+                "#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8"
+            )
             busco_bin.chmod(0o755)
 
             attempt = load_frozen_attempt(
@@ -572,13 +664,18 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
                 expected_stage="gene_annotation",
             )
             attempt_dict = attempt.model_dump(mode="json")
-            attempt_dict["env"]["PATH"] = f"{bin_dir}{os.pathsep}{attempt_dict['env'].get('PATH', os.environ.get('PATH', ''))}"
+            fallback_path = os.environ.get("PATH", "")
+            attempt_dict["env"]["PATH"] = (
+                f"{bin_dir}{os.pathsep}{attempt_dict['env'].get('PATH', fallback_path)}"
+            )
             updated_attempt = FrozenAttemptSpec.model_validate(attempt_dict)
 
             run_state = _v2_state(tmpdir)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": {
                     "status": "busco_frozen",
                     "execution_attempts": [
@@ -587,9 +684,9 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
                 },
             }
             busco_ran = run_method_attempts(run_state, GENE_BUSCO_LIFECYCLE)
-            run_state["stage_outputs"]["gene_annotation"] = busco_ran[
-                "stage_outputs"
-            ]["gene_annotation"]
+            run_state["stage_outputs"]["gene_annotation"] = busco_ran["stage_outputs"][
+                "gene_annotation"
+            ]
             busco_run = collect_gene_busco_artifacts(run_state)
             gene = busco_run["stage_outputs"]["gene_annotation"]
             # BUSCO fails → downgrades to missing

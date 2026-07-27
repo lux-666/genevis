@@ -2,4 +2,3 @@ version: 1
 description: "Hard validation-rule manifest. Rule files block unsafe or impossible values only."
 rule_files:
   - rules/catalog_safety.yaml
-  - rules/profile_boundaries.yaml

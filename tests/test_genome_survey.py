@@ -10,10 +10,12 @@ import unittest
 from pathlib import Path
 
 from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.state import initial_state
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.state import initial_state
 from app.stages.genome_survey.builder import build_stage
-from app.stages.genome_survey.method_application.genomescope2 import build_genomescope2_graph
+from app.stages.genome_survey.method_application.genomescope2 import (
+    build_genomescope2_graph,
+)
 from app.stages.genome_survey.method_application.jellyfish import build_jellyfish_graph
 from app.stages.genome_survey.nodes import _parse_genomescope_summary
 from tests.data_v2 import v2_run_dir
@@ -30,7 +32,9 @@ class GenomeSurveyDescriptorTests(unittest.TestCase):
             "genome_survey.kmer_count.jellyfish",
             "genome_survey.model.genomescope2",
         }
-        self.assertTrue(expected_methods.issubset(set(registry.by_stage["genome_survey"])))
+        self.assertTrue(
+            expected_methods.issubset(set(registry.by_stage["genome_survey"]))
+        )
 
 
 class GenomeSurveyStageTests(unittest.TestCase):
@@ -45,7 +49,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
         }
 
         for module_path in method_modules:
-            tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+            tree = ast.parse(
+                module_path.read_text(encoding="utf-8"), filename=str(module_path)
+            )
             imported_modules = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -55,7 +61,8 @@ class GenomeSurveyStageTests(unittest.TestCase):
                         imported_modules.add(node.module)
                     if node.module == "app.stages.genome_survey":
                         imported_modules.update(
-                            f"app.stages.genome_survey.{alias.name}" for alias in node.names
+                            f"app.stages.genome_survey.{alias.name}"
+                            for alias in node.names
                         )
             self.assertTrue(
                 forbidden.isdisjoint(imported_modules),
@@ -106,19 +113,19 @@ class GenomeSurveyStageTests(unittest.TestCase):
         jellyfish = bin_dir / "jellyfish"
         genomescope = bin_dir / "genomescope2"
         if fail_if_called:
-            script = "#!/bin/sh\necho called > \"$GENOME_SURVEY_CALLED\"\nexit 99\n"
+            script = '#!/bin/sh\necho called > "$GENOME_SURVEY_CALLED"\nexit 99\n'
             jellyfish.write_text(script, encoding="utf-8")
             genomescope.write_text(script, encoding="utf-8")
         else:
             jellyfish.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = \"count\" ]; then\n"
-                "  while [ \"$1\" != \"-o\" ]; do shift; done\n"
+                'if [ "$1" = "count" ]; then\n'
+                '  while [ "$1" != "-o" ]; do shift; done\n'
                 "  shift\n"
                 "  printf 'fake-jf\\n' > \"$1\"\n"
                 "  exit 0\n"
                 "fi\n"
-                "if [ \"$1\" = \"histo\" ]; then\n"
+                'if [ "$1" = "histo" ]; then\n'
                 "  printf '1\\t10\\n2\\t5\\n'\n"
                 "  exit 0\n"
                 "fi\n"
@@ -126,16 +133,18 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 encoding="utf-8",
             )
             summary = (
-                "genome_size\\tNA\\nheterozygosity\\t0.001-0.002\\nrepeat_fraction\\tNA\\n"
+                "genome_size\\tNA\\nheterozygosity\\t0.001-0.002\\n"
+                "repeat_fraction\\tNA\\n"
                 if unparseable_summary
-                else "genome_size\\t12345\\nheterozygosity\\t0.001\\nrepeat_fraction\\t0.2\\n"
+                else "genome_size\\t12345\\nheterozygosity\\t0.001\\n"
+                "repeat_fraction\\t0.2\\n"
             )
             genomescope.write_text(
                 "#!/bin/sh\n"
-                "while [ \"$1\" != \"-o\" ]; do shift; done\n"
+                'while [ "$1" != "-o" ]; do shift; done\n'
                 "shift\n"
-                "outdir=\"$1\"\n"
-                "mkdir -p \"$outdir\"\n"
+                'outdir="$1"\n'
+                'mkdir -p "$outdir"\n'
                 f"printf '{summary}' > \"$outdir/summary.txt\"\n",
                 encoding="utf-8",
             )
@@ -210,7 +219,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(payload["status"], "planned")
             self.assertEqual(payload["genome_size_source"], "provided")
 
-    def test_manifest_inventory_size_overrides_planned_survey_when_raw_short_reads_exist(self):
+    def test_manifest_size_overrides_survey_with_raw_short_reads(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_r1 = Path(tmpdir) / "short_R1.fq.gz"
             short_r2 = Path(tmpdir) / "short_R2.fq.gz"
@@ -247,13 +258,17 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
             self.assertEqual(survey["genome_size_source"], "provided")
-            self.assertEqual(survey["genome_size_source_path"], "inventory.genome_size_estimate")
+            self.assertEqual(
+                survey["genome_size_source_path"], "inventory.genome_size_estimate"
+            )
             self.assertEqual(survey["measured_estimates"]["genome_size"], None)
             self.assertEqual(
                 survey["estimate_source_paths"]["genome_size"],
                 "inventory.genome_size_estimate",
             )
-            payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
+            payload = json.loads(
+                Path(survey["result_artifact_ref"]).read_text(encoding="utf-8")
+            )
             self.assertEqual(payload["genome_size_prior"], 2_000_000)
 
     def test_local_full_mode_runs_jellyfish_and_genomescope2(self):
@@ -289,13 +304,15 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 },
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "survey_parameters": {
                         "kmer_size": 21,
                         "hash_size": "10M",
                         "threads": 1,
                     },
-                }
+                },
             }
 
             result = build_stage().invoke(state)
@@ -327,7 +344,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "survey_parameters": {
                         "kmer_size": 21,
                         "hash_size": "10M",
@@ -342,9 +361,15 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
-            self.assertEqual(survey["survey_input_refs"], ["s1:raw_short_dna_reads:short.fq"])
-            payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(payload["input_asset_refs"], ["s1:raw_short_dna_reads:short.fq"])
+            self.assertEqual(
+                survey["survey_input_refs"], ["s1:raw_short_dna_reads:short.fq"]
+            )
+            payload = json.loads(
+                Path(survey["result_artifact_ref"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                payload["input_asset_refs"], ["s1:raw_short_dna_reads:short.fq"]
+            )
             self.assertEqual(payload["metadata"]["input_family"], "raw_short_dna_reads")
             self.assertEqual(survey["estimates"]["heterozygosity"], 0.001)
             self.assertEqual(survey["estimates"]["repeat_fraction"], 0.2)
@@ -361,7 +386,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
+                .read_text()
+                .splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("genome_survey.kmer_db", artifact_types)
@@ -371,7 +398,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             ledger_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text()
+                .splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertEqual(event_types.count("attempt_started"), 2)
@@ -398,7 +427,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "survey_parameters": {
                         "kmer_size": 21,
                         "hash_size": "10M",
@@ -410,7 +441,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertEqual(result["last_error"], "genomescope2_genome_size_unavailable")
+            self.assertEqual(
+                result["last_error"], "genomescope2_genome_size_unavailable"
+            )
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "failed")
             self.assertEqual(survey["error_code"], "GENOME_SIZE_UNAVAILABLE")
@@ -424,7 +457,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIn("genomescope2_repeat_fraction_unparsed", survey["notes"])
             self.assertIn("genomescope2_estimates_unparsed", survey["notes"])
 
-    def test_explicit_size_overrides_unparseable_genome_size_after_local_survey_runs(self):
+    def test_explicit_size_overrides_unparseable_genome_size_after_local_survey_runs(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_reads = Path(tmpdir) / "short.fq"
             short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -445,7 +480,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "survey_parameters": {
                         "kmer_size": 21,
                         "hash_size": "10M",
@@ -468,7 +505,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
             self.assertEqual(survey["estimates"]["genome_size"], 2_000_000)
             self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
-            self.assertTrue((Path(result["data_dir"]) / "work" / "genome_survey").exists())
+            self.assertTrue(
+                (Path(result["data_dir"]) / "work" / "genome_survey").exists()
+            )
 
     def test_parse_genomescope2_summary_table(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -524,8 +563,14 @@ class GenomeSurveyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
                 }
             }
 
@@ -535,7 +580,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "raw_long_reads")
-            self.assertEqual(survey["survey_input_refs"], ["s1:raw_long_reads:reads.fastq"])
+            self.assertEqual(
+                survey["survey_input_refs"], ["s1:raw_long_reads:reads.fastq"]
+            )
             self.assertEqual(survey["estimates"]["genome_size"], 12345)
             self.assertEqual(survey["genome_size_prior"], 12345)
             self.assertEqual(survey["genome_size_source"], "survey")
@@ -543,7 +590,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertTrue(Path(survey["genomescope2_summary_ref"]).exists())
 
     def test_prefers_read_qc_filtered_long_reads_over_raw_registry(self):
-        """Survey should consume post-QC long reads like assembly, not raw manifest paths."""
+        """Consume post-QC long reads like assembly, not raw manifest paths."""
         with tempfile.TemporaryDirectory() as tmpdir:
             raw_reads = Path(tmpdir) / "raw.fastq.gz"
             raw_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -572,8 +619,14 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 },
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
                 },
             }
             state["resource_refs"]["long_reads"] = ResourceRef(
@@ -583,9 +636,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 metadata={
                     "platforms": ["ont"],
                     "formats": ["fastq"],
-                    "input_asset_ids": [
-                        f"s1:clean_long_reads:read_qc:{filtered.name}"
-                    ],
+                    "input_asset_ids": [f"s1:clean_long_reads:read_qc:{filtered.name}"],
                 },
             ).to_dict()
 
@@ -600,7 +651,13 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 [f"s1:clean_long_reads:read_qc:{filtered.name}"],
             )
             # Jellyfish must have been pointed at filtered path, not raw gz.
-            script = Path(result["data_dir"]) / "work" / "genome_survey" / "jellyfish" / "run_jellyfish.sh"
+            script = (
+                Path(result["data_dir"])
+                / "work"
+                / "genome_survey"
+                / "jellyfish"
+                / "run_jellyfish.sh"
+            )
             self.assertTrue(script.exists(), "expected jellyfish script under work/")
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(filtered), script_text)
@@ -634,7 +691,11 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 },
                 "genome_survey": {
                     "execution_mode": "local",
-                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
                 },
             }
             state["resource_refs"]["long_reads"] = ResourceRef(
@@ -681,8 +742,14 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 },
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
                 },
             }
             state["resource_refs"]["long_reads"] = ResourceRef(
@@ -698,7 +765,13 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "clean_long_reads")
-            script = Path(result["data_dir"]) / "work" / "genome_survey" / "jellyfish" / "run_jellyfish.sh"
+            script = (
+                Path(result["data_dir"])
+                / "work"
+                / "genome_survey"
+                / "jellyfish"
+                / "run_jellyfish.sh"
+            )
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(filtered.resolve()), script_text)
             self.assertNotIn(str(raw_reads), script_text)
@@ -732,8 +805,14 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 },
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
                 },
             }
 
@@ -742,14 +821,22 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
-            script = Path(result["data_dir"]) / "work" / "genome_survey" / "jellyfish" / "run_jellyfish.sh"
+            script = (
+                Path(result["data_dir"])
+                / "work"
+                / "genome_survey"
+                / "jellyfish"
+                / "run_jellyfish.sh"
+            )
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(short_reads), script_text)
             self.assertNotIn(str(filtered), script_text)
 
     def test_jellyfish_freeze_rejects_empty_input_paths(self):
         """Local jellyfish freeze must fail closed when resolved assets are empty."""
-        from app.stages.genome_survey.method_application.jellyfish import freeze_jellyfish_attempt
+        from app.stages.genome_survey.method_application.jellyfish import (
+            freeze_jellyfish_attempt,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir, str(self._write_registry(tmpdir, assets=[])))
@@ -760,7 +847,11 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     "survey_input_family": "clean_long_reads",
                     "survey_input_refs": [],
                     "resolved_assets": {"clean_long_reads": []},
-                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
                     "env_target": "local",
                 }
             }
@@ -797,7 +888,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("survey_parameters.hash_size", result["last_error"])
-            self.assertFalse((Path(state["data_dir"]) / "ledger" / "events.jsonl").exists())
+            self.assertFalse(
+                (Path(state["data_dir"]) / "ledger" / "events.jsonl").exists()
+            )
 
     def test_local_full_mode_requires_explicit_survey_parameters(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -821,9 +914,13 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("survey_parameters.kmer_size", result["last_error"])
-            self.assertFalse((Path(state["data_dir"]) / "ledger" / "events.jsonl").exists())
+            self.assertFalse(
+                (Path(state["data_dir"]) / "ledger" / "events.jsonl").exists()
+            )
 
-    def test_explicit_genome_size_overrides_measurement_but_keeps_other_survey_estimates(self):
+    def test_explicit_size_overrides_only_genome_measurement(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             long_reads = Path(tmpdir) / "BGI_CycloneSEQ.fastq.gz"
             long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -844,8 +941,14 @@ class GenomeSurveyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
                 }
             }
             state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
@@ -871,7 +974,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
             self.assertEqual(survey["genome_size_source"], "provided")
-            payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
+            payload = json.loads(
+                Path(survey["result_artifact_ref"]).read_text(encoding="utf-8")
+            )
             self.assertEqual(payload["measured_estimates"]["genome_size"], 12345)
             self.assertEqual(payload["estimates"]["genome_size"], 2_000_000)
             self.assertEqual(payload["genome_size_source"], "provided")
@@ -992,11 +1097,15 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "blocked_env")
-            self.assertEqual(survey["method_name"], "genome_survey.kmer_count.jellyfish")
+            self.assertEqual(
+                survey["method_name"], "genome_survey.kmer_count.jellyfish"
+            )
             self.assertIn("conda", result["last_error"])
             ledger_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text()
+                .splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("env_preflight_blocked", event_types)
@@ -1012,16 +1121,16 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             conda_stub = conda_stub_dir / "conda"
             conda_stub.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = \"run\" ]; then\n"
+                'if [ "$1" = "run" ]; then\n'
                 "  shift\n"
-                "  while [ \"$#\" -gt 0 ]; do\n"
-                "    case \"$1\" in\n"
+                '  while [ "$#" -gt 0 ]; do\n'
+                '    case "$1" in\n'
                 "      --live-stream|--no-capture-output) shift ;;\n"
                 "      -n|-p) shift 2 ;;\n"
                 "      *) break ;;\n"
                 "    esac\n"
                 "  done\n"
-                "  if [ \"$1\" = \"true\" ]; then exit 0; fi\n"
+                '  if [ "$1" = "true" ]; then exit 0; fi\n'
                 "  exit 1\n"
                 "fi\n"
                 "exit 0\n",
@@ -1049,10 +1158,14 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "missing_tool")
-            self.assertEqual(survey["method_name"], "genome_survey.kmer_count.jellyfish")
+            self.assertEqual(
+                survey["method_name"], "genome_survey.kmer_count.jellyfish"
+            )
             self.assertIn("jellyfish", survey["missing_tools"])
 
-    def test_missing_genomescope_after_jellyfish_succeeds_blocks_with_missing_tool(self):
+    def test_missing_genomescope_after_jellyfish_succeeds_blocks_with_missing_tool(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_reads = Path(tmpdir) / "short.fq"
             short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -1076,25 +1189,26 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             conda_stub = conda_stub_dir / "conda"
             conda_stub.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = \"run\" ]; then\n"
+                'if [ "$1" = "run" ]; then\n'
                 "  shift\n"
-                "  while [ \"$#\" -gt 0 ]; do\n"
-                "    case \"$1\" in\n"
+                '  while [ "$#" -gt 0 ]; do\n'
+                '    case "$1" in\n'
                 "      --live-stream|--no-capture-output) shift ;;\n"
                 "      -n|-p) shift 2 ;;\n"
                 "      *) break ;;\n"
                 "    esac\n"
                 "  done\n"
-                "  if [ \"$1\" = \"true\" ]; then exit 0; fi\n"
-                "  if [ \"$1\" = \"sh\" ] && [ \"$2\" = \"-c\" ]; then\n"
-                "    # Tool probe: positional $1 is the tool name (5th arg of `sh -c ... preflight TOOL`).\n"
-                "    if [ \"$5\" = \"jellyfish\" ]; then exit 0; fi\n"
-                "    if [ \"$5\" = \"genomescope2\" ]; then exit 1; fi\n"
+                '  if [ "$1" = "true" ]; then exit 0; fi\n'
+                '  if [ "$1" = "sh" ] && [ "$2" = "-c" ]; then\n'
+                "    # Tool probe: positional $1 is the tool name "
+                "(5th arg of `sh -c ... preflight TOOL`).\n"
+                '    if [ "$5" = "jellyfish" ]; then exit 0; fi\n'
+                '    if [ "$5" = "genomescope2" ]; then exit 1; fi\n'
                 "    exit 1\n"
                 "  fi\n"
-                "  if [ \"$1\" = \"/bin/bash\" ]; then\n"
+                '  if [ "$1" = "/bin/bash" ]; then\n'
                 "    # Execute the script normally so jellyfish counts/histos run.\n"
-                "    exec \"$@\"\n"
+                '    exec "$@"\n'
                 "  fi\n"
                 "  exit 1\n"
                 "fi\n"
@@ -1109,13 +1223,13 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             jellyfish_stub = jelly_stub_dir / "jellyfish"
             jellyfish_stub.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = \"count\" ]; then\n"
-                "  while [ \"$1\" != \"-o\" ]; do shift; done\n"
+                'if [ "$1" = "count" ]; then\n'
+                '  while [ "$1" != "-o" ]; do shift; done\n'
                 "  shift\n"
                 "  printf 'fake-jf\\n' > \"$1\"\n"
                 "  exit 0\n"
                 "fi\n"
-                "if [ \"$1\" = \"histo\" ]; then\n"
+                'if [ "$1" = "histo" ]; then\n'
                 "  printf '1\\t10\\n2\\t5\\n'\n"
                 "  exit 0\n"
                 "fi\n"

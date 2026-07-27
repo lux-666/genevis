@@ -1,7 +1,7 @@
 import ast
 import json
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 
 class ProjectScaffoldTests(unittest.TestCase):
@@ -19,9 +19,16 @@ class ProjectScaffoldTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
                     continue
-                if isinstance(node.right, ast.Constant) and node.right.value in forbidden:
-                    violations.append(f"{path.relative_to(root)}:{node.lineno}:{node.right.value}")
-        self.assertEqual(violations, [], "stage code must use SessionPaths/stage path helpers")
+                if (
+                    isinstance(node.right, ast.Constant)
+                    and node.right.value in forbidden
+                ):
+                    violations.append(
+                        f"{path.relative_to(root)}:{node.lineno}:{node.right.value}"
+                    )
+        self.assertEqual(
+            violations, [], "stage code must use SessionPaths/stage path helpers"
+        )
 
     def test_domain_stage_order_matches_long_read_pipeline(self):
         from app.workflow import STAGE_ORDER

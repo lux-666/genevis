@@ -91,9 +91,7 @@ def compact_terminal_checkpoint(
             + ", ".join(missing)
         )
 
-    latest_checkpoint_id = latest.config.get("configurable", {}).get(
-        "checkpoint_id"
-    )
+    latest_checkpoint_id = latest.config.get("configurable", {}).get("checkpoint_id")
     if not isinstance(latest_checkpoint_id, str) or not latest_checkpoint_id:
         raise TerminalCheckpointCompactionError(
             "latest checkpoint is missing its checkpoint_id"

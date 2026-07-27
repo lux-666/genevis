@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-
 AssemblyReadInputType = Literal["long_reads.fofn", "clean_long_reads"]
 
 
@@ -23,7 +22,9 @@ def resolve_assembly_read_paths(
     case they are anchored to the FOFN directory rather than the process CWD.
     """
 
-    if input_ref is None or (not isinstance(input_ref, list) and not str(input_ref).strip()):
+    if input_ref is None or (
+        not isinstance(input_ref, list) and not str(input_ref).strip()
+    ):
         raise AssemblyInputError("requires assembly input_ref")
     if isinstance(input_ref, list):
         paths = [Path(path).expanduser() for path in input_ref if str(path).strip()]

@@ -14,7 +14,3 @@ class PlanWarning(BaseModel):
 
     def __str__(self) -> str:
         return self.message
-
-    def model_dump_json_compat(self) -> str:
-        """Return JSON-compatible representation (message string for backward compatibility)."""
-        return self.message

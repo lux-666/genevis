@@ -14,11 +14,16 @@ parameter-recommendation gate
    with AutoHiC. Missing required inputs block the stage; an attempted AutoHiC
    run that does not complete is a stage failure.
 4. The stage has no local method-selection or skip/no-op branch.
-5. AutoHiC uses the shared parameter-recommendation and approval contracts.
-6. The recommender uses the LLM to directly recommend the restriction enzyme.
-   Every recommendation requires human approval before execution.
+5. AutoHiC uses the shared schema-3 canonical-snapshot, recommendation-manifest,
+   and approval contracts.
+6. The recommender returns an attempt-local sparse mapping from the complete
+   adjustable AutoHiC L2 catalog. The mapping may be empty, and every
+   shape-valid recommendation requires human approval before execution.
 7. Parameter approval and final chromosome-assembly adoption remain separate
    review gates.
+8. Execution-failure retry is controlled by operator policy and budget. Final
+   adoption review may request a fresh parameter attempt. Neither path merges
+   the previous mapping into the new recommendation.
 
 ## 2. Parent and Stage Boundary
 
@@ -54,6 +59,7 @@ flowchart TD
     resolve["resolve_hic_inputs"]
     recommend["recommend_autohic_parameters"]
     autohic["autohic<br/>freeze → run → collect"]
+    retry_gate["execution_retry_gate"]
     review["chromosome_assembly_review"]
     block["block<br/>persisted human interrupt"]
     requirements["block_requirements"]
@@ -75,12 +81,15 @@ flowchart TD
     fail --> ending
     autohic -- "completed" --> review
     autohic -- "missing runtime requirement" --> requirements
-    autohic -- "execution failed" --> fail
+    autohic -- "execution failed" --> retry_gate
+    retry_gate -- "authorized and within budget" --> recommend
+    retry_gate -- "disabled / exhausted / invalid evidence" --> fail
     review -- "adoption request persisted" --> block
     review -- "request preparation failed" --> fail
 
     block -. "approve_parameters: resume" .-> enter
     block -. "accept candidate / keep prior assembly" .-> next
+    block -. "request_parameter_retry" .-> enter
 ```
 
 The compiled subgraph has no method-selection or local skip branch.
@@ -99,7 +108,8 @@ already been fixed as the method and before any execution plan is frozen.
 It follows the assembly parameter-recommendation loop:
 
 ```text
-build full input profile and immutable basis
+build canonical facts and typed AutoHiC context
+  -> persist schema-3 input snapshot and immutable basis
   -> construct the strict model-facing DTO directly
   -> render and persist the exact model request
   -> call LLM for a parameter recommendation
@@ -109,33 +119,44 @@ build full input profile and immutable basis
   -> freeze the approved parameters for execution
 ```
 
-The LLM directly recommends `restriction_enzyme`. The recommendation may use
-explicitly allowlisted manifest facts, Hi-C library facts, read information,
-and the supported-enzyme catalog supplied in the DTO. File locators, session
-identity, artifact metadata, and unrestricted library metadata are audit facts,
-not model input. Every proposal requires human approval.
+The LLM returns only AutoHiC parameters that should be set explicitly for the
+current attempt. The mapping may contain any subset of the adjustable catalog,
+including no keys. It may use explicitly supplied species facts, bounded Hi-C
+library facts, and chronological evidence from earlier attempts. File locators,
+session identity, artifact metadata, unrestricted library metadata, runtime
+paths, threads, retry policy, and model locations are audit/executor facts, not
+model input. Every shape-valid proposal requires human approval.
 
-Even when the manifest already contains a restriction enzyme, the recommender
-still produces a proposal and every proposal goes through human approval. A
-user correction produces a new recommendation using the same lifecycle as the
-assembly parameter gate.
+An explicitly supplied restriction enzyme is an L1 fact. If the sparse L2
+mapping omits it, freeze uses that fact; if both are absent, the post-approval
+executability check blocks. A retry receives ordered, bounded prior-attempt
+evidence but creates a fresh mapping with no inheritance, patch, or delta rule.
+
+The schema-3 recommendation manifest is the only accepted root for this chain.
+It binds `input_snapshot.json`, `basis_snapshot.json`, the exact model records,
+and the parsed recommendation to the AutoHiC method/task/attempt identity.
+Retries reuse canonical facts from the verified initial chain, add typed retry
+context and predecessor refs, and do not rebuild those facts from mutable stage
+state. Pre-v3 recommendation refs, mixed identities, or an unverified
+predecessor fail closed before approval or execution.
 
 ### 4.2 Other AutoHiC configuration
 
-The current implementation exposes no other LLM-recommended parameters:
-
 | Configuration | Source |
 |---|---|
-| `restriction_enzyme` | LLM recommendation plus mandatory human approval |
+| `restriction_enzyme` | supplied L1 fact and/or approved sparse L2 override |
+| `number_of_edit_rounds` | approved sparse L2 override or executor default |
+| `translocation_adjust`, `inversion_adjust`, `debris_adjust` | approved sparse L2 overrides or executor defaults |
+| `error_max_epoch`, `error_min_len`, `error_max_len` | approved sparse L2 overrides or executor defaults |
+| `error_filter_score`, `error_filter_iou_score` | approved sparse L2 overrides or executor defaults |
 | AutoHiC, Juicer, 3D-DNA, Python, and model paths | `config/envs.yaml` and environment resolution |
 | CPU/threads | execution resource settings |
-| edit rounds, correction flags, and error thresholds | project-pinned AutoHiC defaults |
 | assembly, R1/R2, species name, and output paths | resolved or derived run inputs |
 
-This keeps the recommendation surface small while preserving the same approval,
-resume, response-parsing, and artifact contracts already used by assembly. It does
-not introduce a Hi-C-specific persistence contract or change
-[`data-v2.md`](data-v2.md).
+Executor defaults are materialized separately in frozen evidence and are never
+added to the recommendation or approval payload. The workflow preserves the
+same approval, resume, response-parsing, and artifact contracts used by
+Assembly and does not introduce a Hi-C-specific attempt schema.
 
 ## 5. Stage Outputs and Adoption
 
@@ -144,21 +165,27 @@ HTML report, and the execution evidence needed for review. The final review gate
 chooses between:
 
 - adopting the AutoHiC chromosome-level assembly for downstream stages;
-- keeping the previously adopted contig-level assembly.
+- keeping the previously adopted contig-level assembly;
+- requesting a fresh parameter attempt with the current report, contact map,
+  assembly file, scaffold FASTA, and reviewer notes as immutable evidence.
 
 Rejecting an AutoHiC result is a reviewed adoption decision. It is not a skip
 mode and does not reintroduce method selection.
 
 ## 6. Current State Contract
 
-Resolved Hi-C inputs route directly to `recommend_autohic_parameters`. The
-restriction-enzyme proposal uses the shared recommendation persistence,
-response parsing, approval, resume, and frozen-attempt contracts. Missing
-requirements produce a blocked-requirement outcome; an attempted AutoHiC run
-that fails produces an execution failure. These outcomes do not share a skip or
+Resolved Hi-C inputs route directly to `recommend_autohic_parameters`. Initial,
+execution-failure retry, and review-failure retry tasks use the same sparse
+response, persistence, approval, resume, and frozen-attempt contracts. Missing
+requirements produce a blocked-requirement outcome. A failed execution is
+sealed and either stops or creates a new recommendation according to explicit
+operator retry policy and budget. These outcomes do not share a skip or
 method-selection branch.
 
 The AutoHiC stage cursor owns `current_parameter_attempt_id` and the compact
 `parameter_attempts` chain. Each `ParameterAttempt` owns its own
 `frozen_attempt_ref` and `execution_ref`; there is no parallel
 `autohic_frozen_attempt_ref` or `autohic_execution_result` cursor.
+Predecessors are sealed before retry, later attempts use attempt-specific work
+and published-output paths, and checkpoint state keeps only compact refs rather
+than model bodies, logs, or effective configs.

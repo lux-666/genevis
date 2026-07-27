@@ -111,7 +111,22 @@ write_run_config_stages "$RC" "read_qc" "assembly"
 
 # Note: assembly_dedup is not in LocalExecStage, it runs automatically
 # when there is a materialized assembly and long reads.
-# We don't add it to local_exec explicitly.
+# Request it as a workflow target without adding it to local_exec explicitly.
+python3 - "$RC" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+requested = list(config.get("requested_stages") or [])
+if "assembly_dedup" not in requested:
+    requested.append("assembly_dedup")
+config["requested_stages"] = requested
+assert "assembly_dedup" not in config.get("local_exec", []), config
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PY
 
 # ---- Run ----
 cd "${PROJECT_ROOT}"
@@ -241,8 +256,9 @@ from pathlib import Path
 from app.execution.evidence import load_execution_evidence, load_frozen_attempt
 from app.graph.builder import build_graph
 from app.schemas.artifacts import ParameterAttempt
-from app.stages.assembly.parameters.storage import load_recommendation_bundle, read_json_artifact
+from app.stages.assembly.parameters.storage import read_json_artifact
 from app.storage.artifacts import resolve_artifact_ref
+from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 
 run_dir = Path(sys.argv[1])
 session_id = sys.argv[2]
@@ -291,26 +307,39 @@ assert attempt.recommendation_manifest_ref.path_ref == (
 assert attempt.command_ref.path_ref == f"artifacts/assembly/attempts/{attempt_scope}/command.json"
 assert attempt.frozen_parameters_ref.path_ref == f"artifacts/assembly/attempts/{attempt_scope}/frozen_parameters.json"
 
-# Canonical loaders verify artifact-index identity, hashes, types, and all
-# recommendation-manifest refs before returning the payloads.
-bundle = load_recommendation_bundle(state, attempt.recommendation_manifest_ref)
-manifest = bundle["manifest"]
-recommendation_record = bundle["recommendation"]
-assert manifest.get("method_id") == method_id, manifest
-assert manifest.get("recommendation_id") == attempt.attempt_id, manifest
-assert recommendation_record.get("method_id") == method_slug, recommendation_record
-recommendation = recommendation_record.get("recommendation") or {}
-recommended_parameters = recommendation.get("parameters")
-assert isinstance(recommended_parameters, dict), recommendation
+# The approved boundary verifies the attempt, approval binding, immutable
+# schema-3 snapshot/catalog chain, artifact identities, hashes, and types.
+bundle = load_approved_parameter_chain_v3(
+    state,
+    attempt=attempt,
+    expected_stage="assembly",
+    expected_method_id=method_id,
+)
+manifest = bundle.chain.manifest
+recommendation_record = bundle.chain.recommendation
+assert manifest.method_id == method_id, manifest
+assert manifest.recommendation_id == attempt.attempt_id, manifest
+assert bundle.chain.catalog.method_id == method_id, bundle.chain.catalog
+assert bundle.chain.input_snapshot.method_id == method_id, bundle.chain.input_snapshot
+assert recommendation_record.get("method_id") == method_id, recommendation_record
+recommended_parameters = bundle.approved_l2
 
 command = read_json_artifact(state, attempt.command_ref)
 frozen_parameters = read_json_artifact(state, attempt.frozen_parameters_ref)
 sources = command.get("parameter_sources")
 assert isinstance(sources, dict), "command.json missing parameter_sources"
-for group in ("l0_fixed", "l1_readonly", "l2_recommended"):
+source_groups = (
+    "l0_executor",
+    "l1_facts",
+    "l2_approved",
+    "effective_parameters",
+    "effective_source_by_parameter",
+    "applications",
+)
+for group in source_groups:
     assert isinstance(sources.get(group), dict), f"missing parameter source group: {group}"
-assert sources["l2_recommended"] == recommended_parameters
-assert frozen_parameters.get("parameter_sources") == sources
+assert sources["l2_approved"] == recommended_parameters
+assert {group: frozen_parameters.get(group) for group in source_groups} == sources
 
 argv = command.get("argv")
 assert isinstance(argv, list) and argv, "command.json missing argv"
@@ -370,7 +399,11 @@ events_path = run_dir / "ledger" / "events.jsonl"
 assert events_path.is_file(), f"missing ledger events: {events_path}"
 events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 assert any(
-    event.get("event_type") == "attempt_succeeded" and event.get("method_name") == method_id
+    event.get("event_type") == "attempt_succeeded"
+    and (
+        event.get("method_name")
+        or (event.get("summary") or {}).get("method_name")
+    ) == method_id
     for event in events
 ), f"ledger has no attempt_succeeded for {method_id}"
 

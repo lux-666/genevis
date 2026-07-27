@@ -1,13 +1,171 @@
-method_id: autohic
+catalog_id: autohic
+method_id: hic_scaffolding.candidate.autohic
 tool: AutoHiC
-read_type: hic
-description: "AutoHiC restriction-enzyme recommendation surface. Runtime and model paths are resolved outside the LLM recommendation."
+description: "Sparse AutoHiC biological/configuration recommendation surface. Runtime and model paths are resolved outside the LLM recommendation."
 
 parameters:
   restriction_enzyme:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: string
+    application:
+      kind: config_key
+      key: restriction_enzyme
+    required_for_execution: true
+    layers:
+      l1:
+        fact: hic_provided_restriction_enzyme
+        transform: identity
+      l2:
+        adjustable: true
     description: "Restriction enzyme used to prepare the selected Hi-C library."
     notes: "The LLM proposes this value and every proposal requires human approval."
+
+  threads:
+    value_type: int
+    min: 1
+    application:
+      kind: config_key
+      key: threads
+    required_for_execution: true
+    layers:
+      l0:
+        kind: runtime
+        binding: hic_threads
+        required: false
+        materialized_default: 10
+    description: "Number of CPU threads used by AutoHiC."
+
+  number_of_edit_rounds:
+    value_type: int
+    min: 0
+    max: 10
+    application:
+      kind: config_key
+      key: number_of_edit_rounds
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: 2
+      l2:
+        adjustable: true
+    description: "Number of AutoHiC edit rounds."
+
+  translocation_adjust:
+    value_type: boolean
+    application:
+      kind: config_key
+      key: translocation_adjust
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: true
+      l2:
+        adjustable: true
+    description: "Whether AutoHiC applies translocation adjustment."
+
+  inversion_adjust:
+    value_type: boolean
+    application:
+      kind: config_key
+      key: inversion_adjust
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: true
+      l2:
+        adjustable: true
+    description: "Whether AutoHiC applies inversion adjustment."
+
+  debris_adjust:
+    value_type: boolean
+    application:
+      kind: config_key
+      key: debris_adjust
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: false
+      l2:
+        adjustable: true
+    description: "Whether AutoHiC applies debris adjustment."
+
+  error_max_epoch:
+    value_type: int
+    min: 1
+    max: 20
+    application:
+      kind: config_key
+      key: error_max_epoch
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: 5
+      l2:
+        adjustable: true
+    description: "Maximum error-detection training epochs."
+
+  error_min_len:
+    value_type: int
+    min: 1
+    application:
+      kind: config_key
+      key: error_min_len
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: 15000
+      l2:
+        adjustable: true
+    description: "Minimum sequence length considered by error detection."
+
+  error_max_len:
+    value_type: int
+    min: 1
+    application:
+      kind: config_key
+      key: error_max_len
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: 20000000
+      l2:
+        adjustable: true
+    description: "Maximum sequence length considered by error detection."
+
+  error_filter_score:
+    value_type: float
+    min: 0.0
+    max: 1.0
+    application:
+      kind: config_key
+      key: error_filter_score
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: 0.9
+      l2:
+        adjustable: true
+    description: "AutoHiC error confidence filter score."
+
+  error_filter_iou_score:
+    value_type: float
+    min: 0.0
+    max: 1.0
+    application:
+      kind: config_key
+      key: error_filter_iou_score
+    required_for_execution: true
+    layers:
+      l0:
+        kind: materialized_default
+        value: 0.8
+      l2:
+        adjustable: true
+    description: "AutoHiC error intersection-over-union filter score."

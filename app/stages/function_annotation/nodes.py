@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
 from app.configuration import load_descriptor_registry
@@ -25,13 +27,16 @@ from app.schemas.artifacts import (
     FunctionDatabaseProvenance,
     FunctionMethodResult,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     append_route_trace,
     stage_artifacts_dir,
-    stage_output,
     stage_work_dir,
-    update_stage_output,
+)
+from app.stages.function_annotation.state import (
+    FunctionAnnotationCursor,
+    function_annotation_output,
+    update_function_annotation_output,
 )
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import PREDICTED_PROTEINS_SPEC
@@ -65,7 +70,12 @@ FUNCTION_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
 }
 
 
-def build_diamond_graph():
+def build_diamond_graph() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the shared DIAMOND execution lifecycle."""
 
     return build_method_graph(
@@ -75,24 +85,27 @@ def build_diamond_graph():
     )
 
 
-def _function_output(state: TopLevelState) -> dict[str, Any]:
-    return stage_output(state, "function_annotation")
+def _function_output(state: TopLevelState) -> FunctionAnnotationCursor:
+    return function_annotation_output(state)
 
 
-def _update_function_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    return update_stage_output(state, "function_annotation", payload)
+def _update_function_output(
+    state: TopLevelState,
+    payload: Mapping[str, object],
+) -> StateUpdate:
+    return update_function_annotation_output(state, payload)
 
 
-def _fail_update(state: TopLevelState, reason: str) -> dict:
+def _fail_update(state: TopLevelState, reason: str) -> StateUpdate:
     return _update_function_output(state, {"status": "failed", "reason": reason})
 
 
-def enter_function_annotation(state: TopLevelState) -> dict:
+def enter_function_annotation(state: TopLevelState) -> StateUpdate:
     """Mark function annotation as running."""
     return {"supervision_state": "running_stage"}
 
 
-def resolve_protein_inputs(state: TopLevelState) -> dict:
+def resolve_protein_inputs(state: TopLevelState) -> StateUpdate:
     """Resolve required predicted proteins and optional structural annotation refs."""
     if _function_output(state).get("status"):
         return {}
@@ -114,7 +127,7 @@ def resolve_protein_inputs(state: TopLevelState) -> dict:
     )
 
 
-def plan_function_methods(state: TopLevelState) -> dict:
+def plan_function_methods(state: TopLevelState) -> StateUpdate:
     """Plan function annotation candidates without running tools."""
     function_out = _function_output(state)
     if function_out.get("status") != "resolved":
@@ -159,7 +172,7 @@ def plan_function_methods(state: TopLevelState) -> dict:
     )
 
 
-def validate_database_provenance(state: TopLevelState) -> dict:
+def validate_database_provenance(state: TopLevelState) -> StateUpdate:
     """Validate database provenance and write the planning artifact."""
     function_out = _function_output(state)
     if function_out.get("status") != "methods_planned":
@@ -247,7 +260,7 @@ def _freeze_func_method_attempt(
     cfg: dict[str, str],
     script_body: str,
     extra_metadata: dict[str, Any] | None = None,
-) -> dict:
+) -> StateUpdate:
     function_out = _function_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
@@ -293,7 +306,7 @@ def _freeze_func_method_attempt(
 
 def _collect_func_method_artifacts(
     state: TopLevelState, *, method_name: str, cfg: dict[str, str], artifact_type: str
-) -> dict:
+) -> StateUpdate:
     function_out = _function_output(state)
     executions = load_method_executions(state, DIAMOND_LIFECYCLE)
     if len(executions) != 1:
@@ -336,18 +349,20 @@ def _collect_func_method_artifacts(
 # --- diamond method execution nodes ----------------------------------------------
 
 
-def freeze_diamond_attempt(state: TopLevelState) -> dict:
+def freeze_diamond_attempt(state: TopLevelState) -> StateUpdate:
     function_out = _function_output(state)
     if function_out.get("status") != "provenance_validated":
         return {}
     if function_out.get("execution_mode") != "local":
         return _update_function_output(state, {"status": "diamond_completed"})
 
-    db_provenance = function_out.get("database_provenance") or []
+    db_provenance = _validated_provenance_records(
+        function_out.get("database_provenance")
+    )
     db_path = None
     for record in db_provenance:
-        if record.get("method_name") == DIAMOND_METHOD:
-            db_path = record.get("database_source_ref")
+        if record.method_name == DIAMOND_METHOD:
+            db_path = record.database_source_ref
             break
     if not db_path:
         return _update_function_output(state, {"status": "diamond_completed"})
@@ -381,13 +396,15 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
         ""
         if database_is_index
         else (
-            f"diamond makedb --in {shlex.quote(str(database_source))} -d {shlex.quote(str(dmnd_index))}\n"
+            f"diamond makedb --in {shlex.quote(str(database_source))} "
+            f"-d {shlex.quote(str(dmnd_index))}\n"
         )
     )
     script = (
         "set -e\n"
         f"{setup_command}"
-        f"diamond blastp --db {shlex.quote(str(dmnd_index))} --query {shlex.quote(str(proteins_ref))}"
+        f"diamond blastp --db {shlex.quote(str(dmnd_index))} "
+        f"--query {shlex.quote(str(proteins_ref))}"
         f" --outfmt 6 --threads {threads} --out {shlex.quote(str(output_tsv))}\n"
         f"test -f {shlex.quote(str(output_tsv))}\n"
     )
@@ -409,7 +426,7 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_diamond_artifacts(state: TopLevelState) -> dict:
+def collect_diamond_artifacts(state: TopLevelState) -> StateUpdate:
     function_out = _function_output(state)
     if function_out.get("status") != "diamond_ran":
         return {}
@@ -421,7 +438,7 @@ def collect_diamond_artifacts(state: TopLevelState) -> dict:
     )
 
 
-def commit_function_annotation(state: TopLevelState) -> dict:
+def commit_function_annotation(state: TopLevelState) -> StateUpdate:
     """Publish function annotation bundle and complete the workflow."""
     function_out = _function_output(state)
     data_dir = Path(state.get("data_dir", "data"))
@@ -439,10 +456,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     materialized_annotated_gff = _existing_file_ref(
         expected_outputs.get("annotated_gene_models_gff3")
     )
-    provenance = [
-        FunctionDatabaseProvenance.model_validate(record)
-        for record in function_out.get("database_provenance", [])
-    ]
+    provenance = _validated_provenance_records(function_out.get("database_provenance"))
     method_results = _function_method_results(state, function_out, provenance)
     bundle = FunctionAnnotationBundle(
         session_id=session_id,
@@ -497,32 +511,35 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     Ledger(data_dir).record_artifact_registered(
         session_id, artifact.model_dump(mode="json")
     )
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["function_annotation"] = {
-        **function_out,
-        "status": "completed",
-        "diamond_hits_ref": diamond_hits_ref,
-        "gene_function_tsv_ref": materialized_gene_function,
-        "go_annotation_table_ref": materialized_go,
-        "kegg_annotation_table_ref": materialized_kegg,
-        "pfam_interpro_table_ref": materialized_pfam,
-        "annotated_gene_models_gff3_ref": materialized_annotated_gff,
-        "method_results": [result.model_dump(mode="json") for result in method_results],
-        "bundle_artifact_ref": str(bundle_ref),
-        "artifact_refs": [
-            *function_out.get("artifact_refs", []),
-            str(artifact.file_path),
-        ],
-    }
+    stage_update = _update_function_output(
+        state,
+        {
+            "status": "completed",
+            "diamond_hits_ref": diamond_hits_ref,
+            "gene_function_tsv_ref": materialized_gene_function,
+            "go_annotation_table_ref": materialized_go,
+            "kegg_annotation_table_ref": materialized_kegg,
+            "pfam_interpro_table_ref": materialized_pfam,
+            "annotated_gene_models_gff3_ref": materialized_annotated_gff,
+            "method_results": [
+                result.model_dump(mode="json") for result in method_results
+            ],
+            "bundle_artifact_ref": str(bundle_ref),
+            "artifact_refs": [
+                *function_out.get("artifact_refs", []),
+                str(artifact.file_path),
+            ],
+        },
+    )
     return {
-        "stage_outputs": outputs,
+        **stage_update,
         "current_stage": next_stage_name("function_annotation"),
         "supervision_state": "completed",
         "route_trace": append_route_trace(state, "function_annotation_stage"),
     }
 
 
-def _existing_file_ref(ref: Any) -> str | None:
+def _existing_file_ref(ref: str | None) -> str | None:
     if not ref:
         return None
     path = Path(str(ref))
@@ -531,7 +548,7 @@ def _existing_file_ref(ref: Any) -> str | None:
 
 def _function_method_results(
     state: TopLevelState,
-    function_out: dict[str, Any],
+    function_out: FunctionAnnotationCursor,
     provenance: list[FunctionDatabaseProvenance],
 ) -> list[FunctionMethodResult]:
     results: list[FunctionMethodResult] = []
@@ -562,7 +579,7 @@ def _function_method_results(
     return results
 
 
-def fail_function_annotation(state: TopLevelState) -> dict:
+def fail_function_annotation(state: TopLevelState) -> StateUpdate:
     """Stop workflow on invalid function annotation inputs or provenance."""
     function_out = _function_output(state)
     return {
@@ -582,7 +599,10 @@ def _first_value(values: dict[str, Any], keys: list[str]) -> str | None:
 
 def _validate_protein_artifact_ref(proteins_ref: str) -> str | None:
     if "://" in proteins_ref:
-        return f"proteins_fasta_ref must be a local file path for function_annotation: {proteins_ref}"
+        return (
+            "proteins_fasta_ref must be a local file path for "
+            f"function_annotation: {proteins_ref}"
+        )
     path = Path(proteins_ref)
     if not path.exists():
         return f"protein artifact not found for function_annotation: {proteins_ref}"
@@ -592,7 +612,7 @@ def _validate_protein_artifact_ref(proteins_ref: str) -> str | None:
 
 
 def _validate_provenance_records(
-    raw_provenance: Any,
+    raw_provenance: object,
     proteins_ref: str,
 ) -> tuple[list[FunctionDatabaseProvenance], str | None]:
     if raw_provenance is None:
@@ -614,16 +634,30 @@ def _validate_provenance_records(
         if record.method_name not in FUNCTION_EXECUTABLE_METHODS:
             return (
                 [],
-                f"unsupported function_annotation provenance method: {record.method_name}",
+                "unsupported function_annotation provenance method: "
+                f"{record.method_name}",
             )
         if record.input_proteins_ref is None:
             record = record.model_copy(update={"input_proteins_ref": proteins_ref})
         elif record.input_proteins_ref != proteins_ref:
             return (
                 [],
-                f"database_provenance[{index}].input_proteins_ref does not match proteins_fasta_ref",
+                f"database_provenance[{index}].input_proteins_ref does not "
+                "match proteins_fasta_ref",
             )
         records.append(record)
     if not records:
         return [], "database_provenance must be a non-empty list"
     return records, None
+
+
+def _validated_provenance_records(
+    raw_provenance: object,
+) -> list[FunctionDatabaseProvenance]:
+    """Narrow provenance after the stage's validation transition."""
+
+    if not isinstance(raw_provenance, list):
+        raise ValueError("validated function provenance must be a list")
+    return [
+        FunctionDatabaseProvenance.model_validate(record) for record in raw_provenance
+    ]

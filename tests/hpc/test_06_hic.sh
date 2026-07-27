@@ -7,7 +7,7 @@
 #    2. Hi-C shell script generation correctness
 #    3. RunConfig Hi-C schema validation
 #    4. Fixed AutoHiC pipeline with no method selection
-#    5. LLM restriction-enzyme recommendation plus mandatory human approval
+#    5. Sparse AutoHiC recommendation plus mandatory human approval
 #    6. Hi-C artifacts published to new layout
 #    7. Distinct missing-requirements and execution-failure outcomes
 #    8. Unit tests pass
@@ -85,11 +85,17 @@ rc_data = {
             'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
             'threads': ${ASSEMBLY_THREADS},
         },
+        'retry_on_execution_failure': True,
+        'max_execution_retries': 1,
+        'max_review_retries': 1,
     },
 }
 rc = RunConfig.model_validate(rc_data)
 assert rc.hic_scaffolding is not None, 'hic_scaffolding config is None'
 assert rc.hic_scaffolding.autohic_parameters.restriction_enzyme == '${HIC_RESTRICTION_ENZYME}'
+assert rc.hic_scaffolding.retry_on_execution_failure is True
+assert rc.hic_scaffolding.max_execution_retries == 1
+assert rc.hic_scaffolding.max_review_retries == 1
 assert 'methods' not in HiCScaffoldingRunConfig.model_fields
 print('HiCScaffoldingRunConfig: fixed AutoHiC pipeline')
 print('Hi-C RunConfig validation: PASS')
@@ -120,9 +126,23 @@ else:
 python3 -c "
 from app.stages.hic_scaffolding.parameters.catalog import load_autohic_parameter_catalog
 catalog = load_autohic_parameter_catalog()
-dynamic = {name for name, spec in catalog.parameters.items() if spec.level == 2}
-assert dynamic == {'restriction_enzyme'}, dynamic
-print('AutoHiC planner recommends only restriction_enzyme')
+dynamic = {
+    name for name, spec in catalog.parameters.items()
+    if spec.layers.l2 is not None
+}
+assert dynamic == {
+    'restriction_enzyme',
+    'number_of_edit_rounds',
+    'translocation_adjust',
+    'inversion_adjust',
+    'debris_adjust',
+    'error_max_epoch',
+    'error_min_len',
+    'error_max_len',
+    'error_filter_score',
+    'error_filter_iou_score',
+}, dynamic
+print('AutoHiC planner exposes the complete adjustable L2 catalog')
 " 2>&1 && pass "AutoHiC planning contract" || fail "AutoHiC planning contract"
 
 cd "${SCRIPT_DIR}"
@@ -179,7 +199,12 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     config = json.load(handle)
 config["requested_stages"] = ["hic_scaffolding"]
-config["hic_scaffolding"] = {"autohic_parameters": {"threads": 10}}
+config["hic_scaffolding"] = {
+    "autohic_parameters": {"threads": 10},
+    "retry_on_execution_failure": False,
+    "max_execution_retries": 0,
+    "max_review_retries": 1,
+}
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(config, handle, indent=2)
 PY
@@ -199,6 +224,17 @@ PY
     else
         RUN_EXITCODE=$?
         warn "Hi-C invocation returned ${RUN_EXITCODE}; inspecting durable state"
+    fi
+
+    PARAMETER_RESUME_STATUS=0
+    resume_configured_parameter_gates "$SID" || PARAMETER_RESUME_STATUS=$?
+    if (( PARAMETER_RESUME_STATUS == 3 )); then
+        info "[SKIP] Hi-C session is intentionally paused at parameter_approval."
+        exit 77
+    elif (( PARAMETER_RESUME_STATUS != 0 )); then
+        fail "Hi-C parameter-approval handling failed"
+    elif (( RUN_EXITCODE != 0 )) && (( ${HPC_PARAMETER_APPROVALS_RESUMED:-0} == 0 )); then
+        fail "Hi-C invocation failed with no durable parameter gate resumed"
     fi
 
     GATE_STATUS=0

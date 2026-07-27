@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-
+from app.stages.hic_scaffolding.state import (
+    HiCScaffoldingCursor,
+    hic_scaffolding_output,
+)
+from app.workflow import is_terminal_failure
 
 _REQUIREMENT_STATUSES = {
     "blocked_missing_requirements",
@@ -14,14 +17,22 @@ _REQUIREMENT_STATUSES = {
 }
 
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("hic_scaffolding") or {}
+def _output(state: TopLevelState) -> HiCScaffoldingCursor:
+    return hic_scaffolding_output(state)
 
 
 def route_after_enter(state: TopLevelState) -> str:
     """Resume an approved parameter attempt directly at AutoHiC freeze."""
 
-    return "autohic" if _output(state).get("status") == "parameters_approved" else "resolve"
+    status = _output(state).get("status")
+    if status in {
+        "retry_parameters_after_execution_failure",
+        "retry_parameters_after_review_failure",
+    }:
+        return "recommend"
+    if status in {"parameters_approved", "autohic_frozen", "autohic_ran"}:
+        return "autohic"
+    return "resolve"
 
 
 def route_after_resolve(state: TopLevelState) -> str:
@@ -48,9 +59,19 @@ def route_after_autohic(state: TopLevelState) -> str:
     status = _output(state).get("status")
     if status in _REQUIREMENT_STATUSES:
         return "requirements"
+    if status == "failed" and _output(state).get("failure_kind") == "execution":
+        return "retry_gate"
     if is_terminal_failure(status):
         return "fail"
     return "review"
+
+
+def route_after_retry_gate(state: TopLevelState) -> str:
+    """Continue only when operator policy authorized a fresh recommendation."""
+
+    if _output(state).get("status") == "retry_parameters_after_execution_failure":
+        return "recommend"
+    return "fail"
 
 
 def route_after_review(state: TopLevelState) -> str:

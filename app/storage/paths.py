@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-
 LAYOUT_SCHEMA_VERSION = 2
 _LAYOUT_FILENAME = "layout.json"
 _LEGACY_RUNTIME_DIRS = frozenset(
@@ -34,7 +33,11 @@ def _validate_session_id(session_id: str) -> str:
     if not isinstance(session_id, str) or not session_id.strip():
         raise DataLayoutError("session_id must be a non-empty string")
     candidate = Path(session_id)
-    if candidate.is_absolute() or len(candidate.parts) != 1 or session_id in {".", ".."}:
+    if (
+        candidate.is_absolute()
+        or len(candidate.parts) != 1
+        or session_id in {".", ".."}
+    ):
         raise DataLayoutError(f"session_id must be one path component: {session_id!r}")
     return session_id
 
@@ -49,7 +52,9 @@ def _contained_path(base: Path, *parts: str | Path) -> Path:
     try:
         candidate.relative_to(base)
     except ValueError as exc:
-        raise DataLayoutError(f"path escapes its run-owned directory: {relative}") from exc
+        raise DataLayoutError(
+            f"path escapes its run-owned directory: {relative}"
+        ) from exc
     return candidate
 
 
@@ -70,7 +75,8 @@ class SessionPaths:
         resolved = _resolved(run_dir)
         if resolved.parent.name != "runs" or not resolved.name:
             raise DataLayoutError(
-                f"run directory must have shape <data-root>/runs/<session-id>: {resolved}"
+                "run directory must have shape <data-root>/runs/<session-id>: "
+                f"{resolved}"
             )
         paths = cls(resolved.parent.parent, resolved.name)
         if paths.run_dir != resolved:
@@ -125,6 +131,26 @@ class SessionPaths:
         return self.control_dir / "manifest.yaml"
 
     @property
+    def input_manifest_path(self) -> Path:
+        """The immutable manifest published by the freeze transaction.
+
+        ``manifest_path`` is retained for the existing draft/materialization
+        callers.  New frozen execution must use this explicitly named path so
+        a mutable draft can never be mistaken for the execution contract.
+        """
+        return self.control_dir / "input_manifest.yaml"
+
+    @property
+    def manifest_draft_path(self) -> Path:
+        """The mutable manifest projection owned by the intake workflow."""
+        return self.control_dir / "manifest_draft.yaml"
+
+    @property
+    def tui_state_path(self) -> Path:
+        """The authoritative mutable state for a pre-freeze TUI session."""
+        return self.control_dir / "tui_state.json"
+
+    @property
     def ask_plan_path(self) -> Path:
         return self.control_dir / "ask_plan.json"
 
@@ -135,6 +161,16 @@ class SessionPaths:
     @property
     def dependency_manifest_path(self) -> Path:
         return self.control_dir / "dependency_manifest.json"
+
+    @property
+    def frozen_inputs_path(self) -> Path:
+        """The create-only commit marker for frozen control inputs."""
+        return self.control_dir / "frozen_inputs.json"
+
+    @property
+    def execution_lock_path(self) -> Path:
+        """Advisory ownership lock for one frozen execution attempt."""
+        return self.control_dir / ".execution.lock"
 
     @property
     def artifact_index_path(self) -> Path:
@@ -149,7 +185,9 @@ class SessionPaths:
         return self.checkpoints_dir / "checkpoints.sqlite"
 
     def stage_artifacts_dir(self, stage: str) -> Path:
-        return _contained_path(self.artifacts_dir, _validate_path_component(stage, "stage"))
+        return _contained_path(
+            self.artifacts_dir, _validate_path_component(stage, "stage")
+        )
 
     def stage_work_dir(self, stage: str) -> Path:
         return _contained_path(self.work_dir, _validate_path_component(stage, "stage"))
@@ -169,9 +207,13 @@ class SessionPaths:
         try:
             relative = candidate.relative_to(self.run_dir)
         except ValueError as exc:
-            raise DataLayoutError(f"durable reference is outside run root: {candidate}") from exc
+            raise DataLayoutError(
+                f"durable reference is outside run root: {candidate}"
+            ) from exc
         if relative == Path("."):
-            raise DataLayoutError("a durable reference must identify an entry below the run root")
+            raise DataLayoutError(
+                "a durable reference must identify an entry below the run root"
+            )
         return relative.as_posix()
 
     def resolve_ref(self, path_ref: str | Path) -> Path:
@@ -238,9 +280,13 @@ def _read_layout_marker(marker: Path) -> dict[str, Any]:
         raise DataLayoutError(f"missing v2 data layout marker: {marker}") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise DataLayoutError(f"invalid data layout marker: {marker}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != LAYOUT_SCHEMA_VERSION:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != LAYOUT_SCHEMA_VERSION
+    ):
         raise DataLayoutError(
-            f"unsupported data layout schema in {marker}; expected {LAYOUT_SCHEMA_VERSION}"
+            f"unsupported data layout schema in {marker}; expected "
+            f"{LAYOUT_SCHEMA_VERSION}"
         )
     return payload
 

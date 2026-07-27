@@ -15,6 +15,8 @@ from typing import Any, Final
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domains.assembly.constants import HIFIASM_METHOD, HIFIASM_ONT_METHOD
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_GUIDANCE_PATH: Final = (
     _PROJECT_ROOT
@@ -24,7 +26,7 @@ DEFAULT_GUIDANCE_PATH: Final = (
     / "parameter_recommender"
     / "guidance.yaml"
 )
-KNOWN_GUIDANCE_METHODS: Final = frozenset({"hifiasm", "hifiasm_ont"})
+KNOWN_GUIDANCE_METHODS: Final = frozenset({HIFIASM_METHOD, HIFIASM_ONT_METHOD})
 
 
 class MethodGuidance(BaseModel):
@@ -93,9 +95,13 @@ class MethodGuidanceRegistry:
             raise FileNotFoundError(f"Method guidance not found: {guidance_path}")
         raw: Any = yaml.safe_load(guidance_path.read_text(encoding="utf-8")) or {}
         document = _GuidanceDocument.model_validate(raw)
-        records = tuple(sorted(document.guidance, key=lambda record: record.guidance_id))
+        records = tuple(
+            sorted(document.guidance, key=lambda record: record.guidance_id)
+        )
         ids = [record.guidance_id for record in records]
-        duplicates = sorted({guidance_id for guidance_id in ids if ids.count(guidance_id) > 1})
+        duplicates = sorted(
+            {guidance_id for guidance_id in ids if ids.count(guidance_id) > 1}
+        )
         if duplicates:
             raise ValueError(f"Duplicate guidance_id(s): {', '.join(duplicates)}")
         return cls(
@@ -107,7 +113,11 @@ class MethodGuidanceRegistry:
         """Return guidance cards for one method, ordered by stable ID."""
 
         _validate_method_id(method_id)
-        return [record.model_card() for record in self.records if method_id in record.methods]
+        return [
+            record.model_card()
+            for record in self.records
+            if method_id in record.methods
+        ]
 
     def require(self, guidance_id: str) -> MethodGuidance:
         """Resolve a cited ID or fail closed."""
@@ -118,7 +128,9 @@ class MethodGuidanceRegistry:
             raise ValueError(f"Unknown guidance_id: {guidance_id}") from exc
 
 
-def load_method_guidance(path: str | Path = DEFAULT_GUIDANCE_PATH) -> MethodGuidanceRegistry:
+def load_method_guidance(
+    path: str | Path = DEFAULT_GUIDANCE_PATH,
+) -> MethodGuidanceRegistry:
     """Load the structured method-guidance registry."""
 
     return MethodGuidanceRegistry.load(path)

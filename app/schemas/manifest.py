@@ -17,7 +17,9 @@ from app.schemas.assets import AssetType
 
 Platform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi", "illumina", "unknown"]
 Layout = Literal["single", "paired", "unknown"]
-Format = Literal["fastq", "fasta", "bam", "cram", "hic", "assembly", "gff3", "gff", "gtf", "unknown"]
+Format = Literal[
+    "fastq", "fasta", "bam", "cram", "hic", "assembly", "gff3", "gff", "gtf", "unknown"
+]
 Compression = Literal["gzip", "bzip2", "xz", "none", "unknown"]
 
 _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
@@ -50,12 +52,48 @@ class InputAssetSpec(BaseModel):
     format: Format = "unknown"
     compression: Compression = "unknown"
     estimated_pairs: int | None = None
+    # Paired reads are represented explicitly at intake time.  ``paths`` is
+    # retained as the flattened runtime view for existing inventory adapters;
+    # the order is derived from these pairs, never from file names.
+    paired_reads: list["PairedReadSpec"] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _validate_asset_type(self):
+    def _validate_asset_type(self) -> InputAssetSpec:
         if self.asset_type not in _ACCEPTED_MANIFEST_ASSET_TYPES:
-            raise ValueError(f"asset_type must be one of {_ACCEPTED_MANIFEST_ASSET_TYPES}, got {self.asset_type!r}")
+            raise ValueError(
+                f"asset_type must be one of {_ACCEPTED_MANIFEST_ASSET_TYPES}, "
+                f"got {self.asset_type!r}"
+            )
+        if self.paired_reads:
+            if self.asset_type != "hic_reads_registered":
+                raise ValueError(
+                    "paired_reads is currently supported only for hic_reads_registered"
+                )
+            flattened = [
+                path for pair in self.paired_reads for path in (pair.r1, pair.r2)
+            ]
+            if self.paths and self.paths != flattened:
+                raise ValueError("paths must preserve the explicit paired_reads order")
+            self.paths = flattened
+            if self.layout not in {"unknown", "paired"}:
+                raise ValueError("paired_reads requires layout='paired'")
+            self.layout = "paired"
+        return self
+
+
+class PairedReadSpec(BaseModel):
+    """One explicit R1/R2 pair in a paired-read asset."""
+
+    model_config = {"extra": "forbid"}
+
+    r1: str = Field(min_length=1)
+    r2: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_distinct_paths(self) -> PairedReadSpec:
+        if self.r1 == self.r2:
+            raise ValueError("paired read R1 and R2 must be different paths")
         return self
 
 
@@ -70,12 +108,17 @@ class InputManifest(BaseModel):
     genome_size_estimate: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
-    def _detect_ambiguous_long_reads(self):
+    def _detect_ambiguous_long_reads(self) -> InputManifest:
         has_long_reads = any(a.asset_type == "raw_long_reads" for a in self.assets)
-        has_long_rna = any(a.asset_type == "raw_isoseq_or_long_rna_reads" for a in self.assets)
+        has_long_rna = any(
+            a.asset_type == "raw_isoseq_or_long_rna_reads" for a in self.assets
+        )
         if has_long_reads and has_long_rna:
             for asset in self.assets:
-                if asset.asset_type in ("raw_long_reads", "raw_isoseq_or_long_rna_reads"):
+                if asset.asset_type in (
+                    "raw_long_reads",
+                    "raw_isoseq_or_long_rna_reads",
+                ):
                     if asset.platform == "unknown":
                         asset.metadata.setdefault("ambiguous", True)
         return self
@@ -94,7 +137,12 @@ def _detect_compression(path: Path) -> Compression:
 
 def _detect_format(path: Path) -> Format:
     name = path.name.lower()
-    if name.endswith(".fastq") or name.endswith(".fq") or name.endswith(".fastq.gz") or name.endswith(".fq.gz"):
+    if (
+        name.endswith(".fastq")
+        or name.endswith(".fq")
+        or name.endswith(".fastq.gz")
+        or name.endswith(".fq.gz")
+    ):
         return "fastq"
     if (
         name.endswith(".fasta")
@@ -126,7 +174,11 @@ def _detect_format(path: Path) -> Format:
 
 def _metadata_indicates_cycloneseq(metadata: dict[str, Any]) -> bool:
     """Return whether user metadata explicitly names BGI CycloneSEQ."""
-    values = [str(value).lower() for value in metadata.values() if isinstance(value, (str, int, float))]
+    values = [
+        str(value).lower()
+        for value in metadata.values()
+        if isinstance(value, (str, int, float))
+    ]
     return any("cycloneseq" in value or "cyclone seq" in value for value in values)
 
 
@@ -189,12 +241,16 @@ def _infer_asset_properties(spec: InputAssetSpec) -> dict[str, Any]:
         first = paths[0]
         props["inferred_compression"] = _detect_compression(first)
         props["inferred_format"] = _detect_format(first)
-        props["inferred_platform"] = _detect_platform(first, spec.platform, spec.metadata)
+        props["inferred_platform"] = _detect_platform(
+            first, spec.platform, spec.metadata
+        )
         props["inferred_layout"] = _detect_layout(paths)
     return props
 
 
-def validate_manifest(manifest: InputManifest, *, require_existing_files: bool = True) -> dict[str, Any]:
+def validate_manifest(
+    manifest: InputManifest, *, require_existing_files: bool = True
+) -> dict[str, Any]:
     """Validate a manifest and return a report.
 
     Returns a dict with:
@@ -217,7 +273,10 @@ def validate_manifest(manifest: InputManifest, *, require_existing_files: bool =
             seen_adoption[spec.asset_type] = seen_adoption.get(spec.asset_type, 0) + 1
     for atype, count in seen_adoption.items():
         if count > 1:
-            errors.append(f"{atype}: adoption assets must appear exactly once, got {count} entries")
+            errors.append(
+                f"{atype}: adoption assets must appear exactly once, got {count} "
+                "entries"
+            )
 
     for spec in manifest.assets:
         props = _infer_asset_properties(spec)
@@ -227,17 +286,38 @@ def validate_manifest(manifest: InputManifest, *, require_existing_files: bool =
             errors.append(f"{spec.asset_type}: missing files {props['paths_missing']}")
 
         if props["paths_exist"] and props["inferred_format"] == "unknown":
-            warnings.append(f"{spec.asset_type}: could not infer format from {spec.paths}")
+            warnings.append(
+                f"{spec.asset_type}: could not infer format from {spec.paths}"
+            )
 
         inferred_format = props.get("inferred_format")
-        if spec.asset_type == "gene_models" and inferred_format not in {"gff3", "gff", "gtf"}:
-            errors.append(f"{spec.asset_type}: expected GFF/GFF3/GTF, got {inferred_format}")
-        if spec.asset_type in {"predicted_proteins", "transcripts_fasta"} and inferred_format != "fasta":
+        if spec.asset_type == "gene_models" and inferred_format not in {
+            "gff3",
+            "gff",
+            "gtf",
+        }:
+            errors.append(
+                f"{spec.asset_type}: expected GFF/GFF3/GTF, got {inferred_format}"
+            )
+        if (
+            spec.asset_type in {"predicted_proteins", "transcripts_fasta"}
+            and inferred_format != "fasta"
+        ):
             errors.append(f"{spec.asset_type}: expected FASTA, got {inferred_format}")
-        if spec.asset_type in {"gene_models", "predicted_proteins", "transcripts_fasta"} and len(spec.paths) > 1:
-            errors.append(f"{spec.asset_type}: adoption assets must have exactly one path, got {len(spec.paths)}")
+        if (
+            spec.asset_type
+            in {"gene_models", "predicted_proteins", "transcripts_fasta"}
+            and len(spec.paths) > 1
+        ):
+            errors.append(
+                f"{spec.asset_type}: adoption assets must have exactly one path, "
+                f"got {len(spec.paths)}"
+            )
 
-        if spec.asset_type == "raw_long_reads" and props["inferred_platform"] == "unknown":
+        if (
+            spec.asset_type == "raw_long_reads"
+            and props["inferred_platform"] == "unknown"
+        ):
             warnings.append(f"{spec.asset_type}: platform unknown for {spec.paths}")
 
         if spec.metadata.get("ambiguous"):

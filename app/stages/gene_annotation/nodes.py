@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from collections.abc import Callable, Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, cast
+
+from langgraph.graph.state import CompiledStateGraph
 
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
@@ -38,14 +41,28 @@ from app.schemas.artifacts import (
     GeneAnnotationPlan,
 )
 from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.state import TopLevelState
+from app.schemas.state import (
+    DOMAIN_STAGES,
+    ActiveInterrupt,
+    DomainStage,
+    StateUpdate,
+    TopLevelState,
+    validate_state_field,
+)
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
     stage_artifacts_dir,
-    stage_output,
     stage_work_dir,
-    update_stage_output,
+)
+from app.stages.gene_annotation.state import (
+    CANDIDATE_BUNDLE_CURSOR_ADAPTER,
+    CURSOR_JSON_OBJECT_ADAPTER,
+    CandidateBundleCursor,
+    CursorJsonValue,
+    GeneAnnotationCursor,
+    gene_annotation_output,
+    update_gene_annotation_output,
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import MASKED_ASSEMBLY_SPEC, assembly_resource_spec
@@ -66,19 +83,21 @@ PROTEIN_HELPER_METHODS: list[str] = []
 GENE_CONTRACT_METHOD = "gene_annotation.contract"
 
 
-def _gene_output(state: TopLevelState) -> dict[str, Any]:
-    return stage_output(state, "gene_annotation")
+def _gene_output(state: TopLevelState) -> GeneAnnotationCursor:
+    return gene_annotation_output(state)
 
 
-def _update_gene_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    return update_stage_output(state, "gene_annotation", payload)
+def _update_gene_output(
+    state: TopLevelState, payload: Mapping[str, object]
+) -> StateUpdate:
+    return update_gene_annotation_output(state, payload)
 
 
-def _fail_update(state: TopLevelState, reason: str) -> dict:
+def _fail_update(state: TopLevelState, reason: str) -> StateUpdate:
     return _update_gene_output(state, {"status": "failed", "reason": reason})
 
 
-def enter_gene_annotation(state: TopLevelState) -> dict:
+def enter_gene_annotation(state: TopLevelState) -> StateUpdate:
     """Validate the annotation intake plan and mark gene annotation running."""
     try:
         load_annotation_intake_plan(state)
@@ -87,7 +106,7 @@ def enter_gene_annotation(state: TopLevelState) -> dict:
     return {"supervision_state": "running_stage"}
 
 
-def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
+def resolve_gene_annotation_inputs(state: TopLevelState) -> StateUpdate:
     """Resolve masked genome and optional annotation evidence."""
     if _gene_output(state).get("status", ""):
         return {}
@@ -172,7 +191,7 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
     return _update_gene_output(state, {**base_payload, "status": "resolved"})
 
 
-def select_evidence_profile(state: TopLevelState) -> dict:
+def select_evidence_profile(state: TopLevelState) -> StateUpdate:
     """Select the evidence profile from available annotation evidence."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "resolved":
@@ -203,7 +222,7 @@ def select_evidence_profile(state: TopLevelState) -> dict:
     )
 
 
-def plan_gene_methods(state: TopLevelState) -> dict:
+def plan_gene_methods(state: TopLevelState) -> StateUpdate:
     """List executable candidate gene annotation methods without selecting a default."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "evidence_profile_selected":
@@ -241,7 +260,7 @@ def plan_gene_methods(state: TopLevelState) -> dict:
     )
 
 
-def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
+def plan_evidence_merge_or_review(state: TopLevelState) -> StateUpdate:
     """Write a gene annotation plan and record review triggers (merge prep)."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "candidates_accepted":
@@ -251,10 +270,19 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
     review_required = bool(review_triggers)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
+    genome_input_ref = gene_out.get("genome_input_ref")
+    if not genome_input_ref:
+        return _fail_update(state, "gene annotation plan requires genome_input_ref")
+    evidence_profile = gene_out["evidence_profile"]
+    if evidence_profile == "provided_annotation":
+        return _fail_update(
+            state,
+            "provided annotation cannot enter executable gene annotation planning",
+        )
     plan = GeneAnnotationPlan(
         session_id=session_id,
         status="planned",
-        genome_input_ref=gene_out["genome_input_ref"],
+        genome_input_ref=genome_input_ref,
         genome_input_source=gene_out["genome_input_source"],
         unmasked_fallback_reason=gene_out.get("unmasked_fallback_reason"),
         repeat_annotation_ref=gene_out.get("repeat_annotation_ref"),
@@ -262,7 +290,7 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
         long_rna_read_refs=gene_out.get("long_rna_read_refs", []),
         protein_evidence_refs=gene_out.get("protein_evidence_refs", []),
         lineage_or_species_hints=gene_out.get("lineage_or_species_hints", {}),
-        evidence_profile=gene_out["evidence_profile"],
+        evidence_profile=evidence_profile,
         candidate_methods=gene_out.get("candidate_methods", []),
         helper_methods=gene_out.get("helper_methods", []),
         expected_outputs=gene_out.get("expected_outputs", {}),
@@ -272,9 +300,7 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
         notes=gene_out.get("notes", []),
         metadata={"execution_enabled": bool(gene_out.get("executed_methods"))},
     )
-    plan_source = stage_work_dir(
-        state, "gene_annotation", "gene_annotation_plan.json"
-    )
+    plan_source = stage_work_dir(state, "gene_annotation", "gene_annotation_plan.json")
     plan_source.parent.mkdir(parents=True, exist_ok=True)
     plan_source.write_text(
         json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -315,7 +341,7 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
     )
 
 
-def commit_gene_annotation(state: TopLevelState) -> dict:
+def commit_gene_annotation(state: TopLevelState) -> StateUpdate:
     """Publish the gene annotation bundle and advance to function annotation."""
     gene_out = _gene_output(state)
     if gene_out.get("status") == "provided_annotation_resolved":
@@ -324,7 +350,7 @@ def commit_gene_annotation(state: TopLevelState) -> dict:
 
 
 def _resolve_final_gene_set(
-    gene_out: dict[str, Any],
+    gene_out: GeneAnnotationCursor,
 ) -> tuple[str | None, str | None, str | None, str | None]:
     """Resolve the materialized final gene set: (gff, proteins, cds, error).
 
@@ -360,8 +386,11 @@ def _resolve_final_gene_set(
     return gff_ref, str(proteins_ref), (str(cds_ref) if cds_ref else None), None
 
 
-def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
+def _commit_planned_gene_annotation(state: TopLevelState) -> StateUpdate:
     gene_out = _gene_output(state)
+    genome_input_ref = gene_out.get("genome_input_ref")
+    if not genome_input_ref:
+        return _fail_update(state, "gene annotation commit requires genome_input_ref")
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     expected_outputs = gene_out["expected_outputs"]
@@ -370,6 +399,10 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     )
     if final_error:
         return _fail_update(state, final_error)
+    if final_proteins_ref is None:
+        return _fail_update(
+            state, "no materialized proteins_fasta_ref for final gene set"
+        )
     genes_gff3_ref = final_gff_ref or expected_outputs["genes_gff3"]
     transcripts_ref = (
         final_cds_ref
@@ -379,7 +412,7 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     bundle = GeneAnnotationBundle(
         session_id=session_id,
         status="planned",
-        genome_input_ref=gene_out["genome_input_ref"],
+        genome_input_ref=genome_input_ref,
         genome_input_source=gene_out["genome_input_source"],
         genes_gff3_ref=genes_gff3_ref,
         transcripts_fasta_ref=transcripts_ref,
@@ -424,24 +457,28 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
         ),
     ).path
 
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["gene_annotation"] = {
-        **gene_out,
-        "status": "completed",
-        "gene_models_ref": genes_gff3_ref,
-        "gene_models": genes_gff3_ref,
-        "genes_gff3_ref": genes_gff3_ref,
-        "transcripts_fasta_ref": transcripts_ref,
-        "predicted_proteins_ref": final_proteins_ref,
-        "predicted_proteins": final_proteins_ref,
-        "proteins_fasta_ref": final_proteins_ref,
-        "evidence_report_ref": expected_outputs["evidence_report"],
-        "bundle_artifact_ref": str(bundle_ref),
-        "artifact_refs": [*gene_out.get("artifact_refs", []), str(artifact.file_path)],
-    }
+    gene_update = _update_gene_output(
+        state,
+        {
+            "status": "completed",
+            "gene_models_ref": genes_gff3_ref,
+            "gene_models": genes_gff3_ref,
+            "genes_gff3_ref": genes_gff3_ref,
+            "transcripts_fasta_ref": transcripts_ref,
+            "predicted_proteins_ref": final_proteins_ref,
+            "predicted_proteins": final_proteins_ref,
+            "proteins_fasta_ref": final_proteins_ref,
+            "evidence_report_ref": expected_outputs["evidence_report"],
+            "bundle_artifact_ref": str(bundle_ref),
+            "artifact_refs": [
+                *gene_out.get("artifact_refs", []),
+                str(artifact.file_path),
+            ],
+        },
+    )
     trace = append_route_trace(state, "gene_annotation_stage")
     return {
-        "stage_outputs": outputs,
+        **gene_update,
         "current_stage": next_stage_name("gene_annotation"),
         "supervision_state": "running_stage",
         "route_trace": trace,
@@ -459,15 +496,18 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     }
 
 
-def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
+def _commit_adopted_gene_annotation(state: TopLevelState) -> StateUpdate:
     gene_out = _gene_output(state)
+    genome_input_ref = gene_out.get("genome_input_ref")
+    if not genome_input_ref:
+        return _fail_update(state, "adopted gene annotation requires genome_input_ref")
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     review_triggers = list(gene_out.get("review_triggers") or [])
     bundle = GeneAnnotationBundle(
         session_id=session_id,
         status="adopted_existing_annotation",
-        genome_input_ref=gene_out["genome_input_ref"],
+        genome_input_ref=genome_input_ref,
         genome_input_source=gene_out["genome_input_source"],
         genes_gff3_ref=gene_out["genes_gff3_ref"],
         transcripts_fasta_ref=gene_out.get("transcripts_fasta_ref"),
@@ -524,19 +564,20 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
     )
     bundle_ref = published_bundle.path
 
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["gene_annotation"] = {
-        **gene_out,
-        "status": "completed",
-        "bundle_status": "adopted_existing_annotation",
-        "method_selection_required": False,
-        "evidence_report_ref": None,
-        "bundle_artifact_ref": str(bundle_ref),
-        "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
-    }
+    gene_update = _update_gene_output(
+        state,
+        {
+            "status": "completed",
+            "bundle_status": "adopted_existing_annotation",
+            "method_selection_required": False,
+            "evidence_report_ref": None,
+            "bundle_artifact_ref": str(bundle_ref),
+            "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
+        },
+    )
     trace = append_route_trace(state, "gene_annotation_stage")
     return {
-        "stage_outputs": outputs,
+        **gene_update,
         "current_stage": next_stage_name("gene_annotation"),
         "supervision_state": "running_stage",
         "route_trace": trace,
@@ -554,7 +595,7 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
     }
 
 
-def fail_gene_annotation(state: TopLevelState) -> dict:
+def fail_gene_annotation(state: TopLevelState) -> StateUpdate:
     """Stop workflow on invalid gene annotation inputs or descriptors."""
     gene_out = _gene_output(state)
     return {
@@ -580,7 +621,7 @@ GENE_REVIEW_GATES = (
 )
 
 
-def _gene_review_policy(state: TopLevelState) -> dict[str, Any]:
+def _gene_review_policy(state: TopLevelState) -> dict[str, CursorJsonValue]:
     return _gene_output(state).get("review_policy") or {"mode": "auto"}
 
 
@@ -606,9 +647,9 @@ def _run_gene_gate(
     gate_id: str,
     reason: str,
     payload: ReviewPayload,
-    applier: Callable[[TopLevelState, ResumeReviewRequest], dict],
+    applier: Callable[[TopLevelState, ResumeReviewRequest], StateUpdate],
     auto_decision: str,
-) -> dict:
+) -> StateUpdate:
     """Write the request, evaluate policy, then auto-decide or block."""
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
@@ -644,26 +685,28 @@ def _run_gene_gate(
         )
         return applier(state, auto_request)
 
-    gene_out = _gene_output(state)
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["gene_annotation"] = {
-        **gene_out,
-        "status": "blocked_human",
-        "active_gate_id": gate_id,
-        "review_request_artifact_ref": request_ref.model_dump(mode="json"),
-        "review_policy_outcome": outcome.model_dump(mode="json"),
-        "auto_decidable": payload.auto_decidable,
-        "pending_human_confirmation": pending,
-    }
+    gene_update = _update_gene_output(
+        state,
+        {
+            "status": "blocked_human",
+            "active_gate_id": gate_id,
+            "review_request_artifact_ref": request_ref.model_dump(mode="json"),
+            "review_policy_outcome": outcome.model_dump(mode="json"),
+            "auto_decidable": payload.auto_decidable,
+            "pending_human_confirmation": pending,
+        },
+    )
+    compact_interrupt: object = persisted_request.compact_interrupt(
+        stage="gene_annotation",
+        gate_id=gate_id,
+        reason=reason,
+    )
+    validate_state_field("active_interrupt", compact_interrupt)
     return {
         "current_stage": "gene_annotation",
         "supervision_state": "blocked_human",
-        "stage_outputs": outputs,
-        "active_interrupt": persisted_request.compact_interrupt(
-            stage="gene_annotation",
-            gate_id=gate_id,
-            reason=reason,
-        ),
+        **gene_update,
+        "active_interrupt": cast(ActiveInterrupt, compact_interrupt),
     }
 
 
@@ -671,8 +714,8 @@ def _record_gene_gate_decision(
     state: TopLevelState,
     gate_id: str,
     request: ResumeReviewRequest,
-    payload_extra: dict[str, Any],
-) -> dict[str, Any]:
+    payload_extra: Mapping[str, object],
+) -> dict[str, CursorJsonValue]:
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     decision_payload = {
@@ -686,7 +729,7 @@ def _record_gene_gate_decision(
         "metadata": request.metadata,
         **payload_extra,
     }
-    active_interrupt = state.get("active_interrupt") or {}
+    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
     review_request_id = request.review_request_id or active_interrupt.get(
         "review_request_id"
     )
@@ -720,27 +763,30 @@ def _record_gene_gate_decision(
         gate_id=gate_id,
         review_request_id=review_request_id,
     )
-    return decision_ref.model_dump(mode="json")
+    return CURSOR_JSON_OBJECT_ADAPTER.validate_python(
+        decision_ref.model_dump(mode="json")
+    )
 
 
 def _gene_gate_own_update(
     state: TopLevelState,
     gate_id: str,
     request: ResumeReviewRequest,
-    gene_fields: dict[str, Any],
-    decision_ref: dict[str, Any],
-) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["gene_annotation"] = {
-        **_gene_output(state),
-        **gene_fields,
-        "decision": request.decision,
-        "decided_by": request.decided_by,
-        f"{gate_id}_decision_ref": decision_ref,
-        "active_gate_id": None,
-    }
+    gene_fields: Mapping[str, object],
+    decision_ref: dict[str, CursorJsonValue],
+) -> StateUpdate:
+    gene_update = _update_gene_output(
+        state,
+        {
+            **gene_fields,
+            "decision": request.decision,
+            "decided_by": request.decided_by,
+            f"{gate_id}_decision_ref": decision_ref,
+            "active_gate_id": None,
+        },
+    )
     return {
-        "stage_outputs": outputs,
+        **gene_update,
         "route_trace": append_route_trace(state, gate_id),
         "active_interrupt": None,
     }
@@ -748,7 +794,7 @@ def _gene_gate_own_update(
 
 def _gene_gate_stop(
     state: TopLevelState, gate_id: str, request: ResumeReviewRequest
-) -> dict:
+) -> StateUpdate:
     decision_ref = _record_gene_gate_decision(state, gate_id, request, {})
     own = _gene_gate_own_update(
         state, gate_id, request, {"status": "stopped"}, decision_ref
@@ -774,7 +820,8 @@ def _gene_method_readiness_issues(
         "augustus_species_model"
     ):
         issues.append(
-            "gene_annotation.candidate.augustus requires augustus_species_model before execution"
+            "gene_annotation.candidate.augustus requires augustus_species_model "
+            "before execution"
         )
     return issues
 
@@ -828,7 +875,7 @@ def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPay
     )
 
 
-def block_gene_method_planning_review(state: TopLevelState) -> dict:
+def block_gene_method_planning_review(state: TopLevelState) -> StateUpdate:
     if _gene_output(state).get("status") != "methods_planned":
         return {}
     return _run_gene_gate(
@@ -843,7 +890,7 @@ def block_gene_method_planning_review(state: TopLevelState) -> dict:
 
 def apply_gene_method_planning_review_decision(
     state: TopLevelState, request: ResumeReviewRequest
-) -> dict:
+) -> StateUpdate:
     _require_gene_stage(request, "gene_method_planning_review")
     if request.decision not in {"select_methods", "accept", "stop"}:
         raise ResumeValidationError(
@@ -881,22 +928,26 @@ def apply_gene_method_planning_review_decision(
         decision_ref,
     )
     # Only this gate may rewrite the downstream stage suffix.
-    if request.decision == "select_methods" and state.get("requested_stages"):
-        downstream = [
-            stage
-            for stage in state.get("requested_stages", [])
-            if stage in DOWNSTREAM_STAGES
-        ]
-        own["requested_stages"] = rewrite_requested_stages_after_assembly_review(
-            state.get("requested_stages"), downstream
+    requested_stages = state.get("requested_stages")
+    if request.decision == "select_methods" and requested_stages:
+        downstream = [stage for stage in requested_stages if stage in DOWNSTREAM_STAGES]
+        rewritten = rewrite_requested_stages_after_assembly_review(
+            requested_stages, downstream
         )
+        unknown = set(rewritten).difference(DOMAIN_STAGES)
+        if unknown:
+            raise ResumeValidationError(
+                "gene annotation requested-stage rewrite produced unknown stages: "
+                + ", ".join(sorted(unknown))
+            )
+        own["requested_stages"] = [cast(DomainStage, stage) for stage in rewritten]
     return own
 
 
 # --- executable method preparation ---------------------------------------------
 
 
-def prepare_gene_method_execution(state: TopLevelState) -> dict:
+def prepare_gene_method_execution(state: TopLevelState) -> StateUpdate:
     """Prepare output targets for confirmed executable methods."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "methods_confirmed":
@@ -963,7 +1014,7 @@ def build_candidate_evidence_review_payload(state: TopLevelState) -> ReviewPaylo
     )
 
 
-def block_candidate_evidence_review(state: TopLevelState) -> dict:
+def block_candidate_evidence_review(state: TopLevelState) -> StateUpdate:
     if _gene_output(state).get("status") != "candidates_ready":
         return {}
     return _run_gene_gate(
@@ -978,7 +1029,7 @@ def block_candidate_evidence_review(state: TopLevelState) -> dict:
 
 def apply_candidate_evidence_review_decision(
     state: TopLevelState, request: ResumeReviewRequest
-) -> dict:
+) -> StateUpdate:
     _require_gene_stage(request, "candidate_evidence_review")
     if request.decision not in {
         "accept_candidate",
@@ -1018,7 +1069,8 @@ def apply_candidate_evidence_review_decision(
         chosen = request.method_name or request.candidate_id
         if not chosen or chosen not in candidate_refs:
             raise ResumeValidationError(
-                f"accept_candidate requires method_name of an executed candidate; got {chosen!r}"
+                "accept_candidate requires method_name of an executed candidate; "
+                f"got {chosen!r}"
             )
         accepted = {chosen: candidate_refs[chosen]}
     else:
@@ -1069,7 +1121,7 @@ def build_merge_review_payload(state: TopLevelState) -> ReviewPayload:
     )
 
 
-def block_merge_review(state: TopLevelState) -> dict:
+def block_merge_review(state: TopLevelState) -> StateUpdate:
     if _gene_output(state).get("status") != "merge_ready":
         return {}
     return _run_gene_gate(
@@ -1084,7 +1136,7 @@ def block_merge_review(state: TopLevelState) -> dict:
 
 def apply_merge_review_decision(
     state: TopLevelState, request: ResumeReviewRequest
-) -> dict:
+) -> StateUpdate:
     _require_gene_stage(request, "merge_review")
     if request.decision not in {"accept_weights", "adjust_weights", "stop"}:
         raise ResumeValidationError(
@@ -1144,7 +1196,7 @@ def build_final_gene_set_review_payload(state: TopLevelState) -> ReviewPayload:
     )
 
 
-def block_final_gene_set_review(state: TopLevelState) -> dict:
+def block_final_gene_set_review(state: TopLevelState) -> StateUpdate:
     if _gene_output(state).get("status") != "merge_accepted":
         return {}
     return _run_gene_gate(
@@ -1159,7 +1211,7 @@ def block_final_gene_set_review(state: TopLevelState) -> dict:
 
 def apply_final_gene_set_review_decision(
     state: TopLevelState, request: ResumeReviewRequest
-) -> dict:
+) -> StateUpdate:
     _require_gene_stage(request, "final_gene_set_review")
     if request.decision not in {"accept", "reject", "stop"}:
         raise ResumeValidationError(
@@ -1262,7 +1314,9 @@ GENE_BUSCO_LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_miniprot_graph():
+def build_miniprot_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         MINIPROT_LIFECYCLE,
         freeze_miniprot_attempt,
@@ -1270,7 +1324,9 @@ def build_miniprot_graph():
     )
 
 
-def build_augustus_graph():
+def build_augustus_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         AUGUSTUS_LIFECYCLE,
         freeze_augustus_attempt,
@@ -1278,7 +1334,9 @@ def build_augustus_graph():
     )
 
 
-def build_gffread_graph():
+def build_gffread_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         GFFREAD_LIFECYCLE,
         freeze_candidate_materialization,
@@ -1286,7 +1344,9 @@ def build_gffread_graph():
     )
 
 
-def build_evm_graph():
+def build_evm_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         EVM_LIFECYCLE,
         freeze_evm_attempt,
@@ -1294,12 +1354,15 @@ def build_evm_graph():
     )
 
 
-def build_gene_busco_graph():
+def build_gene_busco_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         GENE_BUSCO_LIFECYCLE,
         freeze_gene_busco_attempt,
         collect_gene_busco_artifacts,
     )
+
 
 # Per-candidate EVM evidence class, keyed by method. Used both for EVM weight
 # selection and for the standardized candidate bundle. Methods absent here
@@ -1325,7 +1388,7 @@ _EVM_CLASS_WEIGHT_KEY = {
 }
 
 
-def freeze_candidate_materialization(state: TopLevelState) -> dict:
+def freeze_candidate_materialization(state: TopLevelState) -> StateUpdate:
     """Freeze gffread materialization for a candidate or merged EVM GFF."""
     gene_out = _gene_output(state)
     status = gene_out.get("status")
@@ -1361,7 +1424,9 @@ def freeze_candidate_materialization(state: TopLevelState) -> dict:
 
     genome_ref = gene_out.get("genome_input_ref")
     if not genome_ref:
-        return _fail_update(state, f"{suffix} materialization requires genome_input_ref")
+        return _fail_update(
+            state, f"{suffix} materialization requires genome_input_ref"
+        )
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
@@ -1371,7 +1436,7 @@ def freeze_candidate_materialization(state: TopLevelState) -> dict:
     cds_fa = working_dir / "cds.fa"
 
     env_spec, _packages, blocked = resolve_method_env(
-        gene_out,
+        dict(gene_out),
         stage="gene_annotation",
         method_name=GFFREAD_METHOD,
         session_id=session_id,
@@ -1413,7 +1478,7 @@ def freeze_candidate_materialization(state: TopLevelState) -> dict:
     return freeze_method_attempts(state, GFFREAD_LIFECYCLE, [attempt])
 
 
-def collect_candidate_materialization(state: TopLevelState) -> dict:
+def collect_candidate_materialization(state: TopLevelState) -> StateUpdate:
     """Consume gffread outputs and finish candidate or EVM collection."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "gffread_ran":
@@ -1494,7 +1559,7 @@ def _write_candidate_bundle(
     proteins_fa: Path,
     cds_fa: Path | None,
     gene_count: int,
-) -> dict[str, Any]:
+) -> CandidateBundleCursor:
     """Write minimal metrics/provenance and return a CandidateBundle dict."""
     work_dir = stage_work_dir(state, "gene_annotation", suffix)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1533,7 +1598,9 @@ def _write_candidate_bundle(
         evm_evidence_class=evm_class,
         evm_source_type=suffix,
     )
-    return bundle.model_dump(mode="json")
+    return CANDIDATE_BUNDLE_CURSOR_ADAPTER.validate_python(
+        bundle.model_dump(mode="json")
+    )
 
 
 def _method_category(method_name: str) -> str:
@@ -1541,7 +1608,7 @@ def _method_category(method_name: str) -> str:
     return (method.category if method else None) or "candidate"
 
 
-def _evm_source_type(gene_out: dict[str, Any], method_name: str) -> str:
+def _evm_source_type(gene_out: GeneAnnotationCursor, method_name: str) -> str:
     bundles = gene_out.get("candidate_bundles") or {}
     bundle = bundles.get(method_name) or {}
     source_type = bundle.get("evm_source_type")
@@ -1566,7 +1633,7 @@ def _freeze_gene_method_attempt(
     cfg: dict[str, str],
     script_body: str,
     extra_metadata: dict[str, Any] | None = None,
-) -> dict:
+) -> StateUpdate:
     """Shared freeze path: resolve env, write script, produce FrozenAttemptSpec."""
     gene_out = _gene_output(state)
     genome_ref = gene_out.get("genome_input_ref")
@@ -1577,7 +1644,7 @@ def _freeze_gene_method_attempt(
     session_id = state["session_id"]
 
     env_spec, _packages, blocked = resolve_method_env(
-        gene_out,
+        dict(gene_out),
         stage="gene_annotation",
         method_name=method_name,
         session_id=session_id,
@@ -1624,7 +1691,7 @@ def _collect_gene_method_artifacts(
     lifecycle: MethodExecutionLifecycle,
     method_name: str,
     cfg: dict[str, str],
-) -> dict:
+) -> StateUpdate:
     """Shared collect path: register GFF3 artifact and advance execution state."""
     gene_out = _gene_output(state)
     executions = load_method_executions(state, lifecycle)
@@ -1690,7 +1757,7 @@ def _collect_gene_method_artifacts(
 # --- miniprot freeze / run / collect ------------------------------------------
 
 
-def freeze_miniprot_attempt(state: TopLevelState) -> dict:
+def freeze_miniprot_attempt(state: TopLevelState) -> StateUpdate:
     gene_out = _gene_output(state)
     if gene_out.get("status") != "pending_execution":
         return {}
@@ -1724,7 +1791,7 @@ def freeze_miniprot_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_miniprot_artifacts(state: TopLevelState) -> dict:
+def collect_miniprot_artifacts(state: TopLevelState) -> StateUpdate:
     gene_out = _gene_output(state)
     if gene_out.get("status") != "miniprot_ran":
         return {}
@@ -1746,7 +1813,7 @@ _AUGUSTUS_NO_MODEL_MESSAGE = (
 )
 
 
-def freeze_augustus_attempt(state: TopLevelState) -> dict:
+def freeze_augustus_attempt(state: TopLevelState) -> StateUpdate:
     gene_out = _gene_output(state)
     if gene_out.get("status") != "pending_execution":
         return {}
@@ -1786,7 +1853,7 @@ def freeze_augustus_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_augustus_artifacts(state: TopLevelState) -> dict:
+def collect_augustus_artifacts(state: TopLevelState) -> StateUpdate:
     gene_out = _gene_output(state)
     if gene_out.get("status") != "augustus_ran":
         return {}
@@ -1801,7 +1868,7 @@ def collect_augustus_artifacts(state: TopLevelState) -> dict:
 # --- EVM merge + BUSCO execution (Phase 7 task 05) ----------------------------
 
 
-def freeze_evm_attempt(state: TopLevelState) -> dict:
+def freeze_evm_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze EVM merge or short-circuit single-candidate passthrough."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "merge_accepted":
@@ -1879,7 +1946,7 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     script_path.chmod(0o755)
 
     env_spec, _packages, blocked = resolve_method_env(
-        gene_out,
+        dict(gene_out),
         stage="gene_annotation",
         method_name=EVM_METHOD,
         session_id=session_id,
@@ -1910,7 +1977,7 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     return freeze_method_attempts(state, EVM_LIFECYCLE, [attempt])
 
 
-def collect_evm_artifacts(state: TopLevelState) -> dict:
+def collect_evm_artifacts(state: TopLevelState) -> StateUpdate:
     """Collect EVM merged GFF3 and register as final_gff artifact."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "evm_ran":
@@ -1951,7 +2018,7 @@ def collect_evm_artifacts(state: TopLevelState) -> dict:
     )
 
 
-def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
+def freeze_gene_busco_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze a BUSCO attempt on the final gene set (proteins preferred)."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "evm_collected":
@@ -1999,7 +2066,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
 
     hints = gene_out.get("lineage_or_species_hints") or {}
     busco_lineage = hints.get("busco_lineage")
-    if not busco_lineage:
+    if not isinstance(busco_lineage, str) or not busco_lineage:
         return _update_gene_output(
             state,
             {
@@ -2013,7 +2080,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     session_id = state["session_id"]
 
     env_spec, _packages, blocked = resolve_method_env(
-        gene_out,
+        dict(gene_out),
         stage="gene_annotation",
         method_name=GENE_BUSCO_METHOD,
         session_id=session_id,
@@ -2065,7 +2132,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     return freeze_method_attempts(state, GENE_BUSCO_LIFECYCLE, [attempt])
 
 
-def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
+def collect_gene_busco_artifacts(state: TopLevelState) -> StateUpdate:
     """Collect BUSCO short summary and write completeness signal into gene_output."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "busco_ran":
@@ -2207,7 +2274,8 @@ def _first_asset_path(state: TopLevelState, asset_type: str) -> str | None:
     assets = _registry_assets(state, {asset_type})
     if len(assets) > 1:
         raise ValueError(
-            f"adoption asset {asset_type!r} has {len(assets)} registry entries; manifest validation should have rejected this"
+            f"adoption asset {asset_type!r} has {len(assets)} registry entries; "
+            "manifest validation should have rejected this"
         )
     return str(assets[0]["path"]) if assets else None
 
@@ -2220,7 +2288,9 @@ def _provided_gene_annotation_refs(state: TopLevelState) -> dict[str, str | None
     }
 
 
-def _provided_annotation_review_triggers(gene_out: dict[str, Any]) -> list[str]:
+def _provided_annotation_review_triggers(
+    gene_out: Mapping[str, object],
+) -> list[str]:
     triggers: list[str] = []
     if gene_out.get("genome_input_source") == "assembly":
         triggers.append("unmasked_genome_fallback_requires_review")
@@ -2264,7 +2334,7 @@ def _helper_methods(available_evidence: list[str]) -> list[str]:
     return helpers
 
 
-def _review_triggers(gene_out: dict[str, Any]) -> list[str]:
+def _review_triggers(gene_out: GeneAnnotationCursor) -> list[str]:
     triggers: list[str] = []
     if gene_out.get("evidence_profile") == "mixed_evidence":
         triggers.append("evidence_merge_policy_required")

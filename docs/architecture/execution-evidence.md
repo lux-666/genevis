@@ -83,7 +83,7 @@ points into the retained run `work/` tree. If that file is manually removed,
 resume fails closed; no script hash, duplicate script artifact, or command
 regeneration is required. Data v2 owns that attempt boundary.
 
-For model-recommended Assembly and AutoHiC execution, the same
+For model-recommended Assembly, AutoHiC, and T2T execution, the same
 `ParameterAttempt` owns both this `frozen_attempt_ref` and the later
 `execution_ref`. Sealing an attempt binds both refs into its immutable manifest,
 so advancing the current attempt during a retry cannot erase which runner input

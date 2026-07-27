@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +15,15 @@ from app.schemas.artifacts import (
     HIC_SCAFFOLDED_ASSEMBLY,
     ArtifactMeta,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     absolute_data_dir,
     ordered_unique,
-    stage_output,
-    update_stage_output,
+)
+from app.stages.hic_scaffolding.state import (
+    HiCScaffoldingCursor,
+    hic_scaffolding_output,
+    update_hic_scaffolding_output,
 )
 from app.storage.artifacts import (
     publish_or_recover_work_artifact,
@@ -28,21 +32,24 @@ from app.storage.artifacts import (
 from app.storage.ledger import Ledger
 
 
-def hic_output(state: TopLevelState) -> dict[str, Any]:
-    return stage_output(state, "hic_scaffolding")
+def hic_output(state: TopLevelState) -> HiCScaffoldingCursor:
+    return hic_scaffolding_output(state)
 
 
-def update_hic_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    return update_stage_output(state, "hic_scaffolding", payload)
+def update_hic_output(
+    state: TopLevelState,
+    payload: dict[str, object],
+) -> StateUpdate:
+    return update_hic_scaffolding_output(state, payload)
 
 
 def collect_method_artifacts(
     state: TopLevelState,
     lifecycle: MethodExecutionLifecycle,
     *,
-    extra_artifacts: list[tuple[str, str]] = (),
+    extra_artifacts: Sequence[tuple[str, str]] = (),
     execution_metadata: dict[str, Any] | None = None,
-) -> dict:
+) -> StateUpdate:
     """Register a Hi-C candidate, review bundle, and fallback state."""
     output = hic_output(state)
     if output.get("status") != lifecycle.ran_status:
@@ -130,9 +137,7 @@ def collect_method_artifacts(
                     "method_name": lifecycle.method_name,
                     "status": f"{lifecycle.name}_executed_review_required",
                     "pre_hic_assembly_ref": output.get("pre_hic_assembly_ref"),
-                    "output_assembly_ref": output.get(
-                        "output_assembly_ref"
-                    ),
+                    "output_assembly_ref": output.get("output_assembly_ref"),
                     "chromosome_scaffolded_assembly_candidate_ref": str(
                         published_paths["scaffold_fasta"]
                     ),
@@ -319,6 +324,8 @@ def collect_method_artifacts(
             ),
         },
     )
+
+
 def _execution_summary(result: ExecutionEvidence) -> dict[str, Any]:
     return {
         "success": result.success,

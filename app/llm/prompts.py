@@ -25,7 +25,9 @@ def load_prompt_bundle(name: str) -> PromptBundle:
     try:
         domain, task = name.split(".", 1)
     except ValueError as exc:
-        raise ValueError("Prompt bundle name must look like '<domain>.<task>'.") from exc
+        raise ValueError(
+            "Prompt bundle name must look like '<domain>.<task>'."
+        ) from exc
 
     prompt_dir = PROMPT_ROOT / domain
     system_path = prompt_dir / f"{task}_system.md"
@@ -40,17 +42,27 @@ def load_prompt_bundle(name: str) -> PromptBundle:
     )
 
 
-def render_prompt_messages(bundle: PromptBundle, context: Mapping[str, Any]) -> list[dict[str, str]]:
+def render_prompt_messages(
+    bundle: PromptBundle, context: Mapping[str, Any]
+) -> list[dict[str, str]]:
     """Render a prompt bundle into provider-neutral chat messages."""
 
     values = dict(context)
-    values.setdefault("defaults_json", json.dumps(context.get("defaults", {}), ensure_ascii=False, indent=2, sort_keys=True))
+    values.setdefault(
+        "defaults_json",
+        json.dumps(
+            context.get("defaults", {}), ensure_ascii=False, indent=2, sort_keys=True
+        ),
+    )
     return [
         {"role": "system", "content": bundle.system},
-        {"role": "user", "content": bundle.user_template.format_map(_SafeFormat(values))},
+        {
+            "role": "user",
+            "content": bundle.user_template.format_map(_SafeFormat(values)),
+        },
     ]
 
 
-class _SafeFormat(dict):
+class _SafeFormat(dict[str, Any]):
     def __missing__(self, key: str) -> str:
         return ""

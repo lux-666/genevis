@@ -147,14 +147,14 @@ cd "${SCRIPT_DIR}"
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
 # TEST09_SKIP_UPSTREAM=true skips expensive read_qc + genome_survey and jumps to
-# assembly using raw long reads + an explicit GENOME_SIZE_ESTIMATE.
+# assembly using raw long reads + GENOME_SIZE_ESTIMATE materialized in manifest.
 
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     LOCAL_EXEC_STAGES=("t2t")
 elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
     LOCAL_EXEC_STAGES=("assembly" "assembly_review" "t2t")
     info "TEST09_SKIP_UPSTREAM=true: skipping read_qc and genome_survey"
-    info "  assembly will use raw_long_reads + GENOME_SIZE_ESTIMATE=${GENOME_SIZE_ESTIMATE:-<missing>}"
+    info "  manifest will provide GENOME_SIZE_ESTIMATE=${GENOME_SIZE_ESTIMATE:-<missing>}"
 else
     LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
 fi

@@ -14,7 +14,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
 from app.execution.attempt_owners import MethodExecution
-from app.schemas.state import TopLevelState
+from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.storage.ledger import Ledger, LedgerConflictError, LedgerFormatError
 from app.storage.paths import DataLayoutError
@@ -49,9 +49,9 @@ def collect_with_failure_boundary(
     state: TopLevelState,
     *,
     lifecycle: MethodExecutionLifecycle,
-    collect: Callable[[TopLevelState], dict],
-    update: Callable[[TopLevelState, dict[str, Any]], dict] | None = None,
-) -> dict:
+    collect: Callable[[TopLevelState], StateUpdate],
+    update: Callable[[TopLevelState, dict[str, Any]], StateUpdate] | None = None,
+) -> StateUpdate:
     """Run a stage collect callback behind one bounded failure boundary.
 
     The callback owns business output handling.  If expected filesystem,
@@ -73,7 +73,7 @@ def collect_with_failure_boundary(
             reason=reason,
             lifecycle=lifecycle,
         )
-        payload = {
+        payload: dict[str, JsonValue] = {
             "status": "failed",
             "failure_kind": "collect",
             "reason": reason,

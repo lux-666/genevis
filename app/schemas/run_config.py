@@ -1,8 +1,7 @@
 """Structured run-config contract for Phase 4 local execution.
 
-Lets `gene-agent run --run-config <file>.json` supply the parameters that
-previously required a Python one-liner: the set of stages to opt into local
-execution, shared assembly facts, and method-specific execution parameters.
+Lets `gene-agent run --run-config <file>.json` supply the set of stages to opt
+into local execution, shared assembly facts, and executor-owned settings.
 
 The schema rejects unknown stages, unknown fields, and the combination of
 requesting local `assembly` execution without the three required Flye
@@ -13,15 +12,27 @@ facts, and is not a method catalog.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from app.domains.assembly.selection import is_method_read_type_compatible, normalize_read_type
+from app.domains.assembly.selection import (
+    NormalizedReadType,
+    is_method_read_type_compatible,
+    normalize_read_type,
+)
 from app.schemas.artifacts import FunctionDatabaseProvenance
-from app.schemas.manifest import InputManifest
-from app.schemas.shared_parameters import SharedParameters
+from app.schemas.manifest import InputManifest, Platform
+from app.schemas.shared_parameters import SpeciesFacts
 
 RequestableStage = Literal[
     "read_qc",
@@ -48,10 +59,6 @@ LocalExecStage = Literal[
     "function_annotation",
 ]
 
-FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw", "pacbio-hifi"]
-NextDenovoReadType = Literal["ont", "clr", "hifi"]
-HifiasmReadType = Literal["hifi"]
-HifiasmOntReadType = Literal["ont"]
 AssemblyMethod = Literal["flye", "nextdenovo", "hifiasm", "hifiasm_ont"]
 AssemblyRoute = Literal["cyclone", "ont", "hifi", "auto"]
 ReadQCLengthFilterMethod = Literal[
@@ -61,17 +68,15 @@ ReadQCLengthFilterMethod = Literal[
 ReviewPolicyMode = Literal["strict", "auto"]
 ReviewPolicyStage = Literal["assembly", "assembly_review", "hic_scaffolding"]
 
-class T2TThresholdProfile(BaseModel):
-    """Conservative evidence thresholds for automatic telomere extension."""
+
+class RunConfigSharedParameters(BaseModel):
+    """Cross-stage hints accepted from an external run config."""
 
     model_config = ConfigDict(extra="forbid")
 
-    min_motif_copies: int = Field(default=4, ge=1)
-    terminal_window_bp: int = Field(default=10_000, gt=0)
-    min_mapq: int = Field(default=20, ge=0)
-    max_target_terminal_distance_bp: int = Field(default=1_000, ge=0)
-    min_overlap_bp: int = Field(default=500, gt=0)
-    min_supporting_reads: int = Field(default=1, ge=1)
+    platform: Platform | None = None
+    read_type: NormalizedReadType | None = None
+    species_facts: SpeciesFacts | None = None
 
 
 class T2TRunConfig(BaseModel):
@@ -79,20 +84,18 @@ class T2TRunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
-    telomere_motif: str = "TTAGGG"
+    mode: Literal["propose_only", "manual_review", "auto_patch"] | None = None
     chromosome_list_ref: str | None = None
     assembly_fasta_ref: str | None = None
-    ont_reads_ref: str | None = None
-    thresholds: T2TThresholdProfile = Field(default_factory=T2TThresholdProfile)
+    ont_read_refs: list[str] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def _motif_is_dna(self) -> "T2TRunConfig":
-        motif = self.telomere_motif.upper()
-        if len(motif) < 2 or any(base not in "ACGT" for base in motif):
-            raise ValueError("t2t.telomere_motif must be a DNA motif of at least two bases")
-        self.telomere_motif = motif
-        return self
+    @field_validator("ont_read_refs")
+    @classmethod
+    def _read_refs_must_be_non_empty(cls, values: list[str]) -> list[str]:
+        normalized = [str(value).strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("t2t.ont_read_refs members must be non-empty paths")
+        return normalized
 
 
 class StageReviewPolicyConfig(BaseModel):
@@ -108,7 +111,9 @@ class ReviewPolicyConfig(StageReviewPolicyConfig):
     """Run-level review policy defaults plus optional stage overrides."""
 
     mode: ReviewPolicyMode = "strict"
-    stages: dict[ReviewPolicyStage, StageReviewPolicyConfig] = Field(default_factory=dict)
+    stages: dict[ReviewPolicyStage, StageReviewPolicyConfig] = Field(
+        default_factory=dict
+    )
 
     def effective_for_stage(self, stage: ReviewPolicyStage) -> dict[str, Any]:
         payload: dict[str, Any] = {"mode": self.mode}
@@ -124,42 +129,35 @@ class ReviewPolicyConfig(StageReviewPolicyConfig):
 
 
 class FlyeRunParameters(BaseModel):
-    """Explicit Flye parameters for local assembly execution."""
+    """Flye executor-owned settings for local assembly execution."""
 
     model_config = ConfigDict(extra="forbid")
 
-    read_type: FlyeReadType | None = None
-    estimated_genome_size: int | None = Field(default=None, gt=0)
-    threads: int = Field(gt=0)
+    threads: int | None = Field(default=None, gt=0)
 
 
 class NextDenovoRunParameters(BaseModel):
-    """Explicit NextDenovo parameters for local assembly execution."""
+    """NextDenovo executor-owned settings for local assembly execution."""
 
     model_config = ConfigDict(extra="forbid")
 
-    read_type: NextDenovoReadType | None = None
-    genome_size: int | None = Field(default=None, gt=0)
-    threads: int = Field(gt=0)
-    read_cutoff: int = Field(default=1000, gt=0)
+    threads: int | None = Field(default=None, gt=0)
 
 
 class HifiasmRunParameters(BaseModel):
-    """Explicit hifiasm parameters for local assembly execution."""
+    """Hifiasm executor-owned settings for local assembly execution."""
 
     model_config = ConfigDict(extra="forbid")
 
-    read_type: HifiasmReadType | None = None
-    threads: int = Field(gt=0)
+    threads: int | None = Field(default=None, gt=0)
 
 
 class HifiasmOntRunParameters(BaseModel):
-    """Explicit hifiasm ONT-mode parameters for local assembly execution."""
+    """Hifiasm ONT executor-owned settings for local assembly execution."""
 
     model_config = ConfigDict(extra="forbid")
 
-    read_type: HifiasmOntReadType | None = None
-    threads: int = Field(gt=0)
+    threads: int | None = Field(default=None, gt=0)
 
 
 def infer_assembly_method(assembly: "AssemblyRunConfig") -> AssemblyMethod | None:
@@ -173,17 +171,16 @@ def infer_assembly_method(assembly: "AssemblyRunConfig") -> AssemblyMethod | Non
     return None
 
 
-def _provided_assembly_parameter_methods(assembly: "AssemblyRunConfig") -> list[AssemblyMethod]:
-    return [
-        name
-        for name, value in [
-            ("flye", assembly.flye_parameters),
-            ("nextdenovo", assembly.nextdenovo_parameters),
-            ("hifiasm", assembly.hifiasm_parameters),
-            ("hifiasm_ont", assembly.hifiasm_ont_parameters),
-        ]
-        if value is not None
-    ]
+def _provided_assembly_parameter_methods(
+    assembly: "AssemblyRunConfig",
+) -> list[AssemblyMethod]:
+    candidates: tuple[tuple[AssemblyMethod, BaseModel | None], ...] = (
+        ("flye", assembly.flye_parameters),
+        ("nextdenovo", assembly.nextdenovo_parameters),
+        ("hifiasm", assembly.hifiasm_parameters),
+        ("hifiasm_ont", assembly.hifiasm_ont_parameters),
+    )
+    return [name for name, value in candidates if value is not None]
 
 
 class AssemblyRunConfig(BaseModel):
@@ -213,7 +210,8 @@ class AssemblyRunConfig(BaseModel):
             return self
         if not is_method_read_type_compatible(method, read_type):
             raise ValueError(
-                f"assembly_route '{self.assembly_route}' implies read_type '{read_type}' and is "
+                f"assembly_route '{self.assembly_route}' implies read_type "
+                f"'{read_type}' and is "
                 f"incompatible with assembly_method '{method}'"
             )
 
@@ -232,19 +230,31 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
     method = infer_assembly_method(assembly)
     if method == "flye":
         if not assembly.flye_parameters:
-            raise ValueError("run_config: local assembly method 'flye' requires assembly.flye_parameters")
+            raise ValueError(
+                "run_config: local assembly method 'flye' requires "
+                "assembly.flye_parameters"
+            )
         return
     if method == "nextdenovo":
         if not assembly.nextdenovo_parameters:
-            raise ValueError("run_config: local assembly method 'nextdenovo' requires assembly.nextdenovo_parameters")
+            raise ValueError(
+                "run_config: local assembly method 'nextdenovo' requires "
+                "assembly.nextdenovo_parameters"
+            )
         return
     if method == "hifiasm":
         if not assembly.hifiasm_parameters:
-            raise ValueError("run_config: local assembly method 'hifiasm' requires assembly.hifiasm_parameters")
+            raise ValueError(
+                "run_config: local assembly method 'hifiasm' requires "
+                "assembly.hifiasm_parameters"
+            )
         return
     if method == "hifiasm_ont":
         if not assembly.hifiasm_ont_parameters:
-            raise ValueError("run_config: local assembly method 'hifiasm_ont' requires assembly.hifiasm_ont_parameters")
+            raise ValueError(
+                "run_config: local assembly method 'hifiasm_ont' requires "
+                "assembly.hifiasm_ont_parameters"
+            )
         return
 
     provided = _provided_assembly_parameter_methods(assembly)
@@ -256,7 +266,8 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
         )
     if len(provided) > 1:
         raise ValueError(
-            "run_config: local assembly has parameters for multiple methods; set assembly.assembly_method"
+            "run_config: local assembly has parameters for multiple methods; "
+            "set assembly.assembly_method"
         )
 
 
@@ -264,11 +275,13 @@ def validate_genome_size_execution_plan(
     run_config: "RunConfig",
     manifest: InputManifest,
     *,
-    local_stages: list[str] | None = None,
+    local_stages: Sequence[str] | None = None,
 ) -> None:
     """Require a provided size unless an earlier local survey can produce it."""
 
-    effective_local = list(local_stages if local_stages is not None else run_config.local_exec)
+    effective_local = list(
+        local_stages if local_stages is not None else run_config.local_exec
+    )
     if "assembly" not in effective_local or run_config.assembly is None:
         return
 
@@ -276,13 +289,7 @@ def validate_genome_size_execution_plan(
     if method not in {"flye", "nextdenovo"}:
         return
 
-    method_size = None
-    if method == "flye" and run_config.assembly.flye_parameters:
-        method_size = run_config.assembly.flye_parameters.estimated_genome_size
-    elif method == "nextdenovo" and run_config.assembly.nextdenovo_parameters:
-        method_size = run_config.assembly.nextdenovo_parameters.genome_size
-    shared_size = run_config.shared_parameters.estimated_genome_size if run_config.shared_parameters else None
-    if method_size or shared_size or manifest.genome_size_estimate:
+    if manifest.genome_size_estimate:
         return
 
     requested = list(run_config.requested_stages or [])
@@ -293,7 +300,12 @@ def validate_genome_size_execution_plan(
     )
     has_survey_reads = any(
         asset.asset_type
-        in {"raw_short_dna_reads", "clean_short_dna_reads", "raw_long_reads", "clean_long_reads"}
+        in {
+            "raw_short_dna_reads",
+            "clean_short_dna_reads",
+            "raw_long_reads",
+            "clean_long_reads",
+        }
         for asset in manifest.assets
     )
     survey_is_executable = (
@@ -305,8 +317,9 @@ def validate_genome_size_execution_plan(
         return
 
     raise ValueError(
-        f"run_config: local assembly method {method!r} requires a positive genome size; "
-        "provide it in the manifest/shared/method parameters, or schedule executable "
+        f"run_config: local assembly method {method!r} requires a positive "
+        "genome size; "
+        "provide it in the manifest, or schedule executable "
         "genome_survey before assembly with short or long genomic reads"
     )
 
@@ -323,16 +336,25 @@ class ReadQCLengthFilterConfig(BaseModel):
     @model_validator(mode="after")
     def _require_thresholds_for_executable_filter(self) -> "ReadQCLengthFilterConfig":
         if self.approved and self.method == "skip":
-            raise ValueError("read_qc.length_filter: approved must be false when method is 'skip'")
-        if self.approved and self.method not in ("skip", "read_qc.length_filter.seqkit_seq"):
             raise ValueError(
-                "read_qc.length_filter approved execution is currently supported only for "
+                "read_qc.length_filter: approved must be false when method is 'skip'"
+            )
+        if self.approved and self.method not in (
+            "skip",
+            "read_qc.length_filter.seqkit_seq",
+        ):
+            raise ValueError(
+                "read_qc.length_filter approved execution is currently "
+                "supported only for "
                 "read_qc.length_filter.seqkit_seq"
             )
         if self.method == "read_qc.length_filter.seqkit_seq":
             min_len = self.thresholds.get("min_len")
             if self.approved and (not isinstance(min_len, int) or min_len <= 0):
-                raise ValueError("read_qc.length_filter.thresholds.min_len must be a positive integer when approved")
+                raise ValueError(
+                    "read_qc.length_filter.thresholds.min_len must be a "
+                    "positive integer when approved"
+                )
         return self
 
 
@@ -356,7 +378,9 @@ class GenomeSurveyRunParameters(BaseModel):
     @model_validator(mode="after")
     def _hash_size_must_not_be_empty(self) -> "GenomeSurveyRunParameters":
         if not self.hash_size.strip():
-            raise ValueError("genome_survey.survey_parameters.hash_size must be non-empty")
+            raise ValueError(
+                "genome_survey.survey_parameters.hash_size must be non-empty"
+            )
         return self
 
 
@@ -413,28 +437,13 @@ class AssemblyReviewRunConfig(BaseModel):
 
 
 class AutoHiCRunParameters(BaseModel):
-    """Pinned runtime settings plus an optional enzyme hint for the LLM."""
+    """Pinned executor settings plus an optional enzyme fact for the LLM."""
 
     model_config = ConfigDict(extra="forbid")
 
     restriction_enzyme: str | None = None
-    threads: int = Field(default=10, gt=0)
-    number_of_edit_rounds: int = Field(default=2, ge=0, le=10)
-    translocation_adjust: bool = True
-    inversion_adjust: bool = True
-    debris_adjust: bool = False
-    error_max_epoch: int = Field(default=5, ge=1, le=20)
-    error_min_len: int = Field(default=15_000, gt=0)
-    error_max_len: int = Field(default=20_000_000, gt=0)
-    error_filter_score: float = Field(default=0.9, ge=0.0, le=1.0)
-    error_filter_iou_score: float = Field(default=0.8, ge=0.0, le=1.0)
+    threads: int | None = Field(default=None, gt=0)
     python_command: str = "python3.9"
-
-    @model_validator(mode="after")
-    def _validate_error_window(self) -> "AutoHiCRunParameters":
-        if self.error_max_len < self.error_min_len:
-            raise ValueError("autohic_parameters.error_max_len must be >= error_min_len")
-        return self
 
 
 class HiCScaffoldingRunConfig(BaseModel):
@@ -443,6 +452,9 @@ class HiCScaffoldingRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     autohic_parameters: AutoHiCRunParameters | None = None
+    retry_on_execution_failure: bool = False
+    max_execution_retries: int = Field(default=0, ge=0)
+    max_review_retries: int = Field(default=1, ge=0)
 
 
 class FunctionAnnotationRunConfig(BaseModel):
@@ -450,7 +462,9 @@ class FunctionAnnotationRunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    database_provenance: list[FunctionDatabaseProvenance] | None = Field(default=None, min_length=1)
+    database_provenance: list[FunctionDatabaseProvenance] | None = Field(
+        default=None, min_length=1
+    )
 
 
 class GeneAnnotationRunConfig(BaseModel):
@@ -468,7 +482,7 @@ class RunConfig(BaseModel):
 
     local_exec: list[LocalExecStage] = Field(default_factory=list)
     requested_stages: list[RequestableStage] | None = None
-    shared_parameters: SharedParameters | None = None
+    shared_parameters: RunConfigSharedParameters | None = None
     read_qc: ReadQCRunConfig | None = None
     genome_survey: GenomeSurveyRunConfig | None = None
     assembly: AssemblyRunConfig | None = None
@@ -484,7 +498,10 @@ class RunConfig(BaseModel):
         if "assembly" in self.local_exec:
             validate_local_assembly_execution(self.assembly)
         if "hic_scaffolding" in self.local_exec and self.hic_scaffolding is None:
-            raise ValueError("run_config: local_exec includes 'hic_scaffolding' but hic_scaffolding execution config is missing")
+            raise ValueError(
+                "run_config: local_exec includes 'hic_scaffolding' but "
+                "hic_scaffolding execution config is missing"
+            )
         return self
 
     @model_validator(mode="after")
@@ -500,6 +517,7 @@ class RunConfig(BaseModel):
                 "'read_qc' is not in local_exec"
             )
         return self
+
 
 def load_run_config(path: str | Path) -> RunConfig:
     """Load and validate a run-config JSON file.

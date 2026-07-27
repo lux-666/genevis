@@ -41,13 +41,19 @@ def load_knowledge_pack(
         path = paths[file_key]
         if not path.exists():
             if strict:
-                raise FileNotFoundError(f"{path.name} not found in knowledge pack: {path}")
+                raise FileNotFoundError(
+                    f"{path.name} not found in knowledge pack: {path}"
+                )
             return _empty_pack()
 
     rules = _load_rules(pack_dir, paths["rules"]) if paths["rules"].exists() else {}
     cases = _load_cases(pack_dir, paths["cases"]) if paths["cases"].exists() else []
-    skill = paths["skill"].read_text(encoding="utf-8") if paths["skill"].exists() else None
-    strategies = _load_yaml_mapping(paths["strategies"]) if paths["strategies"].exists() else {}
+    skill = (
+        paths["skill"].read_text(encoding="utf-8") if paths["skill"].exists() else None
+    )
+    strategies = (
+        _load_yaml_mapping(paths["strategies"]) if paths["strategies"].exists() else {}
+    )
     allowed_actions = list(rules.get("allowed_actions", [])) if include_actions else []
 
     return {
@@ -91,7 +97,11 @@ def _load_cases(pack_dir: Path, manifest_path: Path) -> list[dict[str, Any]]:
 
 def _load_rules(pack_dir: Path, manifest_path: Path) -> dict[str, Any]:
     manifest = _load_yaml_mapping(manifest_path)
-    combined = {key: value for key, value in manifest.items() if key not in {"rules", "rule_files"}}
+    combined = {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"rules", "rule_files"}
+    }
     rules: list[dict[str, Any]] = []
     rules.extend(_rule_list(manifest))
     for rel_path in manifest.get("rule_files") or []:
@@ -132,19 +142,23 @@ def _validate_case_manifest(manifest: dict[str, Any], *, source_path: Path) -> N
         raise ValueError(f"Unsupported case_schema {schema!r} in {source_path}")
     if manifest.get("version") != _ASSEMBLY_EVIDENCE_MANIFEST_VERSION:
         raise ValueError(
-            f"Unsupported evidence manifest version {manifest.get('version')!r} in {source_path}"
+            "Unsupported evidence manifest version "
+            f"{manifest.get('version')!r} in {source_path}"
         )
     if "case_files" not in manifest:
         raise ValueError(f"Evidence manifest case_files is required in {source_path}")
     if not manifest["case_files"]:
         raise TypeError(
-            f"case_files must be a list of non-empty strings with at least one entry in {source_path}"
+            "case_files must be a list of non-empty strings with at least one entry "
+            f"in {source_path}"
         )
 
 
 def _case_files(manifest: dict[str, Any], *, source_path: Path) -> list[str]:
     raw = manifest.get("case_files", [])
-    if not isinstance(raw, list) or not all(isinstance(item, str) and item for item in raw):
+    if not isinstance(raw, list) or not all(
+        isinstance(item, str) and item for item in raw
+    ):
         raise TypeError(
             f"case_files must be a list of non-empty strings in {source_path}"
         )
@@ -164,9 +178,13 @@ def _case_list(
     cases = raw["cases"]
     if not isinstance(cases, list):
         raise TypeError(f"cases must be a list in {source_path}")
-    invalid_indexes = [index for index, case in enumerate(cases) if not isinstance(case, dict)]
+    invalid_indexes = [
+        index for index, case in enumerate(cases) if not isinstance(case, dict)
+    ]
     if invalid_indexes:
-        raise TypeError(f"cases entries must be mappings in {source_path}: {invalid_indexes}")
+        raise TypeError(
+            f"cases entries must be mappings in {source_path}: {invalid_indexes}"
+        )
     return cases
 
 

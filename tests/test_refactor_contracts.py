@@ -88,7 +88,13 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                                 "threads": 4,
                             }
                         },
-                        "t2t": {"assembly_fasta_ref": "assembly/final.fasta"},
+                        "t2t": {
+                            "assembly_fasta_ref": "assembly/final.fasta",
+                            "ont_read_refs": [
+                                "reads/ont-a.fastq.gz",
+                                "../shared/ont-b.fastq.gz",
+                            ],
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -114,6 +120,14 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 canonical["t2t"]["assembly_fasta_ref"],
                 str((source_dir / "assembly/final.fasta").resolve()),
             )
+            self.assertEqual(
+                canonical["t2t"]["ont_read_refs"],
+                [
+                    str((source_dir / "reads/ont-a.fastq.gz").resolve()),
+                    str((source_dir / "../shared/ont-b.fastq.gz").resolve()),
+                ],
+            )
+            self.assertNotIn("ont_reads_ref", canonical["t2t"])
 
     def test_external_resume_decision_is_snapshotted_under_run_control(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -132,7 +146,9 @@ class ExecutionRefactorContractTests(unittest.TestCase):
 
             self.assertEqual(snapshot.parent, paths.control_dir / "resume_decisions")
             self.assertRegex(snapshot.name, r"^decision\.[0-9a-f]{16}\.json$")
-            self.assertEqual(snapshot.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
+            self.assertEqual(
+                snapshot.read_text(encoding="utf-8"), source.read_text(encoding="utf-8")
+            )
             self.assertTrue(
                 paths.to_ref(snapshot).startswith("control/resume_decisions/decision.")
             )

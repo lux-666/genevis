@@ -1,86 +1,104 @@
-method_id: flye
+catalog_id: flye
+method_id: assembly.candidate.flye
 tool: flye
-read_type: ont
 description: "Flye long-read assembly catalog for Phase11 typed parameter attempts."
 
 parameters:
   read_type:
-    cli: null
-    level: 0
-    source: run_config
     value_type: string
+    application:
+      kind: selector
+    required_for_execution: true
     allowed_values: ["nano-raw", "nano-hq", "pacbio-raw", "pacbio-hifi"]
-    source_priority:
-      - assembly.flye_parameters.read_type
-      - assembly.read_type_prior.flye
-      - shared_parameters.read_type
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_method_read_type
     description: "Flye read mode; emitted as the corresponding read-type flag."
+
   input_reads:
-    cli: null
-    level: 0
-    source: executor
     value_type: path_list
-    source_priority:
-      - execution.input_reads
-    description: "Input read files."
+    application:
+      kind: choice_option
+      selector: read_type
+      flags:
+        nano-raw: "--nano-raw"
+        nano-hq: "--nano-hq"
+        pacbio-raw: "--pacbio-raw"
+        pacbio-hifi: "--pacbio-hifi"
+      order: 10
+      join: expand
+    required_for_execution: true
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_input_reads
+    description: "Input read files emitted immediately after the selected read-type flag."
+
   output_dir:
-    cli: "--out-dir"
-    level: 0
-    source: executor
     value_type: path
-    source_priority:
-      - execution.output_dir
+    application:
+      kind: cli_option
+      flag: "--out-dir"
+      order: 20
+    required_for_execution: true
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_output_dir
     description: "Flye output directory."
+
   genome_size:
-    cli: "--genome-size"
-    level: 0
-    source: run_config
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--genome-size"
+      order: 30
+    required_for_execution: true
     min: 1
-    source_priority:
-      - assembly.resolved_genome_size.value_bp
+    layers:
+      l1:
+        fact: effective_genome_size_bp
+        transform: identity
     description: "Estimated genome size in bases."
+
   threads:
-    cli: "--threads"
-    level: 0
-    source: run_config
     value_type: int
-    default: 32
+    application:
+      kind: cli_option
+      flag: "--threads"
+      order: 40
     min: 1
-    source_priority:
-      - assembly.flye_parameters.threads
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_threads
+        required: false
+        materialized_default: 32
     description: "Number of CPU threads."
 
-  read_n50:
-    cli: null
-    level: 1
-    source: read_qc
-    value_type: int
-    min: 1
-    source_priority:
-      - read_qc.summary.n50
-    description: "Readonly read N50 context."
-  estimated_coverage:
-    cli: null
-    level: 1
-    source: read_qc
-    value_type: float
-    min: 0
-    description: "Readonly sequencing coverage context; omitted until a producer publishes this field."
-
   asm_coverage:
-    cli: "--asm-coverage"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--asm-coverage"
+      order: 200
     min: 1
     max: 200
+    layers:
+      l2:
+        adjustable: true
     description: "Optional subset coverage for very high-coverage datasets."
+
   min_overlap:
-    cli: "--min-overlap"
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: cli_option
+      flag: "--min-overlap"
+      order: 201
     min: 100
     max: 50000
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum overlap between reads."

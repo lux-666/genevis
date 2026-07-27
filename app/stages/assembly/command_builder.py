@@ -1,309 +1,131 @@
-"""Build deterministic assembly commands from L0/L1/L2 parameter sources."""
+"""Assembly adapters for shared parameter resolution and rendering."""
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
-from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
-from app.schemas.state import TopLevelState
-
-SOURCE_GROUP_LEVELS = {
-    "l0_fixed": 0,
-    "l1_readonly": 1,
-    "l2_recommended": 2,
-}
-
-# hifiasm --hg-size accepts INT with a required k/m/g unit suffix.
-_HG_SIZE_WITH_UNIT_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)?)(?P<unit>[kmgKMG])$")
-_HG_SIZE_BARE_INT_RE = re.compile(r"^\d+$")
-_HG_SIZE_BARE_FLOAT_RE = re.compile(r"^\d+\.\d+$")
-_HG_SIZE_UNIT_MULTIPLIER = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
+from app.domains.parameter_recommendation.resolution import (
+    render_cli_argv,
+    render_config_keys,
+    resolve_parameters,
+)
+from app.schemas.parameter_catalog import (
+    ChoiceOptionApplication,
+    MethodParameterCatalog,
+    SelectorApplication,
+)
+from app.schemas.parameter_recommendation import (
+    RecommendationInputSnapshotV3,
+    ResolvedParameterSources,
+)
 
 
 class ParameterCommandError(ValueError):
-    """Raised when parameter sources cannot be converted to a safe argv."""
+    """Raised when approved parameter sources cannot be rendered safely."""
 
 
-def format_hifiasm_hg_size(value: Any) -> str:
-    """Normalize genome size for hifiasm ``--hg-size``.
-
-    Accepts integer/float base-pair counts or strings such as ``"500m"`` / ``"1g"``
-    / bare bp integers. Always returns a hifiasm-legal ``INT(k|m|g)`` string.
-    """
-
-    if value is None or value == "" or value == "default":
-        raise ParameterCommandError(f"hg_size value is empty: {value!r}")
-
-    if isinstance(value, bool):
-        raise ParameterCommandError(f"hg_size must be a genome size, not boolean: {value!r}")
-
-    if isinstance(value, (int, float)):
-        if value <= 0:
-            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
-        bp = int(value) if float(value).is_integer() else int(round(float(value)))
-        if bp <= 0:
-            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
-        return _bp_to_hifiasm_hg_size(bp)
-
-    if not isinstance(value, str):
-        raise ParameterCommandError(f"hg_size must be int/float/str, got {type(value).__name__}: {value!r}")
-
-    text = value.strip()
-    if not text:
-        raise ParameterCommandError(f"hg_size value is empty: {value!r}")
-
-    match = _HG_SIZE_WITH_UNIT_RE.fullmatch(text)
-    if match:
-        number = float(match.group("number"))
-        unit = match.group("unit").lower()
-        if number <= 0:
-            raise ParameterCommandError(f"hg_size must be positive: {value!r}")
-        # Pass through already-legal values with normalized unit case.
-        return f"{_format_hg_size_number(number)}{unit}"
-
-    if _HG_SIZE_BARE_INT_RE.fullmatch(text):
-        bp = int(text)
-        if bp <= 0:
-            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
-        return _bp_to_hifiasm_hg_size(bp)
-
-    if _HG_SIZE_BARE_FLOAT_RE.fullmatch(text):
-        bp = int(round(float(text)))
-        if bp <= 0:
-            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
-        return _bp_to_hifiasm_hg_size(bp)
-
-    raise ParameterCommandError(
-        f"hg_size must be base-pair count or hifiasm form INT(k|m|g), got {value!r}"
-    )
-
-
-def _bp_to_hifiasm_hg_size(bp: int) -> str:
-    """Convert a positive base-pair count into hifiasm ``--hg-size`` form."""
-
-    if bp <= 0:
-        raise ParameterCommandError(f"hg_size must be positive base pairs: {bp!r}")
-
-    # Prefer the largest unit that keeps a compact, exact-or-3dp representation.
-    for unit, mult in (("g", 1_000_000_000), ("m", 1_000_000), ("k", 1_000)):
-        if bp < mult and unit != "k":
-            continue
-        if bp % mult == 0:
-            return f"{bp // mult}{unit}"
-        if bp >= mult:
-            scaled = bp / mult
-            rounded = round(scaled, 3)
-            # Accept the unit when rounding to 3 decimals reconstructs bp closely.
-            if abs(rounded * mult - bp) <= 0.5:
-                return f"{_format_hg_size_number(rounded)}{unit}"
-
-    # Sub-kilobase genomes: still require a unit suffix for hifiasm.
-    return f"{_format_hg_size_number(bp / 1_000)}k"
-
-
-def _format_hg_size_number(number: float) -> str:
-    if float(number).is_integer():
-        return str(int(number))
-    text = f"{number:.3f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def build_command(
+def resolve_assembly_parameters(
     *,
-    method_id: str,
     catalog: MethodParameterCatalog,
-    parameter_sources: dict[str, dict[str, Any]],
+    l0_executor_values: dict[str, Any],
+    snapshot: RecommendationInputSnapshotV3,
+    approved_l2: dict[str, Any],
+) -> ResolvedParameterSources:
+    """Resolve one approved Assembly attempt from its persisted v3 snapshot."""
+
+    if snapshot.method_id != catalog.method_id:
+        raise ParameterCommandError(
+            f"parameter snapshot method {snapshot.method_id!r} does not match "
+            f"catalog {catalog.method_id!r}"
+        )
+    try:
+        resolved = resolve_parameters(
+            catalog,
+            l0_executor_values=l0_executor_values,
+            snapshot=snapshot,
+            approved_l2=approved_l2,
+        )
+    except ValueError as exc:
+        raise ParameterCommandError(str(exc)) from exc
+    validate_renderable_parameters(catalog, resolved)
+    return resolved
+
+
+def render_assembly_cli(
+    catalog: MethodParameterCatalog,
+    resolved: ResolvedParameterSources,
 ) -> list[str]:
-    """Merge L0/L1/L2 source groups into a deterministic argv."""
+    """Render a complete Assembly CLI command from resolved parameters."""
 
-    validate_parameter_sources(catalog, parameter_sources)
-    argv = [catalog.tool]
-    positional: list[str] = []
-
-    for group_name in ("l0_fixed", "l1_readonly", "l2_recommended"):
-        group = parameter_sources.get(group_name) or {}
-        keys = _ordered_keys(catalog, group, fixed_booleans_first=group_name == "l0_fixed")
-        for key in keys:
-            value = group[key]
-            spec = catalog.parameters[key]
-            emitted, positional_values = _emit_parameter(spec, value)
-            argv.extend(emitted)
-            positional.extend(positional_values)
-
-    argv.extend(positional)
-    return argv
+    validate_renderable_parameters(catalog, resolved)
+    return [catalog.tool, *render_cli_argv(resolved, catalog)]
 
 
-def validate_parameter_sources(
+def render_assembly_config(
     catalog: MethodParameterCatalog,
-    parameter_sources: dict[str, dict[str, Any]],
-) -> None:
-    """Validate that parameter source groups match catalog levels."""
+    resolved: ResolvedParameterSources,
+) -> dict[str, Any]:
+    """Render the typed values consumed by an Assembly config writer."""
 
-    _validate_groups(catalog, parameter_sources)
+    validate_renderable_parameters(catalog, resolved)
+    return render_config_keys(resolved, catalog)
 
 
-def build_parameter_sources(
-    *,
-    method_id: str,
+def parameter_sources_payload(resolved: ResolvedParameterSources) -> dict[str, Any]:
+    """Return all six canonical source views for frozen evidence."""
+
+    return resolved.model_dump(mode="json")
+
+
+def validate_renderable_parameters(
     catalog: MethodParameterCatalog,
-    state: TopLevelState,
-    assembly_out: dict[str, Any],
-    attempt_id: int,
-    recommended_params: dict[str, Any],
-    execution_context: dict[str, Any] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Build replayable parameter source groups for hifiasm methods."""
-
-    execution_context = execution_context or {}
-    l0_fixed: dict[str, Any] = {}
-    l1_readonly: dict[str, Any] = {}
-
-    for key, spec in catalog.parameters.items():
-        if spec.level == 0 and spec.fixed_value is not None:
-            l0_fixed[key] = spec.fixed_value
-        elif spec.level == 0:
-            value = _first_available_value(spec.source_priority or [], state, assembly_out, execution_context)
-            if value is not None:
-                l0_fixed[key] = value
-            elif spec.default is not None:
-                l0_fixed[key] = spec.default
-        elif spec.level == 1:
-            value = _first_available_value(spec.source_priority or [], state, assembly_out, execution_context)
-            if value is not None:
-                if key == "hg_size" or spec.cli == "--hg-size":
-                    value = format_hifiasm_hg_size(value)
-                l1_readonly[key] = value
-
-    return {
-        "l0_fixed": l0_fixed,
-        "l1_readonly": l1_readonly,
-        "l2_recommended": dict(recommended_params),
-    }
-
-
-def _validate_groups(catalog: MethodParameterCatalog, parameter_sources: dict[str, dict[str, Any]]) -> None:
-    unknown_groups = sorted(set(parameter_sources) - set(SOURCE_GROUP_LEVELS))
-    if unknown_groups:
-        raise ParameterCommandError(f"Unknown parameter source group(s): {unknown_groups}")
-    for group_name, expected_level in SOURCE_GROUP_LEVELS.items():
-        group = parameter_sources.get(group_name) or {}
-        if not isinstance(group, dict):
-            raise ParameterCommandError(f"{group_name} must be a mapping")
-        for key in group:
-            spec = catalog.parameters.get(key)
-            if spec is None:
-                raise ParameterCommandError(f"Unknown parameter for {group_name}: {key}")
-            if spec.level != expected_level:
-                raise ParameterCommandError(f"{key} belongs to L{spec.level}, not {group_name}")
-            if group_name == "l2_recommended":
-                _validate_renderable_l2_value(key, spec, group[key])
-
-
-def _validate_renderable_l2_value(
-    key: str,
-    spec: ParameterSpec,
-    value: Any,
+    resolved: ResolvedParameterSources,
 ) -> None:
-    """Reject only values that cannot be rendered as the declared CLI type.
+    """Reject values that cannot be represented by their declared application."""
 
-    This runs after human approval.  It deliberately does not enforce catalog
-    enums, ranges, or biological rules and never substitutes a default.
-    """
+    for name, value in resolved.effective_parameters.items():
+        spec = catalog.parameters.get(name)
+        if spec is None:
+            raise ParameterCommandError(f"Unknown resolved parameter: {name}")
+        if not _is_renderable_value(spec.value_type, value):
+            raise ParameterCommandError(
+                f"{name} cannot be rendered as {spec.value_type}: {value!r}"
+            )
 
-    valid = True
-    if spec.value_type == "boolean":
-        valid = isinstance(value, bool)
-    elif spec.value_type == "int":
-        valid = isinstance(value, int) and not isinstance(value, bool)
-    elif spec.value_type == "float":
-        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
-    elif spec.value_type in {"string", "path"}:
-        valid = isinstance(value, str) and bool(value)
-    elif spec.value_type == "path_list":
-        valid = (
+    for name, spec in catalog.parameters.items():
+        if not isinstance(spec.application, SelectorApplication):
+            continue
+        if name not in resolved.effective_parameters:
+            continue
+        selector_value = str(resolved.effective_parameters[name])
+        choice = next(
+            (
+                candidate.application
+                for candidate in catalog.parameters.values()
+                if isinstance(candidate.application, ChoiceOptionApplication)
+                and candidate.application.selector == name
+            ),
+            None,
+        )
+        if choice is None or selector_value not in choice.flags:
+            raise ParameterCommandError(
+                f"{name} selector value has no declared CLI choice: {selector_value!r}"
+            )
+
+
+def _is_renderable_value(value_type: str, value: Any) -> bool:
+    if value_type == "boolean":
+        return isinstance(value, bool)
+    if value_type == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if value_type == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if value_type in {"string", "path"}:
+        return isinstance(value, str) and bool(value)
+    if value_type == "path_list":
+        return (
             isinstance(value, list)
             and bool(value)
             and all(isinstance(item, str) and bool(item) for item in value)
         )
-    if not valid:
-        raise ParameterCommandError(
-            f"{key} cannot be rendered as {spec.value_type}: {value!r}"
-        )
-
-
-def _ordered_keys(
-    catalog: MethodParameterCatalog,
-    group: dict[str, Any],
-    *,
-    fixed_booleans_first: bool,
-) -> list[str]:
-    catalog_keys = [key for key in catalog.parameters if key in group]
-    if not fixed_booleans_first:
-        return catalog_keys
-    return sorted(
-        catalog_keys,
-        key=lambda key: (
-            not _is_fixed_truthy_boolean(catalog.parameters[key], group[key]),
-            list(catalog.parameters).index(key),
-        ),
-    )
-
-
-def _is_fixed_truthy_boolean(spec: ParameterSpec, value: Any) -> bool:
-    return spec.value_type == "boolean" and bool(value) and spec.fixed_value is not None
-
-
-def _emit_parameter(spec: ParameterSpec, value: Any) -> tuple[list[str], list[str]]:
-    if value is None or value == "":
-        return [], []
-    if spec.value_type == "boolean":
-        if not value:
-            return [], []
-        return ([spec.cli] if spec.cli else []), []
-    if spec.cli is None:
-        if isinstance(value, list):
-            return [], [str(item) for item in value]
-        return [], [str(value)]
-    if spec.value_type == "path_list" and isinstance(value, list):
-        return [spec.cli, ",".join(str(item) for item in value)], []
-    if spec.cli == "--hg-size":
-        value = format_hifiasm_hg_size(value)
-    return [spec.cli, str(value)], []
-
-
-def _first_available_value(
-    paths: list[str],
-    state: TopLevelState,
-    assembly_out: dict[str, Any],
-    execution_context: dict[str, Any],
-) -> Any:
-    roots: dict[str, Any] = {
-        "state": state,
-        "assembly": assembly_out,
-        "execution": execution_context,
-        "shared_parameters": state.get("shared_parameters") or {},
-    }
-    stage_outputs = state.get("stage_outputs") or {}
-    roots.update(stage_outputs)
-    for path in paths:
-        value = _lookup_path(path, roots)
-        if value is not None:
-            return value
-    return None
-
-
-def _lookup_path(path: str, roots: dict[str, Any]) -> Any:
-    parts = path.split(".")
-    if not parts:
-        return None
-    current: Any = roots.get(parts[0])
-    for part in parts[1:]:
-        if current is None:
-            return None
-        if isinstance(current, dict):
-            current = current.get(part)
-        else:
-            current = getattr(current, part, None)
-    return current
+    return False

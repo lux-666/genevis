@@ -73,7 +73,9 @@ class ReviewRecommenderTests(unittest.TestCase):
             request = ReviewPayload(
                 stage="assembly_review",
                 reason="review",
-                candidates=[{"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}],
+                candidates=[
+                    {"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}
+                ],
                 decisions_allowed=["accept", "stop_human_review"],
             )
             chat = _FakeChat(
@@ -106,22 +108,41 @@ class ReviewRecommenderTests(unittest.TestCase):
             self.assertTrue(decision.rationale_artifact_ref)
             artifact_path = _artifact_path(run_dir, decision.rationale_artifact_ref)
             self.assertTrue(artifact_path.exists())
-            records = (run_dir / "artifacts" / "index.jsonl").read_text(encoding="utf-8")
+            records = (run_dir / "artifacts" / "index.jsonl").read_text(
+                encoding="utf-8"
+            )
             self.assertIn("assembly_review.review_recommendation", records)
             artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
             self.assertEqual(artifact_payload["model"], "fake-model-v1")
-            self.assertEqual(artifact_payload["prompt_bundle"], "review.assembly_review_recommend")
-            self.assertTrue(artifact_payload["prompt_paths"]["system"].endswith("review/assembly_review_recommend_system.md"))
-            self.assertTrue(artifact_payload["prompt_paths"]["user"].endswith("review/assembly_review_recommend_user.md"))
-            self.assertEqual(artifact_payload["review_request_id"], persisted.review_request_id)
+            self.assertEqual(
+                artifact_payload["prompt_bundle"], "review.assembly_review_recommend"
+            )
+            self.assertTrue(
+                artifact_payload["prompt_paths"]["system"].endswith(
+                    "review/assembly_review_recommend_system.md"
+                )
+            )
+            self.assertTrue(
+                artifact_payload["prompt_paths"]["user"].endswith(
+                    "review/assembly_review_recommend_user.md"
+                )
+            )
+            self.assertEqual(
+                artifact_payload["review_request_id"], persisted.review_request_id
+            )
             self.assertEqual(artifact_payload["request_hash"], persisted.request_hash)
-            self.assertEqual(artifact_payload["request_ref"], persisted.request_ref.model_dump(mode="json"))
+            self.assertEqual(
+                artifact_payload["request_ref"],
+                persisted.request_ref.model_dump(mode="json"),
+            )
             self.assertNotIn("decisions_allowed", artifact_payload)
             self.assertNotIn("review_request", artifact_payload)
             self.assertIn("raw_recommendation", artifact_payload)
             self.assertIn("recommendation", artifact_payload)
             self.assertIn("rationale_text", artifact_payload)
-            self.assertEqual(chat.bound_formats[0]["response_format"]["type"], "json_schema")
+            self.assertEqual(
+                chat.bound_formats[0]["response_format"]["type"], "json_schema"
+            )
             self.assertEqual(chat.messages[0]["role"], "system")
             self.assertIn("Return exactly one JSON object", chat.messages[0]["content"])
             self.assertEqual(chat.messages[1]["role"], "user")
@@ -160,7 +181,11 @@ class ReviewRecommenderTests(unittest.TestCase):
     def test_recommender_normalizes_common_llm_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "s1")
-            request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["stop_human_review"])
+            request = ReviewPayload(
+                stage="assembly_review",
+                reason="review",
+                decisions_allowed=["stop_human_review"],
+            )
             chat = _FakeChat(
                 json.dumps(
                     {
@@ -183,7 +208,9 @@ class ReviewRecommenderTests(unittest.TestCase):
 
             self.assertEqual(decision.session_id, "s1")
             self.assertEqual(decision.stage, "assembly_review")
-            self.assertEqual(decision.notes, ["Only QUAST is available; keep a human in the loop."])
+            self.assertEqual(
+                decision.notes, ["Only QUAST is available; keep a human in the loop."]
+            )
             artifact_payload = json.loads(
                 _artifact_path(run_dir, decision.rationale_artifact_ref).read_text(
                     encoding="utf-8"
@@ -191,7 +218,9 @@ class ReviewRecommenderTests(unittest.TestCase):
             )
             self.assertNotIn("session_id", artifact_payload["raw_recommendation"])
             self.assertEqual(artifact_payload["recommendation"]["session_id"], "s1")
-            self.assertEqual(artifact_payload["recommendation"]["stage"], "assembly_review")
+            self.assertEqual(
+                artifact_payload["recommendation"]["stage"], "assembly_review"
+            )
 
     def test_recommender_handles_llm_invocation_exception(self):
         class _RaisingChat:
@@ -200,7 +229,9 @@ class ReviewRecommenderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "s1")
-            request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["accept"])
+            request = ReviewPayload(
+                stage="assembly_review", reason="review", decisions_allowed=["accept"]
+            )
             persisted = _persist_request(run_dir, request)
             with self.assertRaisesRegex(RecommendationError, "LLM call failed"):
                 recommend_review_decision(
@@ -246,7 +277,9 @@ class ReviewRecommenderTests(unittest.TestCase):
     def test_recommender_rejects_invalid_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "s1")
-            request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["accept"])
+            request = ReviewPayload(
+                stage="assembly_review", reason="review", decisions_allowed=["accept"]
+            )
             persisted = _persist_request(run_dir, request)
 
             with self.assertRaisesRegex(RecommendationError, "not valid JSON"):
@@ -314,9 +347,13 @@ class ReviewRecommenderTests(unittest.TestCase):
                     )
                 ),
             )
-            second_path = _artifact_path(run_dir, second_decision.rationale_artifact_ref)
+            second_path = _artifact_path(
+                run_dir, second_decision.rationale_artifact_ref
+            )
 
-            self.assertNotEqual(first_persisted.review_request_id, second_persisted.review_request_id)
+            self.assertNotEqual(
+                first_persisted.review_request_id, second_persisted.review_request_id
+            )
             self.assertNotEqual(first_path, second_path)
             self.assertEqual(first_path.read_bytes(), first_bytes)
             self.assertTrue(second_path.exists())

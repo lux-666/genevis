@@ -9,7 +9,12 @@ from typing import Any, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.llm.factory import build_chat_model
-from app.llm.prompts import PROMPT_ROOT, load_prompt_bundle, render_prompt_messages
+from app.llm.prompts import (
+    PROMPT_ROOT,
+    PromptBundle,
+    load_prompt_bundle,
+    render_prompt_messages,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.gates import review_prompt_bundle
 from app.review.persistence import (
@@ -84,11 +89,15 @@ def recommend_review_decision(
     normalized = _normalize_recommendation(raw, session_id=session_id, stage=stage)
     draft = RecommendationDraft.model_validate(normalized)
     if draft.session_id != session_id:
-        raise RecommendationError("recommendation session_id does not match review request")
+        raise RecommendationError(
+            "recommendation session_id does not match review request"
+        )
     if draft.stage != stage:
         raise RecommendationError("recommendation stage does not match review request")
     if draft.decision not in decisions_allowed:
-        raise RecommendationError(f"recommendation decision {draft.decision!r} is not allowed")
+        raise RecommendationError(
+            f"recommendation decision {draft.decision!r} is not allowed"
+        )
 
     try:
         artifact_ref = persist_review_recommendation(
@@ -122,16 +131,25 @@ def recommend_review_decision(
     try:
         return ResumeReviewRequest.model_validate(completed)
     except ValidationError as exc:
-        raise RecommendationError(f"recommendation failed resume schema validation: {exc}") from exc
+        raise RecommendationError(
+            f"recommendation failed resume schema validation: {exc}"
+        ) from exc
 
 
-def _load_stage_prompt_bundle(stage: str, gate_id: str | None = None):
+def _load_stage_prompt_bundle(
+    stage: str,
+    gate_id: str | None = None,
+) -> PromptBundle:
     try:
         bundle_name = review_prompt_bundle(stage, gate_id)
     except KeyError as exc:
-        raise RecommendationError(f"review gate is not registered for stage: {stage}") from exc
+        raise RecommendationError(
+            f"review gate is not registered for stage: {stage}"
+        ) from exc
     if not bundle_name:
-        raise RecommendationError(f"review recommendation prompt not found for stage: {stage}")
+        raise RecommendationError(
+            f"review recommendation prompt not found for stage: {stage}"
+        )
     return load_prompt_bundle(bundle_name)
 
 
@@ -151,7 +169,9 @@ def _load_bound_review_request(
             else ArtifactRef.model_validate(request_ref)
         )
     except Exception as exc:
-        raise RecommendationError("review recommendation request_ref is invalid") from exc
+        raise RecommendationError(
+            "review recommendation request_ref is invalid"
+        ) from exc
     if request_hash != ref.sha256:
         raise RecommendationError(
             "review recommendation request_hash does not match request_ref.sha256"
@@ -212,16 +232,23 @@ def _invoke_model(chat_model: Any, messages: list[dict[str, str]]) -> str:
     try:
         response = chat_model.invoke(messages)
     except Exception as exc:
-        raise RecommendationError(f"review recommendation LLM call failed: {type(exc).__name__}: {exc}") from exc
+        raise RecommendationError(
+            f"review recommendation LLM call failed: {type(exc).__name__}: {exc}"
+        ) from exc
     content = getattr(response, "content", response)
     if isinstance(content, list):
-        content = "".join(str(part.get("text", part)) if isinstance(part, dict) else str(part) for part in content)
+        content = "".join(
+            str(part.get("text", part)) if isinstance(part, dict) else str(part)
+            for part in content
+        )
     if not isinstance(content, str) or not content.strip():
         raise RecommendationError("review recommendation LLM returned empty content")
     return content.strip()
 
 
-def _normalize_recommendation(raw: dict[str, Any], *, session_id: str, stage: str) -> dict[str, Any]:
+def _normalize_recommendation(
+    raw: dict[str, Any], *, session_id: str, stage: str
+) -> dict[str, Any]:
     normalized = dict(raw)
     normalized.setdefault("session_id", session_id)
     normalized.setdefault("stage", stage)
@@ -245,7 +272,9 @@ def _parse_json(text: str) -> dict[str, Any]:
     try:
         payload = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise RecommendationError(f"review recommendation is not valid JSON: {exc}") from exc
+        raise RecommendationError(
+            f"review recommendation is not valid JSON: {exc}"
+        ) from exc
     if not isinstance(payload, dict):
         raise RecommendationError("review recommendation JSON must be an object")
     return payload

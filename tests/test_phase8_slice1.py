@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, resume_review_state
 from app.knowledge.packs import load_knowledge_pack
 from app.review.base import ResumeReviewRequest
@@ -31,6 +30,7 @@ from app.stages.assembly.nodes import (
     resolve_extended_inputs,
     select_route,
 )
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -135,7 +135,10 @@ class KnowledgePackTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
         self.assertIn("safety_boundaries", ctx["rules"])
-        self.assertIn("all_candidates_fragmented", ctx["rules"]["safety_boundaries"]["always_block_human"])
+        self.assertIn(
+            "all_candidates_fragmented",
+            ctx["rules"]["safety_boundaries"]["always_block_human"],
+        )
 
     def test_load_route_selector_context_partial(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -171,7 +174,9 @@ class InputProfilerTests(unittest.TestCase):
         state["current_stage"] = "assembly"
         registry = run_dir / "artifacts" / "inventory" / "asset_registry.json"
         registry.parent.mkdir(parents=True, exist_ok=True)
-        registry.write_text(json.dumps({"session_id": "s1", "assets": assets or []}), encoding="utf-8")
+        registry.write_text(
+            json.dumps({"session_id": "s1", "assets": assets or []}), encoding="utf-8"
+        )
         state["asset_registry_ref"] = str(registry)
         return state
 
@@ -236,7 +241,9 @@ class InputProfilerTests(unittest.TestCase):
 
     def _ref_path(self, state: dict, ref: str | dict) -> Path:
         if isinstance(ref, dict):
-            return SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(ref["path_ref"])
+            return SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(
+                ref["path_ref"]
+            )
         return Path(ref)
 
     def test_resolve_extended_inputs_ont_only_preserves_input_ref(self):
@@ -273,8 +280,17 @@ class InputProfilerTests(unittest.TestCase):
             state = self._state(
                 tmpdir,
                 assets=[
-                    {"asset_id": "ont", "asset_type": "clean_long_reads", "path": str(ont_reads), "platform": "ont"},
-                    {"asset_id": "hifi", "asset_type": "pacbio_hifi", "path": str(hifi_reads)},
+                    {
+                        "asset_id": "ont",
+                        "asset_type": "clean_long_reads",
+                        "path": str(ont_reads),
+                        "platform": "ont",
+                    },
+                    {
+                        "asset_id": "hifi",
+                        "asset_type": "pacbio_hifi",
+                        "path": str(hifi_reads),
+                    },
                 ],
             )
 
@@ -293,7 +309,13 @@ class InputProfilerTests(unittest.TestCase):
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
             state = self._state(
                 tmpdir,
-                assets=[{"asset_id": "reads", "asset_type": "clean_long_reads", "path": str(reads)}],
+                assets=[
+                    {
+                        "asset_id": "reads",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                    }
+                ],
             )
             state["shared_parameters"] = {"read_type": "pacbio_hifi"}
 
@@ -320,17 +342,35 @@ class InputProfilerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
-            state = self._state(tmpdir, assets=[{"asset_id": "ont", "asset_type": "clean_long_reads", "path": str(reads)}])
-            state["stage_outputs"] = {"assembly": {"assembly_route": "hifi", "hifi_reads_ref": str(reads)}}
+            state = self._state(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "ont",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                    }
+                ],
+            )
+            state["stage_outputs"] = {
+                "assembly": {"assembly_route": "hifi", "hifi_reads_ref": str(reads)}
+            }
             resolved = {**state, **resolve_extended_inputs(state)}
 
-            with patch("app.stages.assembly.decision.build_chat_model", side_effect=AssertionError("LLM should not run")):
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                side_effect=AssertionError("LLM should not run"),
+            ):
                 result = infer_input_profile(resolved)
 
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["input_profile"]["profile_source"], "run_config_explicit")
+            self.assertEqual(
+                assembly["input_profile"]["profile_source"], "run_config_explicit"
+            )
             self.assertEqual(assembly["route_decision"]["selected_route"], "hifi")
-            self.assertTrue(self._ref_path(state, assembly["input_profile_ref"]).exists())
+            self.assertTrue(
+                self._ref_path(state, assembly["input_profile_ref"]).exists()
+            )
 
     def test_explicit_cyclone_route_defaults_to_flye_assembly_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -338,7 +378,13 @@ class InputProfilerTests(unittest.TestCase):
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
             state = self._state(
                 tmpdir,
-                assets=[{"asset_id": "cyclone", "asset_type": "clean_long_reads", "path": str(reads)}],
+                assets=[
+                    {
+                        "asset_id": "cyclone",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                    }
+                ],
             )
             state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
             resolved = {**state, **resolve_extended_inputs(state)}
@@ -352,7 +398,10 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(selection["primary_method"], "assembly.candidate.flye")
             self.assertIsNone(selection["fallback_method"])
             self.assertEqual(selection["source"], "run_config")
-            self.assertEqual(selection["rationale"], "run_config explicitly selected cyclone read type")
+            self.assertEqual(
+                selection["rationale"],
+                "run_config explicitly selected cyclone read type",
+            )
             self.assertNotIn("method_decision", assembly)
 
     def test_explicit_ont_route_preserves_ont_selection(self):
@@ -361,7 +410,13 @@ class InputProfilerTests(unittest.TestCase):
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
             state = self._state(
                 tmpdir,
-                assets=[{"asset_id": "ont", "asset_type": "clean_long_reads", "path": str(reads)}],
+                assets=[
+                    {
+                        "asset_id": "ont",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                    }
+                ],
             )
             state["stage_outputs"] = {"assembly": {"assembly_route": "ont"}}
             resolved = {**state, **resolve_extended_inputs(state)}
@@ -374,10 +429,14 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["input_profile"]["recommended_route"], "ont")
             selection = assembly["assembly_selection"]
             self.assertEqual(selection["read_type"], "ont_raw")
-            self.assertEqual(selection["primary_method"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(
+                selection["primary_method"], "assembly.candidate.hifiasm_ont"
+            )
             self.assertIsNone(selection["fallback_method"])
             self.assertEqual(selection["source"], "run_config")
-            self.assertEqual(selection["rationale"], "run_config explicitly selected ont read type")
+            self.assertEqual(
+                selection["rationale"], "run_config explicitly selected ont read type"
+            )
             self.assertNotIn("method_decision", assembly)
 
     def test_infer_input_profile_llm_prompt_receives_skill_text(self):
@@ -399,31 +458,65 @@ class InputProfilerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
-            state = self._state(tmpdir, assets=[{"asset_id": "ont", "asset_type": "clean_long_reads", "path": str(reads)}])
+            state = self._state(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "ont",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                    }
+                ],
+            )
             resolved = {**state, **resolve_extended_inputs(state)}
             model = FakeModel()
 
-            with patch("app.stages.assembly.decision.build_chat_model", return_value=model):
+            with patch(
+                "app.stages.assembly.decision.build_chat_model", return_value=model
+            ):
                 result = infer_input_profile(resolved)
 
             self.assertIsNotNone(model.messages)
             self.assertIn("Route Selection Skill", model.messages[0]["content"])
-            self.assertEqual(result["stage_outputs"]["assembly"]["input_profile"]["recommended_route"], "cyclone")
-            self.assertNotIn("route_selector_prompt", result["stage_outputs"]["assembly"])
-            self.assertNotIn("route_selector_source", result["stage_outputs"]["assembly"])
+            self.assertEqual(
+                result["stage_outputs"]["assembly"]["input_profile"][
+                    "recommended_route"
+                ],
+                "cyclone",
+            )
+            self.assertNotIn(
+                "route_selector_prompt", result["stage_outputs"]["assembly"]
+            )
+            self.assertNotIn(
+                "route_selector_source", result["stage_outputs"]["assembly"]
+            )
 
     def test_infer_input_profile_llm_failure_returns_insufficient_data(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
-            state = self._state(tmpdir, assets=[{"asset_id": "ont", "asset_type": "clean_long_reads", "path": str(reads)}])
+            state = self._state(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "ont",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                    }
+                ],
+            )
             resolved = {**state, **resolve_extended_inputs(state)}
 
-            with patch("app.stages.assembly.decision.build_chat_model", side_effect=RuntimeError("llm down")):
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                side_effect=RuntimeError("llm down"),
+            ):
                 result = infer_input_profile(resolved)
 
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["input_profile"]["recommended_route"], "insufficient_data")
+            self.assertEqual(
+                assembly["input_profile"]["recommended_route"], "insufficient_data"
+            )
             self.assertNotIn("route_selector_prompt", assembly)
             self.assertNotIn("route_selector_source", assembly)
 
@@ -490,7 +583,9 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["status"], "route_selected")
             self.assertEqual(assembly["selected_route"], "ont")
             self.assertEqual(assembly["route_decision"]["selected_route"], "ont")
-            self.assertTrue(self._ref_path(state, assembly["route_decision_ref"]).exists())
+            self.assertTrue(
+                self._ref_path(state, assembly["route_decision_ref"]).exists()
+            )
 
     def test_route_selection_gate_registered_and_resumable(self):
         gate = get_review_gate("assembly", "route_selection")
@@ -503,7 +598,9 @@ class InputProfilerTests(unittest.TestCase):
 
             result = resume_review_state(state, request)
 
-            self.assertEqual(result["stage_outputs"]["assembly"]["selected_route"], "cyclone")
+            self.assertEqual(
+                result["stage_outputs"]["assembly"]["selected_route"], "cyclone"
+            )
 
     def test_route_decision_maps_to_assembly_selection(self):
         """Route decisions write the complete canonical assembly selection."""
@@ -620,7 +717,9 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(selection["primary_method"], "assembly.candidate.hifiasm")
             self.assertIsNone(selection["fallback_method"])
             self.assertEqual(selection["source"], "run_config")
-            self.assertEqual(selection["rationale"], "run_config explicitly selected hifi read type")
+            self.assertEqual(
+                selection["rationale"], "run_config explicitly selected hifi read type"
+            )
             self.assertNotIn("method_decision", assembly)
 
     def test_route_decision_honors_explicit_resume_method_and_read_type(self):
@@ -640,8 +739,14 @@ class InputProfilerTests(unittest.TestCase):
 
             self.assertEqual(assembly["selected_route"], "hifi")
             self.assertEqual(assembly["assembly_selection"]["read_type"], "pacbio_hifi")
-            self.assertEqual(assembly["assembly_selection"]["primary_method"], "assembly.candidate.nextdenovo")
-            self.assertEqual(assembly["assembly_selection"]["metadata"]["read_type_source"], "metadata.read_type")
+            self.assertEqual(
+                assembly["assembly_selection"]["primary_method"],
+                "assembly.candidate.nextdenovo",
+            )
+            self.assertEqual(
+                assembly["assembly_selection"]["metadata"]["read_type_source"],
+                "metadata.read_type",
+            )
 
     def test_route_decision_rejects_read_type_metadata_that_conflicts_with_route(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -653,10 +758,14 @@ class InputProfilerTests(unittest.TestCase):
                 metadata={"read_type": "ont"},
             )
 
-            with self.assertRaisesRegex(ResumeValidationError, "maps to route 'hifi'.*metadata.read_type"):
+            with self.assertRaisesRegex(
+                ResumeValidationError, "maps to route 'hifi'.*metadata.read_type"
+            ):
                 apply_route_decision(state, request)
 
-    def test_route_decision_rejects_unknown_method_name_as_resume_validation_error(self):
+    def test_route_decision_rejects_unknown_method_name_as_resume_validation_error(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             state = self._blocked_route_state(state, self._route_assembly())
@@ -666,5 +775,7 @@ class InputProfilerTests(unittest.TestCase):
                 method_name="assembly.candidate.unknown",
             )
 
-            with self.assertRaisesRegex(ResumeValidationError, "unknown assembly method"):
+            with self.assertRaisesRegex(
+                ResumeValidationError, "unknown assembly method"
+            ):
                 apply_route_decision(state, request)

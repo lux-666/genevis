@@ -31,7 +31,8 @@ else
     [[ -n "$_auto_t2t_assembly" ]] || _auto_t2t_assembly=$(latest_hpc_assembly || true)
     _auto_t2t_reads=""
     if [[ "${PLATFORM:-}" == "ont" || "${PLATFORM:-}" == "cycloneseq" ]]; then
-        # T2T accepts one read file. Do not silently collapse a multi-file input.
+        # This smoke reuses a single configured file; the run-config contract
+        # itself accepts an ordered list of ONT read files.
         read -r -a _t2t_read_paths <<< "${LONG_READS:-}"
         if (( ${#_t2t_read_paths[@]} == 1 )) && [[ -s "${_t2t_read_paths[0]}" ]]; then
             _auto_t2t_reads="${_t2t_read_paths[0]}"
@@ -116,7 +117,7 @@ config = {
     "t2t": {
         "mode": "auto_patch",
         "assembly_fasta_ref": assembly,
-        "ont_reads_ref": reads,
+        "ont_read_refs": [reads],
     },
 }
 with open(path, "w", encoding="utf-8") as handle:
@@ -124,13 +125,14 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 python3 - "$RC" <<'PY'
 import sys
+from pathlib import Path
 from app.schemas.run_config import load_run_config
 
 config = load_run_config(sys.argv[1])
 assert config.t2t is not None
 assert config.t2t.mode == "auto_patch"
 assert config.t2t.assembly_fasta_ref
-assert config.t2t.ont_reads_ref
+assert config.t2t.ont_read_refs == [str(Path(config.t2t.ont_read_refs[0]))]
 print("real T2T run-config validation OK")
 PY
 
@@ -159,6 +161,17 @@ if GA run \
 else
     RUN_EXITCODE=$?
     warn "T2T invocation returned ${RUN_EXITCODE}; inspecting durable state"
+fi
+
+PARAMETER_RESUME_STATUS=0
+resume_configured_parameter_gates "$SID" || PARAMETER_RESUME_STATUS=$?
+if (( PARAMETER_RESUME_STATUS == 3 )); then
+    info "[SKIP] T2T session is intentionally paused at parameter_approval."
+    exit 77
+elif (( PARAMETER_RESUME_STATUS != 0 )); then
+    fail "T2T parameter-approval handling failed"
+elif (( RUN_EXITCODE != 0 )) && (( ${HPC_PARAMETER_APPROVALS_RESUMED:-0} == 0 )); then
+    fail "T2T invocation failed with no durable parameter gate resumed"
 fi
 
 GATE_STATUS=0
@@ -221,9 +234,9 @@ bundle = json.load(open(bundle_path, encoding="utf-8"))
 assert bundle["status"] in {"completed", "completed_with_warnings"}, bundle
 assert bundle["mode"] == "auto_patch", bundle
 assert bundle["input_assembly_ref"] == assembly, bundle
-assert bundle["ont_reads_ref"] == reads, bundle
+assert bundle["ont_read_refs"] == [reads], bundle
 assert bundle.get("metadata", {}).get("execution_enabled") is True, bundle
-final_ref = Path(bundle["final_assembly_for_annotation"])
+final_ref = Path(bundle["output_assembly_ref"])
 assert final_ref.is_file(), final_ref
 opener = gzip.open if final_ref.suffix == ".gz" else open
 with opener(final_ref, "rt", encoding="utf-8") as handle:
@@ -256,9 +269,34 @@ fi
 
 TELOMERIC_ROWS=$(awk 'END {print NR-1}' "$TELOMERIC_READS")
 EVENTS="${RUN_DIR}/ledger/events.jsonl"
+ARTIFACTS_INDEX="${RUN_DIR}/artifacts/index.jsonl"
+assert_file_nonempty "$ARTIFACTS_INDEX" "T2T artifact index"
 if (( TELOMERIC_ROWS > 0 )); then
-    assert_file_exists "${WORK_DIR}/ont_to_assembly.paf" "T2T minimap2 PAF"
     assert_file_contains "${WORK_DIR}/run_minimap2_t2t.sh" "minimap2 -x map-ont" "T2T minimap2 command generated"
+    PAF_ARTIFACT=$(python3 - "$ARTIFACTS_INDEX" "$RUN_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+index_path = Path(sys.argv[1])
+run_dir = Path(sys.argv[2])
+matches = [
+    json.loads(line)
+    for line in index_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+matches = [
+    row for row in matches
+    if row.get("stage") == "t2t"
+    and row.get("artifact_type") == "t2t.read_alignment_paf"
+]
+assert len(matches) == 1, matches
+print(run_dir / matches[0]["path_ref"])
+PY
+    )
+    assert_file_nonempty "$PAF_ARTIFACT" "immutable registered T2T minimap2 PAF"
+    assert_file_contains "$CANDIDATES" '"artifact_type":"t2t.read_alignment_paf"' "T2T candidates bind the immutable PAF"
+    assert_file_contains "$CANDIDATES" '"artifact_type":"t2t.execution_result"' "T2T candidates bind execution evidence"
     if [[ -f "$EVENTS" ]]; then
         assert_ledger_has_method_attempt "$EVENTS" "t2t.alignment.minimap2"
     else
@@ -268,8 +306,6 @@ else
     info "No terminal-telomeric reads detected; minimap2 branch correctly skipped after real read scan."
 fi
 
-ARTIFACTS_INDEX="${RUN_DIR}/artifacts/index.jsonl"
-assert_file_nonempty "$ARTIFACTS_INDEX" "T2T artifact index"
 assert_file_contains "$ARTIFACTS_INDEX" '"stage":"t2t"' "T2T artifacts registered"
 
 GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --trace 2>&1 && \

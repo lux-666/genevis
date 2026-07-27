@@ -15,6 +15,7 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.control.lifecycle import resume_review_state
+from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import load_execution_evidence, persist_execution_result
 from app.integrity import sha256_file
 from app.review.base import ResumeReviewRequest
@@ -22,7 +23,8 @@ from app.review.persistence import persist_review_decision, persist_review_reque
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_BASIS,
-    ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+    ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     ASSEMBLY_PARAMETER_MODEL_REQUEST,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     ASSEMBLY_PARAMETER_RECOMMENDATION,
@@ -35,12 +37,22 @@ from app.schemas.artifacts import (
 )
 from app.schemas.execution import ExecutionResult
 from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalGenomeFacts,
+    CanonicalRecommendationFacts,
+    ParameterRecommendationManifestV3,
+    QuantityFact,
+    QuantityOrigin,
+    RecommendationInputSnapshotV3,
+)
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import (
     ParameterCommandError,
-    build_command,
-    build_parameter_sources,
-    format_hifiasm_hg_size,
+    parameter_sources_payload,
+    render_assembly_cli,
+    render_assembly_config,
+    resolve_assembly_parameters,
 )
 from app.stages.assembly.method_application.flye import FLYE_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.hifiasm import freeze_hifiasm_attempt
@@ -48,19 +60,20 @@ from app.stages.assembly.method_application.hifiasm_ont import (
     freeze_hifiasm_ont_attempt,
 )
 from app.stages.assembly.method_application.nextdenovo import freeze_nextdenovo_attempt
+from app.stages.assembly.method_application.support import (
+    ASSEMBLY_EXECUTION_CONTRACT_KEY,
+    build_assembly_execution_contract,
+)
+from app.stages.assembly.nodes import commit_assembly_plan, plan_candidate_attempts
 from app.stages.assembly.parameters.catalog import (
     lint_parameter_catalogs,
     load_parameter_catalog,
-    validate_source_path_contract,
 )
-from app.stages.assembly.parameters.profile import (
-    build_full_parameter_profile,
-    build_prompt_profile,
-)
+from app.stages.assembly.parameters.context import build_assembly_recommendation_context
 from app.stages.assembly.parameters.storage import (
-    load_recommendation_bundle,
-    read_json_artifact,
-    write_recommendation_json_artifact,
+    read_artifact as read_json_artifact,
+    write_artifact as write_attempt_json_artifact,
+    write_artifact as write_recommendation_json_artifact,
 )
 from app.stages.assembly.parameters.workflow import (
     execution_retry_gate,
@@ -76,6 +89,11 @@ from app.storage.artifacts import (
     publish_artifact_record,
     read_artifact_records,
     resolve_artifact_ref,
+)
+from app.storage.parameter_evidence import (
+    load_approved_parameter_chain_v3,
+    load_parameter_recommendation_chain_v3,
+    publish_parameter_json,
 )
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
@@ -102,7 +120,9 @@ def _runtime_hifiasm_binary() -> str | None:
         binary = explicit if os.path.sep in explicit else shutil.which(explicit)
         if binary and os.access(binary, os.X_OK):
             return binary
-        raise AssertionError(f"HIFIASM_BIN does not point to an executable hifiasm binary: {explicit}")
+        raise AssertionError(
+            f"HIFIASM_BIN does not point to an executable hifiasm binary: {explicit}"
+        )
     return shutil.which("hifiasm")
 
 
@@ -118,11 +138,18 @@ def _parse_semver_prefix(version_text: str) -> tuple[int, int, int]:
 
 
 def _project_hifiasm_min_version() -> tuple[int, int, int]:
-    package_descriptor = Path(__file__).resolve().parents[1] / "descriptors" / "packages" / "hifiasm.yaml"
+    package_descriptor = (
+        Path(__file__).resolve().parents[1]
+        / "descriptors"
+        / "packages"
+        / "hifiasm.yaml"
+    )
     descriptor_text = package_descriptor.read_text(encoding="utf-8")
     match = re.search(r'version_constraint:\s*">=([^"]+)"', descriptor_text)
     if not match:
-        raise AssertionError("descriptors/packages/hifiasm.yaml does not declare a >= version_constraint")
+        raise AssertionError(
+            "descriptors/packages/hifiasm.yaml does not declare a >= version_constraint"
+        )
     return _parse_semver_prefix(match.group(1))
 
 
@@ -152,6 +179,64 @@ def _frozen_attempt_ref(attempt_id: int) -> ArtifactRef:
     )
 
 
+def _snapshot(
+    method_id: str,
+    *,
+    genome_size: int = 2_000_000,
+) -> RecommendationInputSnapshotV3:
+    if method_id == "assembly.candidate.hifiasm":
+        route = "hifi"
+        read_type = "pacbio_hifi"
+    elif method_id == "assembly.candidate.flye":
+        route = "cyclone"
+        read_type = "ont_hq"
+    else:
+        route = "ont"
+        read_type = "ont_raw"
+    return RecommendationInputSnapshotV3(
+        schema_version=3,
+        method_id=method_id,
+        task="recommend_initial",
+        facts=CanonicalRecommendationFacts(
+            genome=CanonicalGenomeFacts(
+                effective_genome_size=QuantityFact(
+                    value=genome_size,
+                    unit="bp",
+                    origin=QuantityOrigin(kind="provided", producer="run_config"),
+                )
+            )
+        ),
+        stage_context=AssemblyRecommendationContext(
+            stage="assembly",
+            assembly_route=route,
+            read_type=read_type,
+            target_level="draft",
+        ),
+    )
+
+
+def _l0_executor_values(method_id: str) -> dict:
+    if method_id == "assembly.candidate.flye":
+        return {
+            "assembly_method_read_type": "nano-hq",
+            "assembly_input_reads": ["/reads/test.fastq"],
+            "assembly_output_dir": "/work/flye",
+            "assembly_threads": 4,
+        }
+    if method_id == "assembly.candidate.nextdenovo":
+        return {
+            "assembly_method_read_type": "ont",
+            "assembly_input_reads": "/work/input.fofn",
+            "assembly_output_dir": "/work/nextdenovo",
+            "assembly_threads": 4,
+        }
+    return {
+        "assembly_output_prefix": "/work/hifiasm/out",
+        "assembly_input_reads": ["/reads/test.fastq"],
+        "assembly_threads": 4,
+    }
+
+
 def _persist_parameter_attempt(
     state: dict,
     *,
@@ -164,26 +249,30 @@ def _persist_parameter_attempt(
     execution_result: dict | None = None,
     execution_stderr: str = "",
 ) -> dict:
-    """Publish a minimal valid recommendation bundle and return its compact cursor."""
+    """Publish a valid approved v3 chain and return its compact attempt cursor."""
+
+    if attempt_id != 0 or task != "recommend_initial" or previous_attempt is not None:
+        raise AssertionError("this fixture publishes only an initial recommendation")
 
     params = dict(recommended_params or {})
     catalog = load_parameter_catalog(method_id)
+    snapshot = _snapshot(method_id)
     common = {
         "state": state,
-        "recommendation_id": attempt_id,
+        "identifier": attempt_id,
         "method_name": method_id,
     }
-    input_profile_ref = write_recommendation_json_artifact(
+    input_snapshot_ref = write_recommendation_json_artifact(
         **common,
-        filename="input_profile.json",
-        payload={"schema_version": 2, "method_id": method_id},
-        artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
+        filename="input_snapshot.json",
+        payload=snapshot.model_dump(mode="json"),
+        artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     )
     basis_ref = write_recommendation_json_artifact(
         **common,
         filename="basis_snapshot.json",
         payload={
-            "schema_version": 2,
+            "schema_version": 3,
             "method_id": catalog.method_id,
             "catalog_snapshot": catalog.model_dump(mode="json"),
             "literature_selection": {},
@@ -195,7 +284,7 @@ def _persist_parameter_attempt(
     model_request_ref = write_recommendation_json_artifact(
         **common,
         filename="model_request.json",
-        payload={"schema_version": 2, "messages": []},
+        payload={"schema_version": 3, "messages": []},
         artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
     )
     model_response_ref = write_recommendation_json_artifact(
@@ -223,33 +312,28 @@ def _persist_parameter_attempt(
         payload={"schema_version": 1, "parsed": True, "error": None},
         artifact_type=ASSEMBLY_PARAMETER_RESPONSE_PARSE,
     )
-    refs = {
-        "input_profile_ref": input_profile_ref.model_dump(mode="json"),
-        "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
-        "model_request_ref": model_request_ref.model_dump(mode="json"),
-        "model_response_ref": model_response_ref.model_dump(mode="json"),
-        "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-        "response_parse_ref": response_parse_ref.model_dump(mode="json"),
-    }
+    manifest = ParameterRecommendationManifestV3(
+        schema_version=3,
+        recommendation_contract="parameter_recommendation_v1",
+        stage="assembly",
+        method_id=method_id,
+        task=task,
+        recommendation_id=attempt_id,
+        status="pending_approval",
+        refs={
+            "input_snapshot_ref": input_snapshot_ref.model_dump(mode="json"),
+            "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
+            "model_request_ref": model_request_ref.model_dump(mode="json"),
+            "model_response_ref": model_response_ref.model_dump(mode="json"),
+            "recommendation_ref": recommendation_ref.model_dump(mode="json"),
+            "response_parse_ref": response_parse_ref.model_dump(mode="json"),
+        },
+        summary={"response_parsed": True},
+    )
     manifest_ref = write_recommendation_json_artifact(
         **common,
         filename="recommendation_manifest.json",
-        payload={
-            "schema_version": 2,
-            "recommendation_contract": "parameter_recommendation_v1",
-            "stage": "assembly",
-            "method_id": method_id,
-            "task": task,
-            "recommendation_id": attempt_id,
-            "status": "approved",
-            "previous_attempt_id": (
-                previous_attempt.get("attempt_id") if previous_attempt else None
-            ),
-            "previous_attempt_seal_hash": (
-                previous_attempt.get("seal_hash") if previous_attempt else None
-            ),
-            "refs": refs,
-        },
+        payload=manifest.model_dump(mode="json"),
         artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
     )
     persisted_request = persist_review_request(
@@ -258,8 +342,10 @@ def _persist_parameter_attempt(
         gate_id="parameter_approval",
         reason="test_parameter_approval",
         payload={
+            "schema_version": 2,
             "attempt_id": attempt_id,
             "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
+            "recommendation_manifest_hash": manifest_ref.sha256,
             "decisions_allowed": ["approve_parameters", "reject_parameters"],
         },
         bindings={"attempt_id": attempt_id, "task": task},
@@ -270,7 +356,15 @@ def _persist_parameter_attempt(
         review_request_id=persisted_request.review_request_id,
         stage="assembly",
         gate_id="parameter_approval",
-        decision={"decision": "approve_parameters", "attempt_id": attempt_id},
+        decision={
+            "schema_version": 2,
+            "decision": "approve_parameters",
+            "attempt_id": attempt_id,
+            "validated_recommendation_manifest_ref": manifest_ref.model_dump(
+                mode="json"
+            ),
+            "validated_recommendation_hash": manifest_ref.sha256,
+        },
         request_ref=persisted_request.request_ref,
         request_hash=persisted_request.request_hash,
         artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
@@ -329,92 +423,154 @@ def _persist_parameter_attempt(
             result=runtime_result,
             error=str(execution_result.get("error", "")),
         )
+    frozen_parameters_ref = None
+    frozen_attempt_ref = None
+    if status != "recommended":
+        resolved = resolve_assembly_parameters(
+            catalog=catalog,
+            snapshot=snapshot,
+            approved_l2=params,
+            l0_executor_values=_l0_executor_values(method_id),
+        )
+        frozen_parameters_ref = write_attempt_json_artifact(
+            state,
+            attempt_id,
+            "frozen_parameters.json",
+            {
+                "schema_version": 3,
+                "stage": "assembly",
+                "attempt_id": attempt_id,
+                "method_id": method_id,
+                "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
+                "approval_decision_ref": approval_ref.model_dump(mode="json"),
+                **parameter_sources_payload(resolved),
+            },
+            artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+            method_name=method_id,
+            scope="attempt",
+        )
+        frozen_attempt_ref = _frozen_attempt_ref(attempt_id)
     return ParameterAttempt(
+        schema_version=3,
         attempt_id=attempt_id,
         method_id=method_id,
         status=status,
         task=task,
-        previous_attempt_id=(
-            previous_attempt.get("attempt_id") if previous_attempt else None
-        ),
         recommendation_manifest_ref=manifest_ref,
         approval_decision_ref=approval_ref,
-        frozen_attempt_ref=(
-            _frozen_attempt_ref(attempt_id) if status != "recommended" else None
-        ),
+        frozen_parameters_ref=frozen_parameters_ref,
+        frozen_attempt_ref=frozen_attempt_ref,
         execution_ref=execution_ref,
-        previous_attempt_seal_hash=(
-            previous_attempt.get("seal_hash") if previous_attempt else None
-        ),
     ).model_dump(mode="json")
 
 
+def _attach_frozen_parameter_sources(
+    state: dict,
+    attempt_value: dict,
+    *,
+    status: str,
+) -> dict:
+    attempt = ParameterAttempt.model_validate(attempt_value)
+    bundle = load_approved_parameter_chain_v3(
+        state,
+        attempt=attempt,
+        expected_stage="assembly",
+        expected_method_id=attempt.method_id,
+    )
+    resolved = resolve_assembly_parameters(
+        catalog=bundle.chain.catalog,
+        snapshot=bundle.chain.input_snapshot,
+        approved_l2=bundle.approved_l2,
+        l0_executor_values=_l0_executor_values(attempt.method_id),
+    )
+    frozen_parameters_ref = write_attempt_json_artifact(
+        state,
+        attempt.attempt_id,
+        "frozen_parameters.json",
+        {
+            "schema_version": 3,
+            "stage": "assembly",
+            "attempt_id": attempt.attempt_id,
+            "method_id": attempt.method_id,
+            "recommendation_manifest_ref": (
+                attempt.recommendation_manifest_ref.model_dump(mode="json")
+            ),
+            "approval_decision_ref": attempt.approval_decision_ref.model_dump(
+                mode="json"
+            ),
+            **parameter_sources_payload(resolved),
+        },
+        artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+        method_name=attempt.method_id,
+    )
+    return ParameterAttempt.model_validate(
+        {
+            **attempt.model_dump(mode="json"),
+            "status": status,
+            "frozen_parameters_ref": frozen_parameters_ref.model_dump(mode="json"),
+            "frozen_attempt_ref": _frozen_attempt_ref(attempt.attempt_id).model_dump(
+                mode="json"
+            ),
+        }
+    ).model_dump(mode="json")
 
 
 def _parameter_response(
-    *,
-    retry_disposition: str | None = None,
     **overrides: int | bool | str,
 ) -> dict:
-    response = {
+    return {
         "parameters": dict(overrides),
         "summary": "Present this parameter recommendation for human review.",
     }
-    if retry_disposition is not None:
-        response["retry_disposition"] = retry_disposition
-    return response
 
 
 def _complete_hifiasm_ont_response(
-    *,
-    retry_disposition: str | None = None,
     **overrides: int | bool | str,
 ) -> dict:
     catalog = load_parameter_catalog("assembly.candidate.hifiasm_ont")
     l2_parameters = {
         parameter
         for parameter, spec in catalog.parameters.items()
-        if spec.level == 2
+        if spec.layers.l2 is not None
     }
     unknown = sorted(set(overrides) - l2_parameters)
     if unknown:
         raise AssertionError(f"test response contains non-L2 ONT parameters: {unknown}")
-    return _parameter_response(
-        retry_disposition=retry_disposition,
-        **overrides,
-    )
-
-
+    return _parameter_response(**overrides)
 
 
 class ParameterCatalogSchemaTests(unittest.TestCase):
     def test_load_hifiasm_ont_catalog(self):
-        catalog = load_parameter_catalog("hifiasm_ont")
+        catalog = load_parameter_catalog("assembly.candidate.hifiasm_ont")
 
-        self.assertEqual(catalog.method_id, "hifiasm_ont")
+        self.assertEqual(catalog.catalog_id, "hifiasm_ont")
+        self.assertEqual(catalog.method_id, "assembly.candidate.hifiasm_ont")
         self.assertEqual(catalog.tool, "hifiasm")
-        self.assertEqual(catalog.parameters["output_prefix"].level, 0)
-        self.assertEqual(catalog.parameters["threads"].level, 0)
-        self.assertEqual(catalog.parameters["input_reads"].level, 0)
-        self.assertEqual(catalog.parameters["ont_mode"].level, 0)
-        self.assertTrue(catalog.parameters["ont_mode"].fixed_value)
-        self.assertEqual(catalog.parameters["hg_size"].level, 1)
-        self.assertEqual(catalog.parameters["hom_cov"].level, 1)
-        self.assertEqual(catalog.parameters["n_hap"].level, 1)
-        self.assertEqual(catalog.parameters["purge_level"].level, 2)
-        self.assertEqual(catalog.parameters["read_length_cutoff"].level, 2)
-        self.assertEqual(catalog.parameters["score_cutoff"].level, 2)
+        for name in ("output_prefix", "threads", "input_reads", "ont_mode"):
+            self.assertIsNotNone(catalog.parameters[name].layers.l0)
+        self.assertTrue(catalog.parameters["ont_mode"].layers.l0.value)
+        self.assertIsNotNone(catalog.parameters["hg_size"].layers.l1)
+        self.assertIsNotNone(catalog.parameters["n_hap"].layers.l0)
+        for name in (
+            "hom_cov",
+            "purge_level",
+            "read_length_cutoff",
+            "score_cutoff",
+        ):
+            self.assertIsNotNone(catalog.parameters[name].layers.l2)
 
     def test_flye_catalog_read_type_values_match_execution_flags(self):
-        catalog = load_parameter_catalog("flye")
+        catalog = load_parameter_catalog("assembly.candidate.flye")
 
-        self.assertEqual(catalog.parameters["read_type"].allowed_values, list(FLYE_READ_TYPE_FLAGS))
+        self.assertEqual(
+            catalog.parameters["read_type"].allowed_values, list(FLYE_READ_TYPE_FLAGS)
+        )
 
     def test_nextdenovo_catalog_keeps_behavior_knobs_in_l2(self):
-        catalog = load_parameter_catalog("nextdenovo")
+        catalog = load_parameter_catalog("assembly.candidate.nextdenovo")
 
-        self.assertEqual(catalog.parameters["read_cutoff"].level, 2)
-        self.assertEqual(catalog.parameters["nextgraph_a"].level, 2)
+        self.assertIsNotNone(catalog.parameters["read_cutoff"].layers.l2)
+        self.assertIsNotNone(catalog.parameters["nextgraph_a"].layers.l2)
 
     def test_catalogs_cover_supported_hifiasm_cli_surface(self):
         expected_keys = {
@@ -449,11 +605,6 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
             "break_low_coverage",
             "break_high_coverage",
             "break_overlap_rate",
-            "primary_mode",
-            "hap1_yak",
-            "hap2_yak",
-            "hap1_read_names",
-            "hap2_read_names",
             "trio_lower_frequency",
             "trio_upper_frequency",
             "trio_unexpected_occurrence",
@@ -462,15 +613,12 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
             "purge_similarity",
             "duplicate_overlap_min_reads",
             "purge_max",
-            "hic_r1",
-            "hic_r2",
             "seed",
             "homology_base_similarity",
             "hic_weight_rounds",
             "hic_perturb_rounds",
             "hic_flip_fraction",
             "hic_misjoin_length",
-            "ul_reads",
             "ul_error_rate",
             "ul_tip_read_count",
             "path_max_drop_ratio",
@@ -488,16 +636,24 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
             "read_length_cutoff",
             "score_cutoff",
         }
-        for method_id in ("hifiasm", "hifiasm_ont"):
+        for method_id in (
+            "assembly.candidate.hifiasm",
+            "assembly.candidate.hifiasm_ont",
+        ):
             catalog = load_parameter_catalog(method_id)
             self.assertTrue(expected_keys <= set(catalog.parameters))
 
-    def test_runtime_hifiasm_help_flags_are_cataloged_when_binary_available(self):
+    def test_cataloged_hifiasm_flags_exist_in_runtime_help_when_binary_available(self):
         binary = _runtime_hifiasm_binary()
         if not binary:
             if os.environ.get("PHASE10_REQUIRE_HIFIASM_RUNTIME") == "1":
-                self.fail("PHASE10_REQUIRE_HIFIASM_RUNTIME=1 requires HIFIASM_BIN or hifiasm on PATH.")
-            self.skipTest("Set HIFIASM_BIN or put hifiasm on PATH to verify runtime help flags.")
+                self.fail(
+                    "PHASE10_REQUIRE_HIFIASM_RUNTIME=1 requires HIFIASM_BIN "
+                    "or hifiasm on PATH."
+                )
+            self.skipTest(
+                "Set HIFIASM_BIN or put hifiasm on PATH to verify runtime help flags."
+            )
 
         version_result = subprocess.run(
             [binary, "--version"],
@@ -507,7 +663,9 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
             check=True,
         )
         runtime_version = version_result.stdout.strip()
-        self.assertGreaterEqual(_parse_semver_prefix(runtime_version), _project_hifiasm_min_version())
+        self.assertGreaterEqual(
+            _parse_semver_prefix(runtime_version), _project_hifiasm_min_version()
+        )
 
         help_result = subprocess.run(
             [binary, "-h"],
@@ -521,14 +679,26 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
         self.assertIn("--rl-cut", help_flags)
         self.assertIn("--sc-cut", help_flags)
 
-        for method_id in ("hifiasm", "hifiasm_ont"):
+        for method_id in (
+            "assembly.candidate.hifiasm",
+            "assembly.candidate.hifiasm_ont",
+        ):
             catalog = load_parameter_catalog(method_id)
-            catalog_flags = {spec.cli for spec in catalog.parameters.values() if spec.cli}
-            missing = sorted(help_flags - catalog_flags)
+            catalog_flags = set()
+            for spec in catalog.parameters.values():
+                application = spec.application
+                flag = getattr(application, "flag", None)
+                if flag:
+                    catalog_flags.add(flag)
+                catalog_flags.update(getattr(application, "flags", {}).values())
+            unsupported = sorted(catalog_flags - help_flags - {"-h", "--version"})
             self.assertEqual(
                 [],
-                missing,
-                f"{method_id} catalog is missing flags advertised by {binary} {runtime_version}: {missing}",
+                unsupported,
+                (
+                    f"{method_id} catalog has flags not advertised by "
+                    f"{binary} {runtime_version}: {unsupported}"
+                ),
             )
 
     def test_load_catalog_is_cwd_independent(self):
@@ -540,21 +710,28 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertEqual(catalog.method_id, "hifiasm_ont")
+        self.assertEqual(catalog.catalog_id, "hifiasm_ont")
+        self.assertEqual(catalog.method_id, "assembly.candidate.hifiasm_ont")
 
     def test_registry_method_catalog_id_comes_from_descriptor(self):
-        self.assertEqual(load_parameter_catalog("assembly.candidate.hifiasm").method_id, "hifiasm")
-        self.assertEqual(load_parameter_catalog("assembly.candidate.hifiasm_ont").method_id, "hifiasm_ont")
+        self.assertEqual(
+            load_parameter_catalog("assembly.candidate.hifiasm").catalog_id,
+            "hifiasm",
+        )
+        self.assertEqual(
+            load_parameter_catalog("assembly.candidate.hifiasm_ont").catalog_id,
+            "hifiasm_ont",
+        )
 
     def test_missing_catalog_raises(self):
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaisesRegex(ValueError, "Unknown method descriptor"):
             load_parameter_catalog("missing_method")
 
-    def test_invalid_level_is_rejected(self):
+    def test_legacy_level_and_cli_fields_are_rejected(self):
         data = {
-            "method_id": "bad",
+            "catalog_id": "bad",
+            "method_id": "assembly.candidate.bad",
             "tool": "hifiasm",
-            "read_type": "ont",
             "parameters": {
                 "bad_param": {
                     "cli": "--bad",
@@ -567,18 +744,21 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             MethodParameterCatalog.model_validate(data)
 
-    def test_unknown_schema_field_is_rejected(self):
+    def test_legacy_source_priority_field_is_rejected(self):
         data = {
-            "method_id": "bad",
+            "catalog_id": "bad",
+            "method_id": "assembly.candidate.bad",
             "tool": "hifiasm",
-            "read_type": "ont",
             "parameters": {
                 "bad_param": {
-                    "cli": "--bad",
-                    "level": 2,
-                    "source": "parameter_recommender",
                     "value_type": "int",
-                    "visible_to_llm": True,
+                    "application": {
+                        "kind": "cli_option",
+                        "flag": "--bad",
+                        "order": 1,
+                    },
+                    "layers": {"l2": {"adjustable": True}},
+                    "source_priority": ["genome_survey.estimates.genome_size"],
                 }
             },
         }
@@ -587,260 +767,213 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
 
     def test_loader_rejects_method_id_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir) / "methods"
-            method_dir = root / "hifiasm"
-            method_dir.mkdir(parents=True)
-            (method_dir / "params.yaml").write_text(
-                "method_id: wrong\n"
+            path = Path(tmpdir) / "params.yaml"
+            path.write_text(
+                "catalog_id: hifiasm\n"
+                "method_id: assembly.candidate.wrong\n"
                 "tool: hifiasm\n"
-                "read_type: hifi\n"
                 "parameters: {}\n",
                 encoding="utf-8",
             )
-            with patch("app.stages.assembly.parameters.catalog.CATALOG_ROOT", root):
+            with (
+                patch(
+                    "app.domains.parameter_recommendation.catalog.parameter_catalog_path",
+                    return_value=path,
+                ),
+                patch(
+                    "app.domains.parameter_recommendation.catalog.catalog_id_for_method",
+                    return_value="hifiasm",
+                ),
+            ):
                 with self.assertRaises(ValueError):
-                    load_parameter_catalog("hifiasm")
+                    load_parameter_catalog("assembly.candidate.hifiasm")
 
 
-class ParameterProfileTests(unittest.TestCase):
-    def _profile_state(self):
-        state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-        state["shared_parameters"] = {
+class CanonicalFactsAndContextTests(unittest.TestCase):
+    def _inputs(self):
+        shared = {
             "organism": "Example species",
             "taxon_id": 12345,
             "clade": "vertebrate",
             "ploidy": 2,
-            "target_level": "draft",
         }
-        state["stage_outputs"] = {
-            "read_qc": {
-                "summary": {
-                    "num_seqs": 100,
-                    "total_bases": 5000000000,
-                    "n50": 30000,
-                    "avg_len": 25000,
-                    "max_len": 90000,
-                    "q20_percent": 91,
-                    "avg_qual": 22.5,
-                }
-            },
-            "genome_survey": {
-                "confidence": "high",
-                "estimates": {
-                    "genome_size": 1200000000,
-                    "heterozygosity": 0.012,
-                    "repeat_fraction": 0.42,
-                },
-                "measured_estimates": {
-                    "genome_size": 1000000000,
-                    "heterozygosity": 0.012,
-                    "repeat_fraction": 0.42,
-                },
-                "provided_overrides": {"genome_size": 1200000000},
-                "estimate_sources": {
-                    "genome_size": "provided",
-                    "heterozygosity": "survey",
-                    "repeat_fraction": "survey",
-                },
-                "estimate_source_paths": {"genome_size": "shared_parameters.estimated_genome_size"},
-            },
-            "assembly_review": {
-                "metrics": {
-                    "assembly_size": 1350000000,
-                    "assembly_size_ratio": 1.35,
-                    "contig_n50": 12000000,
-                    "busco_complete": 0.94,
-                    "busco_duplicate": 0.21,
-                    "quast_metrics": {"misassemblies": 2},
-                }
-            },
+        read_qc = {
+            "summary": {
+                "num_seqs": 100,
+                "total_bases": 5_000_000_000,
+                "n50": 30_000,
+                "avg_len": 25_000,
+                "max_len": 90_000,
+                "q20_percent": 91,
+                "avg_qual": 22.5,
+            }
         }
-        assembly_out = {
-            "assembly_route": "ont",
-            "input_ref": "reads.fastq",
-            "input_profile": {
-                "has_hifi": False,
-                "has_ont": True,
-                "target_level": "draft",
-                "recommended_route": "ont",
+        genome_survey = {
+            "confidence": "high",
+            "estimates": {
+                "genome_size": 1_200_000_000,
+                "heterozygosity": 0.012,
+                "repeat_fraction": 0.42,
             },
+            "measured_estimates": {"genome_size": 1_000_000_000},
+            "provided_overrides": {"genome_size": 1_200_000_000},
+            "estimate_sources": {"genome_size": "provided"},
         }
-        previous_attempt = {
-            "attempt_id": 0,
-            "method_id": "hifiasm_ont",
-            "parameters": {"purge_level": 1},
-            "argv": ["hifiasm", "--ont", "-l", "1", "reads.fastq"],
-            "selected_case_ids": ["case_a"],
-            "execution_result": {"return_code": 1},
-            "failure_class": "bad_parameter",
-            "stderr_tail": "invalid value",
-            "stdout_tail": "hifiasm started",
-        }
-        return state, assembly_out, previous_attempt
+        return shared, read_qc, genome_survey
 
-    def test_full_profile_contains_audit_sections(self):
-        state, assembly_out, previous_attempt = self._profile_state()
+    def test_canonical_facts_preserve_values_units_and_origins(self):
+        shared, read_qc, genome_survey = self._inputs()
 
-        full_profile = build_full_parameter_profile(
-            state,
-            assembly_out=assembly_out,
-            previous_attempt=previous_attempt,
+        facts = build_canonical_facts(
+            shared_parameters=shared,
+            read_qc_output=read_qc,
+            genome_survey_result=genome_survey,
+            asset_flags={"has_hifi": False, "has_ont": True},
         )
 
-        self.assertEqual(set(full_profile), {"sample", "assets", "read_qc", "genome_survey", "previous_attempt", "assembly_review"})
-        self.assertEqual(full_profile["sample"]["organism"], "Example species")
-        self.assertEqual(full_profile["assets"]["assembly_route"], "ont")
-        self.assertEqual(full_profile["assets"]["read_type"], "ont")
-        self.assertEqual(full_profile["assets"]["input_files"], ["reads.fastq"])
-        self.assertNotIn("has_ultra_long", full_profile["assets"])
-        self.assertNotIn("has_trio", full_profile["assets"])
-        self.assertEqual(full_profile["read_qc"]["read_n50"], 30000)
-        self.assertEqual(full_profile["read_qc"]["read_count"], 100)
-        self.assertEqual(full_profile["read_qc"]["read_mean"], 25000)
-        self.assertEqual(full_profile["read_qc"]["longest_read"], 90000)
-        self.assertEqual(full_profile["read_qc"]["q20_fraction"], 0.91)
-        self.assertEqual(full_profile["read_qc"]["mean_quality"], 22.5)
-        self.assertAlmostEqual(full_profile["read_qc"]["raw_coverage"], 5000000000 / 1200000000)
+        self.assertEqual(facts.species.scientific_name, "Example species")
+        self.assertEqual(facts.species.taxon_id, "12345")
+        self.assertEqual(facts.species.ploidy.value, 2)
+        self.assertEqual(facts.reads.read_n50.value, 30_000)
+        self.assertEqual(facts.reads.q20_fraction.value, 0.91)
+        self.assertEqual(facts.genome.effective_genome_size.value, 1_200_000_000)
+        self.assertEqual(facts.genome.effective_genome_size.unit, "bp")
+        self.assertEqual(facts.genome.effective_genome_size.origin.kind, "provided")
+        self.assertAlmostEqual(
+            facts.genome.provided_vs_measured_relative_change.value,
+            0.2,
+        )
+        self.assertAlmostEqual(
+            facts.sequencing.raw_coverage.value,
+            5_000_000_000 / 1_200_000_000,
+        )
+        self.assertEqual(facts.sequencing.raw_coverage.origin.kind, "derived")
         self.assertEqual(
-            full_profile["read_qc"]["raw_coverage_basis"],
-            {
-                "numerator_bases": 5000000000,
-                "numerator_source_path": "read_qc.summary.total_bases",
-                "denominator_bases": 1200000000,
-                "denominator_source": "provided",
-                "denominator_source_path": "shared_parameters.estimated_genome_size",
-            },
+            facts.sequencing.raw_coverage.origin.producer,
+            "parameter_recommendation",
         )
-        self.assertEqual(full_profile["genome_survey"]["effective_genome_size"], 1200000000)
-        self.assertEqual(full_profile["genome_survey"]["measured_genome_size"], 1000000000)
-        self.assertEqual(full_profile["genome_survey"]["provided_genome_size"], 1200000000)
-        self.assertEqual(full_profile["genome_survey"]["genome_size_source"], "provided")
-        self.assertAlmostEqual(full_profile["genome_survey"]["genome_size_delta_ratio"], 0.2)
-        self.assertEqual(full_profile["genome_survey"]["heterozygosity"], 0.012)
-        self.assertEqual(full_profile["genome_survey"]["repeat_fraction"], 0.42)
-        self.assertEqual(full_profile["previous_attempt"]["stderr_tail"], "invalid value")
-        self.assertEqual(full_profile["assembly_review"]["busco_duplicate"], 0.21)
+        self.assertTrue(facts.asset_presence.has_ont)
 
     def test_survey_measurement_drives_coverage_without_provided_override(self):
-        state, assembly_out, previous_attempt = self._profile_state()
-        survey = state["stage_outputs"]["genome_survey"]
-        survey["estimates"]["genome_size"] = 1000000000
-        survey["provided_overrides"] = {}
-        survey["estimate_sources"]["genome_size"] = "survey"
-        survey["estimate_source_paths"] = {}
+        shared, read_qc, genome_survey = self._inputs()
+        genome_survey["estimates"]["genome_size"] = 1_000_000_000
+        genome_survey["provided_overrides"] = {}
+        genome_survey["estimate_sources"]["genome_size"] = "survey"
 
-        full_profile = build_full_parameter_profile(
-            state,
-            assembly_out=assembly_out,
-            previous_attempt=previous_attempt,
+        facts = build_canonical_facts(
+            shared_parameters=shared,
+            read_qc_output=read_qc,
+            genome_survey_result=genome_survey,
         )
 
-        self.assertEqual(full_profile["read_qc"]["raw_coverage"], 5.0)
-        self.assertEqual(
-            full_profile["read_qc"]["raw_coverage_basis"]["denominator_source_path"],
-            "genome_survey.measured_estimates.genome_size",
-        )
-        self.assertNotIn("provided_genome_size", full_profile["genome_survey"])
-        self.assertNotIn("genome_size_delta_ratio", full_profile["genome_survey"])
+        self.assertEqual(facts.sequencing.raw_coverage.value, 5.0)
+        self.assertEqual(facts.genome.effective_genome_size.origin.kind, "measured")
+        self.assertIsNone(facts.genome.provided_genome_size)
+        self.assertIsNone(facts.genome.provided_vs_measured_relative_change)
 
-    def test_missing_genome_size_does_not_fabricate_coverage(self):
-        state, assembly_out, previous_attempt = self._profile_state()
-        state["stage_outputs"]["genome_survey"] = {
-            "estimates": {"heterozygosity": 0.01, "repeat_fraction": 0.3},
-            "measured_estimates": {"heterozygosity": 0.01, "repeat_fraction": 0.3},
-            "estimate_sources": {"heterozygosity": "survey", "repeat_fraction": "survey"},
+    def test_missing_genome_size_does_not_recover_legacy_coverage(self):
+        shared, read_qc, _genome_survey = self._inputs()
+        read_qc["summary"]["effective_coverage_1kb"] = 99
+
+        facts = build_canonical_facts(
+            shared_parameters=shared,
+            read_qc_output=read_qc,
+            genome_survey_result={
+                "estimates": {"heterozygosity": 0.01, "repeat_fraction": 0.3},
+                "measured_estimates": {},
+                "provided_overrides": {},
+                "estimate_sources": {},
+            },
+        )
+
+        self.assertIsNone(facts.genome.effective_genome_size)
+        self.assertIsNone(facts.sequencing.raw_coverage)
+
+    def test_context_uses_selection_and_explicit_stage_fields(self):
+        assembly_out = {
+            "assembly_selection": {
+                "read_type": "ont_hq",
+                "primary_method": "assembly.candidate.flye",
+                "source": "run_config",
+                "rationale": "test",
+            },
+            "assembly_route": "cyclone",
+            "target_level": "near_t2t",
+            "input_profile": {
+                "recommended_route": "hifi",
+                "read_type": "hifi",
+                "target_level": "draft",
+            },
         }
-        state["stage_outputs"]["read_qc"]["summary"]["effective_coverage_1kb"] = 99
 
-        full_profile = build_full_parameter_profile(
-            state,
+        context = build_assembly_recommendation_context(
+            {},
             assembly_out=assembly_out,
-            previous_attempt=previous_attempt,
         )
 
-        self.assertNotIn("raw_coverage", full_profile["read_qc"])
-        self.assertNotIn("effective_coverage_1kb", full_profile["read_qc"])
+        self.assertEqual(context.assembly_route, "cyclone")
+        self.assertEqual(context.read_type, "ont_hq")
+        self.assertEqual(context.target_level, "near_t2t")
 
-    def test_cyclone_route_keeps_route_separate_from_case_read_type(self):
-        state, assembly_out, previous_attempt = self._profile_state()
-        assembly_out["assembly_route"] = "cyclone"
-        assembly_out["read_type"] = "nano-raw"
-        assembly_out["input_profile"]["recommended_route"] = "cyclone"
+    def test_manifest_rejects_legacy_input_profile_ref(self):
+        ref = ArtifactRef(
+            artifact_id=f"art_{'a' * 32}",
+            path_ref="artifacts/assembly/parameter_recommendations/000/a.json",
+            sha256="a" * 64,
+            size_bytes=1,
+            artifact_type="assembly.parameter.test",
+        ).model_dump(mode="json")
+        refs = {
+            "input_snapshot_ref": ref,
+            "basis_snapshot_ref": ref,
+            "model_request_ref": ref,
+            "model_response_ref": ref,
+            "response_parse_ref": ref,
+            "recommendation_ref": ref,
+        }
+        refs["input_profile_ref"] = refs.pop("input_snapshot_ref")
 
-        full_profile = build_full_parameter_profile(
-            state,
-            assembly_out=assembly_out,
-            previous_attempt=previous_attempt,
-        )
-        prompt_profile = build_prompt_profile(full_profile, "recommend_initial")
+        with self.assertRaises(ValidationError):
+            ParameterRecommendationManifestV3.model_validate(
+                {
+                    "schema_version": 3,
+                    "recommendation_contract": "parameter_recommendation_v1",
+                    "stage": "assembly",
+                    "method_id": "assembly.candidate.hifiasm_ont",
+                    "task": "recommend_initial",
+                    "recommendation_id": 0,
+                    "status": "pending_approval",
+                    "refs": refs,
+                }
+            )
 
-        self.assertEqual(full_profile["assets"]["assembly_route"], "cyclone")
-        self.assertEqual(full_profile["assets"]["read_type"], "ont")
-        self.assertEqual(prompt_profile["assets"]["assembly_route"], "cyclone")
-        self.assertEqual(prompt_profile["assets"]["read_type"], "ont")
-
-    def test_hifi_route_maps_to_parameter_case_read_type(self):
-        state, assembly_out, previous_attempt = self._profile_state()
-        assembly_out["assembly_route"] = "hifi"
-        assembly_out["input_profile"]["recommended_route"] = "hifi"
-
-        full_profile = build_full_parameter_profile(
-            state,
-            assembly_out=assembly_out,
-            previous_attempt=previous_attempt,
-        )
-
-        self.assertEqual(full_profile["assets"]["assembly_route"], "hifi")
-        self.assertEqual(full_profile["assets"]["read_type"], "hifi")
-
-    def test_prompt_profiles_are_task_scoped(self):
-        state, assembly_out, previous_attempt = self._profile_state()
-        full_profile = build_full_parameter_profile(state, assembly_out=assembly_out, previous_attempt=previous_attempt)
-
-        initial = build_prompt_profile(full_profile, "recommend_initial")
-        self.assertIn("read_qc", initial)
-        self.assertIn("genome_survey", initial)
-        self.assertNotIn("previous_attempt", initial)
-        self.assertNotIn("input_files", initial["assets"])
-        self.assertNotIn("has_ultra_long", initial["assets"])
-        self.assertNotIn("has_trio", initial["assets"])
-
-        execution_repair = build_prompt_profile(full_profile, "retry_after_execution_failure")
-        self.assertNotIn("stderr_tail", execution_repair["previous_attempt"])
-        self.assertNotIn("stdout_tail", execution_repair["previous_attempt"])
-        self.assertNotIn("read_qc", execution_repair)
-        self.assertNotIn("assembly_review", execution_repair)
-
-        quality_replan = build_prompt_profile(full_profile, "retry_after_review_failure")
-        self.assertEqual(
-            quality_replan["previous_attempt"]["parameters"],
-            {"purge_level": 1},
-        )
-        self.assertEqual(quality_replan["assembly_review"]["assembly_size_ratio"], 1.35)
-        self.assertNotIn("stderr_tail", quality_replan["previous_attempt"])
 
 class CommandBuilderTests(unittest.TestCase):
     def setUp(self):
-        self.catalog = load_parameter_catalog("hifiasm_ont")
+        self.method_id = "assembly.candidate.hifiasm_ont"
+        self.catalog = load_parameter_catalog(self.method_id)
+        self.snapshot = _snapshot(self.method_id, genome_size=1_000_000_000)
 
-    def test_build_hifiasm_ont_command_merges_sources(self):
-        argv = build_command(
-            method_id="hifiasm_ont",
+    def test_hifiasm_ont_resolver_and_renderer_preserve_source_ownership(self):
+        resolved = resolve_assembly_parameters(
             catalog=self.catalog,
-            parameter_sources={
-                "l0_fixed": {
-                    "output_prefix": "work/out/asm",
-                    "threads": 8,
-                    "input_reads": ["reads1.fq", "reads2.fq"],
-                    "ont_mode": True,
-                },
-                "l1_readonly": {"hg_size": "1g", "hom_cov": 36},
-                "l2_recommended": {"purge_level": 1, "read_length_cutoff": 3000, "score_cutoff": 10},
+            snapshot=self.snapshot,
+            approved_l2={
+                "hom_cov": 36,
+                "purge_level": 1,
+                "read_length_cutoff": 3000,
+                "score_cutoff": 10,
+            },
+            l0_executor_values={
+                "assembly_output_prefix": "work/out/asm",
+                "assembly_threads": 8,
+                "assembly_input_reads": ["reads1.fq", "reads2.fq"],
             },
         )
+        argv = render_assembly_cli(self.catalog, resolved)
 
         self.assertEqual(argv[0], "hifiasm")
-        self.assertLess(argv.index("--ont"), argv.index("-o"))
+        self.assertLess(argv.index("--ont"), argv.index("reads1.fq"))
         self.assertEqual(argv[argv.index("-o") + 1], "work/out/asm")
         self.assertEqual(argv[argv.index("-t") + 1], "8")
         self.assertEqual(argv[argv.index("--hg-size") + 1], "1g")
@@ -848,201 +981,165 @@ class CommandBuilderTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-l") + 1], "1")
         self.assertEqual(argv[argv.index("--rl-cut") + 1], "3000")
         self.assertEqual(argv[-2:], ["reads1.fq", "reads2.fq"])
-
-    def test_build_command_rejects_unknown_parameter(self):
-        with self.assertRaises(ParameterCommandError):
-            build_command(
-                method_id="hifiasm_ont",
-                catalog=self.catalog,
-                parameter_sources={"l0_fixed": {"not_real": 1}, "l1_readonly": {}, "l2_recommended": {}},
-            )
-
-    def test_build_command_rejects_wrong_level(self):
-        with self.assertRaises(ParameterCommandError):
-            build_command(
-                method_id="hifiasm_ont",
-                catalog=self.catalog,
-                parameter_sources={"l0_fixed": {}, "l1_readonly": {}, "l2_recommended": {"hg_size": "1g"}},
-            )
-
-    def test_build_command_rejects_unrenderable_l2_without_substituting_default(self):
-        with self.assertRaisesRegex(ParameterCommandError, "cannot be rendered as float"):
-            build_command(
-                method_id="hifiasm_ont",
-                catalog=self.catalog,
-                parameter_sources={
-                    "l0_fixed": {"output_prefix": "asm", "threads": 1, "input_reads": ["reads.fq"], "ont_mode": True},
-                    "l1_readonly": {},
-                    "l2_recommended": {"purge_similarity": "default"},
-                },
-            )
-
-    def test_build_parameter_sources_derives_l0_l1_and_l2(self):
-        state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-        assembly_out = {
-            "hifiasm_ont_parameters": {"read_type": "ont", "threads": 4},
-            "resolved_genome_size": {
-                "value_bp": 1_000_000_000,
-                "source": "provided",
-                "source_path": "shared_parameters.estimated_genome_size",
-            },
-        }
-
-        sources = build_parameter_sources(
-            method_id="hifiasm_ont",
-            catalog=self.catalog,
-            state=state,
-            assembly_out=assembly_out,
-            attempt_id=0,
-            recommended_params={"purge_level": 1},
-            execution_context={"output_prefix": "asm", "input_reads": ["reads.fq"]},
+        self.assertEqual(resolved.l1_facts["hg_size"], "1g")
+        self.assertEqual(resolved.l2_approved["purge_level"], 1)
+        self.assertEqual(
+            resolved.effective_source_by_parameter["purge_level"],
+            "l2",
         )
 
-        self.assertEqual(sources["l0_fixed"]["output_prefix"], "asm")
-        self.assertEqual(sources["l0_fixed"]["threads"], 4)
-        self.assertTrue(sources["l0_fixed"]["ont_mode"])
-        self.assertEqual(sources["l1_readonly"]["hg_size"], "1g")
-        self.assertNotIn("hom_cov", sources["l1_readonly"])
-        self.assertEqual(sources["l2_recommended"], {"purge_level": 1})
+    def test_resolver_rejects_unknown_approved_parameter(self):
+        with self.assertRaisesRegex(ParameterCommandError, "not cataloged as L2"):
+            resolve_assembly_parameters(
+                catalog=self.catalog,
+                snapshot=self.snapshot,
+                approved_l2={"not_real": 1},
+                l0_executor_values=_l0_executor_values(self.method_id),
+            )
 
-    def test_build_parameter_sources_injects_l0_catalog_defaults_into_hifiasm_argv(self):
-        for method_id, param_key in (
-            ("assembly.candidate.hifiasm", "hifiasm_parameters"),
-            ("assembly.candidate.hifiasm_ont", "hifiasm_ont_parameters"),
+    def test_resolver_rejects_l2_override_of_l1_parameter(self):
+        with self.assertRaisesRegex(ParameterCommandError, "not cataloged as L2"):
+            resolve_assembly_parameters(
+                catalog=self.catalog,
+                snapshot=self.snapshot,
+                approved_l2={"hg_size": "1g"},
+                l0_executor_values=_l0_executor_values(self.method_id),
+            )
+
+    def test_resolver_rejects_unrenderable_l2_without_substituting_default(self):
+        with self.assertRaisesRegex(
+            ParameterCommandError, "cannot be rendered as float"
+        ):
+            resolve_assembly_parameters(
+                catalog=self.catalog,
+                snapshot=self.snapshot,
+                approved_l2={"purge_similarity": "default"},
+                l0_executor_values=_l0_executor_values(self.method_id),
+            )
+
+    def test_parameter_sources_payload_contains_all_six_views(self):
+        resolved = resolve_assembly_parameters(
+            catalog=self.catalog,
+            snapshot=self.snapshot,
+            approved_l2={"purge_level": 1},
+            l0_executor_values={
+                "assembly_output_prefix": "asm",
+                "assembly_input_reads": ["reads.fq"],
+                "assembly_threads": 4,
+            },
+        )
+        sources = parameter_sources_payload(resolved)
+
+        self.assertEqual(
+            set(sources),
+            {
+                "l0_executor",
+                "l1_facts",
+                "l2_approved",
+                "effective_parameters",
+                "effective_source_by_parameter",
+                "applications",
+            },
+        )
+        self.assertEqual(sources["l0_executor"]["output_prefix"], "asm")
+        self.assertEqual(sources["l1_facts"]["hg_size"], "1g")
+        self.assertEqual(sources["l2_approved"], {"purge_level": 1})
+
+    def test_resolver_materializes_hifiasm_thread_default(self):
+        for method_id in (
+            "assembly.candidate.hifiasm",
+            "assembly.candidate.hifiasm_ont",
         ):
             with self.subTest(method_id=method_id):
                 catalog = load_parameter_catalog(method_id)
-                state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-                assembly_out = {param_key: {"read_type": "ont" if method_id.endswith("hifiasm_ont") else "hifi"}}
-
-                sources = build_parameter_sources(
-                    method_id=method_id,
+                resolved = resolve_assembly_parameters(
                     catalog=catalog,
-                    state=state,
-                    assembly_out=assembly_out,
-                    attempt_id=0,
-                    recommended_params={},
-                    execution_context={"output_prefix": "/tmp/hifiasm", "input_reads": ["/tmp/r.fq"]},
+                    snapshot=_snapshot(method_id),
+                    approved_l2={},
+                    l0_executor_values={
+                        "assembly_output_prefix": "/tmp/hifiasm",
+                        "assembly_input_reads": ["/tmp/r.fq"],
+                    },
                 )
-                argv = build_command(method_id=method_id, catalog=catalog, parameter_sources=sources)
+                argv = render_assembly_cli(catalog, resolved)
 
-                self.assertEqual(sources["l0_fixed"]["threads"], 32)
+                self.assertEqual(resolved.l0_executor["threads"], 32)
                 self.assertEqual(argv[argv.index("-t") + 1], "32")
 
-
-    def test_format_hifiasm_hg_size_converts_bp_and_passthrough(self):
+    def test_hifiasm_genome_size_fact_transform_is_rendered(self):
         cases = [
             (500_000_000, "500m"),
             (3_100_000_000, "3.1g"),
             (2_000_000, "2m"),
-            (12_345, "12.345k"),
+            (12_345, "12.3k"),
             (500, "0.5k"),
-            ("500m", "500m"),
-            ("1g", "1g"),
-            ("1G", "1g"),
-            ("0.5g", "0.5g"),
-            ("500000000", "500m"),
         ]
-        for raw, expected in cases:
-            with self.subTest(raw=raw):
-                self.assertEqual(format_hifiasm_hg_size(raw), expected)
-
-    def test_format_hifiasm_hg_size_rejects_invalid(self):
-        for raw in (0, -1, "0", "abc", "500bp", True, None, ""):
-            with self.subTest(raw=raw):
-                with self.assertRaises(ParameterCommandError):
-                    format_hifiasm_hg_size(raw)
-
-    def test_build_command_formats_bare_bp_hg_size(self):
-        argv = build_command(
-            method_id="hifiasm_ont",
-            catalog=self.catalog,
-            parameter_sources={
-                "l0_fixed": {
-                    "output_prefix": "asm",
-                    "threads": 4,
-                    "input_reads": ["reads.fq"],
-                    "ont_mode": True,
-                },
-                "l1_readonly": {"hg_size": 500_000_000},
-                "l2_recommended": {},
-            },
-        )
-        self.assertEqual(argv[argv.index("--hg-size") + 1], "500m")
-
-    def test_build_parameter_sources_formats_survey_genome_size_prior_bp(self):
-        state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-        state["stage_outputs"] = {
-            "genome_survey": {
-                "genome_size_prior": 500_000_000,
-                "estimates": {"hom_cov": 30},
-            }
-        }
-        assembly_out = {
-            "hifiasm_ont_parameters": {"read_type": "ont", "threads": 4},
-            "resolved_genome_size": {
-                "value_bp": 500_000_000,
-                "source": "survey",
-                "source_path": "genome_survey.genome_size_prior",
-            },
-        }
-
-        sources = build_parameter_sources(
-            method_id="hifiasm_ont",
-            catalog=self.catalog,
-            state=state,
-            assembly_out=assembly_out,
-            attempt_id=0,
-            recommended_params={},
-            execution_context={"output_prefix": "asm", "input_reads": ["reads.fq"]},
-        )
-        argv = build_command(
-            method_id="hifiasm_ont",
-            catalog=self.catalog,
-            parameter_sources=sources,
-        )
-
-        self.assertEqual(sources["l1_readonly"]["hg_size"], "500m")
-        self.assertEqual(argv[argv.index("--hg-size") + 1], "500m")
-
-    def test_build_parameter_sources_formats_canonical_provided_genome_size_bp(self):
-        for method_id, param_key in (
-            ("hifiasm", "hifiasm_parameters"),
-            ("hifiasm_ont", "hifiasm_ont_parameters"),
-        ):
-            with self.subTest(method_id=method_id):
-                catalog = load_parameter_catalog(method_id)
-                state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-                assembly_out = {
-                    param_key: {
-                        "read_type": "ont" if method_id.endswith("ont") else "hifi",
-                        "threads": 8,
-                    },
-                    "resolved_genome_size": {
-                        "value_bp": 3_100_000_000,
-                        "source": "provided",
-                        "source_path": "shared_parameters.estimated_genome_size",
-                    },
-                }
-                sources = build_parameter_sources(
-                    method_id=method_id,
-                    catalog=catalog,
-                    state=state,
-                    assembly_out=assembly_out,
-                    attempt_id=0,
-                    recommended_params={},
-                    execution_context={"output_prefix": "asm", "input_reads": ["reads.fq"]},
+        for genome_size, expected in cases:
+            with self.subTest(genome_size=genome_size):
+                resolved = resolve_assembly_parameters(
+                    catalog=self.catalog,
+                    snapshot=_snapshot(self.method_id, genome_size=genome_size),
+                    approved_l2={},
+                    l0_executor_values=_l0_executor_values(self.method_id),
                 )
-                self.assertEqual(sources["l1_readonly"]["hg_size"], "3.1g")
+                argv = render_assembly_cli(self.catalog, resolved)
+
+                self.assertEqual(resolved.l1_facts["hg_size"], expected)
+                self.assertEqual(argv[argv.index("--hg-size") + 1], expected)
+
+    def test_nextdenovo_config_renderer_uses_effective_values(self):
+        method_id = "assembly.candidate.nextdenovo"
+        catalog = load_parameter_catalog(method_id)
+        resolved = resolve_assembly_parameters(
+            catalog=catalog,
+            snapshot=_snapshot(method_id),
+            approved_l2={"read_cutoff": 7777, "nextgraph_a": 2},
+            l0_executor_values=_l0_executor_values(method_id),
+        )
+
+        rendered = render_assembly_config(catalog, resolved)
+
+        self.assertEqual(rendered["read_cutoff"], 7777)
+        self.assertEqual(rendered["nextgraph_a"], 2)
+
+    def test_quantity_facts_reject_legacy_string_and_boolean_values(self):
+        for raw in ("500m", True, float("nan"), float("inf")):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValidationError):
+                    QuantityFact.model_validate(
+                        {
+                            "value": raw,
+                            "unit": "bp",
+                            "origin": {
+                                "kind": "provided",
+                                "producer": "run_config",
+                            },
+                        }
+                    )
 
     def test_all_catalog_source_paths_match_the_static_contract(self):
         lint_parameter_catalogs()
 
-    def test_catalog_source_path_typo_fails_closed(self):
-        catalog = self.catalog.model_copy(deep=True)
-        catalog.parameters["hg_size"].source_priority = ["genome_survey.estimates.genmoe_size"]
-        with self.assertRaisesRegex(ValueError, "invalid source_priority"):
-            validate_source_path_contract(catalog)
+    def test_catalog_fact_key_typo_fails_closed(self):
+        payload = {
+            "catalog_id": "bad",
+            "method_id": "assembly.candidate.bad",
+            "tool": "bad",
+            "parameters": {
+                "genome_size": {
+                    "value_type": "int",
+                    "application": {
+                        "kind": "cli_option",
+                        "flag": "--genome-size",
+                        "order": 1,
+                    },
+                    "layers": {"l1": {"fact": "genome_survey.estimates.genmoe_size"}},
+                }
+            },
+        }
+
+        with self.assertRaises(ValidationError):
+            MethodParameterCatalog.model_validate(payload)
 
 
 class ParameterRecommendationNodeTests(unittest.TestCase):
@@ -1068,28 +1165,74 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 decision="approve_parameters",
                 metadata={
                     key: interrupt.get(key)
-                    for key in ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
+                    for key in (
+                        "attempt_id",
+                        "task",
+                        "previous_attempt_id",
+                        "recommendation_hash",
+                    )
                 },
             ),
         )
         return {**blocked, **update}
 
-
     def _state(self, tmpdir: str):
         state = _v2_state(tmpdir)
-        state["shared_parameters"] = {"organism": "Example species", "target_level": "draft"}
+        state["shared_parameters"] = {
+            "organism": "Example species",
+            "target_level": "draft",
+        }
+        read_qc_summary = {
+            "n50": 30_000,
+            "total_bases": 42_000_000_000,
+        }
+        genome_survey_result = {
+            "estimates": {"genome_size": 1_000_000_000, "heterozygosity": 0.01},
+            "estimate_sources": {"genome_size": "survey"},
+        }
+        read_qc_ref = publish_parameter_json(
+            state,
+            stage="read_qc",
+            scope="recommendation",
+            identifier=0,
+            filename="summary.json",
+            payload={"schema_version": 2, **read_qc_summary},
+            artifact_type="read_qc.summary",
+            method_name="read_qc.test_fixture",
+        )
+        genome_survey_ref = publish_parameter_json(
+            state,
+            stage="genome_survey",
+            scope="recommendation",
+            identifier=0,
+            filename="result.json",
+            payload={"schema_version": 2, **genome_survey_result},
+            artifact_type="genome_survey.result",
+            method_name="genome_survey.test_fixture",
+        )
         state["stage_outputs"] = {
-            "read_qc": {"summary": {"n50": 30000, "effective_coverage_5kb": 42}},
-            "genome_survey": {"estimates": {"genome_size": 1000000000, "heterozygosity": "medium"}},
+            "read_qc": {
+                "summary": read_qc_summary,
+                "summary_artifact_ref": read_qc_ref.model_dump(mode="json"),
+            },
+            "genome_survey": {
+                **genome_survey_result,
+                "result_artifact_ref": genome_survey_ref.model_dump(mode="json"),
+            },
             "assembly": {
                 "status": "selected",
                 "execution_mode": "local",
                 "primary_method": "assembly.candidate.hifiasm_ont",
                 "selected_route": "ont",
                 "assembly_route": "ont",
+                "target_level": "draft",
                 "input_ref": "reads.fastq",
                 "input_type": "clean_long_reads",
-                "input_profile": {"recommended_route": "ont", "has_ont": True, "has_hifi": False},
+                "input_profile": {
+                    "recommended_route": "ont",
+                    "has_ont": True,
+                    "has_hifi": False,
+                },
                 "assembly_selection": {
                     "read_type": "ont_raw",
                     "primary_method": "assembly.candidate.hifiasm_ont",
@@ -1108,25 +1251,30 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             payload = _complete_hifiasm_ont_response(
                 purge_level=1, read_length_cutoff=3000
             )
-            with patch("app.llm.parameters.assembly.recommender.build_chat_model", return_value=_FakeModel(payload)):
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=_FakeModel(payload),
+            ):
                 result = recommend_assembly_parameters(state)
             artifact_records = read_artifact_records(Path(state["data_dir"]), "s1")
             assembly = result["stage_outputs"]["assembly"]
             cursor = ParameterRecommendationCursor.model_validate(
                 assembly["current_parameter_recommendation"]
             )
-            bundle = load_recommendation_bundle(
+            chain = load_parameter_recommendation_chain_v3(
                 {**state, "stage_outputs": result["stage_outputs"]},
-                cursor.manifest_ref,
+                manifest_ref=cursor.manifest_ref,
+                expected_stage="assembly",
+                expected_method_id="assembly.candidate.hifiasm_ont",
             )
 
         self.assertEqual(assembly["status"], "blocked_human")
         self.assertEqual(assembly.get("parameter_attempts") or [], [])
-        recommendation = bundle["recommendation"]["recommendation"]
+        recommendation = chain.recommendation["recommendation"]
         self.assertEqual(cursor.recommendation_id, 0)
         self.assertEqual(cursor.method_id, "assembly.candidate.hifiasm_ont")
         self.assertEqual(
-            bundle["manifest"]["recommendation_contract"],
+            chain.manifest.recommendation_contract,
             "parameter_recommendation_v1",
         )
         self.assertEqual(
@@ -1134,68 +1282,86 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             {"purge_level": 1, "read_length_cutoff": 3000},
         )
         self.assertEqual(
-            bundle["basis_snapshot"]["catalog_snapshot"]["method_id"],
-            "hifiasm_ont",
+            chain.catalog.method_id,
+            "assembly.candidate.hifiasm_ont",
         )
-        self.assertTrue(bundle["response_parse"]["parsed"])
-        refs = bundle["manifest"]["refs"]
-        self.assertIn("parameter_recommendations/000/input_profile.json", refs["input_profile_ref"]["path_ref"])
-        self.assertIn("parameter_recommendations/000/model_request.json", refs["model_request_ref"]["path_ref"])
-        self.assertIn("parameter_recommendations/000/model_response.json", refs["model_response_ref"]["path_ref"])
-        self.assertIn("parameter_recommendations/000/response_parse.json", refs["response_parse_ref"]["path_ref"])
-        artifact_types = {
-            record["artifact_type"]
-            for record in artifact_records
-        }
-        self.assertIn("assembly.parameter.input_profile", artifact_types)
+        self.assertTrue(chain.response_parse["parsed"])
+        refs = chain.manifest.refs
+        self.assertIn(
+            "parameter_recommendations/000/input_snapshot.json",
+            refs.input_snapshot_ref.path_ref,
+        )
+        self.assertIn(
+            "parameter_recommendations/000/model_request.json",
+            refs.model_request_ref.path_ref,
+        )
+        self.assertIn(
+            "parameter_recommendations/000/model_response.json",
+            refs.model_response_ref.path_ref,
+        )
+        self.assertIn(
+            "parameter_recommendations/000/response_parse.json",
+            refs.response_parse_ref.path_ref,
+        )
+        artifact_types = {record["artifact_type"] for record in artifact_records}
+        self.assertIn(
+            "assembly.parameter_recommendation.input_snapshot", artifact_types
+        )
         self.assertIn("assembly.parameter.model_request", artifact_types)
         self.assertIn("assembly.parameter.recommendation_manifest", artifact_types)
-
-
-
-
-
 
     def test_model_unavailable_fails_before_execution_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            with patch("app.llm.parameters.assembly.recommender.build_chat_model", side_effect=RuntimeError("missing api key")):
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                side_effect=RuntimeError("missing api key"),
+            ):
                 result = recommend_assembly_parameters(state)
             assembly = result["stage_outputs"]["assembly"]
             cursor = ParameterRecommendationCursor.model_validate(
                 assembly["current_parameter_recommendation"]
             )
-            bundle = load_recommendation_bundle(
+            chain = load_parameter_recommendation_chain_v3(
                 {**state, "stage_outputs": result["stage_outputs"]},
-                cursor.manifest_ref,
+                manifest_ref=cursor.manifest_ref,
+                expected_stage="assembly",
+                expected_method_id="assembly.candidate.hifiasm_ont",
             )
 
         self.assertEqual(assembly["status"], "parameter_response_invalid")
         self.assertEqual(cursor.status, "response_invalid")
         self.assertIn(
             "missing api key",
-            bundle["response_parse"]["error"],
+            chain.response_parse["error"],
         )
         self.assertEqual(assembly.get("parameter_attempts") or [], [])
 
     def test_any_parsed_parameter_mapping_reaches_human_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            payload = _parameter_response(threads=64, purge_level=9, unknown_knob="review-me")
-            with patch("app.llm.parameters.assembly.recommender.build_chat_model", return_value=_FakeModel(payload)):
+            payload = _parameter_response(
+                threads=64, purge_level=9, unknown_knob="review-me"
+            )
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=_FakeModel(payload),
+            ):
                 result = recommend_assembly_parameters(state)
             assembly = result["stage_outputs"]["assembly"]
             cursor = ParameterRecommendationCursor.model_validate(
                 assembly["current_parameter_recommendation"]
             )
-            bundle = load_recommendation_bundle(
+            chain = load_parameter_recommendation_chain_v3(
                 {**state, "stage_outputs": result["stage_outputs"]},
-                cursor.manifest_ref,
+                manifest_ref=cursor.manifest_ref,
+                expected_stage="assembly",
+                expected_method_id="assembly.candidate.hifiasm_ont",
             )
 
         self.assertEqual(assembly["status"], "blocked_human")
         self.assertEqual(
-            bundle["recommendation"]["recommendation"]["parameters"],
+            chain.recommendation["recommendation"]["parameters"],
             {"threads": 64, "purge_level": 9, "unknown_knob": "review-me"},
         )
 
@@ -1227,7 +1393,9 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 expected_method_name="assembly.candidate.hifiasm_ont",
             )
 
-            self.assertEqual(assembly["status"], "retry_parameters_after_execution_failure")
+            self.assertEqual(
+                assembly["status"], "retry_parameters_after_execution_failure"
+            )
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
             self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
             self.assertNotIn("execution_failure_log_tail", assembly)
@@ -1240,13 +1408,106 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertIn("line 149", stderr_path.read_text(encoding="utf-8"))
             self.assertNotIn("failure_class", assembly["parameter_attempts"][0])
 
-    def test_execution_retry_gate_does_not_apply_hifiasm_classifier_to_other_methods(self):
+    def test_execution_retry_prompt_includes_bounded_stderr_tail_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            stderr_text = "discarded diagnostic\n" * 2_000 + "tail diagnostic marker\n"
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.hifiasm_ont",
+                recommended_params={"purge_level": 1},
+                status="execution_failed",
+                execution_result={"return_code": 17, "status": "failed"},
+                execution_stderr=stderr_text,
+            )
+            state["stage_outputs"]["assembly"].update(
+                {
+                    "status": "failed",
+                    "current_parameter_attempt_id": 0,
+                    "parameter_attempts": [attempt],
+                }
+            )
+            retry_gate = execution_retry_gate(state)
+            state["stage_outputs"] = retry_gate["stage_outputs"]
+            retry_model = _FakeModel(_complete_hifiasm_ont_response(purge_level=2))
+
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=retry_model,
+            ):
+                recommendation = recommend_assembly_parameters(state)
+
+            prompt_request = json.loads(retry_model.messages[1]["content"])
+            serialized = json.dumps(prompt_request, ensure_ascii=False)
+
+        stderr_tail = prompt_request["assembly_context"]["retry"]["attempt_history"][
+            -1
+        ]["execution"]["stderr_tail"]
+        self.assertTrue(stderr_tail.endswith("tail diagnostic marker"))
+        self.assertLessEqual(len(stderr_tail), 4_000)
+        self.assertEqual(
+            recommendation["stage_outputs"]["assembly"]["status"], "blocked_human"
+        )
+        self.assertNotIn("stderr_ref", serialized)
+        self.assertNotIn("path_ref", serialized)
+        self.assertNotIn("parameter_attempt_0.stderr.log", serialized)
+
+    def test_review_retry_prompt_excludes_execution_stderr_tail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.hifiasm_ont",
+                recommended_params={"purge_level": 1},
+                status="executed",
+                execution_result={
+                    "success": True,
+                    "return_code": 0,
+                    "status": "ok",
+                },
+                execution_stderr="review retry must not receive this log",
+            )
+            state["stage_outputs"]["assembly"].update(
+                {
+                    "status": "draft_ready",
+                    "current_parameter_attempt_id": 0,
+                    "parameter_attempts": [attempt],
+                }
+            )
+            state["stage_outputs"]["assembly_review"] = {
+                "metrics": {
+                    "assembly_size_ratio": 1.35,
+                    "busco_complete": 0.94,
+                    "busco_duplicate": 0.21,
+                }
+            }
+            retry_gate = parameter_quality_gate(state)
+            state["stage_outputs"] = retry_gate["stage_outputs"]
+            retry_model = _FakeModel(_complete_hifiasm_ont_response(purge_level=2))
+
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=retry_model,
+            ):
+                recommend_assembly_parameters(state)
+
+            serialized = retry_model.messages[1]["content"]
+
+        self.assertNotIn("review retry must not receive this log", serialized)
+        self.assertNotIn("stderr_tail", serialized)
+
+    def test_execution_retry_gate_does_not_apply_hifiasm_classifier_to_other_methods(
+        self,
+    ):
         for method_id in (
             "assembly.candidate.flye",
             "assembly.candidate.nextdenovo",
             "assembly.candidate.hifiasm_ont",
         ):
-            with self.subTest(method_id=method_id), tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                self.subTest(method_id=method_id),
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
                 state = _v2_state(tmpdir)
                 attempt = _persist_parameter_attempt(
                     state,
@@ -1267,7 +1528,9 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 self.assertNotIn("failure_class", attempt)
                 self.assertNotIn("candidate_evidence_case_ref", attempt)
                 self.assertIsNotNone(
-                    result["stage_outputs"]["assembly"]["parameter_retry_request"]["failure_ref"]
+                    result["stage_outputs"]["assembly"]["parameter_retry_request"][
+                        "failure_ref"
+                    ]
                 )
 
     def test_execution_retry_gate_emits_no_candidate_and_binds_sealed_request(self):
@@ -1297,11 +1560,14 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertNotIn("candidate_evidence_case_ref", attempt)
             request = result["stage_outputs"]["assembly"]["parameter_retry_request"]
             self.assertEqual(request["previous_attempt_id"], 0)
-            self.assertEqual(request["previous_attempt_seal_hash"], attempt["seal_hash"])
+            self.assertEqual(
+                request["previous_attempt_seal_hash"], attempt["seal_hash"]
+            )
             self.assertEqual(request["failure_ref"], attempt["execution_ref"])
 
-
-    def test_freeze_failure_without_execution_result_does_not_route_to_execution_retry(self):
+    def test_freeze_failure_without_execution_result_does_not_route_to_execution_retry(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _v2_state(tmpdir)
             attempt = _persist_parameter_attempt(
@@ -1334,14 +1600,20 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     "parameter_attempts": [attempt],
                 },
                 "assembly_review": {
-                    "metrics": {"busco_complete": 0.94, "busco_duplicate": 0.21, "assembly_size_ratio": 1.35}
+                    "metrics": {
+                        "busco_complete": 0.94,
+                        "busco_duplicate": 0.21,
+                        "assembly_size_ratio": 1.35,
+                    }
                 },
             }
 
             result = parameter_quality_gate(state)
 
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["status"], "retry_parameters_after_review_failure")
+            self.assertEqual(
+                assembly["status"], "retry_parameters_after_review_failure"
+            )
             self.assertEqual(assembly["quality_gate"]["failure_mode"], "under_purged")
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
             self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
@@ -1357,67 +1629,128 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
     def test_review_retry_recommendation_can_adjust_ont_l2_parameters(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
+            state["stage_outputs"]["assembly"].update(
+                {
+                    "env": {"ASSEMBLY_TEST": "1"},
+                    "hifiasm_ont_parameters": {"threads": 7},
+                    "flye_parameters": {"threads": 99},
+                    "selected_methods": ["assembly.candidate.hifiasm_ont"],
+                }
+            )
             initial_payload = _complete_hifiasm_ont_response(
                 purge_level=1, read_length_cutoff=3000, score_cutoff=10
             )
             retry_payload = _complete_hifiasm_ont_response(
-                retry_disposition="retry",
                 purge_level=2, read_length_cutoff=5000, score_cutoff=12
             )
 
-            with patch("app.llm.parameters.assembly.recommender.build_chat_model", return_value=_FakeModel(initial_payload)):
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=_FakeModel(initial_payload),
+            ):
                 first = recommend_assembly_parameters(state)
             state = self._approve(state, first)
+            state["stage_outputs"]["assembly"][ASSEMBLY_EXECUTION_CONTRACT_KEY] = (
+                build_assembly_execution_contract(
+                    state["stage_outputs"]["assembly"],
+                    method_id="assembly.candidate.hifiasm_ont",
+                ).model_dump(mode="json")
+            )
             state["stage_outputs"]["assembly"]["status"] = "draft_ready"
-            state["stage_outputs"]["assembly"]["parameter_attempts"][0]["status"] = "executed"
-            state["stage_outputs"]["assembly"]["parameter_attempts"][0][
-                "frozen_attempt_ref"
-            ] = _frozen_attempt_ref(0).model_dump(mode="json")
+            initial_attempt = state["stage_outputs"]["assembly"]["parameter_attempts"][
+                0
+            ]
+            state["stage_outputs"]["assembly"]["parameter_attempts"][0] = (
+                _attach_frozen_parameter_sources(
+                    state,
+                    initial_attempt,
+                    status="executed",
+                )
+            )
+            committed = commit_assembly_plan(state)
+            state = {**state, **committed}
+            committed_assembly = state["stage_outputs"]["assembly"]
             state["stage_outputs"]["assembly_review"] = {
-                "metrics": {"busco_complete": 0.94, "busco_duplicate": 0.21, "assembly_size_ratio": 1.35}
+                "metrics": {
+                    "busco_complete": 0.94,
+                    "busco_duplicate": 0.21,
+                    "assembly_size_ratio": 1.35,
+                }
             }
 
             gate = parameter_quality_gate(state)
             state["stage_outputs"] = gate["stage_outputs"]
-            self.assertEqual(state["stage_outputs"]["assembly"]["status"], "retry_parameters_after_review_failure")
-            self.assertEqual(state["stage_outputs"]["assembly"]["current_parameter_attempt_id"], 0)
-            self.assertEqual(state["stage_outputs"]["assembly"]["proposed_parameter_attempt_id"], 1)
+            self.assertEqual(
+                state["stage_outputs"]["assembly"]["status"],
+                "retry_parameters_after_review_failure",
+            )
+            self.assertEqual(
+                state["stage_outputs"]["assembly"]["current_parameter_attempt_id"], 0
+            )
+            self.assertEqual(
+                state["stage_outputs"]["assembly"]["proposed_parameter_attempt_id"], 1
+            )
 
-            with patch("app.llm.parameters.assembly.recommender.build_chat_model", return_value=_FakeModel(retry_payload)):
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=_FakeModel(retry_payload),
+            ):
                 retry = recommend_assembly_parameters(state)
             state = self._approve(state, retry)
             assembly = state["stage_outputs"]["assembly"]
-            attempts = {item["attempt_id"]: item for item in assembly["parameter_attempts"]}
-            hydrated = {
-                attempt_id: hydrate_parameter_attempt(state, attempt)
-                for attempt_id, attempt in attempts.items()
+            planned = plan_candidate_attempts(state)
+            planned_assembly = planned["stage_outputs"]["assembly"]
+            attempts = {
+                item["attempt_id"]: item for item in assembly["parameter_attempts"]
             }
-            retry_bundle = load_recommendation_bundle(
+            initial_evidence = hydrate_parameter_attempt(state, attempts[0])
+            retry_bundle = load_approved_parameter_chain_v3(
                 state,
-                attempts[1]["recommendation_manifest_ref"],
+                attempt=attempts[1],
+                expected_stage="assembly",
+                expected_method_id="assembly.candidate.hifiasm_ont",
             )
+            resolved = resolve_assembly_parameters(
+                catalog=retry_bundle.chain.catalog,
+                snapshot=retry_bundle.chain.input_snapshot,
+                approved_l2=retry_bundle.approved_l2,
+                l0_executor_values={
+                    "assembly_output_prefix": "asm",
+                    "assembly_threads": 1,
+                    "assembly_input_reads": ["reads.fastq"],
+                },
+            )
+            argv = render_assembly_cli(retry_bundle.chain.catalog, resolved)
 
         self.assertEqual(assembly["status"], "parameters_approved")
-        self.assertEqual(attempts[1]["previous_attempt_id"], 0)
-        self.assertEqual(hydrated[0]["review_failure"]["failure_mode"], "under_purged")
+        self.assertEqual(committed_assembly["execution_mode"], "local")
+        self.assertNotIn("env", committed_assembly)
+        self.assertNotIn("hifiasm_ont_parameters", committed_assembly)
         self.assertEqual(
-            retry_bundle["input_profile"]["assembly_review"]["failure_mode"],
+            committed_assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY]["threads"],
+            {"value": 7, "source": "run_config"},
+        )
+        self.assertNotIn("flye_parameters", committed_assembly)
+        self.assertEqual(planned_assembly["status"], "hifiasm_ont_execution_planned")
+        self.assertEqual(
+            planned_assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY],
+            committed_assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY],
+        )
+        self.assertEqual(attempts[1]["previous_attempt_id"], 0)
+        self.assertEqual(initial_evidence.review.failure_mode, "under_purged")
+        retry_context = retry_bundle.chain.input_snapshot.stage_context.retry
+        self.assertIsNotNone(retry_context)
+        self.assertEqual(
+            retry_context.attempt_history[0].review.failure_mode,
             "under_purged",
         )
-        self.assertEqual(hydrated[0]["recommended_params"]["purge_level"], 1)
-        self.assertEqual(hydrated[1]["recommended_params"]["purge_level"], 2)
-        self.assertEqual(hydrated[0]["recommended_params"]["read_length_cutoff"], 3000)
-        self.assertEqual(hydrated[1]["recommended_params"]["read_length_cutoff"], 5000)
-        self.assertEqual(hydrated[0]["recommended_params"]["score_cutoff"], 10)
-        self.assertEqual(hydrated[1]["recommended_params"]["score_cutoff"], 12)
-        argv = build_command(
-            method_id="hifiasm_ont",
-            catalog=load_parameter_catalog("hifiasm_ont"),
-            parameter_sources={
-                "l0_fixed": {"output_prefix": "asm", "threads": 1, "input_reads": ["reads.fastq"], "ont_mode": True},
-                "l1_readonly": {},
-                "l2_recommended": hydrated[1]["parameters"],
-            },
+        self.assertEqual(
+            initial_evidence.recommended_parameters,
+            {"purge_level": 1, "read_length_cutoff": 3000, "score_cutoff": 10},
+        )
+        self.assertEqual(
+            retry_bundle.approved_l2,
+            {"purge_level": 2, "read_length_cutoff": 5000, "score_cutoff": 12},
         )
         self.assertEqual(argv[argv.index("-l") + 1], "2")
         self.assertEqual(argv[argv.index("--rl-cut") + 1], "5000")
@@ -1430,14 +1763,23 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
 
 class MethodFreezeParameterFailureTests(unittest.TestCase):
-    def _parameter_attempt(self, state: dict, *, method_name: str, recommended_params=None) -> dict:
+    def _parameter_attempt(
+        self, state: dict, *, method_name: str, recommended_params=None
+    ) -> dict:
         return _persist_parameter_attempt(
             state,
             method_id=method_name,
             recommended_params=dict(recommended_params or {}),
         )
 
-    def _state(self, tmpdir: str, *, method: str, recommended_params=None, attempt_payload: dict | None = None):
+    def _state(
+        self,
+        tmpdir: str,
+        *,
+        method: str,
+        recommended_params=None,
+        attempt_payload: dict | None = None,
+    ):
         reads = Path(tmpdir) / "reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         state = _v2_state(tmpdir)
@@ -1445,12 +1787,10 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             status = "hifiasm_execution_planned"
             param_key = "hifiasm_parameters"
             method_name = "assembly.candidate.hifiasm"
-            read_type = "hifi"
         else:
             status = "hifiasm_ont_execution_planned"
             param_key = "hifiasm_ont_parameters"
             method_name = "assembly.candidate.hifiasm_ont"
-            read_type = "ont"
         assembly = {
             "status": status,
             "input_ref": str(reads),
@@ -1463,7 +1803,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 "source": "run_config",
                 "rationale": "test fixture explicitly selects the assembly method",
             },
-            param_key: {"read_type": read_type, "threads": 1},
+            param_key: {"threads": 1},
             "current_parameter_attempt_id": 0,
         }
         if attempt_payload is not None:
@@ -1476,10 +1816,20 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                     recommended_params=recommended_params,
                 )
             ]
+        assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY] = build_assembly_execution_contract(
+            assembly,
+            method_id=method_name,
+        ).model_dump(mode="json")
         state["stage_outputs"] = {"assembly": assembly}
         return state
 
-    def _nextdenovo_state(self, tmpdir: str, *, recommended_params=None, attempt_payload: dict | None = None):
+    def _nextdenovo_state(
+        self,
+        tmpdir: str,
+        *,
+        recommended_params=None,
+        attempt_payload: dict | None = None,
+    ):
         reads = Path(tmpdir) / "reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         state = _v2_state(tmpdir)
@@ -1495,7 +1845,10 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 "source": "run_config",
                 "rationale": "test fixture explicitly selects the assembly method",
             },
-            "nextdenovo_parameters": {"read_type": "ont", "genome_size": 2_000_000, "threads": 1},
+            "nextdenovo_parameters": {
+                "genome_size": 2_000_000,
+                "threads": 1,
+            },
             "resolved_genome_size": {
                 "value_bp": 2_000_000,
                 "source": "provided",
@@ -1513,22 +1866,35 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                     recommended_params=recommended_params,
                 )
             ]
+        assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY] = build_assembly_execution_contract(
+            assembly,
+            method_id="assembly.candidate.nextdenovo",
+        ).model_dump(mode="json")
         state["stage_outputs"] = {"assembly": assembly}
         return state
 
-    def test_missing_hifiasm_catalog_returns_structured_failure(self):
+    def test_invalid_hifiasm_approved_bundle_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir, method="hifiasm")
-            with patch("app.stages.assembly.method_application.hifiasm.resolve_method_env", return_value=(None, [], None)):
-                with patch(
-                    "app.stages.assembly.method_application.hifiasm.load_parameter_catalog",
-                    side_effect=FileNotFoundError("missing params.yaml"),
-                ):
-                    result = freeze_hifiasm_attempt(state)
+            with (
+                patch(
+                    "app.stages.assembly.method_application.hifiasm.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.assembly.method_application.hifiasm.load_current_approved_recommendation",
+                    return_value=(
+                        None,
+                        "Hifiasm recommendation evidence is invalid: "
+                        "missing catalog snapshot",
+                    ),
+                ),
+            ):
+                result = freeze_hifiasm_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "failed")
-        self.assertIn("parameter catalog is not usable", assembly["reason"])
+        self.assertIn("recommendation evidence is invalid", assembly["reason"])
 
     def test_hifiasm_freeze_rejects_loose_attempt_cursor_before_work_scope(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1558,7 +1924,10 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             state = self._state(tmpdir, method="hifiasm", recommended_params={})
             payload = state["stage_outputs"]["assembly"]["parameter_attempts"][0]
             payload["recommended_params"] = ["param1", "param2"]
-            with patch("app.stages.assembly.method_application.hifiasm.resolve_method_env", return_value=(None, [], None)):
+            with patch(
+                "app.stages.assembly.method_application.hifiasm.resolve_method_env",
+                return_value=(None, [], None),
+            ):
                 result = freeze_hifiasm_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]
@@ -1566,26 +1935,38 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         self.assertIn("ParameterAttempt", assembly["reason"])
         self.assertIn("recommended_params", assembly["reason"])
 
-    def test_missing_hifiasm_ont_catalog_returns_structured_failure(self):
+    def test_invalid_hifiasm_ont_approved_bundle_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir, method="hifiasm_ont")
-            with patch("app.stages.assembly.method_application.hifiasm_ont.resolve_method_env", return_value=(None, [], None)):
-                with patch(
-                    "app.stages.assembly.method_application.hifiasm_ont.load_parameter_catalog",
-                    side_effect=FileNotFoundError("missing params.yaml"),
-                ):
-                    result = freeze_hifiasm_ont_attempt(state)
+            with (
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.load_current_approved_recommendation",
+                    return_value=(
+                        None,
+                        "Hifiasm ONT recommendation evidence is invalid: "
+                        "missing catalog snapshot",
+                    ),
+                ),
+            ):
+                result = freeze_hifiasm_ont_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "failed")
-        self.assertIn("parameter catalog is not usable", assembly["reason"])
+        self.assertIn("recommendation evidence is invalid", assembly["reason"])
 
     def test_corrupt_hifiasm_ont_recommended_params_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir, method="hifiasm_ont", recommended_params={})
             payload = state["stage_outputs"]["assembly"]["parameter_attempts"][0]
             payload["recommended_params"] = "invalid"
-            with patch("app.stages.assembly.method_application.hifiasm_ont.resolve_method_env", return_value=(None, [], None)):
+            with patch(
+                "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                return_value=(None, [], None),
+            ):
                 result = freeze_hifiasm_ont_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]
@@ -1598,9 +1979,15 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             state = self._state(
                 tmpdir,
                 method="hifiasm_ont",
-                attempt_payload={"attempt_id": 0, "recommended_params": {"purge_level": 1}},
+                attempt_payload={
+                    "attempt_id": 0,
+                    "recommended_params": {"purge_level": 1},
+                },
             )
-            with patch("app.stages.assembly.method_application.hifiasm_ont.resolve_method_env", return_value=(None, [], None)):
+            with patch(
+                "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                return_value=(None, [], None),
+            ):
                 result = freeze_hifiasm_ont_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]
@@ -1631,8 +2018,13 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
 
     def test_hifiasm_ont_freeze_writes_command_artifact_ref(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._state(tmpdir, method="hifiasm_ont", recommended_params={"purge_level": 1})
-            with patch("app.stages.assembly.method_application.hifiasm_ont.resolve_method_env", return_value=(None, [], None)):
+            state = self._state(
+                tmpdir, method="hifiasm_ont", recommended_params={"purge_level": 1}
+            )
+            with patch(
+                "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                return_value=(None, [], None),
+            ):
                 result = freeze_hifiasm_ont_attempt(state)
             artifact_records = read_artifact_records(Path(state["data_dir"]), "s1")
 
@@ -1644,35 +2036,54 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             self.assertTrue(command_path.exists())
             self.assertEqual(command_ref["sha256"], sha256_file(command_path))
             command_payload = json.loads(command_path.read_text(encoding="utf-8"))
-            self.assertEqual(command_payload["method_id"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(
+                command_payload["method_id"], "assembly.candidate.hifiasm_ont"
+            )
             self.assertIn("--ont", command_payload["argv"])
-            self.assertIn("assembly.parameter.command", {record["artifact_type"] for record in artifact_records})
+            self.assertIn(
+                "assembly.parameter.command",
+                {record["artifact_type"] for record in artifact_records},
+            )
 
     def test_nextdenovo_freeze_rejects_l2_override_of_l0_parameter(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._nextdenovo_state(tmpdir, recommended_params={"threads": 64})
-            with patch("app.stages.assembly.method_application.nextdenovo.resolve_method_env", return_value=(None, [], None)):
+            with patch(
+                "app.stages.assembly.method_application.nextdenovo.resolve_method_env",
+                return_value=(None, [], None),
+            ):
                 result = freeze_nextdenovo_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "failed")
         self.assertIn("NextDenovo parameter sources are invalid", assembly["reason"])
-        self.assertIn("threads belongs to L0", assembly["reason"])
+        self.assertIn("not cataloged as L2-adjustable", assembly["reason"])
 
     def test_nextdenovo_freeze_renders_l2_read_cutoff(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._nextdenovo_state(tmpdir, recommended_params={"read_cutoff": 7777, "nextgraph_a": 2})
-            with patch("app.stages.assembly.method_application.nextdenovo.resolve_method_env", return_value=(None, [], None)):
+            state = self._nextdenovo_state(
+                tmpdir, recommended_params={"read_cutoff": 7777, "nextgraph_a": 2}
+            )
+            with patch(
+                "app.stages.assembly.method_application.nextdenovo.resolve_method_env",
+                return_value=(None, [], None),
+            ):
                 result = freeze_nextdenovo_attempt(state)
-            run_cfg_text = Path(result["stage_outputs"]["assembly"]["nextdenovo_run_cfg_path"]).read_text(encoding="utf-8")
+            run_cfg_text = Path(
+                result["stage_outputs"]["assembly"]["nextdenovo_run_cfg_path"]
+            ).read_text(encoding="utf-8")
             command = read_json_artifact(
                 state,
-                result["stage_outputs"]["assembly"]["parameter_attempts"][0]["command_ref"],
+                result["stage_outputs"]["assembly"]["parameter_attempts"][0][
+                    "command_ref"
+                ],
             )
 
         assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "nextdenovo_frozen")
-        self.assertEqual(command["parameter_sources"]["l2_recommended"]["read_cutoff"], 7777)
+        self.assertEqual(
+            command["parameter_sources"]["l2_approved"]["read_cutoff"], 7777
+        )
         self.assertEqual(command["rendered_parameters"]["read_cutoff"], 7777)
         self.assertEqual(command["rendered_parameters"]["nextgraph_a"], 2)
         self.assertIn("read_cutoff = 7777", run_cfg_text)
@@ -1680,8 +2091,13 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
 
     def test_nextdenovo_freeze_rejects_corrupt_l2_integer_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._nextdenovo_state(tmpdir, recommended_params={"read_cutoff": "bad"})
-            with patch("app.stages.assembly.method_application.nextdenovo.resolve_method_env", return_value=(None, [], None)):
+            state = self._nextdenovo_state(
+                tmpdir, recommended_params={"read_cutoff": "bad"}
+            )
+            with patch(
+                "app.stages.assembly.method_application.nextdenovo.resolve_method_env",
+                return_value=(None, [], None),
+            ):
                 result = freeze_nextdenovo_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]

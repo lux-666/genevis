@@ -1,4 +1,4 @@
-"""Data-v2 schema tests for compact parameter cursors."""
+"""Strict v3 schema tests for compact parameter cursors."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _ref(name: str, artifact_type: str = "test.artifact") -> ArtifactRef:
 
 def _attempt_payload(**updates: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "attempt_id": 0,
         "method_id": "assembly.candidate.hifiasm",
         "status": "recommended",
@@ -38,10 +38,10 @@ def _attempt_payload(**updates: object) -> dict[str, object]:
     return payload
 
 
-def test_parameter_attempt_is_strict_compact_v2() -> None:
+def test_parameter_attempt_is_strict_compact_v3() -> None:
     dumped = ParameterAttempt.model_validate(_attempt_payload()).model_dump(mode="json")
 
-    assert dumped["schema_version"] == 2
+    assert dumped["schema_version"] == 3
     assert len(json.dumps(dumped, separators=(",", ":"))) < 2_048
     forbidden = {
         "catalog_snapshot",
@@ -58,7 +58,7 @@ def test_parameter_attempt_is_strict_compact_v2() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("schema_version", 1),
+        ("schema_version", 2),
         ("method_id", ""),
         ("status", "typo"),
         ("task", "retry_sometime"),
@@ -73,6 +73,13 @@ def test_parameter_attempt_rejects_legacy_or_large_fields(
 ) -> None:
     with pytest.raises(ValidationError):
         ParameterAttempt.model_validate(_attempt_payload(**{field: value}))
+
+
+def test_parameter_attempt_requires_explicit_v3_schema() -> None:
+    payload = _attempt_payload()
+    payload.pop("schema_version")
+    with pytest.raises(ValidationError):
+        ParameterAttempt.model_validate(payload)
 
 
 def test_retry_requires_immediate_predecessor_and_seal() -> None:
@@ -135,6 +142,7 @@ def test_recommendation_cursor_binds_manifest_hash_and_request_ref() -> None:
     manifest = _ref("d", "assembly.parameter.recommendation_manifest")
     request = _ref("e", "assembly.parameter_approval.request")
     cursor = ParameterRecommendationCursor(
+        schema_version=3,
         recommendation_id=0,
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
@@ -151,8 +159,15 @@ def test_recommendation_cursor_binds_manifest_hash_and_request_ref() -> None:
             {**cursor.model_dump(mode="json"), "recommendation_hash": "f" * 64}
         )
 
+    missing_schema = cursor.model_dump(mode="json")
+    missing_schema.pop("schema_version")
+    with pytest.raises(ValidationError):
+        ParameterRecommendationCursor.model_validate(missing_schema)
 
-@pytest.mark.parametrize("path_ref", ["data/artifacts/a.json", "/tmp/a.json", "../a.json"])
+
+@pytest.mark.parametrize(
+    "path_ref", ["data/artifacts/a.json", "/tmp/a.json", "../a.json"]
+)
 def test_artifact_ref_rejects_nonportable_paths(path_ref: str) -> None:
     with pytest.raises(ValidationError):
         ArtifactRef(

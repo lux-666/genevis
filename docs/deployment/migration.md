@@ -119,6 +119,9 @@ Schema-valid templates live in `docs/examples/`:
 Copy a template to a server-local directory and replace placeholder paths. Do
 not commit private paths or real sample metadata.
 
+For the two assembly examples, the operator-provided genome-size estimate lives
+in the paired manifest. The run config contains execution choices only.
+
 ## Verification
 
 ```bash

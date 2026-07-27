@@ -6,11 +6,21 @@ import math
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 
 from app.domains.assembly import case_selector as case_selector_module
 from app.domains.assembly import numeric_case_retriever as numeric_retriever_module
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.domains.assembly.retrieval_query import build_hifiasm_retrieval_query
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalGenomeFacts,
+    CanonicalReadFacts,
+    CanonicalRecommendationFacts,
+    CanonicalSequencingFacts,
+    CanonicalSpeciesFacts,
+    QuantityFact,
+)
 
 
 def _case(case_id: str, **facts: float) -> dict:
@@ -41,9 +51,116 @@ def _query(**features: float) -> dict:
         "task": "recommend_initial",
         "read_type": "hifi",
         "assembly_goal": "primary",
-        "numeric_features": {name: {"value": value} for name, value in features.items()},
+        "numeric_features": {
+            name: {"value": value} for name, value in features.items()
+        },
         "categorical_context": {},
     }
+
+
+def _quantity(
+    value: float | int,
+    unit: str,
+    *,
+    kind: str,
+    producer: str,
+) -> QuantityFact:
+    return QuantityFact.model_validate(
+        {
+            "value": value,
+            "unit": unit,
+            "origin": {"kind": kind, "producer": producer},
+        }
+    )
+
+
+def _facts(
+    *,
+    genome_size_bp: int | None = None,
+    coverage: float | None = None,
+    read_n50_bp: int | None = None,
+    heterozygosity: float | None = None,
+    ploidy: int | None = None,
+    clade: str | None = None,
+    read_type: str | None = None,
+) -> CanonicalRecommendationFacts:
+    return CanonicalRecommendationFacts(
+        species=CanonicalSpeciesFacts(
+            clade=clade,
+            ploidy=(
+                _quantity(
+                    ploidy,
+                    "count",
+                    kind="provided",
+                    producer="run_config",
+                )
+                if ploidy is not None
+                else None
+            ),
+        ),
+        reads=CanonicalReadFacts(
+            read_type=read_type,
+            read_n50=(
+                _quantity(
+                    read_n50_bp,
+                    "bp",
+                    kind="measured",
+                    producer="read_qc",
+                )
+                if read_n50_bp is not None
+                else None
+            ),
+        ),
+        genome=CanonicalGenomeFacts(
+            effective_genome_size=(
+                _quantity(
+                    genome_size_bp,
+                    "bp",
+                    kind="resolved",
+                    producer="genome_survey",
+                )
+                if genome_size_bp is not None
+                else None
+            ),
+            heterozygosity=(
+                _quantity(
+                    heterozygosity,
+                    "fraction",
+                    kind="measured",
+                    producer="genome_survey",
+                )
+                if heterozygosity is not None
+                else None
+            ),
+        ),
+        sequencing=CanonicalSequencingFacts(
+            raw_coverage=(
+                _quantity(
+                    coverage,
+                    "x",
+                    kind="derived",
+                    producer="read_qc",
+                )
+                if coverage is not None
+                else None
+            )
+        ),
+    )
+
+
+def _context(
+    *,
+    read_type: str = "pacbio_hifi",
+    assembly_route: str = "hifi",
+) -> AssemblyRecommendationContext:
+    return AssemblyRecommendationContext.model_validate(
+        {
+            "stage": "assembly",
+            "assembly_route": assembly_route,
+            "read_type": read_type,
+            "target_level": "strict_t2t",
+        }
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -93,8 +210,12 @@ def test_coverage_values_across_old_bucket_boundary_are_continuous():
 
 def test_log_ratio_distance_is_scale_invariant_for_doubling():
     retriever = HifiasmNumericCaseRetriever()
-    low = retriever.select([_case("low", genome_size_mb=100)], query=_query(genome_size_mb=200))
-    high = retriever.select([_case("high", genome_size_mb=1000)], query=_query(genome_size_mb=2000))
+    low = retriever.select(
+        [_case("low", genome_size_mb=100)], query=_query(genome_size_mb=200)
+    )
+    high = retriever.select(
+        [_case("high", genome_size_mb=1000)], query=_query(genome_size_mb=2000)
+    )
 
     low_distance = low.trace[0]["numeric_distance"]
     high_distance = high.trace[0]["numeric_distance"]
@@ -111,11 +232,24 @@ def test_missing_values_renormalize_over_shared_dimensions():
     )
 
     assert result.metadata["selected_case_ids"][:2] == ["complete", "missing"]
-    trace = {item["case_id"]: item for item in result.trace if item["decision"] == "candidate"}
-    assert trace["complete"]["numeric_distance"] == trace["missing"]["numeric_distance"] == 0
+    trace = {
+        item["case_id"]: item
+        for item in result.trace
+        if item["decision"] == "candidate"
+    }
+    assert (
+        trace["complete"]["numeric_distance"]
+        == trace["missing"]["numeric_distance"]
+        == 0
+    )
     assert trace["complete"]["ranking_score"] == trace["missing"]["ranking_score"] == 1
-    assert trace["complete"]["evidence_coverage"] > trace["missing"]["evidence_coverage"]
-    assert trace["missing"]["feature_distances"]["genome_size_mb"]["status"] == "missing_case_value"
+    assert (
+        trace["complete"]["evidence_coverage"] > trace["missing"]["evidence_coverage"]
+    )
+    assert (
+        trace["missing"]["feature_distances"]["genome_size_mb"]["status"]
+        == "missing_case_value"
+    )
 
 
 def test_numeric_similarity_does_not_penalize_missing_case_dimensions():
@@ -142,8 +276,13 @@ def test_numeric_similarity_does_not_penalize_missing_case_dimensions():
 
     assert result.metadata["selected_case_ids"] == ["weak_exact"]
     trace = {item["case_id"]: item for item in result.trace}
-    assert trace["complete"]["numeric_distance"] > trace["weak_exact"]["numeric_distance"]
-    assert trace["complete"]["evidence_coverage"] > trace["weak_exact"]["evidence_coverage"]
+    assert (
+        trace["complete"]["numeric_distance"] > trace["weak_exact"]["numeric_distance"]
+    )
+    assert (
+        trace["complete"]["evidence_coverage"]
+        > trace["weak_exact"]["evidence_coverage"]
+    )
 
 
 def test_interval_contains_query_and_uses_nearest_boundary_outside():
@@ -373,7 +512,9 @@ def test_numeric_scales_and_weights_are_configuration_backed():
     )
 
     assert configured_retriever.max_cases == 5
-    assert configured.trace[0]["numeric_distance"] > default.trace[0]["numeric_distance"]
+    assert (
+        configured.trace[0]["numeric_distance"] > default.trace[0]["numeric_distance"]
+    )
 
 
 def test_numeric_strategy_requires_a_mapping_even_when_falsy():
@@ -388,12 +529,17 @@ def test_non_finite_numeric_configuration_is_rejected():
 
 @pytest.mark.parametrize(
     "task",
-    ["retry_after_execution_failure", "retry_after_review_failure", "not_a_parameter_task"],
+    [
+        "retry_after_execution_failure",
+        "retry_after_review_failure",
+        "not_a_parameter_task",
+    ],
 )
 def test_query_adapter_rejects_non_initial_tasks(task):
     with pytest.raises(ValueError, match="only supports task='recommend_initial'"):
         build_hifiasm_retrieval_query(
-            {"assets": {"read_type": "hifi"}},
+            _facts(),
+            _context(),
             method_id="assembly.candidate.hifiasm",
             task=task,
         )
@@ -401,7 +547,11 @@ def test_query_adapter_rejects_non_initial_tasks(task):
 
 @pytest.mark.parametrize(
     "task",
-    ["retry_after_execution_failure", "retry_after_review_failure", "not_a_parameter_task"],
+    [
+        "retry_after_execution_failure",
+        "retry_after_review_failure",
+        "not_a_parameter_task",
+    ],
 )
 def test_numeric_retriever_rejects_non_initial_queries(task):
     query = _query(coverage=30)
@@ -421,29 +571,33 @@ def _dispatch_initial(monkeypatch, cases, *, max_cases=None, numeric_config=None
         cases,
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
-        prompt_profile={
-            "assets": {"read_type": "hifi"},
-            "read_qc": {"effective_coverage_1kb": 30},
-        },
+        facts=_facts(coverage=30, read_type="pacbio_hifi"),
+        context=_context(),
         max_cases=max_cases,
         strategy={"hifiasm_numeric": numeric_config or {}},
     )
 
 
 def test_hifiasm_numeric_selection_respects_budget_and_is_stable(monkeypatch):
-    cases = [_case(case_id, coverage=30) for case_id in ("g", "a", "f", "c", "b", "e", "d")]
+    cases = [
+        _case(case_id, coverage=30) for case_id in ("g", "a", "f", "c", "b", "e", "d")
+    ]
     selected, metadata = _dispatch_initial(monkeypatch, cases, max_cases=1)
 
     assert [case["case_id"] for case in selected] == ["a"]
     assert metadata["retrieval_backend"] == "numeric_literature"
     assert metadata["eligible_case_count"] == 7
 
-    reversed_selected, _ = _dispatch_initial(monkeypatch, list(reversed(cases)), max_cases=1)
+    reversed_selected, _ = _dispatch_initial(
+        monkeypatch, list(reversed(cases)), max_cases=1
+    )
     assert [case["case_id"] for case in reversed_selected] == ["a"]
 
 
 @pytest.mark.parametrize("count", [1, 2, 3, 4])
-def test_hifiasm_initial_cutover_selects_every_eligible_case_when_under_five(monkeypatch, count):
+def test_hifiasm_initial_cutover_selects_every_eligible_case_when_under_five(
+    monkeypatch, count
+):
     selected, metadata = _dispatch_initial(
         monkeypatch,
         [_case(f"case_{index}", coverage=30) for index in range(count)],
@@ -467,7 +621,9 @@ def test_hifiasm_initial_cutover_has_no_score_or_coverage_threshold(monkeypatch)
     assert selected[0]["numeric_match"]["evidence_coverage"] == 0.0
 
 
-def test_hifiasm_numeric_cutover_handles_empty_corpus_without_legacy_fallback(monkeypatch):
+def test_hifiasm_numeric_cutover_handles_empty_corpus_without_legacy_fallback(
+    monkeypatch,
+):
     legacy = {
         "case_id": "legacy_hifiasm_seed",
         "features": {"read_type": "hifi", "coverage": 30},
@@ -483,7 +639,8 @@ def test_hifiasm_numeric_cutover_handles_empty_corpus_without_legacy_fallback(mo
         [legacy],
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
-        prompt_profile={"assets": {"read_type": "hifi"}},
+        facts=_facts(read_type="pacbio_hifi"),
+        context=_context(),
         strategy={"hifiasm_numeric": {}},
     )
 
@@ -513,7 +670,8 @@ def test_hifiasm_retry_never_enters_a_selector(monkeypatch, task):
             [],
             method_id="assembly.candidate.hifiasm",
             task=task,
-            prompt_profile={"assets": {"read_type": "hifi"}},
+            facts=_facts(read_type="pacbio_hifi"),
+            context=_context(),
             strategy={"hifiasm_numeric": {}},
         )
 
@@ -534,7 +692,9 @@ def test_hifiasm_numeric_cutover_rejects_invalid_active_configuration(
     monkeypatch.setattr(
         case_selector_module,
         "validate_hifiasm_evidence_cases",
-        lambda values, pack_root: pytest.fail("invalid config must fail before corpus loading"),
+        lambda values, pack_root: pytest.fail(
+            "invalid config must fail before corpus loading"
+        ),
     )
 
     with pytest.raises(ValueError, match=message):
@@ -542,7 +702,8 @@ def test_hifiasm_numeric_cutover_rejects_invalid_active_configuration(
             [],
             method_id="assembly.candidate.hifiasm",
             task="recommend_initial",
-            prompt_profile={"assets": {"read_type": "hifi"}},
+            facts=_facts(read_type="pacbio_hifi"),
+            context=_context(),
             strategy={"hifiasm_numeric": numeric_config},
         )
 
@@ -551,7 +712,9 @@ def test_hifiasm_dispatch_rejects_unknown_task_before_backend_selection(monkeypa
     monkeypatch.setattr(
         case_selector_module,
         "validate_hifiasm_evidence_cases",
-        lambda values, pack_root: pytest.fail("invalid task must fail before retrieval"),
+        lambda values, pack_root: pytest.fail(
+            "invalid task must fail before retrieval"
+        ),
     )
 
     with pytest.raises(ValueError, match="unsupported assembly parameter task"):
@@ -559,69 +722,79 @@ def test_hifiasm_dispatch_rejects_unknown_task_before_backend_selection(monkeypa
             [],
             method_id="assembly.candidate.hifiasm",
             task="not_a_parameter_task",
-            prompt_profile={"assets": {"read_type": "hifi"}},
+            facts=_facts(read_type="pacbio_hifi"),
+            context=_context(),
             strategy={"hifiasm_numeric": {}},
         )
 
 
-def test_query_adapter_records_units_precedence_and_source_paths():
+def test_query_adapter_records_units_and_canonical_source_paths():
     query = build_hifiasm_retrieval_query(
-        {
-            "sample": {"ploidy": 2, "clade": "vertebrate"},
-            "assets": {"read_type": "hifi"},
-            "read_qc": {
-                "effective_coverage_1kb": 31.5,
-                "effective_coverage_5kb": 29.0,
-                "read_n50": 18700,
-            },
-            "genome_survey": {
-                "estimated_genome_size": 1_200_000_000,
-                "heterozygosity": 0.011,
-            },
-        },
+        _facts(
+            genome_size_bp=1_200_000_000,
+            coverage=31.5,
+            read_n50_bp=18_700,
+            heterozygosity=0.011,
+            ploidy=2,
+            clade="vertebrate",
+            read_type="pacbio_hifi",
+        ),
+        _context(),
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
     )
 
     assert "query_id" not in query
     assert query["method_id"] == "assembly.candidate.hifiasm"
-    assert query["read_type"] == "hifi"
+    assert query["read_type"] == "pacbio_hifi"
     assert "assembly_goal" not in query
     assert query["numeric_features"]["genome_size_mb"] == {
         "value": 1200.0,
-        "source_ref": "prompt_profile.genome_survey.estimated_genome_size",
+        "source_ref": "facts.genome.effective_genome_size",
     }
     assert query["numeric_features"]["coverage"] == {
         "value": 31.5,
-        "source_ref": "prompt_profile.read_qc.effective_coverage_1kb",
+        "source_ref": "facts.sequencing.raw_coverage",
     }
     assert query["numeric_features"]["read_n50_kb"]["value"] == 18.7
 
 
-def test_query_adapter_treats_non_finite_values_as_missing():
+def test_canonical_facts_reject_non_finite_values_before_query_adapter():
+    with pytest.raises(ValidationError, match="finite"):
+        _quantity(
+            math.nan,
+            "x",
+            kind="derived",
+            producer="read_qc",
+        )
+    with pytest.raises(ValidationError, match="finite"):
+        _quantity(
+            math.inf,
+            "bp",
+            kind="resolved",
+            producer="genome_survey",
+        )
+
     query = build_hifiasm_retrieval_query(
-        {
-            "assets": {"read_type": "hifi"},
-            "read_qc": {"effective_coverage_1kb": math.nan},
-            "genome_survey": {"estimated_genome_size": math.inf},
-        },
+        _facts(),
+        _context(),
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
     )
-
     assert query["numeric_features"]["coverage"]["value"] is None
     assert query["numeric_features"]["genome_size_mb"]["value"] is None
 
 
-def test_query_adapter_normalizes_ont_without_using_it_as_a_filter():
+def test_query_adapter_uses_typed_ont_context_without_filtering():
     query = build_hifiasm_retrieval_query(
-        {"assets": {"read_type": "ont"}},
-        method_id="assembly.candidate.hifiasm-ont",
+        _facts(read_type="ont_raw"),
+        _context(read_type="ont_raw", assembly_route="ont"),
+        method_id="assembly.candidate.hifiasm_ont",
         task="recommend_initial",
     )
 
-    assert query["method_id"] == "assembly.candidate.hifiasm-ont"
-    assert query["read_type"] == "ont"
+    assert query["method_id"] == "assembly.candidate.hifiasm_ont"
+    assert query["read_type"] == "ont_raw"
 
 
 def test_no_approved_cases_returns_non_blocking_fallback_metadata():

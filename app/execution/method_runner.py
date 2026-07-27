@@ -212,9 +212,7 @@ def run_frozen_attempt(
         if ledger_error:
             boundary_errors.append(ledger_error)
         if boundary_errors:
-            error = bounded_failure_reason(
-                "; ".join([error, *boundary_errors])
-            )
+            error = bounded_failure_reason("; ".join([error, *boundary_errors]))
         return RunOutcome(
             success=False,
             result=result,
@@ -334,9 +332,7 @@ def _ensure_failure_result(
         update={
             "success": False,
             "status": "failed",
-            "status_detail": bounded_failure_reason(
-                result.status_detail or detail
-            ),
+            "status_detail": bounded_failure_reason(result.status_detail or detail),
             "stdout_path": stdout_path,
             "stderr_path": stderr_path,
         }

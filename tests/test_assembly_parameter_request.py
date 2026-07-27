@@ -7,76 +7,186 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from app.llm.parameters.assembly.response import (
-    PARAMETER_RECOMMENDATION_CONTRACT,
+from app.domains.assembly.constants import (
+    FLYE_METHOD,
+    HIFIASM_METHOD,
+    NEXTDENOVO_METHOD,
 )
 from app.llm.parameters.assembly.request import (
     AssemblyParameterRequestDTO,
     build_parameter_request_dto,
 )
+from app.llm.parameters.assembly.response import (
+    PARAMETER_RECOMMENDATION_CONTRACT,
+)
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalAssetPresence,
+    CanonicalGenomeFacts,
+    CanonicalReadFacts,
+    CanonicalRecommendationFacts,
+    CanonicalSequencingFacts,
+    CanonicalSpeciesFacts,
+    ExecutionFailureTrigger,
+    ParameterAttemptEvidenceV3,
+    ParameterExecutionEvidence,
+    QuantityFact,
+    QuantityOrigin,
+    RecommendationRetryContext,
+)
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.stages.assembly.parameters.profile import build_prompt_profile
 
 
-def _full_profile(*, previous_attempt: dict | None = None) -> dict:
-    return {
-        "sample": {
-            "sample_id": "sample-1",
-            "organism": "novel species",
-            "ploidy": 2,
-            "target_level": "chromosome",
-        },
-        "assets": {
-            "assembly_route": "hifi",
-            "read_type": "hifi",
-            "has_hifi": True,
-        },
-        "read_qc": {
-            "total_bases": 32_000_000_000,
-            "read_n50": 20_000,
-            "raw_coverage": 32,
-        },
-        "genome_survey": {
-            "effective_genome_size": 1_000_000_000,
-            "genome_size_source": "survey",
-            "heterozygosity": 0.012,
-            "repeat_fraction": 0.45,
-        },
-        "previous_attempt": previous_attempt or {},
-        "assembly_review": {},
-    }
+def _quantity(
+    value: int | float,
+    unit: str,
+    *,
+    kind: str,
+    producer: str,
+) -> QuantityFact:
+    return QuantityFact(
+        value=value,
+        unit=unit,
+        origin=QuantityOrigin(kind=kind, producer=producer),
+    )
+
+
+def _facts() -> CanonicalRecommendationFacts:
+    return CanonicalRecommendationFacts(
+        species=CanonicalSpeciesFacts(
+            scientific_name="novel species",
+            ploidy=_quantity(2, "count", kind="provided", producer="run_config"),
+        ),
+        reads=CanonicalReadFacts(
+            read_type="pacbio_hifi",
+            total_bases=_quantity(
+                32_000_000_000,
+                "bp",
+                kind="measured",
+                producer="read_qc",
+            ),
+            read_n50=_quantity(
+                20_000,
+                "bp",
+                kind="measured",
+                producer="read_qc",
+            ),
+        ),
+        genome=CanonicalGenomeFacts(
+            effective_genome_size=_quantity(
+                1_000_000_000,
+                "bp",
+                kind="resolved",
+                producer="genome_survey",
+            ),
+            heterozygosity=_quantity(
+                0.012,
+                "fraction",
+                kind="measured",
+                producer="genome_survey",
+            ),
+            repeat_fraction=_quantity(
+                0.45,
+                "fraction",
+                kind="measured",
+                producer="genome_survey",
+            ),
+        ),
+        sequencing=CanonicalSequencingFacts(
+            raw_coverage=_quantity(
+                32,
+                "x",
+                kind="derived",
+                producer="parameter_recommendation",
+            )
+        ),
+        asset_presence=CanonicalAssetPresence(has_hifi=True),
+    )
+
+
+def _context(
+    method_id: str = HIFIASM_METHOD,
+    *,
+    retry: RecommendationRetryContext | None = None,
+) -> AssemblyRecommendationContext:
+    if method_id == HIFIASM_METHOD:
+        route, read_type = "hifi", "pacbio_hifi"
+    else:
+        route, read_type = "cyclone", "ont_hq"
+    return AssemblyRecommendationContext(
+        stage="assembly",
+        assembly_route=route,
+        read_type=read_type,
+        target_level="draft",
+        retry=retry,
+    )
 
 
 def _initial_request() -> tuple[dict, dict]:
-    catalog = load_parameter_catalog("hifiasm")
-    profile = _full_profile()
+    catalog = load_parameter_catalog(HIFIASM_METHOD)
+    facts = _facts()
+    context = _context()
     basis = build_parameter_basis_snapshot(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
+        facts=facts,
+        context=context,
     )
     request = build_parameter_request_dto(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
+        facts=facts,
+        context=context,
         task="recommend_initial",
         basis_snapshot=basis,
     )
     return basis, request
 
 
+def _retry_context(
+    *, include_locator_fields: bool = False
+) -> RecommendationRetryContext:
+    execution = ParameterExecutionEvidence(
+        status="failed",
+        failure_class="memory_exhausted",
+        stderr_tail=(
+            "unknown option --purge-level" if include_locator_fields else None
+        ),
+    )
+    previous = ParameterAttemptEvidenceV3(
+        attempt_id=0,
+        task="recommend_initial",
+        status="execution_failed",
+        recommended_parameters={"purge_level": 1},
+        approved_parameters={"purge_level": 1},
+        effective_parameters={"purge_level": 1},
+        effective_sources={"purge_level": "l2"},
+        execution=execution,
+    )
+    return RecommendationRetryContext(
+        trigger=ExecutionFailureTrigger(
+            status="failed",
+            failure_class="memory_exhausted",
+        ),
+        attempt_history=(previous,),
+    )
+
+
 def test_initial_builder_returns_only_the_strict_model_dto() -> None:
     _, request = _initial_request()
 
+    assert request["schema_version"] == 3
     assert request["recommendation_contract"] == PARAMETER_RECOMMENDATION_CONTRACT
     assert request["literature_cases"]
     assert request["method_guidance"]
     assert set(request) == {
+        "schema_version",
         "recommendation_contract",
         "method_id",
         "task",
-        "observations",
+        "facts",
+        "assembly_context",
         "method_guidance",
         "adjustable_parameters",
         "literature_selection",
@@ -88,6 +198,7 @@ def test_initial_builder_returns_only_the_strict_model_dto() -> None:
         "evidence_registry",
         "baseline_overrides",
         "payload_hash",
+        "dependency_refs",
     }.isdisjoint(request)
     parameter_specs = list(request["adjustable_parameters"].values())
     for spec in parameter_specs:
@@ -139,78 +250,57 @@ def test_full_basis_and_model_case_have_separate_explicit_owners() -> None:
     assert "methods_path" not in json.dumps(request, ensure_ascii=False)
 
 
-def test_retry_reuses_basis_and_exposes_previous_recommendation_as_context_only() -> None:
-    catalog = load_parameter_catalog("hifiasm")
-    initial_profile = _full_profile()
+def test_retry_reuses_basis_and_exposes_typed_attempt_history() -> None:
+    catalog = load_parameter_catalog(HIFIASM_METHOD)
+    facts = _facts()
+    initial_context = _context()
     basis = build_parameter_basis_snapshot(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=build_prompt_profile(initial_profile, "recommend_initial"),
+        facts=facts,
+        context=initial_context,
     )
-    previous = {
-        "attempt_id": 0,
-        "method_id": "hifiasm",
-        "parameters": {"purge_level": 1},
-        "execution_status": "failed",
-        "failure_class": "memory_exhausted",
-    }
-    retry_profile = _full_profile(previous_attempt=previous)
 
     retry = build_parameter_request_dto(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=build_prompt_profile(
-            retry_profile,
-            "retry_after_execution_failure",
-        ),
+        facts=facts,
+        context=_context(retry=_retry_context()),
         task="retry_after_execution_failure",
         basis_snapshot=basis,
     )
-
-    assert retry["literature_cases"] == build_parameter_request_dto(
-        method_id="hifiasm",
+    initial = build_parameter_request_dto(
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=build_prompt_profile(initial_profile, "recommend_initial"),
+        facts=facts,
+        context=initial_context,
         task="recommend_initial",
         basis_snapshot=basis,
-    )["literature_cases"]
+    )
+
+    assert retry["literature_cases"] == initial["literature_cases"]
     assert "baseline_params" not in retry
-    assert retry["retry_context"]["previous_attempt"]["parameters"] == {
-        "purge_level": 1
-    }
-    assert retry["retry_context"]["previous_attempt"]["failure_class"] == (
-        "memory_exhausted"
-    )
+    history = retry["assembly_context"]["retry"]["attempt_history"]
+    assert history[0]["recommended_parameters"] == {"purge_level": 1}
+    assert history[0]["execution"]["failure_class"] == "memory_exhausted"
 
 
-def test_retry_dto_never_receives_attempt_or_command_audit_fields() -> None:
-    catalog = load_parameter_catalog("hifiasm")
-    initial_profile = _full_profile()
+def test_retry_dto_exposes_only_bounded_attempt_evidence() -> None:
+    catalog = load_parameter_catalog(HIFIASM_METHOD)
+    facts = _facts()
+    initial_context = _context()
     basis = build_parameter_basis_snapshot(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=build_prompt_profile(initial_profile, "recommend_initial"),
-    )
-    retry_profile = _full_profile(
-        previous_attempt={
-            "attempt_id": 9,
-            "method_id": "hifiasm",
-            "tool_version": "0.25",
-            "command_argv": ["hifiasm", "-o", "/private/run/work/out"],
-            "stderr_ref": "artifacts/assembly/attempts/009/stderr.log",
-            "stdout_ref": "artifacts/assembly/attempts/009/stdout.log",
-            "execution_status": "failed",
-            "failure_class": "memory_exhausted",
-        }
+        facts=facts,
+        context=initial_context,
     )
 
     request = build_parameter_request_dto(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=build_prompt_profile(
-            retry_profile,
-            "retry_after_execution_failure",
-        ),
+        facts=facts,
+        context=_context(retry=_retry_context(include_locator_fields=True)),
         task="retry_after_execution_failure",
         basis_snapshot=basis,
     )
@@ -220,24 +310,24 @@ def test_retry_dto_never_receives_attempt_or_command_audit_fields() -> None:
     assert "/private/run/work/out" not in serialized
     assert "stderr_ref" not in serialized
     assert "stdout_ref" not in serialized
-    assert '"attempt_id"' not in serialized
+    assert "unknown option --purge-level" in serialized
+    attempt = request["assembly_context"]["retry"]["attempt_history"][0]
+    assert set(attempt) == {
+        "attempt_id",
+        "task",
+        "status",
+        "recommended_parameters",
+        "approved_parameters",
+        "effective_parameters",
+        "effective_sources",
+        "execution",
+    }
 
 
-def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators() -> None:
-    catalog = load_parameter_catalog("hifiasm")
-    profile = _full_profile()
-    basis = build_parameter_basis_snapshot(
-        method_id="hifiasm",
-        catalog=catalog,
-        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
-    )
-    request = build_parameter_request_dto(
-        method_id="hifiasm",
-        catalog=catalog,
-        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
-        task="recommend_initial",
-        basis_snapshot=basis,
-    )
+def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators() -> (
+    None
+):
+    basis, request = _initial_request()
 
     assert "query_id" not in basis["literature_selection"]
     assert "query_id" not in request["literature_selection"]
@@ -247,18 +337,21 @@ def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators(
 
 
 def test_methods_without_guidance_or_cases_produce_serializable_dtos() -> None:
-    profile = _full_profile()
-    for method_id in ("flye", "nextdenovo"):
+    facts = _facts()
+    for method_id in (FLYE_METHOD, NEXTDENOVO_METHOD):
         catalog = load_parameter_catalog(method_id)
+        context = _context(method_id)
         basis = build_parameter_basis_snapshot(
             method_id=method_id,
             catalog=catalog,
-            prompt_profile=build_prompt_profile(profile, "recommend_initial"),
+            facts=facts,
+            context=context,
         )
         request = build_parameter_request_dto(
             method_id=method_id,
             catalog=catalog,
-            prompt_profile=build_prompt_profile(profile, "recommend_initial"),
+            facts=facts,
+            context=context,
             task="recommend_initial",
             basis_snapshot=basis,
         )

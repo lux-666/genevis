@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
@@ -11,32 +13,47 @@ from app.graph.checkpointer import (
     get_checkpointer,
 )
 from app.graph.routing import route_controller, route_from_current_stage
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
+from app.stages.assembly.builder import build_stage as build_assembly_stage
+from app.stages.assembly_dedup.builder import build_stage as build_assembly_dedup_stage
+from app.stages.assembly_review.builder import (
+    build_stage as build_assembly_review_stage,
+)
+from app.stages.function_annotation.builder import (
+    build_stage as build_function_annotation_stage,
+)
+from app.stages.gene_annotation.builder import (
+    build_stage as build_gene_annotation_stage,
+)
+from app.stages.genome_survey.builder import build_stage as build_genome_survey_stage
+from app.stages.hic_scaffolding.builder import (
+    build_stage as build_hic_scaffolding_stage,
+)
+from app.stages.inventory.builder import build_stage as build_inventory_stage
+from app.stages.read_qc.builder import build_stage as build_read_qc_stage
+from app.stages.repeat_annotation.builder import (
+    build_stage as build_repeat_annotation_stage,
+)
+from app.stages.t2t.builder import build_stage as build_t2t_stage
 from app.workflow import (
     STAGE_ORDER,
     TERMINAL_STAGE,
     next_requested_stage,
     unrequested_stages_from_current,
 )
-from app.stages.assembly.builder import build_stage as build_assembly_stage
-from app.stages.assembly_dedup.builder import build_stage as build_assembly_dedup_stage
-from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
-from app.stages.function_annotation.builder import build_stage as build_function_annotation_stage
-from app.stages.gene_annotation.builder import build_stage as build_gene_annotation_stage
-from app.stages.genome_survey.builder import build_stage as build_genome_survey_stage
-from app.stages.hic_scaffolding.builder import build_stage as build_hic_scaffolding_stage
-from app.stages.inventory.builder import build_stage as build_inventory_stage
-from app.stages.read_qc.builder import build_stage as build_read_qc_stage
-from app.stages.repeat_annotation.builder import build_stage as build_repeat_annotation_stage
-from app.stages.t2t.builder import build_stage as build_t2t_stage
 
 
 def build_graph(
     *,
-    checkpointer=None,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
     backend: CheckpointerBackend = DEFAULT_CHECKPOINTER_BACKEND,
     data_dir: str = "data",
-):
+) -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the thin parent graph.
 
     ``checkpointer`` overrides backend resolution when provided (used by
@@ -45,7 +62,7 @@ def build_graph(
     """
     graph = StateGraph(TopLevelState)
 
-    def operator_route_controller(state: TopLevelState) -> dict:
+    def operator_route_controller(state: TopLevelState) -> StateUpdate:
         session_id = state.get("session_id")
         runtime_data_dir = state.get("data_dir", data_dir)
         supervision = state.get("supervision_state")
@@ -65,9 +82,9 @@ def build_graph(
                 if isinstance(trace_item, str) and trace_item.endswith("_stage"):
                     completed_stage = trace_item[: -len("_stage")]
                     if completed_stage in STAGE_ORDER:
-                        completed_cursor = (
-                            state.get("stage_outputs") or {}
-                        ).get(completed_stage, {})
+                        completed_cursor = (state.get("stage_outputs") or {}).get(
+                            completed_stage, {}
+                        )
                         completed_refs = ledger.references_from(
                             completed_cursor,
                             role_prefix=f"stage.{completed_stage}",
@@ -110,7 +127,10 @@ def build_graph(
                     refs=terminal_refs,
                     idempotency_key="session-terminal:failed",
                 )
-            elif supervision == "completed" or state.get("current_stage") == TERMINAL_STAGE:
+            elif (
+                supervision == "completed"
+                or state.get("current_stage") == TERMINAL_STAGE
+            ):
                 ledger.record_session_terminal(
                     session_id,
                     outcome="completed",
@@ -121,17 +141,21 @@ def build_graph(
             elif supervision != "blocked_human":
                 current = state.get("current_stage", "inventory")
                 requested = state.get("requested_stages")
-                if requested and current not in {"inventory", TERMINAL_STAGE} and current not in requested:
+                if (
+                    requested
+                    and current not in {"inventory", TERMINAL_STAGE}
+                    and current not in requested
+                ):
                     next_requested = next_requested_stage(current, requested)
-                    for skipped_stage in unrequested_stages_from_current(
+                    for unrequested_stage in unrequested_stages_from_current(
                         current,
                         requested,
                     ):
                         ledger.record_stage_skipped(
                             session_id,
-                            skipped_stage,
+                            unrequested_stage,
                             reason="not_requested",
-                            idempotency_key=f"stage-skipped:{skipped_stage}",
+                            idempotency_key=f"stage-skipped:{unrequested_stage}",
                         )
                     if next_requested != TERMINAL_STAGE:
                         ledger.record_stage_entered(

@@ -1,6 +1,8 @@
-from typing import get_args, get_type_hints
+from typing import Literal, get_args, get_type_hints
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
+from typing_extensions import TypedDict
 
 from app.schemas.state import (
     ActiveInterrupt,
@@ -8,6 +10,7 @@ from app.schemas.state import (
     ControlState,
     DomainStage,
     StageOutputs,
+    StateUpdate,
     SupervisionState,
     TopLevelState,
     initial_state,
@@ -15,6 +18,15 @@ from app.schemas.state import (
     validate_state_field,
     validate_top_level_state,
 )
+from app.stages.base import update_validated_stage_output, validated_stage_output
+
+
+class _TestAssemblyCursor(TypedDict, total=False):
+    status: Literal["planned", "frozen"]
+    attempt_id: int
+
+
+_TEST_ASSEMBLY_CURSOR_ADAPTER = TypeAdapter(_TestAssemblyCursor)
 
 
 def test_top_level_state_marks_runtime_invariants_as_required() -> None:
@@ -46,6 +58,46 @@ def test_initial_state_populates_all_declared_top_level_fields() -> None:
 
     assert set(state) == set(TopLevelState.__annotations__)
     assert TopLevelState.__required_keys__ <= state.keys()
+
+
+def test_state_update_is_partial_and_cannot_introduce_new_channels() -> None:
+    assert StateUpdate.__required_keys__ == frozenset()
+    assert set(StateUpdate.__annotations__) <= set(TopLevelState.__annotations__)
+
+
+def test_stage_cursor_boundary_validates_before_narrowing_and_serializing() -> None:
+    state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    state["stage_outputs"] = validate_stage_outputs(
+        {"assembly": {"status": "planned", "attempt_id": 0}}
+    )
+
+    cursor = validated_stage_output(
+        state,
+        "assembly",
+        _TEST_ASSEMBLY_CURSOR_ADAPTER,
+    )
+    assert cursor == {"status": "planned", "attempt_id": 0}
+
+    update = update_validated_stage_output(
+        state,
+        "assembly",
+        {"status": "frozen"},
+        _TEST_ASSEMBLY_CURSOR_ADAPTER,
+    )
+    assert update["stage_outputs"]["assembly"] == {
+        "status": "frozen",
+        "attempt_id": 0,
+    }
+
+    state["stage_outputs"] = validate_stage_outputs(
+        {"assembly": {"status": "planned", "attempt_id": "not-an-int"}}
+    )
+    with pytest.raises(ValidationError):
+        validated_stage_output(
+            state,
+            "assembly",
+            _TEST_ASSEMBLY_CURSOR_ADAPTER,
+        )
 
 
 def test_lifecycle_literals_and_interrupt_contract_are_bounded() -> None:
@@ -81,17 +133,20 @@ def test_lifecycle_literals_and_interrupt_contract_are_bounded() -> None:
 
 def test_stage_outputs_are_typed_bounded_json_cursors() -> None:
     assert "Any" not in str(StageOutputs)
-    assert validate_stage_outputs(
-        {
-            "assembly": {
-                "status": "frozen",
-                "frozen_attempt_ref": {
-                    "schema_version": 2,
-                    "path_ref": "artifacts/assembly/attempts/a/attempt.json",
-                },
+    assert (
+        validate_stage_outputs(
+            {
+                "assembly": {
+                    "status": "frozen",
+                    "frozen_attempt_ref": {
+                        "schema_version": 2,
+                        "path_ref": "artifacts/assembly/attempts/a/attempt.json",
+                    },
+                }
             }
-        }
-    )["assembly"]["status"] == "frozen"
+        )["assembly"]["status"]
+        == "frozen"
+    )
 
     with pytest.raises(ValueError, match="unknown stages"):
         validate_stage_outputs({"not_a_stage": {}})
@@ -118,9 +173,7 @@ def test_stage_outputs_reject_embedded_frozen_attempt_before_checkpoint() -> Non
     graph = StateGraph(TopLevelState)
     graph.add_node(
         "embed",
-        lambda _state: {
-            "stage_outputs": {"assembly": {"frozen_attempt": frozen_body}}
-        },
+        lambda _state: {"stage_outputs": {"assembly": {"frozen_attempt": frozen_body}}},
     )
     graph.set_entry_point("embed")
 
@@ -143,9 +196,7 @@ def test_whole_state_budget_warns_at_target_and_rejects_at_hard_limit() -> None:
         validate_top_level_state(hard_state)
 
     with pytest.raises(ValueError, match="whole-state hard limit"):
-        validate_state_field(
-            "shared_parameters", {"padding": "x" * (256 * 1024)}
-        )
+        validate_state_field("shared_parameters", {"padding": "x" * (256 * 1024)})
 
 
 @pytest.mark.parametrize(

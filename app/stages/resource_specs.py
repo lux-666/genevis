@@ -7,7 +7,6 @@ downstream stages.
 
 from app.stages.resource_resolution import ResourceSpec
 
-
 ASSEMBLY_SPEC = ResourceSpec(
     resource_type="assembly",
     asset_types=["assembly_fasta_registered"],

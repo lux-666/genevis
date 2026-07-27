@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
+from app.stages.assembly_dedup.state import (
+    AssemblyDedupCursor,
+    assembly_dedup_output,
+)
 from app.workflow import is_terminal_failure
 
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("assembly_dedup") or {}
+def _output(state: TopLevelState) -> AssemblyDedupCursor:
+    return assembly_dedup_output(state)
 
 
 def route_after_enter(state: TopLevelState) -> str:

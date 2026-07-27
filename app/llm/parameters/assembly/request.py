@@ -12,15 +12,17 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
-from app.domains.assembly.profile_evidence import build_profile_evidence
 from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_catalog import MethodParameterCatalog
-
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalRecommendationFacts,
+)
 
 _PARAMETER_SPEC_FIELDS = (
     "value_type",
@@ -94,22 +96,33 @@ class AssemblyParameterRequestDTO(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schema_version: Literal[3]
     recommendation_contract: Literal["parameter_recommendation_v1"]
     method_id: str = Field(min_length=1)
     task: ParameterAttemptTask
-    observations: list[dict[str, Any]]
+    facts: CanonicalRecommendationFacts
+    assembly_context: AssemblyRecommendationContext
     adjustable_parameters: dict[str, dict[str, Any]]
     method_guidance: list[dict[str, Any]] | None = None
     literature_selection: dict[str, Any] | None = None
     literature_cases: list[dict[str, Any]] | None = None
-    retry_context: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_retry_context(self) -> "AssemblyParameterRequestDTO":
+        has_retry = self.assembly_context.retry is not None
+        if (self.task != "recommend_initial") != has_retry:
+            raise ValueError(
+                "Assembly retry tasks require typed assembly_context.retry"
+            )
+        return self
 
 
 def build_parameter_request_dto(
     *,
     method_id: str,
     catalog: MethodParameterCatalog,
-    prompt_profile: dict[str, Any],
+    facts: CanonicalRecommendationFacts,
+    context: AssemblyRecommendationContext,
     task: ParameterAttemptTask,
     basis_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -117,19 +130,21 @@ def build_parameter_request_dto(
 
     if method_id != catalog.method_id:
         raise ValueError(
-            f"parameter request method {method_id!r} does not match catalog {catalog.method_id!r}"
+            f"parameter request method {method_id!r} does not match "
+            f"catalog {catalog.method_id!r}"
         )
     if basis_snapshot.get("method_id") != catalog.method_id:
         raise ValueError("parameter request basis method does not match the catalog")
 
-    observations, _ = build_profile_evidence(prompt_profile)
     adjustable_parameters = _model_adjustable_parameters(catalog)
 
     request: dict[str, Any] = {
+        "schema_version": 3,
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": method_id,
         "task": task,
-        "observations": _model_observations(observations),
+        "facts": facts,
+        "assembly_context": context,
         "adjustable_parameters": adjustable_parameters,
     }
     _add_visible(
@@ -152,13 +167,6 @@ def build_parameter_request_dto(
         _model_literature_cases(basis_snapshot.get("literature_cases")),
         already_projected=True,
     )
-    if task != "recommend_initial":
-        _add_visible(
-            request,
-            "retry_context",
-            _model_retry_context(_build_retry_context(prompt_profile, task=task)),
-            already_projected=True,
-        )
     return AssemblyParameterRequestDTO.model_validate(request).model_dump(
         mode="json",
         exclude_none=True,
@@ -170,7 +178,7 @@ def _model_adjustable_parameters(
 ) -> dict[str, Any]:
     adjustable_parameters: dict[str, Any] = {}
     for key, spec in catalog.parameters.items():
-        if spec.level == 2:
+        if spec.layers.l2 is not None:
             adjustable_parameters[key] = _model_parameter_spec(
                 spec.model_dump(mode="json")
             )
@@ -185,89 +193,6 @@ def _model_parameter_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         child = _model_safe_value(value[field])
         if child is not _OMIT:
             projected[field] = child
-    return projected
-
-
-def _build_retry_context(profile: dict[str, Any], *, task: str) -> dict[str, Any]:
-    previous = dict(profile.get("previous_attempt") or {})
-    review = dict(profile.get("assembly_review") or {})
-    signals: list[dict[str, Any]] = []
-    for signal_id, path, value in (
-        (
-            "execution.status",
-            "previous_attempt.execution_status",
-            previous.get("execution_status"),
-        ),
-        (
-            "execution.status_detail",
-            "previous_attempt.execution_status_detail",
-            previous.get("execution_status_detail"),
-        ),
-        (
-            "execution.exit_code",
-            "previous_attempt.exit_code",
-            previous.get("exit_code"),
-        ),
-        (
-            "execution.stderr_ref",
-            "previous_attempt.stderr_ref",
-            previous.get("stderr_ref"),
-        ),
-        (
-            "execution.stdout_ref",
-            "previous_attempt.stdout_ref",
-            previous.get("stdout_ref"),
-        ),
-        (
-            "review.failure_mode",
-            "assembly_review.failure_mode",
-            review.get("failure_mode"),
-        ),
-    ):
-        if value is not None:
-            signals.append({"signal_id": signal_id, "path": path, "value": value})
-    for metric, value in review.items():
-        if metric == "failure_mode" or value is None or isinstance(value, (dict, list)):
-            continue
-        signals.append(
-            {
-                "signal_id": f"review.{metric}",
-                "path": f"assembly_review.{metric}",
-                "value": value,
-            }
-        )
-    return {
-        "task": task,
-        "previous_attempt": previous,
-        "assembly_review": review,
-        "signal_ids": [signal["signal_id"] for signal in signals],
-        "signals": signals,
-    }
-
-
-def _model_observations(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        raise ValueError("assembly parameter request observations must be a list")
-    projected: list[dict[str, Any]] = []
-    for index, observation in enumerate(value):
-        if not isinstance(observation, Mapping):
-            raise ValueError(
-                f"assembly parameter request observations[{index}] must be an object"
-            )
-        if not {"id", "section", "name", "value"}.issubset(observation):
-            raise ValueError(
-                f"assembly parameter request observations[{index}] has an invalid shape"
-            )
-        item = _model_mapping_fields(
-            observation,
-            ("id", "section", "group", "name", "value"),
-        )
-        if (
-            item is not _OMIT
-            and {"id", "section", "name", "value"}.issubset(item)
-            and not _mapping_identifies_audit_metadata(item)
-        ):
-            projected.append(item)
     return projected
 
 
@@ -304,30 +229,6 @@ def _model_method_guidance(value: Any) -> Any:
         if card is not _OMIT:
             cards.append(card)
     return cards if cards else _OMIT
-
-
-def _model_retry_context(value: Any) -> Any:
-    if not isinstance(value, Mapping):
-        return _OMIT
-    projected: dict[str, Any] = {}
-    task = _model_safe_value(value.get("task"))
-    if task is not _OMIT:
-        projected["task"] = task
-    for field in ("previous_attempt", "assembly_review"):
-        child = _model_safe_value(value.get(field))
-        if child is not _OMIT:
-            projected[field] = child
-    signal_ids = [
-        signal_id
-        for signal_id in (value.get("signal_ids") or [])
-        if isinstance(signal_id, str) and not _is_audit_locator(signal_id)
-    ]
-    if signal_ids:
-        projected["signal_ids"] = signal_ids
-    signals = _model_safe_value(value.get("signals"))
-    if signals is not _OMIT:
-        projected["signals"] = signals
-    return projected if projected else _OMIT
 
 
 def _add_visible(
@@ -374,7 +275,7 @@ def _model_safe_value(value: Any) -> Any:
 
 
 def _mapping_identifies_audit_metadata(value: Mapping[Any, Any]) -> bool:
-    locator_fields = ("path", "key", "field", "signal_id")
+    locator_fields: tuple[str, ...] = ("path", "key", "field", "signal_id")
     if {"id", "section", "name", "value"}.issubset(value):
         locator_fields = (*locator_fields, "id", "name")
     for field in locator_fields:

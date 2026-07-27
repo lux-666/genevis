@@ -7,33 +7,48 @@ Routes to:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from app.schemas.state import TopLevelState
+from app.stages.assembly_review.state import (
+    AssemblyReviewCursor,
+    assembly_review_output,
+)
 from app.workflow import is_terminal_failure
 
+EnterRoute = Literal["fail", "resolve_candidates"]
+PlanMetricsRoute = Literal["fail", "quast", "evaluate_rules"]
+QuastRoute = Literal["fail", "busco", "evaluate_rules"]
+EvaluationRoute = Literal["fail", "generate_comparison", "human_gate"]
+QualityGateRoute = Literal[
+    "fail",
+    "replan",
+    "parameter_quality_gate",
+    "related_species_sanity_check",
+]
+ComparisonRoute = Literal["fail", "human_gate"]
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("assembly_review") or {}
+
+def _output(state: TopLevelState) -> AssemblyReviewCursor:
+    return assembly_review_output(state)
 
 
-def _assembly_output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("assembly") or {}
-
-
-def route_after_enter(state: TopLevelState) -> str:
-    status = _assembly_output(state).get("status")
-    if status in {"flye_rerun_planned", "flye_rerun_frozen", "flye_rerun_ran"}:
-        return "flye_rerun"
+def route_after_enter(state: TopLevelState) -> EnterRoute:
+    ar_out = _output(state)
+    assembly_out = (state.get("stage_outputs") or {}).get("assembly") or {}
+    status = assembly_out.get("status")
+    if is_terminal_failure(ar_out.get("status")):
+        return "fail"
+    if assembly_out.get("rerun_request") is not None or status in {
+        "flye_rerun_planned",
+        "flye_rerun_frozen",
+        "flye_rerun_ran",
+    }:
+        return "fail"
     return "resolve_candidates"
 
 
-def route_after_rerun(state: TopLevelState) -> str:
-    assembly_out = _assembly_output(state)
-    if is_terminal_failure(assembly_out.get("status")):
-        return "fail"
-    return "resolve_candidates" if assembly_out.get("status") == "draft_ready" else "fail"
-
-
-def route_after_plan_metrics(state: TopLevelState) -> str:
+def route_after_plan_metrics(state: TopLevelState) -> PlanMetricsRoute:
     """Route after planning review metrics."""
     ar_out = _output(state)
     if is_terminal_failure(ar_out.get("status")):
@@ -43,7 +58,7 @@ def route_after_plan_metrics(state: TopLevelState) -> str:
     return "evaluate_rules"
 
 
-def route_after_quast(state: TopLevelState) -> str:
+def route_after_quast(state: TopLevelState) -> QuastRoute:
     """Route after the QUAST method subgraph returns."""
     ar_out = _output(state)
     if is_terminal_failure(ar_out.get("status")):
@@ -53,7 +68,7 @@ def route_after_quast(state: TopLevelState) -> str:
     return "evaluate_rules"
 
 
-def route_after_busco(state: TopLevelState) -> str:
+def route_after_busco(state: TopLevelState) -> Literal["fail", "evaluate_rules"]:
     """Route after the BUSCO method subgraph returns."""
     ar_out = _output(state)
     if is_terminal_failure(ar_out.get("status")):
@@ -61,24 +76,33 @@ def route_after_busco(state: TopLevelState) -> str:
     return "evaluate_rules"
 
 
-def _has_available_review_metrics(ar_out: dict) -> bool:
+def _has_available_review_metrics(ar_out: AssemblyReviewCursor) -> bool:
     """Check if any review metrics are available (not pending/failed)."""
     signals = ar_out.get("signals") or []
     for signal in signals:
-        if signal.get("status") == "available" and signal.get("signal_name") in {"quast", "busco"}:
+        if signal.get("status") == "available" and signal.get("signal_name") in {
+            "quast",
+            "busco",
+        }:
             return True
     return False
 
 
-def route_after_parameter_quality_gate(state: TopLevelState) -> str:
+def route_after_parameter_quality_gate(state: TopLevelState) -> QualityGateRoute:
     """Route Phase10 parameter-quality gate or continue normal review."""
     ar_out = _output(state)
     if is_terminal_failure(ar_out.get("status")):
         return "fail"
-    if state.get("current_stage") == "assembly" and ar_out.get("status") == "parameter_replan_requested":
+    if (
+        state.get("current_stage") == "assembly"
+        and ar_out.get("status") == "parameter_replan_requested"
+    ):
         return "replan"
     assembly_out = (state.get("stage_outputs") or {}).get("assembly") or {}
-    if assembly_out.get("parameter_attempts") and ar_out.get("status") != "parameter_replan_requested":
+    if (
+        assembly_out.get("parameter_attempts")
+        and ar_out.get("status") != "parameter_replan_requested"
+    ):
         if ar_out.get("parameter_quality_checked"):
             return "related_species_sanity_check"
         if ar_out.get("parameter_retries_exhausted"):
@@ -91,7 +115,7 @@ def route_after_parameter_quality_gate(state: TopLevelState) -> str:
     return "related_species_sanity_check"
 
 
-def route_from_evaluation(state: TopLevelState) -> str:
+def route_from_evaluation(state: TopLevelState) -> EvaluationRoute:
     """Return the next node after assembly review evaluation."""
     ar_out = _output(state)
 
@@ -108,7 +132,7 @@ def route_from_evaluation(state: TopLevelState) -> str:
     return "fail"
 
 
-def route_after_comparison(state: TopLevelState) -> str:
+def route_after_comparison(state: TopLevelState) -> ComparisonRoute:
     """Route after generating candidate comparison."""
     ar_out = _output(state)
     if is_terminal_failure(ar_out.get("status")):

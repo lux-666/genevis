@@ -15,7 +15,7 @@ design and implementation records.
 | [`execution-evidence.md`](execution-evidence.md) | Runtime `ExecutionResult`, durable `ExecutionEvidence`, process logs, and result cursors |
 | [`execution-lifecycle.md`](execution-lifecycle.md) | Shared freeze/run/collect graph, attempt owners, recovery routing, failure policies, and stage-adapter boundary |
 | [`parameter-recommenders.md`](parameter-recommenders.md) | Model-boundary DTOs, exact request/response flow, approval, persistence, and recommender responsibilities |
-| [`autohic-stage.md`](autohic-stage.md) | Parent/Hi-C boundary, AutoHiC-only execution, restriction-enzyme recommendation, and result adoption |
+| [`autohic-stage.md`](autohic-stage.md) | Parent/Hi-C boundary, AutoHiC-only execution, sparse multi-attempt parameter recommendation, retry, and result adoption |
 | [`bootstrap.md`](bootstrap.md) | Minimal initialization of `.env`, `config/envs.yaml`, and configured external-package conformance |
 
 ## Ownership boundaries

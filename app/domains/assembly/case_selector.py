@@ -8,6 +8,11 @@ from typing import Any
 from app.domains.assembly.evidence_case import validate_hifiasm_evidence_cases
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.domains.assembly.retrieval_query import build_hifiasm_retrieval_query
+from app.schemas.artifacts import ParameterAttemptTask
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalRecommendationFacts,
+)
 
 _LITERATURE_METHODS = {"hifiasm", "hifiasm_ont"}
 _RETRY_TASKS = {
@@ -21,8 +26,9 @@ def select_evidence_cases(
     cases: list[dict[str, Any]],
     *,
     method_id: str,
-    task: str,
-    prompt_profile: dict[str, Any],
+    task: ParameterAttemptTask,
+    facts: CanonicalRecommendationFacts,
+    context: AssemblyRecommendationContext,
     min_cases: int = 0,
     max_cases: int | None = None,
     strategy: dict[str, Any] | None = None,
@@ -37,7 +43,9 @@ def select_evidence_cases(
 
     del min_cases
     if task in _RETRY_TASKS:
-        raise ValueError("retry inherits attempt 0 literature cards without reselection")
+        raise ValueError(
+            "retry inherits attempt 0 literature cards without reselection"
+        )
     if task != "recommend_initial":
         raise ValueError(f"unsupported assembly parameter task: {task!r}")
 
@@ -64,7 +72,8 @@ def select_evidence_cases(
         pack_root=Path(source_root) if source_root is not None else None,
     )
     query = build_hifiasm_retrieval_query(
-        prompt_profile,
+        facts,
+        context,
         method_id=method_id,
         task=task,
     )

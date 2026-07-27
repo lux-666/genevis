@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REFERENCE_DIR = PROJECT_ROOT / "data" / "reference" / "ncbi_metazoa"
 MANIFEST_FILENAME = "reference_manifest.json"
@@ -25,9 +24,20 @@ COPYABLE_FILES = ("Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-dir", type=Path, help="Directory holding the pinned NCBI export files")
-    parser.add_argument("--destination", type=Path, default=DEFAULT_REFERENCE_DIR, help="Project reference directory")
-    parser.add_argument("--verify-only", action="store_true", help="Only validate files already in destination")
+    parser.add_argument(
+        "--source-dir", type=Path, help="Directory holding the pinned NCBI export files"
+    )
+    parser.add_argument(
+        "--destination",
+        type=Path,
+        default=DEFAULT_REFERENCE_DIR,
+        help="Project reference directory",
+    )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Only validate files already in destination",
+    )
     args = parser.parse_args(argv)
     if args.verify_only and args.source_dir:
         parser.error("--verify-only cannot be combined with --source-dir")

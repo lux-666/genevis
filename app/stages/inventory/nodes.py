@@ -11,17 +11,29 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from typing_extensions import TypedDict
 
-from app.storage.ledger import Ledger
-from app.schemas.assets import AssetRecord
-from app.schemas.artifacts import ArtifactMeta
-from app.schemas.manifest import InputManifest, validate_manifest
-from app.schemas.state import TopLevelState
-from app.schemas.resource_ref import ResourceRef
 from app.review.persistence import persist_review_decision
+from app.schemas.artifacts import ArtifactMeta
+from app.schemas.assets import AssetRecord
+from app.schemas.manifest import InputManifest, validate_manifest
+from app.schemas.resource_ref import ResourceRef
+from app.schemas.shared_parameters import SharedParameters
+from app.schemas.state import (
+    DomainStage,
+    ResourceRefs,
+    StateUpdate,
+    TopLevelState,
+    validate_top_level_state,
+)
 from app.stages.base import append_route_trace, resolve_run_ref
-from app.storage.paths import SessionPaths
+from app.stages.inventory.state import (
+    read_inventory_stage_output,
+    update_inventory_stage_output,
+)
 from app.storage.artifacts import publish_artifact_record
+from app.storage.ledger import Ledger
+from app.storage.paths import SessionPaths
 
 
 def _load_manifest(manifest_ref: str) -> InputManifest:
@@ -76,7 +88,9 @@ def _build_asset_records(
                     allowed_stages=[],
                     metadata={
                         "layout": props.get("inferred_layout", spec.layout),
-                        "compression": props.get("inferred_compression", spec.compression),
+                        "compression": props.get(
+                            "inferred_compression", spec.compression
+                        ),
                         **spec.metadata,
                     },
                     provenance={
@@ -91,7 +105,12 @@ def _build_asset_records(
 def _entry_mode(manifest: InputManifest) -> str:
     """Return the entry mode implied by manifest assets."""
     asset_types = {asset.asset_type for asset in manifest.assets}
-    supporting = {"repeat_library", "gene_models", "predicted_proteins", "transcripts_fasta"}
+    supporting = {
+        "repeat_library",
+        "gene_models",
+        "predicted_proteins",
+        "transcripts_fasta",
+    }
     non_supporting = asset_types - supporting
     if non_supporting == {"assembly_fasta_registered"}:
         return "existing_assembly"
@@ -131,12 +150,12 @@ def _write_registry(
     ).path
 
 
-def enter_inventory(state: TopLevelState) -> dict:
+def enter_inventory(state: TopLevelState) -> StateUpdate:
     """Mark inventory as running.  No side effects."""
     return {"supervision_state": "running_stage"}
 
 
-def validate_inputs(state: TopLevelState) -> dict:
+def validate_inputs(state: TopLevelState) -> StateUpdate:
     """Load and validate the input manifest.
 
     Returns state updates that the routing node will use to decide
@@ -144,45 +163,79 @@ def validate_inputs(state: TopLevelState) -> dict:
     """
     manifest_ref = state.get("input_manifest_ref")
     if not manifest_ref:
-        return {
-            "stage_outputs": {
-                **(state.get("stage_outputs") or {}),
-                "inventory": {"status": "failed", "reason": "missing input_manifest_ref"},
+        return update_inventory_stage_output(
+            state,
+            {
+                "status": "failed",
+                "reason": "missing input_manifest_ref",
             },
-        }
+        )
 
     try:
         manifest = _load_manifest(str(resolve_run_ref(state, manifest_ref)))
+        canonical_shared = _canonical_shared_parameters(state, manifest)
     except Exception as exc:
-        return {
-            "stage_outputs": {
-                **(state.get("stage_outputs") or {}),
-                "inventory": {"status": "failed", "reason": f"manifest load error: {exc}"},
+        return update_inventory_stage_output(
+            state,
+            {
+                "status": "failed",
+                "reason": f"manifest load error: {exc}",
             },
-        }
+        )
 
     _apply_shared_platform_override(manifest, state)
     report = validate_manifest(manifest)
-    return {
-        "stage_outputs": {
-            **(state.get("stage_outputs") or {}),
-            "inventory": {
-                "status": "validated",
-                "valid": report["valid"],
-                "errors": report["errors"],
-                "warnings": report["warnings"],
-                "asset_count": len(manifest.assets),
-                "entry_mode": _entry_mode(manifest),
-                "genome_size_estimate": manifest.genome_size_estimate,
-                "target_assembly_level": manifest.target_assembly_level,
-            },
+    update = update_inventory_stage_output(
+        state,
+        {
+            "status": "validated",
+            "valid": report["valid"],
+            "errors": report["errors"],
+            "warnings": report["warnings"],
+            "asset_count": len(manifest.assets),
+            "entry_mode": _entry_mode(manifest),
+            "genome_size_estimate": manifest.genome_size_estimate,
+            "target_assembly_level": manifest.target_assembly_level,
         },
-    }
+    )
+    if canonical_shared is not None:
+        update["shared_parameters"] = canonical_shared
+    return update
 
 
-def register_assets(state: TopLevelState) -> dict:
+def _canonical_shared_parameters(
+    state: TopLevelState,
+    manifest: InputManifest,
+) -> dict[str, Any] | None:
+    """Project the manifest-owned genome-size prior into runtime shared facts."""
+
+    manifest_size = manifest.genome_size_estimate
+    if manifest_size is None:
+        return None
+
+    raw_shared = state.get("shared_parameters")
+    if isinstance(raw_shared, SharedParameters):
+        raw_shared = raw_shared.model_dump(exclude_none=True)
+    if raw_shared is None:
+        shared: dict[str, Any] = {}
+    elif isinstance(raw_shared, dict):
+        shared = dict(raw_shared)
+    else:
+        raise ValueError("shared_parameters must be a mapping")
+
+    existing_size = shared.get("estimated_genome_size")
+    if existing_size is not None and existing_size != manifest_size:
+        raise ValueError(
+            "runtime shared_parameters.estimated_genome_size conflicts with "
+            "manifest.genome_size_estimate"
+        )
+    shared["estimated_genome_size"] = manifest_size
+    return SharedParameters.model_validate(shared).model_dump(exclude_none=True)
+
+
+def register_assets(state: TopLevelState) -> StateUpdate:
     """Register assets, write registry artifact, and record ledger events."""
-    inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
+    inventory_out = read_inventory_stage_output(state)
     if inventory_out.get("status") != "validated" or not inventory_out.get("valid"):
         return {}
 
@@ -194,7 +247,9 @@ def register_assets(state: TopLevelState) -> dict:
 
     records = _build_asset_records(manifest, inferred, manifest_ref=manifest_ref)
     data_dir = Path(state.get("data_dir", "data"))
-    registry_path = _write_registry(records, data_dir=data_dir, session_id=manifest.session_id)
+    registry_path = _write_registry(
+        records, data_dir=data_dir, session_id=manifest.session_id
+    )
 
     ledger = Ledger(data_dir)
     ledger.create_session(manifest.session_id, state["input_manifest_ref"])
@@ -208,28 +263,34 @@ def register_assets(state: TopLevelState) -> dict:
     # Populate resource_refs from registered assets
     resource_refs = _populate_resource_refs_from_assets(records)
 
-    return {
-        "asset_registry_ref": str(registry_path),
-        "resource_refs": resource_refs,
-        "stage_outputs": {
-            **(state.get("stage_outputs") or {}),
-            "inventory": {
-                **inventory_out,
-                "status": "completed",
-                "registered_assets": [r.asset_id for r in records],
-            },
+    update = update_inventory_stage_output(
+        state,
+        {
+            "status": "completed",
+            "registered_assets": [r.asset_id for r in records],
         },
-    }
+    )
+    update["asset_registry_ref"] = str(registry_path)
+    update["resource_refs"] = resource_refs
+    return update
 
 
-def _apply_shared_platform_override(manifest: InputManifest, state: TopLevelState) -> None:
+def _apply_shared_platform_override(
+    manifest: InputManifest, state: TopLevelState
+) -> None:
     """Apply an operator-selected platform to raw long-read assets."""
-    shared = state.get("shared_parameters") or {}
-    if hasattr(shared, "model_dump"):
-        shared = shared.model_dump(exclude_none=True)
-    if not isinstance(shared, dict):
+    raw_shared = state.get("shared_parameters")
+    if raw_shared is None:
         return
-    platform = shared.get("platform")
+    try:
+        shared = (
+            raw_shared
+            if isinstance(raw_shared, SharedParameters)
+            else SharedParameters.model_validate(raw_shared)
+        )
+    except ValueError:
+        return
+    platform = shared.platform
     if not platform or platform == "unknown":
         return
     for asset in manifest.assets:
@@ -237,17 +298,18 @@ def _apply_shared_platform_override(manifest: InputManifest, state: TopLevelStat
             asset.platform = platform
 
 
-def commit_inventory(state: TopLevelState) -> dict:
+def commit_inventory(state: TopLevelState) -> StateUpdate:
     """Advance to the next stage based on routing decision."""
     from app.workflow import next_stage_name
 
     trace = append_route_trace(state, "inventory_stage")
-    inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
+    inventory_out = read_inventory_stage_output(state)
+    next_stage: DomainStage
     if inventory_out.get("entry_mode") == "existing_assembly":
         next_stage = "assembly_review"
     else:
         next_stage = next_stage_name("inventory")
-    update = {
+    update: StateUpdate = {
         "current_stage": next_stage,
         "supervision_state": "completed" if next_stage == "done" else "running_stage",
         "route_trace": trace,
@@ -262,14 +324,14 @@ def commit_inventory(state: TopLevelState) -> dict:
     return update
 
 
-def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> dict[str, Any]:
+def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> StateUpdate:
     """Apply a human inventory review decision."""
-    active_interrupt = state.get("active_interrupt") or {}
-    review_request_id = getattr(request, "review_request_id", None) or active_interrupt.get(
-        "review_request_id"
+    active_interrupt = state.get("active_interrupt")
+    review_request_id = getattr(request, "review_request_id", None) or (
+        active_interrupt.get("review_request_id") if active_interrupt else None
     )
-    review_request_hash = getattr(request, "review_request_hash", None) or active_interrupt.get(
-        "request_hash"
+    review_request_hash = getattr(request, "review_request_hash", None) or (
+        active_interrupt.get("request_hash") if active_interrupt else None
     )
     if not review_request_id or not review_request_hash:
         raise ValueError("inventory review decision is missing review request binding")
@@ -309,29 +371,41 @@ def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> dict[
     # Asset registration still consumes the already-validated inventory
     # payload, so restore that control status before invoking it.  This is a
     # state transition only; no validation or selection policy is repeated.
-    stage_outputs = dict(state.get("stage_outputs") or {})
-    stage_outputs["inventory"] = {
-        **dict(stage_outputs.get("inventory") or {}),
-        "status": "validated",
-    }
-    validated_state = {**state, "stage_outputs": stage_outputs}
+    restored = update_inventory_stage_output(state, {"status": "validated"})
+    validated_state = validate_top_level_state({**state, **dict(restored)})
     register_update = register_assets(validated_state)
-    registered_state = {**validated_state, **register_update}
+    registered_state = validate_top_level_state(
+        {**validated_state, **dict(register_update)}
+    )
     commit_update = commit_inventory(registered_state)
-    outputs = dict(register_update.get("stage_outputs") or state.get("stage_outputs") or {})
-    outputs["inventory"] = {
-        **dict(outputs.get("inventory") or {}),
-        "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-    }
-    return {
-        **register_update,
-        **commit_update,
-        "stage_outputs": outputs,
-        "active_interrupt": None,
-    }
+    decision_update = update_inventory_stage_output(
+        registered_state,
+        {
+            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
+        },
+    )
+    result: StateUpdate = {}
+    result.update(register_update)
+    result.update(commit_update)
+    result["stage_outputs"] = decision_update["stage_outputs"]
+    result["active_interrupt"] = None
+    return result
 
 
-def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str, dict]:
+class _ResourceMetadataAccumulator(TypedDict):
+    asset_ids: list[str]
+    platforms: list[str]
+    formats: list[str]
+    asset_types: list[str]
+    assets: list[dict[str, Any]]
+
+
+class _ResourceAccumulator(TypedDict):
+    paths: list[str]
+    metadata: _ResourceMetadataAccumulator
+
+
+def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> ResourceRefs:
     """Populate resource_refs from registered asset records.
 
     Maps asset_type to logical resource names and creates ResourceRef entries.
@@ -342,7 +416,7 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str,
     Returns:
         Dictionary of resource_type -> ResourceRef dict (serialized)
     """
-    resource_refs: dict[str, dict] = {}
+    resource_refs: dict[str, _ResourceAccumulator] = {}
 
     # Group assets by logical resource type
     for record in records:
@@ -353,7 +427,11 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str,
             resource_type = "long_reads"
         elif record.asset_type in ["raw_short_dna_reads", "clean_short_dna_reads"]:
             resource_type = "short_reads"
-        elif record.asset_type in ["hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"]:
+        elif record.asset_type in [
+            "hic_reads_registered",
+            "hic_alignment_bam",
+            "hic_merged_nodups",
+        ]:
             resource_type = "hic_reads"
         elif record.asset_type == "assembly_fasta_registered":
             resource_type = "assembly"
@@ -383,13 +461,32 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str,
             resource_refs[resource_type]["paths"].append(str(record.path))
 
             # Accumulate metadata
-            resource_refs[resource_type]["metadata"]["asset_ids"].append(record.asset_id)
-            if record.platform and record.platform not in resource_refs[resource_type]["metadata"]["platforms"]:
-                resource_refs[resource_type]["metadata"]["platforms"].append(record.platform)
-            if record.format and record.format not in resource_refs[resource_type]["metadata"]["formats"]:
-                resource_refs[resource_type]["metadata"]["formats"].append(record.format)
-            if record.asset_type not in resource_refs[resource_type]["metadata"]["asset_types"]:
-                resource_refs[resource_type]["metadata"]["asset_types"].append(record.asset_type)
+            resource_refs[resource_type]["metadata"]["asset_ids"].append(
+                record.asset_id
+            )
+            if (
+                record.platform
+                and record.platform
+                not in resource_refs[resource_type]["metadata"]["platforms"]
+            ):
+                resource_refs[resource_type]["metadata"]["platforms"].append(
+                    record.platform
+                )
+            if (
+                record.format
+                and record.format
+                not in resource_refs[resource_type]["metadata"]["formats"]
+            ):
+                resource_refs[resource_type]["metadata"]["formats"].append(
+                    record.format
+                )
+            if (
+                record.asset_type
+                not in resource_refs[resource_type]["metadata"]["asset_types"]
+            ):
+                resource_refs[resource_type]["metadata"]["asset_types"].append(
+                    record.asset_type
+                )
             resource_refs[resource_type]["metadata"]["assets"].append(
                 record.model_dump(mode="json")
             )

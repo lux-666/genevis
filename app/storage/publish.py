@@ -9,9 +9,9 @@ from errno import EEXIST, EXDEV
 from pathlib import Path
 from uuid import uuid4
 
-from app.schemas.execution import ExecutionResult
-from app.schemas.descriptors import FrozenAttemptSpec
 from app.integrity import sha256_file
+from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.execution import ExecutionResult
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 
@@ -48,7 +48,9 @@ def publish_file(source: str | Path, destination: str | Path) -> Path:
             return _reuse_existing_snapshot(source_path, destination_path)
         if exc.errno != EXDEV:
             raise
-    temporary = destination_path.with_name(f".{destination_path.name}.{uuid4().hex}.partial")
+    temporary = destination_path.with_name(
+        f".{destination_path.name}.{uuid4().hex}.partial"
+    )
     try:
         shutil.copy2(source_path, temporary)
         if sha256_file(source_path) != sha256_file(temporary):
@@ -58,7 +60,8 @@ def publish_file(source: str | Path, destination: str | Path) -> Path:
         except FileExistsError:
             if sha256_file(temporary) != sha256_file(destination_path):
                 raise FileExistsError(
-                    f"published artifact conflicts with existing snapshot: {destination_path}"
+                    "published artifact conflicts with existing snapshot: "
+                    f"{destination_path}"
                 )
         temporary.unlink()
         source_path.unlink()
@@ -70,13 +73,16 @@ def publish_file(source: str | Path, destination: str | Path) -> Path:
 
 def _reuse_existing_snapshot(source_path: Path, destination_path: Path) -> Path:
     if not destination_path.is_file():
-        raise FileExistsError(f"published artifact destination is not a file: {destination_path}")
+        raise FileExistsError(
+            f"published artifact destination is not a file: {destination_path}"
+        )
     if source_path.exists():
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
         if sha256_file(source_path) != sha256_file(destination_path):
             raise FileExistsError(
-                f"published artifact conflicts with existing snapshot: {destination_path}"
+                "published artifact conflicts with existing snapshot: "
+                f"{destination_path}"
             )
         source_path.unlink()
     return destination_path

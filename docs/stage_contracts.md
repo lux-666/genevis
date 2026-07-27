@@ -108,8 +108,10 @@ Registered methods:
 - `assembly.candidate.nextdenovo`.
 
 Method compatibility is validated against the selected read type and run
-configuration. Assembly and AutoHiC parameter recommendations occur only after
-method selection and require human approval before freezing an attempt.
+configuration. Assembly, AutoHiC, and T2T parameter recommendations occur only
+after method selection and require human approval before freezing an attempt.
+Each recommendation is an attempt-local sparse mapping; retries do not inherit
+omitted values or route around approval through model output.
 Operator-directed Flye reruns return through the same direct-attempt lifecycle.
 
 Missing required parameters, incompatible read types, execution failure, and
@@ -172,9 +174,12 @@ Registered method:
 
 The parent graph bypasses this stage when chromosome-scale assembly is not
 requested or required inputs are absent. AutoHiC owns the Juicer/3D-DNA and
-model-assisted correction pipeline. Restriction-enzyme recommendation requires
-parameter approval; successful execution then opens an adoption gate. The
-operator may adopt the chromosome assembly or retain the previous assembly.
+model-assisted correction pipeline. Its adjustable L2 surface includes the
+restriction enzyme, edit rounds, correction switches, and error thresholds.
+Every shape-valid sparse recommendation requires parameter approval; successful
+execution then opens an adoption gate. The operator may adopt the chromosome
+assembly, retain the previous assembly, or request a fresh parameter attempt.
+Execution-failure retries require explicit operator policy and retry budget.
 
 ## 8. T2T Finishing
 
@@ -184,16 +189,30 @@ assembly ends without overwriting the input FASTA.
 Logical inputs and output:
 
 - requires `assembly`;
-- may consume `long_reads` for supported extension;
+- consumes the complete ordered `ont_read_refs` list when supplied, preferring
+  all clean long-read assets over raw assets;
 - updates `assembly` only when a materialized result is selected.
 
 Registered method:
 
 - `t2t.alignment.minimap2`.
 
-The stage records telomere scans, PAF-backed evidence, proposed patches, and a
-finishing report. Ambiguous, chimeric, or conflicting evidence remains a review
-signal and is never patched automatically.
+Before threshold recommendation or scanning, T2T resolves one telomere motif
+from a schema-3 snapshot of canonical supplied species facts. A supplied
+`species_facts.telomere_motif` is validated and recorded directly through the
+motif-resolution evidence chain; otherwise the persisted LLM boundary resolves
+it from the supplied scientific name. Missing identity, unresolved model
+output, and pre-v3 motif/config checkpoint fields fail closed; none supplies
+motif evidence, and no common repeat is assumed. The verified resolution value,
+source, and ref are bound into the schema-3 threshold-recommendation snapshot
+and are the only motif evidence accepted by later scans and patch checks. The
+stage then obtains a sparse, human-approved threshold recommendation before
+scanning or minimap2 execution. It records source-attributed telomere scans, an
+immutable registered PAF, attempt/execution-bound candidate evidence,
+junction-aware patch records, and a finishing report. Reverse-strand tails are
+oriented target-forward; non-zero junction distances trim the target before
+extension. Ambiguous, chimeric, overlapping, or conflicting evidence is never
+silently materialized, and the source FASTA is never overwritten.
 
 ## 9. Repeat Annotation
 

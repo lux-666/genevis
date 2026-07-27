@@ -71,7 +71,9 @@ def _make_record(
             {
                 "lineage": "actinopterygii_odb10",
                 "complete": busco_complete,
-                "single_copy": (busco_complete - 1.0) if busco_complete is not None else None,
+                "single_copy": (busco_complete - 1.0)
+                if busco_complete is not None
+                else None,
                 "duplicated": busco_duplicated,
                 "fragmented": 1.0,
                 "missing": 3.0,
@@ -88,9 +90,22 @@ def _make_record(
     }
 
 
-def _make_statistics_pack(*, records: list[dict] | None = None, status: str = "available") -> dict:
+def _make_statistics_pack(
+    *, records: list[dict] | None = None, status: str = "available"
+) -> dict:
     if records is None:
-        n50_values = [10_000_000, 11_000_000, 9_500_000, 12_000_000, 10_500_000, 9_000_000, 13_000_000, 8_500_000, 10_200_000, 11_500_000]
+        n50_values = [
+            10_000_000,
+            11_000_000,
+            9_500_000,
+            12_000_000,
+            10_500_000,
+            9_000_000,
+            13_000_000,
+            8_500_000,
+            10_200_000,
+            11_500_000,
+        ]
         size_values = [500_000_000 + i * 10_000_000 for i in range(10)]
         gc_values = [38.0 + i * 0.5 for i in range(10)]
         chromosome_values = [21, 21, 21, 22, 21, 20, 21, 21, 22, 21]
@@ -105,11 +120,27 @@ def _make_statistics_pack(*, records: list[dict] | None = None, status: str = "a
             for i in range(10)
         ]
 
-    n50_values_present = [r["contig_n50_bp"] for r in records if r.get("contig_n50_bp") is not None]
-    size_values_present = [r["total_sequence_length_bp"] for r in records if r.get("total_sequence_length_bp") is not None]
-    gc_values_present = [r["gc_percent"] for r in records if r.get("gc_percent") is not None]
-    busco_complete_present = [r["busco"]["complete"] for r in records if r.get("busco") and r["busco"].get("complete") is not None]
-    busco_duplicated_present = [r["busco"]["duplicated"] for r in records if r.get("busco") and r["busco"].get("duplicated") is not None]
+    n50_values_present = [
+        r["contig_n50_bp"] for r in records if r.get("contig_n50_bp") is not None
+    ]
+    size_values_present = [
+        r["total_sequence_length_bp"]
+        for r in records
+        if r.get("total_sequence_length_bp") is not None
+    ]
+    gc_values_present = [
+        r["gc_percent"] for r in records if r.get("gc_percent") is not None
+    ]
+    busco_complete_present = [
+        r["busco"]["complete"]
+        for r in records
+        if r.get("busco") and r["busco"].get("complete") is not None
+    ]
+    busco_duplicated_present = [
+        r["busco"]["duplicated"]
+        for r in records
+        if r.get("busco") and r["busco"].get("duplicated") is not None
+    ]
 
     metrics = {}
     if n50_values_present:
@@ -123,7 +154,9 @@ def _make_statistics_pack(*, records: list[dict] | None = None, status: str = "a
     if busco_duplicated_present:
         metrics["busco_duplicated_percent"] = _quartiles(busco_duplicated_present)
 
-    chromosome_counts = [r["chromosome_count"] for r in records if r.get("chromosome_count") is not None]
+    chromosome_counts = [
+        r["chromosome_count"] for r in records if r.get("chromosome_count") is not None
+    ]
     mode = None
     if chromosome_counts:
         mode = max(set(chromosome_counts), key=chromosome_counts.count)
@@ -135,7 +168,11 @@ def _make_statistics_pack(*, records: list[dict] | None = None, status: str = "a
             "input_name": "Targetus absentus",
             "canonical_scientific_name": "Targetus absentus",
             "resolution": "alias_table",
-            "taxonomic_hints": {"genus": "Targetus", "family": "Targetidae", "order": "Targetiformes"},
+            "taxonomic_hints": {
+                "genus": "Targetus",
+                "family": "Targetidae",
+                "order": "Targetiformes",
+            },
         },
         "source": {
             "tsv": "Metazoa.ncbi.tsv",
@@ -148,7 +185,12 @@ def _make_statistics_pack(*, records: list[dict] | None = None, status: str = "a
             "source_version": "test-v1",
             "exported_at": "2026-06-23T00:00:00Z",
         },
-        "tier_counts": {"exact": 0, "same_genus": len(records), "same_family": 0, "same_order": 0},
+        "tier_counts": {
+            "exact": 0,
+            "same_genus": len(records),
+            "same_family": 0,
+            "same_order": 0,
+        },
         "display_cohort": {
             "size_limit": 25,
             "records": records[:5],
@@ -166,9 +208,19 @@ def _make_statistics_pack(*, records: list[dict] | None = None, status: str = "a
             "chromosome_count_mode": mode,
             "busco_lineages": ["actinopterygii_odb10"],
             "cohort_composition": {
-                "by_tier": {"exact": 0, "same_genus": len(records), "same_family": 0, "same_order": 0},
+                "by_tier": {
+                    "exact": 0,
+                    "same_genus": len(records),
+                    "same_family": 0,
+                    "same_order": 0,
+                },
                 "by_accession_type": {"GCF": len(records), "GCA": 0},
-                "by_assembly_level": {"chromosome": 0, "scaffold": len(records), "contig": 0, "unknown": 0},
+                "by_assembly_level": {
+                    "chromosome": 0,
+                    "scaffold": len(records),
+                    "contig": 0,
+                    "unknown": 0,
+                },
             },
         },
         "target_position": {
@@ -213,8 +265,16 @@ def _unavailable_statistics_pack() -> dict:
             "exported_at": None,
         },
         "tier_counts": {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0},
-        "display_cohort": {"size_limit": 25, "records": [], "excluded_alternate_haplotype_records": []},
-        "analysis_cohort": {"size_limit": 150, "records": [], "excluded_alternate_haplotype_records": []},
+        "display_cohort": {
+            "size_limit": 25,
+            "records": [],
+            "excluded_alternate_haplotype_records": [],
+        },
+        "analysis_cohort": {
+            "size_limit": 150,
+            "records": [],
+            "excluded_alternate_haplotype_records": [],
+        },
         "computed_summary": {
             "cohort": "analysis_cohort",
             "record_count": 0,
@@ -222,9 +282,19 @@ def _unavailable_statistics_pack() -> dict:
             "chromosome_count_mode": None,
             "busco_lineages": [],
             "cohort_composition": {
-                "by_tier": {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0},
+                "by_tier": {
+                    "exact": 0,
+                    "same_genus": 0,
+                    "same_family": 0,
+                    "same_order": 0,
+                },
                 "by_accession_type": {"GCF": 0, "GCA": 0},
-                "by_assembly_level": {"chromosome": 0, "scaffold": 0, "contig": 0, "unknown": 0},
+                "by_assembly_level": {
+                    "chromosome": 0,
+                    "scaffold": 0,
+                    "contig": 0,
+                    "unknown": 0,
+                },
             },
         },
         "target_position": {
@@ -244,7 +314,9 @@ def _unavailable_statistics_pack() -> dict:
 def _evidence_pack() -> dict:
     return {
         "matching_mode": "same_genus",
-        "selected_records": [{"accession": "GCF_000000001.1", "organism_name": "Targetus relative 1"}],
+        "selected_records": [
+            {"accession": "GCF_000000001.1", "organism_name": "Targetus relative 1"}
+        ],
         "notes": ["evidence pack note"],
     }
 
@@ -285,7 +357,16 @@ class RenderStatisticsFiguresTests(unittest.TestCase):
 
     def test_skips_figure_with_entirely_absent_field(self):
         records = []
-        n50_values = [10_000_000, 11_000_000, 9_500_000, 12_000_000, 10_500_000, 9_000_000, 13_000_000, 8_500_000]
+        n50_values = [
+            10_000_000,
+            11_000_000,
+            9_500_000,
+            12_000_000,
+            10_500_000,
+            9_000_000,
+            13_000_000,
+            8_500_000,
+        ]
         size_values = [500_000_000 + i * 10_000_000 for i in range(8)]
         chromosome_values = [21, 21, 22, 21, 20, 21, 21, 22]
         for i in range(8):
@@ -305,7 +386,13 @@ class RenderStatisticsFiguresTests(unittest.TestCase):
 
             self.assertNotIn("gc_distribution", result)
             self.assertFalse((out_dir / "gc_distribution.png").exists())
-            for key in ("n50_distribution", "assembly_size_distribution", "chromosome_count_distribution", "n50_vs_assembly_size", "cohort_composition"):
+            for key in (
+                "n50_distribution",
+                "assembly_size_distribution",
+                "chromosome_count_distribution",
+                "n50_vs_assembly_size",
+                "cohort_composition",
+            ):
                 self.assertIn(key, result)
 
 
@@ -360,7 +447,9 @@ class BuildAssemblyReviewNotebookTests(unittest.TestCase):
         parseable = False
         for source in code_sources:
             lines = source.splitlines()
-            filtered = "\n".join(line for line in lines if not line.strip().startswith("%"))
+            filtered = "\n".join(
+                line for line in lines if not line.strip().startswith("%")
+            )
             ast.parse(filtered)
             parseable = True
         self.assertTrue(parseable)
@@ -405,7 +494,9 @@ class BuildAssemblyReviewNotebookTests(unittest.TestCase):
 
     def test_code_cell_source_runs_against_synthetic_json_fixture(self):
         import json
+
         import matplotlib
+
         matplotlib.use("Agg")
 
         pack = _make_statistics_pack()
@@ -418,15 +509,20 @@ class BuildAssemblyReviewNotebookTests(unittest.TestCase):
             statistics_pack_relpath="related_species_statistics_pack.json",
             figures_relpaths={},
         )
-        code_sources = [cell.source for cell in notebook.cells if cell.cell_type == "code"]
+        code_sources = [
+            cell.source for cell in notebook.cells if cell.cell_type == "code"
+        ]
         self.assertTrue(code_sources)
         source = code_sources[0]
-        source = "\n".join(line for line in source.splitlines() if not line.strip().startswith("%"))
+        source = "\n".join(
+            line for line in source.splitlines() if not line.strip().startswith("%")
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             json_path = Path(tmpdir) / "related_species_statistics_pack.json"
             json_path.write_text(json.dumps(pack), encoding="utf-8")
             import os
+
             cwd = os.getcwd()
             try:
                 os.chdir(tmpdir)
