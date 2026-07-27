@@ -38,11 +38,16 @@ from app.llm.parameters.assembly.recommender import (
     restore_assembly_parameter_decision,
 )
 from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.review.approval import (
+    ensure_decision_allowed,
+    load_verified_interrupt_request,
+    persist_parameter_approval_decision,
+    validate_parameter_approval_bindings,
+    validate_parameter_recommendation_manifest,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
     ReviewPersistenceError,
-    load_review_request,
-    persist_review_decision,
     persist_review_request,
 )
 from app.schemas.artifacts import (
@@ -82,10 +87,9 @@ from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
-    read_json_artifact,
-    recover_recommendation_json_artifact,
-    write_attempt_json_artifact,
-    write_recommendation_json_artifact,
+    read_artifact,
+    recover_artifact,
+    write_artifact,
 )
 from app.stages.assembly.state import (
     AssemblyStageCursor,
@@ -246,7 +250,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
             stage_context=context,
             dependency_refs=dependency_refs,
         )
-        input_snapshot_ref = write_recommendation_json_artifact(
+        input_snapshot_ref = write_artifact(
             state,
             recommendation_id,
             "input_snapshot.json",
@@ -265,7 +269,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 facts=facts,
                 context=context,
             )
-            basis_ref = write_recommendation_json_artifact(
+            basis_ref = write_artifact(
                 state,
                 recommendation_id,
                 "basis_snapshot.json",
@@ -286,7 +290,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         )
 
         messages = render_assembly_parameter_messages(request_dto)
-        model_request_ref = write_recommendation_json_artifact(
+        model_request_ref = write_artifact(
             state,
             recommendation_id,
             "model_request.json",
@@ -318,7 +322,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
     # invoking the model again.
     model_response_ref: ArtifactRef | None = None
     try:
-        recovered_response = recover_recommendation_json_artifact(
+        recovered_response = recover_artifact(
             state,
             recommendation_id,
             "model_response.json",
@@ -343,7 +347,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         )
     try:
         if model_response_ref is None:
-            model_response_ref = write_recommendation_json_artifact(
+            model_response_ref = write_artifact(
                 state,
                 recommendation_id,
                 "model_response.json",
@@ -358,7 +362,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 method_name="assembly.parameter_recommender",
             )
         parsed = decision.parsed or {}
-        recommendation_ref = write_recommendation_json_artifact(
+        recommendation_ref = write_artifact(
             state,
             recommendation_id,
             "recommendation.json",
@@ -383,7 +387,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         "error": decision.error,
     }
     try:
-        response_parse_ref = write_recommendation_json_artifact(
+        response_parse_ref = write_artifact(
             state,
             recommendation_id,
             "response_parse.json",
@@ -434,7 +438,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
             ),
             summary={"response_parsed": bool(decision.valid)},
         )
-        manifest_ref = write_recommendation_json_artifact(
+        manifest_ref = write_artifact(
             state,
             recommendation_id,
             "recommendation_manifest.json",
@@ -560,61 +564,20 @@ def apply_parameter_approval_decision(
     ):
         raise ResumeValidationError("no unresolved parameter_approval gate")
 
-    required = ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
-    missing = [key for key in required if key not in request.metadata]
-    if missing:
-        raise ResumeValidationError(
-            f"parameter approval metadata missing required bindings: {missing}"
-        )
-    for key in required:
-        if request.metadata.get(key) != interrupt.get(key):
-            raise ResumeValidationError(f"stale parameter approval binding: {key}")
-
-    request_ref = interrupt.get("request_ref")
-    request_id = interrupt.get("review_request_id")
-    if not isinstance(request_ref, dict) or not isinstance(request_id, str):
-        raise ResumeValidationError("parameter approval interrupt has no request ref")
-    try:
-        request_record = load_review_request(
-            absolute_data_dir(state),
-            request_ref,
-            session_id=state["session_id"],
-        )
-    except (ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError(
-            "parameter approval request is missing or changed"
-        ) from exc
-    if request_record.get("review_request_id") != request_id:
-        raise ResumeValidationError("parameter approval request identity mismatch")
-    validated_request_ref = ArtifactRef.model_validate(request_ref)
-    if interrupt.get("request_hash") != validated_request_ref.sha256:
-        raise ResumeValidationError("parameter approval request hash mismatch")
-    payload = request_record.get("payload")
-    if not isinstance(payload, dict):
-        raise ResumeValidationError("parameter approval request has no payload")
-    allowed = list(payload.get("decisions_allowed") or [])
-    if request.decision not in allowed or request.decision not in {
-        "approve_parameters",
-        "reject_parameters",
-    }:
+    validate_parameter_approval_bindings(interrupt, request)
+    if request.decision not in {"approve_parameters", "reject_parameters"}:
         raise ResumeValidationError("unsupported parameter approval decision")
+    request_ref, request_record = load_verified_interrupt_request(state, interrupt)
+    request_id = str(interrupt.get("review_request_id") or "")
+    ensure_decision_allowed(request_record, request)
 
+    payload = request_record.get("payload") or {}
     cursor_value = assembly_out.get("current_parameter_recommendation")
     try:
         cursor = ParameterRecommendationCursor.model_validate(cursor_value)
-    except ValueError as exc:
-        raise ResumeValidationError(
-            "parameter approval has no valid recommendation cursor"
-        ) from exc
-    if cursor.status != "pending_approval" or cursor.review_request_id != request_id:
-        raise ResumeValidationError(
-            "parameter approval cursor is stale or already resolved"
+        manifest_ref = ArtifactRef.model_validate(
+            payload.get("recommendation_manifest_ref")
         )
-    if cursor.recommendation_hash != interrupt.get("recommendation_hash"):
-        raise ResumeValidationError("parameter approval recommendation hash mismatch")
-    manifest_ref_value = payload.get("recommendation_manifest_ref")
-    try:
-        manifest_ref = ArtifactRef.model_validate(manifest_ref_value)
         chain = load_parameter_recommendation_chain_v3(
             state,
             manifest_ref=manifest_ref,
@@ -633,17 +596,8 @@ def apply_parameter_approval_decision(
         raise ResumeValidationError(
             "parameter recommendation manifest binding mismatch"
         )
+    validate_parameter_recommendation_manifest(cursor, chain.manifest)
     manifest = chain.manifest
-    if (
-        manifest.status != "pending_approval"
-        or manifest.recommendation_id != cursor.recommendation_id
-        or manifest.task != cursor.task
-        or manifest.previous_attempt_id != cursor.previous_attempt_id
-        or manifest.previous_attempt_seal_hash != cursor.previous_attempt_seal_hash
-    ):
-        raise ResumeValidationError(
-            "parameter recommendation cursor does not match its manifest"
-        )
     recommendation = chain.recommendation.get("recommendation")
     if not isinstance(recommendation, dict) or not isinstance(
         recommendation.get("parameters"), dict
@@ -686,44 +640,15 @@ def apply_parameter_approval_decision(
                 "parameter retry previous attempt manifest changed"
             )
 
-    try:
-        decision_ref = persist_review_decision(
-            absolute_data_dir(state),
-            session_id=state["session_id"],
-            review_request_id=request_id,
-            stage="assembly",
-            gate_id="parameter_approval",
-            request_hash=str(interrupt["request_hash"]),
-            request_ref=validated_request_ref,
-            decision={
-                "schema_version": 2,
-                "decision": request.decision,
-                "decided_by": request.decided_by,
-                "notes": list(request.notes),
-                "bindings": {key: request.metadata[key] for key in required},
-                "request_hash": validated_request_ref.sha256,
-                "validated_recommendation_manifest_ref": manifest_ref.model_dump(
-                    mode="json"
-                ),
-                "validated_recommendation_hash": manifest_ref.sha256,
-            },
-            method_name="assembly.parameter_approval",
-            artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
-        )
-    except (OSError, ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError(
-            "parameter approval decision could not be persisted"
-        ) from exc
-    Ledger(absolute_data_dir(state)).record_review_decision(
-        state["session_id"],
-        "assembly",
-        gate_id="parameter_approval",
-        decision=request.decision,
-        notes=list(request.notes),
-        artifact_ref=decision_ref.path_ref,
-        metadata={key: request.metadata[key] for key in required},
-        decided_by=request.decided_by,
-        review_request_id=request_id,
+    decision_ref = persist_parameter_approval_decision(
+        state,
+        stage="assembly",
+        request_id=request_id,
+        request_ref=request_ref,
+        request=request,
+        manifest_ref=manifest_ref,
+        method_name="assembly.parameter_approval",
+        artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     )
 
     if request.decision == "reject_parameters":
@@ -882,7 +807,7 @@ def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
     )
     if not previous:
         return {}
-    review_ref = write_attempt_json_artifact(
+    review_ref = write_artifact(
         state,
         current_id,
         "review.json",
@@ -894,6 +819,7 @@ def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
         },
         artifact_type=ASSEMBLY_PARAMETER_REVIEW,
         method_name="assembly.parameter_quality_gate",
+        scope="attempt",
     )
     previous = {
         **previous,
@@ -1077,7 +1003,7 @@ def hydrate_parameter_attempt(
 
     if attempt.frozen_parameters_ref is None:
         raise ValueError("sealed Assembly retry history has no frozen parameters")
-    frozen = read_json_artifact(
+    frozen = read_artifact(
         state,
         attempt.frozen_parameters_ref,
         expected_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
@@ -1152,7 +1078,7 @@ def hydrate_parameter_attempt(
 
     review: AssemblyReviewEvidence | None = None
     if attempt.review_ref is not None:
-        review_record = read_json_artifact(
+        review_record = read_artifact(
             state,
             attempt.review_ref,
             expected_type=ASSEMBLY_PARAMETER_REVIEW,
@@ -1259,7 +1185,7 @@ def _seal_parameter_attempt(
     if value.get("seal_hash"):
         if value["seal_hash"] != digest or not value.get("attempt_manifest_ref"):
             raise ValueError("sealed parameter attempt was mutated")
-        manifest = read_json_artifact(
+        manifest = read_artifact(
             state,
             value["attempt_manifest_ref"],
             expected_type=ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
@@ -1276,7 +1202,7 @@ def _seal_parameter_attempt(
         return value
 
     sealed_at = datetime.now(timezone.utc).isoformat()
-    manifest_ref = write_attempt_json_artifact(
+    manifest_ref = write_artifact(
         state,
         int(value["attempt_id"]),
         "attempt_manifest.json",
@@ -1289,6 +1215,7 @@ def _seal_parameter_attempt(
         },
         artifact_type=ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
         method_name=value["method_id"],
+        scope="attempt",
     )
     return ParameterAttempt.model_validate(
         {

@@ -15,6 +15,7 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
+from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.execution import MethodExecutionAttemptStatus
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
@@ -23,18 +24,6 @@ from app.stages.base import (
 )
 
 JsonObject: TypeAlias = dict[str, PydanticJsonValue]
-
-
-@with_config(ConfigDict(extra="forbid"))
-class ArtifactRefJson(TypedDict):
-    """JSON representation of an immutable artifact reference."""
-
-    schema_version: Literal[2]
-    artifact_id: str
-    path_ref: str
-    sha256: str
-    size_bytes: int
-    artifact_type: str
 
 
 @with_config(ConfigDict(extra="forbid"))

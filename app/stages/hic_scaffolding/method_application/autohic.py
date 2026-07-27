@@ -37,13 +37,15 @@ from app.stages.hic_scaffolding.method_application.support import (
     hic_output,
     update_hic_output,
 )
-from app.stages.hic_scaffolding.parameters.storage import (
+from app.schemas.artifacts import (
     AUTOHIC_PARAMETER_COMMAND,
     AUTOHIC_PARAMETER_CONFIG,
     AUTOHIC_PARAMETER_SCRIPT,
-    AutoHiCParameterPersistenceError,
-    publish_autohic_parameter_file,
-    write_autohic_parameter_artifact,
+)
+from app.stages.hic_scaffolding.parameters.storage import (
+    ParameterPersistenceError,
+    publish_file as publish_autohic_parameter_file,
+    write_artifact as write_autohic_parameter_artifact,
 )
 from app.stages.hic_scaffolding.state import HiCScaffoldingCursor
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
@@ -158,7 +160,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             label=LIFECYCLE.name,
         )
         if parameter_attempt.status != "recommended":
-            raise AutoHiCParameterPersistenceError(
+            raise ParameterPersistenceError(
                 "AutoHiC current parameter attempt is not approved for freeze"
             )
         frozen_parameters_ref = write_autohic_parameter_artifact(
@@ -184,7 +186,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             method_name=METHOD,
             scope="attempt",
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return update_hic_output(
             state,
             {
@@ -246,7 +248,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             config_ref.path_ref
         )
         config_path.symlink_to(published_config_path)
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return update_hic_output(
             state,
             {
@@ -292,7 +294,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             script_ref.path_ref
         )
         script.symlink_to(published_script)
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return update_hic_output(
             state,
             {
@@ -354,7 +356,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
     except (
         OSError,
         ValueError,
-        AutoHiCParameterPersistenceError,
+        ParameterPersistenceError,
     ) as exc:
         return update_hic_output(
             state,
@@ -460,7 +462,7 @@ def _parameters(
             resolved_sources,
             approved_bundle.chain.catalog,
         )
-    except (ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (ValueError, ParameterPersistenceError) as exc:
         return (
             {},
             None,

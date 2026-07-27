@@ -6,6 +6,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.llm.parameters.base import (
+    PARAMETER_RECOMMENDATION_CONTRACT,
+    build_adjustable_parameters,
+)
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     CanonicalRecommendationFacts,
@@ -14,9 +18,6 @@ from app.schemas.parameter_recommendation import (
 )
 
 T2T_METHOD: Literal["t2t.alignment.minimap2"] = "t2t.alignment.minimap2"
-PARAMETER_RECOMMENDATION_CONTRACT: Literal["parameter_recommendation_v1"] = (
-    "parameter_recommendation_v1"
-)
 
 
 class T2TParameterRequest(BaseModel):
@@ -59,28 +60,10 @@ def build_t2t_parameter_request(
 ) -> T2TParameterRequest:
     if catalog.method_id != T2T_METHOD:
         raise ValueError("T2T parameter request requires the minimap2 T2T catalog")
-    adjustable = {
-        name: {
-            key: value
-            for key, value in spec.model_dump(mode="json").items()
-            if key
-            in {
-                "value_type",
-                "allowed_values",
-                "min",
-                "max",
-                "description",
-                "notes",
-            }
-            and value is not None
-        }
-        for name, spec in catalog.parameters.items()
-        if spec.layers.l2 is not None
-    }
     return T2TParameterRequest(
         schema_version=3,
         task="recommend_initial",
         facts=facts.species,
         t2t_context=context,
-        adjustable_parameters=adjustable,
+        adjustable_parameters=build_adjustable_parameters(catalog),
     )

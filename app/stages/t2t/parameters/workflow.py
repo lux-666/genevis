@@ -43,11 +43,16 @@ from app.llm.parameters.t2t.request import (
     T2T_METHOD,
     build_t2t_parameter_request,
 )
+from app.review.approval import (
+    ensure_decision_allowed,
+    load_verified_interrupt_request,
+    persist_parameter_approval_decision,
+    validate_parameter_approval_bindings,
+    validate_parameter_recommendation_manifest,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
     ReviewPersistenceError,
-    load_review_request,
-    persist_review_decision,
     persist_review_request,
 )
 from app.schemas.artifacts import (
@@ -67,6 +72,7 @@ from app.schemas.artifacts import (
     T2T_PARAMETER_RECOMMENDATION_MANIFEST,
     T2T_PARAMETER_RESPONSE_PARSE,
     ArtifactRef,
+    ArtifactRefJson,
     ParameterAttempt,
     ParameterRecommendationCursor,
 )
@@ -91,13 +97,12 @@ from app.stages.t2t.parameters.execution import (
     T2TFrozenExecutionInputs,
 )
 from app.stages.t2t.parameters.storage import (
-    T2TParameterPersistenceError,
-    read_t2t_parameter_artifact,
-    recover_t2t_parameter_artifact,
-    write_t2t_parameter_artifact,
+    ParameterPersistenceError,
+    read_artifact as read_t2t_parameter_artifact,
+    recover_artifact as recover_t2t_parameter_artifact,
+    write_artifact as write_t2t_parameter_artifact,
 )
 from app.stages.t2t.state import (
-    ArtifactRefJson,
     read_t2t_stage_output,
     update_t2t_stage_output,
 )
@@ -140,7 +145,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
                 state, existing_manifest_ref
             )
             return hydrated
-        except (ValueError, T2TParameterPersistenceError) as exc:
+        except (ValueError, ParameterPersistenceError) as exc:
             return _fail(state, f"T2T motif evidence is missing or changed: {exc}")
 
     shared = state.get("shared_parameters")
@@ -171,7 +176,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
             artifact_type=T2T_MOTIF_INPUT_SNAPSHOT,
             method_name=_MOTIF_RESOLVER_METHOD,
         )
-    except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail(state, f"T2T motif snapshot persistence failed: {exc}")
 
     if species_facts.supplied_telomere_motif:
@@ -192,7 +197,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
                 motif=motif,
                 summary=summary,
             )
-        except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+        except (OSError, ValueError, ParameterPersistenceError) as exc:
             return _fail(state, f"T2T motif resolution persistence failed: {exc}")
         return update_t2t_stage_output(
             state,
@@ -227,7 +232,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
             artifact_type=T2T_MOTIF_MODEL_REQUEST,
             method_name=_MOTIF_RESOLVER_METHOD,
         )
-    except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail(state, f"T2T motif request failed: {exc}")
 
     response_ref: ArtifactRef | None = None
@@ -287,7 +292,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
             model_response_ref=response_ref,
             response_parse_ref=parse_ref,
         )
-    except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail(state, f"T2T motif response persistence failed: {exc}")
 
     refs = {
@@ -561,7 +566,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
         hydrated_update, motif_snapshot = _hydrate_t2t_motif_resolution(
             state, motif_manifest_ref
         )
-    except (ValueError, T2TParameterPersistenceError) as exc:
+    except (ValueError, ParameterPersistenceError) as exc:
         return _fail(state, f"T2T motif evidence is missing or changed: {exc}")
     hydrated_state: TopLevelState = {**state, **hydrated_update}
     hydrated_output = read_t2t_stage_output(hydrated_state)
@@ -654,7 +659,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             artifact_type=T2T_PARAMETER_MODEL_REQUEST,
             method_name=_RECOMMENDER_METHOD,
         )
-    except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail(state, f"T2T parameter request failed: {exc}")
 
     response_ref: ArtifactRef | None = None
@@ -739,7 +744,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             artifact_type=T2T_PARAMETER_RECOMMENDATION_MANIFEST,
             method_name=_RECOMMENDER_METHOD,
         )
-    except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail(state, f"T2T parameter response persistence failed: {exc}")
 
     cursor = ParameterRecommendationCursor(
@@ -848,37 +853,16 @@ def apply_t2t_parameter_approval_decision(
     ):
         raise ResumeValidationError("no unresolved T2T parameter_approval gate")
 
-    required = ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
-    missing = [key for key in required if key not in request.metadata]
-    if missing:
-        raise ResumeValidationError("T2T parameter approval metadata is incomplete")
-    for key in required:
-        if request.metadata.get(key) != interrupt.get(key):
-            raise ResumeValidationError(f"stale T2T parameter approval binding: {key}")
+    validate_parameter_approval_bindings(interrupt, request)
+    if request.decision not in {"approve_parameters", "reject_parameters"}:
+        raise ResumeValidationError("unsupported T2T parameter approval decision")
+    request_ref, request_record = load_verified_interrupt_request(state, interrupt)
+    ensure_decision_allowed(request_record, request)
 
-    request_ref_value = interrupt.get("request_ref")
-    request_id = interrupt.get("review_request_id")
-    request_hash = interrupt.get("request_hash")
-    if (
-        not isinstance(request_ref_value, dict)
-        or not isinstance(request_id, str)
-        or not isinstance(request_hash, str)
-    ):
-        raise ResumeValidationError(
-            "T2T parameter approval interrupt has no request identity"
-        )
-    if (
-        request.review_request_id != request_id
-        or request.review_request_hash != request_hash
-    ):
-        raise ResumeValidationError(
-            "T2T parameter approval decision request identity is stale"
-        )
-
+    payload = request_record.get("payload") or {}
     try:
-        request_ref = ArtifactRef.model_validate(request_ref_value)
-        request_record = load_review_request(
-            absolute_data_dir(state), request_ref, session_id=state["session_id"]
+        request_ref_validated = ArtifactRef.model_validate(
+            interrupt.get("request_ref")
         )
         cursor = ParameterRecommendationCursor.model_validate(
             output.get("current_parameter_recommendation")
@@ -888,34 +872,9 @@ def apply_t2t_parameter_approval_decision(
             "T2T parameter approval request is missing or changed"
         ) from exc
     if (
-        request_ref.sha256 != request_hash
-        or request_record.get("review_request_id") != request_id
-        or request_record.get("stage") != "t2t"
-        or request_record.get("gate_id") != "parameter_approval"
-        or request_record.get("reason") != "t2t_parameter_approval_required"
+        request_record.get("reason") != "t2t_parameter_approval_required"
     ):
         raise ResumeValidationError("T2T parameter approval request identity mismatch")
-    bindings = request_record.get("bindings")
-    if not isinstance(bindings, dict) or any(
-        bindings.get(key) != interrupt.get(key)
-        or bindings.get(key) != request.metadata.get(key)
-        for key in required
-    ):
-        raise ResumeValidationError("T2T parameter approval request bindings are stale")
-
-    payload = request_record.get("payload")
-    if not isinstance(payload, dict):
-        raise ResumeValidationError("T2T parameter approval request has no payload")
-    if request.decision not in {"approve_parameters", "reject_parameters"}:
-        raise ResumeValidationError("unsupported T2T parameter approval decision")
-    decisions_allowed = payload.get("decisions_allowed")
-    if (
-        not isinstance(decisions_allowed, list)
-        or not all(isinstance(decision, str) for decision in decisions_allowed)
-        or request.decision not in decisions_allowed
-    ):
-        raise ResumeValidationError("T2T parameter approval decision was not offered")
-
     try:
         manifest_ref = ArtifactRef.model_validate(
             payload.get("recommendation_manifest_ref")
@@ -926,17 +885,17 @@ def apply_t2t_parameter_approval_decision(
         ) from exc
     if (
         cursor.status != "pending_approval"
-        or cursor.review_request_id != request_id
+        or cursor.review_request_id != interrupt.get("review_request_id")
         or cursor.review_request_ref != request_ref
-        or cursor.recommendation_id != request.metadata["attempt_id"]
+        or cursor.recommendation_id != interrupt.get("attempt_id")
         or cursor.method_id != T2T_METHOD
         or cursor.method_id != payload.get("method_id")
-        or cursor.task != request.metadata["task"]
+        or cursor.task != interrupt.get("task")
         or cursor.task != payload.get("task")
-        or cursor.previous_attempt_id != request.metadata["previous_attempt_id"]
+        or cursor.previous_attempt_id != interrupt.get("previous_attempt_id")
         or cursor.manifest_ref != manifest_ref
         or cursor.recommendation_hash != manifest_ref.sha256
-        or cursor.recommendation_hash != request.metadata["recommendation_hash"]
+        or cursor.recommendation_hash != interrupt.get("recommendation_hash")
         or cursor.recommendation_hash != payload.get("recommendation_manifest_hash")
     ):
         raise ResumeValidationError("T2T parameter approval cursor is stale")
@@ -952,24 +911,13 @@ def apply_t2t_parameter_approval_decision(
         OSError,
         ValueError,
         ParameterEvidenceError,
-        T2TParameterPersistenceError,
+        ParameterPersistenceError,
     ) as exc:
         raise ResumeValidationError(
             "T2T parameter recommendation evidence is missing or changed"
         ) from exc
+    validate_parameter_recommendation_manifest(cursor, chain.manifest)
     manifest = chain.manifest
-    if (
-        chain.manifest_ref != manifest_ref
-        or manifest.status != "pending_approval"
-        or manifest.recommendation_id != cursor.recommendation_id
-        or manifest.method_id != cursor.method_id
-        or manifest.task != cursor.task
-        or manifest.previous_attempt_id != cursor.previous_attempt_id
-        or manifest.previous_attempt_seal_hash != cursor.previous_attempt_seal_hash
-    ):
-        raise ResumeValidationError(
-            "T2T parameter recommendation cursor does not match its manifest"
-        )
 
     attempts = output.get("parameter_attempts")
     if not isinstance(attempts, list):
@@ -994,48 +942,15 @@ def apply_t2t_parameter_approval_decision(
             "T2T parameter recommendation has no parameters mapping"
         )
 
-    try:
-        decision_ref = persist_review_decision(
-            absolute_data_dir(state),
-            session_id=state["session_id"],
-            review_request_id=request_id,
-            stage="t2t",
-            gate_id="parameter_approval",
-            request_hash=request_ref.sha256,
-            request_ref=request_ref,
-            decision={
-                "schema_version": 2,
-                "decision": request.decision,
-                "decided_by": request.decided_by,
-                "notes": list(request.notes),
-                "bindings": {key: request.metadata[key] for key in required},
-                "request_hash": request_ref.sha256,
-                "validated_recommendation_manifest_ref": manifest_ref.model_dump(
-                    mode="json"
-                ),
-                "validated_recommendation_hash": manifest_ref.sha256,
-            },
-            method_name=_APPROVAL_METHOD,
-            artifact_type=T2T_PARAMETER_APPROVAL_DECISION,
-        )
-    except (
-        OSError,
-        ValueError,
-        ReviewPersistenceError,
-    ) as exc:
-        raise ResumeValidationError(
-            "T2T parameter approval decision could not be persisted"
-        ) from exc
-    Ledger(absolute_data_dir(state)).record_review_decision(
-        state["session_id"],
-        "t2t",
-        gate_id="parameter_approval",
-        decision=request.decision,
-        notes=list(request.notes),
-        artifact_ref=decision_ref.path_ref,
-        metadata={key: request.metadata[key] for key in required},
-        decided_by=request.decided_by,
-        review_request_id=request_id,
+    decision_ref = persist_parameter_approval_decision(
+        state,
+        stage="t2t",
+        request_id=interrupt.get("review_request_id"),
+        request_ref=request_ref,
+        request=request,
+        manifest_ref=manifest_ref,
+        method_name=_APPROVAL_METHOD,
+        artifact_type=T2T_PARAMETER_APPROVAL_DECISION,
     )
     if request.decision == "reject_parameters":
         stage_update = update_t2t_stage_output(
@@ -1164,7 +1079,7 @@ def freeze_t2t_parameters(state: TopLevelState) -> StateUpdate:
         ValueError,
         ParameterAttemptStateError,
         ParameterEvidenceError,
-        T2TParameterPersistenceError,
+        ParameterPersistenceError,
     ) as exc:
         return _fail(state, f"T2T approved parameters are not executable: {exc}")
     return update_t2t_stage_output(

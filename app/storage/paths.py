@@ -131,6 +131,26 @@ class SessionPaths:
         return self.control_dir / "manifest.yaml"
 
     @property
+    def input_manifest_path(self) -> Path:
+        """The immutable manifest published by the freeze transaction.
+
+        ``manifest_path`` is retained for the existing draft/materialization
+        callers.  New frozen execution must use this explicitly named path so
+        a mutable draft can never be mistaken for the execution contract.
+        """
+        return self.control_dir / "input_manifest.yaml"
+
+    @property
+    def manifest_draft_path(self) -> Path:
+        """The mutable manifest projection owned by the intake workflow."""
+        return self.control_dir / "manifest_draft.yaml"
+
+    @property
+    def tui_state_path(self) -> Path:
+        """The authoritative mutable state for a pre-freeze TUI session."""
+        return self.control_dir / "tui_state.json"
+
+    @property
     def ask_plan_path(self) -> Path:
         return self.control_dir / "ask_plan.json"
 
@@ -141,6 +161,16 @@ class SessionPaths:
     @property
     def dependency_manifest_path(self) -> Path:
         return self.control_dir / "dependency_manifest.json"
+
+    @property
+    def frozen_inputs_path(self) -> Path:
+        """The create-only commit marker for frozen control inputs."""
+        return self.control_dir / "frozen_inputs.json"
+
+    @property
+    def execution_lock_path(self) -> Path:
+        """Advisory ownership lock for one frozen execution attempt."""
+        return self.control_dir / ".execution.lock"
 
     @property
     def artifact_index_path(self) -> Path:

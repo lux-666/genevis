@@ -6,8 +6,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from app.llm.parameters.base import (
+    PARAMETER_RECOMMENDATION_CONTRACT,
+    build_adjustable_parameters,
+)
 from app.schemas.artifacts import ParameterAttemptTask
-from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     AutoHiCRecommendationContext,
     CanonicalRecommendationFacts,
@@ -16,9 +19,6 @@ from app.schemas.parameter_recommendation import (
 
 AUTOHIC_METHOD: Literal["hic_scaffolding.candidate.autohic"] = (
     "hic_scaffolding.candidate.autohic"
-)
-PARAMETER_RECOMMENDATION_CONTRACT: Literal["parameter_recommendation_v1"] = (
-    "parameter_recommendation_v1"
 )
 
 
@@ -51,38 +51,18 @@ def build_autohic_parameter_request(
     *,
     facts: CanonicalRecommendationFacts,
     context: AutoHiCRecommendationContext,
-    catalog: MethodParameterCatalog,
+    catalog: "app.schemas.parameter_catalog.MethodParameterCatalog",
     task: ParameterAttemptTask = "recommend_initial",
 ) -> AutoHiCParameterRequest:
-    """Project typed recommendation inputs into the strict model-facing DTO.
+    """Project typed recommendation inputs into the strict model-facing DTO."""
 
-    Only canonical species facts and the typed stage context cross the model
-    boundary; paths, artifact references, and run identity remain excluded.
-    """
+    from app.schemas.parameter_catalog import MethodParameterCatalog  # local import avoids cycle
 
-    if catalog.method_id != AUTOHIC_METHOD:
+    if not isinstance(catalog, MethodParameterCatalog) or catalog.method_id != AUTOHIC_METHOD:
         raise ValueError("AutoHiC model request requires the autohic catalog")
-    adjustable = {
-        name: {
-            key: value
-            for key, value in specification.model_dump(mode="json").items()
-            if key
-            in {
-                "value_type",
-                "allowed_values",
-                "min",
-                "max",
-                "description",
-                "notes",
-            }
-            and value is not None
-        }
-        for name, specification in catalog.parameters.items()
-        if specification.layers.l2 is not None
-    }
+    adjustable = build_adjustable_parameters(catalog)
     if not adjustable:
         raise ValueError("AutoHiC model request requires at least one L2 parameter")
-
     return AutoHiCParameterRequest(
         schema_version=3,
         task=task,

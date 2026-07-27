@@ -8,6 +8,7 @@ from typing import Literal, cast
 from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import TypedDict
 
+from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.state import (
     JsonValue,
     StateUpdate,
@@ -18,16 +19,6 @@ from app.stages.base import (
     update_validated_stage_output,
     validated_stage_output,
 )
-
-
-@with_config(ConfigDict(extra="forbid"))
-class ArtifactRefJson(TypedDict):
-    schema_version: Literal[2]
-    artifact_id: str
-    path_ref: str
-    sha256: str
-    size_bytes: int
-    artifact_type: str
 
 
 @with_config(ConfigDict(extra="forbid"))

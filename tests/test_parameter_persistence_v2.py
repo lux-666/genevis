@@ -27,7 +27,7 @@ from app.stages.assembly.nodes import plan_candidate_attempts
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
-    recover_recommendation_json_artifact,
+    recover_artifact as recover_recommendation_json_artifact,
 )
 from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
 from app.storage.artifacts import read_artifact_records

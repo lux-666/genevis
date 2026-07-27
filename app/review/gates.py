@@ -35,6 +35,7 @@ class ReviewGateDeclaration:
     related_parameter_gate: tuple[str, str] | None = None
     parameter_recommendation_notes: tuple[str, ...] = field(default_factory=tuple)
     plan_order: int = 100
+    interrupt_context_builder: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -61,6 +62,21 @@ class ReviewGateDeclaration:
                 f"review gate timeout applier is not callable: {self.timeout_applier}"
             )
         return cast(TimeoutApplier, applier)
+
+    def load_interrupt_context_builder(
+        self,
+    ) -> "Callable[[dict], dict] | None":
+        """Load the stage-specific interrupt context builder, if registered."""
+        if not self.interrupt_context_builder:
+            return None
+        module_name, function_name = self.interrupt_context_builder.rsplit(":", 1)
+        module = import_module(module_name)
+        builder = getattr(module, function_name)
+        if not callable(builder):
+            raise TypeError(
+                f"interrupt_context_builder is not callable: {self.interrupt_context_builder}"
+            )
+        return builder
 
 
 _DECLARATIONS: dict[tuple[str, str], ReviewGateDeclaration] = {}
@@ -211,6 +227,9 @@ register_review_gate(
             "stop_human_review",
         ),
         decision_applier="app.stages.assembly_review.nodes:apply_assembly_review_resume_decision",
+        interrupt_context_builder=(
+            "app.review.interrupt_context:assembly_review_interrupt_context"
+        ),
         prompt_bundle="review.assembly_review_recommend",
         prompt_adapter="assembly_review",
         template_preferred_decision="accept",
@@ -239,6 +258,9 @@ register_review_gate(
             "stop_human_review",
         ),
         decision_applier="app.stages.assembly.nodes:apply_route_decision",
+        interrupt_context_builder=(
+            "app.review.interrupt_context:assembly_route_selection_interrupt_context"
+        ),
         timeout_applier="app.stages.assembly.nodes:apply_selection_timeout",
         prompt_bundle="assembly.route_selector",
         prompt_adapter="generic",
@@ -255,6 +277,9 @@ register_review_gate(
         decision_applier=(
             "app.stages.hic_scaffolding.parameters.workflow:"
             "apply_autohic_parameter_approval_decision"
+        ),
+        interrupt_context_builder=(
+            "app.review.interrupt_context:hic_scaffolding_interrupt_context"
         ),
         prompt_adapter="generic",
         proposal_kind="parameter_recommendation",
@@ -275,6 +300,9 @@ register_review_gate(
             "stop_human_review",
         ),
         decision_applier="app.stages.hic_scaffolding.nodes:apply_hic_scaffolding_resume_decision",
+        interrupt_context_builder=(
+            "app.review.interrupt_context:hic_scaffolding_interrupt_context"
+        ),
         prompt_adapter="hic_scaffolding",
         template_preferred_decision="accept_candidate",
         proposal_kind="autohic_result_review",

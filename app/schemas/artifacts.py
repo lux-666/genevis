@@ -13,6 +13,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from typing_extensions import TypedDict
 
 from app.integrity import sha256_file
 
@@ -79,6 +80,9 @@ HIC_PARAMETER_APPROVAL_DECISION = "hic_scaffolding.parameter_approval.decision"
 HIC_PARAMETER_FROZEN_PARAMETERS = "hic_scaffolding.parameter.frozen_parameters"
 HIC_PARAMETER_ATTEMPT_MANIFEST = "hic_scaffolding.parameter.attempt_manifest"
 HIC_PARAMETER_REVIEW = "hic_scaffolding.parameter.review"
+AUTOHIC_PARAMETER_CONFIG = "hic_scaffolding.parameter.config"
+AUTOHIC_PARAMETER_SCRIPT = "hic_scaffolding.parameter.script"
+AUTOHIC_PARAMETER_COMMAND = "hic_scaffolding.parameter.command"
 T2T_PARAMETER_INPUT_SNAPSHOT = "t2t.parameter_recommendation.input_snapshot"
 T2T_PARAMETER_BASIS = "t2t.parameter.basis_snapshot"
 T2T_PARAMETER_MODEL_REQUEST = "t2t.parameter.model_request"
@@ -181,6 +185,17 @@ class ArtifactRef(BaseModel):
             size_bytes=artifact.file_size_bytes,
             artifact_type=artifact.artifact_type,
         )
+
+
+class ArtifactRefJson(TypedDict):
+    """JSON (TypedDict) twin of ArtifactRef — used in stage checkpoint cursors."""
+
+    schema_version: Literal[2]
+    artifact_id: str
+    path_ref: str
+    sha256: str
+    size_bytes: int
+    artifact_type: str
 
 
 ParameterAttemptStatus = Literal[

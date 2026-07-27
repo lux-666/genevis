@@ -43,7 +43,7 @@ from app.schemas.parameter_recommendation import (
 )
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly.parameters.storage import (
-    write_attempt_json_artifact,
+    write_artifact as _write_attempt_artifact,
 )
 from app.stages.assembly.state import (
     AssemblyStageCursor,
@@ -260,7 +260,7 @@ def freeze_parameterized_attempt(
             state,
             f"{label} frozen parameter sources are invalid: {exc}",
         )
-    command_ref = write_attempt_json_artifact(
+    command_ref = _write_attempt_artifact(
         state,
         parameter_attempt_id,
         "command.json",
@@ -271,8 +271,9 @@ def freeze_parameterized_attempt(
         },
         artifact_type=ASSEMBLY_PARAMETER_COMMAND,
         method_name=lifecycle.method_name,
+        scope="attempt",
     )
-    frozen_parameters_ref = write_attempt_json_artifact(
+    frozen_parameters_ref = _write_attempt_artifact(
         state,
         parameter_attempt_id,
         "frozen_parameters.json",
@@ -291,6 +292,7 @@ def freeze_parameterized_attempt(
         },
         artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
         method_name=lifecycle.method_name,
+        scope="attempt",
     )
     session_id = state["session_id"]
     attempt = build_frozen_attempt(

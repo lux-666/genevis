@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -177,9 +179,13 @@ def _load_raw(config_path: Path) -> ConfigMapping:
         raise FileNotFoundError(f"env config missing: {config_path}")
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"env config must be a mapping: {config_path}")
-    return cast(ConfigMapping, raw)
+    return _validated_raw(raw, source=config_path)
+
+
+def _validated_raw(raw: object, *, source: Path) -> ConfigMapping:
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"env config must be a mapping: {source}")
+    return cast(ConfigMapping, deepcopy(dict(raw)))
 
 
 def _entry(raw: ConfigMapping, keys: tuple[str, ...]) -> ConfigMapping | None:
@@ -196,12 +202,23 @@ def _entry(raw: ConfigMapping, keys: tuple[str, ...]) -> ConfigMapping | None:
 class EnvResolver:
     """Resolve conda environments for stages and methods from the active config."""
 
-    def __init__(self, config_path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        config_path: Path | str | None = None,
+        *,
+        config_data: Mapping[str, Any] | None = None,
+    ) -> None:
         self.config_path = (
             Path(config_path) if config_path is not None else active_config_path()
         )
-        self._raw = _load_raw(self.config_path)
+        self._raw = (
+            _load_raw(self.config_path)
+            if config_data is None
+            else _validated_raw(config_data, source=self.config_path)
+        )
         default_section = self._raw.get("default") or {}
+        if not isinstance(default_section, Mapping):
+            raise ValueError("default config section must be a mapping")
         self.conda_bin: str = str(default_section.get("conda_bin") or "conda")
         fallback_env = default_section.get("fallback_env")
         fallback_prefix = default_section.get("fallback_prefix")
@@ -218,9 +235,11 @@ class EnvResolver:
         self._fallback_prefix: str | None = (
             str(fallback_prefix) if fallback_prefix else None
         )
-        self.packages: dict[str, PackageSpec] = self._load_packages(
-            self._raw.get("packages") or {}
-        )
+        packages = self._raw.get("packages") or {}
+        if not isinstance(packages, Mapping):
+            raise ValueError("packages config section must be a mapping")
+        self.packages = self._load_packages(dict(packages))
+        self._validate_environment_entries()
 
     @staticmethod
     def _load_packages(raw: ConfigMapping) -> dict[str, PackageSpec]:
@@ -249,6 +268,25 @@ class EnvResolver:
             )
         return packages
 
+    def _validate_environment_entries(self) -> None:
+        """Eagerly validate all declared stage/method overrides and packages."""
+
+        sections: tuple[tuple[str, Literal["stage", "method"]], ...] = (
+            ("stages", "stage"),
+            ("methods", "method"),
+        )
+        for section_name, source in sections:
+            raw_section = self._raw.get(section_name)
+            if raw_section is None:
+                continue
+            if not isinstance(raw_section, Mapping):
+                raise ValueError(f"{section_name} config section must be a mapping")
+            for name, entry in raw_section.items():
+                if not isinstance(entry, Mapping):
+                    raise ValueError(f"{section_name}.{name} must be a mapping")
+                spec = self._build_spec(dict(entry), source=source)
+                self.packages_for_spec(spec)
+
     def resolve(self, *, stage: str, method_name: str | None = None) -> EnvSpec:
         """Return the resolved env for a method, falling back to stage then default."""
         if method_name:
@@ -276,14 +314,20 @@ class EnvResolver:
         if not conda_env and not conda_prefix:
             conda_env = self._fallback_env
             conda_prefix = self._fallback_prefix
-        required = list(entry.get("required_tools") or [])
-        package_tools = [str(tool) for tool in (entry.get("package_tools") or [])]
+        required = entry.get("required_tools") or []
+        package_tools = entry.get("package_tools") or []
+        if isinstance(required, (str, bytes)) or not isinstance(required, Sequence):
+            raise ValueError("required_tools must be a list")
+        if isinstance(package_tools, (str, bytes)) or not isinstance(
+            package_tools, Sequence
+        ):
+            raise ValueError("package_tools must be a list")
         return EnvSpec(
             conda_bin=self.conda_bin,
             conda_env=str(conda_env) if conda_env else None,
             conda_prefix=str(conda_prefix) if conda_prefix else None,
             required_tools=[str(tool) for tool in required],
-            package_tools=package_tools,
+            package_tools=[str(tool) for tool in package_tools],
             source=source,
         )
 

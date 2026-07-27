@@ -1,7 +1,8 @@
 """Command-line entrypoint for gene-agent.
 
-Usage:
-    gene-agent run --session-id <id> --manifest <path> [--data-dir <dir>]
+Normal workflows start in ``gene-agent tui``.  The bootstrap command is an
+auxiliary machine-setup tool; direct run/ask parsing remains only for internal
+callers and existing automation.
 """
 
 from __future__ import annotations
@@ -134,10 +135,27 @@ def _build_assembly_selection(
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="gene-agent")
-    subparsers = parser.add_subparsers(dest="command")
+    parser = argparse.ArgumentParser(
+        prog="gene-agent",
+        description=(
+            "Start and run workflows with 'gene-agent tui'. Use bootstrap only "
+            "to initialize or repair this machine's configuration."
+        ),
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="{tui,bootstrap,inspect,storage-audit,resume,review}",
+    )
 
-    run_parser = subparsers.add_parser("run", help="Run a genome workflow session")
+    # Retain these parsers for tests and existing automation, but omit ``help``
+    # so argparse does not advertise them as normal user workflows.
+    run_parser = subparsers.add_parser(
+        "run",
+        description=(
+            "Internal compatibility command for tests and automation. "
+            "Normal workflows use 'gene-agent tui'."
+        ),
+    )
     run_parser.add_argument(
         "--session-id", help="Unique session identifier; generated when omitted"
     )
@@ -183,7 +201,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     ask_parser = subparsers.add_parser(
-        "ask", help="Start a workflow from a natural-language request"
+        "ask",
+        description=(
+            "Internal compatibility command for legacy ask plans. "
+            "Normal workflows use 'gene-agent tui'."
+        ),
     )
     ask_parser.add_argument(
         "request_text",
@@ -375,7 +397,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     tui_parser = subparsers.add_parser(
         "tui",
-        help="Launch a workflow or interactively review a blocked session",
+        help="Start, run, or resume an interactive workflow",
     )
     tui_parser.add_argument(
         "--data-dir", default=default_data_root(), help="Workflow data root"
@@ -384,23 +406,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--resume-session",
         default=None,
         metavar="SESSION_ID",
-        help=(
-            "Attach to one blocked durable workflow session and review its active gate"
-        ),
+        help=argparse.SUPPRESS,
     )
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
         help=(
-            "Initialize and validate project configuration, then check "
-            "external packages"
+            "Auxiliary machine configuration initialization and validation"
         ),
     )
-    bootstrap_parser.add_argument(
+    bootstrap_mode = bootstrap_parser.add_mutually_exclusive_group()
+    bootstrap_mode.add_argument(
         "--apply",
         action="store_true",
         default=False,
         help="Apply planned project configuration and package conformance actions.",
+    )
+    bootstrap_mode.add_argument(
+        "--update",
+        action="store_true",
+        default=False,
+        help=(
+            "Select existing bootstrap-managed fields to replace; default mode "
+            "only fills missing values."
+        ),
     )
     bootstrap_parser.add_argument(
         "--config",
@@ -470,7 +499,62 @@ def _peek_manifest_session_id(manifest_path: Path) -> str | None:
     return None
 
 
+def execute_frozen_session(
+    session_id: str,
+    data_dir: str | Path,
+    *,
+    checkpointer: CheckpointerBackend | None = None,
+    interactive_gate: bool = True,
+) -> int:
+    """Execute one verified TUI-frozen session without rematerializing inputs.
+
+    This is the internal executor used by the TUI.  It intentionally accepts a
+    session identity rather than user-supplied manifest/run-config paths: the
+    freeze marker is the only authority for those files.
+    """
+
+    from app.storage.frozen_inputs import (
+        FrozenExecutionActiveError,
+        FrozenExecutionRecoveryError,
+        FrozenInputError,
+        frozen_execution_lock,
+        frozen_execution_progress,
+        validate_frozen_inputs,
+    )
+
+    try:
+        paths = SessionPaths(data_dir, session_id)
+        with frozen_execution_lock(paths):
+            validate_frozen_inputs(paths)
+            progress = frozen_execution_progress(paths)
+            if progress == "partial":
+                raise FrozenExecutionRecoveryError(
+                    "partial execution evidence exists without a resumable checkpoint"
+                )
+
+            args = argparse.Namespace(
+                session_id=session_id,
+                manifest=str(paths.input_manifest_path),
+                data_dir=str(paths.data_root),
+                run_config=str(paths.run_config_path),
+                local_exec=[],
+                checkpointer=checkpointer,
+                _frozen_session=True,
+                _resume_checkpoint=progress == "checkpoint",
+                _interactive_gate=interactive_gate,
+            )
+            return _run_session(args)
+    except FrozenExecutionActiveError as exc:
+        print(f"error: frozen session is already active: {exc}", file=sys.stderr)
+        return 1
+    except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
+        print(f"error: frozen session cannot execute: {exc}", file=sys.stderr)
+        return 1
+
+
 def _run_session(args: argparse.Namespace) -> int:
+    frozen_session = bool(getattr(args, "_frozen_session", False))
+    resume_checkpoint = bool(getattr(args, "_resume_checkpoint", False))
     try:
         request = EntryRequest(
             session_id=args.session_id, manifest=args.manifest, data_dir=args.data_dir
@@ -486,46 +570,93 @@ def _run_session(args: argparse.Namespace) -> int:
         print("error: run request requires a manifest", file=sys.stderr)
         return 1
     manifest_path = Path(request.manifest)
-    if not manifest_path.exists():
-        print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
-        return 1
-
-    manifest_session_id = _peek_manifest_session_id(manifest_path)
-    if request.session_id is None:
-        adopted = manifest_session_id or generate_session_id(data_dir)
-        try:
-            request = EntryRequest(
-                session_id=adopted,
-                manifest=request.manifest,
-                data_dir=data_dir,
-            )
-        except ValueError as exc:
-            print(f"error: invalid run request: {exc}", file=sys.stderr)
-            return 1
-    elif manifest_session_id is not None and manifest_session_id != request.session_id:
-        print(
-            "error: manifest session_id "
-            f"{manifest_session_id!r} does not match CLI --session-id "
-            f"{request.session_id!r}; the asset registry would land under "
-            "the manifest id while every other stage would write under the "
-            "CLI id. Make them match (drop one, or align the values).",
-            file=sys.stderr,
+    run_config_path = getattr(args, "run_config", None)
+    frozen_bundle = None
+    frozen_paths: SessionPaths | None = None
+    if frozen_session:
+        from app.storage.frozen_inputs import (
+            FrozenInputError,
+            validate_frozen_inputs,
         )
-        return 1
-    else:
+
         try:
+            if request.session_id is None:
+                raise ValueError("frozen execution requires a session_id")
+            frozen_paths = SessionPaths(data_dir, request.session_id)
+            expected_manifest = frozen_paths.input_manifest_path.resolve(strict=False)
+            supplied_manifest = manifest_path.expanduser().resolve(strict=False)
+            if supplied_manifest != expected_manifest:
+                raise ValueError(
+                    "frozen execution manifest must be the session input_manifest.yaml"
+                )
+            if run_config_path is None:
+                raise ValueError(
+                    "frozen execution requires the session run_config.json"
+                )
+            expected_run_config = frozen_paths.run_config_path.resolve(strict=False)
+            supplied_run_config = Path(run_config_path).expanduser().resolve(
+                strict=False
+            )
+            if supplied_run_config != expected_run_config:
+                raise ValueError(
+                    "frozen execution run config must be the session run_config.json"
+                )
+            frozen_bundle = validate_frozen_inputs(frozen_paths)
+            manifest_path = frozen_paths.input_manifest_path
+            run_config_path = str(frozen_paths.run_config_path)
             request = EntryRequest(
                 session_id=request.session_id,
-                manifest=request.manifest,
+                manifest=str(manifest_path),
                 data_dir=data_dir,
             )
-        except ValueError as exc:
-            print(f"error: invalid run request: {exc}", file=sys.stderr)
+        except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
+            print(f"error: frozen session cannot execute: {exc}", file=sys.stderr)
+            return 1
+    else:
+        if not manifest_path.exists():
+            print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
             return 1
 
-    run_config: RunConfig | None = None
-    run_config_path = getattr(args, "run_config", None)
-    if run_config_path:
+        manifest_session_id = _peek_manifest_session_id(manifest_path)
+        if request.session_id is None:
+            adopted = manifest_session_id or generate_session_id(data_dir)
+            try:
+                request = EntryRequest(
+                    session_id=adopted,
+                    manifest=request.manifest,
+                    data_dir=data_dir,
+                )
+            except ValueError as exc:
+                print(f"error: invalid run request: {exc}", file=sys.stderr)
+                return 1
+        elif (
+            manifest_session_id is not None
+            and manifest_session_id != request.session_id
+        ):
+            print(
+                "error: manifest session_id "
+                f"{manifest_session_id!r} does not match CLI --session-id "
+                f"{request.session_id!r}; the asset registry would land under "
+                "the manifest id while every other stage would write under the "
+                "CLI id. Make them match (drop one, or align the values).",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            try:
+                request = EntryRequest(
+                    session_id=request.session_id,
+                    manifest=request.manifest,
+                    data_dir=data_dir,
+                )
+            except ValueError as exc:
+                print(f"error: invalid run request: {exc}", file=sys.stderr)
+                return 1
+
+    run_config: RunConfig | None = (
+        frozen_bundle.run_config if frozen_bundle is not None else None
+    )
+    if not frozen_session and run_config_path:
         try:
             run_config = load_run_config(run_config_path)
         except (FileNotFoundError, ValueError) as exc:
@@ -551,8 +682,12 @@ def _run_session(args: argparse.Namespace) -> int:
             validate_local_assembly_execution(
                 run_config.assembly if run_config else None
             )
-            manifest = InputManifest.model_validate(
-                yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+            manifest = (
+                frozen_bundle.manifest
+                if frozen_bundle is not None
+                else InputManifest.model_validate(
+                    yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+                )
             )
             assert run_config is not None
             validate_genome_size_execution_plan(
@@ -568,21 +703,25 @@ def _run_session(args: argparse.Namespace) -> int:
     if session_id is None:
         print("error: run request could not resolve a session_id", file=sys.stderr)
         return 1
-    paths = SessionPaths(data_dir, session_id)
-    try:
-        materialize_run_layout(
-            paths,
-            manifest_path=manifest_path,
-            run_config_path=Path(run_config_path) if run_config_path else None,
-        )
-        if run_config is not None:
-            run_config = load_run_config(paths.run_config_path)
-    except (RunMaterializationError, FileNotFoundError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    paths = frozen_paths or SessionPaths(data_dir, session_id)
+    if frozen_session:
+        canonical_manifest_path = paths.input_manifest_path
+    else:
+        try:
+            materialize_run_layout(
+                paths,
+                manifest_path=manifest_path,
+                run_config_path=Path(run_config_path) if run_config_path else None,
+            )
+            if run_config is not None:
+                run_config = load_run_config(paths.run_config_path)
+            canonical_manifest_path = paths.manifest_path
+        except (RunMaterializationError, FileNotFoundError, ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     run_dir = paths.run_dir
     request = request.model_copy(update={"data_dir": str(run_dir)})
-    manifest_ref = paths.to_ref(paths.manifest_path)
+    manifest_ref = paths.to_ref(canonical_manifest_path)
     Ledger(request.data_dir).create_session(session_id, manifest_ref)
 
     requested_stages = (
@@ -752,7 +891,7 @@ def _run_session(args: argparse.Namespace) -> int:
     graph = build_graph(backend=backend, data_dir=request.data_dir)
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     try:
-        result = graph.invoke(state, config=config)
+        result = graph.invoke(None if resume_checkpoint else state, config=config)
     except Exception as exc:
         # A stage bug must still leave an operator-readable durable terminal
         # record.  Prefer the latest checkpoint values because the in-memory
@@ -1484,6 +1623,7 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
     from app.execution.project_bootstrap import (
         apply_project_bootstrap_plan,
         collect_project_bootstrap_plan,
+        validate_project_bootstrap_plan,
     )
 
     # Determine config path
@@ -1492,12 +1632,25 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
     else:
         config_path = Path("config/envs.yaml")
 
+    update_requested = bool(getattr(args, "update", False))
+    apply_requested = bool(getattr(args, "apply", False))
+    conformance_packages = {"juicer"} if apply_requested else set()
+    if update_requested and apply_requested:
+        print(
+            "error: bootstrap --update commits interactively and cannot be "
+            "combined with --apply",
+            file=sys.stderr,
+        )
+        return 1
+
     print(f"Checking configuration: {config_path}")
     existing_issues = verify_envs_yaml(config_path) if config_path.exists() else []
     interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    effective_apply = apply_requested
     needs_initialization = (
         not config_path.exists()
         or interactive
+        or update_requested
         or any("placeholder" in issue for issue in existing_issues)
     )
     if needs_initialization:
@@ -1506,24 +1659,71 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                 config_path,
                 prompt=input,
                 secret_prompt=getpass.getpass,
+                update=update_requested,
             )
+        except (KeyboardInterrupt, EOFError):
+            print("\nBootstrap update cancelled; no changes were written.")
+            return 1
         except (OSError, ValueError, yaml.YAMLError) as exc:
             print(
                 f"\n❌ Failed to inspect project configuration: {exc}", file=sys.stderr
             )
             return 1
 
-        if init_plan.changes:
-            print("\nProject configuration plan:")
-            for change in init_plan.changes:
-                print(f"  - {change.file}: {change.field} = {change.display_value()}")
+        if update_requested:
+            conformance_packages = set(init_plan.conformance_packages)
+
         if init_plan.unresolved_fields:
             print("\n❌ Missing project configuration values:")
             for field in init_plan.unresolved_fields:
                 print(f"  - {field}")
             return 1
+        try:
+            validate_project_bootstrap_plan(init_plan)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"\n❌ Candidate configuration is invalid: {exc}", file=sys.stderr)
+            return 1
+
+        if init_plan.changes:
+            print("\nProject configuration plan:")
+            for change in init_plan.changes:
+                if update_requested:
+                    print(
+                        f"  - {change.file}: {change.field} "
+                        f"{change.display_previous_value()} -> "
+                        f"{change.display_value()}"
+                    )
+                elif change.previous_value is None:
+                    print(
+                        f"  - {change.file}: {change.field} "
+                        f"= {change.display_value()}"
+                    )
+                else:
+                    print(
+                        f"  - {change.file}: {change.field} "
+                        f"{change.display_previous_value()} -> "
+                        f"{change.display_value()}"
+                    )
+        print("✓ Candidate configuration is valid")
         if init_plan.has_changes:
-            if not args.apply:
+            if update_requested:
+                while True:
+                    try:
+                        confirmation = input(
+                            "\nPress Enter to apply these changes "
+                            "(Ctrl-C/Ctrl-D cancels): "
+                        )
+                    except (KeyboardInterrupt, EOFError):
+                        print("\nBootstrap update cancelled; no changes were written.")
+                        return 1
+                    if confirmation == "":
+                        effective_apply = True
+                        break
+                    print(
+                        "Type nothing and press Enter to apply, or interrupt "
+                        "to cancel."
+                    )
+            elif not apply_requested:
                 print("\nRun with --apply to write these project configuration changes")
                 return 0
             try:
@@ -1537,8 +1737,12 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                 return 1
             print("✓ Project configuration initialized")
 
-    # Verify with the same EnvResolver used by stage execution.
-    issues = verify_envs_yaml(config_path)
+    # Validate the persisted candidate, allowing only canaries produced by the
+    # declared conformance action that runs immediately below.
+    issues = verify_envs_yaml(
+        config_path,
+        conformance_packages=conformance_packages,
+    )
     if issues:
         print("\n❌ Configuration issues found:")
         for issue in issues:
@@ -1558,6 +1762,8 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
     conformance_results = []
     for package_name, package_spec in resolver.packages.items():
         if package_spec.conform_on_bootstrap:
+            if update_requested and package_name not in conformance_packages:
+                continue
             print(f"\nConformance: {package_name}")
             if package_name == "juicer":
                 # Get juicer_tools spec if referenced
@@ -1566,7 +1772,7 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                 if jar_root_ref and jar_root_ref in resolver.packages:
                     juicer_tools_spec = resolver.packages[jar_root_ref]
 
-                if args.apply:
+                if effective_apply:
                     result = conform_juicer(package_spec, juicer_tools_spec)
                     conformance_results.append(result)
                     if result.status == "ok":
@@ -1580,15 +1786,23 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                     if juicer_tools_spec:
                         print("    - Link juicer_tools.jar into scripts/common/")
 
-    if not args.apply and any(
+    if not update_requested and not effective_apply and any(
         pkg.conform_on_bootstrap for pkg in resolver.packages.values()
     ):
         print("\n💡 Run with --apply to execute conformance actions")
 
-    # Step 4: Preflight all packages
+    # Step 4: Strictly verify and preflight all packages after conformance.
+    issues = verify_envs_yaml(config_path)
+    if issues:
+        print("\n❌ Configuration issues found after conformance:")
+        for issue in issues:
+            print(f"  - {issue}")
+
     print("\nPackage preflight:")
     preflight_results = preflight_all(resolver)
-    all_ok = True
+    all_ok = not issues and all(
+        result.status == "ok" for result in conformance_results
+    )
     for package_name, preflight_result in preflight_results:
         if preflight_result.status == "ok":
             print(f"  ✓ {package_name}: all canary paths present")
@@ -1606,7 +1820,7 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
         return 0
     else:
         print("❌ Bootstrap incomplete: some packages have missing files")
-        if args.apply:
+        if effective_apply:
             print("   Review the errors above and fix the install_root paths")
         else:
             print("   Run with --apply after fixing configuration")
@@ -1615,10 +1829,9 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
-    # Load .env once at the entry point so every subcommand (run, ask,
-    # inspect, resume) sees the same secrets without re-implementing the
-    # loader in each branch. setdefault semantics mean already-exported
-    # environment variables still win.
+    # Load .env once at the entry point so public tools and compatibility
+    # callers see the same secrets without re-implementing the loader in each
+    # branch. setdefault semantics mean already-exported variables still win.
     _load_dotenv_without_override()
     args = _parse_args(argv)
     if args.command == "run":

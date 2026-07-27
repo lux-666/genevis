@@ -8,29 +8,14 @@ from typing import Literal
 from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import TypedDict
 
-from app.schemas.artifacts import (
-    ParameterAttemptStatus,
-    ParameterAttemptTask,
-    ParameterRecommendationStatus,
-)
+from app.schemas.artifacts import ArtifactRefJson
+from app.schemas.parameter_cursors import ParameterAttemptJson, ParameterRecommendationJson
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,
     validated_stage_output,
 )
 from app.stages.t2t.parameters.catalog import T2TMode
-
-
-@with_config(ConfigDict(extra="forbid"))
-class ArtifactRefJson(TypedDict):
-    """JSON representation of an immutable artifact reference."""
-
-    schema_version: Literal[2]
-    artifact_id: str
-    path_ref: str
-    sha256: str
-    size_bytes: int
-    artifact_type: str
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -51,47 +36,6 @@ class T2TThresholdsJson(TypedDict):
     max_target_terminal_distance_bp: int
     min_overlap_bp: int
     min_supporting_reads: int
-
-
-@with_config(ConfigDict(extra="forbid"))
-class T2TParameterAttemptJson(TypedDict, total=False):
-    """JSON representation of a compact parameter-attempt cursor."""
-
-    schema_version: Literal[3]
-    attempt_id: int
-    method_id: str
-    status: ParameterAttemptStatus
-    task: ParameterAttemptTask
-    previous_attempt_id: int | None
-    recommendation_manifest_ref: ArtifactRefJson
-    approval_decision_ref: ArtifactRefJson
-    frozen_parameters_ref: ArtifactRefJson | None
-    command_ref: ArtifactRefJson | None
-    frozen_attempt_ref: ArtifactRefJson | None
-    execution_ref: ArtifactRefJson | None
-    review_ref: ArtifactRefJson | None
-    attempt_manifest_ref: ArtifactRefJson | None
-    recommendation_contract: Literal["parameter_recommendation_v1"]
-    previous_attempt_seal_hash: str | None
-    sealed_at: str | None
-    seal_hash: str | None
-
-
-@with_config(ConfigDict(extra="forbid"))
-class T2TParameterRecommendationJson(TypedDict):
-    """JSON representation of the active recommendation cursor."""
-
-    schema_version: Literal[3]
-    recommendation_id: int
-    method_id: str
-    task: ParameterAttemptTask
-    status: ParameterRecommendationStatus
-    previous_attempt_id: int | None
-    manifest_ref: ArtifactRefJson
-    recommendation_hash: str
-    review_request_id: str | None
-    review_request_ref: ArtifactRefJson | None
-    previous_attempt_seal_hash: str | None
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -186,8 +130,8 @@ class T2TStageCursor(TypedDict, total=False):
     block_reason: str
     current_parameter_attempt_id: int
     proposed_parameter_attempt_id: int | None
-    parameter_attempts: list[T2TParameterAttemptJson]
-    current_parameter_recommendation: T2TParameterRecommendationJson
+    parameter_attempts: list[ParameterAttemptJson]
+    current_parameter_recommendation: ParameterRecommendationJson
 
     # Tool preflight fields returned by the shared execution boundary.
     env_target: str

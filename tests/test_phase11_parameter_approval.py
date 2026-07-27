@@ -20,7 +20,7 @@ from app.execution.parameter_attempts import (
     update_current_parameter_attempt,
 )
 from app.schemas.artifacts import ArtifactRef, ParameterAttempt
-from app.stages.assembly.parameters.storage import read_json_artifact
+from app.stages.assembly.parameters.storage import read_artifact as read_json_artifact
 from app.stages.assembly.parameters.workflow import (
     _seal_parameter_attempt,
     _validate_parameter_attempt_chain,

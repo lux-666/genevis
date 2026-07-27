@@ -15,7 +15,7 @@ from app.schemas.parameter_recommendation import (
     T2TRecommendationContext,
 )
 from app.schemas.state import TopLevelState
-from app.stages.t2t.parameters.storage import read_t2t_parameter_artifact
+from app.stages.t2t.parameters.storage import read_artifact as read_t2t_parameter_artifact
 from app.stages.t2t.state import T2TStageCursor, read_t2t_stage_output
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 

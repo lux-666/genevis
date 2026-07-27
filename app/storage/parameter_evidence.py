@@ -741,3 +741,121 @@ def _safe_component(value: str, *, label: str) -> str:
     if not value or path.is_absolute() or len(path.parts) != 1 or value in {".", ".."}:
         raise ParameterEvidenceError(f"{label} must be one safe path component")
     return value
+
+
+# ---------------------------------------------------------------------------
+# Stage-bound persistence boundary
+# ---------------------------------------------------------------------------
+
+
+class ParameterPersistenceError(ValueError):
+    """Raised at the workflow boundary when parameter evidence is inconsistent.
+
+    Wraps :exc:`ParameterEvidenceError` so callers only need to catch one type.
+    """
+
+
+@dataclass(frozen=True)
+class ParameterStageStorage:
+    """Binds a stage name to the shared parameter-evidence persistence API.
+
+    Instantiate once per stage module; expose ``write_artifact``,
+    ``read_artifact``, ``recover_artifact``, and ``publish_file`` at module
+    level.  ``ParameterPersistenceError`` is re-exported from this module so
+    callers import both from the same place.
+    """
+
+    stage: str
+
+    def write_artifact(
+        self,
+        state: Mapping[str, Any],
+        identifier: int,
+        filename: str,
+        payload: Mapping[str, Any],
+        *,
+        artifact_type: str,
+        method_name: str,
+        scope: ParameterEvidenceScope = "recommendation",
+    ) -> ArtifactRef:
+        """Publish one immutable recommendation- or attempt-scoped JSON artifact."""
+
+        try:
+            return publish_parameter_json(
+                state,
+                stage=self.stage,
+                scope=scope,
+                identifier=identifier,
+                filename=filename,
+                payload=dict(payload),
+                artifact_type=artifact_type,
+                method_name=method_name,
+            )
+        except ParameterEvidenceError as exc:
+            raise ParameterPersistenceError(str(exc)) from exc
+
+    def read_artifact(
+        self,
+        state: Mapping[str, Any],
+        value: ArtifactRef | Mapping[str, Any],
+        *,
+        expected_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Read and integrity-check one immutable parameter artifact."""
+
+        try:
+            return read_parameter_json(state, value, expected_type=expected_type)
+        except ParameterEvidenceError as exc:
+            raise ParameterPersistenceError(str(exc)) from exc
+
+    def recover_artifact(
+        self,
+        state: Mapping[str, Any],
+        identifier: int,
+        filename: str,
+        *,
+        expected_type: str,
+        method_name: str,
+        scope: ParameterEvidenceScope = "recommendation",
+    ) -> tuple[ArtifactRef, dict[str, Any]] | None:
+        """Recover an already-published parameter transform by logical path."""
+
+        try:
+            return recover_parameter_json(
+                state,
+                stage=self.stage,
+                scope=scope,
+                identifier=identifier,
+                filename=filename,
+                expected_type=expected_type,
+                method_name=method_name,
+            )
+        except ParameterEvidenceError as exc:
+            raise ParameterPersistenceError(str(exc)) from exc
+
+    def publish_file(
+        self,
+        state: Mapping[str, Any],
+        identifier: int,
+        filename: str,
+        source: str | Path,
+        *,
+        artifact_type: str,
+        method_name: str,
+        scope: ParameterEvidenceScope = "attempt",
+    ) -> ArtifactRef:
+        """Move one work file into immutable, indexed parameter evidence."""
+
+        try:
+            return publish_parameter_file(
+                state,
+                stage=self.stage,
+                scope=scope,
+                identifier=identifier,
+                filename=filename,
+                source=source,
+                artifact_type=artifact_type,
+                method_name=method_name,
+            )
+        except ParameterEvidenceError as exc:
+            raise ParameterPersistenceError(str(exc)) from exc

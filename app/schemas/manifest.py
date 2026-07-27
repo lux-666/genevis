@@ -52,6 +52,10 @@ class InputAssetSpec(BaseModel):
     format: Format = "unknown"
     compression: Compression = "unknown"
     estimated_pairs: int | None = None
+    # Paired reads are represented explicitly at intake time.  ``paths`` is
+    # retained as the flattened runtime view for existing inventory adapters;
+    # the order is derived from these pairs, never from file names.
+    paired_reads: list["PairedReadSpec"] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -61,6 +65,35 @@ class InputAssetSpec(BaseModel):
                 f"asset_type must be one of {_ACCEPTED_MANIFEST_ASSET_TYPES}, "
                 f"got {self.asset_type!r}"
             )
+        if self.paired_reads:
+            if self.asset_type != "hic_reads_registered":
+                raise ValueError(
+                    "paired_reads is currently supported only for hic_reads_registered"
+                )
+            flattened = [
+                path for pair in self.paired_reads for path in (pair.r1, pair.r2)
+            ]
+            if self.paths and self.paths != flattened:
+                raise ValueError("paths must preserve the explicit paired_reads order")
+            self.paths = flattened
+            if self.layout not in {"unknown", "paired"}:
+                raise ValueError("paired_reads requires layout='paired'")
+            self.layout = "paired"
+        return self
+
+
+class PairedReadSpec(BaseModel):
+    """One explicit R1/R2 pair in a paired-read asset."""
+
+    model_config = {"extra": "forbid"}
+
+    r1: str = Field(min_length=1)
+    r2: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_distinct_paths(self) -> PairedReadSpec:
+        if self.r1 == self.r2:
+            raise ValueError("paired read R1 and R2 must be different paths")
         return self
 
 

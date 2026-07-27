@@ -36,7 +36,8 @@ metadata, and stage choices do not belong in either file.
 ```text
 inspect existing .env and config/envs.yaml
   -> identify values required by current Gene Agent consumers
-  -> ask only for missing values
+  -> default: ask only for missing values
+  -> --update: let the operator select an existing managed field to replace
   -> show the files and fields that will change
   -> create or update the approved fields
   -> load the result through the existing runtime consumers
@@ -44,15 +45,24 @@ inspect existing .env and config/envs.yaml
   -> verify package canary paths
 ```
 
-Without `--apply`, bootstrap shows configuration and conformance changes without
-writing them. With `--apply`, it writes approved project configuration, conforms
-packages that opt in, and then performs the same package preflight used by
-execution.
+In normal initialization mode, bootstrap shows configuration and conformance
+changes without writing them. `--apply` writes that plan, conforms packages that
+opt in, and then performs the same package preflight used by execution.
+
+`gene-agent bootstrap --update` is the explicit repair/update path for a value
+that is already present. It lists the fields bootstrap owns, asks for the
+replacement only after the operator selects it, and shows each replacement as
+`old -> new` in the plan. Empty Enter at the final prompt validates and applies
+the displayed plan; Ctrl-C or Ctrl-D cancels without writing. `--update` and
+`--apply` are mutually exclusive. The default command preserves valid existing
+values.
 
 ## 4. Write Rules
 
 - Preserve existing valid values.
 - Do not overwrite a value unless the user explicitly approves the change.
+- Treat `config/envs.yaml` as the active machine configuration; do not create
+  additional environment profiles from bootstrap.
 - Do not add fields for tools or features that Gene Agent does not currently
   consume.
 - Running bootstrap again with the same answers should make no changes.

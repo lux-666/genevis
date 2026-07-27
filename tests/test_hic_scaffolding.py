@@ -324,7 +324,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             }
         )
         with patch(
-            "app.llm.parameters.hic.recommender.build_chat_model",
+            "app.llm.parameters.base.build_chat_model",
             return_value=model,
         ):
             return build_stage().invoke(state)
@@ -482,7 +482,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 }
             )
             with patch(
-                "app.llm.parameters.hic.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 return_value=model,
             ):
                 result = build_stage().invoke(state)
@@ -630,7 +630,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 }
             )
             with patch(
-                "app.llm.parameters.hic.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 return_value=model,
             ):
                 result = build_stage().invoke(state)
@@ -647,7 +647,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             resolved = resolve_hic_inputs(state)
             resolved_state = {**state, "stage_outputs": resolved["stage_outputs"]}
             with patch(
-                "app.llm.parameters.hic.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 return_value=_FakeModel(
                     {
                         "parameters": {"restriction_enzyme": "MboI"},
@@ -658,7 +658,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 first = recommend_autohic_parameters(resolved_state)
 
             with patch(
-                "app.llm.parameters.hic.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError(
                     "the model must not be called during recovery"
                 ),
@@ -1337,7 +1337,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}),
                 patch(
-                    "app.llm.parameters.hic.recommender.build_chat_model",
+                    "app.llm.parameters.base.build_chat_model",
                     return_value=retry_model,
                 ),
             ):
@@ -1493,7 +1493,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 {"parameters": {}, "summary": "Use ordinary defaults."}
             )
             with patch(
-                "app.llm.parameters.hic.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 return_value=retry_model,
             ):
                 retry_blocked = build_stage().invoke({**reviewed, **retry_requested})
@@ -1538,7 +1538,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}),
                 patch(
-                    "app.llm.parameters.hic.recommender.build_chat_model",
+                    "app.llm.parameters.base.build_chat_model",
                     return_value=attempt_one_model,
                 ),
             ):
@@ -1570,7 +1570,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 }
             )
             with patch(
-                "app.llm.parameters.hic.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 return_value=attempt_two_model,
             ):
                 attempt_two_blocked = build_stage().invoke(

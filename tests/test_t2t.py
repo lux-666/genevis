@@ -131,7 +131,7 @@ class T2TStageTests(unittest.TestCase):
             with (
                 patch("app.llm.parameters.t2t.motif.build_chat_model") as motif_model,
                 patch(
-                    "app.llm.parameters.t2t.recommender.build_chat_model"
+                    "app.llm.parameters.base.build_chat_model"
                 ) as build_model,
             ):
                 motif_model.return_value.invoke.return_value = SimpleNamespace(
@@ -567,7 +567,7 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
 
             with patch(
-                "app.llm.parameters.t2t.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError(
                     "malformed registry input must fail before the model"
                 ),
@@ -943,7 +943,7 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
 
             with patch(
-                "app.llm.parameters.t2t.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError("no-read T2T must not invoke the model"),
             ):
                 result = build_stage().invoke(state)
@@ -967,7 +967,7 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
 
             with patch(
-                "app.llm.parameters.t2t.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError(
                     "malformed input must fail before the model"
                 ),
@@ -986,7 +986,7 @@ class T2TStageTests(unittest.TestCase):
             with (
                 patch("app.llm.parameters.t2t.motif.build_chat_model") as motif_model,
                 patch(
-                    "app.llm.parameters.t2t.recommender.build_chat_model"
+                    "app.llm.parameters.base.build_chat_model"
                 ) as build_model,
             ):
                 motif_model.return_value.invoke.return_value = SimpleNamespace(

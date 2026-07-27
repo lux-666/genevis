@@ -309,6 +309,34 @@ class EntrypointTests(unittest.TestCase):
             )
         self.assertIn("unrecognized arguments", stderr.getvalue())
 
+    def test_top_level_help_exposes_tui_without_advertising_run_or_ask(self):
+        stdout = io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as exit,
+        ):
+            _parse_args(["--help"])
+
+        self.assertEqual(exit.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("Start and run workflows with 'gene-agent tui'", help_text)
+        self.assertRegex(help_text, r"(?m)^\s+tui\s+Start, run, or resume")
+        self.assertRegex(help_text, r"(?m)^\s+bootstrap\s+Auxiliary machine")
+        self.assertNotRegex(help_text, r"(?m)^\s+run\s+")
+        self.assertNotRegex(help_text, r"(?m)^\s+ask\s+")
+
+    def test_internal_run_help_directs_normal_workflows_to_tui(self):
+        stdout = io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as exit,
+        ):
+            _parse_args(["run", "--help"])
+
+        self.assertEqual(exit.exception.code, 0)
+        self.assertIn("Internal compatibility command", stdout.getvalue())
+        self.assertIn("gene-agent tui", stdout.getvalue())
+
     def test_tui_prompt_example_mentions_target_species(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

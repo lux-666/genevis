@@ -10,7 +10,15 @@ from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
 
+from app.control.errors import (
+    DurableResumeUnavailableError,
+    LifecycleError,
+    ResumeValidationError,
+    UnsupportedLifecycleOperationError,
+)
+from app.review.approval import ensure_decision_allowed, load_verified_interrupt_request
 from app.review.base import ResumeReviewRequest
+from app.review.interrupt_context import generic_interrupt_context
 from app.review.gates import (
     ReviewGateDeclaration,
     apply_review_gate_decision,
@@ -27,22 +35,6 @@ from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-
-
-class LifecycleError(ValueError):
-    """Base error for lifecycle operations."""
-
-
-class ResumeValidationError(LifecycleError):
-    """Raised when a resume request cannot be applied."""
-
-
-class DurableResumeUnavailableError(LifecycleError):
-    """Raised when a durable cross-process resume is requested."""
-
-
-class UnsupportedLifecycleOperationError(LifecycleError):
-    """Raised for lifecycle operations outside the current task scope."""
 
 
 def finalize_terminal_state(
@@ -330,7 +322,7 @@ def resume_review_state(
     """Apply a validated human review decision to an in-memory blocked state."""
 
     active_interrupt, request_record = _validated_resume_context(state, request)
-    _ensure_decision_allowed_by_request(request_record, request)
+    ensure_decision_allowed(request_record, request)
     blocked_timeout_seconds, timeout_source = _resolve_blocked_timeout_seconds(
         request_record,
         blocked_timeout_seconds,
@@ -358,7 +350,7 @@ def validate_resume_review_state(
     """Validate blocked-state identity and allowed decision without side effects."""
 
     _active_interrupt, request_record = _validated_resume_context(state, request)
-    _ensure_decision_allowed_by_request(request_record, request)
+    ensure_decision_allowed(request_record, request)
 
 
 def reject_unsupported_lifecycle_operation(operation: str) -> None:
@@ -373,7 +365,7 @@ def _validate_common_resume_state(
     state: TopLevelState, request: ResumeReviewRequest
 ) -> None:
     _active_interrupt, request_record = _validated_resume_context(state, request)
-    _ensure_decision_allowed_by_request(request_record, request)
+    ensure_decision_allowed(request_record, request)
 
 
 def _validate_resume_identity(
@@ -438,94 +430,8 @@ def _validated_resume_context(
         raise ResumeValidationError(
             "resume review_request_hash does not match active_interrupt.request_hash"
         )
-    request_record = _load_verified_interrupt_request(state, active_interrupt)
+    _request_ref, request_record = load_verified_interrupt_request(state, active_interrupt)
     return active_interrupt, request_record
-
-
-def _load_verified_interrupt_request(
-    state: Mapping[str, Any],
-    active_interrupt: Mapping[str, Any],
-) -> dict[str, Any]:
-    data_dir = state.get("data_dir")
-    session_id = state.get("session_id")
-    if not data_dir or not session_id:
-        raise ResumeValidationError(
-            "v2 review request verification requires state data_dir and session_id"
-        )
-    request_ref = active_interrupt.get("request_ref")
-    try:
-        ref = ArtifactRef.model_validate(request_ref)
-    except Exception as exc:
-        raise ResumeValidationError("active_interrupt.request_ref is invalid") from exc
-    request_hash = str(active_interrupt.get("request_hash") or "")
-    if ref.sha256 != request_hash:
-        raise ResumeValidationError(
-            "active_interrupt.request_hash does not match request_ref.sha256"
-        )
-    try:
-        record = load_review_request(
-            data_dir,
-            ref,
-            session_id=str(session_id),
-        )
-    except ReviewPersistenceError as exc:
-        raise ResumeValidationError(
-            f"review request verification failed: {exc}"
-        ) from exc
-
-    request_id = str(active_interrupt.get("review_request_id") or "")
-    if record.get("review_request_id") != request_id:
-        raise ResumeValidationError(
-            "review request artifact ID does not match "
-            "active_interrupt.review_request_id"
-        )
-    if record.get("stage") != active_interrupt.get("stage"):
-        raise ResumeValidationError(
-            "review request artifact stage does not match active_interrupt.stage"
-        )
-    if record.get("gate_id") != active_interrupt.get("gate_id"):
-        raise ResumeValidationError(
-            "review request artifact gate_id does not match active_interrupt.gate_id"
-        )
-    bindings = record.get("bindings") or {}
-    if not isinstance(bindings, dict):
-        raise ResumeValidationError("review request artifact bindings are invalid")
-    binding_fields = {
-        "attempt_id",
-        "previous_attempt_id",
-        "task",
-        "recommendation_hash",
-    }
-    for key in binding_fields:
-        record_has = key in bindings
-        interrupt_has = key in active_interrupt
-        if record_has != interrupt_has or (
-            record_has and bindings.get(key) != active_interrupt.get(key)
-        ):
-            raise ResumeValidationError(
-                f"review request binding {key!r} does not match active_interrupt"
-            )
-    return record
-
-
-def _ensure_decision_allowed_by_request(
-    request_record: dict[str, Any],
-    request: ResumeReviewRequest,
-) -> None:
-    payload = request_record.get("payload")
-    if not isinstance(payload, dict):
-        raise ResumeValidationError("review request artifact payload is invalid")
-    allowed = payload.get("decisions_allowed")
-    if not isinstance(allowed, list) or not all(
-        isinstance(decision, str) for decision in allowed
-    ):
-        raise ResumeValidationError(
-            "review request artifact does not contain a valid decisions_allowed list"
-        )
-    if request.decision not in allowed:
-        raise ResumeValidationError(
-            f"decision {request.decision!r} is not allowed by the bound review request"
-        )
 
 
 def _resolve_blocked_timeout_seconds(
@@ -674,7 +580,7 @@ def _decision_requirements_from_state(
 ) -> dict[str, Any] | None:
     if not active_interrupt:
         return None
-    record = _load_verified_interrupt_request(state, active_interrupt)
+    _ref, record = load_verified_interrupt_request(state, active_interrupt)
     payload = record.get("payload")
     if not isinstance(payload, dict):
         raise ResumeValidationError("review request artifact payload is invalid")
@@ -705,82 +611,13 @@ def _decision_requirements(
     decisions_allowed = active_interrupt.get("decisions_allowed")
     if decisions_allowed is None and gate is not None:
         decisions_allowed = list(gate.decisions_allowed)
-    if stage == "assembly_review":
-        return _with_review_policy_requirements(
-            active_interrupt,
-            {
-                "stage": stage,
-                "gate_id": active_interrupt.get("gate_id")
-                or (gate.gate_id if gate else None),
-                "decisions_allowed": decisions_allowed or [],
-                "candidate_ids": [
-                    candidate.get("candidate_id")
-                    for candidate in active_interrupt.get("candidates", [])
-                ],
-                "candidate_final_assembly_refs": _candidate_final_assembly_refs(
-                    active_interrupt.get("candidates", [])
-                ),
-                "candidate_report_refs": _candidate_report_refs(
-                    active_interrupt.get("signals", [])
-                ),
-                "report_refs": dict(active_interrupt.get("report_refs") or {}),
-                "candidate_comparison_context": dict(
-                    active_interrupt.get("candidate_comparison_context") or {}
-                ),
-                "requires_structured_resume": True,
-            },
-        )
-    if stage == "hic_scaffolding":
-        return _with_review_policy_requirements(
-            active_interrupt,
-            {
-                "stage": stage,
-                "gate_id": active_interrupt.get("gate_id")
-                or (gate.gate_id if gate else None),
-                "decisions_allowed": decisions_allowed or [],
-                "candidate_methods": _candidate_methods(active_interrupt),
-                "executed_candidate_methods": [
-                    name
-                    for name, candidate in dict(
-                        active_interrupt.get("method_candidates") or {}
-                    ).items()
-                    if candidate.get("status") == "executed"
-                ],
-                "method_candidates": dict(
-                    active_interrupt.get("method_candidates") or {}
-                ),
-                "requires_structured_resume": True,
-            },
-        )
-    if stage == "assembly" and active_interrupt.get("gate_id") == "route_selection":
-        return _with_review_policy_requirements(
-            active_interrupt,
-            {
-                "stage": stage,
-                "gate_id": "route_selection",
-                "decisions_allowed": decisions_allowed or [],
-                "recommended_route": active_interrupt.get("recommended_route"),
-                "recommended_assembly_selection": dict(
-                    active_interrupt.get("recommended_assembly_selection") or {}
-                ),
-                "recommendation_reasoning": active_interrupt.get(
-                    "recommendation_reasoning"
-                ),
-                "uncertainty_notes": list(
-                    active_interrupt.get("uncertainty_notes") or []
-                ),
-                "available_routes": list(
-                    active_interrupt.get("available_routes") or []
-                ),
-                "available_read_types": list(
-                    active_interrupt.get("available_read_types") or []
-                ),
-                "compatible_methods": dict(
-                    active_interrupt.get("compatible_methods") or {}
-                ),
-                "requires_structured_resume": True,
-            },
-        )
+
+    builder = gate.load_interrupt_context_builder() if gate is not None else None
+    if builder is not None:
+        extra = builder(active_interrupt)
+    else:
+        extra = generic_interrupt_context(active_interrupt)
+
     return _with_review_policy_requirements(
         active_interrupt,
         {
@@ -788,70 +625,10 @@ def _decision_requirements(
             "gate_id": active_interrupt.get("gate_id")
             or (gate.gate_id if gate else None),
             "decisions_allowed": decisions_allowed or [],
-            "candidate_ids": _candidate_ids(active_interrupt),
-            "candidate_methods": _candidate_methods(active_interrupt),
+            **extra,
             "requires_structured_resume": True,
         },
     )
-
-
-def _candidate_final_assembly_refs(candidates: Any) -> dict[str, str]:
-    if not isinstance(candidates, list):
-        return {}
-    refs: dict[str, str] = {}
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        candidate_id = candidate.get("candidate_id")
-        final_ref = candidate.get("final_assembly_ref") or candidate.get("assembly_ref")
-        if candidate_id and final_ref:
-            refs[str(candidate_id)] = str(final_ref)
-    return refs
-
-
-def _candidate_report_refs(signals: Any) -> dict[str, list[str]]:
-    if not isinstance(signals, list):
-        return {}
-    refs: dict[str, list[str]] = {}
-    for signal in signals:
-        if not isinstance(signal, dict):
-            continue
-        candidate_id = signal.get("candidate_id")
-        if not candidate_id:
-            continue
-        metric_refs = signal.get("metric_refs") or []
-        if not isinstance(metric_refs, list):
-            continue
-        bucket = refs.setdefault(str(candidate_id), [])
-        for ref in metric_refs:
-            if ref and str(ref) not in bucket:
-                bucket.append(str(ref))
-    return refs
-
-
-def _candidate_ids(payload: dict[str, Any]) -> list[str]:
-    candidates = payload.get("candidates")
-    if not isinstance(candidates, list):
-        return []
-    return [
-        str(candidate.get("candidate_id"))
-        for candidate in candidates
-        if isinstance(candidate, dict) and candidate.get("candidate_id") is not None
-    ]
-
-
-def _candidate_methods(payload: dict[str, Any]) -> list[str]:
-    methods = payload.get("candidate_methods")
-    if isinstance(methods, list):
-        return [str(method) for method in methods]
-    candidates = payload.get("candidates")
-    if not isinstance(candidates, list):
-        return []
-    return [
-        str(candidate.get("method_name"))
-        for candidate in candidates
-        if isinstance(candidate, dict) and candidate.get("method_name") is not None
-    ]
 
 
 _PARAMETER_APPROVAL_BINDING_FIELDS = (

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Protocol
 
 from typing_extensions import TypedDict
 
@@ -25,6 +26,7 @@ from app.execution.env_resolver import (
     preflight,
 )
 from app.storage.ledger import Ledger
+from app.storage.paths import DataLayoutError, SessionPaths
 
 
 class MethodEnvBlock(TypedDict):
@@ -35,6 +37,12 @@ class MethodEnvBlock(TypedDict):
     env_target: str
     missing_tools: list[str]
     method_name: str
+
+
+class _DependencyResolver(Protocol):
+    def resolve(self, *, stage: str, method_name: str | None = None) -> EnvSpec: ...
+
+    def packages_for_spec(self, spec: EnvSpec) -> list[PackageSpec]: ...
 
 
 def has_explicit_path_override(stage_out: Mapping[str, object]) -> bool:
@@ -79,9 +87,8 @@ def resolve_method_env(
         # the env-config is absent (e.g. tests that drive the PATH-only bypass with
         # a PATH-only stage output) there are no packages to preflight, fall
         # through to the ``(None, [], None)`` PATH-only bypass.
-        config_path = config_path or env_resolver.active_config_path()
-        if config_path and Path(config_path).exists():
-            resolver = EnvResolver(config_path)
+        resolver = _frozen_or_live_resolver(data_dir=data_dir, config_path=config_path)
+        if resolver is not None:
             spec = resolver.resolve(stage=stage, method_name=method_name)
             packages = resolver.packages_for_spec(spec)
             for package in packages:
@@ -105,8 +112,12 @@ def resolve_method_env(
             return None, packages, None
         return None, [], None
 
-    # ``None`` lets EnvResolver use config/envs.yaml.
-    resolver = EnvResolver(config_path)
+    resolver = _frozen_or_live_resolver(data_dir=data_dir, config_path=config_path)
+    if resolver is None:
+        # This branch is reachable only for the existing PATH-only test and
+        # override behavior when no active config exists.  A frozen session
+        # never reaches it: incomplete/tampered frozen contracts raise above.
+        resolver = EnvResolver(config_path)
     spec = resolver.resolve(stage=stage, method_name=method_name)
     conda_result = preflight(spec)
     if conda_result.status != "ok":
@@ -157,6 +168,41 @@ def resolve_method_env(
         )
 
     return spec, packages, None
+
+
+def _frozen_or_live_resolver(
+    *,
+    data_dir: str | Path,
+    config_path: Path | None,
+) -> _DependencyResolver | None:
+    """Return the run snapshot resolver when one exists, else live config.
+
+    New-format frozen sessions are intentionally strict: even an explicit
+    ``config_path`` injection cannot replace the recorded machine dependency
+    contract.  Legacy runs with no frozen-input signal retain their previous
+    live-config behavior while the TUI migration is in progress.
+    """
+
+    try:
+        paths = SessionPaths.from_run_dir(data_dir)
+    except DataLayoutError:
+        paths = None
+    if paths is not None:
+        from app.storage.frozen_inputs import has_frozen_input_contract
+
+        if has_frozen_input_contract(paths):
+            from app.execution.dependency_snapshot import (
+                load_frozen_dependency_resolver,
+            )
+
+            return load_frozen_dependency_resolver(paths.run_dir)
+
+    if config_path is not None:
+        return EnvResolver(config_path)
+    active = env_resolver.active_config_path()
+    if active.exists():
+        return EnvResolver(active)
+    return None
 
 
 def _record_preflight_block(

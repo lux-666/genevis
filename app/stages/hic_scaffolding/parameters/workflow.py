@@ -32,11 +32,16 @@ from app.llm.parameters.hic.request import (
     PARAMETER_RECOMMENDATION_CONTRACT,
     build_autohic_parameter_request,
 )
+from app.review.approval import (
+    ensure_decision_allowed,
+    load_verified_interrupt_request,
+    persist_parameter_approval_decision,
+    validate_parameter_approval_bindings,
+    validate_parameter_recommendation_manifest,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
     ReviewPersistenceError,
-    load_review_request,
-    persist_review_decision,
     persist_review_request,
 )
 from app.schemas.artifacts import (
@@ -84,10 +89,11 @@ from app.stages.hic_scaffolding.parameters.context import (
     build_autohic_recommendation_context,
 )
 from app.stages.hic_scaffolding.parameters.storage import (
-    AutoHiCParameterPersistenceError,
-    read_autohic_parameter_artifact,
-    recover_autohic_parameter_artifact,
-    write_autohic_parameter_artifact,
+    ParameterPersistenceError,
+    publish_file as publish_autohic_parameter_file,
+    read_artifact as read_autohic_parameter_artifact,
+    recover_artifact as recover_autohic_parameter_artifact,
+    write_artifact as write_autohic_parameter_artifact,
 )
 from app.stages.hic_scaffolding.state import HiCScaffoldingCursor
 from app.storage.ledger import Ledger
@@ -126,7 +132,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
         attempts_before = _validate_parameter_attempt_chain(
             state, list(hic_out.get("parameter_attempts") or [])
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail_update(
             state,
             f"AutoHiC parameter attempt chain is invalid: {exc}",
@@ -166,7 +172,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             )
             for index, attempt in enumerate(attempts_before)
         ]
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail_update(
             state,
             f"AutoHiC retry history is invalid: {exc}",
@@ -219,7 +225,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
         FileNotFoundError,
         OSError,
         ValueError,
-        AutoHiCParameterPersistenceError,
+        ParameterPersistenceError,
     ) as exc:
         return _fail_update(
             state,
@@ -278,7 +284,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             artifact_type=HIC_PARAMETER_MODEL_REQUEST,
             method_name=_RECOMMENDER_METHOD,
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail_update(
             state,
             f"AutoHiC parameter request persistence failed: {exc}",
@@ -299,7 +305,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
         else:
             model_response_ref, response_record = recovered_response
             decision = restore_autohic_parameter_decision(response_record)
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail_update(
             state,
             f"AutoHiC parameter response recovery failed: {exc}",
@@ -385,7 +391,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             artifact_type=HIC_PARAMETER_RECOMMENDATION_MANIFEST,
             method_name=_RECOMMENDER_METHOD,
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail_update(
             state,
             f"AutoHiC parameter response persistence failed: {exc}",
@@ -506,50 +512,13 @@ def apply_autohic_parameter_approval_decision(
     ):
         raise ResumeValidationError("no unresolved AutoHiC parameter_approval gate")
 
-    required = ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
-    missing = [key for key in required if key not in request.metadata]
-    if missing:
-        raise ResumeValidationError(
-            f"AutoHiC parameter approval metadata missing bindings: {missing}"
-        )
-    for key in required:
-        if request.metadata.get(key) != interrupt.get(key):
-            raise ResumeValidationError(
-                f"stale AutoHiC parameter approval binding: {key}"
-            )
-
-    request_ref_value = interrupt.get("request_ref")
-    request_id = interrupt.get("review_request_id")
-    if not isinstance(request_ref_value, dict) or not isinstance(request_id, str):
-        raise ResumeValidationError(
-            "AutoHiC parameter approval has no request identity"
-        )
-    try:
-        request_ref = ArtifactRef.model_validate(request_ref_value)
-        request_record = load_review_request(
-            absolute_data_dir(state),
-            request_ref,
-            session_id=state["session_id"],
-        )
-    except (ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError(
-            "AutoHiC parameter approval request is missing or changed"
-        ) from exc
-    if request_record.get(
-        "review_request_id"
-    ) != request_id or request_ref.sha256 != interrupt.get("request_hash"):
-        raise ResumeValidationError(
-            "AutoHiC parameter approval request binding mismatch"
-        )
-    payload = request_record.get("payload")
-    if not isinstance(payload, dict):
-        raise ResumeValidationError("AutoHiC parameter approval request has no payload")
-    if request.decision not in {
-        "approve_parameters",
-        "reject_parameters",
-    } or request.decision not in set(payload.get("decisions_allowed") or []):
+    validate_parameter_approval_bindings(interrupt, request)
+    if request.decision not in {"approve_parameters", "reject_parameters"}:
         raise ResumeValidationError("unsupported AutoHiC parameter approval decision")
+    request_ref, request_record = load_verified_interrupt_request(state, interrupt)
+    ensure_decision_allowed(request_record, request)
 
+    payload = request_record.get("payload") or {}
     try:
         cursor = ParameterRecommendationCursor.model_validate(
             hic_out.get("current_parameter_recommendation")
@@ -563,7 +532,7 @@ def apply_autohic_parameter_approval_decision(
         ) from exc
     if (
         cursor.status != "pending_approval"
-        or cursor.review_request_id != request_id
+        or cursor.review_request_id != interrupt.get("review_request_id")
         or cursor.manifest_ref != manifest_ref
         or cursor.recommendation_hash != interrupt.get("recommendation_hash")
         or manifest_ref.sha256 != payload.get("recommendation_manifest_hash")
@@ -577,21 +546,11 @@ def apply_autohic_parameter_approval_decision(
             expected_stage="hic_scaffolding",
             expected_method_id=AUTOHIC_METHOD,
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         raise ResumeValidationError(
             "AutoHiC parameter recommendation evidence is missing or changed"
         ) from exc
-    manifest = chain.manifest
-    if (
-        manifest.status != "pending_approval"
-        or manifest.recommendation_id != cursor.recommendation_id
-        or manifest.task != cursor.task
-        or manifest.previous_attempt_id != cursor.previous_attempt_id
-        or manifest.previous_attempt_seal_hash != cursor.previous_attempt_seal_hash
-    ):
-        raise ResumeValidationError(
-            "AutoHiC parameter recommendation cursor does not match its manifest"
-        )
+    validate_parameter_recommendation_manifest(cursor, chain.manifest)
     recommendation = dict(chain.recommendation.get("recommendation") or {})
     if not isinstance(recommendation.get("parameters"), dict):
         raise ResumeValidationError("AutoHiC recommendation has no parameters mapping")
@@ -599,7 +558,7 @@ def apply_autohic_parameter_approval_decision(
         attempts = _validate_parameter_attempt_chain(
             state, list(hic_out.get("parameter_attempts") or [])
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
         raise ResumeValidationError(
             "AutoHiC parameter attempt chain is invalid"
         ) from exc
@@ -615,44 +574,15 @@ def apply_autohic_parameter_approval_decision(
         ):
             raise ResumeValidationError("AutoHiC parameter retry predecessor changed")
 
-    try:
-        decision_ref = persist_review_decision(
-            absolute_data_dir(state),
-            session_id=state["session_id"],
-            review_request_id=request_id,
-            stage="hic_scaffolding",
-            gate_id="parameter_approval",
-            request_hash=request_ref.sha256,
-            request_ref=request_ref,
-            decision={
-                "schema_version": 2,
-                "decision": request.decision,
-                "decided_by": request.decided_by,
-                "notes": list(request.notes),
-                "bindings": {key: request.metadata[key] for key in required},
-                "validated_recommendation_manifest_ref": manifest_ref.model_dump(
-                    mode="json"
-                ),
-                "validated_recommendation_hash": manifest_ref.sha256,
-            },
-            method_name=_APPROVAL_METHOD,
-            artifact_type=HIC_PARAMETER_APPROVAL_DECISION,
-        )
-    except (OSError, ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError(
-            "AutoHiC parameter approval decision could not be persisted"
-        ) from exc
-
-    Ledger(absolute_data_dir(state)).record_review_decision(
-        state["session_id"],
-        "hic_scaffolding",
-        gate_id="parameter_approval",
-        decision=request.decision,
-        notes=list(request.notes),
-        artifact_ref=decision_ref.path_ref,
-        metadata={key: request.metadata[key] for key in required},
-        decided_by=request.decided_by,
-        review_request_id=request_id,
+    decision_ref = persist_parameter_approval_decision(
+        state,
+        stage="hic_scaffolding",
+        request_id=interrupt.get("review_request_id"),
+        request_ref=request_ref,
+        request=request,
+        manifest_ref=manifest_ref,
+        method_name=_APPROVAL_METHOD,
+        artifact_type=HIC_PARAMETER_APPROVAL_DECISION,
     )
     if request.decision == "reject_parameters":
         stage_update = _update_hic_output(
@@ -761,7 +691,7 @@ def autohic_execution_retry_gate(state: TopLevelState) -> StateUpdate:
         KeyError,
         OSError,
         ValueError,
-        AutoHiCParameterPersistenceError,
+        ParameterPersistenceError,
     ) as exc:
         return _fail_update(
             state,
@@ -831,7 +761,7 @@ def prepare_autohic_review_retry(
         KeyError,
         OSError,
         ValueError,
-        AutoHiCParameterPersistenceError,
+        ParameterPersistenceError,
     ) as exc:
         return _fail_update(
             state,

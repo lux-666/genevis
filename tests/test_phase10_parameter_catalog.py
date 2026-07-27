@@ -71,9 +71,9 @@ from app.stages.assembly.parameters.catalog import (
 )
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
 from app.stages.assembly.parameters.storage import (
-    read_json_artifact,
-    write_attempt_json_artifact,
-    write_recommendation_json_artifact,
+    read_artifact as read_json_artifact,
+    write_artifact as write_attempt_json_artifact,
+    write_artifact as write_recommendation_json_artifact,
 )
 from app.stages.assembly.parameters.workflow import (
     execution_retry_gate,
@@ -259,7 +259,7 @@ def _persist_parameter_attempt(
     snapshot = _snapshot(method_id)
     common = {
         "state": state,
-        "recommendation_id": attempt_id,
+        "identifier": attempt_id,
         "method_name": method_id,
     }
     input_snapshot_ref = write_recommendation_json_artifact(
@@ -447,6 +447,7 @@ def _persist_parameter_attempt(
             },
             artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
             method_name=method_id,
+            scope="attempt",
         )
         frozen_attempt_ref = _frozen_attempt_ref(attempt_id)
     return ParameterAttempt(

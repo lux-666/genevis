@@ -31,8 +31,8 @@ from app.stages.t2t.nodes import enter_t2t, scan_assembly_telomeres
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.execution import load_t2t_frozen_execution_inputs
 from app.stages.t2t.parameters.storage import (
-    read_t2t_parameter_artifact,
-    write_t2t_parameter_artifact,
+    read_artifact as read_t2t_parameter_artifact,
+    write_artifact as write_t2t_parameter_artifact,
 )
 from app.stages.t2t.parameters.workflow import (
     apply_t2t_parameter_approval_decision,
@@ -159,7 +159,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
 
     def _recommend(self, state: dict, parameters: dict | None = None) -> dict:
         with patch(
-            "app.llm.parameters.t2t.recommender.build_chat_model"
+            "app.llm.parameters.base.build_chat_model"
         ) as build_model:
             build_model.return_value.invoke.return_value = self._response(
                 {
@@ -654,7 +654,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
             )
             resolved = self._resolve_provided(state)
             with patch(
-                "app.llm.parameters.t2t.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError("zero assets must bypass recommendation"),
             ):
                 self.assertEqual(recommend_t2t_parameters(resolved), {})
@@ -671,7 +671,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
             resolved = self._resolve_provided(state)
             resolved["stage_outputs"]["t2t"]["resolved_telomere_motif"] = "CCCC"
             with patch(
-                "app.llm.parameters.t2t.recommender.build_chat_model",
+                "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError("changed motif checkpoint must fail first"),
             ):
                 failed = self._merge(resolved, recommend_t2t_parameters(resolved))
@@ -723,7 +723,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
 
                 with (
                     patch(
-                        "app.stages.t2t.parameters.workflow.persist_review_decision"
+                        "app.review.approval.persist_review_decision"
                     ) as persist_decision,
                     self.assertRaises(ResumeValidationError),
                 ):
@@ -783,7 +783,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
 
                 with (
                     patch(
-                        "app.stages.t2t.parameters.workflow.persist_review_decision"
+                        "app.review.approval.persist_review_decision"
                     ) as persist_decision,
                     self.assertRaises(ResumeValidationError),
                 ):
@@ -831,7 +831,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                         return_value=changed_chain,
                     ),
                     patch(
-                        "app.stages.t2t.parameters.workflow.persist_review_decision"
+                        "app.review.approval.persist_review_decision"
                     ) as persist_decision,
                     self.assertRaises(ResumeValidationError),
                 ):
@@ -854,7 +854,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
 
                 with (
                     patch(
-                        "app.stages.t2t.parameters.workflow.persist_review_decision"
+                        "app.review.approval.persist_review_decision"
                     ) as persist_decision,
                     self.assertRaises(ResumeValidationError),
                 ):
@@ -934,7 +934,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "app.stages.t2t.parameters.workflow.persist_review_decision"
+                    "app.review.approval.persist_review_decision"
                 ) as persist_decision,
                 self.assertRaises(ResumeValidationError),
             ):

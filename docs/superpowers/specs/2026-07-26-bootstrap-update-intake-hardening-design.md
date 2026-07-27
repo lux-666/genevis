@@ -130,18 +130,34 @@ Resume never mutates the frozen control inputs.
 The confirmed planner passes its resolved execution order and selected methods
 into the freeze boundary alongside the run-config draft. The freeze boundary
 validates the run config first and verifies that the supplied stage selection
-agrees with its requested/local-execution scope. It then builds the execution
-dependency closure: explicitly selected methods plus any registered method
-choices that a selected stage is allowed to make after freeze. Dynamic choices
-are therefore bounded by the selected stage instead of being inferred from a
-`RunConfig` that does not retain general method selections.
+agrees with its requested/local-execution scope. A selected method must use the
+selected stage's `<stage>.` prefix.
+
+The configured method closure is derived directly from the `methods` mapping in
+the active `envs.yaml` and the descriptor registry. For each selected stage:
+
+- when the planner supplied explicit methods, retain their configured overrides
+  and every same-stage configured method absent from
+  `load_descriptor_registry().by_stage[stage]`; those non-registry entries are
+  fixed runtime-internal methods rather than alternative planner choices; and
+- when the planner supplied no explicit method for that stage, retain every
+  configured method with that stage prefix because the post-freeze choice is
+  still open.
+
+Thus `gene_annotation.materialize.gffread`, `gene_annotation.merge.evm`, and
+`gene_annotation.busco` remain available whenever `gene_annotation` is
+selected, while unselected planner alternatives and other-stage methods are
+omitted. Dynamic choices are bounded by the selected stage instead of being
+inferred from a `RunConfig` that does not retain general method selections.
 
 Dependency snapshot capture receives this validated closure. The snapshot
 contains the default environment plus only stage/method entries in the closure
 and only packages referenced by those resolved specs. It does not serialize
 methods from unrelated stages, unrelated configured packages, or `.env`
-values. The snapshot's stage and method keys durably record the closure used at
-execution time.
+values. The snapshot stores the exact supplied stage and explicit-method scope
+as well as the effective configured stage/method entries. A repeated freeze
+must match that stored scope in addition to the manifest, run config, and parent
+identity; a different dependency selection is a conflict.
 
 The frozen resolver continues to fail closed if a selected spec references a
 package absent from the snapshot. Execution never falls back to live
@@ -176,7 +192,8 @@ Focused tests must cover:
 12. an unlocked nonterminal checkpoint resumes without fresh execution, while
     partial execution without a resumable checkpoint fails closed;
 13. selected dependency closures omit unrelated-stage methods/packages while
-    retaining allowed post-freeze choices for selected stages; and
+    retaining configured fixed internal methods (`gffread`, EVM, and BUSCO),
+    and a different dependency scope cannot reuse an existing freeze; and
 14. the existing frozen hash, child rerun, and live-config isolation tests
     remain green.
 
