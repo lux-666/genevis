@@ -1615,6 +1615,7 @@ def _run_tui(args: argparse.Namespace) -> int:
 def _run_bootstrap(args: argparse.Namespace) -> int:
     """Initialize project config, then validate and conform packages."""
     from app.execution import env_resolver
+    from app.execution.method_preflight import preflight_methods
     from app.execution.package_bootstrap import (
         conform_juicer,
         preflight_all,
@@ -1747,9 +1748,10 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
         print("\n❌ Configuration issues found:")
         for issue in issues:
             print(f"  - {issue}")
-        return 1
+    else:
+        print("✓ Configuration file is valid")
 
-    print("✓ Configuration file is valid")
+    initial_issues = list(issues)
 
     # Step 2: Load resolver
     try:
@@ -1792,7 +1794,10 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
         print("\n💡 Run with --apply to execute conformance actions")
 
     # Step 4: Strictly verify and preflight all packages after conformance.
-    issues = verify_envs_yaml(config_path)
+    post_conformance_issues = verify_envs_yaml(config_path)
+    issues = [
+        issue for issue in post_conformance_issues if issue not in initial_issues
+    ]
     if issues:
         print("\n❌ Configuration issues found after conformance:")
         for issue in issues:
@@ -1800,7 +1805,7 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
 
     print("\nPackage preflight:")
     preflight_results = preflight_all(resolver)
-    all_ok = not issues and all(
+    all_ok = not initial_issues and not issues and all(
         result.status == "ok" for result in conformance_results
     )
     for package_name, preflight_result in preflight_results:
@@ -1811,19 +1816,66 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
             if preflight_result.missing_paths:
                 for path in preflight_result.missing_paths:
                     print(f"      - missing: {path}")
+            print(
+                "      Fix: check the package install_root/canary paths in "
+                "config/envs.yaml, then rerun bootstrap."
+            )
             all_ok = False
+
+    print("\nMethod environment preflight:")
+    try:
+        method_results = preflight_methods(resolver)
+    except (OSError, ValueError, RuntimeError) as exc:
+        method_results = []
+        print(f"  ❌ method preflight could not run: {exc}")
+        print(
+            "      Fix: correct the methods/default environment entries in "
+            "config/envs.yaml, then rerun bootstrap."
+        )
+        all_ok = False
+    if not method_results:
+        print("  ✓ no configured methods")
+    for method_result in method_results:
+        required = ", ".join(method_result.required_tools) or "no required tools"
+        if method_result.status == "ok":
+            print(
+                f"  ✓ {method_result.method_name} "
+                f"[{method_result.env_target}]: tools available ({required})"
+            )
+            if method_result.package_tools:
+                print(
+                    "      package refs: "
+                    + ", ".join(method_result.package_tools)
+                )
+            continue
+
+        if method_result.status == "blocked_env":
+            print(
+                f"  ❌ {method_result.method_name} "
+                f"[{method_result.env_target}]: environment probe failed"
+            )
+        else:
+            missing = ", ".join(method_result.missing_tools)
+            print(
+                f"  ❌ {method_result.method_name} "
+                f"[{method_result.env_target}]: missing tool(s): {missing}"
+            )
+        if method_result.detail:
+            print(f"      Error: {method_result.detail}")
+        print(
+            "      Fix: install the listed executable(s) in the reported "
+            f"conda target or correct its mapping (conda bin: "
+            f"{method_result.conda_bin}), then rerun bootstrap."
+        )
+        all_ok = False
 
     # Step 5: Summary
     print("\n" + "=" * 60)
     if all_ok:
-        print("✓ Bootstrap complete: all packages validated")
+        print("✓ Bootstrap complete: configuration, packages, and methods validated")
         return 0
     else:
-        print("❌ Bootstrap incomplete: some packages have missing files")
-        if effective_apply:
-            print("   Review the errors above and fix the install_root paths")
-        else:
-            print("   Run with --apply after fixing configuration")
+        print("❌ Bootstrap failed: fix the specific errors listed above")
         return 1
 
 

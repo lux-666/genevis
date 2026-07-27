@@ -1,7 +1,8 @@
 # Project Bootstrap Architecture
 
 **Scope:** Minimal initialization of project-owned configuration consumed by
-Gene Agent, followed by configured external-package conformance and preflight
+Gene Agent, followed by configured external-package and method-environment
+conformance/preflight
 
 ## 1. Goal
 
@@ -43,11 +44,25 @@ inspect existing .env and config/envs.yaml
   -> load the result through the existing runtime consumers
   -> apply configured package conformance with --apply
   -> verify package canary paths
+  -> probe every configured method in its resolved conda environment
+  -> report each missing package path or executable with a repair hint
 ```
 
 In normal initialization mode, bootstrap shows configuration and conformance
 changes without writing them. `--apply` writes that plan, conforms packages that
-opt in, and then performs the same package preflight used by execution.
+opt in, and then performs package preflight plus a method-level environment
+preflight. The method preflight resolves every configured method through the
+same method -> stage -> default precedence used at execution time, runs
+`conda run ... command -v` probes on the current host, and groups identical
+conda targets so repeated tools are checked once. A failed check prints the
+specific method, environment, missing executable or package path, and a repair
+hint; bootstrap returns non-zero only after printing those details.
+
+Running bootstrap against an existing config repeats both checks. A preview
+without `--apply` still stops before writing a newly generated config, so it has
+no persisted environment mapping to probe; the first `--apply` performs the
+complete check immediately. TUI dependency freeze deliberately remains free of
+conda probing.
 
 `gene-agent bootstrap --update` is the explicit repair/update path for a value
 that is already present. It lists the fields bootstrap owns, asks for the

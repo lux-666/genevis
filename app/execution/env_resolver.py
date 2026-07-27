@@ -284,8 +284,12 @@ class EnvResolver:
             for name, entry in raw_section.items():
                 if not isinstance(entry, Mapping):
                     raise ValueError(f"{section_name}.{name} must be a mapping")
-                spec = self._build_spec(dict(entry), source=source)
-                self.packages_for_spec(spec)
+                # Package references are checked by ``packages_for_spec`` at
+                # the execution/bootstrap consumer boundary. Keeping this
+                # loader check focused on the shape of environment entries
+                # lets callers report which method references the missing
+                # package instead of failing during resolver construction.
+                self._build_spec(dict(entry), source=source)
 
     def resolve(self, *, stage: str, method_name: str | None = None) -> EnvSpec:
         """Return the resolved env for a method, falling back to stage then default."""
@@ -302,6 +306,30 @@ class EnvResolver:
             conda_prefix=self._fallback_prefix,
             source="default",
         )
+
+    def configured_method_specs(self) -> list[tuple[str, EnvSpec]]:
+        """Return every configured method and its effective environment spec.
+
+        Bootstrap uses this view to validate the same method-level precedence
+        that stage execution uses. Method names are configuration keys and the
+        first dotted component is their owning stage.
+        """
+        raw_methods = self._raw.get("methods") or {}
+        if not isinstance(raw_methods, Mapping):
+            raise ValueError("methods config section must be a mapping")
+        entries: list[tuple[str, EnvSpec]] = []
+        for raw_name in raw_methods:
+            method_name = str(raw_name).strip()
+            if not method_name:
+                raise ValueError("methods config contains an empty method name")
+            stage = method_name.split(".", 1)[0]
+            entries.append(
+                (
+                    method_name,
+                    self.resolve(stage=stage, method_name=method_name),
+                )
+            )
+        return entries
 
     def _build_spec(
         self,

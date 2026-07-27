@@ -36,6 +36,13 @@ class ProjectBootstrapTests(unittest.TestCase):
             package_roots, error_model, chromosome_model = _autohic_fixture(root)
             stdout = io.StringIO()
             stderr = io.StringIO()
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_conda = fake_bin / "conda"
+            fake_conda.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_conda.chmod(0o755)
+            previous_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{fake_bin}{os.pathsep}{previous_path}"
             previous_key = os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
             try:
                 answers = [
@@ -89,6 +96,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                     os.environ["GENE_AGENT_LLM_API_KEY"], "sk-bootstrap-secret"
                 )
             finally:
+                os.environ["PATH"] = previous_path
                 if previous_key is None:
                     os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
                 else:
@@ -596,7 +604,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                         )
                     )
 
-                self.assertEqual(code, 0)
+                self.assertEqual(code, 1)
                 self.assertEqual(config_path.read_bytes(), before)
                 self.assertIn(
                     "GENE_AGENT_LLM_API_KEY=new-secret",

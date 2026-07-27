@@ -226,6 +226,25 @@ def verify_envs_yaml(
             f"default.fallback_prefix is still a placeholder: {fallback_prefix}"
         )
 
+    # Keep package-reference errors attached to the declaring stage/method so
+    # bootstrap can report the exact config entry instead of failing while the
+    # resolver is being constructed.
+    for section_name, names in (
+        ("stages", (resolver._raw.get("stages") or {}).keys()),
+        ("methods", (resolver._raw.get("methods") or {}).keys()),
+    ):
+        for raw_name in names:
+            name = str(raw_name)
+            stage = name.split(".", 1)[0]
+            spec = resolver.resolve(
+                stage=stage,
+                method_name=name if section_name == "methods" else None,
+            )
+            try:
+                resolver.packages_for_spec(spec)
+            except ValueError as exc:
+                issues.append(f"{section_name}.{name}: {exc}")
+
     # Check package install_root paths, models, and declared canaries.
     for package_name, package_spec in resolver.packages.items():
         install_root = package_spec.install_root

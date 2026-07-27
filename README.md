@@ -118,6 +118,13 @@ the parent router and makes each stage independently testable.
 冻结输入后调用内部执行器；各 stage 再按已确认的输入和目标决定执行、跳过或
 进入人工 gate。`bootstrap` 只是初始化或修复本机配置的辅助工具。
 
+`bootstrap --apply` 在写入 `config/envs.yaml`、完成 Juicer conformance 后，
+还会在当前主机逐项检查配置中的全部 method。检查使用实际 method -> stage ->
+default 解析出的 conda 环境执行 `conda run ... command -v`，并按相同环境去重。
+AutoHiC、Juicer、3D-DNA、juicer-tools 的安装目录、canary 和模型路径仍由 package
+preflight 检查。任何失败都会列出具体 method、conda target、缺失工具或路径以及
+修复提示；修好后重新运行 bootstrap 即可。
+
 ### 1. TUI / Plan Layer: choose stages
 
 TUI 的入口就是启动一个交互式对话框：
