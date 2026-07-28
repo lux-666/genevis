@@ -37,6 +37,9 @@ and optional auxiliary Hifiasm outputs.
   auxiliary artifacts without exposing them as peer assemblies.
 - Prevent planned but unexecuted fallback methods from appearing as materialized
   review candidates.
+- Preserve Assembly Dedup's separate raw-versus-purged candidate relation; the
+  single-backbone rule applies to assembler-origin products, not later derived
+  review candidates.
 
 ## Non-goals
 
@@ -87,9 +90,10 @@ the code:
   and resolver behavior.
 - `docs/stage_contracts.md` owns the biological Assembly input/output contract.
 - `docs/architecture/execution-lifecycle.md` and
-  `docs/architecture/execution-evidence.md` remain unchanged: executable
-  methods continue through the shared freeze/run/collect graph and canonical
-  execution evidence.
+  `docs/architecture/execution-evidence.md` continue to own the shared
+  freeze/run/collect graph and canonical execution evidence. Execution
+  Lifecycle gains only the external-input verification described below; this
+  feature does not create a stage-local runner path.
 
 The feature specification may describe those interactions but does not replace
 their ownership.
@@ -99,7 +103,7 @@ their ownership.
 | Fact | Authoritative owner | Checkpoint or ledger projection |
 |---|---|---|
 | User-declared input paths and metadata | frozen control manifest | control ref only |
-| Per-file asset identity, platform, format, and declaration provenance | immutable asset-registry artifact | registry ArtifactRef, counts, IDs, platform set |
+| Per-file asset identity, platform, format, declaration provenance, external byte size, and SHA-256 | immutable asset-registry artifact | registry ArtifactRef, counts, IDs, platform set |
 | Derived read file and its source asset | immutable read-set manifest | manifest ArtifactRef, member count, platform set |
 | File location, hash, size, and integrity | artifact index | `ArtifactRef` |
 | Selected Assembly method and current parameter attempt | typed Assembly cursor and `ParameterAttempt` | bounded IDs/status/refs |
@@ -136,7 +140,7 @@ Every record retains:
 - `input_group_id`;
 - asset type and canonical external path;
 - sample, platform, format, compression, and layout;
-- checksum status;
+- external byte size, SHA-256, and verification timestamp;
 - manifest entry and path ordinals;
 - declared path and metadata source;
 - platform-resolution source.
@@ -146,6 +150,20 @@ session identity and canonical declared file path. This makes replay stable and
 prevents equal basenames in different directories from colliding. Declaring
 the same canonical path more than once is rejected rather than assigned two
 roles silently.
+
+Declared read files remain verified external dependencies rather than
+ArtifactRefs, because their bytes are not copied below the run root. Inventory
+hashes every declared read file and records its size and SHA-256 before
+publishing the registry. The registry is the immutable external-input
+dependency manifest for those assets. A registered read asset cannot remain in
+`pending` or `skipped` checksum state.
+
+The run declares `verified_external_dependencies` as its execution-replay
+capability once the registry is committed. The frozen attempt for a method that
+directly consumes an external read records the selected asset IDs, sizes, and
+digests. The shared run boundary verifies those dependencies immediately before
+Runner invocation, including after resume; a mismatch fails without starting
+the tool. Run-owned filtered read artifacts use their ArtifactRefs instead.
 
 ### Inference report
 
@@ -163,16 +181,18 @@ projected to a member only when the inference record names that source.
 Platform resolution is:
 
 1. explicit per-entry manifest platform;
-2. a global shared platform only when exactly one long-read input group has an
-   unknown platform;
+2. a global shared platform only when the manifest contains exactly one
+   long-read input group and that group has an unknown platform;
 3. bounded filename/metadata inference;
 4. `unknown`.
 
 The global shared platform never mutates all `raw_long_reads` entries. When
 several long-read groups exist, each group must have an explicit or
-independently inferred platform. If any group remains unknown, inventory opens
-the existing human-review boundary with
-`ambiguous_long_read_platforms`; it must not select the first platform.
+independently inferred platform. If any group remains unknown, frozen-input
+validation fails with `mixed_long_read_platform_unresolved` and instructs the
+operator to create a new run with explicit per-entry platforms. A frozen
+manifest is never amended by an inventory review decision, and inventory must
+not select the first platform.
 
 ## Data v2 Registry Reference
 
@@ -213,6 +233,9 @@ contract. Its metadata is bounded to:
 The current `metadata["assets"]` copy is removed. Resolution verifies the
 registry ref and reconstructs per-path runtime members from the ordered IDs.
 A missing ID, duplicate ID, path mismatch, or platform mismatch fails closed.
+For external assets it also verifies the current size against the registry;
+the shared execution boundary performs the full SHA-256 verification before a
+tool consumes the bytes.
 
 ### Read-QC-produced long reads
 
@@ -295,9 +318,10 @@ per-platform QC graphs.
 ### Planning and execution
 
 Only the selected primary method produces a planned candidate bundle and enters
-parameter recommendation/execution. A fallback method may remain a bounded
-selection hint, but it does not receive a candidate ID, expected output path, or
-review entry until a future workflow explicitly activates it.
+parameter recommendation/execution. The currently unused `fallback_method`
+selection and cursor fields are removed rather than retained as a dormant
+second route. Future method switching after a failed primary attempt requires a
+separate design.
 
 The existing `ParameterAttemptOwner` remains the sole checkpoint owner for the
 selected parameterized method's frozen and execution refs.
@@ -326,8 +350,23 @@ FASTA. Missing or empty primary output is a collection failure.
 
 Recognized GFA, alternate-contig, and haplotype outputs are optional. When
 present and non-empty, collect publishes and indexes them with explicit roles
-such as `primary_graph`, `alternate_graph`, or `haplotype_graph`. Missing
-optional outputs do not fail a primary assembly.
+using this deterministic filename-to-role mapping:
+
+| File relative to the selected output prefix | Auxiliary role |
+|---|---|
+| `.bp.p_ctg.gfa` | `primary_graph_bp` |
+| `.p_ctg.gfa` | `primary_graph_legacy` |
+| `.bp.a_ctg.gfa` | `alternate_graph_bp` |
+| `.a_ctg.gfa` | `alternate_graph_legacy` |
+| `.hic.hap1.p_ctg.gfa` | `hic_haplotype_1_graph` |
+| `.hic.hap2.p_ctg.gfa` | `hic_haplotype_2_graph` |
+| `.hap1.p_ctg.gfa` | `haplotype_1_graph` |
+| `.hap2.p_ctg.gfa` | `haplotype_2_graph` |
+
+Every non-empty recognized file is retained under its distinct role. The
+canonical primary FASTA is derived from `.bp.p_ctg.gfa` when present and falls
+back to `.p_ctg.gfa`; no other auxiliary graph is eligible. Missing optional
+outputs do not fail a primary assembly.
 
 The auxiliary ArtifactRefs appear only in the executed candidate bundle and
 artifact index. They do not enter `resource_refs["assembly"].paths`, Assembly
@@ -339,10 +378,13 @@ Review's candidate list, Hi-C scaffolding, or T2T automatically.
 after Assembly collect. Its bounded metadata contains the executed
 candidate-bundle ArtifactRef, selected method ID, and candidate ID.
 
-Assembly Review loads and verifies the bundle, evaluates the one materialized
-primary candidate, and retains its existing human decision boundary. Assembly
-Dedup and later stages consume only the primary assembly resource. A planned
-fallback bundle cannot become a candidate because none is published.
+Assembly Review loads and verifies the bundle and retains its existing human
+decision boundary. Assembly emits exactly one assembler-origin candidate.
+Assembly Dedup may subsequently preserve the raw candidate and add a purged
+derivative candidate exactly as required by the normative stage contract; both
+remain eligible for Assembly Review. Auxiliary Hifiasm products and planned
+assembler fallbacks never enter that comparison. Later stages consume only the
+assembly selected by review.
 
 ## T2T Input Resolution
 
@@ -373,10 +415,13 @@ not only schema unit tests.
 ## Failure and Resume Semantics
 
 - Duplicate canonical input paths, generated asset-ID collisions, inference
-  ordinal mismatches, and mixed unknown platforms block before registry
-  publication.
+  ordinal mismatches, and unresolved platforms in a multi-group manifest fail
+  before registry publication. Correcting a frozen manifest requires a new
+  run.
 - Missing, unindexed, checksum-invalid, or schema-invalid registry/read-set
   refs fail closed.
+- An external read whose current size or SHA-256 differs from its registry
+  record fails before Runner invocation, including after resume.
 - Read-set member/path cardinality or identity mismatches fail collection
   before the resource table changes.
 - Replaying a completed publication with the same path and hash is idempotent;
@@ -397,13 +442,15 @@ writers change atomically.
 
 Implementation should proceed along existing boundaries:
 
-1. typed registry, inference, stable IDs, and verified registry loader;
+1. typed registry, inference, stable IDs, external-input hashes, and verified
+   registry loader;
 2. compact inventory ResourceRef projection;
 3. read-set manifest publication and shared runtime read resolver;
-4. read-QC provenance-preserving commit;
-5. Assembly and T2T platform-specific input selection;
-6. single-primary candidate publication and Hifiasm auxiliary artifacts;
-7. owning architecture specifications, tests, and reports.
+4. shared pre-run verification of external input dependencies;
+5. read-QC provenance-preserving commit;
+6. Assembly and T2T platform-specific input selection;
+7. single-primary candidate publication and Hifiasm auxiliary artifacts;
+8. owning architecture specifications, tests, and reports.
 
 This ordering is implementation guidance only. Every merged change must keep
 the current representation internally consistent; no intermediate dual write
@@ -420,7 +467,10 @@ is allowed.
 - Declaring the same canonical path twice is rejected.
 - Inference for a later same-type entry cannot change an earlier entry.
 - A global shared platform does not overwrite an explicitly mixed manifest.
-- Mixed entries with an unresolved platform enter human review.
+- Mixed entries with an unresolved platform fail frozen-input validation and
+  require a new explicitly classified run.
+- Registered external reads have ready size/SHA-256 evidence; changed bytes
+  fail before execution, including resumed execution.
 - The registry cursor is a verified ArtifactRef; corrupt registry bytes fail
   closed.
 
@@ -452,7 +502,10 @@ is allowed.
   that exists.
 - Missing optional output succeeds; missing primary output fails.
 - `resource_refs["assembly"].paths` contains exactly one primary FASTA.
-- Assembly Review sees one materialized candidate and no planned fallback.
+- Assembly emits one materialized assembler-origin candidate and no planned
+  fallback.
+- After Assembly Dedup, Assembly Review may see the raw and purged related
+  candidates without seeing auxiliary Hifiasm products.
 - Bundle and ledger payloads contain ArtifactRefs and bounded scalars, not
   absolute internal artifact paths or execution bodies.
 
@@ -476,5 +529,7 @@ artifacts. A HiFi Assembly run consumes only HiFi, publishes one canonical
 primary FASTA, and retains any recognized auxiliary Hifiasm outputs without
 turning them into peer candidates. A later T2T run can still resolve only the
 ONT members. The checkpoint, resource table, ledger, artifact index, crash
-ordering, and resume behavior satisfy the existing Data v2 contracts without
-legacy fallback or dual write.
+ordering, external-dependency verification, and resume behavior satisfy the
+existing Data v2 contracts without legacy fallback or dual write. A later
+purge-dups step may add its raw/purged derived candidate relation without
+reintroducing assembler fallbacks or auxiliary graphs as peer candidates.
