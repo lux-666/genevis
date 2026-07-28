@@ -105,7 +105,7 @@ their ownership.
 | User-declared input paths and metadata | frozen control manifest | control ref only |
 | Per-file asset identity, platform, format, declaration provenance, external byte size, and SHA-256 | immutable asset-registry artifact | registry ArtifactRef, counts, IDs, platform set |
 | Derived read file and its source asset | immutable read-set manifest | manifest ArtifactRef, member count, platform set |
-| File location, hash, size, and integrity | artifact index | `ArtifactRef` |
+| Run-owned artifact location, hash, size, and integrity | artifact index | `ArtifactRef` |
 | Selected Assembly method and current parameter attempt | typed Assembly cursor and `ParameterAttempt` | bounded IDs/status/refs |
 | Primary and auxiliary Assembly outputs | immutable executed candidate bundle plus artifact index | candidate-bundle ArtifactRef and primary resource path |
 | Registration/materialization ordering | ledger | bounded counts, IDs, and ArtifactRefs |
@@ -134,6 +134,15 @@ produces one record. A multi-path manifest entry also receives a stable
 `input_group_id` so related chunks or explicitly paired inputs retain their
 group relation.
 
+The registry covers frozen long-read declarations from both the input manifest
+and supported run-config overrides. In this slice those overrides are
+`assembly.hifi_reads_ref` and `t2t.ont_read_refs`. Their declaration source and
+field name are retained in provenance; the former supplies
+`platform=pacbio_hifi` and the latter supplies `platform=ont`. A path already
+declared by the manifest reuses the same asset identity and must have compatible
+platform metadata. Conflicting duplicate declarations fail frozen-input
+validation.
+
 Every record retains:
 
 - opaque stable `asset_id`;
@@ -142,7 +151,7 @@ Every record retains:
 - sample, platform, format, compression, and layout;
 - external byte size, SHA-256, and verification timestamp;
 - manifest entry and path ordinals;
-- declared path and metadata source;
+- declared path, declaration source, and manifest/run-config field;
 - platform-resolution source.
 
 Within one frozen session, `asset_id` is deterministically derived from the
@@ -279,6 +288,20 @@ The runtime member list is not checkpointed. Stage freeze callbacks load it
 again from verified immutable refs and bind the exact selected paths and
 identities into the existing frozen attempt and parameter evidence.
 
+The resolver retains the normative Resource Handoff precedence:
+
+1. explicit run override;
+2. current `resource_refs["long_reads"]`;
+3. registry fallback.
+
+An override changes selection, not provenance ownership. Every override path
+must resolve to exactly one member in the verified asset registry or current
+read-set manifest. Frozen run-config overrides are therefore registered during
+inventory as described above. A runtime-only path that is absent from both
+authoritative records fails with `unregistered_long_read_override`; the
+resolver never synthesizes an asset record or bypasses external-input hash
+verification.
+
 ## Assembly Input Selection
 
 Assembly resolves the complete long-read member list and partitions it by
@@ -392,6 +415,13 @@ T2T obtains ONT reads from the shared runtime long-read resolver with an
 explicit `platform="ont"` predicate. It prefers the current read-set manifest
 when read-QC produced derived reads and otherwise uses the registry.
 
+Frozen `t2t.ont_read_refs` retain their existing explicit-override precedence.
+They select those exact ordered paths from the verified registry or read-set
+manifest. If a supplied path was not also in the input manifest, inventory has
+already registered it from the frozen run config with ONT platform, size, and
+SHA-256 provenance. A missing, conflicting, or unregistered supplied path
+fails closed.
+
 T2T does not use auxiliary Hifiasm contigs in this slice. Missing ONT members
 continues to follow the stage's existing bypass or failure policy; it must not
 substitute HiFi because both share `raw_long_reads`.
@@ -469,6 +499,9 @@ is allowed.
 - A global shared platform does not overwrite an explicitly mixed manifest.
 - Mixed entries with an unresolved platform fail frozen-input validation and
   require a new explicitly classified run.
+- Frozen `assembly.hifi_reads_ref` and `t2t.ont_read_refs` become verified
+  registry members; duplicate conflicts and unregistered runtime overrides
+  fail closed.
 - Registered external reads have ready size/SHA-256 evidence; changed bytes
   fail before execution, including resumed execution.
 - The registry cursor is a verified ArtifactRef; corrupt registry bytes fail
@@ -493,6 +526,8 @@ is allowed.
 - The approved parameter snapshot and frozen attempt retain selected member
   identity.
 - T2T resolves ONT after both no-filter and filtered read-QC handoffs.
+- Explicit `t2t.ont_read_refs` preserve precedence while selecting verified
+  members with stable source identities.
 - T2T never substitutes HiFi for absent ONT.
 
 ### Assembly product
