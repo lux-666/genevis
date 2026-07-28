@@ -182,8 +182,10 @@ Every record retains:
 Within one frozen session, `asset_id` is deterministically derived from the
 session identity and canonical declared file path. This makes replay stable and
 prevents equal basenames in different directories from colliding. Declaring
-the same canonical path more than once is rejected rather than assigned two
-roles silently.
+the same canonical path more than once in one declaration source is rejected
+rather than assigned two roles silently. A compatible manifest/run-config
+declaration of the same path is the explicit cross-source exception: it reuses
+the manifest-owned identity and records both declaration fields in provenance.
 
 Declared read files remain verified external dependencies rather than
 ArtifactRefs, because their bytes are not copied below the run root. Inventory
@@ -282,7 +284,8 @@ dependency-snapshot, and commit-marker transaction.
 `InputManifest.paired_reads` declarations. The existing singular
 `assembly.hic_reads_ref` is not pair authority: it cannot construct an R1/R2
 pair or enable phasing by itself. If supplied under existing override
-semantics, it must resolve inside an already registered pair; the pair
+semantics, it must resolve inside exactly one registered paired-read
+declaration and selects that declaration's complete pair set; the pair
 declaration remains authoritative.
 
 ## Data v2 Registry Reference
@@ -327,6 +330,39 @@ A missing ID, duplicate ID, path mismatch, or platform mismatch fails closed.
 For external assets it also verifies the current size against the registry;
 the shared execution boundary performs the full SHA-256 verification before a
 tool consumes the bytes.
+
+### Inventory-produced Hi-C reads
+
+`resource_refs["hic_reads"].paths` carries the materialized Hi-C paths required
+by the same ResourceRef contract. Its metadata is bounded to:
+
+- the asset-registry ArtifactRef;
+- ordered asset IDs corresponding one-to-one with `paths`;
+- pair count;
+- deduplicated asset types, platforms, and formats.
+
+It does not embed asset records or a second pair table. A shared verified
+paired-read resolver loads the referenced registry records by ordered ID,
+checks every ResourceRef path against its record, and returns runtime-only
+ordered pairs containing manifest entry ordinal, `pair_index`, R1, and R2
+members. It requires exactly one R1 and one R2 for each unique
+`(manifest_entry_ordinal, pair_index)` key and rejects within-entry gaps,
+duplicates, cross-entry pairs, path/ID mismatches, and unpaired members. Pair
+ordering is manifest entry ordinal followed by `pair_index`, never ResourceRef
+path position or file names.
+
+Both HiFi Hifiasm phasing and Hi-C scaffolding consume this resolver. The
+current `metadata["assets"]` shortcut and the Hi-C scaffolding fallback that
+constructs assets from flattened paths are removed. This keeps
+`resource_refs` as the only cross-stage file table while the registry remains
+the authority for pair semantics.
+
+When absent, `assembly.hic_reads_ref` leaves all registered pair groups
+selected. When present, it is only a group-selection anchor: the path must
+resolve to one member of exactly one frozen `InputAssetSpec.paired_reads`
+declaration, and the resolver selects that declaration's complete pair set.
+It never selects one mate independently, constructs a pair, or enables
+`use_hic_phasing`.
 
 ### Read-QC-produced long reads
 
@@ -412,8 +448,8 @@ The HiFi Hifiasm method has these slots:
 |---|---|---:|---|
 | primary | all selected `pacbio_hifi` members | one or more | positional, expanded |
 | ultra-long | all selected ONT members when `use_ultralong_ont=true` | one or more when enabled | `--ul`, comma-joined |
-| Hi-C R1 | every registered R1 ordered by `pair_index` when `use_hic_phasing=true` | one or more when enabled | `--h1`, comma-joined |
-| Hi-C R2 | every registered R2 ordered by `pair_index` when `use_hic_phasing=true` | equal to R1 | `--h2`, comma-joined |
+| Hi-C R1 | every registered R1 ordered by manifest entry then `pair_index` when `use_hic_phasing=true` | one or more when enabled | `--h1`, comma-joined |
+| Hi-C R2 | every registered R2 in the same pair-key order when `use_hic_phasing=true` | equal to R1 | `--h2`, comma-joined |
 
 The Hifiasm parameter catalog adds optional L0 `path_list` parameters for the
 three new bindings. The existing renderer already supports expanded and
@@ -477,14 +513,50 @@ per-platform QC graphs.
 
 ### Planning and execution
 
-Only the selected primary method produces a planned candidate bundle and enters
-parameter recommendation/execution. The currently unused `fallback_method`
-selection and cursor fields are removed rather than retained as a dormant
-second route. Future method switching after a failed primary attempt requires a
-separate design.
+Only the selected primary method enters parameter recommendation. After its
+parameter attempt freezes, that method publishes one planned candidate bundle
+and enters execution. The currently unused `fallback_method` selection and
+cursor fields are removed rather than retained as a dormant second route.
+Future method switching after a failed primary attempt requires a separate
+design.
 
 The existing `ParameterAttemptOwner` remains the sole checkpoint owner for the
 selected parameterized method's frozen and execution refs.
+
+### Planned and executed bundle lifecycle
+
+`AssemblyCandidateBundle` remains one existing schema with status-specific
+validation; no second product schema is introduced.
+
+A `status="planned"` bundle is an immutable planning artifact for the selected
+method. It contains the candidate/method identity, input member IDs grouped by
+semantic role, parameter-attempt identity, and expected output roles. It has no
+`primary_output`, no `native_outputs`, and is not published in
+`resource_refs["assembly"]` or Assembly Review's materialized-candidate list.
+The freeze step publishes and indexes it before Runner invocation and records
+its ArtifactRef in the attempt evidence.
+
+Collect never edits or replaces the planned artifact. After validating the
+runner outputs, it publishes a new immutable `status="executed"` bundle with:
+
+- the same candidate ID, method ID, ordered input-role identities, and
+  parameter-attempt identity as the plan;
+- the planned-bundle ArtifactRef as its `plan_ref`;
+- a required `primary_output`;
+- zero or more `native_outputs`.
+
+Status-specific validation rejects output ArtifactRefs in a planned bundle,
+rejects an executed bundle without `plan_ref` or `primary_output`, and rejects
+any executed identity or input-role drift from its verified plan. The existing
+`expected_outputs` planning field is advisory role declaration only; it is not
+a file handoff and cannot satisfy executed output validation.
+
+Publication order is: publish and index validated outputs and logs; publish and
+index the executed bundle with dependencies on the plan and output refs; append
+bounded artifact/attempt ledger events; then update stage cursors and
+`resource_refs`. A crash before the final state update is reconciled from the
+indexed executed bundle and ledger without mutating or regenerating the plan.
+Only the executed bundle ref enters candidate handoff metadata.
 
 ### Executed candidate bundle
 
@@ -493,6 +565,7 @@ for one Assembly attempt. It contains:
 
 - candidate and method IDs;
 - selected input asset/member IDs grouped by semantic input role;
+- the immutable planned-bundle ArtifactRef;
 - `primary_output`, containing the canonical assembly ArtifactRef;
 - `native_outputs`, containing zero or more generic
   `AssemblyNativeOutput` entries;
@@ -659,7 +732,9 @@ is allowed.
   other's inference.
 - Equal basenames in different directories produce distinct asset IDs.
 - Repeating the same frozen manifest produces the same IDs.
-- Declaring the same canonical path twice is rejected.
+- Repeating the same canonical path within one declaration source is rejected;
+  a compatible manifest/run-config alias reuses one identity, while conflicting
+  cross-source metadata fails.
 - Inference for a later same-type entry cannot change an earlier entry.
 - A global shared platform does not overwrite an explicitly mixed manifest.
 - Mixed entries with an unresolved platform fail frozen-input validation and
@@ -674,6 +749,11 @@ is allowed.
 - Multi-lane `paired_reads` publish one file record per mate with matching
   `pair_index` and opposite `mate` values; incomplete, duplicated, or reordered
   pairs fail closed.
+- `resource_refs["hic_reads"]` carries only ordered IDs, the registry ref, and
+  bounded summary metadata; it does not embed asset or pair records.
+- The paired-read resolver reconstructs complete ordered pairs from verified
+  registry records and rejects path/ID mismatch, cross-entry mates, duplicate
+  roles, or gaps without falling back to path parity or file names.
 
 ### TUI draft and freeze
 
@@ -729,6 +809,12 @@ is allowed.
 - Hifiasm collect publishes primary FASTA and every recognized optional output
   that exists.
 - Missing optional output succeeds; missing primary output fails.
+- A planned bundle is immutable, contains no output ArtifactRefs, and never
+  enters the materialized candidate handoff.
+- Collect publishes a distinct executed bundle whose `plan_ref`, candidate
+  identity, method, inputs, and parameter attempt match the verified plan.
+- A crash after executed-bundle indexing but before state update resumes from
+  indexed bundle/ledger evidence without rewriting the planned bundle.
 - `resource_refs["assembly"].paths` contains exactly one primary FASTA.
 - Assembly emits one materialized assembler-origin candidate and no planned
   fallback.
