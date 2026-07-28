@@ -444,10 +444,12 @@ not only schema unit tests.
 
 ## Failure and Resume Semantics
 
-- Duplicate canonical input paths, generated asset-ID collisions, inference
-  ordinal mismatches, and unresolved platforms in a multi-group manifest fail
-  before registry publication. Correcting a frozen manifest requires a new
-  run.
+- Duplicate canonical paths within one declaration source, conflicting
+  cross-source declarations, generated asset-ID collisions, inference ordinal
+  mismatches, and unresolved platforms in a multi-group manifest fail before
+  registry publication. A compatible manifest/run-config declaration of the
+  same path reuses one asset identity. Correcting a frozen manifest requires a
+  new run.
 - Missing, unindexed, checksum-invalid, or schema-invalid registry/read-set
   refs fail closed.
 - An external read whose current size or SHA-256 differs from its registry
