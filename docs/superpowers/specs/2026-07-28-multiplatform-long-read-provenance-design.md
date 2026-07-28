@@ -23,18 +23,37 @@ The Assembly stage also creates planned bundles for a primary and fallback
 method even though it executes only the primary method. That makes an
 unmaterialized fallback look like a peer assembly candidate. This change
 instead models one selected Assembly attempt with one canonical primary FASTA
-and optional auxiliary Hifiasm outputs.
+and zero or more method-native outputs in the existing executed candidate
+bundle.
+
+The current TUI intake has the same single-platform assumption: its typed draft
+contains ONT reads but no HiFi reads, and its planner entry request hard-codes
+ONT. The existing manifest, run-config, draft, and candidate-bundle structures
+are otherwise sufficient. This design extends those structures in place rather
+than adding a second input-selection or assembly-product protocol.
 
 ## Goals
 
 - Preserve a stable identity and platform for every declared long-read file.
 - Keep HiFi and ONT distinct through inventory, read-QC, resource handoff,
   Assembly input selection, and later T2T input resolution.
+- Accept every file belonging to the selected read role. A platform split
+  across several manifest entries or several files in one entry must not be
+  reduced to the first path.
+- Extend the existing TUI draft and planner so a user can declare HiFi, ONT,
+  and paired multi-lane Hi-C inputs in natural language before the ordinary
+  manifest/run-config freeze.
+- Let the HiFi Hifiasm method consume multiple primary HiFi files, optional
+  multiple ONT ultra-long files through `--ul`, and optional paired multi-lane
+  Hi-C files through `--h1`/`--h2`.
+- Keep `assembly.candidate.hifiasm_ont` as a separate ONT-primary method that
+  fixes Hifiasm's `--ont` switch and does not reuse the HiFi hybrid-input
+  contract.
 - Retain Data v2 ownership, immutable-artifact, ArtifactRef, ledger, checkpoint,
   crash, and resume invariants.
 - Publish one canonical Assembly FASTA for downstream stages.
-- Retain recognized Hifiasm graph, alternate-contig, and haplotype outputs as
-  auxiliary artifacts without exposing them as peer assemblies.
+- Retain adapter-declared method-native deliverables as indexed artifacts
+  without exposing them as peer assemblies.
 - Prevent planned but unexecuted fallback methods from appearing as materialized
   review candidates.
 - Preserve Assembly Dedup's separate raw-versus-purged candidate relation; the
@@ -47,11 +66,12 @@ and optional auxiliary Hifiasm outputs.
   NextDenovo/NextPolish.
 - No candidate integration, quarTeT orchestration, or automatic assembler
   fallback.
-- No use of ONT as Hifiasm `--ul` input in this slice.
-- No Hifiasm `--h1`/`--h2` input binding or haplotype-selection workflow.
-- No new HiFi collection flow in the TUI. Existing manifest-based intake is
-  the supported mixed-platform entry path.
-- No automatic use of auxiliary Hifiasm contigs by Hi-C scaffolding or T2T.
+- No automatic selection between Hifiasm's primary, alternate, or haplotype
+  graphs. Only the adapter-declared canonical primary FASTA enters the
+  downstream assembly resource.
+- No use of `--ul`, `--h1`, or `--h2` in the separate
+  `assembly.candidate.hifiasm_ont` method.
+- No automatic use of method-native Hifiasm contigs by Hi-C scaffolding or T2T.
 - No compatibility reader, migration, or dual write for earlier development
   sessions or checkpoints.
 
@@ -64,19 +84,24 @@ This fixes the immediate overwrite but loses the relation again when read-QC
 projects several inputs into one platform. It is rejected because it cannot
 meet the end-to-end provenance goal.
 
-### Add a bounded provenance spine
+### Extend the existing contracts in place
 
 Make the asset registry authoritative for declared inputs, add an immutable
 read-set manifest for derived read files, and make resource resolution load
-those records into runtime-only typed members. Keep Assembly single-method and
-single-primary-output. This is the selected approach.
+those records into runtime-only typed members. Add HiFi facts beside the
+existing ONT and Hi-C facts in `TuiSessionDraft`, add explicit Hifiasm input-use
+booleans to the existing run config, add optional read-role bindings to the
+existing parameter catalog, and extend the existing executed
+`AssemblyCandidateBundle` with generic method-native outputs. Keep Assembly
+single-method and single-primary-output. This is the selected approach.
 
-### Build a general assembly-product and multi-attempt framework
+### Add a new input-slot and assembly-product framework
 
-Introduce a collection of independently executable assembly attempts, generic
-candidate selection, integration, and recovery. This would address a future
-dual-assembler workflow but is unnecessary for the current single-backbone
-requirement and is explicitly deferred.
+Introduce new input IDs and run-config input bindings, a new top-level assembly
+product manifest, or a general dynamic method-input DSL. These abstractions
+overlap the current manifest, run config, parameter catalog, and candidate
+bundle. They are unnecessary for the current single-backbone requirement and
+are explicitly deferred.
 
 ## Architectural Boundaries
 
@@ -107,7 +132,7 @@ their ownership.
 | Derived read file and its source asset | immutable read-set manifest | manifest ArtifactRef, member count, platform set |
 | Run-owned artifact location, hash, size, and integrity | artifact index | `ArtifactRef` |
 | Selected Assembly method and current parameter attempt | typed Assembly cursor and `ParameterAttempt` | bounded IDs/status/refs |
-| Primary and auxiliary Assembly outputs | immutable executed candidate bundle plus artifact index | candidate-bundle ArtifactRef and primary resource path |
+| Primary and method-native Assembly outputs | immutable executed candidate bundle plus artifact index | candidate-bundle ArtifactRef and primary resource path |
 | Registration/materialization ordering | ledger | bounded counts, IDs, and ArtifactRefs |
 | Current cross-stage read or assembly location | `resource_refs` | paths plus bounded provenance refs |
 
@@ -130,9 +155,10 @@ including `pacbio_hifi`, `ont`, `clr`, `cycloneseq`, and `unknown`.
 
 The inventory artifact is validated as one typed registry document containing
 the session ID and an ordered list of `AssetRecord` values. Every file path
-produces one record. A multi-path manifest entry also receives a stable
-`input_group_id` so related chunks or explicitly paired inputs retain their
-group relation.
+produces one record. The manifest structure remains
+`InputManifest.assets: list[InputAssetSpec]`; it does not gain a second input-ID
+namespace. Related chunks retain their manifest entry and path ordinals, while
+explicitly paired Hi-C files retain typed pair metadata.
 
 The registry covers frozen long-read declarations from both the input manifest
 and supported run-config overrides. In this slice those overrides are
@@ -146,7 +172,6 @@ validation.
 Every record retains:
 
 - opaque stable `asset_id`;
-- `input_group_id`;
 - asset type and canonical external path;
 - sample, platform, format, compression, and layout;
 - external byte size, SHA-256, and verification timestamp;
@@ -173,6 +198,14 @@ directly consumes an external read records the selected asset IDs, sizes, and
 digests. The shared run boundary verifies those dependencies immediately before
 Runner invocation, including after resume; a mismatch fails without starting
 the tool. Run-owned filtered read artifacts use their ArtifactRefs instead.
+
+For `hic_reads_registered`, `paired_reads` remains the frozen manifest's source
+of truth. Inventory creates one file-level `AssetRecord` per mate and adds
+`pair_index` and `mate: R1 | R2` to its existing metadata projection. The
+flattened `paths` list remains only a compatibility projection in the frozen
+manifest. Assembly and AutoHiC reconstruct lane lists from pair metadata, never
+from file names or even/odd list positions. Duplicate mates, incomplete pairs,
+or a repeated file in two pairs fail before registry publication.
 
 ### Inference report
 
@@ -202,6 +235,55 @@ validation fails with `mixed_long_read_platform_unresolved` and instructs the
 operator to create a new run with explicit per-entry platforms. A frozen
 manifest is never amended by an inventory review decision, and inventory must
 not select the first platform.
+
+## Existing TUI Draft and Freeze Extension
+
+`TuiSessionDraft` remains the sole mutable pre-freeze authority.
+`manifest_draft.yaml` remains its rebuildable projection, and the planner
+continues to build the existing `RunConfig`. Natural-language parsing updates
+typed draft facts; it never edits frozen YAML or JSON directly.
+
+`AssetCollectionState` gains `hifi_reads: HifiReadsFact | None` beside the
+existing `ont_reads` and `hic_reads` facts. Both long-read facts contain a
+non-empty ordered `paths` list, so several sequencing chunks remain one
+confirmed platform fact. The role vocabulary, deterministic parser, optional
+LLM parser, replacement confirmation, answer history, rerun reuse, rendering,
+and manifest materializer all gain the HiFi role. Existing
+`HiCPairedReadsFact.pairs` continues to represent multiple lanes explicitly.
+
+`WorkflowIntent` and the existing planner state gain only the typed intent
+needed to project current run-config fields:
+
+- optional requested Assembly method;
+- explicit request to use ONT ultra-long reads in the HiFi Hifiasm method;
+- explicit request to use Hi-C phasing in the HiFi Hifiasm method.
+
+The parsers set those booleans only from explicit user language or a subsequent
+planner answer. Merely declaring ONT or Hi-C files does not silently enable a
+different Hifiasm mode. When Hifiasm and matching inputs are present, the
+planner may recommend the options, but the existing final manifest/run-config
+preview and confirmation remain the authorization boundary.
+
+`materialize_manifest_draft()` emits one existing `InputAssetSpec` for the
+confirmed HiFi paths, one for the confirmed ONT paths, and the existing
+paired-read spec for Hi-C. Both long-read specs keep
+`asset_type=raw_long_reads` and differ by `platform`. No new manifest document,
+input-binding table, or user-visible input ID is introduced.
+
+`HifiasmRunParameters` gains the executor-owned booleans
+`use_ultralong_ont` and `use_hic_phasing`, both defaulting to false. The
+run config does not duplicate manifest paths. Existing explicit path overrides
+retain their current precedence and must resolve to verified registered
+members. The freeze boundary cross-validates the generated run config against
+the frozen manifest before publishing the existing atomic manifest, run-config,
+dependency-snapshot, and commit-marker transaction.
+
+`use_hic_phasing` consumes only complete pairs from the frozen
+`InputManifest.paired_reads` declarations. The existing singular
+`assembly.hic_reads_ref` is not pair authority: it cannot construct an R1/R2
+pair or enable phasing by itself. If supplied under existing override
+semantics, it must resolve inside an already registered pair; the pair
+declaration remains authoritative.
 
 ## Data v2 Registry Reference
 
@@ -305,22 +387,77 @@ verification.
 ## Assembly Input Selection
 
 Assembly resolves the complete long-read member list and partitions it by
-platform. The selected route determines the primary subset:
+platform. It aggregates every matching member across every manifest entry in
+stable registry/read-set order. The canonical resolved value for each method
+slot is an ordered member list, and no method adapter selects `[0]`. Existing
+single-path override fields may explicitly constrain that list, but they do not
+replace registry/read-set provenance or implicitly discard sibling files.
 
-- Hifiasm uses every `pacbio_hifi` member in resource order.
-- Hifiasm ONT uses every ONT member supported by its existing format contract.
-- Flye and NextDenovo keep their current read-type compatibility rules but
-  receive only members matching the selected read type.
+The existing Assembly parameter catalog remains the method input-application
+boundary. Its closed `ExecutorBindingKey` vocabulary gains:
 
-ONT members are not consumed by the HiFi Hifiasm attempt in this slice. They
-remain reachable through the current long-read resource and provenance
-artifacts for later T2T use.
+- `assembly_ultralong_reads`;
+- `assembly_hic_r1_reads`;
+- `assembly_hic_r2_reads`.
 
-An explicit route whose required platform subset is empty fails before
-parameter recommendation. A mixed-platform set is never collapsed to
-`platforms[0]`. The parameter input snapshot and frozen attempt record the
-selected member identities and exact paths; resume loads those immutable
-records rather than rerunning platform inference.
+The existing `assembly_input_reads` binding remains the primary-read slot.
+This is an in-place extension of the current L0 executor bindings, not a new
+general input-slot DSL.
+
+### `assembly.candidate.hifiasm`
+
+The HiFi Hifiasm method has these slots:
+
+| Slot | Selection | Cardinality | CLI application |
+|---|---|---:|---|
+| primary | all selected `pacbio_hifi` members | one or more | positional, expanded |
+| ultra-long | all selected ONT members when `use_ultralong_ont=true` | one or more when enabled | `--ul`, comma-joined |
+| Hi-C R1 | every registered R1 ordered by `pair_index` when `use_hic_phasing=true` | one or more when enabled | `--h1`, comma-joined |
+| Hi-C R2 | every registered R2 ordered by `pair_index` when `use_hic_phasing=true` | equal to R1 | `--h2`, comma-joined |
+
+The Hifiasm parameter catalog adds optional L0 `path_list` parameters for the
+three new bindings. The existing renderer already supports expanded and
+comma-joined lists; no shell concatenation or temporary merged FASTQ is
+introduced. A representative rendered command is:
+
+```text
+hifiasm -o PREFIX -t 32 \
+  --ul ont-ul-1.fq.gz,ont-ul-2.fq.gz \
+  --h1 lane1-R1.fq.gz,lane2-R1.fq.gz \
+  --h2 lane1-R2.fq.gz,lane2-R2.fq.gz \
+  hifi-1.fq.gz hifi-2.fq.gz
+```
+
+These applications follow the upstream Hifiasm option contract: positional
+reads are the primary input, `--ul` is the ultra-long ONT companion input, and
+`--h1`/`--h2` are the paired Hi-C inputs. The separate `--ont` primary mode is
+not applied by this method.
+
+The ONT files in this method are supplementary ultra-long inputs. They do not
+replace or join the primary HiFi slot.
+
+### `assembly.candidate.hifiasm_ont`
+
+Hifiasm ONT remains a separate method and parameter catalog. It selects every
+compatible ONT FASTQ member as its primary positional input and fixes the
+`--ont` CLI switch. It does not set `--ul`, and this slice rejects
+`use_ultralong_ont` or `use_hic_phasing` when `hifiasm_ont` is selected. In
+particular, `--ont` must never be inferred merely because ONT supplementary
+reads are present beside a HiFi Hifiasm attempt.
+
+### Flye and NextDenovo
+
+Flye keeps its existing `path_list` binding and passes every member of one
+selected read type after the corresponding Flye flag. It must not mix HiFi,
+ONT, CLR, or CycloneSEQ members in one primary slot. NextDenovo keeps its
+existing behavior of writing every selected primary member to the attempt FOFN.
+
+An explicit route whose required primary subset is empty fails before parameter
+recommendation. Enabling an optional Hifiasm slot whose required subset is
+empty also fails before freeze. A mixed-platform set is never collapsed to
+`platforms[0]`. The parameter input snapshot and frozen attempt bind each slot's
+ordered member identities and exact paths; resume loads those immutable records
+rather than rerunning platform or mate inference.
 
 ## Read-QC Policy for Mixed Platforms
 
@@ -355,9 +492,10 @@ The executed Assembly candidate bundle is the authoritative product manifest
 for one Assembly attempt. It contains:
 
 - candidate and method IDs;
-- selected input asset/member IDs;
-- primary assembly ArtifactRef;
-- optional auxiliary output entries with a role and ArtifactRef;
+- selected input asset/member IDs grouped by semantic input role;
+- `primary_output`, containing the canonical assembly ArtifactRef;
+- `native_outputs`, containing zero or more generic
+  `AssemblyNativeOutput` entries;
 - canonical stdout/stderr refs or bounded run-relative projections allowed by
   Execution Evidence;
 - parameter-attempt identity;
@@ -366,32 +504,47 @@ for one Assembly attempt. It contains:
 It does not contain absolute internal artifact paths, embedded execution
 evidence, command bodies, or a second copy of the parameter recommendation.
 
-### Hifiasm collection
+`AssemblyNativeOutput` contains:
+
+- a coarse `artifact_class`, such as `assembly_graph`,
+  `alternate_contigs`, `haplotype_contigs`, `report`, `config`, `log`, or
+  `other`;
+- an adapter-owned stable `native_role`;
+- a format/media-type value;
+- its ArtifactRef.
+
+The shared collector validates and registers these entries but does not know
+tool filenames. Each existing method adapter declares the finite set of
+deliverables worth retaining. Undeclared intermediates remain under `work/`
+and are not preserved automatically. Adding a new assembler or a new native
+deliverable changes its adapter declaration, not the candidate-bundle schema.
+
+### Hifiasm output declaration
 
 The Hifiasm adapter must always materialize and publish the canonical primary
 FASTA. Missing or empty primary output is a collection failure.
 
-Recognized GFA, alternate-contig, and haplotype outputs are optional. When
-present and non-empty, collect publishes and indexes them with explicit roles
-using this deterministic filename-to-role mapping:
+Recognized GFA, alternate-contig, and haplotype outputs are one adapter-specific
+implementation of the generic native-output contract. When present and
+non-empty, collect publishes and indexes them using this deterministic mapping:
 
-| File relative to the selected output prefix | Auxiliary role |
-|---|---|
-| `.bp.p_ctg.gfa` | `primary_graph_bp` |
-| `.p_ctg.gfa` | `primary_graph_legacy` |
-| `.bp.a_ctg.gfa` | `alternate_graph_bp` |
-| `.a_ctg.gfa` | `alternate_graph_legacy` |
-| `.hic.hap1.p_ctg.gfa` | `hic_haplotype_1_graph` |
-| `.hic.hap2.p_ctg.gfa` | `hic_haplotype_2_graph` |
-| `.hap1.p_ctg.gfa` | `haplotype_1_graph` |
-| `.hap2.p_ctg.gfa` | `haplotype_2_graph` |
+| File relative to the selected output prefix | Artifact class | Native role |
+|---|---|---|
+| `.bp.p_ctg.gfa` | `assembly_graph` | `hifiasm.primary_graph_bp` |
+| `.p_ctg.gfa` | `assembly_graph` | `hifiasm.primary_graph_legacy` |
+| `.bp.a_ctg.gfa` | `alternate_contigs` | `hifiasm.alternate_graph_bp` |
+| `.a_ctg.gfa` | `alternate_contigs` | `hifiasm.alternate_graph_legacy` |
+| `.hic.hap1.p_ctg.gfa` | `haplotype_contigs` | `hifiasm.hic_haplotype_1_graph` |
+| `.hic.hap2.p_ctg.gfa` | `haplotype_contigs` | `hifiasm.hic_haplotype_2_graph` |
+| `.hap1.p_ctg.gfa` | `haplotype_contigs` | `hifiasm.haplotype_1_graph` |
+| `.hap2.p_ctg.gfa` | `haplotype_contigs` | `hifiasm.haplotype_2_graph` |
 
 Every non-empty recognized file is retained under its distinct role. The
 canonical primary FASTA is derived from `.bp.p_ctg.gfa` when present and falls
-back to `.p_ctg.gfa`; no other auxiliary graph is eligible. Missing optional
+back to `.p_ctg.gfa`; no other native graph is eligible. Missing optional
 outputs do not fail a primary assembly.
 
-The auxiliary ArtifactRefs appear only in the executed candidate bundle and
+The native-output ArtifactRefs appear only in the executed candidate bundle and
 artifact index. They do not enter `resource_refs["assembly"].paths`, Assembly
 Review's candidate list, Hi-C scaffolding, or T2T automatically.
 
@@ -405,7 +558,7 @@ Assembly Review loads and verifies the bundle and retains its existing human
 decision boundary. Assembly emits exactly one assembler-origin candidate.
 Assembly Dedup may subsequently preserve the raw candidate and add a purged
 derivative candidate exactly as required by the normative stage contract; both
-remain eligible for Assembly Review. Auxiliary Hifiasm products and planned
+remain eligible for Assembly Review. Method-native products and planned
 assembler fallbacks never enter that comparison. Later stages consume only the
 assembly selected by review.
 
@@ -422,7 +575,7 @@ already registered it from the frozen run config with ONT platform, size, and
 SHA-256 provenance. A missing, conflicting, or unregistered supplied path
 fails closed.
 
-T2T does not use auxiliary Hifiasm contigs in this slice. Missing ONT members
+T2T does not use method-native Hifiasm contigs in this slice. Missing ONT members
 continues to follow the stage's existing bypass or failure policy; it must not
 substitute HiFi because both share `raw_long_reads`.
 
@@ -456,12 +609,17 @@ not only schema unit tests.
   record fails before Runner invocation, including after resume.
 - Read-set member/path cardinality or identity mismatches fail collection
   before the resource table changes.
+- Incomplete or duplicated Hi-C pairs, unequal ordered R1/R2 lane counts, and
+  pair-index/mate mismatches fail before an Assembly attempt freezes.
+- `use_ultralong_ont=true` without registered ONT members and
+  `use_hic_phasing=true` without complete registered pairs fail before freeze.
+  Both options are invalid for `assembly.candidate.hifiasm_ont`.
 - Replaying a completed publication with the same path and hash is idempotent;
   different bytes at the same immutable path fail closed.
 - A stale checkpoint after registry or read-set ledger publication is
   reconciled from the ledger and verified refs according to Data v2; inference
   and lineage are not recomputed from current code.
-- Hifiasm primary-output failure stops collection. Missing optional auxiliary
+- Hifiasm primary-output failure stops collection. Missing optional native
   outputs does not.
 - No failure path converts an unexecuted fallback method into a candidate.
 
@@ -474,15 +632,18 @@ writers change atomically.
 
 Implementation should proceed along existing boundaries:
 
-1. typed registry, inference, stable IDs, external-input hashes, and verified
-   registry loader;
-2. compact inventory ResourceRef projection;
-3. read-set manifest publication and shared runtime read resolver;
-4. shared pre-run verification of external input dependencies;
-5. read-QC provenance-preserving commit;
-6. Assembly and T2T platform-specific input selection;
-7. single-primary candidate publication and Hifiasm auxiliary artifacts;
-8. owning architecture specifications, tests, and reports.
+1. TUI HiFi facts, existing manifest projection, and run-config option
+   projection;
+2. typed registry, ordered inference, stable IDs, Hi-C pair metadata,
+   external-input hashes, and verified registry loader;
+3. compact inventory ResourceRef projection;
+4. read-set manifest publication and shared runtime read resolver;
+5. shared pre-run verification of external input dependencies;
+6. read-QC provenance-preserving commit;
+7. Assembly method-specific multi-file selection and Hifiasm L0 bindings;
+8. single-primary candidate publication and generic method-native outputs;
+9. T2T platform-specific input selection;
+10. owning architecture specifications, tests, and reports.
 
 This ordering is implementation guidance only. Every merged change must keep
 the current representation internally consistent; no intermediate dual write
@@ -492,8 +653,10 @@ is allowed.
 
 ### Inventory and manifest
 
-- Two `raw_long_reads` entries, one HiFi and one ONT, retain distinct platform,
-  format, metadata, and asset IDs.
+- Several `raw_long_reads` entries and several paths per entry retain distinct
+  platform, format, metadata, asset IDs, and deterministic order.
+- Two `raw_long_reads` entries, one HiFi and one ONT, cannot overwrite each
+  other's inference.
 - Equal basenames in different directories produce distinct asset IDs.
 - Repeating the same frozen manifest produces the same IDs.
 - Declaring the same canonical path twice is rejected.
@@ -508,6 +671,23 @@ is allowed.
   fail before execution, including resumed execution.
 - The registry cursor is a verified ArtifactRef; corrupt registry bytes fail
   closed.
+- Multi-lane `paired_reads` publish one file record per mate with matching
+  `pair_index` and opposite `mate` values; incomplete, duplicated, or reordered
+  pairs fail closed.
+
+### TUI draft and freeze
+
+- Natural language can confirm several HiFi paths, several ONT paths, and
+  several explicit Hi-C pairs in one draft.
+- `materialize_manifest_draft()` emits separate existing
+  `raw_long_reads` entries for HiFi and ONT plus the existing paired Hi-C
+  entry.
+- Replacing confirmed HiFi uses the same explicit replacement boundary as
+  ONT and Hi-C; rerun drafts revalidate and reuse every platform independently.
+- Hifiasm input-use booleans are projected into the existing run config only
+  from explicit intent/planner confirmation and appear in the final preview.
+- Freeze rejects method/input contradictions before publishing any control
+  file and preserves the existing idempotent atomic transaction.
 
 ### Resource handoff and read-QC
 
@@ -522,11 +702,22 @@ is allowed.
 
 ### Assembly and T2T
 
-- A HiFi route selects all HiFi members and no ONT members.
-- An ONT route selects all compatible ONT members and no HiFi members.
+- Flye receives every file of exactly one selected read type; its existing
+  multi-file CLI expansion remains green.
+- NextDenovo writes every selected primary member to its FOFN.
+- HiFi Hifiasm receives every HiFi file as positional primary input.
+- With `use_ultralong_ont=true`, HiFi Hifiasm receives every selected ONT file
+  once through one comma-joined `--ul` option.
+- With `use_hic_phasing=true`, HiFi Hifiasm receives every R1 lane through
+  `--h1` and the matching ordered R2 lanes through `--h2`.
+- HiFi Hifiasm never emits `--ont`.
+- `hifiasm_ont` receives every compatible ONT FASTQ as primary input, fixes
+  `--ont`, and emits none of `--ul`, `--h1`, or `--h2` in this slice.
+- A missing requested primary or enabled supplementary input fails before
+  parameter recommendation or attempt freeze.
 - A missing requested platform fails before parameter recommendation.
-- The approved parameter snapshot and frozen attempt retain selected member
-  identity.
+- The approved parameter snapshot and frozen attempt retain ordered member
+  identity grouped by input role.
 - T2T resolves ONT after both no-filter and filtered read-QC handoffs.
 - Explicit `t2t.ont_read_refs` preserve precedence while selecting verified
   members with stable source identities.
@@ -542,31 +733,38 @@ is allowed.
 - Assembly emits one materialized assembler-origin candidate and no planned
   fallback.
 - After Assembly Dedup, Assembly Review may see the raw and purged related
-  candidates without seeing auxiliary Hifiasm products.
+  candidates without seeing method-native Hifiasm products.
 - Bundle and ledger payloads contain ArtifactRefs and bounded scalars, not
   absolute internal artifact paths or execution bodies.
+- A non-Hifiasm adapter can declare a native output without changing the
+  candidate-bundle schema or shared collector.
 
 ### Data v2 regressions
 
 - Artifact index and ledger writes are replay-idempotent.
 - Storage audit finds no dangling refs from registry, read-set, candidate, or
-  auxiliary artifacts.
+  method-native artifacts.
 - Checkpoint-free retention reaches registry, read-set, selected outputs, and
-  auxiliary outputs through indexed dependencies and ledger roots.
+  method-native outputs through indexed dependencies and ledger roots.
 - Corrupting any authoritative referenced artifact fails replay/resume closed.
 - Existing state, checkpoint compaction, execution lifecycle, and storage-audit
   suites remain green.
 
 ## Acceptance Criteria
 
-A frozen manifest may declare HiFi and ONT as separate `raw_long_reads`
-entries. After inventory and optional read-QC, every current long-read path can
-be traced to its stable source asset and platform through verified immutable
-artifacts. A HiFi Assembly run consumes only HiFi, publishes one canonical
-primary FASTA, and retains any recognized auxiliary Hifiasm outputs without
-turning them into peer candidates. A later T2T run can still resolve only the
-ONT members. The checkpoint, resource table, ledger, artifact index, crash
-ordering, external-dependency verification, and resume behavior satisfy the
-existing Data v2 contracts without legacy fallback or dual write. A later
-purge-dups step may add its raw/purged derived candidate relation without
-reintroducing assembler fallbacks or auxiliary graphs as peer candidates.
+A TUI draft or frozen manifest may declare several HiFi files, several ONT
+files, and several explicit Hi-C pairs using the existing draft, manifest, and
+run-config structures. After inventory and optional read-QC, every current
+long-read and Hi-C path can be traced to its stable source asset, platform, and
+pair role through verified immutable artifacts. A HiFi Hifiasm run consumes all
+primary HiFi files and, only when explicitly enabled, passes all ONT
+ultra-long files through `--ul` and all paired lanes through `--h1`/`--h2`.
+The separate Hifiasm ONT method consumes ONT as primary input under `--ont`.
+Both publish one canonical primary FASTA and retain adapter-declared
+method-native outputs without turning them into peer candidates. A later T2T
+run can still resolve only the ONT members. The checkpoint, resource table,
+ledger, artifact index, crash ordering, external-dependency verification, and
+resume behavior satisfy the existing Data v2 contracts without legacy fallback
+or dual write. A later purge-dups step may add its raw/purged derived candidate
+relation without reintroducing assembler fallbacks or native graphs as peer
+candidates.
