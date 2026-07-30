@@ -15,8 +15,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
-from app.control.lifecycle import ResumeValidationError
-from app.domains.assembly.selection import AssemblySelection
+from app.control.errors import ResumeValidationError
+from app.domains.assembly.selection import validate_assembly_selection
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (
     load_execution_evidence,
@@ -1329,7 +1329,7 @@ def _selected_parameter_method(assembly_out: AssemblyStageCursor) -> str | None:
     selection = assembly_out.get("assembly_selection")
     if isinstance(selection, dict):
         try:
-            return AssemblySelection.model_validate(selection).primary_method
+            return validate_assembly_selection(selection).primary_method
         except ValueError:
             return None
     return None

@@ -1,7 +1,8 @@
 # Gene Agent Architecture
 
-Gene Agent implements the ONT/CLR long-read genome workflow whose biological
-rationale is retained in `docs/archive/deep-research-report.md`.
+Gene Agent implements a multiplatform long-read genome workflow for ONT, HiFi,
+CLR, and CycloneSEQ. Its biological rationale is retained in
+`docs/archive/deep-research-report.md`.
 
 This document is the system overview. Stage inputs and outputs live in
 `docs/stage_contracts.md`; cross-cutting contracts are registered in

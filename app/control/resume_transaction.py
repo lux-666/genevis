@@ -8,8 +8,8 @@ from typing import Any, Callable, Mapping
 
 from langchain_core.runnables import RunnableConfig
 
+from app.control.errors import DurableResumeUnavailableError
 from app.control.lifecycle import (
-    DurableResumeUnavailableError,
     ResumeValidationError,
     UnsupportedLifecycleOperationError,
     finalize_terminal_state,

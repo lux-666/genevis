@@ -37,7 +37,6 @@ class RecommendationDraft(BaseModel):
     decision: str
     candidate_id: str | None = None
     method_name: str | None = None
-    final_assembly_ref: str | None = None
     rejected_candidates: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

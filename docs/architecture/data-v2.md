@@ -126,6 +126,9 @@ an object `compact` are not sufficient.
 | Run identity and requested configuration | `control/` | IDs and refs |
 | Imported input bytes | input artifacts | Ref, hash, size, provenance summary |
 | External input/database provenance | immutable dependency manifest | Ref and verification status |
+| Per-file sequencing identity, platform, format, and declaration provenance | immutable asset registry | Registry ArtifactRef, ordered member IDs, counts, platform/format sets |
+| Derived read-to-source correspondence | immutable read-set manifest | Manifest ArtifactRef, ordered source IDs, counts |
+| Assembly primary and method-native products | immutable executed candidate bundle plus artifact index | Executed bundle ArtifactRef, selected method/candidate IDs |
 | Exact profile used for a recommendation | input/profile snapshot artifact | Ref and hash |
 | Descriptor, catalog, case, and policy basis | immutable run snapshot | Ref, hash, selected IDs |
 | Exact model invocation | `model_request.json` | Request ref, model ID |
@@ -316,8 +319,14 @@ The universal durable minimum is deliberately small:
 
 The frozen-attempt record contains the complete normalized runner input needed
 for execution, including its `script_path`, `working_dir`, expected output
-paths, environment projection, and Conda selection, subject to the secrets
-policy. It is persisted before the runner starts.
+paths, environment projection, Conda selection, and typed input dependencies,
+subject to the secrets policy. Registry-owned dependencies retain asset
+identity plus size/SHA-256 evidence; run-owned dependencies retain a complete
+`ArtifactRef` and the exact path supplied to the command. Explicit external
+files retain size/SHA-256 evidence, and external directories retain a
+deterministic tree hash plus file-count and total-byte evidence. The record is
+persisted before the runner starts, and all dependencies are revalidated
+immediately before execution.
 
 For a parameterized method execution that originates in the model
 recommendation/approval lifecycle, `ParameterAttempt` is the sole checkpoint
@@ -607,6 +616,14 @@ The current implementation enforces the following:
 
 - A new run contains no repeated session ID below its run root.
 - Every durable internal ref is session-relative and hash-verifiable.
+- Inventory emits a typed asset-registry `ArtifactRef`; new checkpoints and
+  resource metadata do not use an absolute registry path or embedded asset
+  records.
+- Sequencing files retain per-member identity and platform provenance even
+  when several manifest entries share one `asset_type`.
+- Assembly publishes one assembler-origin backbone. Planned bundles contain no
+  output refs; executed bundles reference their plan, primary FASTA, and
+  adapter-declared native outputs.
 - Copying a run to a different absolute path preserves audit replay.
 - A blocked review resumes from the latest frontier using only checkpoint plus
   verified run-local refs.

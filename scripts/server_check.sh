@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Server-side environment check for gene-agent Phase 4 acceptance.
-# Reports the current commit/branch and verifies the conda envs and tools the
-# Phase 4 mainline needs. Never installs anything; never modifies the
+# Server-side environment check for gene-agent.
+# Reports the current commit/branch and verifies the conda envs and core tools
+# needed by the executable workflow. Never installs anything; never modifies the
 # filesystem. Exits non-zero on any missing piece so a server operator can
-# fix the environment before running the Phase 4 smoke.
+# fix the environment before running workflows.
 #
 # Usage:
 #   bash scripts/server_check.sh
@@ -41,16 +41,15 @@ if ! conda run -n "${ORCHESTRATOR_ENV}" python -c 'import sys; print(sys.version
 fi
 ok "${ORCHESTRATOR_ENV} runs python"
 
-# Phase 5/02 made sqlite the default checkpoint backend, so the
-# orchestrator env must carry langgraph-checkpoint-sqlite. Without it,
-# `gene-agent run` fails with ImportError on the very first invocation.
+# The TUI uses sqlite checkpoints for durable execution and review, so the
+# orchestrator environment must carry langgraph-checkpoint-sqlite.
 if ! conda run -n "${ORCHESTRATOR_ENV}" python -c 'from langgraph.checkpoint.sqlite import SqliteSaver' >/dev/null 2>&1; then
   fail "conda env '${ORCHESTRATOR_ENV}' is missing langgraph-checkpoint-sqlite; run 'pip install -e .' inside that env (see docs/deployment/migration.md)"
 fi
 ok "${ORCHESTRATOR_ENV} has langgraph-checkpoint-sqlite"
 
 if ! conda env list | awk '{print $1}' | grep -qx "${EXEC_ENV}"; then
-  fail "conda env '${EXEC_ENV}' not found; create it with the bioinformatics tool stack before running Phase 4"
+  fail "conda env '${EXEC_ENV}' not found; create it with the bioinformatics tool stack before running workflows"
 fi
 ok "${EXEC_ENV} env exists"
 

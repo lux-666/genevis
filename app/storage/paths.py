@@ -151,10 +151,6 @@ class SessionPaths:
         return self.control_dir / "tui_state.json"
 
     @property
-    def ask_plan_path(self) -> Path:
-        return self.control_dir / "ask_plan.json"
-
-    @property
     def run_config_path(self) -> Path:
         return self.control_dir / "run_config.json"
 

@@ -162,6 +162,48 @@ parameters:
         value: false
     description: "Internal/debug binary-only mode."
 
+  ultralong_reads:
+    value_type: path_list
+    application:
+      kind: cli_option
+      flag: "--ul"
+      order: 12
+      join: comma
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_ultralong_reads
+        required: false
+    description: "Optional ONT ultra-long companion reads; never primary ONT mode."
+
+  hic_r1_reads:
+    value_type: path_list
+    application:
+      kind: cli_option
+      flag: "--h1"
+      order: 13
+      join: comma
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_hic_r1_reads
+        required: false
+    description: "Optional ordered Hi-C R1 lane files."
+
+  hic_r2_reads:
+    value_type: path_list
+    application:
+      kind: cli_option
+      flag: "--h2"
+      order: 14
+      join: comma
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_hic_r2_reads
+        required: false
+    description: "Optional ordered Hi-C R2 lane files matching hic_r1_reads."
+
   ont_mode:
     value_type: boolean
     application:

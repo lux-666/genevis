@@ -6,10 +6,13 @@ from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import ConfigDict, TypeAdapter, with_config
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from app.schemas.artifacts import ArtifactRefJson
-from app.schemas.parameter_cursors import ParameterAttemptJson, ParameterRecommendationJson
+from app.schemas.parameter_cursors import (
+    ParameterAttemptJson,
+    ParameterRecommendationJson,
+)
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,
@@ -19,11 +22,22 @@ from app.stages.t2t.parameters.catalog import T2TMode
 
 
 @with_config(ConfigDict(extra="forbid"))
-class T2TOntReadInputJson(TypedDict):
-    """One canonical ONT input stored in the compact stage cursor."""
+class T2TConfiguredReadInputJson(TypedDict):
+    """One run-config long-read selection copied into the stage cursor."""
 
-    asset_id: str
     path: str
+    platform: str
+
+
+@with_config(ConfigDict(extra="forbid"))
+class T2TLongReadInputJson(TypedDict):
+    """One canonical long-read input stored in the compact stage cursor."""
+
+    member_id: str
+    source_asset_id: str
+    path: str
+    platform: str
+    read_artifact_ref: NotRequired[ArtifactRefJson]
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -93,20 +107,24 @@ class T2TStageCursor(TypedDict, total=False):
     mode: T2TMode
     chromosome_list_ref: str | None
     assembly_fasta_ref: str | None
-    ont_read_refs: list[str]
+    read_inputs: list[T2TConfiguredReadInputJson]
 
     # Input resolution and immutable execution inputs.
     status: T2TStatus
     reason: str
     failure_kind: str
     source_stage: str
-    ont_read_inputs: list[T2TOntReadInputJson]
-    ont_reads_source: Literal[
-        "run_config", "clean_long_reads", "raw_long_reads", "missing"
+    long_read_refs: list[str]
+    long_read_inputs: list[T2TLongReadInputJson]
+    long_reads_source: Literal[
+        "run_config",
+        "read_set_manifest",
+        "asset_registry",
+        "resource_ref",
+        "missing",
     ]
     execution_enabled: bool
     input_assembly_ref: str
-    out_dir: str
     work_dir: str
     output_assembly_ref: str
     notes: list[str]
@@ -142,10 +160,9 @@ class T2TStageCursor(TypedDict, total=False):
     assembly_telomere_scan_ref: str
     assembly_sequence_count: int
     assembly_missing_end_count: int
-    ont_read_paths: list[str]
     reads_telomere_scan_ref: str
     telomeric_reads_ref: str
-    telomeric_reads_fasta_ref: str
+    telomeric_reads_fasta_refs: dict[str, str]
     read_count: int
     telomeric_read_count: int
     candidate_skip_reason: str
@@ -166,6 +183,7 @@ class T2TStageCursor(TypedDict, total=False):
     telomere_status_summary_ref: str
     t2t_finishing_report_ref: str
     bundle_ref: str
+    finishing_evidence_phase: Literal["pre_review", "final"]
     artifact_refs: list[str]
     review_request_artifact_ref: ArtifactRefJson
     auto_decidable: bool
@@ -176,12 +194,6 @@ class T2TStageCursor(TypedDict, total=False):
     review_decision_artifact_ref: ArtifactRefJson
     decided_by: Literal["human", "llm_provisional", "auto_rule"]
     rationale_artifact_ref: str | None
-
-    # Recognized only so enter_t2t can reject legacy checkpoints explicitly.
-    configured_telomere_motif: str | None
-    legacy_motif_hint: str | None
-    telomere_motif: str | None
-    telomere_motif_input_profile_ref: str | ArtifactRefJson | None
 
 
 T2T_STAGE_CURSOR_ADAPTER = TypeAdapter(T2TStageCursor)

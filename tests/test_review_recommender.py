@@ -73,9 +73,7 @@ class ReviewRecommenderTests(unittest.TestCase):
             request = ReviewPayload(
                 stage="assembly_review",
                 reason="review",
-                candidates=[
-                    {"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}
-                ],
+                candidates=[{"candidate_id": "flye"}],
                 decisions_allowed=["accept", "stop_human_review"],
             )
             chat = _FakeChat(
@@ -85,7 +83,6 @@ class ReviewRecommenderTests(unittest.TestCase):
                         "stage": "assembly_review",
                         "decision": "accept",
                         "candidate_id": "flye",
-                        "final_assembly_ref": "draft.fasta",
                         "notes": ["metrics support provisional accept"],
                     }
                 )

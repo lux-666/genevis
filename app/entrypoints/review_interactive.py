@@ -158,14 +158,12 @@ def _render_assembly_review(
     _render_assembly_review_downstream_context(decisions)
 
     candidate_ids = requirements.get("candidate_ids") or []
-    candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
+    candidate_refs = requirements.get("candidate_primary_output_refs") or {}
     if candidate_ids:
         print("\ncandidates:")
         for cid in candidate_ids:
-            ref = candidate_refs.get(cid, "<unknown>")
-            exists = _looks_like_existing_fasta(ref) if ref != "<unknown>" else False
-            marker = "FASTA ok" if exists else "MISSING/invalid FASTA"
-            print(f"  [{cid}] {ref}  ({marker})")
+            ref = _artifact_ref_label(candidate_refs.get(cid))
+            print(f"  [{cid}] {ref}")
             _print_candidate_core_reports(requirements, cid, indent="    ")
 
     report_refs = requirements.get("report_refs") or {}
@@ -270,8 +268,6 @@ def _render_generic_gate(requirements: dict[str, Any]) -> None:
 
 def prompt_assembly_review_decision(
     requirements: dict[str, Any],
-    *,
-    data_dir: str | None = None,
 ) -> dict[str, Any] | None:
     """Prompt the operator for an assembly_review decision. Returns None on cancel."""
     decisions = requirements.get("decisions_allowed", [])
@@ -283,7 +279,7 @@ def prompt_assembly_review_decision(
         )
         return None
     candidate_ids = requirements.get("candidate_ids") or []
-    candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
+    candidate_refs = requirements.get("candidate_primary_output_refs") or {}
 
     decision = _prompt_choice("decision", decisions, DECISION_HELP)
     if decision is None:
@@ -292,45 +288,20 @@ def prompt_assembly_review_decision(
     _print_selected_assembly_review_decision_effect(decision)
 
     candidate_id = None
-    final_assembly_ref = None
     rejected = []
     metadata: dict[str, Any] = {}
 
     if decision in ("accept", "pass", "purge", "polish", "continue_low_confidence"):
         selectable_candidates = list(candidate_ids)
         if decision in {"accept", "pass", "continue_low_confidence"}:
-            selectable_candidates = _materialized_assembly_candidates(
-                candidate_ids,
-                candidate_refs,
-                data_dir=data_dir,
-            )
-            if len(selectable_candidates) != len(candidate_ids):
-                skipped = [
-                    cid for cid in candidate_ids if cid not in selectable_candidates
-                ]
-                print("\nunavailable_candidates:")
-                for cid in skipped:
-                    ref = candidate_refs.get(cid, "")
-                    print(f"  - {cid}: FASTA missing or invalid ({ref})")
-            if not selectable_candidates:
-                print(
-                    "error: no materialized assembly FASTA is available for accept",
-                    file=sys.stderr,
-                )
-                return None
             _render_candidate_selection_evidence(
                 requirements,
                 selectable_candidates,
                 candidate_refs,
-                data_dir=data_dir,
             )
 
         if len(selectable_candidates) == 1:
             candidate_id = selectable_candidates[0]
-            final_assembly_ref = _execution_candidate_ref(
-                candidate_refs.get(candidate_id),
-                data_dir=data_dir,
-            )
             print(f"  using candidate: {candidate_id}")
         elif selectable_candidates:
             candidate_id = _prompt_choice(
@@ -339,15 +310,10 @@ def prompt_assembly_review_decision(
                 _candidate_choice_descriptions(
                     selectable_candidates,
                     candidate_refs,
-                    data_dir=data_dir,
                 ),
             )
             if candidate_id is None:
                 return None
-            final_assembly_ref = _execution_candidate_ref(
-                candidate_refs.get(candidate_id),
-                data_dir=data_dir,
-            )
         else:
             try:
                 candidate_id = input("candidate_id: ").strip()
@@ -356,17 +322,6 @@ def prompt_assembly_review_decision(
             if not candidate_id:
                 return None
 
-        if decision not in ("purge", "polish"):
-            if not final_assembly_ref:
-                try:
-                    final_assembly_ref = input(
-                        f"final_assembly_ref [{candidate_refs.get(candidate_id, '')}]: "
-                    ).strip()
-                except (EOFError, KeyboardInterrupt):
-                    return None
-                if not final_assembly_ref:
-                    final_assembly_ref = candidate_refs.get(candidate_id)
-
         rejected = [c for c in candidate_ids if c != candidate_id]
 
     if decision in ("purge", "polish"):
@@ -374,14 +329,12 @@ def prompt_assembly_review_decision(
         if transform_metadata is None:
             return None
         metadata = transform_metadata
-        final_assembly_ref = metadata.get("action_output_ref")
     notes_raw = _prompt_notes()
 
     result: dict[str, Any] = {
         "stage": "assembly_review",
         "decision": decision,
         "candidate_id": candidate_id,
-        "final_assembly_ref": final_assembly_ref,
         "rejected_candidates": rejected,
         "notes": [notes_raw] if notes_raw else ["interactive review"],
         "decided_by": "human",
@@ -391,87 +344,37 @@ def prompt_assembly_review_decision(
     return result
 
 
-def _materialized_assembly_candidates(
-    candidate_ids: list[str],
-    candidate_refs: dict[str, Any],
-    *,
-    data_dir: str | None = None,
-) -> list[str]:
-    return [
-        cid
-        for cid in candidate_ids
-        if _looks_like_existing_fasta(candidate_refs.get(cid), data_dir=data_dir)
-    ]
-
-
-def _execution_candidate_ref(path: Any, *, data_dir: str | None) -> str | None:
-    if not path:
-        return None
-    ref = Path(str(path))
-    if ref.is_absolute() or data_dir is None:
-        return str(ref)
-    return str(SessionPaths.from_run_dir(data_dir).resolve_ref(ref.as_posix()))
-
-
-def _looks_like_existing_fasta(path: Any, *, data_dir: str | None = None) -> bool:
-    if not path:
-        return False
-    resolved = _execution_candidate_ref(path, data_dir=data_dir)
-    if not resolved:
-        return False
-    ref = Path(resolved)
-    if not ref.is_file():
-        return False
-    try:
-        with ref.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if stripped:
-                    return stripped.startswith(">")
-    except OSError:
-        return False
-    return False
-
-
 def _render_candidate_selection_evidence(
     requirements: dict[str, Any],
     candidate_ids: list[str],
     candidate_refs: dict[str, Any],
-    *,
-    data_dir: str | None = None,
 ) -> None:
     if not candidate_ids:
         return
     print("\ncandidate_evidence:")
     for cid in candidate_ids:
-        ref = candidate_refs.get(cid, "")
-        marker = (
-            "FASTA ok"
-            if _looks_like_existing_fasta(ref, data_dir=data_dir)
-            else "MISSING/invalid FASTA"
-        )
-        print(f"  [{cid}] {marker}")
+        ref = _artifact_ref_label(candidate_refs.get(cid))
+        print(f"  [{cid}]")
         if ref:
-            print(f"    assembly: {ref}")
+            print(f"    primary_output: {ref}")
         _print_candidate_core_reports(requirements, cid, indent="    ")
 
 
 def _candidate_choice_descriptions(
     candidate_ids: list[str],
     candidate_refs: dict[str, Any],
-    *,
-    data_dir: str | None = None,
 ) -> dict[str, str]:
-    descriptions: dict[str, str] = {}
-    for cid in candidate_ids:
-        ref = candidate_refs.get(cid, "")
-        marker = (
-            "FASTA ok"
-            if _looks_like_existing_fasta(ref, data_dir=data_dir)
-            else "MISSING/invalid FASTA"
-        )
-        descriptions[cid] = f"{marker}; {ref}"
-    return descriptions
+    return {
+        cid: _artifact_ref_label(candidate_refs.get(cid)) for cid in candidate_ids
+    }
+
+
+def _artifact_ref_label(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "<missing typed primary output>"
+    artifact_type = value.get("artifact_type") or "artifact"
+    artifact_id = value.get("artifact_id") or "<missing-id>"
+    return f"{artifact_type}:{artifact_id}"
 
 
 def _print_candidate_core_reports(
@@ -802,7 +705,6 @@ def build_decision_brief(
         brief["candidates"] = _brief_assembly_candidates(
             requirements,
             request_payload,
-            data_dir=data_dir,
         )
         brief["evidence"] = _brief_assembly_evidence(
             requirements, request_payload, data_dir, summary
@@ -890,10 +792,7 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
         print(f"\nCandidates ({len(candidates)}):")
         for c in candidates:
             status = f" [{c['status']}]" if c.get("status") else ""
-            exists_marker = ""
-            if c.get("ref"):
-                exists_marker = " (exists)" if c.get("exists") else " (MISSING)"
-            print(f"  - {c['id']}{status}{exists_marker}")
+            print(f"  - {c['id']}{status}")
             if c.get("ref"):
                 print(f"    ref: {c['ref']}")
             if c.get("method"):
@@ -1023,11 +922,9 @@ def _load_ref_payload(ref: Any, data_dir: str) -> dict[str, Any] | None:
 def _brief_assembly_candidates(
     requirements: dict[str, Any],
     request_payload: dict[str, Any] | None,
-    *,
-    data_dir: str | None = None,
 ) -> list[dict[str, Any]]:
     candidate_ids = requirements.get("candidate_ids") or []
-    candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
+    candidate_refs = requirements.get("candidate_primary_output_refs") or {}
     payload_candidates = (request_payload or {}).get("candidates") or []
     payload_map = {
         c.get("candidate_id"): c for c in payload_candidates if isinstance(c, dict)
@@ -1035,18 +932,15 @@ def _brief_assembly_candidates(
 
     result = []
     for cid in candidate_ids:
-        entry: dict[str, Any] = {"id": cid, "ref": candidate_refs.get(cid)}
+        entry: dict[str, Any] = {
+            "id": cid,
+            "ref": _artifact_ref_label(candidate_refs.get(cid)),
+        }
         pc = payload_map.get(cid) or {}
         if pc.get("method_name"):
             entry["method"] = pc["method_name"]
         if pc.get("status"):
             entry["status"] = pc["status"]
-        ref_path = Path(entry["ref"]) if entry.get("ref") else None
-        entry["exists"] = (
-            _looks_like_existing_fasta(ref_path, data_dir=data_dir)
-            if ref_path
-            else False
-        )
         reports = _candidate_core_report_refs(requirements, cid)
         if reports:
             entry["reports"] = reports
@@ -1217,7 +1111,7 @@ def collect_gate_decision(
     render_decision_brief(brief)
 
     if gate.prompt_adapter == "assembly_review":
-        raw_decision = prompt_assembly_review_decision(requirements, data_dir=data_dir)
+        raw_decision = prompt_assembly_review_decision(requirements)
     elif gate.prompt_adapter == "hic_scaffolding":
         raw_decision = prompt_hic_scaffolding_decision(requirements)
     elif gate.prompt_adapter == "t2t":

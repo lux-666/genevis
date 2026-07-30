@@ -16,7 +16,7 @@ def build_chat_model(
     if resolved.provider != "openai_compatible":
         raise ValueError(f"Unsupported LLM provider: {resolved.provider!r}")
     if not resolved.api_key:
-        raise ValueError("GENE_AGENT_LLM_API_KEY is required for ask/intent parsing.")
+        raise ValueError("GENE_AGENT_LLM_API_KEY is required for TUI intent parsing.")
 
     cls = chat_model_cls or _load_chat_openai()
     kwargs: dict[str, Any] = {

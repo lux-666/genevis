@@ -33,7 +33,8 @@ stage adapter:
 
 `freeze_t2t_alignment()` owns command construction only. It must:
 
-1. resolve the selected assembly and combined telomeric-read FASTA;
+1. resolve the selected assembly and platform-preset-grouped telomeric-read
+   FASTAs;
 2. create the stage work directory and minimap2 script;
 3. declare the work PAF as an expected output in `FrozenAttemptSpec`;
 4. persist complete method metadata required by collect;
@@ -108,8 +109,8 @@ lifecycle owner
 ```
 
 The candidate artifact or its manifest must carry immutable bindings to the
-selected attempt and execution. A raw `work/t2t/.../ont_to_assembly.paf` path is
-not sufficient provenance.
+selected attempt and execution. A raw
+`work/t2t/.../long_reads_to_assembly.paf` path is not sufficient provenance.
 
 ## Tests
 

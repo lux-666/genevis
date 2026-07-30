@@ -15,6 +15,10 @@ from app.domains.parameter_recommendation.resolution import (
 )
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+)
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -23,6 +27,9 @@ from app.execution.lifecycle import (
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import current_parameter_attempt
 from app.schemas.artifacts import (
+    AUTOHIC_PARAMETER_COMMAND,
+    AUTOHIC_PARAMETER_CONFIG,
+    AUTOHIC_PARAMETER_SCRIPT,
     HIC_ASSEMBLY_FILE,
     HIC_CONTACT_MAP,
     HIC_HTML_REPORT,
@@ -37,17 +44,18 @@ from app.stages.hic_scaffolding.method_application.support import (
     hic_output,
     update_hic_output,
 )
-from app.schemas.artifacts import (
-    AUTOHIC_PARAMETER_COMMAND,
-    AUTOHIC_PARAMETER_CONFIG,
-    AUTOHIC_PARAMETER_SCRIPT,
-)
 from app.stages.hic_scaffolding.parameters.storage import (
     ParameterPersistenceError,
+)
+from app.stages.hic_scaffolding.parameters.storage import (
     publish_file as publish_autohic_parameter_file,
+)
+from app.stages.hic_scaffolding.parameters.storage import (
     write_artifact as write_autohic_parameter_artifact,
 )
 from app.stages.hic_scaffolding.state import HiCScaffoldingCursor
+from app.stages.resource_resolution import resolve_stage_resource
+from app.stages.resource_specs import assembly_resource_spec
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_variable
@@ -304,6 +312,65 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             },
         )
 
+    try:
+        assembly_resolution = resolve_stage_resource(
+            state,
+            resource_spec=assembly_resource_spec(),
+        )
+        if (
+            not assembly_resolution.found
+            or assembly_resolution.path is None
+            or Path(assembly_resolution.path).resolve(strict=False)
+            != assembly.resolve(strict=False)
+        ):
+            raise ValueError(
+                "resolved assembly no longer matches pre_hic_assembly_ref"
+            )
+        if assembly_resolution.asset_records:
+            assembly_dependencies = asset_input_dependencies(
+                state,
+                [record.asset_id for record in assembly_resolution.asset_records],
+                [record.path for record in assembly_resolution.asset_records],
+            )
+        else:
+            assembly_artifact_ref = assembly_resolution.metadata.get(
+                "primary_output_ref"
+            )
+            if assembly_artifact_ref is None:
+                raise ValueError(
+                    "run-owned pre-Hi-C assembly lacks primary_output_ref"
+                )
+            assembly_dependencies = [
+                artifact_input_dependency(
+                    state,
+                    assembly_artifact_ref,
+                    assembly,
+                )
+            ]
+        read_dependencies = asset_input_dependencies(
+            state,
+            list(output.get("hic_read_refs") or []),
+            list(parameters["hic_read_paths"]),
+        )
+        config_dependency = artifact_input_dependency(
+            state,
+            config_ref,
+            published_config_path,
+        )
+        input_dependencies = [
+            *assembly_dependencies,
+            *read_dependencies,
+            config_dependency,
+        ]
+    except (OSError, ValueError) as exc:
+        return update_hic_output(
+            state,
+            {
+                "status": "failed",
+                "failure_kind": "parameter_freeze",
+                "reason": f"AutoHiC input dependency error: {exc}",
+            },
+        )
     attempt = build_frozen_attempt(
         attempt_id=(
             f"{session_id}:hic_scaffolding:autohic:"
@@ -317,6 +384,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[scaffold_fasta, contact_map, assembly_file, html_report],
         env=output.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "parameter_attempt_id": parameter_attempt.attempt_id,
             "work_output_dir": str(output_dir),

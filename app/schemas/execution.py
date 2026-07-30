@@ -7,7 +7,7 @@ the method-runner helpers.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +16,62 @@ from app.schemas.artifacts import ArtifactRef
 ExecutionFailureStatus = Literal["failed", "blocked_env", "missing_tool"]
 ExecutionStatus = Literal["ok", "failed", "blocked_env", "missing_tool"]
 MethodExecutionAttemptStatus = Literal["frozen", "executed", "execution_failed"]
+
+
+class AssetInputDependency(BaseModel):
+    """One registry-owned external file consumed by a frozen attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["asset"] = "asset"
+    asset_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ArtifactInputDependency(BaseModel):
+    """One run-owned immutable artifact consumed by a frozen attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["artifact"] = "artifact"
+    artifact_ref: ArtifactRef
+    path: str = Field(min_length=1)
+
+
+class FileInputDependency(BaseModel):
+    """One unregistered external file consumed by a frozen attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["file"] = "file"
+    path: str = Field(min_length=1)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DirectoryInputDependency(BaseModel):
+    """One external directory consumed by a frozen attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["directory"] = "directory"
+    path: str = Field(min_length=1)
+    file_count: int = Field(ge=0)
+    total_size_bytes: int = Field(ge=0)
+    tree_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+InputDependency: TypeAlias = Annotated[
+    (
+        AssetInputDependency
+        | ArtifactInputDependency
+        | FileInputDependency
+        | DirectoryInputDependency
+    ),
+    Field(discriminator="kind"),
+]
 
 
 class ExecutionResult(BaseModel):

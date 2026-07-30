@@ -1,7 +1,7 @@
-"""Structured run-config contract for Phase 4 local execution.
+"""Structured run-config contract for frozen-session execution.
 
-Lets `gene-agent run --run-config <file>.json` supply the set of stages to opt
-into local execution, shared assembly facts, and executor-owned settings.
+The TUI freezes this document before execution. It supplies the stages opted
+into local execution, shared biological facts, and executor-owned settings.
 
 The schema rejects unknown stages, unknown fields, and the combination of
 requesting local `assembly` execution without the three required Flye
@@ -12,7 +12,8 @@ facts, and is not a method catalog.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
 
@@ -67,6 +68,16 @@ ReadQCLengthFilterMethod = Literal[
 ]
 ReviewPolicyMode = Literal["strict", "auto"]
 ReviewPolicyStage = Literal["assembly", "assembly_review", "hic_scaffolding"]
+T2TReadPlatform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi"]
+
+_RUN_CONFIG_PATH_FIELDS = (
+    ("assembly", "hifi_reads_ref"),
+    ("assembly", "hic_reads_ref"),
+    ("assembly_review", "busco", "lineage_path"),
+    ("assembly_review", "related_species_reference_dir"),
+    ("t2t", "chromosome_list_ref"),
+    ("t2t", "assembly_fasta_ref"),
+)
 
 
 class RunConfigSharedParameters(BaseModel):
@@ -79,6 +90,23 @@ class RunConfigSharedParameters(BaseModel):
     species_facts: SpeciesFacts | None = None
 
 
+class T2TReadInput(BaseModel):
+    """One explicitly classified long-read input selected for T2T finishing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    platform: T2TReadPlatform
+
+    @field_validator("path")
+    @classmethod
+    def _path_must_be_non_empty(cls, value: str) -> str:
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("t2t.read_inputs[].path must be a non-empty path")
+        return normalized
+
+
 class T2TRunConfig(BaseModel):
     """Optional finishing controls for the top-level T2T stage."""
 
@@ -87,15 +115,14 @@ class T2TRunConfig(BaseModel):
     mode: Literal["propose_only", "manual_review", "auto_patch"] | None = None
     chromosome_list_ref: str | None = None
     assembly_fasta_ref: str | None = None
-    ont_read_refs: list[str] = Field(default_factory=list)
+    read_inputs: list[T2TReadInput] = Field(default_factory=list)
 
-    @field_validator("ont_read_refs")
-    @classmethod
-    def _read_refs_must_be_non_empty(cls, values: list[str]) -> list[str]:
-        normalized = [str(value).strip() for value in values]
-        if any(not value for value in normalized):
-            raise ValueError("t2t.ont_read_refs members must be non-empty paths")
-        return normalized
+    @model_validator(mode="after")
+    def _read_inputs_must_not_repeat_paths(self) -> "T2TRunConfig":
+        paths = [item.path for item in self.read_inputs]
+        if len(paths) != len(set(paths)):
+            raise ValueError("t2t.read_inputs must not repeat a path")
+        return self
 
 
 class StageReviewPolicyConfig(BaseModel):
@@ -150,6 +177,8 @@ class HifiasmRunParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     threads: int | None = Field(default=None, gt=0)
+    use_ultralong_ont: bool = False
+    use_hic_phasing: bool = False
 
 
 class HifiasmOntRunParameters(BaseModel):
@@ -215,6 +244,22 @@ class AssemblyRunConfig(BaseModel):
                 f"incompatible with assembly_method '{method}'"
             )
 
+        return self
+
+    @model_validator(mode="after")
+    def _reject_parameter_blocks_for_other_methods(self) -> "AssemblyRunConfig":
+        if self.assembly_method is None:
+            return self
+        provided = _provided_assembly_parameter_methods(self)
+        unexpected = [
+            method for method in provided if method != self.assembly_method
+        ]
+        if unexpected:
+            required_key = f"assembly.{self.assembly_method}_parameters"
+            raise ValueError(
+                f"assembly_method {self.assembly_method!r} requires "
+                f"{required_key} and cannot use parameter blocks for {unexpected}"
+            )
         return self
 
 
@@ -476,7 +521,7 @@ class GeneAnnotationRunConfig(BaseModel):
 
 
 class RunConfig(BaseModel):
-    """Phase 4 run-config consumed by `gene-agent run --run-config`."""
+    """Strict run-config consumed by the internal frozen-session executor."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -519,6 +564,89 @@ class RunConfig(BaseModel):
         return self
 
 
+def canonicalize_run_config_paths(
+    payload: Mapping[str, Any],
+    *,
+    source_dir: Path | None,
+) -> dict[str, Any]:
+    """Return a copy whose declared filesystem inputs are canonical paths.
+
+    File-backed configs resolve relative paths against their own directory.
+    In-memory configs have no stable anchor and must already contain absolute
+    paths.  This function is the shared path boundary for ordinary run-config
+    loading and the create-only frozen-input transaction.
+    """
+
+    normalized = deepcopy(dict(payload))
+    for field_path in _RUN_CONFIG_PATH_FIELDS:
+        _canonicalize_payload_path(normalized, field_path, source_dir)
+    _canonicalize_t2t_read_inputs(normalized, source_dir)
+    return normalized
+
+
+def _canonicalize_payload_path(
+    payload: dict[str, Any],
+    field_path: tuple[str, ...],
+    source_dir: Path | None,
+) -> None:
+    parent: Any = payload
+    for key in field_path[:-1]:
+        if not isinstance(parent, dict) or key not in parent:
+            return
+        parent = parent[key]
+    if not isinstance(parent, dict):
+        return
+    key = field_path[-1]
+    value = parent.get(key)
+    if value is None:
+        return
+    parent[key] = _canonical_path(
+        value,
+        source_dir=source_dir,
+        field=".".join(field_path),
+    )
+
+
+def _canonicalize_t2t_read_inputs(
+    payload: dict[str, Any],
+    source_dir: Path | None,
+) -> None:
+    raw_t2t = payload.get("t2t")
+    if raw_t2t is None:
+        return
+    if not isinstance(raw_t2t, dict):
+        return
+    raw_inputs = raw_t2t.get("read_inputs")
+    if raw_inputs is None:
+        return
+    if not isinstance(raw_inputs, list):
+        raise ValueError("t2t.read_inputs must be a list")
+    for index, item in enumerate(raw_inputs):
+        if not isinstance(item, dict):
+            raise ValueError(f"t2t.read_inputs[{index}] must be an object")
+        item["path"] = _canonical_path(
+            item.get("path"),
+            source_dir=source_dir,
+            field=f"t2t.read_inputs[{index}].path",
+        )
+
+
+def _canonical_path(
+    value: object,
+    *,
+    source_dir: Path | None,
+    field: str,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty path")
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return str(path.resolve(strict=False))
+    if source_dir is None:
+        raise ValueError(f"{field} must be absolute for an in-memory run config")
+    return str((source_dir / path).resolve(strict=False))
+
+
 def load_run_config(path: str | Path) -> RunConfig:
     """Load and validate a run-config JSON file.
 
@@ -540,6 +668,10 @@ def load_run_config(path: str | Path) -> RunConfig:
     if not isinstance(raw, dict):
         raise ValueError("run-config must be a JSON object at the top level")
     try:
-        return RunConfig.model_validate(raw)
-    except ValidationError as exc:
+        canonical = canonicalize_run_config_paths(
+            raw,
+            source_dir=config_path.expanduser().resolve(strict=False).parent,
+        )
+        return RunConfig.model_validate(canonical)
+    except (ValidationError, ValueError) as exc:
         raise ValueError(f"run-config failed validation: {exc}") from exc

@@ -25,10 +25,10 @@ PREDICTED_PROTEINS_SPEC = ResourceSpec(
 )
 LONG_READS_SPEC = ResourceSpec(
     resource_type="long_reads",
-    asset_types=["clean_long_reads", "pacbio_hifi", "raw_long_reads", "long_reads"],
+    asset_types=["clean_long_reads", "raw_long_reads"],
     asset_type_priority_groups=[
-        ["clean_long_reads", "pacbio_hifi"],
-        ["raw_long_reads", "long_reads"],
+        ["clean_long_reads"],
+        ["raw_long_reads"],
     ],
     allow_multiple=True,
 )
@@ -44,16 +44,6 @@ HIC_READS_SPEC = ResourceSpec(
     allow_multiple=True,
     required=False,
 )
-
-# Compatibility names for callers that distinguish raw/clean manifest inputs.
-RAW_READS_SPEC = LONG_READS_SPEC
-CLEAN_READS_SPEC = ResourceSpec(
-    resource_type="long_reads",
-    asset_types=["clean_long_reads"],
-    allow_multiple=True,
-    required=False,
-)
-
 
 def assembly_resource_spec() -> ResourceSpec:
     """Return the canonical current-assembly requirement."""

@@ -60,19 +60,15 @@ bash scripts/server_check.sh
 bash scripts/server_test.sh
 ```
 
-Copy a current template from `docs/examples/` into a server-local directory,
-replace its placeholder paths, and run the CLI inside the server checkout:
+Start the TUI inside the server checkout and provide server-owned input paths
+during intake:
 
 ```bash
-gene-agent run \
-  --manifest data/server_run/manifest.yaml \
-  --run-config data/server_run/run_config.json \
-  --session-id server-run-YYYYMMDD-a \
-  --data-dir data/server_run/out \
-  --checkpointer sqlite
+gene-agent tui --data-dir data/server_run/out
 ```
 
-The server owns all real paths and generated output.
+The TUI freezes the manifest and run config before execution. The server owns
+all real paths and generated output.
 
 ## Block and Resume
 

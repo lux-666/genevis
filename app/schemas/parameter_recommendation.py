@@ -339,7 +339,7 @@ class T2TRecommendationContext(BaseModel):
     stage: Literal["t2t"]
     resolved_telomere_motif: DnaMotif
     motif_source: Literal["provided_species_fact", "llm_species_resolution"]
-    ont_asset_count: int = Field(ge=1)
+    long_read_asset_count: int = Field(ge=1)
 
 
 StageRecommendationContext = Annotated[
@@ -485,15 +485,21 @@ class RecommendationInputSnapshotV3(BaseModel):
             if refs.motif_resolution_ref is None:
                 raise ValueError("T2T parameter snapshots require motif_resolution_ref")
             has_exact_asset_refs = (
-                len(refs.stage_input_refs) == self.stage_context.ont_asset_count + 1
+                len(refs.stage_input_refs)
+                == self.stage_context.long_read_asset_count + 1
             )
-            has_registry_manifest = len(refs.stage_input_refs) == 2 and any(
-                ref.artifact_type == "asset_registry" for ref in refs.stage_input_refs
+            registry_ref_count = sum(
+                ref.artifact_type == "asset_registry"
+                for ref in refs.stage_input_refs
+            )
+            has_registry_manifest = (
+                registry_ref_count == 1 and len(refs.stage_input_refs) in {1, 2}
             )
             if not has_exact_asset_refs and not has_registry_manifest:
                 raise ValueError(
                     "T2T parameter snapshot stage_input_refs must contain the input "
-                    "assembly plus either every ONT asset or one asset_registry ref"
+                    "assembly identity plus either every long-read artifact or "
+                    "one asset_registry ref covering registered inputs"
                 )
         elif refs.motif_resolution_ref is not None:
             raise ValueError(

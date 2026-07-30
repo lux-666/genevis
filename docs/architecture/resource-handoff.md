@@ -18,7 +18,18 @@ A persisted `ResourceRef` has this shape:
   "resource_type": "assembly",
   "paths": ["/run/artifacts/assembly/draft.fasta"],
   "source_stage": "assembly",
-  "metadata": {"candidate_bundle_refs": ["..."]}
+  "metadata": {
+    "candidate_bundle_ref": {
+      "schema_version": 2,
+      "artifact_id": "art_...",
+      "path_ref": "artifacts/assembly/attempts/000/candidates/hifiasm_candidate.executed.json",
+      "sha256": "...",
+      "size_bytes": 1234,
+      "artifact_type": "draft_assembly.candidate"
+    },
+    "selected_method": "assembly.candidate.hifiasm",
+    "candidate_id": "session:assembly.candidate.hifiasm:parameter_attempt_0"
+  }
 }
 ```
 
@@ -76,6 +87,43 @@ table and never mutates the supplied state.
 Candidate bundles, review decisions, execution evidence, reports, and metrics
 remain artifacts. They may be referenced from resource metadata but do not form
 a second cross-stage file table.
+
+## Sequencing-member identity
+
+Inventory registers every declared file independently. Two
+`raw_long_reads` entries, or two files inside one entry, therefore retain
+distinct opaque asset IDs even when they have the same basename. Platform and
+format are per-member registry facts; `asset_type` is not an identity key.
+
+Inventory-produced `long_reads` and `hic_reads` metadata contains the typed
+asset-registry `ArtifactRef`, ordered asset IDs corresponding one-to-one with
+`paths`, member/pair counts, and deduplicated platform/format sets. It never
+embeds asset records. Consumers reconstruct and verify members through the
+shared registry/read-set resolvers.
+
+Hi-C pair authority is the manifest declaration projected into registry
+`manifest_entry_ordinal`, `pair_index`, and `mate` facts. File names and flat
+path position never create a pair.
+
+## Assembly input roles and product handoff
+
+Assembly partitions the complete ordered long-read member set by platform.
+The HiFi Hifiasm method binds all selected HiFi members positionally, optional
+ONT ultra-long members to one comma-joined `--ul`, and all declared Hi-C lanes
+to comma-joined `--h1`/`--h2`. The separate Hifiasm-ONT method binds ONT as
+primary positional input and fixes `--ont`; it does not reuse `--ul`.
+
+Only one assembler-origin backbone is materialized. Its executed candidate
+bundle references the immutable plan, canonical primary FASTA, and generic
+adapter-declared native outputs. Native graphs, alternate contigs, reports,
+logs, or configs remain inside that executed bundle and do not become peer
+assembly candidates or downstream assembly paths.
+
+New Assembly checkpoints hold singular typed
+`planned_candidate_bundle_ref` and `executed_candidate_bundle_ref` values.
+Former plural and absolute-path candidate cursor fields are rejected. Data v2
+does not read or migrate legacy checkpoints, and no run writes those fields
+into checkpoints or resource handoffs.
 
 ## FOFN boundary
 

@@ -21,6 +21,8 @@ from app.stages.read_qc.method_application.seqkit_length_filter import (
     build_seqkit_length_filter_graph,
 )
 from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
+from app.schemas.artifacts import ArtifactMeta
+from app.storage.artifacts import publish_artifact_record
 from app.storage.audit import audit_run_storage
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
@@ -114,6 +116,18 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         )
         return path
 
+    def _publish_registry_ref(self, data_dir: str, session_id: str, registry_path: str | Path) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8")
+        artifact = ArtifactMeta.from_file(
+            source, stage="inventory",
+            method_name="inventory.register_assets", artifact_type="asset_registry"
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
@@ -121,7 +135,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "read_qc"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
+            if registry_ref is not None else None
+        )
         return state
 
     def _fake_seqkit_bin(self, tmpdir: str) -> Path:
@@ -199,7 +216,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 data_dir=str(v2_run_dir(data_dir, "s1")),
             )
             state["current_stage"] = "read_qc"
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._publish_registry_ref(
+                state["data_dir"], "s1", str(registry)
+            )
             Ledger(state["data_dir"]).create_session("s1", "control/manifest.yaml")
 
             result = build_graph(backend="memory", data_dir=str(data_dir)).invoke(
@@ -780,6 +799,18 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
         )
         return path
 
+    def _publish_registry_ref(self, data_dir: str, session_id: str, registry_path: str | Path) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8")
+        artifact = ArtifactMeta.from_file(
+            source, stage="inventory",
+            method_name="inventory.register_assets", artifact_type="asset_registry"
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
@@ -787,7 +818,10 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "read_qc"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
+            if registry_ref is not None else None
+        )
         return state
 
     def test_missing_fastq_path_blocks_with_blocked_input_status(self):

@@ -1,4 +1,4 @@
-"""Internal assembly selector contract and compatibility helpers."""
+"""Internal assembly selector contract and normalization helpers."""
 
 from __future__ import annotations
 
@@ -110,7 +110,6 @@ class AssemblySelection(BaseModel):
 
     read_type: NormalizedReadType
     primary_method: str
-    fallback_method: str | None = None
     source: AssemblySelectionSource
     rationale: str
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -118,23 +117,19 @@ class AssemblySelection(BaseModel):
     @model_validator(mode="after")
     def _validate_methods(self) -> "AssemblySelection":
         self.primary_method = normalize_method_id(self.primary_method)
-        if self.fallback_method:
-            self.fallback_method = normalize_method_id(self.fallback_method)
         if not is_method_read_type_compatible(self.primary_method, self.read_type):
             raise ValueError(
                 "assembly_selection primary_method "
                 f"{self.primary_method!r} is incompatible "
                 f"with read_type {self.read_type!r}"
             )
-        if self.fallback_method and not is_method_read_type_compatible(
-            self.fallback_method, self.read_type
-        ):
-            raise ValueError(
-                "assembly_selection fallback_method "
-                f"{self.fallback_method!r} is incompatible "
-                f"with read_type {self.read_type!r}"
-            )
         return self
+
+
+def validate_assembly_selection(value: object) -> AssemblySelection:
+    """Validate one strict single-method assembly selection."""
+
+    return AssemblySelection.model_validate(value)
 
 
 def normalize_method_id(value: str) -> str:

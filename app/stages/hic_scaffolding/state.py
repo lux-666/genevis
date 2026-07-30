@@ -17,11 +17,12 @@ from typing_extensions import TypedDict
 
 from app.schemas.artifacts import (
     ArtifactRefJson,
-    ParameterAttemptStatus,
     ParameterAttemptTask,
-    ParameterRecommendationStatus,
 )
-from app.schemas.parameter_cursors import ParameterAttemptJson, ParameterRecommendationJson
+from app.schemas.parameter_cursors import (
+    ParameterAttemptJson,
+    ParameterRecommendationJson,
+)
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,

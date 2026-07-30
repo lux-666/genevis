@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domains.parameter_recommendation.resolution import render_stage_values
 from app.execution.parameter_attempts import current_parameter_attempt
@@ -15,7 +16,9 @@ from app.schemas.parameter_recommendation import (
     T2TRecommendationContext,
 )
 from app.schemas.state import TopLevelState
-from app.stages.t2t.parameters.storage import read_artifact as read_t2t_parameter_artifact
+from app.stages.t2t.parameters.storage import (
+    read_artifact as read_t2t_parameter_artifact,
+)
 from app.stages.t2t.state import T2TStageCursor, read_t2t_stage_output
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 
@@ -33,13 +36,16 @@ class T2TExecutionThresholds(BaseModel):
     min_supporting_reads: int
 
 
-class T2TOntReadInput(BaseModel):
-    """One canonical ONT input frozen for the T2T executor."""
+class T2TLongReadInput(BaseModel):
+    """One canonical long-read input frozen for the T2T executor."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    asset_id: str = Field(min_length=1)
+    member_id: str = Field(min_length=1)
+    source_asset_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
+    platform: str = Field(min_length=1)
+    read_artifact_ref: ArtifactRef | None = None
 
 
 class T2TFrozenExecutionInputs(BaseModel):
@@ -52,17 +58,62 @@ class T2TFrozenExecutionInputs(BaseModel):
     motif_source: Literal["provided_species_fact", "llm_species_resolution"]
     mode: Literal["propose_only", "manual_review", "auto_patch"]
     input_assembly_ref: str = Field(min_length=1)
-    ont_read_inputs: tuple[T2TOntReadInput, ...] = ()
+    long_read_inputs: tuple[T2TLongReadInput, ...] = ()
     chromosome_list_ref: str | None = None
+    chromosome_names: tuple[str, ...] = ()
     work_dir: str = Field(min_length=1)
     execution_enabled: bool
 
-    @field_validator("ont_read_inputs", mode="before")
+    @field_validator("long_read_inputs", mode="before")
     @classmethod
-    def _normalize_ont_inputs(cls, value: Any) -> tuple[Any, ...]:
+    def _normalize_long_read_inputs(cls, value: Any) -> tuple[Any, ...]:
         if not isinstance(value, (list, tuple)):
-            raise ValueError("ont_read_inputs must be a list")
+            raise ValueError("long_read_inputs must be a list")
         return tuple(value)
+
+    @field_validator("chromosome_names", mode="before")
+    @classmethod
+    def _normalize_chromosome_names(cls, value: Any) -> tuple[Any, ...]:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("chromosome_names must be a list")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _validate_chromosome_snapshot(self) -> "T2TFrozenExecutionInputs":
+        if self.chromosome_list_ref is None:
+            if self.chromosome_names:
+                raise ValueError(
+                    "chromosome_names require a configured chromosome_list_ref"
+                )
+            return self
+        if not self.chromosome_names:
+            raise ValueError(
+                "configured chromosome_list_ref requires a non-empty frozen "
+                "chromosome_names snapshot"
+            )
+        if len(self.chromosome_names) != len(set(self.chromosome_names)):
+            raise ValueError("frozen chromosome_names contain duplicates")
+        return self
+
+
+def load_chromosome_names_snapshot(path_value: str | None) -> tuple[str, ...]:
+    """Load one configured chromosome list into a canonical immutable snapshot."""
+
+    if path_value is None:
+        return ()
+    path = Path(path_value)
+    if not path.is_file():
+        raise ValueError(f"configured chromosome_list_ref is not a file: {path}")
+    names = {
+        stripped
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    }
+    if not names:
+        raise ValueError(
+            f"configured chromosome_list_ref contains no chromosome names: {path}"
+        )
+    return tuple(sorted(names))
 
 
 def load_t2t_frozen_execution_inputs(
@@ -149,6 +200,8 @@ def load_t2t_frozen_execution_inputs(
         or execution_inputs.motif_source != context.motif_source
     ):
         raise ValueError("T2T frozen motif does not match the approved snapshot")
-    if len(execution_inputs.ont_read_inputs) != context.ont_asset_count:
-        raise ValueError("T2T frozen ONT inputs do not match the approved snapshot")
+    if len(execution_inputs.long_read_inputs) != context.long_read_asset_count:
+        raise ValueError(
+            "T2T frozen long-read inputs do not match the approved snapshot"
+        )
     return execution_inputs

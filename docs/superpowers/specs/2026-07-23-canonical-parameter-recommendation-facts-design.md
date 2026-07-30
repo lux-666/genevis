@@ -495,7 +495,7 @@ discriminated union on the field `stage`.
 |---|---|
 | `AssemblyRecommendationContext` | `stage: Literal["assembly"]`; `assembly_route: Literal["hifi", "ont", "cyclone"]`; `read_type: NormalizedReadType`; `target_level: Literal["draft", "near_t2t", "strict_t2t"]`; `retry: RecommendationRetryContext \| None` |
 | `AutoHiCRecommendationContext` | `stage: Literal["hic_scaffolding"]`; `library_protocols: tuple[NonEmptyStr, ...]`; `provided_restriction_enzyme: NonEmptyStr \| None`; `retry: RecommendationRetryContext \| None` |
-| `T2TRecommendationContext` | `stage: Literal["t2t"]`; `resolved_telomere_motif: DnaMotif`; `motif_source: Literal["provided_species_fact", "llm_species_resolution"]`; `ont_asset_count: PositiveInt` |
+| `T2TRecommendationContext` | `stage: Literal["t2t"]`; `resolved_telomere_motif: DnaMotif`; `motif_source: Literal["provided_species_fact", "llm_species_resolution"]`; `long_read_asset_count: PositiveInt` |
 
 `library_protocols` is deterministically deduplicated, sorted, and limited to
 64 values of at most 120 characters. The T2T threshold workflow has no retry in

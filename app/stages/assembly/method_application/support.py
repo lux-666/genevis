@@ -8,6 +8,8 @@ to that lifecycle.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -22,6 +24,10 @@ from app.domains.assembly.constants import (
 )
 from app.domains.assembly.selection import NormalizedReadType, method_read_type
 from app.execution.attempt_owners import MethodExecution
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+)
 from app.execution.lifecycle import MethodExecutionLifecycle, freeze_method_attempts
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import (
@@ -34,9 +40,12 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_COMMAND,
     ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
     ArtifactMeta,
+    ArtifactRef,
     AssemblyCandidateBundle,
+    AssemblyNativeOutput,
     ParameterAttempt,
 )
+from app.schemas.execution import InputDependency
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     ResolvedParameterSources,
@@ -59,6 +68,11 @@ from app.storage.artifacts import (
     publish_or_recover_work_artifact,
     register_artifact_records,
 )
+from app.storage.assembly_candidates import (
+    VerifiedPlannedCandidate,
+    load_executed_candidate_bundle,
+    load_planned_candidate_bundle,
+)
 from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
     ApprovedParameterBundleV3,
@@ -75,6 +89,25 @@ _ASSEMBLY_METHODS = frozenset(
         HIFIASM_ONT_METHOD,
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AssemblyNativeOutputDeclaration:
+    """Adapter-owned declaration of one optional method-native deliverable."""
+
+    path: Path
+    artifact_type: str
+    artifact_class: Literal[
+        "assembly_graph",
+        "alternate_contigs",
+        "haplotype_contigs",
+        "report",
+        "config",
+        "log",
+        "other",
+    ]
+    native_role: str
+    media_type: str
 _PARAMETER_KEY_BY_METHOD = {
     FLYE_METHOD: "flye_parameters",
     NEXTDENOVO_METHOD: "nextdenovo_parameters",
@@ -235,6 +268,7 @@ def freeze_parameterized_attempt(
     working_dir: Path,
     expected_outputs: list[Path],
     env_spec: Any,
+    input_dependencies: list[InputDependency],
     command_payload: dict[str, Any],
     frozen_parameters_payload: dict[str, Any],
     frozen_attempt_metadata: dict[str, Any],
@@ -251,6 +285,20 @@ def freeze_parameterized_attempt(
             f"{label} current parameter recommendation is not approved for freeze",
         )
     parameter_attempt_id = approved_attempt.attempt_id
+    output = assembly_stage_output(state)
+    try:
+        planned_candidate = _planned_candidate_bundle(
+            state,
+            output,
+            lifecycle.method_name,
+            parameter_attempt_id=parameter_attempt_id,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return fail_update(
+            state,
+            f"{label} planned candidate bundle is invalid: {exc}",
+        )
+    planned_candidate_ref = planned_candidate.ref
     try:
         parameter_sources = ResolvedParameterSources.model_validate(
             frozen_parameters_payload.get("parameter_sources")
@@ -308,9 +356,13 @@ def freeze_parameterized_attempt(
         expected_outputs=expected_outputs,
         env=execution_contract.environment.values,
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             **frozen_attempt_metadata,
             "parameter_attempt_id": parameter_attempt_id,
+            "planned_candidate_bundle_ref": planned_candidate_ref.model_dump(
+                mode="json"
+            ),
         },
     )
     return freeze_method_attempts(
@@ -387,24 +439,47 @@ def collect_method_artifacts(
     *,
     execution: MethodExecution,
     substep_name: str,
-    extra_artifacts: list[tuple[Path, str]],
-    bundle_logs: dict[str, str],
-    bundle_metadata: dict[str, Any],
+    native_outputs: list[AssemblyNativeOutputDeclaration] | None = None,
 ) -> StateUpdate:
-    """Register standard artifacts and materialize the selected candidate bundle."""
+    """Publish one executed candidate bundle without mutating its plan."""
     output = assembly_stage_output(state)
     if output.get("status") != lifecycle.ran_status:
         return {}
 
     attempt = execution.attempt
     result = execution.evidence
+    parameter_attempt_id = attempt.metadata.get("parameter_attempt_id")
+    if not isinstance(parameter_attempt_id, int) or parameter_attempt_id < 0:
+        raise ValueError(
+            f"{lifecycle.name} frozen attempt has no parameter attempt identity"
+        )
+    planned_candidate = _planned_candidate_bundle(
+        state,
+        output,
+        lifecycle.method_name,
+        parameter_attempt_id=parameter_attempt_id,
+    )
+    plan_ref = planned_candidate.ref
+    attempt_plan_ref = ArtifactRef.model_validate(
+        attempt.metadata.get("planned_candidate_bundle_ref")
+    )
+    if attempt_plan_ref != plan_ref:
+        raise ValueError(
+            f"{lifecycle.name} frozen attempt candidate plan ref drifted"
+        )
+    bundle_path = planned_candidate.path
+    plan = planned_candidate.bundle
     draft_value = execution.attempt.metadata.get("draft_assembly_path")
     if not isinstance(draft_value, str) or not draft_value:
         raise ValueError(f"{lifecycle.name} frozen attempt has no draft assembly path")
     draft_assembly = Path(draft_value)
-    if not draft_assembly.exists():
+    if not draft_assembly.is_file():
         raise FileNotFoundError(
             f"expected {lifecycle.name} draft assembly missing: {draft_assembly}"
+        )
+    if draft_assembly.stat().st_size <= 0:
+        raise ValueError(
+            f"expected {lifecycle.name} draft assembly is empty: {draft_assembly}"
         )
 
     artifacts = [
@@ -415,13 +490,28 @@ def collect_method_artifacts(
             artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
             metadata={
                 "attempt_id": attempt.attempt_id,
-                "candidate_id": f"{attempt.session_id}:{lifecycle.method_name}",
+                "candidate_id": plan.candidate_id,
             },
         )
     ]
     paths = SessionPaths.from_run_dir(absolute_data_dir(state))
-    for path, artifact_type in extra_artifacts:
-        resolved_path = path.expanduser().resolve(strict=False)
+    artifact_paths: set[Path] = {draft_assembly.resolve(strict=False)}
+
+    retained_native: list[tuple[AssemblyNativeOutputDeclaration, Path]] = []
+    seen_native_roles: set[str] = set()
+    for declaration in native_outputs or []:
+        if declaration.native_role in seen_native_roles:
+            raise ValueError(
+                f"duplicate Assembly native role: {declaration.native_role}"
+            )
+        seen_native_roles.add(declaration.native_role)
+        resolved_path = declaration.path.expanduser().resolve(strict=False)
+        metadata = {
+            "attempt_id": attempt.attempt_id,
+            "candidate_id": plan.candidate_id,
+            "native_role": declaration.native_role,
+            "artifact_class": declaration.artifact_class,
+        }
         try:
             resolved_path.relative_to(paths.artifacts_dir)
         except ValueError:
@@ -432,50 +522,62 @@ def collect_method_artifacts(
                     resolved_path,
                     stage="assembly",
                     method_name=lifecycle.method_name,
-                    artifact_type=artifact_type,
-                    metadata={"attempt_id": attempt.attempt_id},
+                    artifact_type=declaration.artifact_type,
+                    metadata=metadata,
                 )
             except FileNotFoundError:
                 continue
             resolved_path = published.path
+        if not resolved_path.is_file() or resolved_path.stat().st_size <= 0:
+            continue
+        if resolved_path in artifact_paths:
+            raise ValueError(
+                "one Assembly artifact path cannot own multiple output roles: "
+                f"{resolved_path}"
+            )
+        artifact_paths.add(resolved_path)
         artifacts.append(
             ArtifactMeta.from_file(
                 resolved_path,
                 stage="assembly",
                 method_name=lifecycle.method_name,
-                artifact_type=artifact_type,
-                metadata={"attempt_id": attempt.attempt_id},
+                artifact_type=declaration.artifact_type,
+                metadata=metadata,
             )
         )
+        retained_native.append((declaration, resolved_path))
 
-    bundle_path = _candidate_bundle_path(output, lifecycle.method_name)
-    if bundle_path is None:
-        return update_assembly_stage_output(
-            state,
-            {
-                "status": "failed",
-                "reason": f"missing {lifecycle.name} candidate bundle ref",
-            },
+    output_refs = register_artifact_records(
+        state.get("data_dir", "data"), attempt.session_id, artifacts
+    )
+    ref_by_path = {
+        Path(artifact.file_path).resolve(strict=False): ref
+        for artifact, ref in zip(artifacts, output_refs, strict=True)
+    }
+    primary_output = ref_by_path[draft_assembly.resolve(strict=False)]
+    native_entries = [
+        AssemblyNativeOutput(
+            artifact_class=declaration.artifact_class,
+            native_role=declaration.native_role,
+            media_type=declaration.media_type,
+            artifact_ref=ref_by_path[path.resolve(strict=False)],
         )
-    bundle_data = json.loads(bundle_path.read_text(encoding="utf-8"))
+        for declaration, path in retained_native
+    ]
+    log_refs = {
+        "stdout": result.stdout_ref,
+        "stderr": result.stderr_ref,
+    }
+
+    bundle_data = plan.model_dump(mode="json")
     bundle_data["status"] = "executed"
-    bundle_data["expected_outputs"] = {
-        **dict(bundle_data.get("expected_outputs") or {}),
-        "draft_assembly_fasta": str(draft_assembly),
-    }
-    bundle_data["logs"] = {
-        **dict(bundle_data.get("logs") or {}),
-        "stdout": result.stdout_ref.path_ref,
-        "stderr": result.stderr_ref.path_ref,
-        **bundle_logs,
-    }
-    bundle_data["metadata"] = {
-        **dict(bundle_data.get("metadata") or {}),
-        "execution_enabled": True,
-        "attempt_id": attempt.attempt_id,
-        "draft_assembly_artifact_ref": str(draft_assembly),
-        "draft_assembly_ref_status": "materialized",
-        **bundle_metadata,
+    bundle_data["plan_ref"] = plan_ref.model_dump(mode="json")
+    bundle_data["primary_output"] = primary_output.model_dump(mode="json")
+    bundle_data["native_outputs"] = [
+        entry.model_dump(mode="json") for entry in native_entries
+    ]
+    bundle_data["log_refs"] = {
+        name: ref.model_dump(mode="json") for name, ref in log_refs.items()
     }
     bundle = AssemblyCandidateBundle.model_validate(bundle_data)
     executed_bundle_path = bundle_path.with_name(
@@ -489,7 +591,11 @@ def collect_method_artifacts(
         f".{executed_bundle_path.name}.{uuid4().hex}.tmp"
     )
     temporary_bundle.write_text(
-        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        json.dumps(
+            bundle.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     bundle_artifact = ArtifactMeta.from_file(
@@ -501,10 +607,19 @@ def collect_method_artifacts(
             "candidate_id": bundle.candidate_id,
             "execution_enabled": True,
             "attempt_id": attempt.attempt_id,
+            "dependency_refs": [
+                plan_ref.model_dump(mode="json"),
+                primary_output.model_dump(mode="json"),
+                *[
+                    entry.artifact_ref.model_dump(mode="json")
+                    for entry in native_entries
+                ],
+                *[ref.model_dump(mode="json") for ref in log_refs.values()],
+            ],
         },
     )
     try:
-        publish_artifact_record(
+        published_bundle = publish_artifact_record(
             state.get("data_dir", "data"),
             attempt.session_id,
             bundle_artifact,
@@ -512,11 +627,19 @@ def collect_method_artifacts(
         )
     finally:
         temporary_bundle.unlink(missing_ok=True)
-    artifacts.append(bundle_artifact)
-
-    register_artifact_records(
-        state.get("data_dir", "data"), attempt.session_id, artifacts
+    verified_bundle = load_executed_candidate_bundle(
+        absolute_data_dir(state),
+        attempt.session_id,
+        published_bundle.ref,
+        expected_method_name=lifecycle.method_name,
+        expected_candidate_id=plan.candidate_id,
+        expected_parameter_attempt_id=parameter_attempt_id,
     )
+    if verified_bundle.primary_output_ref != primary_output:
+        raise ValueError(
+            f"{lifecycle.name} published candidate primary output ref drifted"
+        )
+    artifacts.append(bundle_artifact)
     ledger = Ledger(state.get("data_dir", "data"))
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger.record_attempt_succeeded(
@@ -532,26 +655,20 @@ def collect_method_artifacts(
         "name": substep_name,
         "status": "executed",
         "method_name": lifecycle.method_name,
-        "draft_assembly_ref": str(draft_assembly),
-        "candidate_ref": str(executed_bundle_path),
+        "draft_assembly_ref": str(verified_bundle.primary_output_path),
     }
     return update_assembly_stage_output(
         state,
         {
             "status": "draft_ready",
-            "draft_assembly_ref": str(draft_assembly),
-            "candidate_assembly_refs": [str(draft_assembly)],
-            "executed_candidate_refs": [str(executed_bundle_path)],
+            "draft_assembly_ref": str(verified_bundle.primary_output_path),
+            "executed_candidate_bundle_ref": verified_bundle.ref.model_dump(
+                mode="json"
+            ),
             "artifact_refs": ordered_unique(
                 [
                     *list(output.get("artifact_refs") or []),
                     *[str(item.file_path) for item in artifacts],
-                ]
-            ),
-            "candidate_artifact_refs": ordered_unique(
-                [
-                    *list(output.get("candidate_artifact_refs") or []),
-                    str(executed_bundle_path),
                 ]
             ),
             "substeps": substeps,
@@ -604,15 +721,71 @@ def blocked_parameters(
     }
 
 
-def _candidate_bundle_path(
-    output: AssemblyStageCursor, method_name: str
-) -> Path | None:
-    for ref in output.get("selected_candidate_refs") or []:
-        path = Path(ref)
-        if (
-            path.exists()
-            and json.loads(path.read_text(encoding="utf-8")).get("method_name")
-            == method_name
-        ):
-            return path
-    return None
+def build_read_input_dependencies(
+    state: TopLevelState,
+    output: Any,
+    role: str,
+    paths: Sequence[Any],
+) -> list[InputDependency]:
+    """Build verified frozen-input dependencies for one ordered read role."""
+    member_ids: list[str] = list(
+        (dict(output.get("assembly_input_member_ids") or {})).get(role) or []
+    )
+    artifact_refs: list = list(
+        (dict(output.get("assembly_input_artifact_refs") or {})).get(role) or []
+    )
+    path_list = list(paths)
+    if len(member_ids) != len(path_list):
+        raise ValueError(
+            f"input dependency cardinality mismatch for role {role!r}: "
+            f"{len(member_ids)} member_ids vs {len(path_list)} paths"
+        )
+    if len(artifact_refs) != len(member_ids):
+        raise ValueError(
+            f"input dependency cardinality mismatch for role {role!r}: "
+            f"{len(artifact_refs)} artifact refs vs {len(member_ids)} member IDs"
+        )
+    deps: list[InputDependency] = []
+    for member_id, art_ref, path in zip(
+        member_ids,
+        artifact_refs,
+        path_list,
+        strict=True,
+    ):
+        if art_ref is not None:
+            deps.append(artifact_input_dependency(state, art_ref, path))
+        else:
+            deps.extend(asset_input_dependencies(state, [member_id], [path]))
+    return deps
+
+
+def _planned_candidate_bundle(
+    state: TopLevelState,
+    output: AssemblyStageCursor,
+    method_name: str,
+    *,
+    parameter_attempt_id: int,
+) -> VerifiedPlannedCandidate:
+    """Resolve the one typed planned candidate and bind it to Assembly input."""
+
+    raw_ref = output.get("planned_candidate_bundle_ref")
+    if raw_ref is None:
+        raise ValueError("planned candidate bundle ref is missing")
+    verified = load_planned_candidate_bundle(
+        absolute_data_dir(state),
+        state["session_id"],
+        raw_ref,
+        expected_method_name=method_name,
+        expected_parameter_attempt_id=parameter_attempt_id,
+    )
+    expected_member_ids = dict(output.get("assembly_input_member_ids") or {})
+    expected_platforms = dict(
+        output.get("assembly_input_member_platforms") or {}
+    )
+    if (
+        verified.bundle.input_type != output.get("input_type")
+        or verified.bundle.input_member_ids != expected_member_ids
+        or verified.bundle.input_member_platforms != expected_platforms
+    ):
+        raise ValueError("planned candidate identity drifted from Assembly input")
+    return verified

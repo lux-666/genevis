@@ -29,7 +29,9 @@ from app.stages.assembly.command_builder import (
     resolve_assembly_parameters,
 )
 from app.stages.assembly.method_application.support import (
+    AssemblyNativeOutputDeclaration,
     approved_method_read_type,
+    build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
@@ -161,6 +163,12 @@ def freeze_flye_attempt(state: TopLevelState) -> StateUpdate:
         encoding="utf-8",
     )
     script.chmod(0o755)
+    try:
+        input_dependencies = build_read_input_dependencies(
+            state, output, "primary", read_paths
+        )
+    except ValueError as exc:
+        return fail_update(state, f"Flye input dependency cardinality error: {exc}")
     return freeze_parameterized_attempt(
         state,
         LIFECYCLE,
@@ -171,6 +179,7 @@ def freeze_flye_attempt(state: TopLevelState) -> StateUpdate:
         working_dir=working_dir,
         expected_outputs=[draft],
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         command_payload={
             "argv": argv,
             "command": command,
@@ -205,20 +214,18 @@ def freeze_flye_attempt(state: TopLevelState) -> StateUpdate:
 def collect_flye_artifacts(state: TopLevelState) -> StateUpdate:
     output = assembly_stage_output(state)
     [execution] = load_method_executions(state, LIFECYCLE)
-    attempt = execution.attempt
-    metadata = dict(attempt.metadata or {})
     return collect_method_artifacts(
         state,
         LIFECYCLE,
         execution=execution,
         substep_name="flye_assembly",
-        extra_artifacts=[
-            (Path(output.get("flye_output_dir", "")) / "flye.log", "assembly.flye_log")
+        native_outputs=[
+            AssemblyNativeOutputDeclaration(
+                path=Path(output.get("flye_output_dir", "")) / "flye.log",
+                artifact_type="assembly.flye_log",
+                artifact_class="log",
+                native_role="flye.run_log",
+                media_type="text/plain",
+            )
         ],
-        bundle_logs={},
-        bundle_metadata={
-            "read_profile": metadata.get("read_profile"),
-            "estimated_genome_size": metadata.get("estimated_genome_size"),
-            "threads": metadata.get("threads"),
-        },
     )

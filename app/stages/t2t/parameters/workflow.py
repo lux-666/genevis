@@ -95,11 +95,18 @@ from app.stages.t2t.parameters.context import build_t2t_recommendation_context
 from app.stages.t2t.parameters.execution import (
     T2TExecutionThresholds,
     T2TFrozenExecutionInputs,
+    load_chromosome_names_snapshot,
 )
 from app.stages.t2t.parameters.storage import (
     ParameterPersistenceError,
+)
+from app.stages.t2t.parameters.storage import (
     read_artifact as read_t2t_parameter_artifact,
+)
+from app.stages.t2t.parameters.storage import (
     recover_artifact as recover_t2t_parameter_artifact,
+)
+from app.stages.t2t.parameters.storage import (
     write_artifact as write_t2t_parameter_artifact,
 )
 from app.stages.t2t.state import (
@@ -118,12 +125,6 @@ from app.storage.parameter_evidence import (
 _RECOMMENDER_METHOD = "t2t.parameter_recommender"
 _APPROVAL_METHOD = "t2t.parameter_approval"
 _MOTIF_RESOLVER_METHOD = T2T_MOTIF_RESOLVER_ID
-_LEGACY_MOTIF_FIELDS = (
-    "configured_telomere_motif",
-    "legacy_motif_hint",
-    "telomere_motif",
-    "telomere_motif_input_profile_ref",
-)
 
 
 def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
@@ -132,12 +133,6 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
     output = read_t2t_stage_output(state)
     if output.get("status") != "resolved":
         return {}
-    legacy_fields = sorted(field for field in _LEGACY_MOTIF_FIELDS if field in output)
-    if legacy_fields:
-        return _fail(
-            state,
-            f"unsupported legacy T2T motif checkpoint fields: {legacy_fields}",
-        )
     existing_manifest_ref = output.get("telomere_motif_resolution_manifest_ref")
     if existing_manifest_ref is not None:
         try:
@@ -556,7 +551,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
     output = read_t2t_stage_output(state)
     if output.get("status") != "motif_resolved":
         return {}
-    read_inputs = output.get("ont_read_inputs")
+    read_inputs = output.get("long_read_inputs")
     if not isinstance(read_inputs, list) or not read_inputs:
         return {}
     motif_manifest_ref = output.get("telomere_motif_resolution_manifest_ref")
@@ -603,7 +598,9 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             else {
                 "assembly": assembly_ref,
                 **{
-                    f"ont_read_{index:04d}": _t2t_ont_input_path(item, index=index)
+                    f"long_read_{index:04d}": _t2t_long_read_input_path(
+                        item, index=index
+                    )
                     for index, item in enumerate(read_inputs)
                 },
             }
@@ -861,9 +858,7 @@ def apply_t2t_parameter_approval_decision(
 
     payload = request_record.get("payload") or {}
     try:
-        request_ref_validated = ArtifactRef.model_validate(
-            interrupt.get("request_ref")
-        )
+        ArtifactRef.model_validate(interrupt.get("request_ref"))
         cursor = ParameterRecommendationCursor.model_validate(
             output.get("current_parameter_recommendation")
         )
@@ -871,9 +866,7 @@ def apply_t2t_parameter_approval_decision(
         raise ResumeValidationError(
             "T2T parameter approval request is missing or changed"
         ) from exc
-    if (
-        request_record.get("reason") != "t2t_parameter_approval_required"
-    ):
+    if request_record.get("reason") != "t2t_parameter_approval_required":
         raise ResumeValidationError("T2T parameter approval request identity mismatch")
     try:
         manifest_ref = ArtifactRef.model_validate(
@@ -1040,8 +1033,11 @@ def freeze_t2t_parameters(state: TopLevelState) -> StateUpdate:
                 "motif_source": context.motif_source,
                 "mode": mode,
                 "input_assembly_ref": output.get("input_assembly_ref"),
-                "ont_read_inputs": output.get("ont_read_inputs") or [],
+                "long_read_inputs": output.get("long_read_inputs") or [],
                 "chromosome_list_ref": output.get("chromosome_list_ref"),
+                "chromosome_names": load_chromosome_names_snapshot(
+                    output.get("chromosome_list_ref")
+                ),
                 "work_dir": output.get("work_dir"),
                 "execution_enabled": output.get("execution_enabled"),
             }
@@ -1095,12 +1091,12 @@ def freeze_t2t_parameters(state: TopLevelState) -> StateUpdate:
     )
 
 
-def _t2t_ont_input_path(item: Any, *, index: int) -> str:
+def _t2t_long_read_input_path(item: Any, *, index: int) -> str:
     if not isinstance(item, dict):
-        raise ValueError(f"ont_read_inputs[{index}] must be an object")
+        raise ValueError(f"long_read_inputs[{index}] must be an object")
     path = item.get("path")
     if not isinstance(path, str) or not path.strip():
-        raise ValueError(f"ont_read_inputs[{index}].path must be a non-empty string")
+        raise ValueError(f"long_read_inputs[{index}].path must be a non-empty string")
     return path
 
 

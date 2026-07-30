@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import TypeAliasType, TypedDict
 
+from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,
@@ -53,8 +54,11 @@ class CandidateBundleCursor(TypedDict, total=False):
     method_name: str
     category: str
     annotation_gff_ref: str
+    annotation_gff_artifact_ref: ArtifactRefJson
     proteins_fasta_ref: str
+    proteins_fasta_artifact_ref: ArtifactRefJson
     cds_fasta_ref: str | None
+    cds_fasta_artifact_ref: ArtifactRefJson | None
     metrics_ref: str | None
     provenance_ref: str | None
     evm_evidence_class: str
@@ -78,11 +82,16 @@ class GeneAnnotationCursor(TypedDict, total=False):
 
     genome_input_ref: str | None
     genome_input_source: GenomeInputSource
+    genome_input_artifact_ref: ArtifactRefJson
+    genome_input_asset_id: str
     unmasked_fallback_reason: str | None
     repeat_annotation_ref: str | None
     rnaseq_read_refs: list[str]
     long_rna_read_refs: list[str]
     protein_evidence_refs: list[str]
+    rnaseq_read_asset_ids: list[str]
+    long_rna_read_asset_ids: list[str]
+    protein_evidence_asset_ids: list[str]
     lineage_or_species_hints: dict[str, CursorJsonValue]
     evidence_profile: EvidenceProfile
     available_evidence: list[str]
@@ -124,6 +133,8 @@ class GeneAnnotationCursor(TypedDict, total=False):
     final_proteins_ref: str | None
     final_cds_ref: str | None
     final_gff_artifact_ref: dict[str, CursorJsonValue]
+    final_proteins_artifact_ref: ArtifactRefJson
+    final_cds_artifact_ref: ArtifactRefJson | None
     busco_completeness: int | float | None
     busco_completeness_status: Literal["pending", "available", "missing", "failed"]
     busco_note: str

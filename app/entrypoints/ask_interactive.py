@@ -1,12 +1,9 @@
-"""Interactive TTY loop for `gene-agent ask`."""
+"""Interactive planning helpers shared by the TUI and review intake."""
 
 from __future__ import annotations
 
-import argparse
 import logging
 import re
-import sys
-import tempfile
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -28,11 +25,9 @@ from app.entrypoints.ask_planner import (
     _default_methods_for_stage,
     _executable_methods_for_stage,
     _fill_draft_default_methods,
-    build_initial_plan_draft,
     build_run_plan_summary,
     merge_clarification_response,
     next_clarification,
-    save_plan_to_default_path,
 )
 from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.ask_plan import (
@@ -43,7 +38,6 @@ from app.schemas.ask_plan import (
 from app.schemas.shared_parameters import (
     SharedParameters,
 )
-from app.stages.preflight import PlanValidation
 
 try:
     import questionary
@@ -60,150 +54,6 @@ _FIXED_METHOD_STAGES = {"hic_scaffolding"}
 
 class _UserAbort(Exception):
     pass
-
-
-def is_interactive(args: argparse.Namespace) -> bool:
-    if getattr(args, "json", False):
-        return False
-    if getattr(args, "non_interactive", False):
-        return False
-    return sys.stdin.isatty()
-
-
-def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
-    try:
-        return _interactive_loop_inner(plan, args)
-    except (_UserAbort, KeyboardInterrupt, EOFError):
-        print("\nAborted.")
-        return 1
-
-
-def _reset_plan_selection(plan: AskPlanState) -> AskPlanState:
-    return plan.model_copy(
-        update={
-            "selected_stages": None,
-            "resolved_execution_order": None,
-            "selected_methods": None,
-            "shared_parameters": None,
-            "method_parameters": None,
-            "stage_parameters": None,
-            "confirmed": False,
-        }
-    )
-
-
-def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int:
-    set_params = getattr(args, "set_params", None) or []
-
-    if plan.selected_stages is None:
-        draft = build_initial_plan_draft(plan)
-        if draft is not None:
-            draft = _apply_set_params(draft, set_params)
-            reviewed = _review_plan_draft(draft)
-            if reviewed is None:
-                print("\n--- Editing plan manually ---\n")
-                plan = _apply_set_params(plan, set_params)
-            else:
-                plan = reviewed
-        else:
-            plan = _apply_set_params(plan, set_params)
-    else:
-        plan = _apply_set_params(plan, set_params)
-
-    plan_ref = save_plan_to_default_path(plan)
-
-    while True:
-        clarification = next_clarification(plan, ask_plan_ref=plan_ref)
-        if clarification is None:
-            break
-
-        if clarification.kind == "confirm":
-            # Preflight validation before execution confirmation
-            # Note: Validation requires inventory to be completed first, which happens
-            # during execution. During TUI planning, we try to validate if possible,
-            # but skip if the asset registry doesn't exist yet.
-            if plan.selected_stages:
-                validation_attempted = _attempt_preflight_validation(plan)
-                if validation_attempted:
-                    # Validation found blocking issues
-                    choice = _prompt_validation_action()
-
-                    if choice == "modify_stages":
-                        print("\n--- Restarting from stage selection ---\n")
-                        plan = _reset_plan_selection(plan)
-                        plan_ref = save_plan_to_default_path(plan)
-                        continue
-                    elif choice == "provide_data":
-                        print("\n📝 Please add the missing assets to your manifest.")
-                        raw = (
-                            input(
-                                "After updating the manifest, press Enter to "
-                                "re-validate, or type b to edit the plan: "
-                            )
-                            .strip()
-                            .lower()
-                        )
-                        if raw in {"b", "back", "edit"}:
-                            print("\n--- Restarting from stage selection ---\n")
-                            plan = _reset_plan_selection(plan)
-                            plan_ref = save_plan_to_default_path(plan)
-                            continue
-
-                        # Re-validate after user updates manifest
-                        print("\n--- Re-validating after manifest update ---\n")
-                        validation_attempted = _attempt_preflight_validation(plan)
-                        if validation_attempted:
-                            # Still has blocking issues - reset to stage selection
-                            print(
-                                "\n⚠️  Validation still failed. Returning to "
-                                "stage selection so you can edit the plan.\n"
-                            )
-                            plan = _reset_plan_selection(plan)
-                            plan_ref = save_plan_to_default_path(plan)
-                            continue
-                        else:
-                            # Validation passed - continue to confirmation
-                            print("✓ Validation passed! Continuing...\n")
-                    elif choice == "proceed_anyway":
-                        print(
-                            "\n⚠️  Warning: continuing despite preflight "
-                            "validation errors."
-                        )
-                        print(
-                            "Execution may fail later or stop at a human-review "
-                            "gate if required inputs are still missing."
-                        )
-
-            _render_confirm(clarification)
-            if not _prompt_confirm("Proceed?"):
-                print("\n--- Restarting from stage selection ---\n")
-                plan = _reset_plan_selection(plan)
-                plan_ref = save_plan_to_default_path(plan)
-                continue
-            response = AskClarificationResponse(kind="confirm", confirmed=True)
-        else:
-            response = _prompt_for_answer(clarification, plan)
-
-        plan = merge_clarification_response(plan, response)
-        plan_ref = save_plan_to_default_path(plan)
-
-    return _execute_confirmed_plan(plan, args)
-
-
-def apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState:
-    """Apply --set params to a plan. Public for use in non-interactive mode."""
-    return _apply_set_params(plan, set_params)
-
-
-def _parse_set_params(raw: list[str]) -> dict[str, str]:
-    """Parse --set KEY=VALUE arguments into a dictionary (internal helper)."""
-    result: dict[str, str] = {}
-    for item in raw:
-        if "=" not in item:
-            raise ValueError(f"--set value must be KEY=VALUE, got: {item!r}")
-        key, _, value = item.partition("=")
-        result[key.strip()] = value.strip()
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1606,7 +1456,7 @@ def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, A
     Asks simple per-method questions (database path, name, version) and
     auto-fills the rest (method_name, snapshot_date, descriptor_version).
     input_proteins_ref is left unset: function_annotation adopts the resolved
-    proteins_fasta_ref at runtime, which the ask layer cannot know for
+    proteins_fasta_ref at runtime, which the planner cannot know for
     manifest-provided proteins.  Users never see or construct JSON.
     """
     from datetime import date
@@ -1879,181 +1729,3 @@ def _parse_genome_size(raw: str) -> int | str:
     suffix = m.group(2).lower()
     multiplier = _GENOME_SIZE_MULTIPLIERS.get(suffix, 1)
     return int(number * multiplier)
-
-
-def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState:
-    if not set_params:
-        return plan
-    parsed = _parse_set_params(set_params)
-    # Assembly/Flye MVP only. Generalize via method descriptors when more
-    # executable methods are supported.
-    _PARAM_ALIASES = {
-        "genome_size": ("shared_parameters", "estimated_genome_size"),
-        "estimated_genome_size": ("shared_parameters", "estimated_genome_size"),
-        "platform": ("shared_parameters", "platform"),
-        "read_type": ("shared_parameters", "read_type"),
-        "threads": ("assembly.candidate.flye", "threads"),
-        "hic_threads": ("hic_scaffolding.candidate.autohic", "threads"),
-    }
-    existing = dict(plan.method_parameters or {})
-    shared = (
-        plan.shared_parameters.model_dump(exclude_none=True)
-        if plan.shared_parameters
-        else {}
-    )
-    for key, value in parsed.items():
-        normalized_value: Any = value
-        alias = _PARAM_ALIASES.get(key)
-        if alias:
-            method, param = alias
-            if method == "shared_parameters":
-                if param == "estimated_genome_size":
-                    normalized_value = _parse_genome_size(value)
-                if param == "read_type":
-                    normalized_value = FLYE_TO_SHARED_READ_TYPE.get(
-                        str(normalized_value),
-                        normalized_value,
-                    )
-                if param == "platform":
-                    normalized_value = _normalize_shared_platform(normalized_value)
-                shared[param] = normalized_value
-                continue
-            bucket = dict(existing.get(method, {}))
-            bucket[param] = normalized_value
-            existing[method] = bucket
-    update: dict[str, Any] = {}
-    if existing:
-        update["method_parameters"] = existing
-    if shared:
-        shared = _derive_shared_parameter_defaults(shared)
-        update["shared_parameters"] = SharedParameters.model_validate(shared)
-    if update:
-        return plan.model_copy(update=update)
-    return plan
-
-
-def _attempt_preflight_validation(plan: AskPlanState) -> bool:
-    """
-    Attempt preflight validation before execution.
-
-    Returns True if validation failed or could not be completed safely.
-    Returns False if validation passed.
-    """
-    try:
-        # Load the manifest and run inventory in a disposable session layout.
-        from app.schemas.state import initial_state
-        from app.stages.inventory.nodes import register_assets, validate_inputs
-        from app.stages.preflight import validate_execution_plan
-        from app.storage.materialization import materialize_run_layout
-        from app.storage.paths import SessionPaths
-
-        manifest_path = Path(plan.manifest_ref)
-        if not manifest_path.exists():
-            print(
-                "\nPreflight validation could not run: manifest not found: "
-                f"{manifest_path}",
-                file=sys.stderr,
-            )
-            return True
-
-        with tempfile.TemporaryDirectory(prefix="gene-agent-preflight-") as temp_root:
-            paths = SessionPaths(temp_root, plan.session_id)
-            materialize_run_layout(
-                paths,
-                manifest_path=manifest_path,
-                run_config_path=None,
-            )
-
-            # Create initial state and run inventory to get asset_registry_ref.
-            state = initial_state(
-                session_id=plan.session_id,
-                input_manifest_ref=paths.to_ref(paths.manifest_path),
-                data_dir=str(paths.run_dir),
-            )
-
-            # Run the inventory nodes needed to populate asset_registry_ref.
-            for inventory_step in (validate_inputs, register_assets):
-                update = inventory_step(state)
-                if update:
-                    state = {**state, **update}
-
-            # Now validate with the populated state.
-            validation = validate_execution_plan(
-                state=state,
-                requested_stages=plan.selected_stages or [],
-            )
-
-        if not validation.valid:
-            _render_validation_errors(validation)
-            return True
-
-        return False
-
-    except Exception as exc:
-        logger.warning("Preflight validation failed unexpectedly.", exc_info=True)
-        print(
-            f"\nPreflight validation could not complete: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        print(
-            "Fix the validation error, edit the plan, or choose the advanced "
-            "override to proceed anyway.",
-            file=sys.stderr,
-        )
-        return True
-
-
-def _render_validation_errors(validation: PlanValidation) -> None:
-    """Display friendly validation errors to the user."""
-    print(f"\n{validation.summary}\n")
-
-    # Display first blocker details
-    if validation.first_blocker:
-        blocker = validation.checks[validation.first_blocker]
-        print(f"Stage: {blocker.stage}")
-        print(f"Status: {'✓ can run' if blocker.can_run else '✗ cannot run'}\n")
-
-        if blocker.missing:
-            print("Missing resources:")
-            for res in blocker.missing:
-                print(f"  • {res.resource_name}: {res.message}")
-
-        if blocker.suggestions:
-            print("\n💡 Suggestions:")
-            for suggestion in blocker.suggestions:
-                print(f"  → {suggestion}")
-
-    # Display overall suggestions
-    if validation.suggestions:
-        print("\n📋 Next steps:")
-        for suggestion in validation.suggestions:
-            print(f"  • {suggestion}")
-
-
-def _prompt_validation_action() -> str:
-    """Prompt user for action when validation fails."""
-    print("\nWhat would you like to do?")
-    print("  1. Modify stage selection (remove blocked stages)")
-    print("  2. Provide missing data (add assets to manifest)")
-    print("  3. Proceed anyway (advanced)")
-
-    invalid_attempts = 0
-    while True:
-        choice = input("\nYour choice [1/2/3]: ").strip()
-        if choice == "1":
-            return "modify_stages"
-        elif choice == "2":
-            return "provide_data"
-        elif choice == "3":
-            return "proceed_anyway"
-        else:
-            invalid_attempts += 1
-            print("Invalid choice. Please enter 1, 2, or 3.")
-            if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
-                raise _UserAbort()
-
-
-def _execute_confirmed_plan(plan: AskPlanState, args: argparse.Namespace) -> int:
-    from app.entrypoints.ask_execution import execute_confirmed_plan
-
-    return execute_confirmed_plan(plan, args)

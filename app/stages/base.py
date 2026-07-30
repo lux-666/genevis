@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -19,6 +18,7 @@ from app.schemas.state import (
     TopLevelState,
     validate_stage_outputs,
 )
+from app.storage.asset_registry import load_asset_records
 from app.storage.paths import SessionPaths
 
 
@@ -160,17 +160,9 @@ def load_assets_from_registry(
     Returns:
         List of matching assets, or empty list if not found/error
     """
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
+    if not state.get("asset_registry_ref"):
         return []
-
-    registry_path = Path(str(registry_ref))
-    if not registry_path.exists():
-        return []
-
-    try:
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        assets = registry.get("assets", [])
-        return [asset for asset in assets if asset.get("asset_type") in asset_types]
-    except (OSError, json.JSONDecodeError):
-        return []
+    return [
+        record.model_dump(mode="json")
+        for record in load_asset_records(state, set(asset_types))
+    ]

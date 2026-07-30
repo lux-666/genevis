@@ -370,7 +370,7 @@ class TopLevelState(TypedDict, total=False):
 
     # Durable references to external contracts and compact artifact indexes.
     input_manifest_ref: Required[str]
-    asset_registry_ref: NotRequired[str | None]
+    asset_registry_ref: NotRequired[dict[str, Any] | None]
     stage_plan_ref: NotRequired[str | None]
 
     # Human-review or pause metadata. Keep payloads short and ref-heavy.
@@ -410,7 +410,7 @@ class StateUpdate(TypedDict, total=False):
     current_stage: DomainStage
     requested_stages: list[DomainStage] | None
     input_manifest_ref: str
-    asset_registry_ref: str | None
+    asset_registry_ref: dict[str, Any] | None
     stage_plan_ref: str | None
     active_interrupt: ActiveInterrupt | None
     shared_parameters: SharedParameters | dict[str, Any] | None

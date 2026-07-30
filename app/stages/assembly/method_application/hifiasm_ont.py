@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from pathlib import Path
 from typing import cast
 
 from app.configuration import load_descriptor_registry
@@ -27,8 +28,12 @@ from app.stages.assembly.command_builder import (
     render_assembly_cli,
     resolve_assembly_parameters,
 )
+from app.stages.assembly.method_application.hifiasm_outputs import (
+    hifiasm_native_output_declarations,
+)
 from app.stages.assembly.method_application.support import (
     approved_assembly_read_type,
+    build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
@@ -42,6 +47,7 @@ from app.stages.assembly.state import (
 )
 from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
+from app.storage.publish import shell_publish_file
 
 LIFECYCLE = MethodExecutionLifecycle(
     stage="assembly",
@@ -138,6 +144,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     draft = artifact_dir / "draft_assembly.fasta"
+    temp_draft = working_dir / "draft_assembly.fasta"
     prefix = output_dir / "hifiasm_ont"
     gfa = output_dir / "hifiasm_ont.bp.p_ctg.gfa"
     fallback_gfa = output_dir / "hifiasm_ont.p_ctg.gfa"
@@ -166,10 +173,20 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
         f" elif [ -f {shlex.quote(str(fallback_gfa))} ];"
         f" then gfa={shlex.quote(str(fallback_gfa))};"
         " else echo 'expected hifiasm primary contig GFA missing' >&2; exit 1; fi\n"
-        f'awk \'/^S/{{print ">"$2"\\n"$3}}\' "$gfa" > {shlex.quote(str(draft))}\n',
+        f'awk \'/^S/{{print ">"$2"\\n"$3}}\' "$gfa" > '
+        f"{shlex.quote(str(temp_draft))}\n"
+        f"{shell_publish_file(temp_draft, draft)}\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
+    try:
+        input_dependencies = build_read_input_dependencies(
+            state, output, "primary", read_paths
+        )
+    except ValueError as exc:
+        return fail_update(
+            state, f"Hifiasm ONT input dependency cardinality error: {exc}"
+        )
     return freeze_parameterized_attempt(
         state,
         LIFECYCLE,
@@ -180,6 +197,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
         working_dir=working_dir,
         expected_outputs=[draft],
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         command_payload={
             "argv": argv,
             "command": command,
@@ -214,15 +232,16 @@ def collect_hifiasm_ont_artifacts(state: TopLevelState) -> StateUpdate:
     [execution] = load_method_executions(state, LIFECYCLE)
     attempt = execution.attempt
     metadata = dict(attempt.metadata or {})
+    output_dir = Path(str(metadata.get("hifiasm_ont_output_dir") or ""))
     return collect_method_artifacts(
         state,
         LIFECYCLE,
         execution=execution,
         substep_name="hifiasm_ont_assembly",
-        extra_artifacts=[],
-        bundle_logs={},
-        bundle_metadata={
-            "read_profile": metadata.get("read_profile"),
-            "threads": metadata.get("threads"),
-        },
+        native_outputs=hifiasm_native_output_declarations(
+            output_dir,
+            output_prefix="hifiasm_ont",
+            role_namespace="hifiasm_ont",
+            artifact_type="assembly.hifiasm_ont_native_gfa",
+        ),
     )

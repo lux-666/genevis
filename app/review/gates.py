@@ -74,7 +74,8 @@ class ReviewGateDeclaration:
         builder = getattr(module, function_name)
         if not callable(builder):
             raise TypeError(
-                f"interrupt_context_builder is not callable: {self.interrupt_context_builder}"
+                "interrupt_context_builder is not callable: "
+                f"{self.interrupt_context_builder}"
             )
         return builder
 
@@ -233,7 +234,7 @@ register_review_gate(
         prompt_bundle="review.assembly_review_recommend",
         prompt_adapter="assembly_review",
         template_preferred_decision="accept",
-        required_resume_fields=("candidate_id", "final_assembly_ref"),
+        required_resume_fields=("candidate_id",),
         proposal_kind="assembly_candidate_review",
         proposal_label="Assembly result and evidence review",
         parameter_recommendation_status="mixed",

@@ -42,7 +42,7 @@ class TuiWorkflowTests(unittest.TestCase):
         path.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         return path
 
-    def test_initial_goal_can_confirm_ont_and_hic_without_follow_up(self):
+    def test_initial_goal_can_confirm_ont_and_hic_assets_inline(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "data"
@@ -87,10 +87,12 @@ class TuiWorkflowTests(unittest.TestCase):
                 captured["draft"].intake.hic_reads.pairs[0].r1,
                 str(r1.resolve()),
             )
-            self.assertIsNone(next_intake_clarification(captured["draft"]))
+            # Assets are confirmed; T2T without species still needs the batch question.
+            clarification = next_intake_clarification(captured["draft"])
+            self.assertIsNotNone(clarification)
+            self.assertEqual(clarification.kind, "t2t_batch")
             paths = SessionPaths(data_dir, "s1")
             self.assertTrue(paths.manifest_draft_path.is_file())
-            self.assertFalse(paths.ask_plan_path.exists())
 
     def test_initial_goal_does_not_assign_unlabelled_path_to_ont(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -450,7 +452,6 @@ class TuiWorkflowTests(unittest.TestCase):
             self.assertTrue(paths.run_config_path.is_file())
             self.assertTrue(paths.dependency_manifest_path.is_file())
             self.assertTrue(paths.frozen_inputs_path.is_file())
-            self.assertFalse(paths.ask_plan_path.exists())
             execute.assert_called_once_with(
                 "s1",
                 draft.data_dir,

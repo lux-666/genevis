@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gene-agent"
 version = "0.1.0"
-description = "LangGraph-driven ONT/CLR genome assembly and annotation workflow agent"
+description = "LangGraph-driven multiplatform long-read genome assembly and annotation agent for ONT, HiFi, CLR, and CycloneSEQ"
 requires-python = ">=3.11"
 dependencies = [
     # LangGraph + checkpointer pins. We invoke `graph.get_state`,

@@ -43,20 +43,20 @@ class AssemblyDedupCursor(TypedDict, total=False):
     missing_tools: list[str]
     method_name: str
 
-    selected_candidate_refs: list[str]
-    candidate_ref: str
+    candidate_bundle_ref: ArtifactRefJson
     candidate_id: str | None
+    input_primary_output_ref: ArtifactRefJson
     input_assembly_ref: str
     output_assembly_ref: str
-    long_reads_ref: str
-    long_read_refs: list[str]
-    read_mapping_preset: Literal["map-hifi", "map-pb", "map-ont"]
+    input_member_ids: list[str]
+    input_member_platforms: list[str]
     cutoffs_strategy: Literal["calcuts_auto"]
     get_seqs_exclude_haplotigs: bool
 
     execution_attempts: list[MethodExecutionAttemptJson]
     purged_assembly_ref: str | None
-    purged_candidate_ref: str | None
+    purged_candidate_bundle_ref: ArtifactRefJson | None
+    purged_primary_output_ref: ArtifactRefJson | None
     artifact_refs: list[str]
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from langgraph.graph.state import CompiledStateGraph
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import asset_input_dependencies
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -121,6 +122,17 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
     )
     script_path.chmod(0o755)
 
+    try:
+        input_dependencies = asset_input_dependencies(
+            state,
+            [str(asset["asset_id"]) for asset in assets],
+            read_paths,
+        )
+    except ValueError as exc:
+        return update_survey_output(
+            state,
+            {"status": "failed", "reason": f"jellyfish input dependency error: {exc}"},
+        )
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:genome_survey:jellyfish",
         session_id=session_id,
@@ -131,6 +143,7 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[kmer_db, kmer_hist],
         env=output.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "input_asset_refs": output.get("survey_input_refs", []),
             "input_family": input_family,

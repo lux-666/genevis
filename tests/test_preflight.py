@@ -10,12 +10,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state
 from app.stages.preflight import (
     check_stage_prerequisites,
     validate_execution_plan,
 )
+from app.storage.artifacts import publish_artifact_record
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
 
 
 class PreflightCheckTests(unittest.TestCase):
@@ -30,6 +34,20 @@ class PreflightCheckTests(unittest.TestCase):
         )
         return path
 
+    def _registry_ref(self, data_dir: str, session_id: str, registry_path: Path) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", "asset_registry.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(registry_path.read_text(encoding="utf-8"), encoding="utf-8")
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def test_check_stage_prerequisites_missing_assembly(self):
         """测试缺少 assembly 时的检查"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -39,9 +57,9 @@ class PreflightCheckTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}  # No upstream outputs
 
             check = check_stage_prerequisites(state, "hic_scaffolding")
@@ -74,9 +92,9 @@ class PreflightCheckTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             check = check_stage_prerequisites(state, "hic_scaffolding")
@@ -98,9 +116,9 @@ class PreflightCheckTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {"assembly_review": {"status": "completed"}}
             state["resource_refs"]["assembly"] = ResourceRef(
                 resource_type="assembly",
@@ -133,9 +151,9 @@ class PreflightCheckTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             check = check_stage_prerequisites(state, "gene_annotation")
@@ -166,9 +184,9 @@ class PreflightCheckTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
             state["skip_reasons"] = {
                 "repeat_annotation": "repeat_annotation_skipped_by_user"
@@ -193,6 +211,20 @@ class PreflightValidationTests(unittest.TestCase):
         )
         return path
 
+    def _registry_ref(self, data_dir: str, session_id: str, registry_path: Path) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", "asset_registry.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(registry_path.read_text(encoding="utf-8"), encoding="utf-8")
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def test_validate_execution_plan_valid(self):
         """测试有效的执行计划"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -215,9 +247,9 @@ class PreflightValidationTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             validation = validate_execution_plan(
@@ -242,9 +274,9 @@ class PreflightValidationTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             validation = validate_execution_plan(
@@ -266,9 +298,9 @@ class PreflightValidationTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             # Both stages require assembly, should block at first one
@@ -304,9 +336,9 @@ class PreflightValidationTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             # read_qc requires reads, hic_scaffolding requires assembly
@@ -342,9 +374,9 @@ class PreflightValidationTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             validation = validate_execution_plan(
@@ -364,9 +396,9 @@ class PreflightValidationTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             validation = validate_execution_plan(
@@ -401,9 +433,9 @@ class PreflightValidationTests(unittest.TestCase):
             state = initial_state(
                 session_id="s1",
                 input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
-            state["asset_registry_ref"] = str(registry)
+            state["asset_registry_ref"] = self._registry_ref(state["data_dir"], state["session_id"], registry)
             state["stage_outputs"] = {}
 
             validation = validate_execution_plan(

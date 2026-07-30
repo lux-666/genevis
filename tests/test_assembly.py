@@ -14,6 +14,7 @@ from app.control.lifecycle import resume_review_state
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
+    validate_assembly_selection,
 )
 from app.review.base import ResumeReviewRequest
 from app.schemas.descriptors import DescriptorRegistry
@@ -27,7 +28,8 @@ from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
 from app.stages.assembly.nodes import infer_input_profile
-from app.storage.artifacts import resolve_artifact_ref
+from app.schemas.artifacts import ArtifactMeta
+from app.storage.artifacts import publish_artifact_record, resolve_artifact_ref
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -50,29 +52,71 @@ def _attempt_execution(state: dict, attempt: dict) -> dict:
     return _ref_json(state, attempt["execution_ref"])
 
 
+def _native_output_path(state: dict, candidate: dict, role: str) -> Path:
+    output = next(
+        item for item in candidate["native_outputs"] if item["native_role"] == role
+    )
+    return _ref_path(state, output["artifact_ref"])
+
+
 def _assembly_selection(
     *,
     read_type: str,
     primary_method: str,
-    fallback_method: str | None = None,
     source: str = "run_config",
     rationale: str = "test fixture explicitly selects the assembly method",
 ) -> dict:
     return {
         "read_type": read_type,
         "primary_method": primary_method,
-        "fallback_method": fallback_method,
         "source": source,
         "rationale": rationale,
     }
 
 
 def _set_long_reads(state: dict, *paths: Path, platform: str = "cycloneseq") -> None:
+    asset_ids = [f"fixture-long-read-{index}" for index, _path in enumerate(paths)]
+    registry_content = json.dumps(
+        {
+            "schema_version": 1,
+            "session_id": state["session_id"],
+            "assets": [
+                {
+                    "asset_id": asset_ids[index],
+                    "asset_type": "clean_long_reads",
+                    "path": str(path.resolve(strict=False)),
+                    "platform": platform,
+                    "format": "fastq",
+                    "metadata": {
+                        "manifest_entry_ordinal": 0,
+                        "path_ordinal": index,
+                    },
+                }
+                for index, path in enumerate(paths)
+            ],
+        }
+    )
+    _session_paths = SessionPaths.from_run_dir(state["data_dir"])
+    source = _session_paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(registry_content, encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        source,
+        stage="inventory",
+        method_name="inventory.register_assets",
+        artifact_type="asset_registry",
+    )
+    published = publish_artifact_record(state["data_dir"], state["session_id"], artifact)
+    state["asset_registry_ref"] = published.ref.model_dump(mode="json")
     state["resource_refs"]["long_reads"] = ResourceRef(
         resource_type="long_reads",
         paths=[str(path) for path in paths],
         source_stage="read_qc",
-        metadata={"platforms": [platform], "formats": ["fastq"]},
+        metadata={
+            "asset_ids": asset_ids,
+            "platforms": [platform],
+            "formats": ["fastq"],
+        },
     ).to_dict()
 
 
@@ -139,6 +183,18 @@ class AssemblyDescriptorTests(unittest.TestCase):
                 self.assertIn("flye", mapping)
                 self.assertIn("nextdenovo", mapping)
                 self.assertTrue({"hifiasm", "hifiasm_ont"} & set(mapping))
+
+    def test_removed_fallback_selection_is_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_assembly_selection(
+                {
+                    "read_type": "cyclone",
+                    "primary_method": "assembly.candidate.flye",
+                    "fallback_method": "assembly.candidate.nextdenovo",
+                    "source": "run_config",
+                    "rationale": "removed checkpoint field",
+                }
+            )
 
 
 class AssemblyStageTests(unittest.TestCase):
@@ -235,6 +291,24 @@ class AssemblyStageTests(unittest.TestCase):
         )
         return path
 
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", "asset_registry.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def _state(self, tmpdir: str, registry_ref: str | None):
         run_dir = v2_run_dir(tmpdir, "s1")
         state = initial_state(
@@ -243,7 +317,11 @@ class AssemblyStageTests(unittest.TestCase):
             data_dir=str(run_dir),
         )
         state["current_stage"] = "assembly"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(str(run_dir), "s1", registry_ref)
+            if registry_ref is not None
+            else None
+        )
         state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
         return state
 
@@ -399,7 +477,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             self.assertTrue(assembly["input_profile"]["has_rnaseq"])
 
-    def test_plans_primary_and_one_fallback_from_fofn_and_genome_size_prior(self):
+    def test_plans_only_primary_backbone_from_fofn_and_genome_size_prior(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -422,7 +500,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_selection": _assembly_selection(
                         read_type="cyclone",
                         primary_method="assembly.candidate.flye",
-                        fallback_method="assembly.candidate.nextdenovo",
                     ),
                 },
             }
@@ -430,26 +507,32 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(
+                result["current_stage"],
+                "assembly_dedup",
+                result.get("last_error") or result["stage_outputs"].get("assembly"),
+            )
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "planned")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
-            self.assertEqual(
-                assembly["fallback_method"], "assembly.candidate.nextdenovo"
+            self.assertNotIn("fallback_method", assembly)
+            candidate = _ref_json(
+                result,
+                assembly["planned_candidate_bundle_ref"],
             )
-            self.assertEqual(len(assembly["selected_candidate_refs"]), 2)
-            self.assertLessEqual(len(assembly["selected_candidate_refs"]), 2)
-            for candidate_ref in assembly["selected_candidate_refs"]:
-                candidate = json.loads(Path(candidate_ref).read_text(encoding="utf-8"))
-                self.assertEqual(candidate["status"], "planned")
-                self.assertEqual(candidate["input_ref"], str(reads))
-                self.assertEqual(candidate["genome_size_prior"], 2_000_000)
-                self.assertEqual(candidate["artifact_type"], "draft_assembly.candidate")
-                self.assertTrue(
-                    candidate["expected_outputs"]["draft_assembly_fasta"].endswith(
-                        ".fasta"
-                    )
+            self.assertEqual(candidate["status"], "planned")
+            self.assertEqual(
+                candidate["input_ref"],
+                str(reads.resolve(strict=False)),
+            )
+            self.assertEqual(candidate["genome_size_prior"], 2_000_000)
+            self.assertEqual(candidate["artifact_type"], "draft_assembly.candidate")
+            self.assertNotIn("logs", candidate)
+            self.assertTrue(
+                candidate["expected_outputs"]["draft_assembly_fasta"].endswith(
+                    ".fasta"
                 )
+            )
 
     def test_missing_genome_size_rejects_methods_that_require_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -484,7 +567,7 @@ class AssemblyStageTests(unittest.TestCase):
                 rejected["assembly.candidate.nextdenovo"], "genome_size_required"
             )
 
-    def test_auto_planning_limits_selection_to_primary_and_fallback(
+    def test_auto_planning_materializes_only_the_primary_backbone(
         self,
     ):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -516,11 +599,10 @@ class AssemblyStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(len(assembly["selected_candidate_refs"]), 2)
+            self.assertIn("planned_candidate_bundle_ref", assembly)
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
-            self.assertEqual(
-                assembly["fallback_method"], "assembly.candidate.nextdenovo"
-            )
+            self.assertNotIn("fallback_method", assembly)
+            self.assertNotIn("selected_candidate_refs", assembly)
             self.assertNotIn(
                 "assembly.candidate.hifiasm", assembly["candidate_methods"]
             )
@@ -563,7 +645,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
-            self.assertIn("assembly.candidate.hifiasm", assembly["selected_methods"])
+            self.assertNotIn("selected_methods", assembly)
             self.assertIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
 
     def test_raw_long_reads_with_pacbio_hifi_platform_count_as_hifi_route(self):
@@ -667,7 +749,10 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["status"], "planned")
             self.assertNotIn("draft_assembly_ref", assembly)
             candidate = json.loads(
-                Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["planned_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
             self.assertEqual(candidate["status"], "planned")
             self.assertFalse(candidate["metadata"]["execution_enabled"])
@@ -776,7 +861,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["status"], "draft_ready")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
-            self.assertIn("executed_candidate_refs", assembly)
+            self.assertIn("executed_candidate_bundle_ref", assembly)
             self.assertNotIn("flye_frozen_attempt", assembly)
             self.assertNotIn("flye_execution_result", assembly)
             self.assertNotIn("env", assembly)
@@ -788,7 +873,10 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
 
             candidate = json.loads(
-                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["executed_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(
@@ -799,10 +887,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(
                 candidate["metadata"]["draft_assembly_ref_status"], "materialized"
             )
-            self.assertEqual(
-                len(assembly["candidate_artifact_refs"]),
-                len(set(assembly["candidate_artifact_refs"])),
-            )
+            self.assertNotIn("candidate_artifact_refs", assembly)
 
             artifact_events = [
                 json.loads(line)
@@ -861,7 +946,10 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["input_type"], "clean_long_reads")
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
             candidate = json.loads(
-                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["executed_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
             self.assertEqual(candidate["status"], "executed")
 
@@ -935,7 +1023,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_selection": _assembly_selection(
                         read_type="cyclone",
                         primary_method="assembly.candidate.flye",
-                        fallback_method="assembly.candidate.nextdenovo",
                     ),
                     "parameter_recommendation": {
                         "max_execution_retries": 0,
@@ -1023,6 +1110,19 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
+            self.assertTrue(
+                {
+                    "fallback_method",
+                    "selected_methods",
+                    "selected_candidate_plans",
+                    "candidate_artifact_refs",
+                    "selected_candidate_refs",
+                    "selected_candidate_bundle_refs",
+                    "executed_candidate_refs",
+                    "executed_candidate_bundle_refs",
+                    "candidate_assembly_refs",
+                }.isdisjoint(assembly)
+            )
             self.assertEqual(
                 assembly["substeps"]["hifiasm_assembly"]["status"], "executed"
             )
@@ -1033,9 +1133,37 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertNotIn("hifiasm_execution_result", assembly)
 
             candidate = json.loads(
-                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["executed_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
             self.assertEqual(candidate["status"], "executed")
+            self.assertEqual(
+                candidate["plan_ref"],
+                assembly["planned_candidate_bundle_ref"],
+            )
+            frozen_attempt = _ref_json(
+                result,
+                assembly["parameter_attempts"][0]["frozen_attempt_ref"],
+            )
+            self.assertEqual(
+                frozen_attempt["attempt"]["metadata"][
+                    "planned_candidate_bundle_ref"
+                ],
+                assembly["planned_candidate_bundle_ref"],
+            )
+            self.assertEqual(
+                _ref_path(result, candidate["primary_output"]),
+                draft,
+            )
+            primary_graph = next(
+                output
+                for output in candidate["native_outputs"]
+                if output["native_role"] == "hifiasm.primary_graph_bp"
+            )
+            self.assertEqual(primary_graph["artifact_class"], "assembly_graph")
+            self.assertTrue(_ref_path(result, primary_graph["artifact_ref"]).is_file())
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
             self.assertEqual(
@@ -1076,7 +1204,11 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(
+                result["current_stage"],
+                "assembly_dedup",
+                result.get("last_error") or result["stage_outputs"].get("assembly"),
+            )
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(
                 assembly["primary_method"], "assembly.candidate.hifiasm_ont"
@@ -1090,6 +1222,19 @@ class AssemblyStageTests(unittest.TestCase):
             command = _attempt_command(result, assembly["parameter_attempts"][0])
             script = Path(command["script_path"]).read_text(encoding="utf-8")
             self.assertIn("--ont", script)
+            candidate = _ref_json(
+                result,
+                assembly["executed_candidate_bundle_ref"],
+            )
+            primary_graph = _native_output_path(
+                result,
+                candidate,
+                "hifiasm_ont.primary_graph_bp",
+            )
+            self.assertTrue(primary_graph.is_file())
+            self.assertNotIn("logs", candidate)
+            self.assertNotIn("executed_candidate_refs", assembly)
+            self.assertNotIn("executed_candidate_bundle_refs", assembly)
 
     def test_local_hifiasm_rejects_invalid_threads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1255,7 +1400,10 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
 
             candidate = json.loads(
-                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["executed_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(candidate["metadata"]["execution_enabled"])
@@ -1263,13 +1411,24 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(
                 candidate["metadata"]["draft_assembly_ref_status"], "materialized"
             )
-            run_cfg = Path(candidate["logs"]["run_cfg"])
+            run_cfg = _native_output_path(
+                result,
+                candidate,
+                "nextdenovo.run_config",
+            )
             self.assertTrue(run_cfg.exists())
             run_cfg_text = run_cfg.read_text(encoding="utf-8")
             self.assertIn("read_type = ont", run_cfg_text)
             self.assertIn("genome_size = 2000000", run_cfg_text)
             self.assertIn("read_cutoff = 1000", run_cfg_text)
-            self.assertEqual(candidate["logs"]["run_cfg"], str(run_cfg))
+            self.assertEqual(
+                next(
+                    output["artifact_class"]
+                    for output in candidate["native_outputs"]
+                    if output["native_role"] == "nextdenovo.run_config"
+                ),
+                "config",
+            )
 
             ledger_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             events = [
@@ -1321,12 +1480,19 @@ class AssemblyStageTests(unittest.TestCase):
             attempt = assembly["parameter_attempts"][0]
             command_payload = _attempt_command(result, attempt)
             candidate = json.loads(
-                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["executed_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
-            run_cfg = Path(candidate["logs"]["run_cfg"])
+            run_cfg = _native_output_path(
+                result,
+                candidate,
+                "nextdenovo.run_config",
+            )
             run_cfg_text = run_cfg.read_text(encoding="utf-8")
             self.assertIn("read_cutoff = 1000", run_cfg_text)
-            self.assertIn("parallel_jobs = 32", run_cfg_text)
+            self.assertIn("parallel_jobs = 1", run_cfg_text)
             self.assertIn("sort_options = -m 1g -t 32", run_cfg_text)
             self.assertIn("nextgraph_options = -a 1", run_cfg_text)
             sources = command_payload["parameter_sources"]
@@ -1362,6 +1528,24 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         )
         return path
 
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", "asset_registry.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def _state(self, tmpdir: str, registry_ref: str):
         run_dir = v2_run_dir(tmpdir, "s1")
         state = initial_state(
@@ -1370,7 +1554,9 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             data_dir=str(run_dir),
         )
         state["current_stage"] = "assembly"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = self._publish_registry_ref(
+            str(run_dir), "s1", registry_ref
+        )
         state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
         return state
 
@@ -1417,7 +1603,11 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                     "asset_id": "s1:clean_long_reads:clean.fastq",
                     "asset_type": "clean_long_reads",
                     "path": str(clean_reads),
-                    "platform": "cycloneseq",
+                    "platform": (
+                        "pacbio_hifi"
+                        if shared_read_type == "pacbio_hifi"
+                        else "ont"
+                    ),
                 }
             ],
         )
@@ -1505,7 +1695,10 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertIn("--pacbio-hifi", script_text)
             self.assertIn("--genome-size 2000000", script_text)
             candidate = json.loads(
-                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["executed_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
             self.assertEqual(candidate["metadata"]["read_profile"], "pacbio-hifi")
             self.assertEqual(candidate["metadata"]["estimated_genome_size"], 2_000_000)
@@ -1553,7 +1746,10 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             # strips it; the executed Flye candidate bundle carries execution
             # provenance.
             candidate = json.loads(
-                Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8")
+                _ref_path(
+                    result,
+                    assembly["executed_candidate_bundle_ref"],
+                ).read_text(encoding="utf-8")
             )
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertNotIn("execution_mode", candidate["metadata"])

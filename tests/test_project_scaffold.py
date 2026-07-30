@@ -83,9 +83,6 @@ class ProjectScaffoldTests(unittest.TestCase):
             root / "docs" / "stage_contracts.md",
             root / "docs" / "governance.md",
             root / "descriptors" / "registry.yaml",
-            root / "descriptors" / "assets" / "ont_clr_long_reads.yaml",
-            root / "config" / "defaults.yaml",
-            root / "config" / "resource_profiles.yaml",
         ]
 
         missing = [path for path in expected_paths if not path.exists()]

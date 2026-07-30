@@ -14,7 +14,11 @@ from app.review.persistence import (
     persist_review_decision,
     persist_review_request,
 )
-from app.schemas.artifacts import ArtifactRef, HiCScaffoldDecisionArtifact
+from app.schemas.artifacts import (
+    HIC_SCAFFOLDED_ASSEMBLY,
+    ArtifactRef,
+    HiCScaffoldDecisionArtifact,
+)
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, append_route_trace
 from app.stages.hic_scaffolding.method_application.support import (
@@ -27,8 +31,10 @@ from app.stages.hic_scaffolding.parameters.workflow import (
     prepare_autohic_review_retry,
 )
 from app.stages.hic_scaffolding.state import HIC_SCAFFOLDING_CURSOR_ADAPTER
+from app.stages.read_resolution import resolve_hic_pairs
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
-from app.stages.resource_specs import HIC_READS_SPEC, assembly_resource_spec
+from app.stages.resource_specs import assembly_resource_spec
+from app.storage.artifacts import artifact_ref_for_path
 from app.storage.ledger import Ledger
 from app.workflow import next_stage_name
 
@@ -50,7 +56,14 @@ def resolve_hic_inputs(state: TopLevelState) -> StateUpdate:
         resource_spec=assembly_resource_spec(),
     )
     final_assembly_ref, source = assembly.path, assembly.source
-    hic_assets = _hic_assets(state)
+    try:
+        hic_assets = _hic_assets(state)
+    except ValueError as exc:
+        return _fail_update(
+            state,
+            f"Hi-C provenance is invalid: {exc}",
+            failure_kind="invalid_input",
+        )
     hic_read_refs = [
         str(asset.get("asset_id")) for asset in hic_assets if asset.get("asset_id")
     ]
@@ -303,6 +316,50 @@ def apply_hic_scaffolding_resume_decision(
     ):
         raise ResumeValidationError("AutoHiC adoption review request binding mismatch")
 
+    adoption_resource_metadata: dict[str, Any] | None = None
+    if request.decision == "accept_candidate":
+        if request.decided_by != "human":
+            raise ResumeValidationError(
+                "AutoHiC candidate adoption requires a human review decision"
+            )
+        try:
+            current_assembly = resolve_stage_resource(
+                state,
+                resource_spec=assembly_resource_spec(),
+            )
+            if (
+                not current_assembly.found
+                or current_assembly.path is None
+                or Path(current_assembly.path).resolve(strict=False)
+                != Path(str(pre_hic_assembly_ref)).resolve(strict=False)
+            ):
+                raise ValueError(
+                    "current assembly no longer matches pre_hic_assembly_ref"
+                )
+            primary_output_ref = artifact_ref_for_path(
+                absolute_data_dir(state),
+                state["session_id"],
+                final_assembly,
+                expected_type=HIC_SCAFFOLDED_ASSEMBLY,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise ResumeValidationError(
+                f"AutoHiC adopted assembly provenance is invalid: {exc}"
+            ) from exc
+        adoption_resource_metadata = {
+            "decision": request.decision,
+            "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
+            "primary_output_ref": primary_output_ref.model_dump(mode="json"),
+        }
+        if current_assembly.metadata.get("candidate_bundle_ref") is not None:
+            adoption_resource_metadata["input_candidate_bundle_ref"] = (
+                current_assembly.metadata["candidate_bundle_ref"]
+            )
+        if current_assembly.metadata.get("primary_output_ref") is not None:
+            adoption_resource_metadata["input_primary_output_ref"] = (
+                current_assembly.metadata["primary_output_ref"]
+            )
+
     decision_metadata = {
         **dict(request.metadata),
         "review_evidence": {
@@ -427,23 +484,26 @@ def apply_hic_scaffolding_resume_decision(
             **stage_update,
             "last_error": "hic_scaffolding stopped by human review decision",
         }
-    return {
+    update: StateUpdate = {
         "current_stage": next_stage_name("hic_scaffolding"),
         "supervision_state": "running_stage",
         "active_interrupt": None,
         **stage_update,
         "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
-        "resource_refs": update_resource_ref(
-            state,
-            "assembly",
-            [final_assembly],
-            "hic_scaffolding",
-            {
-                "decision": request.decision,
-                "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
-            },
-        ),
     }
+    if request.decision == "keep_prior_assembly":
+        return update
+
+    if adoption_resource_metadata is None:
+        raise ResumeValidationError("AutoHiC adoption metadata is unavailable")
+    update["resource_refs"] = update_resource_ref(
+        state,
+        "assembly",
+        [final_assembly],
+        "hic_scaffolding",
+        adoption_resource_metadata,
+    )
+    return update
 
 
 def fail_hic_scaffolding(state: TopLevelState) -> StateUpdate:
@@ -476,22 +536,22 @@ def _target_assembly_level(state: TopLevelState) -> str:
 
 
 def _hic_assets(state: TopLevelState) -> list[dict[str, Any]]:
-    resolution = resolve_stage_resource(state, resource_spec=HIC_READS_SPEC)
-    if not resolution.found:
-        return []
-    metadata = resolution.metadata
-    assets = metadata.get("assets")
-    if isinstance(assets, list) and assets:
-        return [dict(asset) for asset in assets if isinstance(asset, dict)]
-    asset_ids = list(metadata.get("asset_ids") or [])
-    return [
-        {
-            "asset_id": asset_ids[index]
-            if index < len(asset_ids)
-            else f"hic_reads:{index}",
-            "asset_type": "hic_reads",
-            "path": path,
-            "metadata": metadata,
-        }
-        for index, path in enumerate(resolution.paths)
-    ]
+    pairs = resolve_hic_pairs(state)
+    assets: list[dict[str, Any]] = []
+    for pair in pairs:
+        for mate, member in (("R1", pair.r1), ("R2", pair.r2)):
+            assets.append(
+                {
+                    "asset_id": member.member_id,
+                    "asset_type": "hic_reads_registered",
+                    "path": member.path,
+                    "metadata": {
+                        "manifest_entry_ordinal": pair.manifest_entry_ordinal,
+                        "pair_index": pair.pair_index,
+                        "mate": mate,
+                        "platform": member.platform,
+                        "format": member.format,
+                    },
+                }
+            )
+    return assets

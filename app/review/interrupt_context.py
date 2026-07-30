@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from app.schemas.artifacts import ArtifactRef
+
 
 def assembly_review_interrupt_context(
     interrupt: Mapping[str, Any],
@@ -24,7 +26,7 @@ def assembly_review_interrupt_context(
             for candidate in candidates
             if isinstance(candidate, dict)
         ],
-        "candidate_final_assembly_refs": _candidate_final_assembly_refs(candidates),
+        "candidate_primary_output_refs": _candidate_primary_output_refs(candidates),
         "candidate_report_refs": _candidate_report_refs(signals),
         "report_refs": dict(interrupt.get("report_refs") or {}),
         "candidate_comparison_context": dict(
@@ -73,19 +75,21 @@ def assembly_route_selection_interrupt_context(
 # ---------------------------------------------------------------------------
 
 
-def _candidate_final_assembly_refs(candidates: Any) -> dict[str, str]:
+def _candidate_primary_output_refs(
+    candidates: Any,
+) -> dict[str, dict[str, Any]]:
     if not isinstance(candidates, list):
         return {}
-    refs: dict[str, str] = {}
+    refs: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         candidate_id = candidate.get("candidate_id")
-        final_ref = candidate.get("final_assembly_ref") or candidate.get(
-            "assembly_ref"
-        )
-        if candidate_id and final_ref:
-            refs[str(candidate_id)] = str(final_ref)
+        primary_output_ref = candidate.get("primary_output_ref")
+        if candidate_id and primary_output_ref:
+            refs[str(candidate_id)] = ArtifactRef.model_validate(
+                primary_output_ref
+            ).model_dump(mode="json")
     return refs
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from langgraph.graph.state import CompiledStateGraph
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import artifact_input_dependency
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -84,6 +85,21 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> StateUpdate:
     )
     script_path.chmod(0o755)
 
+    try:
+        input_dependency = artifact_input_dependency(
+            state,
+            output["kmer_hist_artifact_ref"],
+            output["kmer_hist_path"],
+        )
+    except (OSError, ValueError) as exc:
+        return update_survey_output(
+            state,
+            {
+                "status": "failed",
+                "failure_kind": "invalid_input",
+                "reason": f"GenomeScope2 histogram dependency is invalid: {exc}",
+            },
+        )
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:genome_survey:genomescope2",
         session_id=session_id,
@@ -94,6 +110,7 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[summary_path],
         env=output.get("env"),
         env_spec=env_spec,
+        input_dependencies=[input_dependency],
         metadata={
             "kmer_hist_path": output.get("kmer_hist_path"),
             "summary_path": str(summary_path),

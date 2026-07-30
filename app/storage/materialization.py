@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from app.schemas.run_config import canonicalize_run_config_paths
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 
@@ -81,17 +82,6 @@ def _resolve_asset_path(raw_path: Any, source_dir: Path, *, index: int) -> Path:
     return (source_dir / path).resolve(strict=False)
 
 
-_RUN_CONFIG_PATH_FIELDS = (
-    ("assembly", "hifi_reads_ref"),
-    ("assembly", "hic_reads_ref"),
-    ("assembly_review", "busco", "lineage_path"),
-    ("assembly_review", "related_species_reference_dir"),
-    ("t2t", "chromosome_list_ref"),
-    ("t2t", "assembly_fasta_ref"),
-)
-_RUN_CONFIG_PATH_LIST_FIELDS = (("t2t", "ont_read_refs"),)
-
-
 def _materialize_run_config(source: Path, destination: Path) -> None:
     source = Path(source).expanduser().resolve(strict=False)
     try:
@@ -103,74 +93,16 @@ def _materialize_run_config(source: Path, destination: Path) -> None:
     if not isinstance(payload, dict):
         raise RunMaterializationError("run config root must be an object")
 
-    for field_path in _RUN_CONFIG_PATH_FIELDS:
-        _normalize_run_config_path(payload, field_path, source.parent)
-    for field_path in _RUN_CONFIG_PATH_LIST_FIELDS:
-        _normalize_run_config_path_list(payload, field_path, source.parent)
+    try:
+        payload = canonicalize_run_config_paths(
+            payload,
+            source_dir=source.parent,
+        )
+    except ValueError as exc:
+        raise RunMaterializationError(
+            f"run config path declaration is invalid: {exc}"
+        ) from exc
     destination.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-
-
-def _normalize_run_config_path(
-    payload: dict[str, Any],
-    field_path: tuple[str, ...],
-    source_dir: Path,
-) -> None:
-    parent: Any = payload
-    for key in field_path[:-1]:
-        if not isinstance(parent, dict) or key not in parent:
-            return
-        parent = parent[key]
-    if not isinstance(parent, dict):
-        return
-    key = field_path[-1]
-    value = parent.get(key)
-    if value is None:
-        return
-    if not isinstance(value, str) or not value.strip():
-        raise RunMaterializationError(
-            f"run config {'.'.join(field_path)} must be a non-empty path"
-        )
-    path = Path(value).expanduser()
-    parent[key] = str(
-        path if path.is_absolute() else (source_dir / path).resolve(strict=False)
-    )
-
-
-def _normalize_run_config_path_list(
-    payload: dict[str, Any],
-    field_path: tuple[str, ...],
-    source_dir: Path,
-) -> None:
-    parent: Any = payload
-    for key in field_path[:-1]:
-        if not isinstance(parent, dict) or key not in parent:
-            return
-        parent = parent[key]
-    if not isinstance(parent, dict):
-        return
-    key = field_path[-1]
-    values = parent.get(key)
-    if values is None:
-        return
-    if not isinstance(values, list):
-        raise RunMaterializationError(
-            f"run config {'.'.join(field_path)} must be a list of paths"
-        )
-    normalized: list[str] = []
-    for index, value in enumerate(values):
-        if not isinstance(value, str) or not value.strip():
-            raise RunMaterializationError(
-                f"run config {'.'.join(field_path)}[{index}] must be a non-empty path"
-            )
-        path = Path(value).expanduser()
-        normalized.append(
-            str(
-                path
-                if path.is_absolute()
-                else (source_dir / path).resolve(strict=False)
-            )
-        )
-    parent[key] = normalized

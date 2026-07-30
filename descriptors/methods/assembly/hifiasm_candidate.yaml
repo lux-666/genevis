@@ -7,6 +7,16 @@ required_inputs:
   - name: long_reads
     type: clean_long_reads
     description: "Clean HiFi reads (FASTA or FASTQ)."
+optional_inputs:
+  - name: ultralong_reads
+    type: clean_long_reads
+    description: "ONT ultra-long companion reads passed with --ul."
+  - name: hic_r1_reads
+    type: hic_reads_registered
+    description: "Ordered Hi-C R1 lane files passed with --h1."
+  - name: hic_r2_reads
+    type: hic_reads_registered
+    description: "Ordered Hi-C R2 lane files passed with --h2."
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly

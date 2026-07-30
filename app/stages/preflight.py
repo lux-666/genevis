@@ -112,7 +112,6 @@ def check_stage_prerequisites(
 
     for req in requirements:
         spec = req["spec"]
-        override = req.get("override")
 
         # First check if any upstream stage in this plan will produce this resource
         found_in_plan = _check_planned_resource(
@@ -124,9 +123,7 @@ def check_stage_prerequisites(
             continue
 
         # Otherwise check current state
-        resolution = resolve_stage_resource(
-            state, resource_spec=spec, override=override
-        )
+        resolution = resolve_stage_resource(state, resource_spec=spec)
 
         if not resolution.found:
             if spec.required or _is_contextually_required(state, stage, spec):
@@ -169,8 +166,8 @@ def validate_execution_plan(
     """
     Validate if requested stages can run.
 
-    Checks stage prerequisites in dependency order (STAGE_ORDER).
-    Simulates resource production from upstream stages in the plan.
+    Checks stage prerequisites in dependency order (STAGE_ORDER) and projects
+    resource availability from upstream stages in the same plan.
 
     Args:
         state: Initial state (inventory completed)
@@ -179,12 +176,8 @@ def validate_execution_plan(
     Returns:
         PlanValidation with overall status, per-stage checks, suggestions
     """
-    import copy
-
     from app.workflow import STAGE_ORDER
 
-    # Build a simulated state that accumulates resources from planned stages
-    simulated_state = copy.deepcopy(state)
     produced_resources = _collect_planned_resources(requested_stages)
     stages_processed: set[str] = set()
 
@@ -197,16 +190,14 @@ def validate_execution_plan(
             continue
 
         check = check_stage_prerequisites(
-            simulated_state, stage, produced_resources, stages_processed
+            state, stage, produced_resources, stages_processed
         )
         checks[stage] = check
 
         if not check.can_run and first_blocker is None:
             first_blocker = stage
 
-        # Simulate this stage's outputs being added to state
         if check.can_run:
-            _simulate_stage_outputs(simulated_state, stage)
             stages_processed.add(stage)
 
     valid = first_blocker is None
@@ -223,15 +214,7 @@ def validate_execution_plan(
 
 
 def _get_stage_requirements(stage: str) -> list[dict[str, Any]]:
-    """
-    Get resource requirements for a stage.
-
-    TODO: Future enhancement - generate via LLM + knowledge base.
-    Current: Hardcoded basic requirements.
-
-    Returns:
-        List of requirement dicts with 'name', 'spec', optional 'override'
-    """
+    """Return the central declarative resource requirements for one stage."""
     # Import here to avoid circular dependency
     from app.stages.resource_specs import STAGE_REQUIREMENTS
 
@@ -277,7 +260,6 @@ def _is_contextually_required(
     if stage == "gene_annotation" and spec.resource_type == "masked_assembly":
         return not _has_unmasked_fallback_reason(state)
     return False
-
 
 def _has_unmasked_fallback_reason(state: TopLevelState) -> bool:
     """Mirror gene_annotation runtime's explicit unmasked fallback gate."""
@@ -364,27 +346,3 @@ _collect_planned_resources
                 return True
 
     return False
-
-
-def _simulate_stage_outputs(state: TopLevelState, stage: str) -> None:
-    """
-    Simulate a stage having run by adding placeholder outputs to state.
-
-    This mutates the state to help downstream stages in the same plan
-    see that their inputs will be available.
-
-    Args:
-        state: State to mutate
-        stage: Stage that just "ran"
-    """
-    from app.schemas.resource_ref import ResourceRef
-    from app.stages.resource_specs import STAGE_CONTRACTS
-
-    refs = dict(state.get("resource_refs") or {})
-    for resource_type in (STAGE_CONTRACTS.get(stage) or {}).get("produces", []):
-        refs[resource_type] = ResourceRef(
-            resource_type=resource_type,
-            paths=[f"/planned/{stage}/{resource_type}"],
-            source_stage=stage,
-        ).to_dict()
-    state["resource_refs"] = refs

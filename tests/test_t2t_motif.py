@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.control.lifecycle import ResumeValidationError
 from app.llm.parameters.t2t.motif import T2TMotifRequest
 from app.llm.parameters.t2t.request import T2TParameterRequest
@@ -40,7 +42,6 @@ from app.stages.t2t.parameters.workflow import (
     recommend_t2t_parameters,
     resolve_t2t_telomere_motif,
 )
-from app.stages.t2t.routing import route_after_enter
 from app.storage.artifacts import publish_artifact_record
 from app.storage.parameter_evidence import load_parameter_recommendation_chain_v3
 from app.storage.paths import SessionPaths
@@ -60,7 +61,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
-        read_inputs: list[dict[str, str]] = []
+        read_inputs: list[dict[str, object]] = []
         read_refs: list[dict] = []
         paths = SessionPaths.from_run_dir(state["data_dir"])
         assembly_source = paths.work_path("inventory", "assembly.fa")
@@ -86,13 +87,19 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 source,
                 stage="inventory",
                 method_name="test.input_registry",
-                artifact_type="input.ont_reads",
+                artifact_type="input.long_reads",
             )
             published = publish_artifact_record(
                 state["data_dir"], state["session_id"], artifact
             )
             read_inputs.append(
-                {"asset_id": f"ont-{index:04d}", "path": str(published.path)}
+                {
+                    "member_id": f"ont-{index:04d}",
+                    "source_asset_id": f"ont-{index:04d}",
+                    "path": str(published.path),
+                    "platform": "ont",
+                    "read_artifact_ref": published.ref.model_dump(mode="json"),
+                }
             )
             read_refs.append(published.ref.model_dump(mode="json"))
         state["stage_outputs"] = {
@@ -101,8 +108,8 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "execution_mode": "local",
                 "mode": "auto_patch",
                 "chromosome_list_ref": None,
-                "ont_read_refs": [item["path"] for item in read_inputs],
-                "ont_read_inputs": read_inputs,
+                "long_read_refs": [str(item["path"]) for item in read_inputs],
+                "long_read_inputs": read_inputs,
                 "input_assembly_ref": str(published_assembly.path),
                 "work_dir": str(paths.work_path("t2t", "t2t_finishing")),
                 "execution_enabled": True,
@@ -112,7 +119,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
             parents=True, exist_ok=True
         )
         state["_test_assembly_ref"] = published_assembly.ref.model_dump(mode="json")
-        state["_test_ont_refs"] = read_refs
+        state["_test_read_refs"] = read_refs
         if species_facts is not None:
             state["shared_parameters"] = {"species_facts": species_facts}
         return state
@@ -143,7 +150,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                         "stage": "t2t",
                         "resolved_telomere_motif": "TTAGGG",
                         "motif_source": "provided_species_fact",
-                        "ont_asset_count": "1",
+                        "long_read_asset_count": "1",
                     },
                     "adjustable_parameters": {},
                 }
@@ -158,9 +165,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
         return self._merge(state, update)
 
     def _recommend(self, state: dict, parameters: dict | None = None) -> dict:
-        with patch(
-            "app.llm.parameters.base.build_chat_model"
-        ) as build_model:
+        with patch("app.llm.parameters.base.build_chat_model") as build_model:
             build_model.return_value.invoke.return_value = self._response(
                 {
                     "parameters": parameters or {},
@@ -510,14 +515,10 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 state["stage_outputs"]["t2t"].update(
                     {"status": "parameters_ready", field: "TTAGGG"}
                 )
-                update = enter_t2t(state)
-                resumed = self._merge(state, update)
-                output = stage_output(resumed, "t2t")
-                self.assertEqual(output["status"], "failed")
-                self.assertIn("unsupported legacy", output["reason"])
-                self.assertEqual(route_after_enter(resumed), "fail")
+                with self.assertRaises(ValidationError):
+                    enter_t2t(state)
 
-    def test_threshold_snapshot_binds_two_ont_assets_and_motif_resolution(self):
+    def test_threshold_snapshot_binds_two_long_read_assets_and_motif_resolution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(
                 tmpdir,
@@ -540,7 +541,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 blocked, manifest["refs"]["input_snapshot_ref"]
             )
             self.assertEqual(snapshot["schema_version"], 3)
-            self.assertEqual(snapshot["stage_context"]["ont_asset_count"], 2)
+            self.assertEqual(snapshot["stage_context"]["long_read_asset_count"], 2)
             self.assertEqual(
                 snapshot["stage_context"]["motif_source"], "provided_species_fact"
             )
@@ -554,7 +555,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 [ref["artifact_id"] for ref in dependency_refs["stage_input_refs"]],
                 [
                     state["_test_assembly_ref"]["artifact_id"],
-                    *[ref["artifact_id"] for ref in state["_test_ont_refs"]],
+                    *[ref["artifact_id"] for ref in state["_test_read_refs"]],
                 ],
             )
 
@@ -569,13 +570,24 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 read_count=2,
             )
             paths = SessionPaths.from_run_dir(state["data_dir"])
+            long_read_inputs = state["stage_outputs"]["t2t"]["long_read_inputs"]
+            registry_assets = [
+                {
+                    "asset_id": item["source_asset_id"],
+                    "asset_type": "clean_long_reads",
+                    "path": item["path"],
+                    "platform": item["platform"],
+                    "format": "fastq",
+                }
+                for item in long_read_inputs
+            ]
             registry_source = paths.work_path("inventory", "asset_registry.json")
             registry_source.parent.mkdir(parents=True, exist_ok=True)
             registry_source.write_text(
                 json.dumps(
                     {
                         "session_id": "s1",
-                        "assets": state["stage_outputs"]["t2t"]["ont_read_inputs"],
+                        "assets": registry_assets,
                     }
                 ),
                 encoding="utf-8",
@@ -591,7 +603,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 state["session_id"],
                 registry_artifact,
             )
-            state["asset_registry_ref"] = str(published_registry.path)
+            state["asset_registry_ref"] = published_registry.ref.model_dump(mode="json")
 
             blocked = self._recommend(self._resolve_provided(state))
             output = stage_output(blocked, "t2t")
@@ -642,7 +654,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "TTAGGG",
             )
 
-    def test_zero_ont_assets_bypasses_threshold_recommendation(self):
+    def test_zero_long_read_assets_bypasses_threshold_recommendation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(
                 tmpdir,
@@ -1027,8 +1039,13 @@ class T2TMotifResolutionTests(unittest.TestCase):
             ready_output["resolved_telomere_motif"] = "CCCC"
             ready_output["mode"] = "propose_only"
             ready_output["chromosome_list_ref"] = str(Path(tmpdir) / "changed.txt")
-            ready_output["ont_read_inputs"] = [
-                {"asset_id": "changed", "path": str(Path(tmpdir) / "changed.fastq")}
+            ready_output["long_read_inputs"] = [
+                {
+                    "member_id": "changed",
+                    "source_asset_id": "changed",
+                    "path": str(Path(tmpdir) / "changed.fastq"),
+                    "platform": "clr",
+                }
             ]
             ready_output["execution_enabled"] = False
             ready_output["work_dir"] = str(
@@ -1057,9 +1074,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
             self.assertEqual(
                 [
                     item.model_dump(mode="json")
-                    for item in frozen_inputs.ont_read_inputs
+                    for item in frozen_inputs.long_read_inputs
                 ],
-                original["ont_read_inputs"],
+                original["long_read_inputs"],
             )
             self.assertIsNone(frozen_inputs.chromosome_list_ref)
             self.assertEqual(frozen_inputs.work_dir, original["work_dir"])

@@ -15,7 +15,16 @@ from app.review.persistence import load_review_request
 from app.schemas.state import initial_state
 from app.stages.inventory.builder import build_stage
 from app.stages.inventory.nodes import apply_inventory_resume_decision
+from app.storage.artifacts import resolve_artifact_ref
 from tests.data_v2 import v2_run_dir
+
+
+def _registry_path(state: dict) -> Path:
+    return resolve_artifact_ref(
+        state["data_dir"],
+        state["session_id"],
+        state["asset_registry_ref"],
+    )
 
 
 class InventoryStageTests(unittest.TestCase):
@@ -104,7 +113,7 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertIn("asset_registry_ref", result)
             self.assertIsNotNone(result["asset_registry_ref"])
-            registry_path = Path(result["asset_registry_ref"])
+            registry_path = _registry_path(result)
             self.assertTrue(registry_path.exists())
             registry = json.loads(registry_path.read_text())
             self.assertEqual(registry["session_id"], "s1")
@@ -113,7 +122,10 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(
                 asset["provenance"]["manifest_ref"], "control/manifest.yaml"
             )
-            self.assertEqual(asset["provenance"]["declared_path"], str(fq))
+            self.assertEqual(
+                asset["provenance"]["declarations"][0]["declared_path"],
+                str(fq),
+            )
             self.assertNotIn("manifest", result["stage_outputs"]["inventory"])
 
     def test_inventory_does_not_block_for_unknown_long_read_platform(self):
@@ -134,7 +146,7 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "running_stage")
             self.assertIsNone(result.get("active_interrupt"))
-            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(registry["assets"][0]["platform"], "unknown")
             warnings = result["stage_outputs"]["inventory"]["warnings"]
             self.assertTrue(any("platform unknown" in warning for warning in warnings))
@@ -157,7 +169,7 @@ class InventoryStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(registry["assets"][0]["platform"], "ont")
             self.assertFalse(
                 any(
@@ -187,7 +199,7 @@ class InventoryStageTests(unittest.TestCase):
             graph = build_stage()
             result = graph.invoke(state)
             self.assertEqual(result["current_stage"], "read_qc")
-            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            registry = json.loads(_registry_path(result).read_text())
             asset = registry["assets"][0]
             self.assertEqual(asset["asset_type"], "raw_long_reads")
             self.assertEqual(asset["platform"], "cycloneseq")
@@ -216,7 +228,7 @@ class InventoryStageTests(unittest.TestCase):
             state = self._state("s2", path)
             graph = build_stage()
             result = graph.invoke(state)
-            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(len(registry["assets"]), 3)
             asset_types = {a["asset_type"] for a in registry["assets"]}
             self.assertEqual(asset_types, {"raw_long_reads", "raw_short_dna_reads"})
@@ -286,7 +298,7 @@ class InventoryStageTests(unittest.TestCase):
             self.assertIsNone(update["active_interrupt"])
             self.assertEqual(update["current_stage"], "read_qc")
             self.assertEqual(update["supervision_state"], "running_stage")
-            self.assertTrue(Path(update["asset_registry_ref"]).exists())
+            self.assertTrue(_registry_path({**blocked, **update}).exists())
 
     def test_inventory_with_existing_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -317,7 +329,7 @@ class InventoryStageTests(unittest.TestCase):
                 result["stage_outputs"]["inventory"]["target_assembly_level"],
                 "chromosome",
             )
-            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(
                 registry["assets"][0]["asset_type"], "assembly_fasta_registered"
             )
@@ -346,7 +358,7 @@ class InventoryStageTests(unittest.TestCase):
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly_review")
-            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            registry = json.loads(_registry_path(result).read_text())
             assets = {asset["asset_type"]: asset for asset in registry["assets"]}
             self.assertEqual(assets["gene_models"]["format"], "gff3")
             self.assertEqual(assets["predicted_proteins"]["format"], "fasta")

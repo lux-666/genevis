@@ -58,7 +58,6 @@ class ResumeReviewRequest(BaseModel):
     candidate_id: str | None = None
     candidate_ids: list[str] = Field(default_factory=list)
     method_name: str | None = None
-    final_assembly_ref: str | None = None
     rejected_candidates: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

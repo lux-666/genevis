@@ -162,12 +162,12 @@ explicitly paired Hi-C files retain typed pair metadata.
 
 The registry covers frozen long-read declarations from both the input manifest
 and supported run-config overrides. In this slice those overrides are
-`assembly.hifi_reads_ref` and `t2t.ont_read_refs`. Their declaration source and
-field name are retained in provenance; the former supplies
-`platform=pacbio_hifi` and the latter supplies `platform=ont`. A path already
-declared by the manifest reuses the same asset identity and must have compatible
-platform metadata. Conflicting duplicate declarations fail frozen-input
-validation.
+`assembly.hifi_reads_ref` and the entries in `t2t.read_inputs`. Their
+declaration source and field name are retained in provenance; the former
+supplies `platform=pacbio_hifi`, while every T2T entry declares one of
+`cycloneseq`, `ont`, `clr`, or `pacbio_hifi`. A path already declared by the
+manifest reuses the same asset identity and must have the exact same platform
+metadata. Conflicting duplicate declarations fail frozen-input validation.
 
 Every record retains:
 
@@ -204,7 +204,7 @@ the tool. Run-owned filtered read artifacts use their ArtifactRefs instead.
 For `hic_reads_registered`, `paired_reads` remains the frozen manifest's source
 of truth. Inventory creates one file-level `AssetRecord` per mate and adds
 `pair_index` and `mate: R1 | R2` to its existing metadata projection. The
-flattened `paths` list remains only a compatibility projection in the frozen
+flattened `paths` list remains a bounded path projection in the frozen
 manifest. Assembly and AutoHiC reconstruct lane lists from pair metadata, never
 from file names or even/odd list positions. Duplicate mates, incomplete pairs,
 or a repeated file in two pairs fail before registry publication.
@@ -520,6 +520,9 @@ cursor fields are removed rather than retained as a dormant second route.
 Future method switching after a failed primary attempt requires a separate
 design.
 
+Checkpoint cursor schemas reject the removed `fallback_method` and former
+plural/path-based candidate-ref fields at their read boundaries.
+
 The existing `ParameterAttemptOwner` remains the sole checkpoint owner for the
 selected parameterized method's frozen and execution refs.
 
@@ -617,6 +620,10 @@ canonical primary FASTA is derived from `.bp.p_ctg.gfa` when present and falls
 back to `.p_ctg.gfa`; no other native graph is eligible. Missing optional
 outputs do not fail a primary assembly.
 
+The Hifiasm ONT adapter applies the same filename/class mapping under its own
+output prefix and uses the `hifiasm_ont.*` native-role namespace. Thus `--ont`
+mode retains its GFAs without conflating them with standard Hifiasm attempts.
+
 The native-output ArtifactRefs appear only in the executed candidate bundle and
 artifact index. They do not enter `resource_refs["assembly"].paths`, Assembly
 Review's candidate list, Hi-C scaffolding, or T2T automatically.
@@ -637,20 +644,21 @@ assembly selected by review.
 
 ## T2T Input Resolution
 
-T2T obtains ONT reads from the shared runtime long-read resolver with an
-explicit `platform="ont"` predicate. It prefers the current read-set manifest
-when read-QC produced derived reads and otherwise uses the registry.
+T2T obtains the complete platform-preserving long-read selection from the
+shared runtime resolver. It prefers the current read-set manifest when read-QC
+produced derived reads and otherwise uses the registry.
 
-Frozen `t2t.ont_read_refs` retain their existing explicit-override precedence.
-They select those exact ordered paths from the verified registry or read-set
-manifest. If a supplied path was not also in the input manifest, inventory has
-already registered it from the frozen run config with ONT platform, size, and
-SHA-256 provenance. A missing, conflicting, or unregistered supplied path
-fails closed.
+Frozen `t2t.read_inputs` retain explicit-selection precedence. Each configured
+source path binds to its registered source asset and, when read-QC transformed
+that asset, to the corresponding derived ArtifactRef. If a supplied path was
+not also in the input manifest, inventory registers it from the frozen run
+config with its explicitly declared platform, size, and SHA-256 provenance. A
+missing, conflicting, unknown-platform, or unregistered supplied path fails
+closed.
 
-T2T does not use method-native Hifiasm contigs in this slice. Missing ONT members
-continues to follow the stage's existing bypass or failure policy; it must not
-substitute HiFi because both share `raw_long_reads`.
+T2T does not use method-native Hifiasm contigs in this slice. Telomeric reads
+are grouped by canonical platform into `map-ont`, `map-hifi`, and `map-pb`
+inputs, executed inside one frozen minimap2 attempt, and combined into one PAF.
 
 ## Checkpoint and Boundedness Rules
 
@@ -739,7 +747,7 @@ is allowed.
 - A global shared platform does not overwrite an explicitly mixed manifest.
 - Mixed entries with an unresolved platform fail frozen-input validation and
   require a new explicitly classified run.
-- Frozen `assembly.hifi_reads_ref` and `t2t.ont_read_refs` become verified
+- Frozen `assembly.hifi_reads_ref` and `t2t.read_inputs` become verified
   registry members; duplicate conflicts and unregistered runtime overrides
   fail closed.
 - Registered external reads have ready size/SHA-256 evidence; changed bytes
@@ -798,10 +806,12 @@ is allowed.
 - A missing requested platform fails before parameter recommendation.
 - The approved parameter snapshot and frozen attempt retain ordered member
   identity grouped by input role.
-- T2T resolves ONT after both no-filter and filtered read-QC handoffs.
-- Explicit `t2t.ont_read_refs` preserve precedence while selecting verified
-  members with stable source identities.
-- T2T never substitutes HiFi for absent ONT.
+- T2T resolves ONT, PacBio HiFi, CLR, and CycloneSEQ after both no-filter and
+  filtered read-QC handoffs.
+- Explicit `t2t.read_inputs` preserve order and exact platform provenance while
+  selecting verified members with stable source identities.
+- Unknown or conflicting platforms fail closed instead of being assigned a
+  minimap2 preset.
 
 ### Assembly product
 
@@ -848,7 +858,8 @@ ultra-long files through `--ul` and all paired lanes through `--h1`/`--h2`.
 The separate Hifiasm ONT method consumes ONT as primary input under `--ont`.
 Both publish one canonical primary FASTA and retain adapter-declared
 method-native outputs without turning them into peer candidates. A later T2T
-run can still resolve only the ONT members. The checkpoint, resource table,
+run can resolve all eligible long-read members across supported platforms. The
+checkpoint, resource table,
 ledger, artifact index, crash ordering, external-dependency verification, and
 resume behavior satisfy the existing Data v2 contracts without legacy fallback
 or dual write. A later purge-dups step may add its raw/purged derived candidate

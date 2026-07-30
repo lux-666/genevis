@@ -320,6 +320,79 @@ class AssemblyRenderingV3Tests(unittest.TestCase):
                 self.assertEqual(argv[-1], "/reads/long.fastq.gz")
                 self.assertEqual("--ont" in argv, method_id == HIFIASM_ONT_METHOD)
 
+    def test_hifiasm_renders_multifile_supplementary_read_roles(self):
+        catalog = load_parameter_catalog(HIFIASM_METHOD)
+        resolved = resolve_assembly_parameters(
+            catalog=catalog,
+            snapshot=_snapshot(HIFIASM_METHOD),
+            approved_l2={"kmer_length": 31},
+            l0_executor_values={
+                "assembly_output_prefix": "/work/hifiasm/out",
+                "assembly_input_reads": [
+                    "/reads/hifi-a.fastq.gz",
+                    "/reads/hifi-b.fastq.gz",
+                ],
+                "assembly_ultralong_reads": [
+                    "/reads/ont-a.fastq.gz",
+                    "/reads/ont-b.fastq.gz",
+                ],
+                "assembly_hic_r1_reads": [
+                    "/reads/hic-L1-R1.fastq.gz",
+                    "/reads/hic-L2-R1.fastq.gz",
+                ],
+                "assembly_hic_r2_reads": [
+                    "/reads/hic-L1-R2.fastq.gz",
+                    "/reads/hic-L2-R2.fastq.gz",
+                ],
+                "assembly_threads": 16,
+            },
+        )
+
+        argv = render_assembly_cli(catalog, resolved)
+
+        self.assertNotIn("--ont", argv)
+        self.assertEqual(
+            argv[argv.index("--ul") + 1],
+            "/reads/ont-a.fastq.gz,/reads/ont-b.fastq.gz",
+        )
+        self.assertEqual(
+            argv[argv.index("--h1") + 1],
+            "/reads/hic-L1-R1.fastq.gz,/reads/hic-L2-R1.fastq.gz",
+        )
+        self.assertEqual(
+            argv[argv.index("--h2") + 1],
+            "/reads/hic-L1-R2.fastq.gz,/reads/hic-L2-R2.fastq.gz",
+        )
+        self.assertEqual(
+            argv[-2:],
+            ["/reads/hifi-a.fastq.gz", "/reads/hifi-b.fastq.gz"],
+        )
+
+    def test_hifiasm_ont_renders_multiple_primary_reads_with_fixed_ont_mode(self):
+        catalog = load_parameter_catalog(HIFIASM_ONT_METHOD)
+        resolved = resolve_assembly_parameters(
+            catalog=catalog,
+            snapshot=_snapshot(HIFIASM_ONT_METHOD),
+            approved_l2={"kmer_length": 31},
+            l0_executor_values={
+                "assembly_output_prefix": "/work/hifiasm-ont/out",
+                "assembly_input_reads": [
+                    "/reads/ont-a.fastq.gz",
+                    "/reads/ont-b.fastq.gz",
+                ],
+                "assembly_threads": 16,
+            },
+        )
+
+        argv = render_assembly_cli(catalog, resolved)
+
+        self.assertIn("--ont", argv)
+        self.assertTrue({"--ul", "--h1", "--h2"}.isdisjoint(argv))
+        self.assertEqual(
+            argv[-2:],
+            ["/reads/ont-a.fastq.gz", "/reads/ont-b.fastq.gz"],
+        )
+
     def test_parameter_sources_payload_contains_all_six_views(self):
         catalog = load_parameter_catalog(FLYE_METHOD)
         resolved = resolve_assembly_parameters(
@@ -525,6 +598,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                         "threads": 6,
                     },
                     "read_type_prior": {prior_key: mutable_read_type},
+                    "assembly_input_member_ids": {"primary": ["fixture-member-0"]},
                 }
                 contract = assembly_support.build_assembly_execution_contract(
                     output,
@@ -670,6 +744,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                     "input_type": "ont_raw",
                     parameter_key: {"read_type": "mutable-value"},
                     "read_type_prior": {"mutable": "mutable-value"},
+                    "assembly_input_member_ids": {"primary": ["fixture-member-0"]},
                 }
                 contract = assembly_support.build_assembly_execution_contract(
                     output,

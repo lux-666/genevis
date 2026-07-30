@@ -36,15 +36,15 @@ def build_t2t_recommendation_context(
             "resolved_telomere_motif_source must be provided_species_fact or "
             "llm_species_resolution"
         )
-    ont_read_inputs = t2t_out.get("ont_read_inputs")
-    if not isinstance(ont_read_inputs, list) or not ont_read_inputs:
+    long_read_inputs = t2t_out.get("long_read_inputs")
+    if not isinstance(long_read_inputs, list) or not long_read_inputs:
         raise ValueError(
-            "ont_read_inputs must contain at least one canonical ONT asset"
+            "long_read_inputs must contain at least one canonical long-read asset"
         )
 
     return T2TRecommendationContext(
         stage="t2t",
         resolved_telomere_motif=resolved_telomere_motif,
         motif_source=validated_motif_source,
-        ont_asset_count=len(ont_read_inputs),
+        long_read_asset_count=len(long_read_inputs),
     )

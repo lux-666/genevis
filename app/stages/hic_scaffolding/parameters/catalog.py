@@ -31,6 +31,6 @@ def load_autohic_parameter_catalog() -> MethodParameterCatalog:
     }
     if adjustable != expected:
         raise ValueError(
-            "AutoHiC parameter catalog does not match the Phase 13 L2 surface"
+            "AutoHiC parameter catalog does not match its declared L2 surface"
         )
     return catalog

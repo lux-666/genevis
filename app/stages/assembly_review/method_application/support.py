@@ -19,6 +19,7 @@ from app.configuration import load_descriptor_registry
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ArtifactMeta,
+    ArtifactRef,
     AssemblyEvalBundle,
     AssemblyEvalSignal,
 )
@@ -34,8 +35,12 @@ from app.stages.assembly_review.state import (
     assembly_review_output,
     update_assembly_review_output,
 )
-from app.stages.base import stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.storage.artifacts import publish_artifact_record
+from app.storage.assembly_candidates import (
+    VerifiedExecutedCandidate,
+    load_executed_candidate_bundle,
+)
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
@@ -60,15 +65,25 @@ def local_execution_enabled(output: AssemblyReviewCursor) -> bool:
     return output.get("execution_mode") == "local"
 
 
-def materialized_candidates(
-    candidates: list[AssemblyCandidateCursor],
-) -> list[AssemblyCandidateCursor]:
-    materialized: list[AssemblyCandidateCursor] = []
-    for candidate in candidates:
-        final_ref = candidate.get("final_assembly_ref")
-        if final_ref and Path(final_ref).exists():
-            materialized.append(candidate)
-    return materialized
+def verified_review_candidate(
+    state: TopLevelState,
+    candidate: AssemblyCandidateCursor,
+) -> VerifiedExecutedCandidate:
+    """Resolve one review cursor through its immutable executed bundle."""
+
+    verified = load_executed_candidate_bundle(
+        absolute_data_dir(state),
+        state["session_id"],
+        candidate["bundle_ref"],
+        expected_method_name=candidate["method_name"],
+        expected_candidate_id=candidate["candidate_id"],
+    )
+    projected_primary = ArtifactRef.model_validate(candidate["primary_output_ref"])
+    if projected_primary != verified.primary_output_ref:
+        raise ValueError(
+            "review candidate primary_output_ref does not match its executed bundle"
+        )
+    return verified
 
 
 def safe_candidate_id(candidate_id: str) -> str:
@@ -148,7 +163,7 @@ def mark_missing_signals(
             status="missing",
             metric_refs=[],
             notes=[reason, "execution_skipped"],
-            metadata={"draft_assembly_ref": candidate.get("final_assembly_ref")},
+            metadata={"primary_output_ref": candidate.get("primary_output_ref")},
         )
     return updated
 

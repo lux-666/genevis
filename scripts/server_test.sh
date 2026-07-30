@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Server-side test runner for gene-agent.
 # Mirrors the Mac developer test loop so a server operator can confirm the
-# checkout passes before the Phase 4 real-data smoke. Stops on the first
-# non-zero exit. Never installs packages.
+# checkout before running real data. Stops on the first non-zero exit. Never
+# installs packages.
 #
 # Usage:
 #   bash scripts/server_test.sh

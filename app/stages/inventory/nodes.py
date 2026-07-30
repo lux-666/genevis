@@ -7,17 +7,21 @@ registry artifact and ledger events.  It does not run bioinformatics tools.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import yaml
 from typing_extensions import TypedDict
 
+from app.integrity import sha256_file
 from app.review.persistence import persist_review_decision
-from app.schemas.artifacts import ArtifactMeta
-from app.schemas.assets import AssetRecord
-from app.schemas.manifest import InputManifest, validate_manifest
+from app.schemas.artifacts import ArtifactMeta, ArtifactRefJson
+from app.schemas.assets import AssetRecord, AssetRegistryDocument
+from app.schemas.manifest import AssetEntryInference, InputManifest
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.run_config import RunConfig, load_run_config
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.state import (
     DomainStage,
@@ -31,7 +35,16 @@ from app.stages.inventory.state import (
     read_inventory_stage_output,
     update_inventory_stage_output,
 )
-from app.storage.artifacts import publish_artifact_record
+from app.storage.artifacts import (
+    PublishedArtifact,
+    publish_artifact_record,
+    recover_published_artifact,
+)
+from app.storage.assembly_candidates import publish_registered_assembly_candidate
+from app.storage.frozen_inputs import (
+    RegisteredReadDeclaration,
+    canonicalize_input_declarations,
+)
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 
@@ -66,40 +79,234 @@ def _load_manifest(manifest_ref: str) -> InputManifest:
 
 def _build_asset_records(
     manifest: InputManifest,
-    inferred: dict[str, Any],
+    inferred: list[dict[str, Any]],
     *,
     manifest_ref: str,
+    run_config_ref: str | None,
+    read_declarations: tuple[RegisteredReadDeclaration, ...],
 ) -> list[AssetRecord]:
-    """Convert validated manifest specs into AssetRecords."""
+    """Convert canonical declarations into one record per external file."""
+    if len(inferred) != len(manifest.assets):
+        raise ValueError(
+            "manifest inference entry count does not match manifest asset count"
+        )
+    reads_by_path = {
+        declaration.path: declaration
+        for declaration in read_declarations
+    }
     records: list[AssetRecord] = []
-    for spec in manifest.assets:
-        props = inferred.get(spec.asset_type, {})
-        for p in spec.paths:
-            path = Path(p)
+    seen_asset_ids: dict[str, str] = {}
+    for entry_ordinal, spec in enumerate(manifest.assets):
+        entry = AssetEntryInference.model_validate(inferred[entry_ordinal])
+        if (
+            entry.manifest_entry_ordinal != entry_ordinal
+            or entry.asset_type != spec.asset_type
+            or len(entry.path_facts) != len(spec.paths)
+        ):
+            raise ValueError(
+                f"manifest inference mismatch at assets[{entry_ordinal}]"
+            )
+        pair_roles = {
+            str(Path(path).expanduser().resolve(strict=False)): (pair_index, mate)
+            for pair_index, pair in enumerate(spec.paired_reads)
+            for mate, path in (("R1", pair.r1), ("R2", pair.r2))
+        }
+        for path_ordinal, declared_path in enumerate(spec.paths):
+            fact = entry.path_facts[path_ordinal]
+            if (
+                fact.path_ordinal != path_ordinal
+                or fact.declared_path != declared_path
+            ):
+                raise ValueError(
+                    f"manifest inference path mismatch at "
+                    f"assets[{entry_ordinal}].paths[{path_ordinal}]"
+                )
+            path = Path(fact.canonical_path)
+            asset_id = _asset_id(manifest.session_id, path)
+            _claim_asset_id(seen_asset_ids, asset_id, path)
+            pair_role = pair_roles.get(str(path))
+            declaration = reads_by_path.get(str(path))
+            if spec.asset_type in {"raw_long_reads", "clean_long_reads"}:
+                if declaration is None:
+                    raise ValueError(
+                        f"missing canonical read declaration for {path}"
+                    )
+                if (
+                    declaration.manifest_entry_ordinal != entry_ordinal
+                    or declaration.path_ordinal != path_ordinal
+                ):
+                    raise ValueError(
+                        f"read declaration ordinal mismatch for {path}"
+                    )
+            metadata: dict[str, Any] = {
+                **spec.metadata,
+                "layout": (
+                    declaration.layout if declaration is not None
+                    else entry.inferred_layout
+                ),
+                "compression": (
+                    declaration.compression
+                    if declaration is not None
+                    else fact.compression
+                ),
+                "manifest_entry_ordinal": entry_ordinal,
+                "path_ordinal": path_ordinal,
+            }
+            if pair_role is not None:
+                metadata["pair_index"] = pair_role[0]
+                metadata["mate"] = pair_role[1]
             records.append(
                 AssetRecord(
-                    asset_id=f"{manifest.session_id}:{spec.asset_type}:{path.name}",
+                    asset_id=asset_id,
                     asset_type=spec.asset_type,
                     path=path,
-                    sample_id=spec.sample_id or manifest.sample_id,
-                    platform=props.get("inferred_platform", spec.platform),
-                    format=props.get("inferred_format", spec.format),
-                    checksum_status="pending",
+                    sample_id=(
+                        declaration.sample_id
+                        if declaration is not None
+                        else spec.sample_id or manifest.sample_id
+                    ),
+                    platform=(
+                        declaration.platform
+                        if declaration is not None
+                        else fact.platform
+                    ),
+                    format=(
+                        declaration.format
+                        if declaration is not None
+                        else fact.format
+                    ),
+                    checksum=sha256_file(path),
+                    checksum_status="ready",
+                    size_bytes=(
+                        declaration.size_bytes
+                        if declaration is not None
+                        else fact.size_bytes
+                    ),
+                    verified_at=datetime.now(timezone.utc),
                     allowed_stages=[],
-                    metadata={
-                        "layout": props.get("inferred_layout", spec.layout),
-                        "compression": props.get(
-                            "inferred_compression", spec.compression
+                    metadata=metadata,
+                    provenance=_asset_provenance(
+                        declaration=declaration,
+                        fallback_declared_path=declared_path,
+                        fallback_field=(
+                            f"assets[{entry_ordinal}].paths[{path_ordinal}]"
                         ),
-                        **spec.metadata,
-                    },
-                    provenance={
-                        "manifest_ref": manifest_ref,
-                        "declared_path": p,
-                    },
+                        platform_resolution_source=(
+                            declaration.platform_resolution_source
+                            if declaration is not None
+                            else fact.platform_resolution_source
+                        ),
+                        manifest_ref=manifest_ref,
+                        run_config_ref=run_config_ref,
+                    ),
                 )
             )
+
+    for declaration in read_declarations:
+        if declaration.manifest_entry_ordinal is not None:
+            continue
+        path = Path(declaration.path)
+        asset_id = _asset_id(manifest.session_id, path)
+        _claim_asset_id(seen_asset_ids, asset_id, path)
+        records.append(
+            AssetRecord(
+                asset_id=asset_id,
+                asset_type=declaration.asset_type,
+                path=path,
+                sample_id=declaration.sample_id,
+                platform=declaration.platform,
+                format=declaration.format,
+                checksum=sha256_file(path),
+                checksum_status="ready",
+                size_bytes=declaration.size_bytes,
+                verified_at=datetime.now(timezone.utc),
+                allowed_stages=[],
+                metadata={
+                    **declaration.metadata,
+                    "layout": declaration.layout,
+                    "compression": declaration.compression,
+                },
+                provenance=_asset_provenance(
+                    declaration=declaration,
+                    fallback_declared_path=declaration.path,
+                    fallback_field="run_config",
+                    platform_resolution_source=(
+                        declaration.platform_resolution_source
+                    ),
+                    manifest_ref=None,
+                    run_config_ref=run_config_ref,
+                ),
+            )
+        )
     return records
+
+
+def _claim_asset_id(
+    seen_asset_ids: dict[str, str],
+    asset_id: str,
+    path: Path,
+) -> None:
+    canonical_path = str(path.resolve(strict=False))
+    previous_path = seen_asset_ids.get(asset_id)
+    if previous_path is not None:
+        if previous_path == canonical_path:
+            raise ValueError(f"duplicate asset record for {canonical_path}")
+        raise ValueError(
+            f"generated asset ID collision between {previous_path} and "
+            f"{canonical_path}"
+        )
+    seen_asset_ids[asset_id] = canonical_path
+
+
+def _asset_provenance(
+    *,
+    declaration: RegisteredReadDeclaration | None,
+    fallback_declared_path: str,
+    fallback_field: str,
+    platform_resolution_source: str,
+    manifest_ref: str | None,
+    run_config_ref: str | None,
+) -> dict[str, Any]:
+    sources = (
+        [
+            {
+                "declaration_source": source.declaration_source,
+                "declaration_field": source.declaration_field,
+                "declared_path": source.declared_path,
+            }
+            for source in declaration.sources
+        ]
+        if declaration is not None
+        else [
+            {
+                "declaration_source": "manifest",
+                "declaration_field": fallback_field,
+                "declared_path": fallback_declared_path,
+            }
+        ]
+    )
+    provenance: dict[str, Any] = {
+        "declarations": sources,
+        "platform_resolution_source": platform_resolution_source,
+    }
+    if manifest_ref is not None:
+        provenance["manifest_ref"] = manifest_ref
+    if (
+        run_config_ref is not None
+        and any(
+            source["declaration_source"] == "run_config"
+            for source in sources
+        )
+    ):
+        provenance["run_config_ref"] = run_config_ref
+    return provenance
+
+
+def _asset_id(session_id: str, path: Path) -> str:
+    """Return a stable opaque identity for one canonical external path."""
+
+    identity = f"{session_id}\0{path.resolve(strict=False)}"
+    return f"asset_{uuid5(NAMESPACE_URL, identity).hex}"
 
 
 def _entry_mode(manifest: InputManifest) -> str:
@@ -110,6 +317,7 @@ def _entry_mode(manifest: InputManifest) -> str:
         "gene_models",
         "predicted_proteins",
         "transcripts_fasta",
+        "function_database",
     }
     non_supporting = asset_types - supporting
     if non_supporting == {"assembly_fasta_registered"}:
@@ -117,21 +325,69 @@ def _entry_mode(manifest: InputManifest) -> str:
     return "raw_inputs"
 
 
+def _recover_registry_if_unchanged(
+    paths: SessionPaths,
+    session_id: str,
+    destination: Path,
+    records: list[AssetRecord],
+) -> PublishedArtifact | None:
+    """Return the existing artifact when all stable asset facts are unchanged.
+
+    Verification timestamps are attempt-local; every other record field,
+    including ordering, provenance, platform, size, and checksum, must match.
+    This keeps replay idempotent without accepting a changed declaration.
+    """
+    try:
+        existing_doc = AssetRegistryDocument.model_validate(
+            json.loads(destination.read_text(encoding="utf-8"))
+        )
+    except Exception:
+        return None
+    existing_payload = [
+        record.model_dump(mode="json", exclude={"verified_at"})
+        for record in existing_doc.assets
+    ]
+    new_payload = [
+        record.model_dump(mode="json", exclude={"verified_at"})
+        for record in records
+    ]
+    if existing_payload != new_payload:
+        return None
+    return recover_published_artifact(
+        paths.run_dir,
+        session_id,
+        destination,
+        stage="inventory",
+        method_name="inventory.register_assets",
+        artifact_type="asset_registry",
+    )
+
+
 def _write_registry(
     records: list[AssetRecord],
     *,
     data_dir: Path,
     session_id: str,
-) -> Path:
+) -> PublishedArtifact:
     """Publish the asset registry through the shared immutable boundary."""
     paths = SessionPaths.from_run_dir(data_dir)
     destination = paths.stage_artifacts_dir("asset_registry") / "registry.json"
+    # If the destination already exists, reuse it when the underlying asset
+    # checksums have not changed.  This makes the node idempotent: a replayed
+    # run with identical inputs returns the same PublishedArtifact without
+    # attempting to overwrite an immutable path.
+    if destination.is_file():
+        recovered = _recover_registry_if_unchanged(
+            paths, session_id, destination, records
+        )
+        if recovered is not None:
+            return recovered
     source = paths.work_path("inventory", "registry.json")
     source.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {
-        "session_id": session_id,
-        "assets": [r.model_dump(mode="json") for r in records],
-    }
+    payload = AssetRegistryDocument(
+        session_id=session_id,
+        assets=records,
+    ).model_dump(mode="json")
     source.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -147,7 +403,7 @@ def _write_registry(
         session_id,
         artifact,
         destination=destination,
-    ).path
+    )
 
 
 def enter_inventory(state: TopLevelState) -> StateUpdate:
@@ -173,7 +429,15 @@ def validate_inputs(state: TopLevelState) -> StateUpdate:
 
     try:
         manifest = _load_manifest(str(resolve_run_ref(state, manifest_ref)))
-        canonical_shared = _canonical_shared_parameters(state, manifest)
+        run_config, _ = _load_inventory_run_config(state)
+        declarations = canonicalize_input_declarations(manifest, run_config)
+        manifest = declarations.manifest
+        report = declarations.manifest_report
+        canonical_shared = _canonical_shared_parameters(
+            state,
+            manifest,
+            run_config,
+        )
     except Exception as exc:
         return update_inventory_stage_output(
             state,
@@ -183,8 +447,6 @@ def validate_inputs(state: TopLevelState) -> StateUpdate:
             },
         )
 
-    _apply_shared_platform_override(manifest, state)
-    report = validate_manifest(manifest)
     update = update_inventory_stage_output(
         state,
         {
@@ -192,7 +454,13 @@ def validate_inputs(state: TopLevelState) -> StateUpdate:
             "valid": report["valid"],
             "errors": report["errors"],
             "warnings": report["warnings"],
-            "asset_count": len(manifest.assets),
+            "asset_count": (
+                sum(len(asset.paths) for asset in manifest.assets)
+                + sum(
+                    declaration.manifest_entry_ordinal is None
+                    for declaration in declarations.read_declarations
+                )
+            ),
             "entry_mode": _entry_mode(manifest),
             "genome_size_estimate": manifest.genome_size_estimate,
             "target_assembly_level": manifest.target_assembly_level,
@@ -206,30 +474,45 @@ def validate_inputs(state: TopLevelState) -> StateUpdate:
 def _canonical_shared_parameters(
     state: TopLevelState,
     manifest: InputManifest,
+    run_config: RunConfig,
 ) -> dict[str, Any] | None:
-    """Project the manifest-owned genome-size prior into runtime shared facts."""
-
-    manifest_size = manifest.genome_size_estimate
-    if manifest_size is None:
-        return None
+    """Reconcile immutable run-config facts with the runtime projection."""
 
     raw_shared = state.get("shared_parameters")
     if isinstance(raw_shared, SharedParameters):
         raw_shared = raw_shared.model_dump(exclude_none=True)
+    configured = (
+        run_config.shared_parameters.model_dump(exclude_none=True)
+        if run_config.shared_parameters is not None
+        else {}
+    )
     if raw_shared is None:
-        shared: dict[str, Any] = {}
+        shared = dict(configured)
     elif isinstance(raw_shared, dict):
         shared = dict(raw_shared)
     else:
         raise ValueError("shared_parameters must be a mapping")
 
-    existing_size = shared.get("estimated_genome_size")
-    if existing_size is not None and existing_size != manifest_size:
-        raise ValueError(
-            "runtime shared_parameters.estimated_genome_size conflicts with "
-            "manifest.genome_size_estimate"
-        )
-    shared["estimated_genome_size"] = manifest_size
+    for key, configured_value in configured.items():
+        runtime_value = shared.get(key)
+        if runtime_value is not None and runtime_value != configured_value:
+            raise ValueError(
+                f"runtime shared_parameters.{key} conflicts with frozen "
+                "run-config"
+            )
+        shared[key] = configured_value
+
+    manifest_size = manifest.genome_size_estimate
+    if manifest_size is not None:
+        existing_size = shared.get("estimated_genome_size")
+        if existing_size is not None and existing_size != manifest_size:
+            raise ValueError(
+                "runtime shared_parameters.estimated_genome_size conflicts with "
+                "manifest.genome_size_estimate"
+            )
+        shared["estimated_genome_size"] = manifest_size
+    if not shared:
+        return None
     return SharedParameters.model_validate(shared).model_dump(exclude_none=True)
 
 
@@ -241,27 +524,105 @@ def register_assets(state: TopLevelState) -> StateUpdate:
 
     manifest_ref = state["input_manifest_ref"]
     manifest = _load_manifest(str(resolve_run_ref(state, manifest_ref)))
-    _apply_shared_platform_override(manifest, state)
-    report = validate_manifest(manifest)
+    run_config, run_config_ref = _load_inventory_run_config(state)
+    declarations = canonicalize_input_declarations(manifest, run_config)
+    manifest = declarations.manifest
+    report = declarations.manifest_report
+    if not report["valid"]:
+        raise ValueError(
+            "input declarations changed after validation: "
+            + "; ".join(report["errors"])
+        )
     inferred = report["inferred"]
 
-    records = _build_asset_records(manifest, inferred, manifest_ref=manifest_ref)
+    records = _build_asset_records(
+        manifest,
+        inferred,
+        manifest_ref=manifest_ref,
+        run_config_ref=run_config_ref,
+        read_declarations=declarations.read_declarations,
+    )
     data_dir = Path(state.get("data_dir", "data"))
-    registry_path = _write_registry(
+    published_registry = _write_registry(
         records, data_dir=data_dir, session_id=manifest.session_id
     )
+    registry_ref = published_registry.ref.model_dump(mode="json")
 
     ledger = Ledger(data_dir)
     ledger.create_session(manifest.session_id, state["input_manifest_ref"])
     ledger.record_assets_registered(
         manifest.session_id,
         [r.model_dump(mode="json") for r in records],
-        registry_ref=str(registry_path),
+        registry_ref=registry_ref,
         ambiguous=any("ambiguous" in w for w in report["warnings"]),
     )
 
     # Populate resource_refs from registered assets
-    resource_refs = _populate_resource_refs_from_assets(records)
+    resource_refs = _populate_resource_refs_from_assets(
+        records,
+        asset_registry_ref=registry_ref,
+    )
+    registered_assemblies = [
+        record
+        for record in records
+        if record.asset_type == "assembly_fasta_registered"
+    ]
+    if len(registered_assemblies) > 1:
+        raise ValueError(
+            "single-backbone inventory accepts exactly one registered assembly"
+        )
+    if registered_assemblies:
+        registered_assembly = registered_assemblies[0]
+        if (
+            registered_assembly.checksum_status != "ready"
+            or registered_assembly.checksum is None
+            or registered_assembly.size_bytes is None
+        ):
+            raise ValueError(
+                "registered assembly lacks immutable byte evidence"
+            )
+        bound_candidate = publish_registered_assembly_candidate(
+            data_dir,
+            manifest.session_id,
+            asset_id=registered_assembly.asset_id,
+            source_path=registered_assembly.path,
+            expected_sha256=registered_assembly.checksum,
+            expected_size_bytes=registered_assembly.size_bytes,
+            asset_registry_ref=published_registry.ref,
+        )
+        assembly_resource = ResourceRef.from_dict(resource_refs["assembly"])
+        source_metadata = dict(assembly_resource.metadata)
+        source_asset_ids = list(source_metadata.pop("asset_ids", []) or [])
+        source_registry_ref = source_metadata.pop("asset_registry_ref", None)
+        resource_refs["assembly"] = ResourceRef(
+            resource_type="assembly",
+            paths=[str(bound_candidate.primary_output_path)],
+            source_stage="inventory_registered_assembly",
+            metadata={
+                **source_metadata,
+                "source_asset_ids": source_asset_ids,
+                "source_asset_registry_ref": source_registry_ref,
+                "candidate_bundle_ref": bound_candidate.ref.model_dump(
+                    mode="json"
+                ),
+                "primary_output_ref": (
+                    bound_candidate.primary_output_ref.model_dump(mode="json")
+                ),
+            },
+        ).to_dict()
+        ledger.record_event(
+            manifest.session_id,
+            "registered_assembly_candidate_bound",
+            {
+                "asset_id": registered_assembly.asset_id,
+                "candidate_bundle_ref": bound_candidate.ref.model_dump(
+                    mode="json"
+                ),
+                "primary_output_ref": (
+                    bound_candidate.primary_output_ref.model_dump(mode="json")
+                ),
+            },
+        )
 
     update = update_inventory_stage_output(
         state,
@@ -270,32 +631,32 @@ def register_assets(state: TopLevelState) -> StateUpdate:
             "registered_assets": [r.asset_id for r in records],
         },
     )
-    update["asset_registry_ref"] = str(registry_path)
+    update["asset_registry_ref"] = registry_ref
     update["resource_refs"] = resource_refs
     return update
 
 
-def _apply_shared_platform_override(
-    manifest: InputManifest, state: TopLevelState
-) -> None:
-    """Apply an operator-selected platform to raw long-read assets."""
-    raw_shared = state.get("shared_parameters")
-    if raw_shared is None:
-        return
-    try:
-        shared = (
-            raw_shared
-            if isinstance(raw_shared, SharedParameters)
-            else SharedParameters.model_validate(raw_shared)
+def _load_inventory_run_config(
+    state: TopLevelState,
+) -> tuple[RunConfig, str | None]:
+    """Load the run-owned declaration source used by frozen validation."""
+
+    paths = SessionPaths.from_run_dir(Path(state.get("data_dir", "data")))
+    if paths.run_config_path.is_file():
+        return (
+            load_run_config(paths.run_config_path),
+            paths.to_ref(paths.run_config_path),
         )
-    except ValueError:
-        return
-    platform = shared.platform
-    if not platform or platform == "unknown":
-        return
-    for asset in manifest.assets:
-        if asset.asset_type == "raw_long_reads":
-            asset.platform = platform
+    raw_shared = state.get("shared_parameters")
+    if isinstance(raw_shared, SharedParameters):
+        shared = raw_shared.model_dump(mode="json", exclude_none=True)
+    elif isinstance(raw_shared, dict):
+        shared = dict(raw_shared)
+    elif raw_shared is None:
+        shared = None
+    else:
+        raise ValueError("shared_parameters must be a mapping")
+    return RunConfig(shared_parameters=shared), None
 
 
 def commit_inventory(state: TopLevelState) -> StateUpdate:
@@ -397,7 +758,9 @@ class _ResourceMetadataAccumulator(TypedDict):
     platforms: list[str]
     formats: list[str]
     asset_types: list[str]
-    assets: list[dict[str, Any]]
+    asset_registry_ref: ArtifactRefJson
+    member_count: int
+    pair_count: int
 
 
 class _ResourceAccumulator(TypedDict):
@@ -405,7 +768,11 @@ class _ResourceAccumulator(TypedDict):
     metadata: _ResourceMetadataAccumulator
 
 
-def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> ResourceRefs:
+def _populate_resource_refs_from_assets(
+    records: list[AssetRecord],
+    *,
+    asset_registry_ref: ArtifactRefJson,
+) -> ResourceRefs:
     """Populate resource_refs from registered asset records.
 
     Maps asset_type to logical resource names and creates ResourceRef entries.
@@ -423,7 +790,7 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> ResourceR
         resource_type = None
 
         # Map asset_type to logical resource name
-        if record.asset_type in ["raw_long_reads", "clean_long_reads", "pacbio_hifi"]:
+        if record.asset_type in ["raw_long_reads", "clean_long_reads"]:
             resource_type = "long_reads"
         elif record.asset_type in ["raw_short_dna_reads", "clean_short_dna_reads"]:
             resource_type = "short_reads"
@@ -453,7 +820,9 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> ResourceR
                         "platforms": [],
                         "formats": [],
                         "asset_types": [],
-                        "assets": [],
+                        "asset_registry_ref": asset_registry_ref,
+                        "member_count": 0,
+                        "pair_count": 0,
                     },
                 }
 
@@ -464,6 +833,7 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> ResourceR
             resource_refs[resource_type]["metadata"]["asset_ids"].append(
                 record.asset_id
             )
+            resource_refs[resource_type]["metadata"]["member_count"] += 1
             if (
                 record.platform
                 and record.platform
@@ -487,9 +857,11 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> ResourceR
                 resource_refs[resource_type]["metadata"]["asset_types"].append(
                     record.asset_type
                 )
-            resource_refs[resource_type]["metadata"]["assets"].append(
-                record.model_dump(mode="json")
-            )
+            if (
+                resource_type == "hic_reads"
+                and record.metadata.get("mate") == "R1"
+            ):
+                resource_refs[resource_type]["metadata"]["pair_count"] += 1
 
     return {
         resource_type: ResourceRef(

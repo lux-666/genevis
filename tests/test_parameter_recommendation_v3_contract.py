@@ -283,12 +283,12 @@ def test_retry_task_requires_typed_retry_context() -> None:
         )
 
 
-def test_t2t_snapshot_requires_motif_ref_and_exact_ont_dependencies() -> None:
+def test_t2t_snapshot_requires_motif_ref_and_exact_long_read_dependencies() -> None:
     context = T2TRecommendationContext(
         stage="t2t",
         resolved_telomere_motif="TTAGGG",
         motif_source="provided_species_fact",
-        ont_asset_count=2,
+        long_read_asset_count=2,
     )
     with pytest.raises(ValidationError, match="motif_resolution_ref"):
         RecommendationInputSnapshotV3(
@@ -313,7 +313,7 @@ def test_t2t_snapshot_requires_motif_ref_and_exact_ont_dependencies() -> None:
     assert len(snapshot.dependency_refs.stage_input_refs) == 3
 
 
-def test_t2t_snapshot_accepts_one_indexed_asset_registry_for_ont_inputs() -> None:
+def test_t2t_snapshot_accepts_one_indexed_registry_for_long_read_inputs() -> None:
     snapshot = RecommendationInputSnapshotV3(
         schema_version=3,
         method_id="t2t.alignment.minimap2",
@@ -323,7 +323,7 @@ def test_t2t_snapshot_accepts_one_indexed_asset_registry_for_ont_inputs() -> Non
             stage="t2t",
             resolved_telomere_motif="TTAGGG",
             motif_source="provided_species_fact",
-            ont_asset_count=3,
+            long_read_asset_count=3,
         ),
         dependency_refs=RecommendationDependencyRefs(
             stage_input_refs=(
@@ -349,7 +349,7 @@ def test_canonical_motif_fields_reject_non_dna_values(motif: str) -> None:
             stage="t2t",
             resolved_telomere_motif=motif,
             motif_source="provided_species_fact",
-            ont_asset_count=1,
+            long_read_asset_count=1,
         )
 
 

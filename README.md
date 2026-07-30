@@ -13,7 +13,7 @@ Agent。它把传统生信 pipeline 中分散的脚本、参数、人工判断�
 
 长读长基因组分析通常不是一次命令就能结束的任务。真实项目里会遇到：
 
-- 输入文件类型复杂：ONT/CLR long reads、short reads、Hi-C、已有 assembly、注释证据等。
+- 输入文件类型复杂：ONT、HiFi、CLR、CycloneSEQ long reads、short reads、Hi-C、已有 assembly、注释证据等。
 - 分析阶段长：read QC、genome survey、assembly、assembly review、Hi-C scaffolding、repeat/gene/function annotation。
 - 方法选择依赖上下文：同一阶段可能有 Flye、NextDenovo、QUAST、BUSCO、RepeatMasker、Miniprot、AUGUSTUS、DIAMOND 等不同工具。
 - 中间结果巨大：FASTQ、FASTA、BAM、GFF3、日志和指标表不适合塞进 agent state。
@@ -90,7 +90,7 @@ app/
   review/       review gate registry, policies, recommendation/resume helpers
   control/      lifecycle and resume semantics
   reports/      operator reports and run traces
-  entrypoints/  CLI, ask flow, TUI, review/resume commands
+  entrypoints/  CLI boundaries, planner/TUI, review/resume commands
 
 docs/
   architecture.md          system architecture and ownership boundaries
@@ -151,13 +151,13 @@ Describe what you want to do (e.g. '对 /path/reads.fa 以卵鳎为目标物种�
 TUI 的实际流程是：
 
 1. 让用户用自然语言描述任务。
-2. 解析这句指令，生成 `AskPlanState`，并 materialize manifest。
+2. 解析这句指令，生成内存中的 planner state，并 materialize manifest。
 3. 进入 `Plan Draft` 页面，展示 session、data dir、manifest、inputs、stages、methods、parameters 和 attention 项。
 4. 在 draft 里可以按 `Enter/c` 继续，按 stage 编号编辑单个 stage，按 `s` 编辑 stage list，按 `r` 重新手动规划。
 5. 进入单个 stage 后，可以按 `m` 改 method，按 `p` 改 parameters，按 `b` 返回 draft。
 6. draft 锁定后不会立刻执行；TUI 会再展示 final run plan 并询问 `Proceed?`。
-7. 用户确认后，TUI 写出 ask run config，把选中的 stage 写成 `requested_stages`，把可执行 stage 写成 `local_exec`。
-8. TUI 在同一进程内构造 structured run 参数并调用 run session 逻辑；不是再启动一个新的 shell 命令。
+7. 用户确认后，TUI 写出 run config，把选中的 stage 写成 `requested_stages`，把可执行 stage 写成 `local_exec`。
+8. TUI 冻结输入后，在同一进程内调用 session executor；不会再拼装或启动另一个 CLI 命令。
 9. 如果运行中遇到 human gate，TUI 会启用 interactive gate loop，在 sqlite checkpoint 上收集决策、写 decision artifact、更新 checkpoint 并继续 graph。
 
 Plan 层控制的是“这次项目要走哪些 stage”。例如只想从已有 assembly 开始做
@@ -271,26 +271,9 @@ TUI 最终会把选择落到 run config：
 `local_exec` 的 stage 仍然可以参与规划、写 artifact、进入 review gate 或作为
 下游 contract 继续传递，但不会偷偷运行昂贵命令。
 
-以下 `run`/`ask` 命令仅为现有自动化、HPC 集成测试和内部调用保留，不是正常
-用户工作流；新的运行应从 `gene-agent tui` 开始：
-
-```bash
-gene-agent run \
-  --session-id <SESSION> \
-  --manifest /absolute/path/to/manifest.yaml \
-  --data-dir /absolute/path/to/data \
-  --run-config /absolute/path/to/run_config.json \
-  --checkpointer sqlite
-```
-
-旧自动化仍可用 `ask` 生成 plan/run config：
-
-```bash
-gene-agent ask "assemble this ONT genome and annotate it" \
-  --data-dir /absolute/path/to/data
-```
-
-非交互场景可以先让 `ask` 输出澄清模板，补完后再继续同一个 ask plan。
+`run` 和 `ask` 兼容命令已移除。新运行只有一个入口：
+`gene-agent tui`。TUI 负责收集输入、确认计划、冻结 manifest/run config，并调用
+内部 session executor；自动化不应绕过这条冻结边界。
 
 ### 3. Stage selection and gates
 

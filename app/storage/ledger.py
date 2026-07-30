@@ -216,7 +216,7 @@ class Ledger:
         session_id: str,
         assets: list[dict[str, Any]],
         *,
-        registry_ref: str,
+        registry_ref: Any,
         ambiguous: bool = False,
     ) -> None:
         """Record inventory cardinality and the authoritative registry ref."""

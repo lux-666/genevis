@@ -74,10 +74,3 @@ parameters match the descriptor and run configuration.
 
 Descriptors do not authorize process execution. Execution requires the stage to
 be enabled for local execution and a complete frozen attempt.
-
-## Asset Rules
-
-Asset descriptors define which manifest asset types may satisfy a stage input.
-They are inputs to inventory and resource resolution, not a second execution or
-cross-stage handoff system. Current logical resource transport is defined in
-[`architecture/resource-handoff.md`](architecture/resource-handoff.md).

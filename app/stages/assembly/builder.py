@@ -21,7 +21,7 @@ from app.stages.assembly.nodes import (
     infer_input_profile,
     plan_candidate_attempts,
     resolve_extended_inputs,
-    select_primary_and_fallback,
+    select_primary,
     select_route,
 )
 from app.stages.assembly.parameters.workflow import (
@@ -56,7 +56,7 @@ def build_stage() -> CompiledStateGraph[
     graph.add_node("infer_input_profile", infer_input_profile)
     graph.add_node("select_route", select_route)
     graph.add_node("build_assembly_candidate_set", build_assembly_candidate_set)
-    graph.add_node("select_primary_and_fallback", select_primary_and_fallback)
+    graph.add_node("select_primary", select_primary)
     graph.add_node("recommend_parameters", recommend_assembly_parameters)
     graph.add_node("plan_candidate_attempts", plan_candidate_attempts)
     graph.add_node("flye", build_flye_graph())
@@ -96,10 +96,10 @@ def build_stage() -> CompiledStateGraph[
     graph.add_conditional_edges(
         "build_assembly_candidate_set",
         route_after_candidate_set,
-        {"select": "select_primary_and_fallback", "fail": "fail"},
+        {"select": "select_primary", "fail": "fail"},
     )
     graph.add_conditional_edges(
-        "select_primary_and_fallback",
+        "select_primary",
         route_after_select,
         {"recommend": "recommend_parameters", "block": "block", "fail": "fail"},
     )

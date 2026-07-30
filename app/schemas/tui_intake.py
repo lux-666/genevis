@@ -13,8 +13,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.schemas.shared_parameters import SharedParameters
 
-IntakeRole = Literal["ont_reads", "hic_reads"]
-AssetCandidateRole = Literal["ont_reads", "hic_r1", "hic_r2", "no_hic"]
+IntakeRole = Literal["hifi_reads", "ont_reads", "hic_reads"]
+AssetCandidateRole = Literal[
+    "hifi_reads",
+    "ont_reads",
+    "hic_r1",
+    "hic_r2",
+    "no_hic",
+]
 TuiLifecycle = Literal[
     "intake",
     "planning",
@@ -36,8 +42,23 @@ class WorkflowIntent(BaseModel):
     target_species: str | None = Field(default=None, min_length=1)
     target_assembly_level: Literal["contig", "scaffold", "chromosome"] = "contig"
     requested_stages: list[str] = Field(default_factory=list)
+    requested_assembly_method: Literal[
+        "flye",
+        "nextdenovo",
+        "hifiasm",
+        "hifiasm_ont",
+    ] | None = None
+    use_ultralong_ont: bool = False
+    use_hic_phasing: bool = False
+    # Intake staging fields for T2T batched collection.  ``telomere_motif``
+    # holds the operator-supplied DNA motif before it is projected into
+    # ``SharedParameters.species_facts``; it is validated on assignment.
+    # ``motif_choice_complete`` is True once the operator has either supplied a
+    # valid motif or explicitly deferred the choice (omission / unknown).
+    telomere_motif: str | None = Field(default=None, min_length=1)
+    motif_choice_complete: bool = False
 
-    @field_validator("goal_text", "sample_id", "target_species")
+    @field_validator("goal_text", "sample_id", "target_species", "telomere_motif")
     @classmethod
     def _strip_non_blank(cls, value: str | None) -> str | None:
         if value is None:
@@ -58,6 +79,25 @@ class WorkflowIntent(BaseModel):
             if normalized not in result:
                 result.append(normalized)
         return result
+
+
+class HifiReadsFact(BaseModel):
+    """Confirmed PacBio HiFi read files for this sample."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["hifi_reads"] = "hifi_reads"
+    paths: list[str] = Field(min_length=1)
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_paths(cls, value: list[str]) -> list[str]:
+        normalized = [str(path).strip() for path in value]
+        if any(not path for path in normalized):
+            raise ValueError("HiFi paths must not be blank")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("HiFi paths must be unique")
+        return normalized
 
 
 class OntReadsFact(BaseModel):
@@ -196,6 +236,7 @@ class AssetCollectionState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     requirements: list[IntakeRole] = Field(default_factory=list)
+    hifi_reads: HifiReadsFact | None = None
     ont_reads: OntReadsFact | None = None
     hic_reads: HiCPairedReadsFact | NoHiCFact | None = None
     unresolved_candidates: list[UnresolvedAssetCandidate] = Field(default_factory=list)

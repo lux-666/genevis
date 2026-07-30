@@ -22,6 +22,15 @@ from app.control.lifecycle import (
 from app.reports.review_report import write_operator_report
 from app.review.base import ResumeReviewRequest, load_resume_review_request
 from app.review.persistence import persist_review_request
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_DRAFT_ASSEMBLY,
+    HIC_SCAFFOLDED_ASSEMBLY,
+    ArtifactMeta,
+    AssemblyCandidateBundle,
+)
+from app.schemas.resource_ref import ResourceRef
+from app.storage.artifacts import publish_artifact_record
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -34,7 +43,6 @@ class ReviewResumeTests(unittest.TestCase):
                 stage="assembly_review",
                 decision="accept",
                 candidate_id="flye",
-                final_assembly_ref="work/assembly/flye/draft.fasta",
                 decided_by="llm_provisional",
             )
 
@@ -46,7 +54,6 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="accept",
             candidate_id="flye",
-            final_assembly_ref="work/assembly/flye/draft.fasta",
             decided_by="llm_provisional",
             rationale_artifact_ref="artifacts/assembly_review/recommendation.json",
         )
@@ -75,7 +82,6 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="accept",
             candidate_id="flye",
-            final_assembly_ref="work/assembly/flye/draft.fasta",
             rejected_candidates=["canu"],
             notes=["human accepted flye"],
             **_review_binding(state),
@@ -91,11 +97,12 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["selected_candidate_id"], "flye")
         self.assertEqual(ar_out["action_type"], "pass")
         self.assertEqual(
-            ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta"
+            ar_out["pre_action_assembly_ref"],
+            str(_candidate_output_path(state, "flye")),
         )
         self.assertEqual(
             update["resource_refs"]["assembly"]["paths"],
-            ["work/assembly/flye/draft.fasta"],
+            [str(_candidate_output_path(state, "flye"))],
         )
         self.assertTrue(
             _artifact_path(state, ar_out["review_decision_artifact_ref"]).exists()
@@ -122,7 +129,6 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="pass",
             candidate_id="flye",
-            final_assembly_ref="work/assembly/flye/draft.fasta",
             notes=["human passed flye through unchanged"],
             **_review_binding(state),
         )
@@ -136,7 +142,7 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["action_execution_mode"], "none")
         self.assertEqual(
             update["resource_refs"]["assembly"]["paths"],
-            ["work/assembly/flye/draft.fasta"],
+            [str(_candidate_output_path(state, "flye"))],
         )
 
     def test_resume_assembly_purge_requires_materialized_output(self):
@@ -146,10 +152,10 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="purge",
             candidate_id="flye",
-            final_assembly_ref="work/assembly/flye.purged.fasta",
             method_name="external_purge_dups",
             metadata={
                 "human_approved_action": True,
+                "action_output_ref": "work/assembly/flye.purged.fasta",
                 "evidence_refs": ["assembly_eval_bundle.json"],
             },
             **_review_binding(state),
@@ -167,10 +173,12 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="purge",
             candidate_id="flye",
-            final_assembly_ref=str(purged),
             method_name="external_purge_dups",
             notes=["human note alone is not enough provenance"],
-            metadata={"human_approved_action": True},
+            metadata={
+                "human_approved_action": True,
+                "action_output_ref": str(purged),
+            },
             **_review_binding(state),
         )
 
@@ -186,9 +194,9 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="purge",
             candidate_id="flye",
-            final_assembly_ref=str(purged),
             metadata={
                 "human_approved_action": True,
+                "action_output_ref": str(purged),
                 "evidence_refs": ["assembly_eval_bundle.json"],
             },
             **_review_binding(state),
@@ -197,28 +205,23 @@ class ReviewResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ResumeValidationError, "method or provenance"):
             resume_review_state(state, request)
 
-    def test_resume_assembly_rejects_mismatched_action_output_ref(self):
+    def test_resume_assembly_rejects_action_output_equal_to_input(self):
         state = _assembly_blocked_state()
-        purged = Path(state["data_dir"]) / "flye.purged.fasta"
-        other = Path(state["data_dir"]) / "other.purged.fasta"
-        purged.write_text(">ctg1\nACGT\n", encoding="utf-8")
-        other.write_text(">ctg1\nACGT\n", encoding="utf-8")
         request = ResumeReviewRequest(
             session_id="s1",
             stage="assembly_review",
             decision="purge",
             candidate_id="flye",
-            final_assembly_ref=str(purged),
             method_name="external_purge_dups",
             metadata={
                 "human_approved_action": True,
-                "action_output_ref": str(other),
+                "action_output_ref": str(_candidate_output_path(state, "flye")),
                 "evidence_refs": ["assembly_eval_bundle.json"],
             },
             **_review_binding(state),
         )
 
-        with self.assertRaisesRegex(ResumeValidationError, "must match"):
+        with self.assertRaisesRegex(ResumeValidationError, "must differ"):
             resume_review_state(state, request)
 
     def test_resume_assembly_purge_promotes_human_supplied_purged_ref(self):
@@ -230,7 +233,6 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="purge",
             candidate_id="flye",
-            final_assembly_ref=str(purged),
             method_name="external_purge_dups",
             notes=["human approved purge after duplicated BUSCO review"],
             metadata={
@@ -248,10 +250,15 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["action_type"], "purge")
         self.assertEqual(ar_out["action_execution_mode"], "external")
         self.assertEqual(
-            ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta"
+            ar_out["pre_action_assembly_ref"],
+            str(_candidate_output_path(state, "flye")),
         )
-        self.assertEqual(ar_out["purged_assembly"], str(purged))
-        self.assertEqual(update["resource_refs"]["assembly"]["paths"], [str(purged)])
+        self.assertNotEqual(ar_out["purged_assembly"], str(purged))
+        self.assertTrue(Path(ar_out["purged_assembly"]).is_file())
+        self.assertEqual(
+            update["resource_refs"]["assembly"]["paths"],
+            [ar_out["purged_assembly"]],
+        )
         action = json.loads(
             _artifact_path(
                 state, ar_out["assembly_review_action_artifact_ref"]
@@ -259,9 +266,10 @@ class ReviewResumeTests(unittest.TestCase):
         )
         self.assertEqual(action["action_type"], "purge")
         self.assertEqual(
-            action["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta"
+            action["pre_action_assembly_ref"],
+            str(_candidate_output_path(state, "flye")),
         )
-        self.assertEqual(action["output_assembly_ref"], str(purged))
+        self.assertEqual(action["output_assembly_ref"], ar_out["purged_assembly"])
         decision_record = json.loads(
             _artifact_path(state, ar_out["review_decision_artifact_ref"]).read_text(
                 encoding="utf-8"
@@ -272,7 +280,9 @@ class ReviewResumeTests(unittest.TestCase):
         )
         self.assertEqual(
             decision_record["decision"]["metadata"]["post_action_assembly_ref"],
-            purged.relative_to(Path(state["data_dir"])).as_posix(),
+            Path(ar_out["purged_assembly"])
+            .relative_to(Path(state["data_dir"]))
+            .as_posix(),
         )
 
     def test_resume_assembly_polish_requires_action_output_ref(self):
@@ -301,11 +311,11 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="polish",
             candidate_id="flye",
-            final_assembly_ref=str(polished),
             method_name="pilon_shortread",
             notes=["human approved polish"],
             metadata={
                 "human_approved_action": True,
+                "action_output_ref": str(polished),
                 "evidence_notes": ["polish requested"],
             },
             **_review_binding(state),
@@ -314,39 +324,6 @@ class ReviewResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ResumeValidationError, "short-read"):
             resume_review_state(state, request)
 
-    def test_resume_assembly_rejects_missing_final_ref_without_mutation(self):
-        state = _assembly_blocked_state()
-        before = copy.deepcopy(state)
-        request = ResumeReviewRequest(
-            session_id="s1",
-            stage="assembly_review",
-            decision="accept",
-            candidate_id="flye",
-            **_review_binding(state),
-        )
-
-        with self.assertRaisesRegex(ResumeValidationError, "final_assembly_ref"):
-            resume_review_state(state, request)
-
-        self.assertEqual(state, before)
-
-    def test_resume_assembly_rejects_mismatched_final_ref(self):
-        state = _assembly_blocked_state()
-        before = copy.deepcopy(state)
-        request = ResumeReviewRequest(
-            session_id="s1",
-            stage="assembly_review",
-            decision="accept",
-            candidate_id="flye",
-            final_assembly_ref="work/assembly/canu/draft.fasta",
-            **_review_binding(state),
-        )
-
-        with self.assertRaisesRegex(ResumeValidationError, "does not match"):
-            resume_review_state(state, request)
-
-        self.assertEqual(state, before)
-
     def test_resume_assembly_honors_interrupt_decisions_allowed(self):
         state = _assembly_blocked_state(decisions_allowed=["stop_human_review"])
         request = ResumeReviewRequest(
@@ -354,7 +331,6 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="accept",
             candidate_id="flye",
-            final_assembly_ref="work/assembly/flye/draft.fasta",
             **_review_binding(state),
         )
 
@@ -368,7 +344,6 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="accept",
             candidate_id="flye",
-            final_assembly_ref="work/assembly/flye/draft.fasta",
             **_review_binding(state),
         )
 
@@ -382,7 +357,6 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="accept",
             candidate_id="unknown",
-            final_assembly_ref="draft.fasta",
             **_review_binding(state),
         )
 
@@ -526,7 +500,12 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(
             hic_out["selected_method_name"], "hic_scaffolding.candidate.autohic"
         )
-        self.assertTrue(hic_out["output_assembly_ref"].endswith("autohic.fasta"))
+        self.assertEqual(
+            hic_out["output_assembly_ref"],
+            state["stage_outputs"]["hic_scaffolding"]["method_candidates"][
+                "hic_scaffolding.candidate.autohic"
+            ]["scaffold_fasta"],
+        )
         self.assertTrue(
             _artifact_path(state, hic_out["review_decision_artifact_ref"]).exists()
         )
@@ -570,10 +549,9 @@ class ReviewResumeTests(unittest.TestCase):
 
         self.assertEqual(update["current_stage"], "t2t")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
-        self.assertTrue(
-            hic_out["output_assembly_ref"].endswith(
-                "work/hic_scaffolding/pre_hic.fasta"
-            )
+        self.assertEqual(
+            hic_out["output_assembly_ref"],
+            state["stage_outputs"]["hic_scaffolding"]["pre_hic_assembly_ref"],
         )
         self.assertTrue(
             _artifact_path(state, hic_out["review_decision_artifact_ref"]).exists()
@@ -618,7 +596,6 @@ class ReviewResumeTests(unittest.TestCase):
                 stage="assembly_review",
                 decision="accept",
                 candidate_id="flye",
-                final_assembly_ref="draft.fasta",
                 unexpected=True,
             )
 
@@ -976,7 +953,6 @@ class LoadResumeReviewRequestTests(unittest.TestCase):
                         "stage": "assembly_review",
                         "decision": "accept",
                         "candidate_id": "flye",
-                        "final_assembly_ref": "draft.fasta",
                         "notes": ["operator reviewed QUAST"],
                     }
                 ),
@@ -1016,7 +992,6 @@ class LoadResumeReviewRequestTests(unittest.TestCase):
                         "stage": "assembly_review",
                         "decision": "accept",
                         "candidate_id": "flye",
-                        "final_assembly_ref": "draft.fasta",
                         "unknown_field": True,
                     }
                 ),
@@ -1057,6 +1032,99 @@ def _artifact_path(state: dict, ref: object) -> Path:
     return Path(str(ref))
 
 
+def _candidate_output_path(state: dict, candidate_id: str) -> Path:
+    candidate = next(
+        item
+        for item in state["stage_outputs"]["assembly_review"]["candidates"]
+        if item["candidate_id"] == candidate_id
+    )
+    return _artifact_path(state, candidate["primary_output_ref"])
+
+
+def _publish_assembly_candidate(
+    data_dir: Path,
+    session_id: str,
+    *,
+    candidate_id: str,
+    method_name: str,
+    source: Path,
+) -> dict:
+    paths = SessionPaths.from_run_dir(data_dir)
+    candidate_dir = paths.artifact_path("assembly", candidate_id)
+    work_dir = paths.work_path("assembly", candidate_id)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    primary = publish_artifact_record(
+        data_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            source,
+            stage="assembly",
+            method_name=method_name,
+            artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+        ),
+        destination=candidate_dir / "draft.fasta",
+    )
+    planned = AssemblyCandidateBundle(
+        session_id=session_id,
+        candidate_id=candidate_id,
+        method_name=method_name,
+        status="planned",
+        input_type="raw_long_reads",
+        input_member_ids={"primary": [f"{candidate_id}:reads"]},
+        input_member_platforms={"primary": ["ont"]},
+        parameter_attempt_id=0,
+        expected_outputs=["primary_assembly"],
+    )
+    plan_source = work_dir / "candidate.planned.json"
+    plan_source.write_text(
+        json.dumps(planned.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+    published_plan = publish_artifact_record(
+        data_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            plan_source,
+            stage="assembly",
+            method_name=method_name,
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+        destination=candidate_dir / "candidate.planned.json",
+    )
+    executed = planned.model_copy(
+        update={
+            "status": "executed",
+            "plan_ref": published_plan.ref,
+            "primary_output": primary.ref,
+        }
+    )
+    executed_source = work_dir / "candidate.executed.json"
+    executed_source.write_text(
+        json.dumps(executed.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+    published_executed = publish_artifact_record(
+        data_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            executed_source,
+            stage="assembly",
+            method_name=method_name,
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+        destination=candidate_dir / "candidate.executed.json",
+    )
+    return {
+        "candidate_id": candidate_id,
+        "method_name": method_name,
+        "source": "test_fixture",
+        "status": "executed",
+        "bundle_ref": published_executed.ref.model_dump(mode="json"),
+        "primary_output_ref": primary.ref.model_dump(mode="json"),
+    }
+
+
 def _assembly_blocked_state(
     *,
     decisions_allowed: list[str] | None = None,
@@ -1068,22 +1136,21 @@ def _assembly_blocked_state(
         draft = data_dir / "work" / "assembly" / method / "draft.fasta"
         draft.parent.mkdir(parents=True, exist_ok=True)
         draft.write_text(">ctg1\nACGT\n", encoding="utf-8")
+    candidates = [
+        _publish_assembly_candidate(
+            data_dir,
+            session_id,
+            candidate_id=method,
+            method_name=f"assembly.candidate.{method}",
+            source=data_dir / "work" / "assembly" / method / "draft.fasta",
+        )
+        for method in ("flye", "canu")
+    ]
     payload = {
         "stage": "assembly_review",
         "gate_id": "assembly_review",
         "reason": "assembly_review_human_decision_required",
-        "candidates": [
-            {
-                "candidate_id": "flye",
-                "method_name": "assembly.candidate.flye",
-                "final_assembly_ref": "work/assembly/flye/draft.fasta",
-            },
-            {
-                "candidate_id": "canu",
-                "method_name": "assembly.candidate.canu",
-                "final_assembly_ref": "work/assembly/canu/draft.fasta",
-            },
-        ],
+        "candidates": candidates,
         "signals": [],
         "decisions_allowed": (
             decisions_allowed
@@ -1105,10 +1172,6 @@ def _assembly_blocked_state(
         },
         "candidate_comparison_context": {
             "candidate_ids": ["flye", "canu"],
-            "candidate_final_assembly_refs": {
-                "flye": "work/assembly/flye/draft.fasta",
-                "canu": "work/assembly/canu/draft.fasta",
-            },
             "candidate_comparison_ref": "candidate_comparison.json",
         },
     }
@@ -1176,6 +1239,38 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
     pre_hic.parent.mkdir(parents=True, exist_ok=True)
     pre_hic.write_text(">ctg1\nACGT\n", encoding="utf-8")
     scaffold.write_text(">chr1\nACGT\n", encoding="utf-8")
+    paths = SessionPaths.from_run_dir(data_dir)
+    published_pre_hic = publish_artifact_record(
+        data_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            pre_hic,
+            stage="assembly_review",
+            method_name="assembly_review.contract",
+            artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+        ),
+        destination=paths.artifact_path(
+            "assembly_review",
+            "selected_assembly.fasta",
+        ),
+    )
+    published_scaffold = publish_artifact_record(
+        data_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            scaffold,
+            stage="hic_scaffolding",
+            method_name="hic_scaffolding.candidate.autohic",
+            artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
+        ),
+        destination=paths.artifact_path(
+            "hic_scaffolding",
+            "autohic",
+            "scaffold.fasta",
+        ),
+    )
+    pre_hic = published_pre_hic.path
+    scaffold = published_scaffold.path
     state = {
         "session_id": session_id,
         "thread_id": session_id,
@@ -1203,6 +1298,18 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
                     }
                 },
             }
+        },
+        "resource_refs": {
+            "assembly": ResourceRef(
+                resource_type="assembly",
+                paths=[str(pre_hic)],
+                source_stage="assembly_review",
+                metadata={
+                    "primary_output_ref": published_pre_hic.ref.model_dump(
+                        mode="json"
+                    )
+                },
+            ).to_dict()
         },
         "skip_reasons": {},
     }

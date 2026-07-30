@@ -320,6 +320,7 @@ def test_freeze_uses_approved_snapshot_after_mutable_genome_state_changes(
             "input_ref": str(reads.resolve()),
             "selected_methods": ["assembly.candidate.hifiasm_ont"],
             "hifiasm_ont_parameters": {"threads": 4},
+            "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
         }
     )
 

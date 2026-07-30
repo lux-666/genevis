@@ -20,7 +20,7 @@ from app.execution.local_runner import LocalRunner
 from app.execution.runner import Runner
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.schemas.execution import ExecutionResult
+from app.schemas.execution import ExecutionResult, InputDependency
 from app.storage.artifacts import register_artifact_records
 from app.storage.ledger import Ledger, LedgerConflictError, LedgerFormatError
 from app.storage.paths import DataLayoutError
@@ -67,6 +67,7 @@ def build_frozen_attempt(
     expected_outputs: list[Path],
     env: dict[str, Any] | None,
     env_spec: EnvSpec | None,
+    input_dependencies: list[InputDependency | dict[str, Any]],
     metadata: dict[str, Any] | None = None,
     interpreter: str = "/bin/bash",
 ) -> FrozenAttemptSpec:
@@ -81,6 +82,7 @@ def build_frozen_attempt(
         "interpreter": interpreter,
         "expected_outputs": expected_outputs,
         "env": {str(k): str(v) for k, v in (env or {}).items()},
+        "input_dependencies": list(input_dependencies),
         "metadata": metadata or {},
     }
     if env_spec is not None:

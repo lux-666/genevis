@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
-from app.domains.assembly.selection import AssemblySelection
+from app.domains.assembly.selection import (
+    AssemblySelection,
+    validate_assembly_selection,
+)
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     RecommendationRetryContext,
@@ -47,7 +50,7 @@ def _require_selection(raw: object) -> AssemblySelection:
     if raw is None:
         raise ValueError("assembly recommendation context requires assembly_selection")
     try:
-        return AssemblySelection.model_validate(raw)
+        return validate_assembly_selection(raw)
     except ValueError as exc:
         raise ValueError(
             "assembly recommendation context has invalid assembly_selection"

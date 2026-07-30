@@ -103,18 +103,35 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
         )
     metadata = resolution.metadata
     asset_ids = list(metadata.get("asset_ids") or [])
-    platforms = list(metadata.get("platforms") or [])
-    formats = list(metadata.get("formats") or [])
+    runtime_assets = [
+        asset
+        for asset in (metadata.get("assets") or [])
+        if isinstance(asset, dict)
+    ]
+    platforms = [
+        str(asset.get("platform") or "unknown")
+        for asset in runtime_assets
+    ] or [str(value) for value in metadata.get("platforms") or []]
+    formats = [
+        str(asset.get("format") or "unknown")
+        for asset in runtime_assets
+    ] or [str(value) for value in metadata.get("formats") or []]
+    unique_platforms = list(dict.fromkeys(platforms))
+    unique_formats = list(dict.fromkeys(formats))
     return _update_read_qc_output(
         state,
         {
             "status": "resolved",
             "input_asset_ref": asset_ids[0] if asset_ids else None,
             "input_asset_refs": asset_ids,
+            "input_member_platforms": platforms,
+            "input_member_formats": formats,
             "raw_long_reads_path": str(paths[0]),
             "raw_long_reads_paths": [str(path) for path in paths],
-            "platform": platforms[0] if platforms else metadata.get("platform"),
-            "format": formats[0] if formats else metadata.get("format"),
+            "platform": (
+                unique_platforms[0] if len(unique_platforms) == 1 else None
+            ),
+            "format": unique_formats[0] if len(unique_formats) == 1 else None,
             "input_source": resolution.source,
         },
     )
@@ -227,6 +244,8 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
         "format",
         "input_asset_ref",
         "input_asset_refs",
+        "input_member_formats",
+        "input_member_platforms",
         "length_filter_decision",
         "length_filter_method",
         "method_name",
@@ -238,6 +257,7 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
         "post_filter_summary_artifact_ref",
         "raw_long_reads_paths",
         "raw_stats_artifact_ref",
+        "read_set_manifest_ref",
         "raw_summary",
         "raw_summary_artifact_ref",
         "reason",
@@ -267,20 +287,38 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
     }
     read_paths = _committed_long_read_paths(output)
     if read_paths:
+        filtered = bool(
+            output.get("filtered_long_reads_ref")
+            or output.get("filtered_long_reads_refs")
+        )
+        metadata: dict[str, Any] = {
+            "platforms": list(
+                dict.fromkeys(output.get("input_member_platforms") or [])
+            ),
+            "formats": list(
+                dict.fromkeys(output.get("input_member_formats") or [])
+            ),
+            "member_count": len(read_paths),
+            "filtered": filtered,
+        }
+        if filtered:
+            if not output.get("read_set_manifest_ref"):
+                raise ValueError(
+                    "filtered read-QC output requires read_set_manifest_ref"
+                )
+            metadata["read_set_manifest_ref"] = output["read_set_manifest_ref"]
+            metadata["source_asset_ids"] = list(
+                output.get("input_asset_refs") or []
+            )
+        else:
+            metadata["asset_registry_ref"] = state.get("asset_registry_ref")
+            metadata["asset_ids"] = list(output.get("input_asset_refs") or [])
         update["resource_refs"] = update_resource_ref(
             state,
             "long_reads",
             read_paths,
             "read_qc",
-            {
-                "platforms": [output["platform"]] if output.get("platform") else [],
-                "formats": [output["format"]] if output.get("format") else [],
-                "input_asset_ids": list(output.get("input_asset_refs") or []),
-                "filtered": bool(
-                    output.get("filtered_long_reads_ref")
-                    or output.get("filtered_long_reads_refs")
-                ),
-            },
+            metadata,
         )
     return update
 

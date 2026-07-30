@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from pathlib import Path
 from typing import cast
 
 from app.configuration import load_descriptor_registry
@@ -27,8 +28,12 @@ from app.stages.assembly.command_builder import (
     render_assembly_cli,
     resolve_assembly_parameters,
 )
+from app.stages.assembly.method_application.hifiasm_outputs import (
+    hifiasm_native_output_declarations,
+)
 from app.stages.assembly.method_application.support import (
     approved_assembly_read_type,
+    build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
@@ -42,6 +47,7 @@ from app.stages.assembly.state import (
 )
 from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
+from app.storage.publish import shell_publish_file
 
 LIFECYCLE = MethodExecutionLifecycle(
     stage="assembly",
@@ -125,21 +131,41 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     draft = artifact_dir / "draft_assembly.fasta"
+    temp_draft = working_dir / "draft_assembly.fasta"
     prefix = output_dir / "hifiasm"
-    gfa = output_dir / "hifiasm.bp.p_ctg.gfa"
-    fallback_gfa = output_dir / "hifiasm.p_ctg.gfa"
+    gfa_bp = output_dir / "hifiasm.bp.p_ctg.gfa"
+    gfa_legacy = output_dir / "hifiasm.p_ctg.gfa"
     script = working_dir / "run_hifiasm.sh"
     try:
         catalog = approved_bundle.chain.catalog
+        l0_values: dict[str, object] = {
+            "assembly_output_prefix": str(prefix),
+            "assembly_input_reads": [str(path) for path in read_paths],
+            **thread_binding,
+        }
+        if output.get("use_ultralong_ont"):
+            ultralong = list(output.get("ultralong_read_refs") or [])
+            if not ultralong:
+                return fail_update(
+                    state,
+                    "Hifiasm --ul was enabled without registered ONT reads",
+                )
+            l0_values["assembly_ultralong_reads"] = ultralong
+        if output.get("use_hic_phasing"):
+            hic_r1 = list(output.get("hic_r1_reads") or [])
+            hic_r2 = list(output.get("hic_r2_reads") or [])
+            if not hic_r1 or len(hic_r1) != len(hic_r2):
+                return fail_update(
+                    state,
+                    "Hifiasm Hi-C phasing requires equal non-empty R1/R2 lanes",
+                )
+            l0_values["assembly_hic_r1_reads"] = hic_r1
+            l0_values["assembly_hic_r2_reads"] = hic_r2
         resolved = resolve_assembly_parameters(
             catalog=catalog,
             snapshot=approved_bundle.chain.input_snapshot,
             approved_l2=approved_bundle.approved_l2,
-            l0_executor_values={
-                "assembly_output_prefix": str(prefix),
-                "assembly_input_reads": [str(path) for path in read_paths],
-                **thread_binding,
-            },
+            l0_executor_values=l0_values,
         )
         argv = render_assembly_cli(catalog, resolved)
         parameter_sources = parameter_sources_payload(resolved)
@@ -149,14 +175,54 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
     script.write_text(
         "set -e\n"
         f"{command}\n"
-        f"if [ -f {shlex.quote(str(gfa))} ]; then gfa={shlex.quote(str(gfa))};"
-        f" elif [ -f {shlex.quote(str(fallback_gfa))} ];"
-        f" then gfa={shlex.quote(str(fallback_gfa))};"
+        f"if [ -f {shlex.quote(str(gfa_bp))} ]; then gfa={shlex.quote(str(gfa_bp))};"
+        f" elif [ -f {shlex.quote(str(gfa_legacy))} ];"
+        f" then gfa={shlex.quote(str(gfa_legacy))};"
         " else echo 'expected hifiasm primary contig GFA missing' >&2; exit 1; fi\n"
-        f'awk \'/^S/{{print ">"$2"\\n"$3}}\' "$gfa" > {shlex.quote(str(draft))}\n',
+        f'awk \'/^S/{{print ">"$2"\\n"$3}}\' "$gfa" > {shlex.quote(str(temp_draft))}\n'
+        f"{shell_publish_file(temp_draft, draft)}\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
+    try:
+        primary_deps = build_read_input_dependencies(
+            state, output, "primary", read_paths
+        )
+        ul_deps = (
+            build_read_input_dependencies(
+                state,
+                output,
+                "ultralong",
+                list(output.get("ultralong_read_refs") or []),
+            )
+            if output.get("use_ultralong_ont")
+            else []
+        )
+        hic_r1_deps = (
+            build_read_input_dependencies(
+                state,
+                output,
+                "hic_r1",
+                list(output.get("hic_r1_reads") or []),
+            )
+            if output.get("use_hic_phasing")
+            else []
+        )
+        hic_r2_deps = (
+            build_read_input_dependencies(
+                state,
+                output,
+                "hic_r2",
+                list(output.get("hic_r2_reads") or []),
+            )
+            if output.get("use_hic_phasing")
+            else []
+        )
+        input_dependencies = primary_deps + ul_deps + hic_r1_deps + hic_r2_deps
+    except ValueError as exc:
+        return fail_update(
+            state, f"Hifiasm input dependency cardinality error: {exc}"
+        )
     return freeze_parameterized_attempt(
         state,
         LIFECYCLE,
@@ -167,6 +233,7 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
         working_dir=working_dir,
         expected_outputs=[draft],
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         command_payload={
             "argv": argv,
             "command": command,
@@ -201,15 +268,17 @@ def collect_hifiasm_artifacts(state: TopLevelState) -> StateUpdate:
     [execution] = load_method_executions(state, LIFECYCLE)
     attempt = execution.attempt
     metadata = dict(attempt.metadata or {})
+    output_dir = Path(str(metadata.get("hifiasm_output_dir") or ""))
+    native_outputs = hifiasm_native_output_declarations(
+        output_dir,
+        output_prefix="hifiasm",
+        role_namespace="hifiasm",
+        artifact_type="assembly.hifiasm_native_gfa",
+    )
     return collect_method_artifacts(
         state,
         LIFECYCLE,
         execution=execution,
         substep_name="hifiasm_assembly",
-        extra_artifacts=[],
-        bundle_logs={},
-        bundle_metadata={
-            "read_profile": metadata.get("read_profile"),
-            "threads": metadata.get("threads"),
-        },
+        native_outputs=native_outputs,
     )

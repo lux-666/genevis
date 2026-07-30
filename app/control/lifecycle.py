@@ -11,14 +11,11 @@ from typing import Any, Literal
 from langchain_core.runnables import RunnableConfig
 
 from app.control.errors import (
-    DurableResumeUnavailableError,
-    LifecycleError,
     ResumeValidationError,
     UnsupportedLifecycleOperationError,
 )
 from app.review.approval import ensure_decision_allowed, load_verified_interrupt_request
 from app.review.base import ResumeReviewRequest
-from app.review.interrupt_context import generic_interrupt_context
 from app.review.gates import (
     ReviewGateDeclaration,
     apply_review_gate_decision,
@@ -27,6 +24,7 @@ from app.review.gates import (
     get_review_gate,
     registered_review_stage_label,
 )
+from app.review.interrupt_context import generic_interrupt_context
 from app.review.persistence import ReviewPersistenceError, load_review_request
 from app.review.records import counts_by_origin, decision_records
 from app.schemas.artifacts import ArtifactRef
@@ -357,7 +355,7 @@ def reject_unsupported_lifecycle_operation(operation: str) -> None:
     if operation in {"retry", "rerun", "rebuild", "rebuild-from"}:
         raise UnsupportedLifecycleOperationError(
             f"{operation} is not a resume operation and is not implemented in "
-            "Phase 3 Task 02."
+            "the current lifecycle contract."
         )
 
 
@@ -430,7 +428,10 @@ def _validated_resume_context(
         raise ResumeValidationError(
             "resume review_request_hash does not match active_interrupt.request_hash"
         )
-    _request_ref, request_record = load_verified_interrupt_request(state, active_interrupt)
+    _request_ref, request_record = load_verified_interrupt_request(
+        state,
+        active_interrupt,
+    )
     return active_interrupt, request_record
 
 
@@ -1050,18 +1051,16 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     }
     if requirements.get("candidate_ids"):
         candidate_ids = list(requirements.get("candidate_ids") or [])
-        candidate_refs = dict(requirements.get("candidate_final_assembly_refs") or {})
+        candidate_refs = dict(
+            requirements.get("candidate_primary_output_refs") or {}
+        )
         guidance["candidate_ids"] = candidate_ids
-        guidance["candidate_final_assembly_refs"] = candidate_refs
+        guidance["candidate_primary_output_refs"] = candidate_refs
         if "candidate_ids" in gate.required_resume_fields:
             template["candidate_ids"] = candidate_ids
         else:
             selected_candidate = candidate_ids[0] if candidate_ids else "<candidate_id>"
             template["candidate_id"] = selected_candidate
-            if "final_assembly_ref" in gate.required_resume_fields or candidate_refs:
-                template["final_assembly_ref"] = candidate_refs.get(
-                    selected_candidate, "<final_assembly_ref>"
-                )
             template["rejected_candidates"] = []
     if requirements.get("candidate_methods"):
         candidate_methods = list(requirements.get("candidate_methods") or [])

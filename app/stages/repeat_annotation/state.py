@@ -88,8 +88,7 @@ class RepeatAnnotationStageCursor(TypedDict, total=False):
     mask_review_decision_ref: JsonObject
     decided_by: str
     rationale_artifact_ref: str | None
-    repeat_annotation: str
-    softmasked_genome: str
+    unmasked_fallback_reason: str | None
     bundle_artifact_ref: str
 
 

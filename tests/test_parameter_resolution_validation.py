@@ -86,10 +86,10 @@ def _t2t_snapshot() -> RecommendationInputSnapshotV3:
             stage="t2t",
             resolved_telomere_motif="TTAGGG",
             motif_source="provided_species_fact",
-            ont_asset_count=1,
+            long_read_asset_count=1,
         ),
         dependency_refs=RecommendationDependencyRefs(
-            stage_input_refs=(_ref("assembly"), _ref("ont")),
+            stage_input_refs=(_ref("assembly"), _ref("long-read")),
             motif_resolution_ref=_ref("motif"),
         ),
     )

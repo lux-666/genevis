@@ -112,7 +112,6 @@ configuration. Assembly, AutoHiC, and T2T parameter recommendations occur only
 after method selection and require human approval before freezing an attempt.
 Each recommendation is an attempt-local sparse mapping; retries do not inherit
 omitted values or route around approval through model output.
-Operator-directed Flye reruns return through the same direct-attempt lifecycle.
 
 Missing required parameters, incompatible read types, execution failure, and
 missing expected outputs are explicit failures rather than planning success.
@@ -152,9 +151,9 @@ Registered methods:
 
 QUAST and BUSCO evidence is collected through an ordered shared lifecycle.
 BUSCO runs only with operator-provided offline lineage provenance. Review may
-accept a candidate, request supported polish/purge actions, schedule an
-operator-parameterized Flye rerun, or stop the workflow. Decisions are bound to
-the current review request and candidate refs.
+accept a candidate, adopt a separately completed polish/purge action, or stop
+the workflow. Decisions are bound to the current review request and typed
+candidate refs.
 
 Signals such as duplicated BUSCO content, size inflation, abnormal depth, or
 missing/inconsistent evidence prevent unsupported automatic acceptance.
@@ -189,8 +188,8 @@ assembly ends without overwriting the input FASTA.
 Logical inputs and output:
 
 - requires `assembly`;
-- consumes the complete ordered `ont_read_refs` list when supplied, preferring
-  all clean long-read assets over raw assets;
+- consumes the complete ordered, platform-preserving long-read set, including
+  ONT, PacBio HiFi, CLR, and CycloneSEQ inputs;
 - updates `assembly` only when a materialized result is selected.
 
 Registered method:
@@ -207,12 +206,17 @@ motif evidence, and no common repeat is assumed. The verified resolution value,
 source, and ref are bound into the schema-3 threshold-recommendation snapshot
 and are the only motif evidence accepted by later scans and patch checks. The
 stage then obtains a sparse, human-approved threshold recommendation before
-scanning or minimap2 execution. It records source-attributed telomere scans, an
-immutable registered PAF, attempt/execution-bound candidate evidence,
-junction-aware patch records, and a finishing report. Reverse-strand tails are
-oriented target-forward; non-zero junction distances trim the target before
-extension. Ambiguous, chimeric, overlapping, or conflicting evidence is never
-silently materialized, and the source FASTA is never overwritten.
+scanning or minimap2 execution. Reads are grouped by platform-specific minimap2
+preset inside one frozen attempt and produce one combined immutable PAF. The
+approved support threshold is applied exactly; the adapter adds no hidden
+minimum or junction-spread veto. It records source-attributed telomere scans,
+attempt/execution-bound candidate evidence, junction-aware patch records, and a
+finishing report. `auto_patch` first creates and validates a candidate, then
+opens a separate human adoption gate; the shared `assembly` resource is not
+changed until adoption. Reverse-strand tails are oriented target-forward;
+non-zero junction distances trim the target before extension. Ambiguous,
+chimeric, overlapping, or conflicting evidence is never silently materialized,
+and the source FASTA is never overwritten.
 
 ## 9. Repeat Annotation
 

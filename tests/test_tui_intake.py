@@ -22,8 +22,10 @@ from app.entrypoints.tui_intake import (
     parse_workflow_intent,
     save_tui_session_draft,
 )
+from app.entrypoints.ask_planner import _build_assembly_execution_config
+from app.entrypoints.tui import _planner_state_from_tui_draft
 from app.schemas.manifest import InputAssetSpec, PairedReadSpec
-from app.schemas.tui_intake import HiCPairedReadsFact, HiCReadPair
+from app.schemas.tui_intake import HifiReadsFact, HiCPairedReadsFact, HiCReadPair
 
 
 class TuiIntakeTests(unittest.TestCase):
@@ -45,6 +47,156 @@ class TuiIntakeTests(unittest.TestCase):
         self.assertEqual(draft.intake.requirements, ["ont_reads", "hic_reads"])
         self.assertIsNone(draft.intake.ont_reads)
         self.assertEqual(next_intake_clarification(draft).role, "ont_reads")
+
+    def test_hifiasm_goal_collects_primary_and_enabled_companion_roles(self):
+        intent = deterministic_workflow_intent(
+            "用 Hifiasm 做 assembly，HiFi 作为主输入，"
+            "通过 --ul 加入 ultra-long ONT，并用 Hi-C phasing"
+        )
+        draft = create_tui_session_draft(
+            session_id="s1",
+            data_dir="data",
+            request_text=intent.goal_text,
+            intent=intent,
+        )
+
+        self.assertEqual(intent.requested_assembly_method, "hifiasm")
+        self.assertTrue(intent.use_ultralong_ont)
+        self.assertTrue(intent.use_hic_phasing)
+        self.assertEqual(
+            draft.intake.requirements,
+            ["hifi_reads", "ont_reads", "hic_reads"],
+        )
+        self.assertEqual(next_intake_clarification(draft).role, "hifi_reads")
+
+    def test_hifiasm_ont_goal_is_a_distinct_ont_primary_method(self):
+        intent = deterministic_workflow_intent(
+            "用 hifiasm-ont --ont 做 assembly"
+        )
+
+        self.assertEqual(intent.requested_assembly_method, "hifiasm_ont")
+        self.assertFalse(intent.use_ultralong_ont)
+        self.assertFalse(intent.use_hic_phasing)
+        self.assertEqual(
+            create_tui_session_draft(
+                session_id="s1",
+                data_dir="data",
+                request_text=intent.goal_text,
+                intent=intent,
+            ).intake.requirements,
+            ["ont_reads"],
+        )
+
+    def test_hifiasm_intent_projects_into_existing_planner_and_run_config(self):
+        intent = deterministic_workflow_intent(
+            "Hifiasm assembly with --ul ONT and Hi-C"
+        )
+        draft = create_tui_session_draft(
+            session_id="s1",
+            data_dir="data",
+            request_text=intent.goal_text,
+            intent=intent,
+        )
+        intake = draft.intake.model_copy(
+            update={"hifi_reads": HifiReadsFact(paths=["/reads/hifi.fastq.gz"])}
+        )
+        draft = draft.model_copy(update={"intake": intake})
+
+        plan = _planner_state_from_tui_draft(draft)
+        assembly = _build_assembly_execution_config(plan, ["assembly"])
+
+        self.assertEqual(
+            plan.selected_methods,
+            {"assembly": "assembly.candidate.hifiasm"},
+        )
+        self.assertEqual(
+            plan.method_parameters["assembly.candidate.hifiasm"],
+            {
+                "use_ultralong_ont": True,
+                "use_hic_phasing": True,
+            },
+        )
+        self.assertEqual(
+            assembly,
+            {
+                "assembly_method": "hifiasm",
+                "assembly_route": "hifi",
+                "hifiasm_parameters": {
+                    "use_ultralong_ont": True,
+                    "use_hic_phasing": True,
+                },
+            },
+        )
+
+    def test_hifiasm_intake_materializes_separate_hifi_ont_and_multilane_hic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hifi = [
+                self._file(root, "hifi/a.fastq.gz"),
+                self._file(root, "hifi/b.fastq.gz"),
+            ]
+            ont = [
+                self._file(root, "ont/a.fastq.gz"),
+                self._file(root, "ont/b.fastq.gz"),
+            ]
+            r1 = [
+                self._file(root, "hic/L1-R1.fastq.gz"),
+                self._file(root, "hic/L2-R1.fastq.gz"),
+            ]
+            r2 = [
+                self._file(root, "hic/L1-R2.fastq.gz"),
+                self._file(root, "hic/L2-R2.fastq.gz"),
+            ]
+            intent = deterministic_workflow_intent(
+                "Hifiasm assembly with --ul ONT and Hi-C"
+            )
+            draft = create_tui_session_draft(
+                session_id="s1",
+                data_dir=str(root / "data"),
+                request_text=intent.goal_text,
+                intent=intent,
+            )
+            answer = (
+                f"HiFi: {hifi[0]} {hifi[1]}; "
+                f"ONT: {ont[0]} {ont[1]}; "
+                f"Hi-C R1: {r1[0]} {r1[1]}; "
+                f"Hi-C R2: {r2[0]} {r2[1]}"
+            )
+
+            result = apply_asset_answer(
+                draft,
+                answer=answer,
+                focused_role="hifi_reads",
+            )
+            manifest = materialize_manifest_draft(result.draft)
+
+            self.assertEqual(
+                result.accepted_roles,
+                ["hifi_reads", "ont_reads", "hic_reads"],
+            )
+            long_reads = [
+                asset
+                for asset in manifest.assets
+                if asset.asset_type == "raw_long_reads"
+            ]
+            self.assertEqual(
+                [asset.platform for asset in long_reads],
+                ["pacbio_hifi", "ont"],
+            )
+            self.assertEqual([len(asset.paths) for asset in long_reads], [2, 2])
+            hic = next(
+                asset
+                for asset in manifest.assets
+                if asset.asset_type == "hic_reads_registered"
+            )
+            self.assertEqual(len(hic.paired_reads), 2)
+            self.assertEqual(
+                [(pair.r1, pair.r2) for pair in hic.paired_reads],
+                [
+                    (str(r1[0].resolve()), str(r2[0].resolve())),
+                    (str(r1[1].resolve()), str(r2[1].resolve())),
+                ],
+            )
 
     def test_llm_cannot_weaken_deterministic_t2t_intent(self):
         request = "sample CHM13 做 T2T 组装"

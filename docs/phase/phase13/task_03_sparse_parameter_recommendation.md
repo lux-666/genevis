@@ -149,10 +149,11 @@ The full profile snapshots the provided facts into immutable evidence. T2T may
 derive a separate motif result from those caller-owned facts, but it must not
 rewrite the species profile.
 
-`shared_parameters.species_facts` is optional for backward-compatible run
-configs. When present, it must validate as the strict model above and therefore
-must contain `scientific_name`. A recommender snapshots exactly the supplied
-object or an explicit `null`; it must not synthesize a partial species profile.
+`shared_parameters.species_facts` is optional for stages that do not consume
+species identity. When present, it must validate as the strict model above and
+therefore must contain `scientific_name`. A recommender snapshots exactly the
+supplied object or an explicit `null`; it must not synthesize a partial species
+profile.
 
 ### Response parsing
 
@@ -279,21 +280,19 @@ defaults remain outside the recommendation and approval records.
 Keep these values model-hidden:
 
 - operator `mode`;
-- input assembly and ONT read refs;
+- input assembly and platform-classified long-read refs;
 - chromosome-list ref;
-- minimap2 executable, preset, threads, paths, and output locations;
+- minimap2 executable, platform-specific presets, threads, paths, and output
+  locations;
 - attempt identity and review policy.
 
 The species telomere motif is resolved at a single T2T boundary before any
-threshold recommendation or sequence scan. The resolver sends the supplied
-species facts, an optional legacy `t2t.telomere_motif` hint, and a prompt with
-discriminating examples to the LLM. It persists the exact request, response,
-shape parse, and resolution manifest. A resolved result is stored as
-`resolved_telomere_motif` with source `llm_species_resolution`; an invalid or
-`unresolved` response fails the stage before scanning. When no species facts
-are supplied, an explicit legacy hint may be used through the same boundary
-and is recorded with its compatibility source. Without either input, motif
-resolution fails closed rather than assuming a common repeat.
+threshold recommendation or sequence scan. The resolver sends only the
+caller-owned canonical species facts and a prompt with discriminating examples
+to the LLM. It persists the exact request, response, shape parse, and resolution
+manifest. A resolved result is stored as `resolved_telomere_motif` with source
+`llm_species_resolution`; missing species facts or an invalid or `unresolved`
+response fails the stage before scanning rather than assuming a common repeat.
 
 Every later T2T consumer (parameter request, assembly/read scan, candidate
 evaluation, and patched-assembly recheck) reads only `resolved_telomere_motif`.
@@ -314,9 +313,10 @@ be recommended. The executor overlays the approved sparse mapping on its
 declared T2T defaults to create the effective threshold profile, while
 preserving the source split in frozen evidence.
 
-If input resolution finds no usable ONT assets, T2T takes the ordinary no-read
-publication path before invoking the recommender. A non-empty but malformed ONT
-list is an input failure and likewise never opens parameter approval.
+If input resolution finds no usable long-read assets, T2T takes the ordinary
+no-read publication path before invoking the recommender. A non-empty but
+malformed long-read list is an input failure and likewise never opens parameter
+approval.
 
 Those defaults are ordinary stage behavior, not recommendation validation. Do
 not add a second minimum, clamp, hard boundary, or automatic-patch safety floor

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import io
 import tempfile
 import unittest
@@ -10,13 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.entrypoints.ask_interactive import (
-    _apply_set_params,
-    _attempt_preflight_validation,
     _draft_attention_items,
     _edit_draft_stage,
     _group_missing_fields_by_scope,
     _parse_genome_size,
-    _parse_set_params,
     _prompt_parameter_values,
     _prompt_text_value,
     _render_confirm,
@@ -24,14 +20,11 @@ from app.entrypoints.ask_interactive import (
     _render_plan_summary,
     _update_derived_defaults,
     _UserAbort,
-    is_interactive,
-    run_interactive_loop,
 )
 from app.entrypoints.ask_planner import (
     build_initial_plan_draft,
     build_run_plan_summary,
     next_clarification,
-    save_plan_to_default_path,
 )
 from app.schemas.ask_plan import AskClarificationRequest, AskPlanState
 
@@ -45,40 +38,6 @@ def _base_plan(**overrides) -> AskPlanState:
     )
     base.update(overrides)
     return AskPlanState(**base)
-
-
-def _ask_ns(**overrides):
-    base = dict(
-        json=False,
-        non_interactive=False,
-        resume_session=None,
-        set_params=[],
-        checkpointer=None,
-    )
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-class IsInteractiveTests(unittest.TestCase):
-    def test_true_when_tty(self):
-        with patch("sys.stdin") as mock_stdin:
-            mock_stdin.isatty.return_value = True
-            self.assertTrue(is_interactive(_ask_ns()))
-
-    def test_false_when_json_flag(self):
-        with patch("sys.stdin") as mock_stdin:
-            mock_stdin.isatty.return_value = True
-            self.assertFalse(is_interactive(_ask_ns(json=True)))
-
-    def test_false_when_non_interactive_flag(self):
-        with patch("sys.stdin") as mock_stdin:
-            mock_stdin.isatty.return_value = True
-            self.assertFalse(is_interactive(_ask_ns(non_interactive=True)))
-
-    def test_false_when_not_tty(self):
-        with patch("sys.stdin") as mock_stdin:
-            mock_stdin.isatty.return_value = False
-            self.assertFalse(is_interactive(_ask_ns()))
 
 
 class BuildInitialPlanDraftTests(unittest.TestCase):
@@ -187,7 +146,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
                 entry_request={"requested_stages": ["assembly"]},
             )
             draft = build_initial_plan_draft(plan)
-            plan_ref = save_plan_to_default_path(draft)
+            plan_ref = Path(tmp) / "tui_state.json"
             clarification = next_clarification(draft, ask_plan_ref=plan_ref)
             self.assertEqual(clarification.kind, "parameter_values")
             self.assertIn(
@@ -197,96 +156,6 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
 
 class InteractiveLoopTests(unittest.TestCase):
     """Tests exercise the plain-text fallback path (questionary disabled)."""
-
-    def test_confirm_y_proceeds_to_execution(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            reads = Path(tmp) / "reads.fastq"
-            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\ngenome_size_estimate: 2000000\nassets:\n"
-                "  - asset_type: raw_long_reads\n"
-                f"    paths:\n      - {reads}\n"
-                "    format: fastq\n    platform: cycloneseq\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                data_dir=tmp,
-                entry_request={
-                    "command": "run",
-                    "manifest": str(manifest),
-                    "data_dir": tmp,
-                    "requested_stages": ["assembly"],
-                },
-            )
-            args = _ask_ns()
-            # Draft prefills flye + genome size (from manifest) + platform.
-            # "y" accept draft (nothing left to clarify), "y" confirm.
-            inputs = iter(["y", "y"])
-            with (
-                patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                patch(
-                    "app.entrypoints.ask_interactive._attempt_preflight_validation",
-                    return_value=False,
-                ),
-                patch("builtins.input", side_effect=lambda *args: next(inputs)),
-                patch(
-                    "app.entrypoints.ask_interactive._execute_confirmed_plan",
-                    return_value=0,
-                ) as mock_exec,
-            ):
-                code = run_interactive_loop(plan, args)
-            self.assertEqual(code, 0)
-            mock_exec.assert_called_once()
-
-    def test_draft_continue_with_missing_fields_blocks_until_stage_edit_completes_it(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as tmp:
-            reads = Path(tmp) / "reads.fastq"
-            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\nassets:\n"
-                "  - asset_type: raw_long_reads\n"
-                f"    paths:\n      - {reads}\n"
-                "    format: fastq\n    platform: ont\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                data_dir=tmp,
-                entry_request={
-                    "command": "run",
-                    "manifest": str(manifest),
-                    "data_dir": tmp,
-                    "requested_stages": ["assembly"],
-                },
-            )
-            args = _ask_ns()
-            inputs = iter(["", "1p", "500m", "", "", "", "y", "y"])
-            with (
-                patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                patch(
-                    "app.entrypoints.ask_interactive._attempt_preflight_validation",
-                    return_value=False,
-                ),
-                patch("builtins.input", side_effect=lambda *args: next(inputs)),
-                patch("sys.stdout", new_callable=io.StringIO) as stdout,
-                patch(
-                    "app.entrypoints.ask_interactive._execute_confirmed_plan",
-                    return_value=0,
-                ) as mock_exec,
-            ):
-                code = run_interactive_loop(plan, args)
-
-            self.assertEqual(code, 0)
-            self.assertIn("Cannot continue yet.", stdout.getvalue())
-            self.assertIn(
-                "assembly: estimated_genome_size is missing", stdout.getvalue()
-            )
-            mock_exec.assert_called_once()
 
     def test_confirm_render_includes_shared_parameters(self):
         req = AskClarificationRequest(
@@ -524,15 +393,6 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertEqual(response.shared_parameters.platform, "cycloneseq")
         self.assertEqual(response.shared_parameters.read_type, "cyclone")
 
-    def test_apply_set_params_accepts_platform_alias(self):
-        plan = _base_plan()
-
-        updated = _apply_set_params(plan, ["platform=nanopore"])
-
-        self.assertIsNotNone(updated.shared_parameters)
-        self.assertEqual(updated.shared_parameters.platform, "ont")
-        self.assertEqual(updated.shared_parameters.read_type, "ont_raw")
-
     def test_parameter_prompt_retries_invalid_shared_read_type(self):
         req = AskClarificationRequest(
             status="clarification_required",
@@ -555,217 +415,6 @@ class InteractiveLoopTests(unittest.TestCase):
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "pacbio_hifi")
-
-    def test_confirm_n_restarts(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            reads = Path(tmp) / "reads.fastq"
-            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\ngenome_size_estimate: 2000000\nassets:\n"
-                "  - asset_type: raw_long_reads\n"
-                f"    paths:\n      - {reads}\n"
-                "    format: fastq\n    platform: cycloneseq\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                data_dir=tmp,
-                entry_request={
-                    "command": "run",
-                    "manifest": str(manifest),
-                    "data_dir": tmp,
-                    "requested_stages": ["assembly"],
-                },
-            )
-            args = _ask_ns()
-            # "n" reject draft -> manual editing.
-            # "" stage selection (intent default = assembly),
-            # "" assembly method, "" platform, "" genome size, "" threads,
-            # "n" reject confirm -> restart from stage selection,
-            # "" stage selection, "" assembly method, "" platform, "" genome size,
-            # "" threads, "y" confirm
-            inputs = iter(
-                [
-                    "n",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "n",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "y",
-                ]
-            )
-            with (
-                patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                patch(
-                    "app.entrypoints.ask_interactive._attempt_preflight_validation",
-                    return_value=False,
-                ),
-                patch("builtins.input", side_effect=lambda *args: next(inputs)),
-                patch(
-                    "app.entrypoints.ask_interactive._execute_confirmed_plan",
-                    return_value=0,
-                ) as mock_exec,
-            ):
-                code = run_interactive_loop(plan, args)
-            self.assertEqual(code, 0)
-            mock_exec.assert_called_once()
-
-    def test_confirm_n_restart_clears_shared_parameters(self):
-        plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["assembly"],
-            selected_methods={
-                "assembly": "assembly.candidate.flye",
-            },
-            shared_parameters={
-                "read_type": "ont_raw",
-                "estimated_genome_size": 500_000_000,
-            },
-            method_parameters={"assembly.candidate.flye": {"threads": 4}},
-        )
-        args = _ask_ns()
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch(
-                "app.entrypoints.ask_interactive._attempt_preflight_validation",
-                return_value=False,
-            ),
-            patch("builtins.input", side_effect=["n", EOFError]),
-            patch(
-                "app.entrypoints.ask_interactive.save_plan_to_default_path"
-            ) as mock_save,
-        ):
-            code = run_interactive_loop(plan, args)
-
-        self.assertEqual(code, 1)
-        restarted = mock_save.call_args_list[1].args[0]
-        self.assertIsNone(restarted.shared_parameters)
-        self.assertIsNone(restarted.method_parameters)
-
-    def test_provide_data_revalidation_pass_continues_to_confirmation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                data_dir=tmp,
-                selected_stages=["assembly"],
-                resolved_execution_order=["assembly"],
-                selected_methods={"assembly": "assembly.candidate.flye"},
-                shared_parameters={
-                    "read_type": "ont_raw",
-                    "estimated_genome_size": 500_000_000,
-                },
-                method_parameters={"assembly.candidate.flye": {"threads": 4}},
-            )
-            args = _ask_ns()
-            inputs = iter(["", "y"])
-            with (
-                patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                patch(
-                    "app.entrypoints.ask_interactive._attempt_preflight_validation",
-                    side_effect=[True, False],
-                ) as mock_preflight,
-                patch(
-                    "app.entrypoints.ask_interactive._prompt_validation_action",
-                    return_value="provide_data",
-                ),
-                patch("builtins.input", side_effect=lambda *args: next(inputs)),
-                patch(
-                    "app.entrypoints.ask_interactive._execute_confirmed_plan",
-                    return_value=0,
-                ) as mock_exec,
-            ):
-                code = run_interactive_loop(plan, args)
-
-            self.assertEqual(code, 0)
-            self.assertEqual(mock_preflight.call_count, 2)
-            mock_exec.assert_called_once()
-
-    def test_provide_data_interrupt_prints_single_abort(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                data_dir=tmp,
-                selected_stages=["assembly"],
-                resolved_execution_order=["assembly"],
-                selected_methods={"assembly": "assembly.candidate.flye"},
-                shared_parameters={
-                    "read_type": "ont_raw",
-                    "estimated_genome_size": 500_000_000,
-                },
-                method_parameters={"assembly.candidate.flye": {"threads": 4}},
-            )
-            args = _ask_ns()
-            with (
-                patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                patch(
-                    "app.entrypoints.ask_interactive._attempt_preflight_validation",
-                    return_value=True,
-                ),
-                patch(
-                    "app.entrypoints.ask_interactive._prompt_validation_action",
-                    return_value="provide_data",
-                ),
-                patch("builtins.input", side_effect=KeyboardInterrupt),
-                patch("sys.stdout", new_callable=io.StringIO) as stdout,
-            ):
-                code = run_interactive_loop(plan, args)
-
-            self.assertEqual(code, 1)
-            self.assertEqual(stdout.getvalue().count("Aborted."), 1)
-
-    def test_parameter_prompt_then_confirm(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            reads = Path(tmp) / "reads.fastq"
-            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\nassets:\n"
-                "  - asset_type: raw_long_reads\n"
-                f"    paths:\n      - {reads}\n"
-                "    format: fastq\n    platform: ont\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                data_dir=tmp,
-                entry_request={
-                    "command": "run",
-                    "manifest": str(manifest),
-                    "data_dir": tmp,
-                    "requested_stages": ["assembly"],
-                },
-            )
-            args = _ask_ns()
-            # Edit assembly parameters from the draft, fill genome size, return
-            # to the plan, continue, and confirm the final run plan.
-            inputs = iter(["1p", "500m", "", "", "", "y", "y"])
-            with (
-                patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                patch(
-                    "app.entrypoints.ask_interactive._attempt_preflight_validation",
-                    return_value=False,
-                ),
-                patch("builtins.input", side_effect=lambda _: next(inputs)),
-                patch(
-                    "app.entrypoints.ask_interactive._execute_confirmed_plan",
-                    return_value=0,
-                ) as mock_exec,
-            ):
-                code = run_interactive_loop(plan, args)
-            self.assertEqual(code, 0)
-            mock_exec.assert_called_once()
 
     def test_edit_draft_stage_returns_after_repeated_invalid_actions(self):
         plan = _base_plan(
@@ -790,90 +439,8 @@ class InteractiveLoopTests(unittest.TestCase):
             with self.assertRaises(_UserAbort):
                 _prompt_text_value("required field", None, required=True)
 
-    def test_preflight_validation_exception_blocks_confirmation(self):
-        plan = _base_plan(manifest_ref="manifest.yaml")
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            plan = plan.model_copy(update={"manifest_ref": str(manifest)})
-            with patch(
-                "app.stages.inventory.nodes.validate_inputs",
-                side_effect=RuntimeError("boom"),
-            ):
-                self.assertTrue(_attempt_preflight_validation(plan))
 
-    def test_preflight_validation_isolated_from_shared_data_root(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            shared_data = root / "data"
-            reads = root / "reads.fastq"
-            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            manifest = root / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\n"
-                "assets:\n"
-                "  - asset_type: raw_long_reads\n"
-                f"    paths: [{reads!s}]\n"
-                "    platform: ont\n"
-                "    format: fastq\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                data_dir=str(shared_data),
-                manifest_ref=str(manifest),
-                selected_stages=["read_qc"],
-            )
-            captured = {}
-            from app.stages.inventory.nodes import (
-                register_assets as real_register_assets,
-            )
-
-            def capture_register(state):
-                captured["data_dir"] = Path(state["data_dir"])
-                return real_register_assets(state)
-
-            with patch(
-                "app.stages.inventory.nodes.register_assets",
-                side_effect=capture_register,
-            ):
-                self.assertFalse(_attempt_preflight_validation(plan))
-
-            self.assertIn("data_dir", captured)
-            self.assertFalse(captured["data_dir"].exists())
-            self.assertFalse(shared_data.exists())
-
-
-class ResumeTests(unittest.TestCase):
-    def test_resume_loads_existing_plan(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            plan = _base_plan(data_dir=tmp, session_id="resume-test")
-            ref = save_plan_to_default_path(plan)
-            from app.schemas.ask_plan import load_ask_plan
-
-            loaded = load_ask_plan(ref)
-            self.assertEqual(loaded.session_id, "resume-test")
-
-
-class SetParamsTests(unittest.TestCase):
-    def test_parse_set_params_basic(self):
-        result = _parse_set_params(["genome_size=500m", "threads=8"])
-        self.assertEqual(result, {"genome_size": "500m", "threads": "8"})
-
-    def test_parse_set_params_invalid(self):
-        with self.assertRaises(ValueError):
-            _parse_set_params(["invalid"])
-
-    def test_apply_set_params_merges_genome_size(self):
-        plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
-        )
-        updated = _apply_set_params(plan, ["genome_size=500m"])
-        shared = updated.shared_parameters
-        self.assertIsNotNone(shared)
-        self.assertEqual(shared.estimated_genome_size, 500_000_000)
-
+class ValueParsingTests(unittest.TestCase):
     def test_parse_genome_size_suffixes(self):
         self.assertEqual(_parse_genome_size("500m"), 500_000_000)
         self.assertEqual(_parse_genome_size("2.5g"), 2_500_000_000)
@@ -881,18 +448,17 @@ class SetParamsTests(unittest.TestCase):
         self.assertEqual(_parse_genome_size("1234"), 1234)
 
 
-class NonInteractiveProtocolTests(unittest.TestCase):
-    def test_non_interactive_emits_protocol_fields(self):
-        """Preserve existing non-TTY behavior; see test_entrypoints.py."""
+class PlannerClarificationTests(unittest.TestCase):
+    def test_clarification_contains_tui_state_ref(self):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / "manifest.yaml"
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
             plan = _base_plan(manifest_ref=str(manifest), data_dir=tmp)
-            plan_ref = save_plan_to_default_path(plan)
+            plan_ref = Path(tmp) / "tui_state.json"
             clarification = next_clarification(plan, ask_plan_ref=plan_ref)
             self.assertIsNotNone(clarification)
             self.assertEqual(clarification.status, "clarification_required")
-            self.assertIn("ask_plan_ref", type(clarification).model_fields)
+            self.assertEqual(clarification.ask_plan_ref, str(plan_ref.resolve()))
 
 
 class DerivedDefaultsTests(unittest.TestCase):

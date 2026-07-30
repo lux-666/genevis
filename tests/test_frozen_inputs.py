@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import io
 import json
@@ -617,15 +616,15 @@ class FrozenInputTests(unittest.TestCase):
                         contextlib.redirect_stderr(stderr),
                     ):
                         code = _run_session(
-                            argparse.Namespace(
+                            **dict(
                                 session_id="s1",
                                 manifest=str(supplied_manifest),
                                 data_dir=str(paths.data_root),
                                 run_config=str(supplied_run_config),
                                 local_exec=[],
                                 checkpointer="memory",
-                                _frozen_session=True,
-                                _interactive_gate=False,
+                                frozen_session=True,
+                                interactive_gate=False,
                             )
                         )
 

@@ -1,9 +1,9 @@
 """Checkpointer factory.
 
-Phase 5/02 introduces a durable sqlite checkpointer so a server/HPC run can
-stop at ``blocked_human``, exit the process, and later resume from a
-decision file. The in-memory backend is preserved for tests and lightweight
-runs that do not need cross-process resume.
+The durable sqlite checkpointer lets a server/HPC run stop at
+``blocked_human``, exit the process, and later resume from a decision file.
+The in-memory backend is preserved for tests and lightweight runs that do not
+need cross-process resume.
 """
 
 from __future__ import annotations

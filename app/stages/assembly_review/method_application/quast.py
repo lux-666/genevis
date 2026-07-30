@@ -11,6 +11,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.execution.attempt_owners import DIRECT_ATTEMPTS_KEY
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import artifact_input_dependency
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -30,13 +31,13 @@ from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly_review.method_application.support import (
     local_execution_enabled,
     mark_missing_signals,
-    materialized_candidates,
     review_methods_error,
     review_output,
     rewrite_eval_bundle,
     safe_candidate_id,
     update_review_output,
     update_signal,
+    verified_review_candidate,
 )
 from app.stages.assembly_review.state import AssemblyReviewCursor
 from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
@@ -79,14 +80,28 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
             state, {"status": "failed", "reason": descriptor_error}
         )
     candidates = output.get("candidates", [])
-    materialized = materialized_candidates(candidates)
+    try:
+        materialized = [
+            (candidate, verified_review_candidate(state, candidate))
+            for candidate in candidates
+        ]
+    except (OSError, TypeError, ValueError) as exc:
+        return update_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": f"QUAST candidate dependency is invalid: {exc}",
+            },
+        )
     signals = mark_missing_signals(
         output.get("signals", []),
         candidates,
         signal_name="quast",
         method_name=QUAST_METHOD,
         reason="quast_requires_materialized_draft_assembly",
-        materialized_ids={candidate.get("candidate_id") for candidate in materialized},
+        materialized_ids={
+            candidate.get("candidate_id") for candidate, _verified in materialized
+        },
     )
     if not materialized:
         return rewrite_eval_bundle(
@@ -108,7 +123,7 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
     if blocked is not None:
         return update_review_output(state, blocked)
     attempts: list[FrozenAttemptSpec] = []
-    for candidate in materialized:
+    for candidate, verified in materialized:
         candidate_id = candidate.get("candidate_id", "unknown")
         safe_id = safe_candidate_id(candidate_id)
         working_dir = stage_work_dir(state, "assembly_review", "quast", safe_id)
@@ -116,10 +131,7 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
         script_path = working_dir / "run_quast.sh"
         out_dir = working_dir / "quast_out"
         report_tsv = out_dir / "report.tsv"
-        final_ref = candidate.get("final_assembly_ref")
-        if final_ref is None:
-            continue
-        assembly_ref = Path(final_ref)
+        assembly_ref = verified.primary_output_path
         script_path.write_text(
             "set -e\n"
             f"mkdir -p {shlex.quote(str(out_dir))}\n"
@@ -139,6 +151,13 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
             expected_outputs=[report_tsv],
             env=output.get("env"),
             env_spec=env_spec,
+            input_dependencies=[
+                artifact_input_dependency(
+                    state,
+                    verified.primary_output_ref,
+                    assembly_ref,
+                )
+            ],
             metadata={
                 "candidate_id": candidate_id,
                 "draft_assembly_ref": str(assembly_ref),

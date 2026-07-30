@@ -13,7 +13,6 @@ Required fields:
   "decision": "one exact string from review_request_json.decisions_allowed",
   "candidate_id": "candidate_id for the selected candidate, or null when decision is stop_human_review",
   "method_name": "method_name for the selected candidate, or null when decision is stop_human_review",
-  "final_assembly_ref": "final_assembly_ref for the selected candidate, or null when decision is stop_human_review",
   "rejected_candidates": [],
   "notes": ["short rationale string; notes must be an array of strings"],
   "metadata": {
@@ -37,7 +36,7 @@ Rules:
 - Do not invent evidence, candidates, methods, or artifact refs.
 - Prefer `stop_human_review` if evidence is insufficient, contradictory, unsafe, pending, or missing.
 - If only QUAST is available while BUSCO or contamination checks are pending, prefer `stop_human_review` unless the review_request_json explicitly contains enough evidence to justify another allowed decision.
-- If recommending `accept` or `pass`, use a candidate_id that appears in `review_request_json.candidates` and copy its `method_name` and `final_assembly_ref` exactly.
+- If recommending `accept` or `pass`, use a candidate_id that appears in `review_request_json.candidates` and copy its `method_name` exactly. The workflow resolves the selected candidate's verified primary output from its immutable bundle.
 - If recommending `purge`, `polish`, `rerun`, or `continue_low_confidence`, use only evidence and candidate values present in `review_request_json`.
 
 Example conservative output when only partial evidence exists:
@@ -49,7 +48,6 @@ Example conservative output when only partial evidence exists:
   "decision": "stop_human_review",
   "candidate_id": null,
   "method_name": null,
-  "final_assembly_ref": null,
   "rejected_candidates": [],
   "notes": ["Only QUAST evidence is available; BUSCO and contamination_check are pending, so a human should confirm before continuing."],
   "metadata": {

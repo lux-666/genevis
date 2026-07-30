@@ -14,7 +14,7 @@ REGISTRY_PATH = descriptor_registry_path()
 
 
 class PlannerMethodCatalog(BaseModel):
-    """Method metadata used by the ask planner, derived from descriptors."""
+    """Method metadata used by the TUI planner, derived from descriptors."""
 
     by_stage: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     by_method: dict[str, dict[str, Any]] = Field(default_factory=dict)

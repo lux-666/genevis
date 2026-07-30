@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import bz2
 import csv
 import gzip
 import json
+import lzma
 import re
 import shlex
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TextIO
+from typing import Any, Literal, TextIO, cast
 
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import TypeAdapter
@@ -21,6 +24,11 @@ from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+    verify_input_dependencies,
+)
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -41,32 +49,41 @@ from app.schemas.artifacts import (
     T2T_READS_TELOMERE_SCAN,
     T2T_STATUS_SUMMARY,
     T2T_TELOMERIC_READS,
+    ArtifactRefJson,
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
 )
+from app.schemas.execution import InputDependency
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
-    stage_artifacts_dir,
     stage_work_dir,
 )
+from app.stages.read_resolution import resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
 from app.stages.t2t.parameters.catalog import T2TMode, resolve_t2t_mode
 from app.stages.t2t.parameters.execution import (
     T2TFrozenExecutionInputs,
+    T2TLongReadInput,
+    load_chromosome_names_snapshot,
     load_t2t_frozen_execution_inputs,
 )
 from app.stages.t2t.state import (
+    T2TConfiguredReadInputJson,
     T2TInterruptJson,
-    T2TOntReadInputJson,
+    T2TLongReadInputJson,
     T2TStageCursor,
     T2TStatus,
     read_t2t_stage_output,
     update_t2t_stage_output,
 )
-from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.artifacts import (
+    artifact_ref_for_path,
+    publish_or_recover_work_artifact,
+)
+from app.storage.asset_registry import load_asset_registry
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError
 from app.workflow import next_stage_name
@@ -88,7 +105,7 @@ class _T2TConfig(TypedDict):
     mode: T2TMode
     chromosome_list_ref: str | None
     assembly_fasta_ref: str | None
-    ont_read_refs: list[str]
+    read_inputs: list[T2TConfiguredReadInputJson]
 
 
 def _top_level_interrupt(value: T2TInterruptJson) -> ActiveInterrupt:
@@ -179,25 +196,7 @@ def _fail(state: TopLevelState, reason: str) -> StateUpdate:
 
 def enter_t2t(state: TopLevelState) -> StateUpdate:
     """Mark T2T finishing as the active stage."""
-    output = _output(state)
-    legacy_fields = sorted(
-        field
-        for field in (
-            "configured_telomere_motif",
-            "legacy_motif_hint",
-            "telomere_motif",
-            "telomere_motif_input_profile_ref",
-        )
-        if field in output
-    )
-    if legacy_fields:
-        return {
-            **_fail(
-                state,
-                f"unsupported legacy T2T motif checkpoint fields: {legacy_fields}",
-            ),
-            "supervision_state": "running_stage",
-        }
+    _output(state)
     return {"supervision_state": "running_stage"}
 
 
@@ -223,21 +222,28 @@ def block_t2t(state: TopLevelState) -> StateUpdate:
 
 
 def resolve_t2t_inputs(state: TopLevelState) -> StateUpdate:
-    """Resolve the current assembly and the complete canonical ONT input list."""
+    """Resolve the assembly and complete canonical long-read input list."""
     existing = _output(state)
     try:
         config = _config(existing)
+        load_chromosome_names_snapshot(config.get("chromosome_list_ref"))
     except ValueError as exc:
         return _fail(state, f"invalid t2t configuration: {exc}")
     assembly = resolve_stage_resource(
         state,
         resource_spec=assembly_resource_spec(),
-        override=config.get("assembly_fasta_ref"),
     )
-    assembly_ref, source_stage = assembly.path, assembly.source
+    configured_assembly_ref = config.get("assembly_fasta_ref")
+    assembly_ref = configured_assembly_ref or assembly.path
+    source_stage = "run_config" if configured_assembly_ref else assembly.source
     if not assembly_ref:
         return _fail(state, "missing final assembly ref for t2t")
     assembly_path = Path(assembly_ref)
+    try:
+        assembly_dependency = _assembly_input_dependency(state, assembly_ref)
+        verify_input_dependencies(state, [assembly_dependency])
+    except (OSError, ValueError, DataLayoutError) as exc:
+        return _fail(state, f"invalid t2t assembly provenance: {exc}")
     if (
         not assembly_path.exists()
         or not assembly_path.is_file()
@@ -246,12 +252,19 @@ def resolve_t2t_inputs(state: TopLevelState) -> StateUpdate:
         return _fail(state, f"t2t input assembly is not a valid FASTA: {assembly_ref}")
 
     try:
-        read_inputs, reads_source = _ont_read_inputs(state, config["ont_read_refs"])
+        read_inputs, reads_source = _long_read_inputs(state, config["read_inputs"])
         if read_inputs:
-            _validate_ont_read_inputs(read_inputs)
-    except (OSError, ValueError) as exc:
-        return _fail(state, f"invalid t2t ONT input: {exc}")
-    out_dir = stage_artifacts_dir(state, "t2t", "outputs", "t2t_finishing")
+            read_dependencies = [
+                _long_read_input_dependency(
+                    state,
+                    T2TLongReadInput.model_validate(item),
+                )
+                for item in read_inputs
+            ]
+            verify_input_dependencies(state, read_dependencies)
+            _validate_long_read_inputs(read_inputs)
+    except (OSError, ValueError, DataLayoutError) as exc:
+        return _fail(state, f"invalid t2t long-read input: {exc}")
     work_dir = stage_work_dir(state, "t2t", "t2t_finishing")
     work_dir.mkdir(parents=True, exist_ok=True)
     return _update(
@@ -262,11 +275,10 @@ def resolve_t2t_inputs(state: TopLevelState) -> StateUpdate:
             "chromosome_list_ref": config.get("chromosome_list_ref"),
             "input_assembly_ref": str(assembly_path),
             "source_stage": source_stage,
-            "ont_read_refs": [item["path"] for item in read_inputs],
-            "ont_read_inputs": read_inputs,
-            "ont_reads_source": reads_source,
+            "long_read_refs": [item["path"] for item in read_inputs],
+            "long_read_inputs": read_inputs,
+            "long_reads_source": reads_source,
             "execution_enabled": existing.get("execution_mode") == "local",
-            "out_dir": str(out_dir),
             "work_dir": str(work_dir),
             "output_assembly_ref": str(assembly_path),
             "notes": [],
@@ -281,6 +293,10 @@ def scan_assembly_telomeres(state: TopLevelState) -> StateUpdate:
         return {}
     try:
         execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        assembly_dependency = _assembly_input_dependency(
+            state, execution_inputs.input_assembly_ref
+        )
+        verify_input_dependencies(state, [assembly_dependency])
         thresholds = execution_inputs.thresholds.model_dump(mode="json")
         rows = list(
             _scan_fasta_ends(
@@ -289,7 +305,7 @@ def scan_assembly_telomeres(state: TopLevelState) -> StateUpdate:
                 thresholds,
             )
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, DataLayoutError) as exc:
         return _fail(state, f"t2t assembly telomere scan failed: {exc}")
     scan_source = Path(execution_inputs.work_dir) / "assembly_telomere_scan.tsv"
     _write_tsv(scan_source, rows, _ASSEMBLY_SCAN_FIELDS)
@@ -301,7 +317,7 @@ def scan_assembly_telomeres(state: TopLevelState) -> StateUpdate:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_ASSEMBLY_TELOMERE_SCAN,
     ).path
-    chromosome_names = _load_chromosome_list(execution_inputs.chromosome_list_ref)
+    chromosome_names = set(execution_inputs.chromosome_names)
     warnings = list(out.get("notes") or [])
     if chromosome_names:
         unknown = sorted(chromosome_names.difference({row["sequence"] for row in rows}))
@@ -331,7 +347,7 @@ def scan_assembly_telomeres(state: TopLevelState) -> StateUpdate:
 
 
 def prepare_t2t_reads(state: TopLevelState) -> StateUpdate:
-    """Validate every resolved ONT path before scanning or mapping it."""
+    """Validate every resolved long-read path before scanning or mapping it."""
     out = _output(state)
     if out.get("status") not in {"resolved", "assembly_scanned"}:
         return {}
@@ -340,30 +356,39 @@ def prepare_t2t_reads(state: TopLevelState) -> StateUpdate:
             execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
         except ValueError as exc:
             return _fail(state, f"t2t frozen execution inputs are invalid: {exc}")
-        read_inputs: list[T2TOntReadInputJson] = [
-            {"asset_id": item.asset_id, "path": item.path}
-            for item in execution_inputs.ont_read_inputs
-        ]
+        read_inputs = []
+        for item in execution_inputs.long_read_inputs:
+            read_input: T2TLongReadInputJson = {
+                "member_id": item.member_id,
+                "source_asset_id": item.source_asset_id,
+                "path": item.path,
+                "platform": item.platform,
+            }
+            if item.read_artifact_ref is not None:
+                read_input["read_artifact_ref"] = cast(
+                    ArtifactRefJson,
+                    item.read_artifact_ref.model_dump(mode="json"),
+                )
+            read_inputs.append(read_input)
     else:
-        read_inputs = list(out.get("ont_read_inputs") or [])
+        read_inputs = list(out.get("long_read_inputs") or [])
     if not read_inputs:
-        return _skip_no_reads(state, out, "no_ont_long_reads")
+        return _skip_no_reads(state, out, "no_long_reads")
     try:
-        validated = _validate_ont_read_inputs(read_inputs)
+        validated = _validate_long_read_inputs(read_inputs)
     except (OSError, ValueError) as exc:
-        return _fail(state, f"invalid t2t ONT input: {exc}")
+        return _fail(state, f"invalid t2t long-read input: {exc}")
     return _update(
         state,
         {
             "status": "reads_prepared",
-            "ont_read_inputs": validated,
-            "ont_read_paths": [item["path"] for item in validated],
+            "long_read_inputs": validated,
         },
     )
 
 
 def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
-    """Stream ONT reads and retain only terminal-telomeric reads for evidence."""
+    """Retain terminal-telomeric reads in platform-compatible preset groups."""
     out = _output(state)
     if out.get("status") != "reads_prepared":
         return {}
@@ -371,17 +396,22 @@ def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
     telomeric_read_count = 0
     try:
         execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        read_dependencies = [
+            _long_read_input_dependency(state, item)
+            for item in execution_inputs.long_read_inputs
+        ]
+        verify_input_dependencies(state, read_dependencies)
         thresholds = execution_inputs.thresholds.model_dump(mode="json")
         reads_scan_source = Path(execution_inputs.work_dir) / "reads_telomere_scan.tsv"
         telomeric_tsv_source = Path(execution_inputs.work_dir) / "telomeric_reads.tsv"
-        telomeric_fasta = Path(execution_inputs.work_dir) / "telomeric_reads.fa"
-        with (
-            reads_scan_source.open("w", encoding="utf-8", newline="") as reads_handle,
-            telomeric_tsv_source.open(
-                "w", encoding="utf-8", newline=""
-            ) as telomeric_handle,
-            telomeric_fasta.open("w", encoding="utf-8") as fasta_handle,
-        ):
+        telomeric_fasta_sources: dict[str, Path] = {}
+        with ExitStack() as stack:
+            reads_handle = stack.enter_context(
+                reads_scan_source.open("w", encoding="utf-8", newline="")
+            )
+            telomeric_handle = stack.enter_context(
+                telomeric_tsv_source.open("w", encoding="utf-8", newline="")
+            )
             reads_writer = csv.DictWriter(
                 reads_handle,
                 fieldnames=_READ_SCAN_FIELDS,
@@ -397,10 +427,12 @@ def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
             reads_writer.writeheader()
             telomeric_writer.writeheader()
             seen_read_ids: set[str] = set()
-            for read_input in execution_inputs.ont_read_inputs:
-                asset_id = read_input.asset_id
+            fasta_handles: dict[str, TextIO] = {}
+            for read_input in execution_inputs.long_read_inputs:
+                member_id = read_input.member_id
+                preset = _minimap2_preset(read_input.platform)
                 for source_read_id, sequence in _iter_sequences(Path(read_input.path)):
-                    read_id = f"{asset_id}::{source_read_id}"
+                    read_id = f"{member_id}::{source_read_id}"
                     if read_id in seen_read_ids:
                         raise ValueError(
                             f"duplicate read identifier within source asset: {read_id}"
@@ -413,8 +445,11 @@ def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
                     )
                     row = {
                         "read_id": read_id,
-                        "source_asset_id": asset_id,
+                        "source_asset_id": read_input.source_asset_id,
+                        "source_member_id": member_id,
                         "source_read_id": source_read_id,
+                        "platform": read_input.platform,
+                        "minimap2_preset": preset,
                         "length": str(len(sequence)),
                         "left_motif_copies": str(left),
                         "right_motif_copies": str(right),
@@ -432,9 +467,20 @@ def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
                         or row["right_has_signal"] == "true"
                     ):
                         telomeric_writer.writerow(row)
+                        fasta_handle = fasta_handles.get(preset)
+                        if fasta_handle is None:
+                            fasta_source = (
+                                Path(execution_inputs.work_dir)
+                                / f"telomeric_reads.{preset}.fa"
+                            )
+                            telomeric_fasta_sources[preset] = fasta_source
+                            fasta_handle = stack.enter_context(
+                                fasta_source.open("w", encoding="utf-8")
+                            )
+                            fasta_handles[preset] = fasta_handle
                         _write_fasta_record(fasta_handle, read_id, sequence)
                         telomeric_read_count += 1
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, DataLayoutError) as exc:
         return _fail(state, f"t2t read telomere scan failed: {exc}")
     reads_scan = publish_or_recover_work_artifact(
         absolute_data_dir(state),
@@ -452,21 +498,27 @@ def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_TELOMERIC_READS,
     ).path
-    telomeric_fasta = publish_or_recover_work_artifact(
-        absolute_data_dir(state),
-        state["session_id"],
-        telomeric_fasta,
-        stage="t2t",
-        method_name=T2T_CONTRACT_METHOD,
-        artifact_type=T2T_TELOMERIC_READS,
-    ).path
+    telomeric_fasta_refs = {
+        preset: str(
+            publish_or_recover_work_artifact(
+                absolute_data_dir(state),
+                state["session_id"],
+                source,
+                stage="t2t",
+                method_name=T2T_CONTRACT_METHOD,
+                artifact_type=T2T_TELOMERIC_READS,
+                metadata={"minimap2_preset": preset},
+            ).path
+        )
+        for preset, source in sorted(telomeric_fasta_sources.items())
+    }
     return _update(
         state,
         {
             "status": "reads_scanned",
             "reads_telomere_scan_ref": str(reads_scan),
             "telomeric_reads_ref": str(telomeric_tsv),
-            "telomeric_reads_fasta_ref": str(telomeric_fasta),
+            "telomeric_reads_fasta_refs": telomeric_fasta_refs,
             "read_count": read_count,
             "telomeric_read_count": telomeric_read_count,
         },
@@ -519,17 +571,35 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
     if blocked:
         return _update(state, blocked)
     work_dir = Path(execution_inputs.work_dir)
-    paf_path = work_dir / "ont_to_assembly.paf"
+    paf_path = work_dir / "long_reads_to_assembly.paf"
     script_path = work_dir / "run_minimap2_t2t.sh"
-    alignment_reads_ref = out.get("telomeric_reads_fasta_ref")
-    if not alignment_reads_ref:
-        return _fail(state, "t2t telomeric read FASTA is missing after read scan")
+    alignment_reads_refs = dict(out.get("telomeric_reads_fasta_refs") or {})
+    if not alignment_reads_refs:
+        return _fail(
+            state, "t2t telomeric read FASTA groups are missing after read scan"
+        )
+    unsupported_presets = sorted(
+        set(alignment_reads_refs).difference({"map-ont", "map-hifi", "map-pb"})
+    )
+    if unsupported_presets:
+        return _fail(
+            state,
+            "t2t telomeric read FASTA groups contain unsupported presets: "
+            f"{unsupported_presets}",
+        )
+    script_lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f": > {shlex.quote(str(paf_path))}",
+    ]
+    for preset, reads_ref in sorted(alignment_reads_refs.items()):
+        script_lines.append(
+            f"minimap2 -x {shlex.quote(preset)} --secondary=no "
+            f"{shlex.quote(execution_inputs.input_assembly_ref)} "
+            f"{shlex.quote(reads_ref)} >> {shlex.quote(str(paf_path))}"
+        )
     script_path.write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\n"
-        f"minimap2 -x map-ont --secondary=no "
-        f"{shlex.quote(execution_inputs.input_assembly_ref)} "
-        f"{shlex.quote(str(alignment_reads_ref))} > "
-        f"{shlex.quote(str(paf_path))}\n",
+        "\n".join(script_lines) + "\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -538,6 +608,26 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
     )
     if parameter_attempt.frozen_parameters_ref is None:
         return _fail(state, "t2t minimap2 has no frozen parameter evidence")
+    try:
+        input_dependencies = [
+            _assembly_input_dependency(state, execution_inputs.input_assembly_ref)
+        ]
+        for _preset, reads_ref in sorted(alignment_reads_refs.items()):
+            reads_artifact_ref = artifact_ref_for_path(
+                absolute_data_dir(state),
+                state["session_id"],
+                reads_ref,
+                expected_type=T2T_TELOMERIC_READS,
+            )
+            input_dependencies.append(
+                artifact_input_dependency(state, reads_artifact_ref, reads_ref)
+            )
+        verify_input_dependencies(state, input_dependencies)
+    except (OSError, ValueError, DataLayoutError) as exc:
+        return _fail(state, f"t2t alignment input dependency is invalid: {exc}")
+    frozen_input_dependencies: list[InputDependency | dict[str, Any]] = [
+        *input_dependencies
+    ]
     attempt = build_frozen_attempt(
         attempt_id=f"{state['session_id']}-t2t-minimap2",
         session_id=state["session_id"],
@@ -548,11 +638,12 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
         expected_outputs=[paf_path],
         env=out.get("env"),
         env_spec=env_spec,
+        input_dependencies=frozen_input_dependencies,
         metadata={
             "parameter_attempt_id": parameter_attempt.attempt_id,
             "paf_path": str(paf_path),
             "assembly_ref": execution_inputs.input_assembly_ref,
-            "reads_ref": str(alignment_reads_ref),
+            "reads_refs": alignment_reads_refs,
         },
     )
     return freeze_method_attempts(state, T2T_ALIGNMENT_LIFECYCLE, [attempt])
@@ -616,8 +707,14 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
         read_signals = {
             row["read_id"]: row for row in _read_tsv(Path(out["telomeric_reads_ref"]))
         }
-        read_sequences = dict(_iter_sequences(Path(out["telomeric_reads_fasta_ref"])))
-        allowed = _load_chromosome_list(execution_inputs.chromosome_list_ref)
+        read_sequences = _load_telomeric_read_sequences(
+            out.get("telomeric_reads_fasta_refs") or {}
+        )
+        allowed = (
+            set(execution_inputs.chromosome_names)
+            if execution_inputs.chromosome_names
+            else None
+        )
         raw = _candidate_rows(
             paf_artifact.path,
             assembly_ends,
@@ -708,7 +805,7 @@ def apply_t2t_patches(state: TopLevelState) -> StateUpdate:
             state,
             {
                 "status": "patch_not_applied",
-                "patch_reason": "selected_read_sequence_unavailable",
+                "patch_reason": "no_auto_patch_candidates",
             },
         )
     if materialized.get("error"):
@@ -726,7 +823,6 @@ def apply_t2t_patches(state: TopLevelState) -> StateUpdate:
             "status": "patched",
             "patched_assembly_ref": materialized["patched_assembly_ref"],
             "patch_records_ref": materialized["patch_records_ref"],
-            "output_assembly_ref": materialized["patched_assembly_ref"],
         },
     )
 
@@ -764,7 +860,7 @@ def validate_patched_assembly(state: TopLevelState) -> StateUpdate:
 
 
 def write_t2t_report(state: TopLevelState) -> StateUpdate:
-    """Write the compact operator report and register all materialized evidence."""
+    """Write final evidence or the immutable packet shown before human review."""
     out = _output(state)
     if out.get("status") == "failed":
         return {}
@@ -781,8 +877,8 @@ def write_t2t_report(state: TopLevelState) -> StateUpdate:
                 "resolved_telomere_motif": execution_inputs.resolved_telomere_motif,
                 "resolved_telomere_motif_source": execution_inputs.motif_source,
                 "input_assembly_ref": execution_inputs.input_assembly_ref,
-                "ont_read_refs": [
-                    item.path for item in execution_inputs.ont_read_inputs
+                "long_read_refs": [
+                    item.path for item in execution_inputs.long_read_inputs
                 ],
                 "mode": execution_inputs.mode,
                 "chromosome_list_ref": execution_inputs.chromosome_list_ref,
@@ -813,8 +909,6 @@ def write_t2t_report(state: TopLevelState) -> StateUpdate:
         summary,
         ["sequence", "left_telomere", "right_telomere", "status"],
     )
-    report_source = Path(report_out["work_dir"]) / "t2t_finishing_report.md"
-    report_source.write_text(_report_markdown(report_out, summary), encoding="utf-8")
     summary_path = publish_or_recover_work_artifact(
         absolute_data_dir(state),
         state["session_id"],
@@ -823,49 +917,20 @@ def write_t2t_report(state: TopLevelState) -> StateUpdate:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_STATUS_SUMMARY,
     ).path
-    report_path = publish_or_recover_work_artifact(
-        absolute_data_dir(state),
-        state["session_id"],
-        report_source,
-        stage="t2t",
-        method_name=T2T_CONTRACT_METHOD,
-        artifact_type=T2T_FINISHING_REPORT,
-    ).path
     final_status = _final_status(report_out, summary)
-    artifacts = _register_artifacts(state, out, summary_path, report_path)
-    bundle_source = Path(report_out["work_dir"]) / "t2t_finishing_bundle.json"
-    bundle = T2TFinishingBundle(
-        session_id=state["session_id"],
-        status=final_status,
-        input_assembly_ref=report_out["input_assembly_ref"],
-        output_assembly_ref=(
-            out.get("output_assembly_ref") or report_out["input_assembly_ref"]
-        ),
-        ont_read_refs=list(report_out.get("ont_read_refs") or []),
-        mode=report_out["mode"],
-        resolved_telomere_motif=report_out.get("resolved_telomere_motif"),
-        resolved_telomere_motif_source=report_out.get("resolved_telomere_motif_source"),
-        patched_assembly_ref=out.get("patched_assembly_ref"),
-        artifact_refs={path.name: str(path) for path in artifacts},
-        notes=list(out.get("notes") or []),
-        metadata={
-            "source_stage": out.get("source_stage"),
-            "execution_enabled": report_out.get("execution_enabled"),
-        },
+    evidence_phase: Literal["pre_review", "final"] = (
+        "pre_review" if final_status == "blocked_human" else "final"
     )
-    bundle_source.write_text(
-        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    bundle_path = publish_or_recover_work_artifact(
-        absolute_data_dir(state),
-        state["session_id"],
-        bundle_source,
-        stage="t2t",
-        method_name=T2T_CONTRACT_METHOD,
-        artifact_type="t2t.bundle",
-    ).path
     final_assembly = out.get("output_assembly_ref") or report_out["input_assembly_ref"]
+    report_path, bundle_path, artifacts = _publish_t2t_finishing_evidence(
+        state,
+        report_out,
+        summary,
+        summary_path=summary_path,
+        status=final_status,
+        output_assembly_ref=final_assembly,
+        evidence_phase=evidence_phase,
+    )
     return _update(
         state,
         {
@@ -873,6 +938,7 @@ def write_t2t_report(state: TopLevelState) -> StateUpdate:
             "telomere_status_summary_ref": str(summary_path),
             "t2t_finishing_report_ref": str(report_path),
             "bundle_ref": str(bundle_path),
+            "finishing_evidence_phase": evidence_phase,
             "artifact_refs": [str(path) for path in artifacts] + [str(bundle_path)],
             "output_assembly_ref": final_assembly,
         },
@@ -880,7 +946,7 @@ def write_t2t_report(state: TopLevelState) -> StateUpdate:
 
 
 def gate_t2t_review(state: TopLevelState) -> StateUpdate:
-    """Block for human review when manual review mode has proposed candidates."""
+    """Block for candidate selection or post-patch human adoption."""
     out = _output(state)
     if out.get("status") != "blocked_human":
         return {}
@@ -920,12 +986,117 @@ def commit_t2t(state: TopLevelState) -> StateUpdate:
         "route_trace": append_route_trace(state, "t2t_stage"),
     }
     if assembly_ref:
+        adopted_patch = bool(
+            out.get("patched_assembly_ref")
+            and str(assembly_ref) == str(out.get("patched_assembly_ref"))
+        )
+        try:
+            current_assembly = resolve_stage_resource(
+                state,
+                resource_spec=assembly_resource_spec(),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            reason = f"t2t assembly resource provenance is invalid: {exc}"
+            return {
+                **_fail(state, reason),
+                "current_stage": "t2t",
+                "supervision_state": "failed_terminal",
+                "last_error": reason,
+            }
+        current_assembly_matches_output = bool(
+            current_assembly.found
+            and current_assembly.path
+            and _canonical_path(current_assembly.path)
+            == _canonical_path(str(assembly_ref))
+        )
+        current_assembly_matches_input = bool(
+            current_assembly.found
+            and current_assembly.path
+            and input_assembly_ref
+            and _canonical_path(current_assembly.path)
+            == _canonical_path(str(input_assembly_ref))
+        )
+        if current_assembly_matches_output:
+            return update
+        if not current_assembly_matches_input:
+            reason = (
+                "t2t assembly resource changed since input resolution; "
+                "refusing to overwrite a newer assembly"
+            )
+            return {
+                **_fail(state, reason),
+                "current_stage": "t2t",
+                "supervision_state": "failed_terminal",
+                "last_error": reason,
+            }
+
+        try:
+            assembly_dependency = _assembly_input_dependency(
+                state,
+                str(assembly_ref),
+            )
+            verify_input_dependencies(state, [assembly_dependency])
+        except (OSError, TypeError, ValueError, DataLayoutError) as exc:
+            reason = f"t2t output assembly provenance is invalid: {exc}"
+            return {
+                **_fail(state, reason),
+                "current_stage": "t2t",
+                "supervision_state": "failed_terminal",
+                "last_error": reason,
+            }
+
+        metadata: dict[str, Any] = {"patched": adopted_patch}
+        if assembly_dependency.kind == "artifact":
+            if (
+                adopted_patch
+                and assembly_dependency.artifact_ref.artifact_type
+                != T2T_PATCHED_ASSEMBLY
+            ):
+                reason = (
+                    "adopted t2t patch does not reference a "
+                    f"{T2T_PATCHED_ASSEMBLY!r} artifact"
+                )
+                return {
+                    **_fail(state, reason),
+                    "current_stage": "t2t",
+                    "supervision_state": "failed_terminal",
+                    "last_error": reason,
+                }
+            metadata["primary_output_ref"] = (
+                assembly_dependency.artifact_ref.model_dump(mode="json")
+            )
+        elif assembly_dependency.kind == "asset":
+            registry_ref = state.get("asset_registry_ref")
+            if registry_ref is None:
+                reason = "t2t output assembly asset has no asset_registry_ref"
+                return {
+                    **_fail(state, reason),
+                    "current_stage": "t2t",
+                    "supervision_state": "failed_terminal",
+                    "last_error": reason,
+                }
+            metadata.update(
+                {
+                    "asset_registry_ref": registry_ref,
+                    "asset_ids": [assembly_dependency.asset_id],
+                }
+            )
+
+        if adopted_patch and current_assembly_matches_input:
+            if current_assembly.metadata.get("candidate_bundle_ref") is not None:
+                metadata["input_candidate_bundle_ref"] = (
+                    current_assembly.metadata["candidate_bundle_ref"]
+                )
+            if current_assembly.metadata.get("primary_output_ref") is not None:
+                metadata["input_primary_output_ref"] = (
+                    current_assembly.metadata["primary_output_ref"]
+                )
         update["resource_refs"] = update_resource_ref(
             state,
             "assembly",
             [str(assembly_ref)],
             "t2t",
-            {"patched": bool(out.get("patched_assembly_ref"))},
+            metadata,
         )
     return update
 
@@ -947,6 +1118,8 @@ def apply_t2t_review_decision(
     if request.stage != "t2t":
         raise ResumeValidationError("t2t review resume requires stage t2t")
     out = _output(state)
+    if out.get("status") != "blocked_human":
+        raise ResumeValidationError("t2t review resume requires a blocked stage")
     try:
         execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
     except ValueError as exc:
@@ -971,52 +1144,207 @@ def apply_t2t_review_decision(
         raise ResumeValidationError(
             "t2t accept_selected_candidates requires candidate_ids"
         )
+    if decision == "accept_selected_candidates" and request.decided_by != "human":
+        raise ResumeValidationError(
+            "t2t candidate adoption requires a human review decision"
+        )
+    accepted_candidate_ids = (
+        list(dict.fromkeys(request.candidate_ids))
+        if decision == "accept_selected_candidates"
+        else []
+    )
+
+    if decision != "stop_pipeline":
+        try:
+            current_assembly = resolve_stage_resource(
+                state,
+                resource_spec=assembly_resource_spec(),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            reason = f"t2t assembly resource provenance is invalid: {exc}"
+            return {
+                **_fail(state, reason),
+                "current_stage": "t2t",
+                "supervision_state": "failed_terminal",
+                "last_error": reason,
+            }
+        if (
+            not current_assembly.found
+            or not current_assembly.path
+            or _canonical_path(current_assembly.path)
+            != _canonical_path(execution_inputs.input_assembly_ref)
+        ):
+            reason = (
+                "t2t assembly resource changed since input resolution; "
+                "refusing to apply a stale review decision"
+            )
+            return {
+                **_fail(state, reason),
+                "current_stage": "t2t",
+                "supervision_state": "failed_terminal",
+                "last_error": reason,
+            }
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    candidate_rows = _read_tsv(Path(out["telomere_extension_candidates_ref"]))
-    selectable = {
-        row["candidate_id"]: row
-        for row in candidate_rows
-        if row.get("candidate_id") and row.get("decision") in {"proposed", "auto_patch"}
-    }
     if decision == "accept_selected_candidates":
-        unknown = sorted(set(request.candidate_ids).difference(selectable))
+        try:
+            review_dependencies = [
+                _assembly_input_dependency(state, execution_inputs.input_assembly_ref)
+            ]
+            review_evidence = [
+                (
+                    out["telomere_extension_candidates_ref"],
+                    T2T_EXTENSION_CANDIDATES,
+                ),
+                *[
+                    (path, T2T_TELOMERIC_READS)
+                    for path in sorted(
+                        (out.get("telomeric_reads_fasta_refs") or {}).values()
+                    )
+                ],
+            ]
+            for path_value, artifact_type in review_evidence:
+                artifact_ref = artifact_ref_for_path(
+                    data_dir,
+                    session_id,
+                    path_value,
+                    expected_type=artifact_type,
+                )
+                review_dependencies.append(
+                    artifact_input_dependency(state, artifact_ref, path_value)
+                )
+            verify_input_dependencies(state, review_dependencies)
+        except (OSError, ValueError, DataLayoutError) as exc:
+            raise ResumeValidationError(
+                f"t2t review evidence changed before adoption: {exc}"
+            ) from exc
+
+        candidate_rows = _read_tsv(Path(out["telomere_extension_candidates_ref"]))
+        allowed_candidate_decisions = (
+            {"auto_patch"} if execution_inputs.mode == "auto_patch" else {"proposed"}
+        )
+        selectable = {
+            row["candidate_id"]: row
+            for row in candidate_rows
+            if row.get("candidate_id")
+            and row.get("decision") in allowed_candidate_decisions
+        }
+        unknown = sorted(set(accepted_candidate_ids).difference(selectable))
         if unknown:
             raise ResumeValidationError(
                 f"unknown t2t candidate_ids: {', '.join(unknown)}"
             )
-        materialized = _materialize_t2t_patches(
-            state,
-            out,
-            execution_inputs=execution_inputs,
-            selected_candidate_ids=set(request.candidate_ids),
-            allowed_decisions={"proposed", "auto_patch"},
-        )
-        if not materialized:
-            raise ResumeValidationError(
-                "t2t selected candidates could not be materialized into a "
-                "patched assembly"
+        if execution_inputs.mode == "auto_patch":
+            expected_ids = set(selectable)
+            selected_ids = set(accepted_candidate_ids)
+            if selected_ids != expected_ids:
+                raise ResumeValidationError(
+                    "t2t post-patch adoption must accept the complete validated "
+                    "candidate assembly"
+                )
+            patched_assembly_ref = out.get("patched_assembly_ref")
+            patched_telomere_scan_ref = out.get("patched_telomere_scan_ref")
+            patch_records_ref = out.get("patch_records_ref")
+            if (
+                not patched_assembly_ref
+                or not Path(patched_assembly_ref).is_file()
+                or not patched_telomere_scan_ref
+                or not Path(patched_telomere_scan_ref).is_file()
+            ):
+                raise ResumeValidationError(
+                    "t2t validated candidate patch evidence is unavailable"
+                )
+            try:
+                adoption_dependencies = []
+                for path_value, artifact_type in (
+                    (patched_assembly_ref, T2T_PATCHED_ASSEMBLY),
+                    (
+                        patched_telomere_scan_ref,
+                        T2T_ASSEMBLY_TELOMERE_SCAN,
+                    ),
+                ):
+                    artifact_ref = artifact_ref_for_path(
+                        data_dir,
+                        session_id,
+                        path_value,
+                        expected_type=artifact_type,
+                    )
+                    adoption_dependencies.append(
+                        artifact_input_dependency(state, artifact_ref, path_value)
+                    )
+                verify_input_dependencies(state, adoption_dependencies)
+            except (OSError, ValueError, DataLayoutError) as exc:
+                raise ResumeValidationError(
+                    f"t2t candidate patch evidence changed before adoption: {exc}"
+                ) from exc
+            output_assembly_ref = patched_assembly_ref
+        else:
+            materialized = _materialize_t2t_patches(
+                state,
+                out,
+                execution_inputs=execution_inputs,
+                selected_candidate_ids=set(accepted_candidate_ids),
+                allowed_decisions={"proposed"},
             )
-        if materialized.get("error"):
-            raise ResumeValidationError(
-                "t2t selected candidates are internally inconsistent: "
-                f"{materialized['error']}"
+            if not materialized:
+                raise ResumeValidationError(
+                    "t2t selected candidates could not be materialized into a "
+                    "patched assembly"
+                )
+            if materialized.get("error"):
+                raise ResumeValidationError(
+                    "t2t selected candidates are internally inconsistent: "
+                    f"{materialized['error']}"
+                )
+            output_assembly_ref = materialized["patched_assembly_ref"]
+            patched_assembly_ref = materialized["patched_assembly_ref"]
+            patch_records_ref = materialized["patch_records_ref"]
+            try:
+                thresholds = execution_inputs.thresholds.model_dump(mode="json")
+                scan_rows = list(
+                    _scan_fasta_ends(
+                        Path(patched_assembly_ref),
+                        execution_inputs.resolved_telomere_motif,
+                        thresholds,
+                    )
+                )
+            except (OSError, ValueError) as exc:
+                raise ResumeValidationError(
+                    f"t2t patched assembly validation failed: {exc}"
+                ) from exc
+            scan_source = Path(execution_inputs.work_dir) / "patched_telomere_scan.tsv"
+            _write_tsv(scan_source, scan_rows, _ASSEMBLY_SCAN_FIELDS)
+            patched_telomere_scan_ref = str(
+                publish_or_recover_work_artifact(
+                    absolute_data_dir(state),
+                    state["session_id"],
+                    scan_source,
+                    stage="t2t",
+                    method_name=T2T_CONTRACT_METHOD,
+                    artifact_type=T2T_ASSEMBLY_TELOMERE_SCAN,
+                ).path
             )
-        output_assembly_ref = materialized["patched_assembly_ref"]
-        patched_assembly_ref = materialized["patched_assembly_ref"]
-        patch_records_ref: str | None = materialized["patch_records_ref"]
-        status = "completed"
+        status = "patched_validated"
     else:
         output_assembly_ref = execution_inputs.input_assembly_ref
-        patched_assembly_ref = None
+        patched_assembly_ref = (
+            out.get("patched_assembly_ref")
+            if execution_inputs.mode == "auto_patch"
+            else None
+        )
         patch_records_ref = out.get("patch_records_ref")
+        patched_telomere_scan_ref = (
+            out.get("patched_telomere_scan_ref")
+            if execution_inputs.mode == "auto_patch"
+            else None
+        )
         status = "failed_terminal" if decision == "stop_pipeline" else "completed"
 
     decision_payload = T2TReviewDecisionArtifact(
         session_id=session_id,
         decision=decision,
-        candidate_ids=list(request.candidate_ids),
+        candidate_ids=accepted_candidate_ids,
         input_assembly_ref=execution_inputs.input_assembly_ref,
         output_assembly_ref=str(output_assembly_ref),
         patched_assembly_ref=patched_assembly_ref,
@@ -1059,14 +1387,21 @@ def apply_t2t_review_decision(
         review_request_id=review_request_id,
     )
 
+    scan_update: dict[str, str] = (
+        {"patched_telomere_scan_ref": patched_telomere_scan_ref}
+        if patched_telomere_scan_ref is not None
+        else {}
+    )
     stage_update = update_t2t_stage_output(
         state,
         {
             "status": status,
             "decision": decision,
-            "selected_candidate_ids": list(request.candidate_ids),
+            "selected_candidate_ids": accepted_candidate_ids,
+            "selected_patch_count": len(accepted_candidate_ids),
             "patched_assembly_ref": patched_assembly_ref,
             "patch_records_ref": patch_records_ref,
+            **scan_update,
             "output_assembly_ref": str(output_assembly_ref),
             "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
             "notes": list(request.notes),
@@ -1082,93 +1417,269 @@ def apply_t2t_review_decision(
             **stage_update,
             "last_error": "t2t stopped by human review decision",
         }
-    updated_state: TopLevelState = {
+    reviewed_state: TopLevelState = {
         **state,
         **stage_update,
         "active_interrupt": None,
         "supervision_state": "running_stage",
     }
-    commit_update = commit_t2t(updated_state)
-    return {**commit_update, "active_interrupt": None, **stage_update}
+    reviewed_out = read_t2t_stage_output(reviewed_state)
+    try:
+        final_evidence_update = _finalize_t2t_evidence(reviewed_state, reviewed_out)
+    except (OSError, ValueError, DataLayoutError) as exc:
+        raise ResumeValidationError(
+            f"t2t final evidence could not be persisted: {exc}"
+        ) from exc
+    finalized_state: TopLevelState = {
+        **reviewed_state,
+        **final_evidence_update,
+    }
+    commit_update = commit_t2t(finalized_state)
+    return {
+        **final_evidence_update,
+        **commit_update,
+        "active_interrupt": None,
+    }
 
 
 def _config(out: T2TStageCursor) -> _T2TConfig:
+    read_inputs = list(out.get("read_inputs") or [])
     return {
         "mode": resolve_t2t_mode(out.get("mode")),
         "chromosome_list_ref": out.get("chromosome_list_ref"),
         "assembly_fasta_ref": out.get("assembly_fasta_ref"),
-        "ont_read_refs": list(out.get("ont_read_refs") or []),
+        "read_inputs": read_inputs,
     }
 
 
-def _ont_read_inputs(
-    state: TopLevelState, overrides: list[str]
-) -> tuple[list[T2TOntReadInputJson], str]:
-    if overrides:
-        return [
-            {"asset_id": f"run_config:{index:03d}", "path": str(path)}
-            for index, path in enumerate(overrides)
-        ], "run_config"
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref or not Path(registry_ref).exists():
-        return [], "missing"
+def _minimap2_preset(platform: str) -> str:
+    """Return the minimap2 -x preset matching the long-read platform."""
+    presets = {
+        "ont": "map-ont",
+        "pacbio_hifi": "map-hifi",
+        "clr": "map-pb",
+        "cycloneseq": "map-ont",
+    }
     try:
-        registry = json.loads(Path(registry_ref).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return presets[platform]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported canonical long-read platform: {platform!r}"
+        ) from exc
+
+
+def _long_read_inputs(
+    state: TopLevelState,
+    configured_inputs: list[T2TConfiguredReadInputJson],
+) -> tuple[list[T2TLongReadInputJson], str]:
+    """Resolve authoritative members through the shared runtime resolver only."""
+
+    override_paths = [item["path"] for item in configured_inputs]
+    configured_by_source_asset = _configured_source_assets(state, configured_inputs)
+    members = resolve_long_read_members(
+        state,
+        override_paths=override_paths or None,
+    )
+    if not members:
         return [], "missing"
-    if not isinstance(registry, dict):
-        raise ValueError("ONT asset registry root must be an object")
-    assets = registry.get("assets", [])
-    if not isinstance(assets, list):
-        raise ValueError("ONT asset registry assets must be a list")
-    for index, asset in enumerate(assets):
-        if not isinstance(asset, dict):
-            raise ValueError(f"ONT asset registry member {index} is not an object")
-    for asset_type in ("clean_long_reads", "raw_long_reads"):
-        members = [
-            (index, asset)
-            for index, asset in enumerate(assets)
-            if asset.get("asset_type") == asset_type
-        ]
-        if not members:
-            continue
-        selected: list[T2TOntReadInputJson] = []
-        for index, asset in members:
-            path = asset.get("path")
-            if not isinstance(path, str) or not path.strip():
-                asset_id = str(asset.get("asset_id") or f"{asset_type}:{index:03d}")
-                raise ValueError(f"ONT registry asset {asset_id!r} has no path")
-            selected.append(
-                {
-                    "asset_id": str(
-                        asset.get("asset_id") or f"{asset_type}:{index:03d}"
-                    ),
-                    "path": path,
-                }
+
+    if configured_by_source_asset:
+        seen_source_assets: set[str] = set()
+        for member in members:
+            configured = configured_by_source_asset.get(member.source_asset_id)
+            if configured is None:
+                raise ValueError(
+                    "resolved long-read member has no configured source lineage: "
+                    f"{member.path}"
+                )
+            if member.source_asset_id in seen_source_assets:
+                raise ValueError(
+                    "configured source asset resolved to multiple long-read members: "
+                    f"{member.source_asset_id}"
+                )
+            seen_source_assets.add(member.source_asset_id)
+            if configured["platform"] != member.platform:
+                raise ValueError(
+                    "configured long-read platform disagrees with registered "
+                    f"provenance for {member.path}"
+                )
+        missing_sources = sorted(
+            set(configured_by_source_asset).difference(seen_source_assets)
+        )
+        if missing_sources:
+            raise ValueError(
+                f"configured long-read sources were not resolved: {missing_sources}"
             )
-        return selected, asset_type
-    return [], "missing"
+
+    source = _long_reads_source(state, configured=bool(configured_inputs))
+    inputs: list[T2TLongReadInputJson] = []
+    for member in members:
+        read_input: T2TLongReadInputJson = {
+            "member_id": member.member_id,
+            "source_asset_id": member.source_asset_id,
+            "path": member.path,
+            "platform": member.platform,
+        }
+        if member.read_artifact_ref is not None:
+            read_input["read_artifact_ref"] = cast(
+                ArtifactRefJson,
+                member.read_artifact_ref.model_dump(mode="json"),
+            )
+        inputs.append(read_input)
+    return inputs, source
 
 
-def _validate_ont_read_inputs(
-    read_inputs: list[T2TOntReadInputJson],
-) -> list[T2TOntReadInputJson]:
-    validated: list[T2TOntReadInputJson] = []
+def _configured_source_assets(
+    state: TopLevelState,
+    configured_inputs: list[T2TConfiguredReadInputJson],
+) -> dict[str, T2TConfiguredReadInputJson]:
+    if not configured_inputs:
+        return {}
+    registry = load_asset_registry(state)
+    configured_by_asset: dict[str, T2TConfiguredReadInputJson] = {}
+    for configured in configured_inputs:
+        configured_path = _canonical_path(configured["path"])
+        matches = [
+            record
+            for record in registry.assets
+            if _canonical_path(record.path) == configured_path
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "configured long-read path must uniquely match one registry asset: "
+                f"{configured['path']}"
+            )
+        record = matches[0]
+        if record.platform != configured["platform"]:
+            raise ValueError(
+                "configured long-read platform disagrees with its registry asset: "
+                f"{configured['path']}"
+            )
+        if record.asset_id in configured_by_asset:
+            raise ValueError(f"duplicate configured long-read asset: {record.asset_id}")
+        configured_by_asset[record.asset_id] = configured
+    return configured_by_asset
+
+
+def _long_reads_source(
+    state: TopLevelState,
+    *,
+    configured: bool,
+) -> Literal[
+    "run_config",
+    "read_set_manifest",
+    "asset_registry",
+    "resource_ref",
+]:
+    if configured:
+        return "run_config"
+    raw_ref = (state.get("resource_refs") or {}).get("long_reads")
+    if not isinstance(raw_ref, Mapping):
+        return "asset_registry"
+    metadata = raw_ref.get("metadata")
+    if isinstance(metadata, Mapping) and metadata.get("read_set_manifest_ref"):
+        return "read_set_manifest"
+    if raw_ref.get("source_stage") in {None, "inventory"}:
+        return "asset_registry"
+    return "resource_ref"
+
+
+def _validate_long_read_inputs(
+    read_inputs: list[T2TLongReadInputJson],
+) -> list[T2TLongReadInputJson]:
+    validated: list[T2TLongReadInputJson] = []
     for item in read_inputs:
-        asset_id = str(item.get("asset_id") or "").strip()
+        member_id = str(item.get("member_id") or "").strip()
+        source_asset_id = str(item.get("source_asset_id") or "").strip()
         reads_path = Path(str(item.get("path") or ""))
-        if not asset_id:
-            raise ValueError("ONT input has no stable asset_id")
+        platform = str(item.get("platform") or "").strip()
+        if not member_id:
+            raise ValueError("long-read input has no stable member_id")
+        if not source_asset_id:
+            raise ValueError("long-read input has no source_asset_id")
+        if not platform:
+            raise ValueError(f"long-read input {member_id!r} has no platform")
+        _minimap2_preset(platform)
         if not reads_path.exists() or not reads_path.is_file():
-            raise ValueError(f"ONT input is not a file: {reads_path}")
+            raise ValueError(f"long-read input is not a file: {reads_path}")
         try:
             next(_iter_sequences(reads_path))
         except StopIteration as exc:
-            raise ValueError(f"ONT input is empty: {reads_path}") from exc
+            raise ValueError(f"long-read input is empty: {reads_path}") from exc
         except (OSError, ValueError) as exc:
-            raise ValueError(f"malformed ONT input {reads_path}: {exc}") from exc
-        validated.append({"asset_id": asset_id, "path": str(reads_path)})
+            raise ValueError(f"malformed long-read input {reads_path}: {exc}") from exc
+        validated_item: T2TLongReadInputJson = {
+            "member_id": member_id,
+            "source_asset_id": source_asset_id,
+            "path": str(reads_path),
+            "platform": platform,
+        }
+        if item.get("read_artifact_ref") is not None:
+            validated_item["read_artifact_ref"] = item["read_artifact_ref"]
+        validated.append(validated_item)
     return validated
+
+
+def _long_read_input_dependency(
+    state: TopLevelState,
+    read_input: T2TLongReadInput,
+) -> InputDependency:
+    if read_input.read_artifact_ref is not None:
+        return artifact_input_dependency(
+            state,
+            read_input.read_artifact_ref,
+            read_input.path,
+        )
+    dependencies = asset_input_dependencies(
+        state,
+        [read_input.source_asset_id],
+        [read_input.path],
+    )
+    return dependencies[0]
+
+
+def _assembly_input_dependency(
+    state: TopLevelState,
+    assembly_path: str,
+) -> InputDependency:
+    try:
+        artifact_ref = artifact_ref_for_path(
+            absolute_data_dir(state),
+            state["session_id"],
+            assembly_path,
+        )
+    except (OSError, ValueError, DataLayoutError):
+        artifact_ref = None
+    if artifact_ref is not None:
+        return artifact_input_dependency(state, artifact_ref, assembly_path)
+
+    canonical_path = _canonical_path(assembly_path)
+    assembly_asset_types = {
+        "assembly_fasta_registered",
+        "draft_assembly",
+        "chromosome_scaffolded_assembly",
+    }
+    matches = [
+        record
+        for record in load_asset_registry(state).assets
+        if record.asset_type in assembly_asset_types
+        and _canonical_path(record.path) == canonical_path
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "assembly input must be one run-owned artifact or uniquely registered "
+            f"assembly asset: {assembly_path}"
+        )
+    dependencies = asset_input_dependencies(
+        state,
+        [matches[0].asset_id],
+        [assembly_path],
+    )
+    return dependencies[0]
+
+
+def _canonical_path(value: str | Path) -> str:
+    return str(Path(value).expanduser().resolve(strict=False))
 
 
 def _skip_no_reads(
@@ -1229,11 +1740,14 @@ def _looks_like_fasta(path: Path) -> bool:
 
 
 def _open_text(path: Path) -> TextIO:
-    return (
-        gzip.open(path, "rt", encoding="utf-8")
-        if path.suffix == ".gz"
-        else path.open("r", encoding="utf-8")
-    )
+    suffix = path.suffix.lower()
+    if suffix in {".gz", ".gzip"}:
+        return gzip.open(path, "rt", encoding="utf-8")
+    if suffix in {".bz2", ".bzip2"}:
+        return bz2.open(path, "rt", encoding="utf-8")
+    if suffix == ".xz":
+        return lzma.open(path, "rt", encoding="utf-8")
+    return path.open("r", encoding="utf-8")
 
 
 def _iter_sequences(path: Path) -> Iterator[tuple[str, str]]:
@@ -1271,6 +1785,20 @@ def _iter_sequences(path: Path) -> Iterator[tuple[str, str]]:
             header = handle.readline()
             if header and not header.startswith("@"):
                 raise ValueError("invalid FASTQ header")
+
+
+def _load_telomeric_read_sequences(
+    fasta_refs: Mapping[str, str],
+) -> dict[str, str]:
+    sequences: dict[str, str] = {}
+    for _preset, path_value in sorted(fasta_refs.items()):
+        for read_id, sequence in _iter_sequences(Path(path_value)):
+            if read_id in sequences:
+                raise ValueError(
+                    f"duplicate telomeric read across preset groups: {read_id}"
+                )
+            sequences[read_id] = sequence
+    return sequences
 
 
 def _scan_fasta_ends(
@@ -1424,7 +1952,7 @@ def _candidate_rows(
             reason = "insufficient_or_conflicting_read_support"
             if accepted and row is representative:
                 decision = "auto_patch" if mode == "auto_patch" else "proposed"
-                reason = "conservative_multi_read_support"
+                reason = "approved_read_support_threshold"
             elif accepted and row in supporting:
                 reason = "supporting_read"
             rows.append(
@@ -1556,23 +2084,14 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle, delimiter="\t"))
 
 
-def _load_chromosome_list(path_value: str | None) -> set[str] | None:
-    if not path_value:
-        return None
-    path = Path(path_value)
-    if not path.exists():
-        return None
-    return {
-        line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    }
-
-
-def _review_candidates(path: Path) -> list[dict[str, Any]]:
+def _review_candidates(
+    path: Path,
+    *,
+    allowed_decisions: set[str],
+) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for row in _read_tsv(path):
-        if row.get("decision") != "proposed":
+        if row.get("decision") not in allowed_decisions:
             continue
         candidates.append(
             {
@@ -1582,6 +2101,7 @@ def _review_candidates(path: Path) -> list[dict[str, Any]]:
                 "read_id": row["read_id"],
                 "supporting_reads": row["supporting_reads"],
                 "extension_length": row["extension_length"],
+                "decision": row["decision"],
                 "reason": row["reason"],
             }
         )
@@ -1610,7 +2130,9 @@ def _materialize_t2t_patches(
     ]
     if not selected:
         return None
-    read_sequences = dict(_iter_sequences(Path(out["telomeric_reads_fasta_ref"])))
+    read_sequences = _load_telomeric_read_sequences(
+        out.get("telomeric_reads_fasta_refs") or {}
+    )
     assembly_sequences = dict(
         _iter_sequences(Path(execution_inputs.input_assembly_ref))
     )
@@ -1719,8 +2241,13 @@ def _final_status(
         return "skipped"
     if out.get("status") == "skipped_no_long_reads":
         return "skipped_no_long_reads"
-    if out.get("patched_assembly_ref"):
-        return "completed"
+    if (
+        out.get("mode") == "auto_patch"
+        and out.get("selected_patch_count", 0)
+        and out.get("patched_assembly_ref")
+        and out.get("patched_telomere_scan_ref")
+    ):
+        return "blocked_human"
     if out.get("mode") == "manual_review" and out.get("proposed_candidate_count", 0):
         return "blocked_human"
     if out.get("candidate_count", 0):
@@ -1728,6 +2255,162 @@ def _final_status(
     if any(row["status"] == "missing_signal" for row in summary) or out.get("notes"):
         return "completed_with_warnings"
     return "completed"
+
+
+def _publish_t2t_finishing_evidence(
+    state: TopLevelState,
+    out: T2TStageCursor,
+    summary: list[dict[str, str]],
+    *,
+    summary_path: Path,
+    status: T2TStatus,
+    output_assembly_ref: str,
+    evidence_phase: Literal["pre_review", "final"],
+) -> tuple[Path, Path, list[Path]]:
+    """Publish one immutable pre-review or final report/bundle pair."""
+
+    stem_suffix = ".pre_review" if evidence_phase == "pre_review" else ""
+    report_source = (
+        Path(out["work_dir"]) / f"t2t_finishing_report{stem_suffix}.md"
+    )
+    report_source.write_text(
+        _report_markdown(
+            out,
+            summary,
+            status=status,
+            output_assembly_ref=output_assembly_ref,
+            evidence_phase=evidence_phase,
+        ),
+        encoding="utf-8",
+    )
+    report_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        report_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_FINISHING_REPORT,
+    ).path
+
+    artifacts_by_path = {
+        str(path): path
+        for path in (
+            Path(value)
+            for value in out.get("artifact_refs") or []
+            if Path(value).is_file()
+        )
+    }
+    artifacts_by_path.update(
+        {
+            str(path): path
+            for path in _register_artifacts(state, out, summary_path, report_path)
+        }
+    )
+    artifacts = list(artifacts_by_path.values())
+    bundle_source = (
+        Path(out["work_dir"]) / f"t2t_finishing_bundle{stem_suffix}.json"
+    )
+    bundle = T2TFinishingBundle(
+        session_id=state["session_id"],
+        evidence_phase=evidence_phase,
+        status=status,
+        input_assembly_ref=out["input_assembly_ref"],
+        output_assembly_ref=output_assembly_ref,
+        long_read_refs=list(out.get("long_read_refs") or []),
+        mode=out["mode"],
+        resolved_telomere_motif=out.get("resolved_telomere_motif"),
+        resolved_telomere_motif_source=out.get("resolved_telomere_motif_source"),
+        patched_assembly_ref=out.get("patched_assembly_ref"),
+        artifact_refs={path.name: str(path) for path in artifacts},
+        notes=list(out.get("notes") or []),
+        metadata={
+            "source_stage": out.get("source_stage"),
+            "execution_enabled": out.get("execution_enabled"),
+            "review_decision": out.get("decision"),
+        },
+    )
+    bundle_source.write_text(
+        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    bundle_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        bundle_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type="t2t.bundle",
+    ).path
+    return report_path, bundle_path, artifacts
+
+
+def _finalize_t2t_evidence(
+    state: TopLevelState,
+    out: T2TStageCursor,
+) -> StateUpdate:
+    """Replace cursor refs with post-review evidence bound to the adopted output."""
+
+    output_assembly_ref = out["output_assembly_ref"]
+    patched_assembly_ref = out.get("patched_assembly_ref")
+    if patched_assembly_ref and output_assembly_ref == patched_assembly_ref:
+        scan_ref = out.get("patched_telomere_scan_ref")
+    else:
+        scan_ref = out.get("assembly_telomere_scan_ref")
+    if not scan_ref or not Path(scan_ref).is_file():
+        raise FileNotFoundError(
+            scan_ref or "no telomere scan exists for the adopted assembly"
+        )
+    summary = [
+        {
+            "sequence": row["sequence"],
+            "left_telomere": row["left_has_signal"],
+            "right_telomere": row["right_has_signal"],
+            "status": "complete"
+            if row["left_has_signal"] == "true" and row["right_has_signal"] == "true"
+            else "missing_signal",
+        }
+        for row in _read_tsv(Path(scan_ref))
+    ]
+    status: T2TStatus = (
+        "completed_with_warnings"
+        if any(row["status"] == "missing_signal" for row in summary)
+        or out.get("notes")
+        else "completed"
+    )
+    summary_source = Path(out["work_dir"]) / "telomere_status_summary.final.tsv"
+    _write_tsv(
+        summary_source,
+        summary,
+        ["sequence", "left_telomere", "right_telomere", "status"],
+    )
+    summary_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        summary_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_STATUS_SUMMARY,
+    ).path
+    report_path, bundle_path, artifacts = _publish_t2t_finishing_evidence(
+        state,
+        out,
+        summary,
+        summary_path=summary_path,
+        status=status,
+        output_assembly_ref=output_assembly_ref,
+        evidence_phase="final",
+    )
+    return update_t2t_stage_output(
+        state,
+        {
+            "status": status,
+            "telomere_status_summary_ref": str(summary_path),
+            "t2t_finishing_report_ref": str(report_path),
+            "bundle_ref": str(bundle_path),
+            "finishing_evidence_phase": "final",
+            "artifact_refs": [str(path) for path in artifacts] + [str(bundle_path)],
+        },
+    )
 
 
 def _block_for_t2t_review(
@@ -1738,11 +2421,30 @@ def _block_for_t2t_review(
     summary_path: Path,
     bundle_path: Path,
 ) -> StateUpdate:
-    candidates = _review_candidates(Path(out["telomere_extension_candidates_ref"]))
+    auto_adoption = out.get("mode") == "auto_patch"
+    reason = (
+        "t2t_candidate_patch_requires_human_adoption"
+        if auto_adoption
+        else "t2t_patch_candidates_require_human_selection"
+    )
+    candidates = _review_candidates(
+        Path(out["telomere_extension_candidates_ref"]),
+        allowed_decisions={"auto_patch"} if auto_adoption else {"proposed"},
+    )
+    report_refs = {
+        "t2t_finishing_report_ref": str(report_path),
+        "telomere_status_summary_ref": str(summary_path),
+        "telomere_extension_candidates_ref": out["telomere_extension_candidates_ref"],
+        "bundle_ref": str(bundle_path),
+    }
+    if out.get("patched_assembly_ref"):
+        report_refs["patched_assembly_ref"] = str(out["patched_assembly_ref"])
+    if out.get("patched_telomere_scan_ref"):
+        report_refs["patched_telomere_scan_ref"] = str(out["patched_telomere_scan_ref"])
     payload = ReviewPayload(
         stage="t2t",
         gate_id="t2t_review",
-        reason="t2t_patch_candidates_require_human_selection",
+        reason=reason,
         candidates=candidates,
         decisions_allowed=[
             "accept_selected_candidates",
@@ -1750,21 +2452,14 @@ def _block_for_t2t_review(
             "stop_pipeline",
         ],
         auto_decidable=False,
-        report_refs={
-            "t2t_finishing_report_ref": str(report_path),
-            "telomere_status_summary_ref": str(summary_path),
-            "telomere_extension_candidates_ref": out[
-                "telomere_extension_candidates_ref"
-            ],
-            "bundle_ref": str(bundle_path),
-        },
+        report_refs=report_refs,
         notes=list(out.get("notes") or []),
     )
     persisted_request = persist_review_request(
         state,
         stage="t2t",
         gate_id="t2t_review",
-        reason="t2t_patch_candidates_require_human_selection",
+        reason=reason,
         payload=payload,
         method_name=T2T_CONTRACT_METHOD,
         artifact_type="t2t.review_request",
@@ -1775,7 +2470,7 @@ def _block_for_t2t_review(
     Ledger(data_dir).record_review_requested(
         session_id,
         "t2t",
-        reason="t2t_patch_candidates_require_human_selection",
+        reason=reason,
         candidates=candidates,
         review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=False,
@@ -1793,7 +2488,7 @@ def _block_for_t2t_review(
             persisted_request.compact_interrupt(
                 stage="t2t",
                 gate_id="t2t_review",
-                reason="t2t_patch_candidates_require_human_selection",
+                reason=reason,
             )
         )
     )
@@ -1808,17 +2503,24 @@ def _block_for_t2t_review(
 def _report_markdown(
     out: T2TStageCursor,
     summary: list[dict[str, str]],
+    *,
+    status: T2TStatus,
+    output_assembly_ref: str,
+    evidence_phase: Literal["pre_review", "final"],
 ) -> str:
     missing = sum(row["status"] == "missing_signal" for row in summary)
+    long_read_inputs = list(out.get("long_read_inputs") or [])
+    long_read_summary = ", ".join(
+        f"{item['path']} [{item['platform']}]" for item in long_read_inputs
+    )
     lines = [
         "# T2T finishing report",
         "",
+        f"- evidence phase: `{evidence_phase}`",
+        f"- status: `{status}`",
         f"- input assembly: `{out.get('input_assembly_ref', '')}`",
         f"- source stage: `{out.get('source_stage', '')}`",
-        (
-            f"- ONT reads: `"
-            f"{', '.join(out.get('ont_read_refs') or []) or 'not available'}`"
-        ),
+        f"- long reads: `{long_read_summary or 'not available'}`",
         f"- execution enabled: `{out.get('execution_enabled')}`",
         f"- resolved telomere motif: `{out.get('resolved_telomere_motif')}`",
         f"- motif source: `{out.get('resolved_telomere_motif_source')}`",
@@ -1826,7 +2528,9 @@ def _report_markdown(
         f"- telomeric reads: `{out.get('telomeric_read_count', 0)}`",
         f"- extension candidates: `{out.get('candidate_count', 0)}`",
         f"- selected patches: `{out.get('selected_patch_count', 0)}`",
-        f"- output assembly: `{out.get('output_assembly_ref', '')}`",
+        f"- candidate patched assembly: `{out.get('patched_assembly_ref') or 'none'}`",
+        f"- human decision: `{out.get('decision') or 'pending_or_not_required'}`",
+        f"- output assembly: `{output_assembly_ref}`",
         "",
         "## Notes",
     ]
@@ -1855,6 +2559,10 @@ def _register_artifacts(
         (out.get("patched_assembly_ref"), T2T_PATCHED_ASSEMBLY),
         (out.get("patch_records_ref"), T2T_PATCH_RECORDS),
     ]
+    candidates.extend(
+        (path, T2T_TELOMERIC_READS)
+        for path in sorted((out.get("telomeric_reads_fasta_refs") or {}).values())
+    )
     paths: list[Path] = []
     for value, artifact_type in candidates:
         if value and Path(value).exists():
@@ -1874,7 +2582,10 @@ _ASSEMBLY_SCAN_FIELDS = [
 _READ_SCAN_FIELDS = [
     "read_id",
     "source_asset_id",
+    "source_member_id",
     "source_read_id",
+    "platform",
+    "minimap2_preset",
     "length",
     "left_motif_copies",
     "right_motif_copies",

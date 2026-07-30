@@ -10,7 +10,7 @@ from typing import Any, Literal, TypedDict, cast
 from uuid import uuid4
 
 from app.configuration import load_descriptor_registry
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.domains.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
@@ -29,10 +29,10 @@ from app.domains.assembly.selection import (
     compatible_methods,
     default_primary_method,
     is_method_read_type_compatible,
-    method_read_type,
     normalize_method_id,
     normalize_read_type,
     resolve_read_type,
+    validate_assembly_selection,
 )
 from app.domains.assembly.selection import (
     route_from_read_type as _route_from_read_type,
@@ -98,9 +98,16 @@ from app.stages.base import (
     stage_artifacts_dir,
     stage_work_dir,
 )
-from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
-from app.stages.resource_specs import HIC_READS_SPEC, LONG_READS_SPEC
-from app.storage.artifacts import publish_artifact_record
+from app.stages.read_resolution import (
+    RuntimeReadMember,
+    resolve_hic_pairs,
+    resolve_long_read_members,
+)
+from app.stages.resource_resolution import update_resource_ref
+from app.storage.artifacts import (
+    publish_artifact_record,
+)
+from app.storage.assembly_candidates import load_executed_candidate_bundle
 from app.storage.ledger import Ledger
 from app.workflow import next_stage_name
 
@@ -150,66 +157,25 @@ def enter_assembly(state: TopLevelState) -> StateUpdate:
 def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
     """Resolve long-read, HiFi, Hi-C, platform, and route hints for assembly."""
     assembly_out = assembly_stage_output(state)
-    explicit_long_ref = assembly_out.get("hifi_reads_ref") or assembly_out.get(
-        "ont_reads_ref"
-    )
-    long_reads = resolve_stage_resource(
-        state,
-        resource_spec=LONG_READS_SPEC,
-        override=str(explicit_long_ref) if explicit_long_ref else None,
-    )
-    if not long_reads.found:
+    try:
+        all_members = resolve_long_read_members(state)
+    except ValueError as exc:
+        return _fail_update(state, f"assembly long-read provenance is invalid: {exc}")
+    if not all_members:
         return _fail_update(state, "assembly requires long reads")
-    input_refs = list(long_reads.paths)
-    primary_ref = input_refs[0]
-    long_read_assets = [
-        asset
-        for asset in (long_reads.metadata.get("assets") or [])
-        if isinstance(asset, dict)
+    hifi_members = [
+        member for member in all_members if member.platform == "pacbio_hifi"
     ]
-    hifi_asset_refs = [
-        str(asset["path"])
-        for asset in long_read_assets
-        if asset.get("path")
-        and (
-            asset.get("asset_type") == "pacbio_hifi"
-            or asset.get("platform") == "pacbio_hifi"
-        )
-    ]
-    non_hifi_asset_refs = [
-        str(asset["path"])
-        for asset in long_read_assets
-        if asset.get("path")
-        and asset.get("asset_type") != "pacbio_hifi"
-        and asset.get("platform") != "pacbio_hifi"
-    ]
-    platforms = list(long_reads.metadata.get("platforms") or [])
-    long_read_platform = (
-        platforms[0]
-        if platforms
-        else long_reads.metadata.get("platform") or _long_read_platform(state)
-    )
-    hifi_reads_ref = assembly_out.get("hifi_reads_ref") or (
-        hifi_asset_refs[0] if hifi_asset_refs else None
-    )
-    has_explicit_hifi_ref = bool(assembly_out.get("hifi_reads_ref"))
-    if not hifi_reads_ref and long_read_platform == "pacbio_hifi":
-        hifi_reads_ref = primary_ref
-    ont_reads_ref = (
-        non_hifi_asset_refs[0]
-        if non_hifi_asset_refs
-        else (
-            None
-            if hifi_reads_ref
-            and (has_explicit_hifi_ref or long_read_platform == "pacbio_hifi")
-            else primary_ref
-        )
-    )
-    hic_reads = resolve_stage_resource(state, resource_spec=HIC_READS_SPEC)
-    hic_reads_ref = assembly_out.get("hic_reads_ref") or hic_reads.path
+    ont_members = [member for member in all_members if member.platform == "ont"]
+    platforms = list(dict.fromkeys(member.platform for member in all_members))
 
     configured_route = assembly_out.get("assembly_route") or "auto"
     existing_selection = _selection_from_output(assembly_out)
+    single_platform_read_type = (
+        PLATFORM_TO_SHARED_READ_TYPE.get(platforms[0])
+        if len(platforms) == 1
+        else None
+    )
     hinted_read_type = resolve_read_type(
         (
             "assembly_selection.read_type",
@@ -217,30 +183,96 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
         ),
         ("assembly_route", configured_route if configured_route != "auto" else None),
         ("shared_parameters.read_type", _shared_parameters(state).get("read_type")),
-        ("hifi_reads_ref", "pacbio_hifi" if hifi_reads_ref else None),
         ("read_type_prior", _normalized_read_type_prior(state)),
+        ("single_registered_platform", single_platform_read_type),
         context="assembly.resolve_extended_inputs",
     )
-    primary_long_reads_ref: str | None
-    if hinted_read_type == "pacbio_hifi":
-        primary_long_reads_ref = hifi_reads_ref or primary_ref
+    if hinted_read_type is None:
+        if platforms != ["unknown"]:
+            return _fail_update(
+                state,
+                "mixed long-read platforms require an explicit "
+                "assembly method/read type",
+            )
+        primary_members = list(all_members)
     else:
-        primary_long_reads_ref = ont_reads_ref or hifi_reads_ref
-    if (
-        hinted_read_type == "pacbio_hifi"
-        and primary_long_reads_ref
-        and not hifi_reads_ref
-    ):
-        hifi_reads_ref = primary_long_reads_ref
-    if not primary_long_reads_ref:
-        return _fail_update(state, "assembly requires long reads")
+        primary_members = _members_for_read_type(all_members, hinted_read_type)
+        if not primary_members and platforms == ["unknown"]:
+            primary_members = list(all_members)
+    explicit_hifi_ref = assembly_out.get("hifi_reads_ref")
+    if hinted_read_type == "pacbio_hifi" and explicit_hifi_ref:
+        try:
+            primary_members = resolve_long_read_members(
+                state,
+                override_paths=[explicit_hifi_ref],
+            )
+        except ValueError as exc:
+            return _fail_update(state, str(exc))
+        if any(
+            member.platform not in {"pacbio_hifi", "unknown"}
+            for member in primary_members
+        ):
+            return _fail_update(
+                state,
+                "assembly.hifi_reads_ref did not resolve to a HiFi member",
+            )
+    if not primary_members:
+        return _fail_update(
+            state,
+            f"assembly has no registered primary reads for {hinted_read_type}",
+        )
+    if platforms == ["unknown"] and hinted_read_type == "pacbio_hifi":
+        hifi_members = list(primary_members)
+    elif platforms == ["unknown"] and hinted_read_type in {"ont_raw", "ont_hq"}:
+        ont_members = list(primary_members)
 
-    primary_platform = (
-        "pacbio_hifi"
-        if hinted_read_type == "pacbio_hifi" or (hifi_reads_ref and not ont_reads_ref)
-        else long_read_platform
+    hifiasm_parameters = assembly_out.get("hifiasm_parameters") or {}
+    use_ultralong_ont = bool(hifiasm_parameters.get("use_ultralong_ont"))
+    use_hic_phasing = bool(hifiasm_parameters.get("use_hic_phasing"))
+    selected_method = existing_selection.primary_method if existing_selection else None
+    if (use_ultralong_ont or use_hic_phasing) and selected_method != HIFIASM_METHOD:
+        return _fail_update(
+            state,
+            "Hifiasm supplementary inputs require assembly.candidate.hifiasm",
+        )
+    if use_ultralong_ont and not ont_members:
+        return _fail_update(
+            state,
+            "use_ultralong_ont requires at least one registered ONT member",
+        )
+    if use_hic_phasing:
+        try:
+            hic_pairs = resolve_hic_pairs(
+                state,
+                selection_anchor=assembly_out.get("hic_reads_ref"),
+            )
+        except ValueError as exc:
+            return _fail_update(state, f"Hi-C provenance is invalid: {exc}")
+        if not hic_pairs:
+            return _fail_update(
+                state,
+                "use_hic_phasing requires at least one complete registered Hi-C pair",
+            )
+    else:
+        hic_pairs = []
+
+    primary_refs = [member.path for member in primary_members]
+    hifi_refs = [member.path for member in hifi_members]
+    ont_refs = [member.path for member in ont_members]
+    hic_r1_reads = [pair.r1.path for pair in hic_pairs]
+    hic_r2_reads = [pair.r2.path for pair in hic_pairs]
+    primary_platforms = list(
+        dict.fromkeys(member.platform for member in primary_members)
     )
-    input_source = long_reads.source
+    primary_platform = (
+        primary_platforms[0] if len(primary_platforms) == 1 else None
+    )
+    input_source = str(
+        (state.get("resource_refs") or {})
+        .get("long_reads", {})
+        .get("source_stage")
+        or "asset_registry"
+    )
 
     resolved_genome_size = resolve_genome_size(state)
     genome_size_prior = (
@@ -253,13 +285,8 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
         if configured_route in ROUTE_VALUES
         else None
     )
-    selected_input_refs = input_refs
-    if hinted_read_type == "pacbio_hifi" and hifi_asset_refs:
-        selected_input_refs = hifi_asset_refs
-    elif hinted_read_type != "pacbio_hifi" and non_hifi_asset_refs:
-        selected_input_refs = non_hifi_asset_refs
     input_ref: str | list[str] = (
-        selected_input_refs[0] if len(selected_input_refs) == 1 else selected_input_refs
+        primary_refs[0] if len(primary_refs) == 1 else primary_refs
     )
     input_type: AssemblyReadInputType = (
         "long_reads.fofn"
@@ -271,14 +298,106 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
         state,
         {
             "status": "resolved_extended",
-            "primary_long_reads_ref": primary_long_reads_ref,
+            "primary_long_reads_ref": primary_refs[0],
+            "primary_long_read_refs": primary_refs,
             "primary_long_read_platform": primary_platform,
-            "ont_reads_ref": ont_reads_ref,
-            "hifi_reads_ref": hifi_reads_ref,
-            "hic_reads_ref": hic_reads_ref,
+            "ont_reads_ref": ont_refs[0] if ont_refs else None,
+            "ultralong_read_refs": ont_refs if use_ultralong_ont else [],
+            "hifi_reads_ref": hifi_refs[0] if hifi_refs else None,
+            "hifi_read_refs": hifi_refs,
+            "hic_reads_ref": (
+                assembly_out.get("hic_reads_ref")
+                or (hic_r1_reads[0] if hic_r1_reads else None)
+            ),
+            "hic_r1_reads": hic_r1_reads,
+            "hic_r2_reads": hic_r2_reads,
+            "assembly_input_member_ids": {
+                "primary": [member.member_id for member in primary_members],
+                "ultralong": (
+                    [member.member_id for member in ont_members]
+                    if use_ultralong_ont
+                    else []
+                ),
+                "hic_r1": (
+                    [pair.r1.member_id for pair in hic_pairs]
+                    if use_hic_phasing
+                    else []
+                ),
+                "hic_r2": (
+                    [pair.r2.member_id for pair in hic_pairs]
+                    if use_hic_phasing
+                    else []
+                ),
+            },
+            "assembly_input_member_platforms": {
+                "primary": [member.platform for member in primary_members],
+                "ultralong": (
+                    [member.platform for member in ont_members]
+                    if use_ultralong_ont
+                    else []
+                ),
+                "hic_r1": (
+                    [pair.r1.platform for pair in hic_pairs]
+                    if use_hic_phasing
+                    else []
+                ),
+                "hic_r2": (
+                    [pair.r2.platform for pair in hic_pairs]
+                    if use_hic_phasing
+                    else []
+                ),
+            },
+            "assembly_input_artifact_refs": {
+                "primary": [
+                    (
+                        member.read_artifact_ref.model_dump(mode="json")
+                        if member.read_artifact_ref
+                        else None
+                    )
+                    for member in primary_members
+                ],
+                "ultralong": (
+                    [
+                        (
+                            member.read_artifact_ref.model_dump(mode="json")
+                            if member.read_artifact_ref
+                            else None
+                        )
+                        for member in ont_members
+                    ]
+                    if use_ultralong_ont
+                    else []
+                ),
+                "hic_r1": (
+                    [
+                        (
+                            pair.r1.read_artifact_ref.model_dump(mode="json")
+                            if pair.r1.read_artifact_ref
+                            else None
+                        )
+                        for pair in hic_pairs
+                    ]
+                    if use_hic_phasing
+                    else []
+                ),
+                "hic_r2": (
+                    [
+                        (
+                            pair.r2.read_artifact_ref.model_dump(mode="json")
+                            if pair.r2.read_artifact_ref
+                            else None
+                        )
+                        for pair in hic_pairs
+                    ]
+                    if use_hic_phasing
+                    else []
+                ),
+            },
+            "use_ultralong_ont": use_ultralong_ont,
+            "use_hic_phasing": use_hic_phasing,
             "platform": primary_platform,
-            "has_hifi": bool(hifi_reads_ref),
-            "has_hic": bool(hic_reads_ref),
+            "has_hifi": bool(hifi_refs),
+            "has_hic": bool(hic_pairs),
             "target_level": target_level,
             "genome_size_prior": genome_size_prior,
             "resolved_genome_size": resolved_genome_size,
@@ -292,6 +411,21 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
             "normalized_read_type": hinted_read_type,
         },
     )
+
+
+def _members_for_read_type(
+    members: list[RuntimeReadMember],
+    read_type: NormalizedReadType,
+) -> list[RuntimeReadMember]:
+    platforms_by_read_type: dict[NormalizedReadType, set[str]] = {
+        "pacbio_hifi": {"pacbio_hifi"},
+        "pacbio_clr": {"clr"},
+        "ont_raw": {"ont"},
+        "ont_hq": {"ont"},
+        "cyclone": {"cycloneseq"},
+    }
+    allowed = platforms_by_read_type[read_type]
+    return [member for member in members if member.platform in allowed]
 
 
 def infer_input_profile(state: TopLevelState) -> StateUpdate:
@@ -702,14 +836,11 @@ def build_assembly_candidate_set(state: TopLevelState) -> StateUpdate:
 
 
 def _planned_candidate_methods(selection: AssemblySelection) -> list[str]:
-    methods = list(dict.fromkeys([selection.primary_method, *ASSEMBLY_AUTO_CANDIDATES]))
-    if selection.fallback_method and selection.fallback_method not in methods:
-        methods.append(selection.fallback_method)
-    return methods
+    return list(dict.fromkeys([selection.primary_method, *ASSEMBLY_AUTO_CANDIDATES]))
 
 
-def select_primary_and_fallback(state: TopLevelState) -> StateUpdate:
-    """Select one primary and at most one fallback candidate."""
+def select_primary(state: TopLevelState) -> StateUpdate:
+    """Select exactly one assembler-origin backbone candidate."""
     assembly_out = assembly_stage_output(state)
     if assembly_out.get("status") != "candidate_set_ready":
         return {}
@@ -723,7 +854,6 @@ def select_primary_and_fallback(state: TopLevelState) -> StateUpdate:
     if selection is None:
         return _block_for_human(state, "assembly_selection_missing")
     requested_primary = selection.primary_method
-    requested_fallback = selection.fallback_method
 
     if requested_primary:
         if requested_primary not in ASSEMBLY_CANDIDATES:
@@ -741,32 +871,11 @@ def select_primary_and_fallback(state: TopLevelState) -> StateUpdate:
     else:
         return _block_for_human(state, "no_compatible_assembly_candidate")
 
-    fallback = None
-    if requested_fallback:
-        if requested_fallback not in ASSEMBLY_CANDIDATES:
-            return _block_for_human(
-                state, f"unknown_assembly_method: {requested_fallback}"
-            )
-        if requested_fallback not in compatible:
-            return _block_for_human(
-                state,
-                assembly_out.get("rejected_candidates", {}).get(
-                    requested_fallback, "method_not_compatible"
-                ),
-            )
-        if requested_fallback != primary:
-            fallback = requested_fallback
-    else:
-        fallback = next((method for method in compatible if method != primary), None)
-
-    selected = [primary, *([fallback] if fallback else [])][:2]
     return update_assembly_stage_output(
         state,
         {
             "status": "selected",
             "primary_method": primary,
-            "fallback_method": fallback,
-            "selected_methods": selected,
         },
     )
 
@@ -844,48 +953,9 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
                 state,
                 f"Assembly execution contract is invalid: {exc}",
             )
-    candidate_refs: list[str] = []
-    selected_plans: list[AssemblyCandidatePlanCursor] = []
-    selection = _selection_from_output(assembly_out)
-    for method_name in assembly_out["selected_methods"]:
+    planned_candidate_bundle_ref: dict[str, Any] | None = None
+    for method_name in [assembly_out["primary_method"]]:
         short_name = method_name.rsplit(".", 1)[-1]
-        fasta_path = (
-            stage_artifacts_dir(
-                state,
-                "assembly",
-                "attempts",
-                attempt_scope,
-                "outputs",
-                short_name,
-            )
-            / "draft_assembly.fasta"
-        )
-        if method_name == NEXTDENOVO_METHOD:
-            log_path = (
-                stage_work_dir(
-                    state, "assembly", "attempts", attempt_scope, "nextdenovo"
-                )
-                / "run.cfg"
-            )
-        elif method_name == HIFIASM_METHOD:
-            log_path = (
-                stage_work_dir(state, "assembly", "attempts", attempt_scope, "hifiasm")
-                / "run_hifiasm.sh"
-            )
-        elif method_name == HIFIASM_ONT_METHOD:
-            log_path = (
-                stage_work_dir(
-                    state, "assembly", "attempts", attempt_scope, "hifiasm_ont"
-                )
-                / "run_hifiasm_ont.sh"
-            )
-        else:
-            log_path = (
-                stage_work_dir(
-                    state, "assembly", "attempts", attempt_scope, short_name, "flye_out"
-                )
-                / "flye.log"
-            )
         bundle_path = candidate_dir / f"{short_name}_candidate.planned.json"
         execution_enabled = (
             (local_flye and method_name == FLYE_METHOD)
@@ -893,34 +963,21 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
             or (local_hifiasm and method_name == HIFIASM_METHOD)
             or (local_hifiasm_ont and method_name == HIFIASM_ONT_METHOD)
         )
-        method_graph_requested = execution_enabled
         bundle = AssemblyCandidateBundle(
             session_id=session_id,
             candidate_id=f"{session_id}:{method_name}:{attempt_label}",
             method_name=method_name,
             status="planned",
-            input_ref=assembly_out["input_ref"],
             input_type=assembly_out["input_type"],
+            input_member_ids=dict(
+                assembly_out.get("assembly_input_member_ids") or {}
+            ),
+            input_member_platforms=dict(
+                assembly_out.get("assembly_input_member_platforms") or {}
+            ),
+            parameter_attempt_id=parameter_attempt_id,
             genome_size_prior=assembly_out.get("genome_size_prior"),
-            expected_outputs={"draft_assembly_fasta": str(fasta_path)},
-            logs={"primary_log": str(log_path)},
-            metadata={
-                "genome_survey_result_ref": assembly_out.get(
-                    "genome_survey_result_ref"
-                ),
-                "read_type_prior": assembly_out.get("read_type_prior"),
-                "assembly_selection": selection.model_dump(mode="json")
-                if selection
-                else None,
-                "method_read_type": method_read_type(method_name, selection.read_type)
-                if selection
-                else None,
-                "execution_enabled": execution_enabled,
-                "method_graph_requested": method_graph_requested,
-                "draft_assembly_ref_status": "pending_execution"
-                if execution_enabled
-                else "planned_path_not_materialized",
-            },
+            expected_outputs=["primary_assembly"],
         )
         temporary = stage_work_dir(
             state,
@@ -930,7 +987,11 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
         )
         temporary.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(
-            json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            json.dumps(
+                bundle.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
         artifact = ArtifactMeta.from_file(
@@ -953,23 +1014,12 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
         finally:
             temporary.unlink(missing_ok=True)
         bundle_path = published.path
-        candidate_refs.append(str(bundle_path))
-        selected_plan = AssemblyCandidatePlan(
-            method_name=method_name,
-            status="selected",
-            role="primary"
-            if method_name == assembly_out["primary_method"]
-            else "fallback",
-            required_inputs=["long_reads"],
-            optional_inputs=["genome_survey_result", "genome_size_prior"],
-            requires_genome_size=method_name in GENOME_SIZE_REQUIRED,
-            candidate_ref=str(bundle_path),
-        )
-        selected_plans.append(
-            cast(
-                AssemblyCandidatePlanCursor,
-                selected_plan.model_dump(mode="json"),
-            )
+        planned_candidate_bundle_ref = published.ref.model_dump(mode="json")
+
+    if planned_candidate_bundle_ref is None:
+        return _fail_update(
+            state,
+            "selected Assembly method produced no candidate plan",
         )
 
     if local_flye:
@@ -984,9 +1034,7 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
         status = "planned"
     plan_update: AssemblyStageCursor = {
         "status": status,
-        "selected_candidate_refs": candidate_refs,
-        "candidate_artifact_refs": candidate_refs,
-        "selected_candidate_plans": selected_plans,
+        "planned_candidate_bundle_ref": planned_candidate_bundle_ref,
         "substeps": {
             **dict(assembly_out.get("substeps") or {}),
             "flye_assembly": {
@@ -1031,14 +1079,11 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
     assembly_out = assembly_stage_output(state)
     committed_keys = [
         "artifact_refs",
-        "candidate_artifact_refs",
-        "candidate_assembly_refs",
         "candidate_methods",
         "candidate_plans",
         "draft_assembly_ref",
-        "executed_candidate_refs",
+        "executed_candidate_bundle_ref",
         "execution_mode",
-        "fallback_method",
         "genome_size_prior",
         "genome_survey_result_ref",
         "input_ref",
@@ -1052,14 +1097,20 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
         "parameter_attempts",
         "primary_method",
         "primary_long_read_platform",
+        "planned_candidate_bundle_ref",
         "rejected_candidates",
-        "selected_candidate_plans",
-        "selected_candidate_refs",
-        "selected_methods",
         "status",
         "retry_counts",
         "substeps",
         ASSEMBLY_EXECUTION_CONTRACT_KEY,
+        "assembly_input_member_ids",
+        "assembly_input_member_platforms",
+        "assembly_input_artifact_refs",
+        "use_ultralong_ont",
+        "use_hic_phasing",
+        "ultralong_read_refs",
+        "hic_r1_reads",
+        "hic_r2_reads",
     ]
     serialized_output = ASSEMBLY_STAGE_CURSOR_ADAPTER.dump_python(
         assembly_out, mode="json"
@@ -1080,30 +1131,47 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
         "route_trace": trace,
         "stage_outputs": outputs,
     }
-    assembly_paths = [
-        str(path)
-        for path in assembly_out.get("candidate_assembly_refs") or []
-        if path and Path(str(path)).is_file()
-    ]
-    if not assembly_paths and assembly_out.get("draft_assembly_ref"):
-        draft = str(assembly_out["draft_assembly_ref"])
-        if Path(draft).is_file():
-            assembly_paths = [draft]
-    if assembly_paths:
+    executed_bundle_ref = assembly_out.get("executed_candidate_bundle_ref")
+    if executed_bundle_ref is not None:
+        try:
+            verified = load_executed_candidate_bundle(
+                absolute_data_dir(state),
+                state["session_id"],
+                executed_bundle_ref,
+                expected_method_name=assembly_out.get("primary_method"),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return _fail_update(
+                state, f"assembly candidate bundle is invalid: {exc}"
+            )
+        checkpoint_primary = assembly_out.get("draft_assembly_ref")
+        if (
+            checkpoint_primary
+            and Path(checkpoint_primary).resolve(strict=False)
+            != verified.primary_output_path.resolve(strict=False)
+        ):
+            return _fail_update(
+                state,
+                "assembly draft path does not match executed candidate primary output",
+            )
         update["resource_refs"] = update_resource_ref(
             state,
             "assembly",
-            assembly_paths,
+            [str(verified.primary_output_path)],
             "assembly",
             {
-                "candidate_bundle_refs": list(
-                    assembly_out.get("executed_candidate_refs") or []
+                "candidate_bundle_ref": verified.ref.model_dump(mode="json"),
+                "primary_output_ref": verified.primary_output_ref.model_dump(
+                    mode="json"
                 ),
-                "methods": list(assembly_out.get("selected_methods") or []),
-                "rejected_candidates": dict(
-                    assembly_out.get("rejected_candidates") or {}
-                ),
+                "selected_method": verified.bundle.method_name,
+                "candidate_id": verified.bundle.candidate_id,
             },
+        )
+    elif assembly_out.get("draft_assembly_ref"):
+        return _fail_update(
+            state,
+            "assembly draft output has no executed candidate bundle ref",
         )
     return update
 
@@ -1296,7 +1364,7 @@ def _selection_from_output(
         return payload
     if isinstance(payload, dict):
         try:
-            return AssemblySelection.model_validate(payload)
+            return validate_assembly_selection(payload)
         except ValueError:
             return None
     return None
@@ -1609,23 +1677,12 @@ def _shared_parameters(state: TopLevelState) -> dict[str, Any]:
 
 
 def _long_read_platform(state: TopLevelState) -> str | None:
-    read_qc_out = (state.get("stage_outputs") or {}).get("read_qc") or {}
-    if read_qc_out.get("platform"):
-        return str(read_qc_out["platform"])
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
+    try:
+        members = resolve_long_read_members(state)
+    except ValueError:
         return None
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return None
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    for asset in registry.get("assets", []):
-        if asset.get("asset_type") in {
-            "raw_long_reads",
-            "clean_long_reads",
-        } and asset.get("platform"):
-            return str(asset["platform"])
-    return None
+    platforms = list(dict.fromkeys(member.platform for member in members))
+    return platforms[0] if len(platforms) == 1 else None
 
 
 def _genome_survey_result_ref(state: TopLevelState) -> str | None:

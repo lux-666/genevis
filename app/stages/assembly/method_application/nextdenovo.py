@@ -28,7 +28,9 @@ from app.stages.assembly.command_builder import (
     resolve_assembly_parameters,
 )
 from app.stages.assembly.method_application.support import (
+    AssemblyNativeOutputDeclaration,
     approved_method_read_type,
+    build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
@@ -172,6 +174,14 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
         encoding="utf-8",
     )
     script.chmod(0o755)
+    try:
+        input_dependencies = build_read_input_dependencies(
+            state, output, "primary", read_paths
+        )
+    except ValueError as exc:
+        return fail_update(
+            state, f"NextDenovo input dependency cardinality error: {exc}"
+        )
     return freeze_parameterized_attempt(
         state,
         LIFECYCLE,
@@ -182,6 +192,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
         working_dir=working_dir,
         expected_outputs=[draft],
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         command_payload={
             "argv": argv,
             "command": command,
@@ -222,8 +233,6 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
 def collect_nextdenovo_artifacts(state: TopLevelState) -> StateUpdate:
     output = assembly_stage_output(state)
     [execution] = load_method_executions(state, LIFECYCLE)
-    attempt = execution.attempt
-    metadata = dict(attempt.metadata or {})
     run_cfg_value = output.get("nextdenovo_run_cfg_path")
     if not run_cfg_value:
         return fail_update(state, "NextDenovo run.cfg path is missing")
@@ -250,15 +259,15 @@ def collect_nextdenovo_artifacts(state: TopLevelState) -> StateUpdate:
         LIFECYCLE,
         execution=execution,
         substep_name="nextdenovo_assembly",
-        extra_artifacts=[(durable_run_cfg, "assembly.nextdenovo_run_cfg")],
-        bundle_logs={
-            "primary_log": str(durable_run_cfg),
-            "run_cfg": str(durable_run_cfg),
-        },
-        bundle_metadata={
-            key: metadata.get(key)
-            for key in ("read_profile", "genome_size", "threads", "read_cutoff")
-        },
+        native_outputs=[
+            AssemblyNativeOutputDeclaration(
+                path=durable_run_cfg,
+                artifact_type="assembly.nextdenovo_run_cfg",
+                artifact_class="config",
+                native_role="nextdenovo.run_config",
+                media_type="text/plain",
+            )
+        ],
     )
     stage_outputs = dict(collected.get("stage_outputs") or {})
     assembly = dict(stage_outputs.get("assembly") or {})
@@ -313,7 +322,7 @@ def _run_cfg(
         "task = all\n"
         "rewrite = yes\n"
         "deltmp = yes\n"
-        f"parallel_jobs = {threads}\n"
+        "parallel_jobs = 1\n"
         "input_type = raw\n"
         f"read_type = {read_type}\n"
         f"input_fofn = {input_fofn}\n"

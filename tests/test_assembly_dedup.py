@@ -27,10 +27,11 @@ class AssemblyDedupStageTests(unittest.TestCase):
                     "session_id": "s1",
                     "candidate_id": candidate_id,
                     "method_name": "assembly.candidate.flye",
-                    "status": "executed",
+                    "status": "planned",
                     "artifact_type": "draft_assembly.candidate",
                     "input_ref": "reads.fofn",
                     "input_type": "long_reads.fofn",
+                    "parameter_attempt_id": 0,
                     "expected_outputs": {"draft_assembly_fasta": draft_ref},
                 },
                 indent=2,
@@ -70,7 +71,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_review")
             self.assertEqual(dedup["status"], "completed")
             self.assertEqual(dedup["skip_reason"], "no_materialized_draft_assembly")
-            self.assertEqual(dedup["selected_candidate_refs"], [str(candidate_ref)])
+            self.assertNotIn("selected_candidate_refs", dedup)
 
     def test_passes_through_when_assembly_output_is_absent(self):
         with tempfile.TemporaryDirectory() as tmpdir:

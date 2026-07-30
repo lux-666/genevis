@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,13 +24,7 @@ from app.entrypoints.ask_planner import (
     merge_clarification_response,
     next_clarification,
 )
-from app.schemas.ask_plan import (
-    AskClarificationResponse,
-    AskPlanState,
-    load_ask_clarification_response,
-    load_ask_plan,
-    save_ask_plan,
-)
+from app.schemas.ask_plan import AskClarificationResponse, AskPlanState
 from app.schemas.descriptors import DescriptorRegistry
 
 
@@ -114,33 +107,6 @@ class AskPlanSchemaTests(unittest.TestCase):
             kind="stage_selection", selected_stages=["read_qc", "assembly"]
         )
         self.assertEqual(response.selected_stages, ["read_qc", "assembly"])
-
-    def test_round_trip_save_load(self):
-        plan = _base_plan()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "plan.json"
-            save_ask_plan(plan, path)
-            loaded = load_ask_plan(path)
-            self.assertEqual(loaded.session_id, "s1")
-            self.assertIsNone(loaded.selected_stages)
-
-    def test_load_missing_file_raises(self):
-        with self.assertRaises(FileNotFoundError):
-            load_ask_plan("/nonexistent/ask_plan.json")
-
-    def test_load_invalid_json_raises(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "plan.json"
-            path.write_text("not json", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "not valid JSON"):
-                load_ask_plan(path)
-
-    def test_load_response_validates_schema(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "response.json"
-            path.write_text(json.dumps({"kind": "stage_selection"}), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "selected_stages"):
-                load_ask_clarification_response(path)
 
 
 class AskPlannerStageSelectionTests(unittest.TestCase):
@@ -1434,39 +1400,36 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
             any("lineage_path" in f for f in result.required_fields),
         )
 
-    def test_write_ask_run_config_with_busco_after_auto_fill(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            plan = _base_plan(
-                data_dir=tmp,
-                selected_stages=["assembly_review"],
-                resolved_execution_order=["assembly_review"],
-                selected_methods={
-                    "assembly_review": [
-                        "assembly_review.eval.quast",
-                        "assembly_review.eval.busco",
-                    ],
+    def test_build_run_config_payload_with_busco_after_auto_fill(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": [
+                    "assembly_review.eval.quast",
+                    "assembly_review.eval.busco",
+                ],
+            },
+            method_parameters={
+                "assembly_review.eval.quast": {"threads": 2},
+                "assembly_review.eval.busco": {
+                    "lineage_path": "/data/busco/lineage",
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "2024-01-08",
+                    "lineage_source": "local",
+                    "threads": 12,
                 },
-                method_parameters={
-                    "assembly_review.eval.quast": {"threads": 2},
-                    "assembly_review.eval.busco": {
-                        "lineage_path": "/data/busco/lineage",
-                        "lineage_name": "embryophyta_odb10",
-                        "lineage_version": "2024-01-08",
-                        "lineage_source": "local",
-                        "threads": 12,
-                    },
-                },
-                confirmed=True,
-            )
-            from app.entrypoints.ask_planner import write_ask_run_config
+            },
+            confirmed=True,
+        )
 
-            path = write_ask_run_config(plan)
-            config = json.loads(path.read_text(encoding="utf-8"))
-            self.assertIn("assembly_review", config["local_exec"])
-            self.assertEqual(config["assembly_review"]["quast"]["threads"], 2)
-            self.assertEqual(
-                config["assembly_review"]["busco"]["lineage_name"], "embryophyta_odb10"
-            )
+        config = build_run_config_payload(_auto_fill_inferred_defaults(plan))
+
+        self.assertIn("assembly_review", config["local_exec"])
+        self.assertEqual(config["assembly_review"]["quast"]["threads"], 2)
+        self.assertEqual(
+            config["assembly_review"]["busco"]["lineage_name"], "embryophyta_odb10"
+        )
 
     def test_busco_lineage_path_warning_surfaces_in_plan(self):
         plan = _base_plan(

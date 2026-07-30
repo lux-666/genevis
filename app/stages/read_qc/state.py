@@ -87,6 +87,8 @@ class ReadQCStageCursor(TypedDict, total=False):
     skip_reason: str
     input_asset_ref: str | None
     input_asset_refs: list[str]
+    input_member_platforms: list[str]
+    input_member_formats: list[str]
     raw_long_reads_path: str
     raw_long_reads_paths: list[str]
     platform: str | None
@@ -114,6 +116,7 @@ class ReadQCStageCursor(TypedDict, total=False):
     length_filter_decision: str
     filtered_long_reads_ref: str
     filtered_long_reads_refs: list[str]
+    read_set_manifest_ref: ArtifactRefJson
     substeps: dict[str, ReadQCSubstepJson]
 
 

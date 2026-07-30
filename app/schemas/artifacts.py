@@ -20,6 +20,7 @@ from app.integrity import sha256_file
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_LONG_READ_SUMMARY = "read_qc.long_read_summary"
 READ_QC_FILTERED_LONG_READS = "read_qc.filtered_long_reads"
+READ_QC_READ_SET_MANIFEST = "read_qc.read_set_manifest"
 READ_QC_LONG_READS_FOFN = "read_qc.long_reads.fofn"
 READ_QC_FILTERED_LONG_READS_FOFN = "read_qc.filtered_long_reads.fofn"
 GENOME_SURVEY_KMER_DB = "genome_survey.kmer_db"
@@ -342,21 +343,126 @@ class GenomeSurveyResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class AssemblyCandidateBundle(BaseModel):
-    """Assembly candidate bundle consumed by assembly_review."""
+class AssemblyNativeOutput(BaseModel):
+    """One method-native Assembly deliverable retained beside the backbone."""
 
-    session_id: str
-    candidate_id: str
-    method_name: str
-    status: Literal["planned", "executed", "failed", "rejected"]
-    artifact_type: str = ASSEMBLY_CANDIDATE_BUNDLE
-    input_ref: str | list[str]
-    input_type: str
-    genome_size_prior: int | None = None
-    expected_outputs: dict[str, str] = Field(default_factory=dict)
-    logs: dict[str, str] = Field(default_factory=dict)
-    rejection_reason: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_class: Literal[
+        "assembly_graph",
+        "alternate_contigs",
+        "haplotype_contigs",
+        "report",
+        "config",
+        "log",
+        "other",
+    ]
+    native_role: str = Field(min_length=1)
+    media_type: str = Field(min_length=1)
+    artifact_ref: ArtifactRef
+
+
+class AssemblyCandidateBundle(BaseModel):
+    """Status-aware Assembly product manifest consumed by assembly_review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    method_name: str = Field(min_length=1)
+    status: Literal["planned", "executed"]
+    artifact_type: Literal[ASSEMBLY_CANDIDATE_BUNDLE] = ASSEMBLY_CANDIDATE_BUNDLE
+    input_type: str = Field(min_length=1)
+    input_member_ids: dict[str, list[str]]
+    input_member_platforms: dict[str, list[str]]
+    parameter_attempt_id: int | None = Field(default=None, ge=0)
+    genome_size_prior: int | None = Field(default=None, gt=0)
+    expected_outputs: list[str] = Field(min_length=1)
+    log_refs: dict[str, ArtifactRef] = Field(default_factory=dict)
+    plan_ref: ArtifactRef | None = None
+    primary_output: ArtifactRef | None = None
+    native_outputs: list[AssemblyNativeOutput] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_status_contract(self) -> "AssemblyCandidateBundle":
+        if set(self.input_member_ids) != set(self.input_member_platforms):
+            raise ValueError(
+                "candidate input member ID and platform roles must match"
+            )
+        if not self.input_member_ids.get("primary"):
+            raise ValueError("candidate bundle requires primary input member IDs")
+        for role, member_ids in self.input_member_ids.items():
+            if not role:
+                raise ValueError("candidate input role cannot be empty")
+            platforms = self.input_member_platforms[role]
+            if len(member_ids) != len(platforms):
+                raise ValueError(
+                    f"candidate input role {role!r} has mismatched member/platform "
+                    "cardinality"
+                )
+            if any(not member_id for member_id in member_ids):
+                raise ValueError(
+                    f"candidate input role {role!r} contains an empty member ID"
+                )
+            if any(not platform for platform in platforms):
+                raise ValueError(
+                    f"candidate input role {role!r} contains an empty platform"
+                )
+            if len(member_ids) != len(set(member_ids)):
+                raise ValueError(
+                    f"candidate input role {role!r} contains duplicate member IDs"
+                )
+        if any(not role for role in self.expected_outputs):
+            raise ValueError("candidate expected output role cannot be empty")
+        if len(self.expected_outputs) != len(set(self.expected_outputs)):
+            raise ValueError("duplicate candidate expected output role")
+        if "primary_assembly" not in self.expected_outputs:
+            raise ValueError(
+                "candidate bundle must declare the primary_assembly output role"
+            )
+        if self.log_refs:
+            expected_log_types = {
+                "stdout": "command.stdout",
+                "stderr": "command.stderr",
+            }
+            if set(self.log_refs) != set(expected_log_types):
+                raise ValueError(
+                    "candidate logs must be the canonical stdout/stderr pair"
+                )
+            for role, expected_type in expected_log_types.items():
+                if self.log_refs[role].artifact_type != expected_type:
+                    raise ValueError(
+                        f"candidate {role} has artifact type "
+                        f"{self.log_refs[role].artifact_type!r}, expected "
+                        f"{expected_type!r}"
+                    )
+        if self.status == "planned":
+            if (
+                self.plan_ref is not None
+                or self.primary_output is not None
+                or self.native_outputs
+                or self.log_refs
+            ):
+                raise ValueError(
+                    "planned candidate bundle cannot contain materialized output refs"
+                )
+            if self.parameter_attempt_id is None:
+                raise ValueError(
+                    "planned candidate bundle requires parameter_attempt_id"
+                )
+        elif self.status == "executed":
+            if self.plan_ref is None or self.primary_output is None:
+                raise ValueError(
+                    "executed candidate bundle requires plan_ref and primary_output"
+                )
+            if self.parameter_attempt_id is None:
+                raise ValueError(
+                    "executed candidate bundle requires parameter_attempt_id"
+                )
+        native_roles = [output.native_role for output in self.native_outputs]
+        if len(native_roles) != len(set(native_roles)):
+            raise ValueError("duplicate native output role")
+        return self
 
 
 class AssemblyEvalSignal(BaseModel):
@@ -470,10 +576,11 @@ class T2TFinishingBundle(BaseModel):
     """Compact provenance for a T2T finishing run and its annotation handoff."""
 
     session_id: str
+    evidence_phase: Literal["pre_review", "final"]
     status: str
     input_assembly_ref: str
     output_assembly_ref: str
-    ont_read_refs: list[str] = Field(default_factory=list)
+    long_read_refs: list[str] = Field(default_factory=list)
     mode: Literal["propose_only", "manual_review", "auto_patch"]
     resolved_telomere_motif: str | None = None
     resolved_telomere_motif_source: str | None = None
@@ -512,8 +619,8 @@ class RepeatAnnotationBundle(BaseModel):
     repeat_library_source: Literal["provided", "de_novo"]
     input_assembly_ref: str
     repeat_library_ref: str
-    repeat_annotation_gff3_ref: str
-    softmasked_genome_ref: str
+    repeat_annotation_gff3_ref: str | None = None
+    softmasked_genome_ref: str | None = None
     hardmasked_genome_ref: str | None = None
     confidence: Literal["high", "low"] = "high"
     low_confidence_reasons: list[str] = Field(default_factory=list)
@@ -610,7 +717,7 @@ class FunctionDatabaseProvenance(BaseModel):
     snapshot_date: str
     database_source_ref: str
     # Optional: when omitted, function_annotation adopts the resolved
-    # proteins_fasta_ref at runtime. The ask layer cannot know the runtime
+    # proteins_fasta_ref at runtime. The planner cannot know the runtime
     # path for manifest-provided proteins, so it leaves this unset.
     input_proteins_ref: str | None = None
     command: str | None = None

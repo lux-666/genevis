@@ -23,6 +23,7 @@ from app.execution.evidence import load_frozen_attempt
 from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_PACKET,
+    ArtifactMeta,
     ReviewDecisionArtifact,
 )
 from app.schemas.descriptors import DescriptorRegistry
@@ -38,6 +39,7 @@ from app.stages.assembly_review.method_application.quast import (
     freeze_quast_attempts,
 )
 from app.storage.paths import SessionPaths
+from app.storage.artifacts import publish_artifact_record
 from tests.data_v2 import v2_run_dir
 
 
@@ -144,6 +146,24 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 freeze.assert_not_called()
                 collect.assert_called_once()
 
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", "asset_registry.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def _build_state(
         self,
         *,
@@ -192,7 +212,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 metadata={"candidate_bundles": candidate_bundles},
             ).to_dict()
         if registry_ref:
-            state["asset_registry_ref"] = registry_ref
+            state["asset_registry_ref"] = self._publish_registry_ref(
+                state["data_dir"], session_id, registry_ref
+            )
         return state
 
     def _write_candidate_bundle(

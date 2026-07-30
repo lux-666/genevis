@@ -136,8 +136,10 @@ inputs. A current run-config can express them as follows:
   },
   "t2t": {
     "mode": "auto_patch",
-    "assembly_fasta_ref": "assembly.fasta",
-    "ont_read_refs": ["clean_lane1.fastq.gz", "clean_lane2.fastq.gz"]
+    "read_inputs": [
+      {"path": "clean_hifi.fastq.gz", "platform": "pacbio_hifi"},
+      {"path": "ultralong_ont.fastq.gz", "platform": "ont"}
+    ]
   }
 }
 ```
@@ -148,6 +150,12 @@ provided-fact motif-resolution chain. When absent, T2T resolves the motif from
 the explicitly supplied scientific name through the model boundary. A T2T-local
 motif config field or pre-v3 checkpoint value is rejected outright.
 
-Relative paths in `ont_read_refs` are resolved independently against the
-run-config file's directory while preserving list order. The singular
-`ont_reads_ref` field is not part of the current T2T contract.
+Each `t2t.read_inputs` entry requires both a path and an explicit platform:
+`cycloneseq`, `ont`, `clr`, or `pacbio_hifi`. Relative paths are resolved
+against the run-config file's directory while preserving list order. Legacy
+ONT-only read fields are not part of the current contract.
+
+T2T normally consumes the current logical `assembly` resource. An explicit
+`t2t.assembly_fasta_ref`, when used, must resolve to either a run-owned indexed
+artifact or an assembly asset already present in the immutable asset registry;
+an arbitrary bare path is rejected.

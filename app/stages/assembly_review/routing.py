@@ -35,15 +35,7 @@ def _output(state: TopLevelState) -> AssemblyReviewCursor:
 
 def route_after_enter(state: TopLevelState) -> EnterRoute:
     ar_out = _output(state)
-    assembly_out = (state.get("stage_outputs") or {}).get("assembly") or {}
-    status = assembly_out.get("status")
     if is_terminal_failure(ar_out.get("status")):
-        return "fail"
-    if assembly_out.get("rerun_request") is not None or status in {
-        "flye_rerun_planned",
-        "flye_rerun_frozen",
-        "flye_rerun_ran",
-    }:
         return "fail"
     return "resolve_candidates"
 

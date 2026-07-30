@@ -116,6 +116,9 @@ FactTransform = Literal["identity", "hifiasm_hg_size"]
 # Valid executor binding keys.
 ExecutorBindingKey = Literal[
     "assembly_input_reads",
+    "assembly_ultralong_reads",
+    "assembly_hic_r1_reads",
+    "assembly_hic_r2_reads",
     "assembly_method_read_type",
     "assembly_output_dir",
     "assembly_output_prefix",

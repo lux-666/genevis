@@ -21,7 +21,7 @@ def route_after_enter(state: TopLevelState) -> str:
         return "scan_assembly"
     if status == "motif_resolved":
         output = _output(state)
-        if not output.get("ont_read_refs"):
+        if not output.get("long_read_refs"):
             return "prepare_reads"
         return "recommend"
     if status == "assembly_scanned":
@@ -39,7 +39,7 @@ def route_after_resolve(state: TopLevelState) -> str:
         return "fail"
     if not output.get("execution_enabled"):
         return "report"
-    if not output.get("ont_read_refs"):
+    if not output.get("long_read_refs"):
         return "prepare_reads"
     return "resolve_motif"
 
@@ -72,7 +72,7 @@ def route_after_read_prepare(state: TopLevelState) -> str:
     output = _output(state)
     if is_terminal_failure(output.get("status")):
         return "fail"
-    return "scan_reads" if output.get("ont_read_inputs") else "report"
+    return "scan_reads" if output.get("long_read_inputs") else "report"
 
 
 def route_after_read_scan(state: TopLevelState) -> str:

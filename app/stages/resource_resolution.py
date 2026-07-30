@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.schemas.artifacts import ArtifactRef
+from app.schemas.assets import AssetRecord
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import ResourceRefs, TopLevelState, validate_resource_refs
 
@@ -43,13 +45,16 @@ class ResourceResolution:
     """Resolved paths (multiple if allow_multiple=True)."""
 
     source: str
-    ("Source identifier: 'override', 'resource_refs', 'asset_registry', or 'missing'.")
+    """Source stage, ``resource_refs``, ``asset_registry``, or ``missing``."""
 
     source_type: str
-    """Source type: 'override', 'resource_refs', 'asset', or 'missing'."""
+    """Source type: ``resource_refs``, ``asset``, or ``missing``."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
     """Additional metadata from ResourceRef or asset."""
+
+    asset_records: tuple[AssetRecord, ...] = ()
+    """Verified runtime registry members, never serialized into state."""
 
     @property
     def path(self) -> str | None:
@@ -61,22 +66,19 @@ def resolve_stage_resource(
     state: TopLevelState,
     *,
     resource_spec: ResourceSpec,
-    override: str | None = None,
 ) -> ResourceResolution:
     """
     Unified resource resolver using resource_refs.
 
     Resolution order:
-    1. RunConfig override (if provided)
-    2. state.resource_refs[resource_type] (central resource table)
-    3. Asset registry (specified asset_types)
+    1. state.resource_refs[resource_type] (central resource table)
+    2. Asset registry (specified asset_types)
 
     Stage checkpoint cursors are deliberately not searched.
 
     Args:
         state: TopLevelState containing resource_refs and asset_registry_ref
         resource_spec: Resource requirement specification
-        override: Optional run_config override path
 
     Returns:
         ResourceResolution with paths, source, metadata
@@ -90,16 +92,7 @@ def resolve_stage_resource(
         >>> print(resolution.source)  # "resource_refs" or "asset_registry"
         >>> print(resolution.paths)   # ["/data/reads.fastq.gz"]
     """
-    # 1. RunConfig override
-    if override:
-        return ResourceResolution(
-            found=True,
-            paths=[str(override)],
-            source="override",
-            source_type="override",
-        )
-
-    # 2. Central resource_refs table
+    # 1. Central resource_refs table
     resource_refs = state.get("resource_refs", {})
     if resource_spec.resource_type in resource_refs:
         ref_data = resource_refs[resource_spec.resource_type]
@@ -111,17 +104,48 @@ def resolve_stage_resource(
             resource_ref = ref_data
 
         paths = list(dict.fromkeys(resource_ref.paths))
-        if resource_ref.source_stage in {None, "inventory"}:
-            assets = resource_ref.metadata.get("assets") or []
-            if isinstance(assets, list):
-                preferred_assets = _preferred_assets(assets, resource_spec)
-                preferred_paths = [
-                    str(asset["path"])
-                    for asset in preferred_assets
-                    if asset.get("path")
-                ]
-                if preferred_paths:
-                    paths = list(dict.fromkeys(preferred_paths))
+        runtime_metadata = dict(resource_ref.metadata)
+        selected_records: list[AssetRecord] = []
+        has_registry_ref = "asset_registry_ref" in resource_ref.metadata
+        has_asset_ids = "asset_ids" in resource_ref.metadata
+        if has_registry_ref != has_asset_ids:
+            raise ValueError(
+                f"registry-backed resource {resource_spec.resource_type!r} "
+                "must carry both asset_registry_ref and asset_ids"
+            )
+        if has_registry_ref:
+            resource_registry_ref = ArtifactRef.model_validate(
+                resource_ref.metadata.get("asset_registry_ref")
+            )
+            current_registry_ref = ArtifactRef.model_validate(
+                state.get("asset_registry_ref")
+            )
+            if resource_registry_ref != current_registry_ref:
+                raise ValueError(
+                    f"registry-backed resource {resource_spec.resource_type!r} "
+                    "does not reference the current asset registry"
+                )
+            asset_ids = list(resource_ref.metadata.get("asset_ids") or [])
+            if not asset_ids:
+                raise ValueError(
+                    f"registry-backed resource {resource_spec.resource_type!r} "
+                    "has no authoritative asset IDs"
+                )
+            from app.storage.asset_registry import records_by_ordered_ids
+
+            records = records_by_ordered_ids(
+                state,
+                [str(asset_id) for asset_id in asset_ids],
+                expected_paths=resource_ref.paths,
+            )
+            selected_records = _preferred_records(records, resource_spec)
+            if not resource_spec.allow_multiple:
+                selected_records = selected_records[:1]
+            paths = [str(record.path) for record in selected_records]
+            runtime_metadata = _metadata_from_records(
+                runtime_metadata,
+                selected_records,
+            )
         if paths:
             if not resource_spec.allow_multiple and len(paths) > 1:
                 paths = paths[:1]
@@ -130,63 +154,34 @@ def resolve_stage_resource(
                 paths=paths,
                 source=resource_ref.source_stage or "resource_refs",
                 source_type="resource_refs",
-                metadata=dict(resource_ref.metadata),
+                metadata=runtime_metadata,
+                asset_records=tuple(selected_records),
             )
 
-    # 3. Fallback to asset registry
+    # 2. Fallback to asset registry
     if resource_spec.asset_types:
-        from app.stages.base import load_assets_from_registry
+        from app.storage.asset_registry import load_asset_records
 
-        assets = load_assets_from_registry(state, resource_spec.asset_types)
-        assets = _preferred_assets(assets, resource_spec)
-        if assets:
-            paths = [str(asset["path"]) for asset in assets if asset.get("path")]
+        records = load_asset_records(
+            state,
+            set(resource_spec.asset_types),
+        )
+        records = _preferred_records(records, resource_spec)
+        if records:
+            if not resource_spec.allow_multiple:
+                records = records[:1]
+            paths = [str(record.path) for record in records]
             if paths:
-                # Preserve enough registry provenance for downstream stages
-                # without requiring them to reopen the registry.
-                first_asset = assets[0]
-                metadata = {
-                    "platform": first_asset.get("platform"),
-                    "format": first_asset.get("format"),
-                    "asset_type": first_asset.get("asset_type"),
-                    "asset_ids": [
-                        str(asset["asset_id"])
-                        for asset in assets
-                        if asset.get("asset_id")
-                    ],
-                    "platforms": list(
-                        dict.fromkeys(
-                            str(asset["platform"])
-                            for asset in assets
-                            if asset.get("platform")
-                        )
-                    ),
-                    "formats": list(
-                        dict.fromkeys(
-                            str(asset["format"])
-                            for asset in assets
-                            if asset.get("format")
-                        )
-                    ),
-                    "asset_types": list(
-                        dict.fromkeys(
-                            str(asset["asset_type"])
-                            for asset in assets
-                            if asset.get("asset_type")
-                        )
-                    ),
-                    "assets": [dict(asset) for asset in assets],
-                }
-
                 return ResourceResolution(
                     found=True,
-                    paths=paths if resource_spec.allow_multiple else paths[:1],
+                    paths=paths,
                     source="asset_registry",
                     source_type="asset",
-                    metadata=metadata,
+                    metadata=_metadata_from_records({}, records),
+                    asset_records=tuple(records),
                 )
 
-    # 4. Resource not found
+    # 3. Resource not found
     return ResourceResolution(
         found=False,
         paths=[],
@@ -195,34 +190,91 @@ def resolve_stage_resource(
     )
 
 
-def _preferred_assets(
-    assets: list[dict[str, Any]], resource_spec: ResourceSpec
-) -> list[dict[str, Any]]:
-    """Select the first available equivalent-type group in registry order."""
+def _preferred_records(
+    records: list[AssetRecord],
+    resource_spec: ResourceSpec,
+) -> list[AssetRecord]:
+    """Apply lifecycle priority without collapsing distinct read platforms."""
 
     groups = resource_spec.asset_type_priority_groups or [
         [asset_type] for asset_type in resource_spec.asset_types
     ]
+    if not groups:
+        return records
+    if resource_spec.resource_type == "long_reads":
+        selected_ids: set[str] = set()
+        platforms = list(
+            dict.fromkeys(str(record.platform or "unknown") for record in records)
+        )
+        for platform in platforms:
+            platform_records = [
+                record
+                for record in records
+                if str(record.platform or "unknown") == platform
+            ]
+            for group in groups:
+                selected = [
+                    record
+                    for record in platform_records
+                    if record.asset_type in group
+                ]
+                if selected:
+                    selected_ids.update(record.asset_id for record in selected)
+                    break
+        return [
+            record
+            for record in records
+            if record.asset_id in selected_ids
+        ]
     for group in groups:
-        selected = [asset for asset in assets if asset.get("asset_type") in group]
+        selected = [
+            record
+            for record in records
+            if record.asset_type in group
+        ]
         if selected:
             return selected
-    return assets
+    return records
 
 
-def resolve_resource(
-    state: TopLevelState,
-    *,
-    resource_spec: ResourceSpec,
-    override: str | None = None,
-) -> ResourceResolution:
-    """Compatibility name for the canonical resolver."""
+def _metadata_from_records(
+    base: dict[str, Any],
+    records: list[AssetRecord],
+) -> dict[str, Any]:
+    """Build an invocation-local projection from authoritative typed records."""
 
-    return resolve_stage_resource(
-        state,
-        resource_spec=resource_spec,
-        override=override,
+    metadata = dict(base)
+    first = records[0] if records else None
+    metadata.update(
+        {
+            "platform": first.platform if first is not None else None,
+            "format": first.format if first is not None else None,
+            "asset_type": first.asset_type if first is not None else None,
+            "asset_ids": [record.asset_id for record in records],
+            "platforms": list(
+                dict.fromkeys(
+                    str(record.platform)
+                    for record in records
+                    if record.platform
+                )
+            ),
+            "formats": list(
+                dict.fromkeys(
+                    str(record.format)
+                    for record in records
+                    if record.format
+                )
+            ),
+            "asset_types": list(
+                dict.fromkeys(record.asset_type for record in records)
+            ),
+            "assets": [
+                record.model_dump(mode="json")
+                for record in records
+            ],
+        }
     )
+    return metadata
 
 
 def update_resource_ref(

@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import asset_input_dependencies
 from app.execution.lifecycle import (
     CompiledMethodGraph,
     MethodExecutionLifecycle,
@@ -69,6 +70,14 @@ def freeze_seqkit_attempt(state: TopLevelState) -> StateUpdate:
     working_dir = stage_work_dir(state, "read_qc", "seqkit_stats")
     working_dir.mkdir(parents=True, exist_ok=True)
     input_paths = read_paths_from_output(output)
+    try:
+        input_dependencies = asset_input_dependencies(
+            state,
+            list(output.get("input_asset_refs") or []),
+            input_paths,
+        )
+    except ValueError as exc:
+        return fail_update(state, f"SeqKit stats input dependency error: {exc}")
     stats_path = working_dir / "seqkit_stats.tsv"
     script_path = working_dir / "run_seqkit_stats.sh"
     input_args = " ".join(shlex.quote(str(path)) for path in input_paths)
@@ -89,6 +98,7 @@ def freeze_seqkit_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[stats_path],
         env=output.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "input_asset_ref": output.get("input_asset_ref"),
             "input_asset_refs": output.get("input_asset_refs") or [],

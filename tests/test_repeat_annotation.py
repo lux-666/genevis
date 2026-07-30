@@ -8,11 +8,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.integrity import sha256_file
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
 from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state
 from app.stages.repeat_annotation.builder import build_stage
 from app.stages.repeat_annotation.nodes import (
@@ -20,35 +20,23 @@ from app.stages.repeat_annotation.nodes import (
     apply_mask_review_decision,
     block_mask_review,
 )
-from app.storage.artifacts import read_artifact_records
+from app.schemas.artifacts import ArtifactMeta
+from app.storage.artifacts import publish_artifact_record, read_artifact_records
 from app.storage.ledger import Ledger
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
-def _invoke_repeat(state: dict) -> dict:
-    """Upgrade pre-refactor test cursors to the explicit resource contract."""
-
-    outputs = state.get("stage_outputs") or {}
-    for stage, keys in (
-        ("hic_scaffolding", ("output_assembly_ref",)),
-        ("assembly_review", ("final_assembly_ref",)),
-    ):
-        stage_out = outputs.get(stage) or {}
-        assembly_ref = next(
-            (stage_out.get(key) for key in keys if stage_out.get(key)), None
-        )
-        if assembly_ref:
-            state["resource_refs"]["assembly"] = ResourceRef(
-                resource_type="assembly",
-                paths=[str(assembly_ref)],
-                source_stage=stage,
-            ).to_dict()
-            break
-    return build_stage().invoke(state)
+def _assembly_asset(path: Path) -> dict[str, str]:
+    return {
+        "asset_id": f"s1:assembly_fasta_registered:{path.name}",
+        "asset_type": "assembly_fasta_registered",
+        "path": str(path),
+    }
 
 
 class RepeatAnnotationDescriptorTests(unittest.TestCase):
-    def test_descriptor_registry_loads_repeat_annotation_placeholders(self):
+    def test_descriptor_registry_loads_repeat_annotation_method(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
         expected = {
@@ -65,11 +53,42 @@ class RepeatAnnotationDescriptorTests(unittest.TestCase):
 class RepeatAnnotationStageTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
+        ready_assets = []
+        for asset in assets:
+            source = Path(asset["path"])
+            ready_assets.append(
+                {
+                    **asset,
+                    "checksum": sha256_file(source),
+                    "checksum_status": "ready",
+                    "size_bytes": source.stat().st_size,
+                }
+            )
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            json.dumps({"session_id": "s1", "assets": ready_assets}, indent=2),
             encoding="utf-8",
         )
         return path
+
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path(
+            "inventory", f"asset_registry_{os.urandom(4).hex()}.json"
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
 
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
@@ -78,7 +97,11 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "repeat_annotation"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
+            if registry_ref is not None
+            else None
+        )
         return state
 
     def _fake_repeatmasker_bin(self, tmpdir: str, *, fail: bool = False) -> Path:
@@ -121,23 +144,18 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
+                    _assembly_asset(assembly),
                     {
                         "asset_id": "s1:repeat_library:trusted_repeats.fa",
                         "asset_type": "repeat_library",
                         "path": str(library),
                         "metadata": {"source": "provided", "trusted": True},
-                    }
+                    },
                 ],
             )
             state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                }
-            }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -155,16 +173,22 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             self.assertNotIn(
                 "repeat_annotation.library.repeatmodeler", repeat["candidate_methods"]
             )
-            self.assertTrue(
-                repeat["softmasked_genome_ref"].endswith("softmasked_genome.fasta")
-            )
+            self.assertNotIn("softmasked_genome_ref", repeat)
+            self.assertNotIn("repeat_annotation_gff3_ref", repeat)
             self.assertTrue(Path(repeat["plan_artifact_ref"]).exists())
             self.assertTrue(Path(repeat["bundle_artifact_ref"]).exists())
+            self.assertEqual(
+                repeat["unmasked_fallback_reason"],
+                "repeat_annotation_not_executed",
+            )
+            self.assertNotIn("masked_assembly", result["resource_refs"])
             bundle = json.loads(
                 Path(repeat["bundle_artifact_ref"]).read_text(encoding="utf-8")
             )
             self.assertEqual(bundle["repeat_library_source"], "provided")
             self.assertFalse(bundle["metadata"]["execution_enabled"])
+            self.assertIsNone(bundle["softmasked_genome_ref"])
+            self.assertIsNone(bundle["repeat_annotation_gff3_ref"])
 
     def test_local_mode_without_explicit_repeatmasker_method_remains_planning_only(
         self,
@@ -177,27 +201,29 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
+                    _assembly_asset(assembly),
                     {
                         "asset_id": "s1:repeat_library:trusted",
                         "asset_type": "repeat_library",
                         "path": str(library),
-                    }
+                    },
                 ],
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                },
                 "repeat_annotation": {"execution_mode": "local"},
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertFalse(repeat["execution_enabled"])
+            self.assertEqual(
+                repeat["unmasked_fallback_reason"],
+                "repeat_annotation_not_executed",
+            )
+            self.assertNotIn("masked_assembly", result["resource_refs"])
             self.assertFalse(
                 (Path(state["data_dir"]) / "ledger" / "events.jsonl").exists()
             )
@@ -214,19 +240,16 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
+                    _assembly_asset(assembly),
                     {
                         "asset_id": "s1:repeat_library:trusted",
                         "asset_type": "repeat_library",
                         "path": str(library),
-                    }
+                    },
                 ],
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                },
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -234,7 +257,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 },
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -244,6 +267,11 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             self.assertTrue(repeat["execution_enabled"])
             self.assertEqual(repeat["execution_mode"], "local")
             self.assertIn("repeatmasker_executed", repeat["notes"])
+            masked_resource = result["resource_refs"]["masked_assembly"]
+            self.assertEqual(
+                masked_resource["metadata"]["primary_output_ref"]["artifact_type"],
+                "repeat_annotation.softmasked_genome",
+            )
             bundle = json.loads(
                 Path(repeat["bundle_artifact_ref"]).read_text(encoding="utf-8")
             )
@@ -280,21 +308,21 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
+                    _assembly_asset(assembly),
                     {
                         "asset_id": "s1:repeat_library:trusted",
                         "asset_type": "repeat_library",
                         "path": str(library),
-                    }
+                    },
                 ],
             )
             data_dir = v2_run_dir(root / "out", "s1")
             state = self._state(tmpdir, str(registry))
+            state["asset_registry_ref"] = self._publish_registry_ref(
+                str(data_dir), "s1", str(registry)
+            )
             state["data_dir"] = os.path.relpath(data_dir, Path.cwd())
             state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                },
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -302,7 +330,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 },
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -321,19 +349,16 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
+                    _assembly_asset(assembly),
                     {
                         "asset_id": "s1:repeat_library:trusted",
                         "asset_type": "repeat_library",
                         "path": str(library),
-                    }
+                    },
                 ],
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                },
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -341,7 +366,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 },
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "repeat_annotation")
             self.assertEqual(result["supervision_state"], "failed_terminal")
@@ -368,16 +393,13 @@ class RepeatAnnotationStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "final.fa"
             assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            registry = self._write_registry(tmpdir, assets=[])
+            registry = self._write_registry(
+                tmpdir,
+                assets=[_assembly_asset(assembly)],
+            )
             state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                }
-            }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -402,20 +424,19 @@ class RepeatAnnotationStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "final.fa"
             assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            registry = self._write_registry(tmpdir, assets=[])
+            registry = self._write_registry(
+                tmpdir,
+                assets=[_assembly_asset(assembly)],
+            )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "assembly_review": {
-                    "status": "completed",
-                    "final_assembly_ref": str(assembly),
-                },
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
                 },
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(result["current_stage"], "gene_annotation")
@@ -429,44 +450,44 @@ class RepeatAnnotationStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "final.fa"
             assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            registry = self._write_registry(tmpdir, assets=[])
+            registry = self._write_registry(
+                tmpdir,
+                assets=[_assembly_asset(assembly)],
+            )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "completed",
-                    "final_assembly_ref": str(assembly),
                     "confidence": "low",
                     "low_confidence_reasons": ["fragmented_assembly"],
                     "metadata": {"assembly_fragmentation": "high"},
                 }
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(repeat["confidence"], "low")
             self.assertIn("fragmented_assembly", repeat["low_confidence_reasons"])
-            self.assertTrue(repeat["softmasked_genome_ref"])
+            self.assertNotIn("softmasked_genome_ref", repeat)
             bundle = json.loads(
                 Path(repeat["bundle_artifact_ref"]).read_text(encoding="utf-8")
             )
             self.assertEqual(bundle["confidence"], "low")
+            self.assertIsNone(bundle["softmasked_genome_ref"])
 
     def test_repeat_annotation_routes_to_gene_annotation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "final.fa"
             assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            registry = self._write_registry(tmpdir, assets=[])
+            registry = self._write_registry(
+                tmpdir,
+                assets=[_assembly_asset(assembly)],
+            )
             state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "assembly_review": {
-                    "status": "completed",
-                    "final_assembly_ref": str(assembly),
-                }
-            }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertIn("repeat_annotation_stage", result["route_trace"])
@@ -475,10 +496,42 @@ class RepeatAnnotationStageTests(unittest.TestCase):
 class MaskReviewGateTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
+        ready_assets = []
+        for asset in assets:
+            source = Path(asset["path"])
+            ready_assets.append(
+                {
+                    **asset,
+                    "checksum": sha256_file(source),
+                    "checksum_status": "ready",
+                    "size_bytes": source.stat().st_size,
+                }
+            )
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}), encoding="utf-8"
+            json.dumps({"session_id": "s1", "assets": ready_assets}),
+            encoding="utf-8",
         )
         return path
+
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path(
+            "inventory", f"asset_registry_{os.urandom(4).hex()}.json"
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
 
     def _state(self, tmpdir: str, registry_ref: str | None) -> dict:
         state = initial_state(
@@ -487,7 +540,11 @@ class MaskReviewGateTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "repeat_annotation"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
+            if registry_ref is not None
+            else None
+        )
         return state
 
     def _fake_repeatmasker_bin(self, tmpdir: str) -> Path:
@@ -540,19 +597,16 @@ class MaskReviewGateTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
+                    _assembly_asset(assembly),
                     {
                         "asset_id": "s1:repeat_library:lib",
                         "asset_type": "repeat_library",
                         "path": str(library),
-                    }
+                    },
                 ],
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                },
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -560,7 +614,7 @@ class MaskReviewGateTests(unittest.TestCase):
                 },
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -597,19 +651,16 @@ class MaskReviewGateTests(unittest.TestCase):
             registry = self._write_registry(
                 tmpdir,
                 assets=[
+                    _assembly_asset(assembly),
                     {
                         "asset_id": "s1:repeat_library:lib",
                         "asset_type": "repeat_library",
                         "path": str(library),
-                    }
+                    },
                 ],
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {
-                    "status": "skipped",
-                    "output_assembly_ref": str(assembly),
-                },
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -618,7 +669,7 @@ class MaskReviewGateTests(unittest.TestCase):
                 },
             }
 
-            result = _invoke_repeat(state)
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(result["current_stage"], "repeat_annotation")
@@ -636,6 +687,32 @@ class MaskReviewGateTests(unittest.TestCase):
             softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
             state = self._state(tmpdir, None)
             Ledger(state["data_dir"]).create_session("s1", "control/manifest.yaml")
+            paths = SessionPaths.from_run_dir(state["data_dir"])
+            work_softmasked = paths.work_path(
+                "repeat_annotation",
+                "softmasked_genome.fasta",
+            )
+            work_softmasked.parent.mkdir(parents=True, exist_ok=True)
+            work_softmasked.write_text(
+                softmasked.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            published_softmasked = publish_artifact_record(
+                state["data_dir"],
+                "s1",
+                ArtifactMeta.from_file(
+                    work_softmasked,
+                    stage="repeat_annotation",
+                    method_name="repeat_annotation.masking.repeatmasker",
+                    artifact_type="repeat_annotation.softmasked_genome",
+                ),
+                destination=paths.artifact_path(
+                    "repeat_annotation",
+                    "repeatmasker",
+                    "softmasked_genome.fasta",
+                ),
+            )
+            softmasked = published_softmasked.path
             state["supervision_state"] = "blocked_human"
             state["stage_outputs"] = {
                 "repeat_annotation": {
@@ -718,8 +795,13 @@ class MaskReviewGateTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
-            self.assertEqual(repeat["softmasked_genome_ref"], str(unmasked))
+            self.assertEqual(repeat["softmasked_genome_ref"], str(softmasked))
             self.assertEqual(repeat["decision"], "skip")
+            self.assertEqual(
+                repeat["unmasked_fallback_reason"],
+                "repeat_masking_skipped_by_user",
+            )
+            self.assertNotIn("resource_refs", result)
             self.assertIn("mask_review_skipped", repeat.get("notes", []))
             self.assertIn("mask_review", result["route_trace"])
 

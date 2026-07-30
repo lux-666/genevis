@@ -193,11 +193,13 @@ class ManifestValidationTests(unittest.TestCase):
             report = validate_manifest(manifest)
             self.assertTrue(report["valid"])
             self.assertEqual(report["errors"], [])
-            self.assertIn("raw_long_reads", report["inferred"])
-            inferred = report["inferred"]["raw_long_reads"]
-            self.assertEqual(inferred["paths_exist"], [str(fq)])
-            self.assertEqual(inferred["detected_format"][str(fq)], "fastq")
-            self.assertEqual(inferred["detected_compression"][str(fq)], "none")
+            self.assertEqual(len(report["inferred"]), 1)
+            inferred = report["inferred"][0]
+            self.assertEqual(inferred["asset_type"], "raw_long_reads")
+            self.assertEqual(inferred["manifest_entry_ordinal"], 0)
+            self.assertEqual(inferred["path_facts"][0]["declared_path"], str(fq))
+            self.assertEqual(inferred["path_facts"][0]["format"], "fastq")
+            self.assertEqual(inferred["path_facts"][0]["compression"], "none")
 
     def test_validate_warns_unknown_format(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -252,7 +254,7 @@ class ManifestValidationTests(unittest.TestCase):
         )
         report = validate_manifest(manifest, require_existing_files=False)
         self.assertTrue(report["valid"])
-        self.assertIn("hic_alignment_bam", report["inferred"])
+        self.assertEqual(report["inferred"][0]["asset_type"], "hic_alignment_bam")
 
     def test_validate_provided_gene_annotation_assets(self):
         manifest = InputManifest(
@@ -270,13 +272,13 @@ class ManifestValidationTests(unittest.TestCase):
         )
         report = validate_manifest(manifest, require_existing_files=False)
         self.assertTrue(report["valid"])
-        self.assertEqual(report["inferred"]["gene_models"]["inferred_format"], "gff3")
-        self.assertEqual(
-            report["inferred"]["predicted_proteins"]["inferred_format"], "fasta"
-        )
-        self.assertEqual(
-            report["inferred"]["transcripts_fasta"]["inferred_format"], "fasta"
-        )
+        inferred_by_type = {
+            item["asset_type"]: item["path_facts"][0]
+            for item in report["inferred"]
+        }
+        self.assertEqual(inferred_by_type["gene_models"]["format"], "gff3")
+        self.assertEqual(inferred_by_type["predicted_proteins"]["format"], "fasta")
+        self.assertEqual(inferred_by_type["transcripts_fasta"]["format"], "fasta")
 
     def test_validate_rejects_wrong_provided_annotation_formats(self):
         manifest = InputManifest(
@@ -402,10 +404,16 @@ class ManifestValidationTests(unittest.TestCase):
                 paths=[str(r1), str(r2)],
                 sample_id="sample_A",
             )
-            props = _infer_asset_properties(spec)
-            self.assertEqual(props["inferred_layout"], "paired")
-            self.assertEqual(props["inferred_compression"], "gzip")
-            self.assertEqual(props["inferred_format"], "fastq")
+            props = _infer_asset_properties(spec, manifest_entry_ordinal=0)
+            self.assertEqual(props.inferred_layout, "paired")
+            self.assertEqual(
+                [fact.compression for fact in props.path_facts],
+                ["gzip", "gzip"],
+            )
+            self.assertEqual(
+                [fact.format for fact in props.path_facts],
+                ["fastq", "fastq"],
+            )
 
     def test_infer_cycloneseq_platform_from_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -416,8 +424,8 @@ class ManifestValidationTests(unittest.TestCase):
                 paths=[str(fq)],
                 metadata={"technology": "BGI CycloneSEQ"},
             )
-            props = _infer_asset_properties(spec)
-            self.assertEqual(props["inferred_platform"], "cycloneseq")
+            props = _infer_asset_properties(spec, manifest_entry_ordinal=0)
+            self.assertEqual(props.path_facts[0].platform, "cycloneseq")
 
 
 if __name__ == "__main__":

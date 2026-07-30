@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import asset_input_dependencies
 from app.execution.lifecycle import (
     CompiledMethodGraph,
     MethodExecutionLifecycle,
@@ -19,8 +20,10 @@ from app.schemas.artifacts import (
     READ_QC_FILTERED_LONG_READS,
     READ_QC_LONG_READ_STATS,
     READ_QC_LONG_READ_SUMMARY,
+    READ_QC_READ_SET_MANIFEST,
     ArtifactMeta,
 )
+from app.schemas.assets import ReadSetManifest, ReadSetMember
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.read_qc.constants import (
@@ -104,6 +107,17 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
+    asset_ids = list(output.get("input_asset_refs") or [])
+    if len(asset_ids) != len(input_paths):
+        return fail_update(
+            state,
+            f"SeqKit filter external_deps cardinality mismatch: "
+            f"{len(asset_ids)} asset_ids vs {len(input_paths)} paths",
+        )
+    try:
+        input_dependencies = asset_input_dependencies(state, asset_ids, input_paths)
+    except ValueError as exc:
+        return fail_update(state, f"SeqKit filter input dependency error: {exc}")
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:read_qc:length_filter",
         session_id=session_id,
@@ -114,9 +128,12 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[*filtered_paths, post_filter_stats_path],
         env=output.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "input_asset_ref": output.get("input_asset_ref"),
-            "input_asset_refs": output.get("input_asset_refs") or [],
+            "input_asset_refs": list(output.get("input_asset_refs") or []),
+            "input_member_platforms": list(output.get("input_member_platforms") or []),
+            "input_member_formats": list(output.get("input_member_formats") or []),
             "raw_long_reads_path": str(input_paths[0]),
             "raw_long_reads_paths": [str(path) for path in input_paths],
             "filtered_long_reads_path": str(filtered_paths[0]),
@@ -148,7 +165,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         "thresholds": {"min_len": min_len},
         "tool": "seqkit",
     }
-    paths = [
+    published_reads = [
         publish_or_recover_work_artifact(
             state.get("data_dir", "data"),
             attempt.session_id,
@@ -157,9 +174,77 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
             method_name=LENGTH_FILTER_METHOD_NAME,
             artifact_type=READ_QC_FILTERED_LONG_READS,
             metadata=filtered_metadata,
-        ).path
+        )
         for path in paths
     ]
+    paths = [published.path for published in published_reads]
+    input_asset_ids = list(attempt.metadata.get("input_asset_refs") or [])
+    input_platforms = list(attempt.metadata.get("input_member_platforms") or [])
+    input_formats = list(attempt.metadata.get("input_member_formats") or [])
+    expected_cardinality = len(paths)
+    if not (
+        len(input_asset_ids)
+        == len(input_platforms)
+        == len(input_formats)
+        == expected_cardinality
+    ):
+        return fail_update(
+            state,
+            "SeqKit filter input/output provenance cardinality mismatch",
+        )
+    registry_ref = state.get("asset_registry_ref")
+    if not isinstance(registry_ref, dict):
+        return fail_update(
+            state,
+            "SeqKit filter cannot publish a read-set without asset_registry_ref",
+        )
+    read_set = ReadSetManifest(
+        session_id=attempt.session_id,
+        source_registry_ref=registry_ref,
+        members=[
+            ReadSetMember(
+                output_ref=published.ref,
+                source_asset_id=input_asset_ids[index],
+                platform=input_platforms[index],
+                format=input_formats[index],
+                transformation_method=LENGTH_FILTER_METHOD_NAME,
+                attempt_id=attempt.attempt_id,
+            )
+            for index, published in enumerate(published_reads)
+        ],
+    )
+    read_set_metadata = {
+        "attempt_id": attempt.attempt_id,
+        "member_count": len(paths),
+        "dependency_refs": [
+            registry_ref,
+            *[
+                published.ref.model_dump(mode="json")
+                for published in published_reads
+            ],
+        ],
+    }
+    read_set_source = (
+        Path(attempt.working_dir) / "filtered_long_reads.read_set_manifest.json"
+    )
+    read_set_source.write_text(
+        json.dumps(
+            read_set.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    published_read_set = publish_or_recover_work_artifact(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        read_set_source,
+        stage="read_qc",
+        method_name=LENGTH_FILTER_METHOD_NAME,
+        artifact_type=READ_QC_READ_SET_MANIFEST,
+        metadata=read_set_metadata,
+    )
     stats_metadata = {
         "attempt_id": attempt.attempt_id,
         "input_asset_ref": output.get("input_asset_ref"),
@@ -242,6 +327,13 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
             artifact_type=READ_QC_LONG_READ_SUMMARY,
             metadata=summary_metadata,
         ),
+        ArtifactMeta.from_file(
+            published_read_set.path,
+            stage="read_qc",
+            method_name=LENGTH_FILTER_METHOD_NAME,
+            artifact_type=READ_QC_READ_SET_MANIFEST,
+            metadata=read_set_metadata,
+        ),
     ]
     data_dir = state.get("data_dir", "data")
     ledger = Ledger(data_dir)
@@ -275,6 +367,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
             "status": "length_filter_executed",
             "filtered_long_reads_ref": str(paths[0]),
             "filtered_long_reads_refs": [str(path) for path in paths],
+            "read_set_manifest_ref": published_read_set.ref.model_dump(mode="json"),
             "post_filter_stats_artifact_ref": str(stats_path),
             "post_filter_summary_artifact_ref": str(summary_path),
             "post_filter_summary": summary,

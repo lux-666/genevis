@@ -37,6 +37,24 @@ def is_terminal_failure(
     return status in TERMINAL_FAILURE_STATUSES or status in extra_statuses
 
 
+def stages_through(endpoint: str) -> list[DomainStage]:
+    """Return the non-inventory prefix of STAGE_ORDER through *endpoint* (inclusive).
+
+    This is the single canonical source for route expansion: both the TUI
+    intake and the planner recommendation derive their stage lists from here
+    rather than maintaining independent literal arrays.
+
+    >>> stages_through("assembly_review")
+    ['read_qc', 'genome_survey', 'assembly', 'assembly_dedup', 'assembly_review']
+    >>> stages_through("t2t")
+    ['read_qc', ..., 'assembly_review', 'hic_scaffolding', 't2t']
+    """
+    if endpoint not in STAGE_ORDER:
+        raise ValueError(f"unknown stage endpoint: {endpoint!r}")
+    stop = STAGE_ORDER.index(endpoint)
+    return [s for s in STAGE_ORDER[1 : stop + 1]]  # skip "inventory"
+
+
 def next_requested_stage(
     current_stage: str,
     requested: Sequence[str],

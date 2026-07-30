@@ -14,6 +14,10 @@ from pydantic import TypeAdapter
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+)
 from app.execution.lifecycle import (
     CompiledMethodGraph,
     MethodExecutionLifecycle,
@@ -59,7 +63,12 @@ from app.stages.repeat_annotation.state import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import ASSEMBLY_SPEC
-from app.storage.artifacts import publish_artifact_record, register_artifact_records
+from app.storage.artifacts import (
+    artifact_ref_for_path,
+    publish_artifact_record,
+    register_artifact_records,
+)
+from app.storage.asset_registry import load_asset_records
 from app.storage.ledger import Ledger
 from app.storage.publish import shell_publish_file
 from app.workflow import next_stage_name
@@ -68,8 +77,6 @@ REPEAT_LIBRARY_CANDIDATES: list[str] = []
 REPEAT_HELPER_METHODS: list[str] = []
 REPEAT_MASKING_METHOD = "repeat_annotation.masking.repeatmasker"
 REPEAT_CONTRACT_METHOD = "repeat_annotation.contract"
-_ASSET_REGISTRY_ADAPTER = TypeAdapter(dict[str, PydanticJsonValue])
-_ASSET_RECORDS_ADAPTER = TypeAdapter(list[AssetRecord])
 _JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, PydanticJsonValue])
 _STRING_LIST_ADAPTER = TypeAdapter(list[str])
 REPEATMASKER_LIFECYCLE = MethodExecutionLifecycle(
@@ -289,22 +296,27 @@ def plan_repeat_masking(state: TopLevelState) -> StateUpdate:
         artifact,
         destination=plan_destination,
     ).path
-    return _update_repeat_output(
-        state,
-        {
-            "status": "masking_planned",
-            "masking_method": REPEAT_MASKING_METHOD,
-            "candidate_methods": candidate_methods,
-            "expected_outputs": expected_outputs,
-            "repeat_annotation_gff3_ref": expected_outputs["repeat_annotation_gff3"],
-            "softmasked_genome_ref": expected_outputs["softmasked_genome"],
-            "hardmasked_genome_ref": expected_outputs["hardmasked_genome"],
-            "plan_artifact_ref": str(plan_ref),
-            "artifact_refs": [str(artifact.file_path)],
-            "notes": notes,
-            "execution_enabled": execution_enabled,
-        },
-    )
+    planned_update: RepeatAnnotationStageCursor = {
+        "status": "masking_planned",
+        "masking_method": REPEAT_MASKING_METHOD,
+        "candidate_methods": candidate_methods,
+        "expected_outputs": expected_outputs,
+        "plan_artifact_ref": str(plan_ref),
+        "artifact_refs": [str(artifact.file_path)],
+        "notes": notes,
+        "execution_enabled": execution_enabled,
+    }
+    if execution_enabled:
+        planned_update.update(
+            {
+                "repeat_annotation_gff3_ref": expected_outputs[
+                    "repeat_annotation_gff3"
+                ],
+                "softmasked_genome_ref": expected_outputs["softmasked_genome"],
+                "hardmasked_genome_ref": expected_outputs["hardmasked_genome"],
+            }
+        )
+    return _update_repeat_output(state, planned_update)
 
 
 def freeze_repeatmasker_attempt(state: TopLevelState) -> StateUpdate:
@@ -377,6 +389,76 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> StateUpdate:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
+
+    try:
+        assembly_resolution = resolve_stage_resource(
+            state,
+            resource_spec=ASSEMBLY_SPEC,
+        )
+        if (
+            not assembly_resolution.found
+            or assembly_resolution.path is None
+            or Path(assembly_resolution.path).resolve(strict=False)
+            != assembly_ref.resolve(strict=False)
+        ):
+            raise ValueError("resolved assembly no longer matches input_assembly_ref")
+        if assembly_resolution.asset_records:
+            assembly_dependencies = asset_input_dependencies(
+                state,
+                [record.asset_id for record in assembly_resolution.asset_records],
+                [record.path for record in assembly_resolution.asset_records],
+            )
+        else:
+            assembly_artifact_ref = artifact_ref_for_path(
+                data_dir,
+                session_id,
+                assembly_ref,
+            )
+            assembly_dependencies = [
+                artifact_input_dependency(
+                    state,
+                    assembly_artifact_ref,
+                    assembly_ref,
+                )
+            ]
+
+        if repeat_out.get("repeat_library_source") == "provided":
+            library_ids = list(repeat_out.get("provided_repeat_library_refs") or [])
+            library_paths = list(repeat_out.get("provided_repeat_library_paths") or [])
+            matching = [
+                (asset_id, path)
+                for asset_id, path in zip(library_ids, library_paths, strict=True)
+                if Path(path).resolve(strict=False) == library_ref.resolve(strict=False)
+            ]
+            if len(matching) != 1:
+                raise ValueError(
+                    "provided repeat library does not map to exactly one "
+                    "registered asset"
+                )
+            library_dependencies = asset_input_dependencies(
+                state,
+                [matching[0][0]],
+                [matching[0][1]],
+            )
+        else:
+            library_artifact_ref = artifact_ref_for_path(
+                data_dir,
+                session_id,
+                library_ref,
+            )
+            library_dependencies = [
+                artifact_input_dependency(
+                    state,
+                    library_artifact_ref,
+                    library_ref,
+                )
+            ]
+    except (OSError, ValueError) as exc:
+        return _fail_update(
+            state,
+            f"RepeatMasker input dependency is invalid: {exc}",
+        )
+
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:repeat_annotation:repeatmasker",
         session_id=session_id,
@@ -387,6 +469,10 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[softmasked_genome, repeat_gff3],
         env=repeat_out.get("env"),
         env_spec=env_spec,
+        input_dependencies=[
+            *assembly_dependencies,
+            *library_dependencies,
+        ],
         metadata={
             "input_assembly_ref": str(assembly_ref),
             "repeat_library_ref": str(library_ref),
@@ -486,16 +572,39 @@ def commit_repeat_annotation(state: TopLevelState) -> StateUpdate:
     session_id = state["session_id"]
     out_dir = stage_artifacts_dir(state, "repeat_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
+    execution_enabled = bool(repeat_out.get("execution_enabled"))
+    unmasked_fallback_reason = repeat_out.get("unmasked_fallback_reason")
+    if not execution_enabled and not unmasked_fallback_reason:
+        unmasked_fallback_reason = "repeat_annotation_not_executed"
+
+    primary_output_ref = None
+    if execution_enabled and not unmasked_fallback_reason:
+        try:
+            primary_output_ref = artifact_ref_for_path(
+                data_dir,
+                session_id,
+                repeat_out["softmasked_genome_ref"],
+                expected_type=REPEAT_SOFTMASKED_GENOME,
+            )
+        except (OSError, ValueError) as exc:
+            reason = f"repeat annotation output provenance is invalid: {exc}"
+            failed = _fail_update(state, reason)
+            return {
+                "stage_outputs": failed["stage_outputs"],
+                "current_stage": "repeat_annotation",
+                "supervision_state": "failed_terminal",
+                "last_error": reason,
+            }
 
     bundle = RepeatAnnotationBundle(
         session_id=session_id,
-        status="executed" if repeat_out.get("execution_enabled") else "planned",
+        status="executed" if execution_enabled else "planned",
         strategy=repeat_out["strategy"],
         repeat_library_source=repeat_out["repeat_library_source"],
         input_assembly_ref=repeat_out["input_assembly_ref"],
         repeat_library_ref=repeat_out["repeat_library_ref"],
-        repeat_annotation_gff3_ref=repeat_out["repeat_annotation_gff3_ref"],
-        softmasked_genome_ref=repeat_out["softmasked_genome_ref"],
+        repeat_annotation_gff3_ref=repeat_out.get("repeat_annotation_gff3_ref"),
+        softmasked_genome_ref=repeat_out.get("softmasked_genome_ref"),
         hardmasked_genome_ref=repeat_out.get("hardmasked_genome_ref"),
         confidence=repeat_out.get("confidence", "high"),
         low_confidence_reasons=repeat_out.get("low_confidence_reasons", []),
@@ -503,8 +612,9 @@ def commit_repeat_annotation(state: TopLevelState) -> StateUpdate:
         plan_artifact_ref=repeat_out.get("plan_artifact_ref"),
         notes=repeat_out.get("notes", []),
         metadata={
-            "execution_enabled": bool(repeat_out.get("execution_enabled")),
+            "execution_enabled": execution_enabled,
             "attempt_id": repeat_out.get("repeatmasker_attempt_id"),
+            "unmasked_fallback_reason": unmasked_fallback_reason,
         },
     )
     bundle_destination = out_dir / "repeat_annotation_bundle.json"
@@ -525,7 +635,8 @@ def commit_repeat_annotation(state: TopLevelState) -> StateUpdate:
             "strategy": repeat_out["strategy"],
             "repeat_library_source": repeat_out["repeat_library_source"],
             "confidence": repeat_out.get("confidence", "high"),
-            "execution_enabled": bool(repeat_out.get("execution_enabled")),
+            "execution_enabled": execution_enabled,
+            "unmasked_fallback_reason": unmasked_fallback_reason,
         },
     )
     bundle_ref = publish_artifact_record(
@@ -535,26 +646,25 @@ def commit_repeat_annotation(state: TopLevelState) -> StateUpdate:
         destination=bundle_destination,
     ).path
 
-    cursor_update = _update_repeat_output(
-        state,
-        {
-            "status": "completed",
-            "repeat_annotation": repeat_out["repeat_annotation_gff3_ref"],
-            "softmasked_genome": repeat_out["softmasked_genome_ref"],
-            "bundle_artifact_ref": str(bundle_ref),
-            "artifact_refs": [
-                *repeat_out.get("artifact_refs", []),
-                str(artifact.file_path),
-            ],
-        },
-    )
+    cursor_payload: RepeatAnnotationStageCursor = {
+        "status": "completed",
+        "bundle_artifact_ref": str(bundle_ref),
+        "artifact_refs": [
+            *repeat_out.get("artifact_refs", []),
+            str(artifact.file_path),
+        ],
+        "unmasked_fallback_reason": unmasked_fallback_reason,
+    }
+    cursor_update = _update_repeat_output(state, cursor_payload)
     trace = append_route_trace(state, "repeat_annotation_stage")
-    return {
+    update: StateUpdate = {
         "stage_outputs": cursor_update["stage_outputs"],
         "current_stage": next_stage_name("repeat_annotation"),
         "supervision_state": "running_stage",
         "route_trace": trace,
-        "resource_refs": update_resource_ref(
+    }
+    if primary_output_ref is not None:
+        update["resource_refs"] = update_resource_ref(
             state,
             "masked_assembly",
             [str(repeat_out["softmasked_genome_ref"])],
@@ -562,9 +672,10 @@ def commit_repeat_annotation(state: TopLevelState) -> StateUpdate:
             {
                 "repeat_annotation_ref": str(repeat_out["repeat_annotation_gff3_ref"]),
                 "bundle_ref": str(bundle_ref),
+                "primary_output_ref": primary_output_ref.model_dump(mode="json"),
             },
-        ),
-    }
+        )
+    return update
 
 
 def block_mask_review(state: TopLevelState) -> StateUpdate:
@@ -689,11 +800,10 @@ def apply_mask_review_decision(
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     notes = list(repeat_out.get("notes") or [])
+    unmasked_fallback_reason = None
     if request.decision == "skip":
-        softmasked_genome_ref = (
-            repeat_out.get("input_assembly_ref") or softmasked_genome_ref
-        )
         notes = [*notes, "mask_review_skipped"]
+        unmasked_fallback_reason = "repeat_masking_skipped_by_user"
 
     decision_payload = {
         "session_id": session_id,
@@ -703,6 +813,7 @@ def apply_mask_review_decision(
         "softmasked_genome_ref": softmasked_genome_ref,
         "repeat_percentage": repeat_out.get("repeat_percentage"),
         "repeat_library_source": repeat_out.get("repeat_library_source"),
+        "unmasked_fallback_reason": unmasked_fallback_reason,
         "notes": list(request.notes),
         "decided_by": request.decided_by,
         "rationale_artifact_ref": request.rationale_artifact_ref,
@@ -745,8 +856,8 @@ def apply_mask_review_decision(
     precommit_update = _update_repeat_output(
         state,
         {
-            "softmasked_genome_ref": softmasked_genome_ref,
             "notes": notes,
+            "unmasked_fallback_reason": unmasked_fallback_reason,
         },
     )
     updated_state = state.copy()
@@ -826,17 +937,9 @@ def _parse_tbl_repeat_percentage(tbl_path: Path) -> float | None:
 
 
 def _repeat_library_assets(state: TopLevelState) -> list[AssetRecord]:
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
+    if not state.get("asset_registry_ref"):
         return []
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return []
-    registry = _ASSET_REGISTRY_ADAPTER.validate_python(
-        json.loads(registry_path.read_text(encoding="utf-8"))
-    )
-    assets = _ASSET_RECORDS_ADAPTER.validate_python(registry.get("assets", []))
-    return [asset for asset in assets if asset.asset_type == "repeat_library"]
+    return load_asset_records(state, {"repeat_library"})
 
 
 def _repeat_confidence(

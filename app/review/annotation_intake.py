@@ -242,7 +242,6 @@ def persist_annotation_intake_plan(
             "gate_id": getattr(request, "gate_id", None),
             "decision": request.decision,
             "candidate_id": getattr(request, "candidate_id", None),
-            "final_assembly_ref": getattr(request, "final_assembly_ref", None),
         },
         "prior_plan": prior_plan,
         "recommended_plan": recommended_payload,

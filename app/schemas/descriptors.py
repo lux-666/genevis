@@ -8,6 +8,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.execution import InputDependency
+
 
 class ResourceHints(BaseModel):
     """Execution resource hints from package and method descriptors."""
@@ -104,6 +106,7 @@ class FrozenAttemptSpec(BaseModel):
     conda_bin: str | None = None
     conda_env: str | None = None
     conda_prefix: str | None = None
+    input_dependencies: list[InputDependency]
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

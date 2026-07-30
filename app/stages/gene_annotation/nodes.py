@@ -15,6 +15,11 @@ from langgraph.graph.state import CompiledStateGraph
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+    directory_input_dependency,
+)
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -36,11 +41,13 @@ from app.review.persistence import (
 from app.review.policy import evaluate
 from app.schemas.artifacts import (
     ArtifactMeta,
+    ArtifactRef,
     CandidateBundle,
     GeneAnnotationBundle,
     GeneAnnotationPlan,
 )
 from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.execution import InputDependency
 from app.schemas.state import (
     DOMAIN_STAGES,
     ActiveInterrupt,
@@ -67,9 +74,11 @@ from app.stages.gene_annotation.state import (
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import MASKED_ASSEMBLY_SPEC, assembly_resource_spec
 from app.storage.artifacts import (
+    artifact_ref_for_path,
     publish_artifact_record,
     publish_or_recover_work_artifact,
 )
+from app.storage.asset_registry import load_asset_records
 from app.storage.ledger import Ledger
 from app.workflow import next_stage_name
 
@@ -110,7 +119,12 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> StateUpdate:
     """Resolve masked genome and optional annotation evidence."""
     if _gene_output(state).get("status", ""):
         return {}
-    genome_ref = _softmasked_genome_ref(state)
+    masked_resolution = resolve_stage_resource(
+        state,
+        resource_spec=MASKED_ASSEMBLY_SPEC,
+    )
+    genome_ref = masked_resolution.path
+    genome_resolution = masked_resolution
     genome_source = "softmasked_genome"
     fallback_reason = None
     if not genome_ref:
@@ -122,6 +136,7 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> StateUpdate:
             resource_spec=assembly_resource_spec(),
         )
         genome_ref = assembly.path
+        genome_resolution = assembly
         genome_source = "assembly"
         if not genome_ref:
             return _fail_update(
@@ -129,21 +144,85 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> StateUpdate:
                 "missing assembly resource for gene_annotation fallback",
             )
 
-    rnaseq_refs = _asset_paths(state, {"clean_rnaseq_reads", "raw_rnaseq_reads"})
-    long_rna_refs = _asset_paths(
+    if genome_ref is None:
+        return _fail_update(state, "gene annotation genome input is missing")
+    genome_path = Path(genome_ref)
+    try:
+        if genome_resolution.asset_records:
+            if len(genome_resolution.asset_records) != 1:
+                raise ValueError(
+                    "gene annotation genome must resolve to exactly one asset"
+                )
+            genome_origin = {
+                "genome_input_asset_id": (
+                    genome_resolution.asset_records[0].asset_id
+                )
+            }
+        else:
+            try:
+                genome_artifact_ref = artifact_ref_for_path(
+                    Path(state.get("data_dir", "data")),
+                    state["session_id"],
+                    genome_path,
+                )
+            except (OSError, ValueError):
+                canonical_genome = genome_path.resolve(strict=False)
+                matching_assets = [
+                    asset
+                    for asset in load_asset_records(state)
+                    if Path(asset.path).resolve(strict=False) == canonical_genome
+                ]
+                if len(matching_assets) != 1:
+                    raise ValueError(
+                        "genome path must map to exactly one registered asset "
+                        "or verified run artifact"
+                    )
+                genome_origin = {
+                    "genome_input_asset_id": matching_assets[0].asset_id
+                }
+            else:
+                genome_origin = {
+                    "genome_input_artifact_ref": (
+                        genome_artifact_ref.model_dump(mode="json")
+                    )
+                }
+    except (OSError, ValueError) as exc:
+        return _fail_update(
+            state,
+            f"gene annotation genome input lacks typed provenance: {exc}",
+        )
+
+    rnaseq_assets = _registry_assets(
+        state,
+        {"clean_rnaseq_reads", "raw_rnaseq_reads"},
+    )
+    long_rna_assets = _registry_assets(
         state,
         {"clean_isoseq_reads", "transcript_ccs_reads", "raw_isoseq_or_long_rna_reads"},
     )
-    protein_refs = _asset_paths(state, {"reference_proteins"})
+    protein_assets = _registry_assets(state, {"reference_proteins"})
+    rnaseq_refs = [str(asset["path"]) for asset in rnaseq_assets]
+    long_rna_refs = [str(asset["path"]) for asset in long_rna_assets]
+    protein_refs = [str(asset["path"]) for asset in protein_assets]
     repeat_ref = _repeat_annotation_ref(state)
     base_payload = {
         "genome_input_ref": genome_ref,
         "genome_input_source": genome_source,
+        **genome_origin,
         "unmasked_fallback_reason": fallback_reason,
         "repeat_annotation_ref": repeat_ref,
         "rnaseq_read_refs": rnaseq_refs,
         "long_rna_read_refs": long_rna_refs,
         "protein_evidence_refs": protein_refs,
+        "rnaseq_read_asset_ids": [
+            str(asset["asset_id"]) for asset in rnaseq_assets
+        ],
+        "long_rna_read_asset_ids": [
+            str(asset["asset_id"]) for asset in long_rna_assets
+        ],
+        "protein_evidence_asset_ids": [
+            str(asset["asset_id"]) for asset in protein_assets
+        ],
         "lineage_or_species_hints": _lineage_or_species_hints(state),
     }
     provided = _provided_gene_annotation_refs(state)
@@ -403,6 +482,12 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> StateUpdate:
         return _fail_update(
             state, "no materialized proteins_fasta_ref for final gene set"
         )
+    final_proteins_artifact_ref = gene_out.get("final_proteins_artifact_ref")
+    if final_proteins_artifact_ref is None:
+        return _fail_update(
+            state,
+            "final predicted proteins lack an ArtifactRef",
+        )
     genes_gff3_ref = final_gff_ref or expected_outputs["genes_gff3"]
     transcripts_ref = (
         final_cds_ref
@@ -491,6 +576,7 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> StateUpdate:
                 "genes_gff3_ref": str(genes_gff3_ref),
                 "transcripts_fasta_ref": str(transcripts_ref),
                 "bundle_ref": str(bundle_ref),
+                "primary_output_ref": final_proteins_artifact_ref,
             },
         ),
     }
@@ -563,6 +649,18 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> StateUpdate:
         ),
     )
     bundle_ref = published_bundle.path
+    predicted_proteins_path = Path(str(gene_out["predicted_proteins_ref"]))
+    matching_proteins = [
+        asset
+        for asset in load_asset_records(state, {"predicted_proteins"})
+        if Path(asset.path).resolve(strict=False)
+        == predicted_proteins_path.resolve(strict=False)
+    ]
+    if len(matching_proteins) != 1:
+        return _fail_update(
+            state,
+            "adopted predicted proteins must map to exactly one registered asset",
+        )
 
     gene_update = _update_gene_output(
         state,
@@ -590,6 +688,7 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> StateUpdate:
                 "genes_gff3_ref": str(gene_out["genes_gff3_ref"]),
                 "transcripts_fasta_ref": gene_out.get("transcripts_fasta_ref"),
                 "bundle_ref": str(bundle_ref),
+                "source_asset_ids": [matching_proteins[0].asset_id],
             },
         ),
     }
@@ -1272,6 +1371,10 @@ GENE_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
 
 CANDIDATE_GFF_TYPE = "gene_annotation.candidate_gff"
 FINAL_GFF_TYPE = "gene_annotation.final_gff"
+CANDIDATE_PROTEINS_TYPE = "gene_annotation.candidate_proteins"
+CANDIDATE_CDS_TYPE = "gene_annotation.candidate_cds"
+FINAL_PROTEINS_TYPE = "gene_annotation.final_proteins"
+FINAL_CDS_TYPE = "gene_annotation.final_cds"
 BUSCO_SUMMARY_TYPE = "gene_annotation.busco_summary"
 
 MINIPROT_LIFECYCLE = MethodExecutionLifecycle(
@@ -1379,6 +1482,31 @@ def _method_evm_class(method_name: str) -> str:
     return (evm or {}).get("evidence_class", "ABINITIO_PREDICTION")
 
 
+def _genome_input_dependency(
+    state: TopLevelState,
+    gene_out: GeneAnnotationCursor,
+) -> InputDependency:
+    """Build the single typed dependency declared during genome resolution."""
+
+    genome_ref = gene_out.get("genome_input_ref")
+    if not genome_ref:
+        raise ValueError("gene annotation genome_input_ref is missing")
+    artifact_ref = gene_out.get("genome_input_artifact_ref")
+    asset_id = gene_out.get("genome_input_asset_id")
+    if bool(artifact_ref) == bool(asset_id):
+        raise ValueError(
+            "gene annotation genome requires exactly one typed input origin"
+        )
+    if artifact_ref:
+        return artifact_input_dependency(state, artifact_ref, genome_ref)
+    dependencies = asset_input_dependencies(
+        state,
+        [str(asset_id)],
+        [genome_ref],
+    )
+    return dependencies[0]
+
+
 # Weight bucket each evidence class draws from in merge_weights.
 _EVM_CLASS_WEIGHT_KEY = {
     "ABINITIO_PREDICTION": "ab_initio",
@@ -1396,6 +1524,7 @@ def freeze_candidate_materialization(state: TopLevelState) -> StateUpdate:
     method_name = ""
     suffix = ""
     output_gff3: Path | None = None
+    output_gff3_artifact_ref: object | None = None
     for candidate_method, cfg in GENE_EXECUTABLE_METHODS.items():
         if status == f"{cfg['suffix']}_collected":
             source_gff3 = (gene_out.get("candidate_refs") or {}).get(candidate_method)
@@ -1408,6 +1537,9 @@ def freeze_candidate_materialization(state: TopLevelState) -> StateUpdate:
             method_name = candidate_method
             suffix = cfg["suffix"]
             output_gff3 = Path(str(source_gff3))
+            output_gff3_artifact_ref = (
+                gene_out.get("candidate_artifact_refs") or {}
+            ).get(candidate_method)
             break
     if status == "evm_outputs_collected":
         source_gff3 = gene_out.get("final_gff_ref")
@@ -1417,10 +1549,16 @@ def freeze_candidate_materialization(state: TopLevelState) -> StateUpdate:
         method_name = EVM_METHOD
         suffix = "evm"
         output_gff3 = Path(str(source_gff3))
+        output_gff3_artifact_ref = gene_out.get("final_gff_artifact_ref")
     if not materialization_target:
         return {}
     if output_gff3 is None:
         return _fail_update(state, f"{suffix} materialization requires a source GFF3")
+    if output_gff3_artifact_ref is None:
+        return _fail_update(
+            state,
+            f"{suffix} materialization source GFF3 lacks an ArtifactRef",
+        )
 
     genome_ref = gene_out.get("genome_input_ref")
     if not genome_ref:
@@ -1456,6 +1594,21 @@ def freeze_candidate_materialization(state: TopLevelState) -> StateUpdate:
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o755)
 
+    try:
+        input_dependencies = [
+            _genome_input_dependency(state, gene_out),
+            artifact_input_dependency(
+                state,
+                output_gff3_artifact_ref,
+                output_gff3,
+            ),
+        ]
+    except (OSError, ValueError) as exc:
+        return _fail_update(
+            state,
+            f"{suffix} materialization input dependency is invalid: {exc}",
+        )
+
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:gene_annotation:{suffix}:materialize",
         session_id=session_id,
@@ -1466,6 +1619,7 @@ def freeze_candidate_materialization(state: TopLevelState) -> StateUpdate:
         expected_outputs=[proteins_fa],
         env=gene_out.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "source_gff3": str(output_gff3),
             "candidate_method": method_name,
@@ -1500,7 +1654,38 @@ def collect_candidate_materialization(state: TopLevelState) -> StateUpdate:
 
     proteins_fa = Path(str(attempt.metadata["proteins_fa"]))
     cds_fa = Path(str(attempt.metadata["cds_fa"]))
-    if not proteins_fa.exists() or proteins_fa.stat().st_size == 0:
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    materialization_target = str(attempt.metadata["materialization_target"])
+    proteins_type = (
+        FINAL_PROTEINS_TYPE
+        if materialization_target == "evm"
+        else CANDIDATE_PROTEINS_TYPE
+    )
+    cds_type = (
+        FINAL_CDS_TYPE
+        if materialization_target == "evm"
+        else CANDIDATE_CDS_TYPE
+    )
+    try:
+        published_proteins = publish_or_recover_work_artifact(
+            data_dir,
+            session_id,
+            proteins_fa,
+            stage="gene_annotation",
+            method_name=GFFREAD_METHOD,
+            artifact_type=proteins_type,
+            metadata={"attempt_id": attempt.attempt_id},
+        )
+    except (OSError, ValueError) as exc:
+        return _update_gene_output(
+            state,
+            {
+                "status": "materialization_failed",
+                "reason": f"{suffix} protein materialization is unavailable: {exc}",
+            },
+        )
+    if published_proteins.path.stat().st_size == 0:
         return _update_gene_output(
             state,
             {
@@ -1508,15 +1693,44 @@ def collect_candidate_materialization(state: TopLevelState) -> StateUpdate:
                 "reason": f"{suffix} protein materialization produced no proteins",
             },
         )
-    cds_ref = cds_fa if cds_fa.exists() else None
+    try:
+        published_cds = publish_or_recover_work_artifact(
+            data_dir,
+            session_id,
+            cds_fa,
+            stage="gene_annotation",
+            method_name=GFFREAD_METHOD,
+            artifact_type=cds_type,
+            metadata={"attempt_id": attempt.attempt_id},
+        )
+    except FileNotFoundError:
+        published_cds = None
+    proteins_fa = published_proteins.path
+    cds_ref = published_cds.path if published_cds is not None else None
+    artifact_payloads = [published_proteins.ref.model_dump(mode="json")]
+    if published_cds is not None:
+        artifact_payloads.append(published_cds.ref.model_dump(mode="json"))
+    Ledger(data_dir).record_attempt_succeeded(
+        session_id,
+        attempt,
+        artifacts=artifact_payloads,
+    )
 
-    if attempt.metadata["materialization_target"] == "evm":
+    if materialization_target == "evm":
         return _update_gene_output(
             state,
             {
                 "status": "evm_collected",
                 "final_proteins_ref": str(proteins_fa),
                 "final_cds_ref": str(cds_ref) if cds_ref else None,
+                "final_proteins_artifact_ref": (
+                    published_proteins.ref.model_dump(mode="json")
+                ),
+                "final_cds_artifact_ref": (
+                    published_cds.ref.model_dump(mode="json")
+                    if published_cds is not None
+                    else None
+                ),
             },
         )
 
@@ -1528,8 +1742,13 @@ def collect_candidate_materialization(state: TopLevelState) -> StateUpdate:
         method_name=method_name,
         suffix=suffix,
         output_gff3=output_gff3,
+        annotation_artifact_ref=ArtifactRef.model_validate(
+            (gene_out.get("candidate_artifact_refs") or {})[method_name]
+        ),
         proteins_fa=proteins_fa,
         cds_fa=cds_ref,
+        proteins_artifact_ref=published_proteins.ref,
+        cds_artifact_ref=published_cds.ref if published_cds is not None else None,
         gene_count=gene_count,
     )
     candidate_bundles = dict(gene_out.get("candidate_bundles") or {})
@@ -1556,8 +1775,11 @@ def _write_candidate_bundle(
     method_name: str,
     suffix: str,
     output_gff3: Path,
+    annotation_artifact_ref: ArtifactRef,
     proteins_fa: Path,
     cds_fa: Path | None,
+    proteins_artifact_ref: ArtifactRef,
+    cds_artifact_ref: ArtifactRef | None,
     gene_count: int,
 ) -> CandidateBundleCursor:
     """Write minimal metrics/provenance and return a CandidateBundle dict."""
@@ -1598,9 +1820,23 @@ def _write_candidate_bundle(
         evm_evidence_class=evm_class,
         evm_source_type=suffix,
     )
-    return CANDIDATE_BUNDLE_CURSOR_ADAPTER.validate_python(
-        bundle.model_dump(mode="json")
+    bundle_payload = bundle.model_dump(mode="json")
+    bundle_payload.update(
+        {
+            "annotation_gff_artifact_ref": (
+                annotation_artifact_ref.model_dump(mode="json")
+            ),
+            "proteins_fasta_artifact_ref": (
+                proteins_artifact_ref.model_dump(mode="json")
+            ),
+            "cds_fasta_artifact_ref": (
+                cds_artifact_ref.model_dump(mode="json")
+                if cds_artifact_ref is not None
+                else None
+            ),
+        }
     )
+    return CANDIDATE_BUNDLE_CURSOR_ADAPTER.validate_python(bundle_payload)
 
 
 def _method_category(method_name: str) -> str:
@@ -1632,6 +1868,7 @@ def _freeze_gene_method_attempt(
     method_name: str,
     cfg: dict[str, str],
     script_body: str,
+    additional_input_dependencies: list[InputDependency] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> StateUpdate:
     """Shared freeze path: resolve env, write script, produce FrozenAttemptSpec."""
@@ -1666,6 +1903,17 @@ def _freeze_gene_method_attempt(
     script_path.write_text(script_body, encoding="utf-8")
     script_path.chmod(0o755)
 
+    try:
+        input_dependencies = [
+            _genome_input_dependency(state, gene_out),
+            *(additional_input_dependencies or []),
+        ]
+    except (OSError, ValueError) as exc:
+        return _fail_update(
+            state,
+            f"{cfg['suffix']} input dependency is invalid: {exc}",
+        )
+
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:gene_annotation:{cfg['suffix']}",
         session_id=session_id,
@@ -1676,6 +1924,7 @@ def _freeze_gene_method_attempt(
         expected_outputs=[output_gff3],
         env=gene_out.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "genome_input_ref": str(genome_ref),
             "output_gff3": str(output_gff3),
@@ -1781,12 +2030,24 @@ def freeze_miniprot_attempt(state: TopLevelState) -> StateUpdate:
         f"miniprot --gff {genome_arg} {protein_args} > {output_arg}\n"
         f"test -f {output_arg}\n"
     )
+    try:
+        protein_dependencies = asset_input_dependencies(
+            state,
+            list(gene_out.get("protein_evidence_asset_ids") or []),
+            [str(ref) for ref in protein_refs],
+        )
+    except ValueError as exc:
+        return _fail_update(
+            state,
+            f"miniprot protein input dependency is invalid: {exc}",
+        )
     return _freeze_gene_method_attempt(
         state,
         lifecycle=MINIPROT_LIFECYCLE,
         method_name=MINIPROT_METHOD,
         cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
         script_body=script,
+        additional_input_dependencies=list(protein_dependencies),
         extra_metadata={"protein_evidence_refs": [str(ref) for ref in protein_refs]},
     )
 
@@ -1897,6 +2158,12 @@ def freeze_evm_attempt(state: TopLevelState) -> StateUpdate:
         if bundle:
             update["final_proteins_ref"] = bundle.get("proteins_fasta_ref")
             update["final_cds_ref"] = bundle.get("cds_fasta_ref")
+            update["final_proteins_artifact_ref"] = bundle.get(
+                "proteins_fasta_artifact_ref"
+            )
+            update["final_cds_artifact_ref"] = bundle.get(
+                "cds_fasta_artifact_ref"
+            )
         return _update_gene_output(state, update)
 
     # Multi-candidate: write EVM weights file and script.
@@ -1926,6 +2193,19 @@ def freeze_evm_attempt(state: TopLevelState) -> StateUpdate:
         weight_lines.append(f"{evm_class}\t{source_type}\t{weight}")
         evm_inputs[_evm_argument_bucket(evm_class)].append(method_ref)
     weights_path.write_text("\n".join(weight_lines) + "\n", encoding="utf-8")
+    try:
+        published_weights = publish_or_recover_work_artifact(
+            data_dir,
+            session_id,
+            weights_path,
+            stage="gene_annotation",
+            method_name=EVM_METHOD,
+            artifact_type="gene_annotation.evm_weights",
+            metadata={"candidate_methods": sorted(candidate_refs)},
+        )
+    except (OSError, ValueError) as exc:
+        return _fail_update(state, f"EVM weights publication failed: {exc}")
+    weights_path = published_weights.path
 
     output_gff3 = working_dir / "evm_merged.gff3"
     script_path = working_dir / "run_evm.sh"
@@ -1956,6 +2236,32 @@ def freeze_evm_attempt(state: TopLevelState) -> StateUpdate:
     if blocked is not None:
         return _update_gene_output(state, blocked)
 
+    try:
+        input_dependencies: list[InputDependency] = [
+            _genome_input_dependency(state, gene_out),
+            artifact_input_dependency(
+                state,
+                published_weights.ref,
+                weights_path,
+            ),
+        ]
+        candidate_artifact_refs = gene_out.get("candidate_artifact_refs") or {}
+        for method_name, method_ref in sorted(candidate_refs.items()):
+            raw_ref = candidate_artifact_refs.get(method_name)
+            if raw_ref is None:
+                raise ValueError(
+                    f"EVM candidate {method_name!r} lacks an ArtifactRef"
+                )
+            input_dependencies.append(
+                artifact_input_dependency(
+                    state,
+                    raw_ref,
+                    method_ref,
+                )
+            )
+    except (OSError, ValueError) as exc:
+        return _fail_update(state, f"EVM input dependency is invalid: {exc}")
+
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:gene_annotation:evm",
         session_id=session_id,
@@ -1966,6 +2272,7 @@ def freeze_evm_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[output_gff3],
         env=gene_out.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "genome_input_ref": str(genome_ref),
             "candidate_refs": candidate_refs,
@@ -2048,12 +2355,16 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> StateUpdate:
 
     transcript_ref = final_cds_ref or gene_out.get("transcripts_fasta_ref")
 
+    busco_input_artifact_ref: object | None = None
     if final_proteins_ref and Path(str(final_proteins_ref)).exists():
         busco_input = str(final_proteins_ref)
         busco_mode = "proteins"
+        busco_input_artifact_ref = gene_out.get("final_proteins_artifact_ref")
     elif transcript_ref and Path(str(transcript_ref)).exists():
         busco_input = str(transcript_ref)
         busco_mode = "transcriptome"
+        if final_cds_ref and str(transcript_ref) == str(final_cds_ref):
+            busco_input_artifact_ref = gene_out.get("final_cds_artifact_ref")
     else:
         return _update_gene_output(
             state,
@@ -2074,6 +2385,22 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> StateUpdate:
                 "busco_completeness_status": "missing",
                 "busco_note": "no busco_lineage in lineage_or_species_hints",
             },
+        )
+    lineage_path = Path(busco_lineage).expanduser()
+    lineage_dependency: InputDependency | None = None
+    if lineage_path.exists() or len(lineage_path.parts) > 1:
+        try:
+            lineage_dependency = directory_input_dependency(lineage_path)
+        except (OSError, ValueError) as exc:
+            return _fail_update(
+                state,
+                f"gene BUSCO lineage dependency is invalid: {exc}",
+            )
+        busco_lineage = lineage_dependency.path
+    if busco_input_artifact_ref is None:
+        return _fail_update(
+            state,
+            "gene BUSCO sequence input lacks an ArtifactRef",
         )
 
     data_dir = absolute_data_dir(state)
@@ -2111,6 +2438,18 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> StateUpdate:
     )
     script_path.chmod(0o755)
 
+    try:
+        busco_input_dependency = artifact_input_dependency(
+            state,
+            busco_input_artifact_ref,
+            busco_input,
+        )
+    except (OSError, ValueError) as exc:
+        return _fail_update(
+            state,
+            f"gene BUSCO input dependency is invalid: {exc}",
+        )
+
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:gene_annotation:busco",
         session_id=session_id,
@@ -2121,6 +2460,10 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> StateUpdate:
         expected_outputs=[short_summary],
         env=gene_out.get("env"),
         env_spec=env_spec,
+        input_dependencies=[
+            busco_input_dependency,
+            *([lineage_dependency] if lineage_dependency is not None else []),
+        ],
         metadata={
             "busco_input": busco_input,
             "busco_mode": busco_mode,
@@ -2252,17 +2595,12 @@ def _explicit_unmasked_fallback_reason(state: TopLevelState) -> str | None:
 def _registry_assets(
     state: TopLevelState, asset_types: set[str]
 ) -> list[dict[str, Any]]:
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
+    if not state.get("asset_registry_ref"):
         return []
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return []
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
     return [
-        asset
-        for asset in registry.get("assets", [])
-        if asset.get("asset_type") in asset_types and asset.get("path")
+        record.model_dump(mode="json")
+        for record in load_asset_records(state, asset_types)
+        if record.path
     ]
 
 

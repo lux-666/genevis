@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,25 @@ from app.stages.resource_resolution import (
     resolve_stage_resource,
     update_resource_ref,
 )
+from app.schemas.artifacts import ArtifactMeta
+from app.storage.artifacts import publish_artifact_record
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
+
+
+def _publish_registry_ref(data_dir: str, session_id: str, registry_path: Path) -> dict:
+    paths = SessionPaths.from_run_dir(data_dir)
+    source = paths.work_path("inventory", "asset_registry.json")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(registry_path.read_text(encoding="utf-8"), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        source,
+        stage="inventory",
+        method_name="inventory.register_assets",
+        artifact_type="asset_registry",
+    )
+    published = publish_artifact_record(data_dir, session_id, artifact)
+    return published.ref.model_dump(mode="json")
 
 
 def test_resolution_precedence_is_override_then_central_then_registry(tmp_path) -> None:
@@ -17,6 +37,8 @@ def test_resolution_precedence_is_override_then_central_then_registry(tmp_path) 
     registry_path.write_text(
         json.dumps(
             {
+                "schema_version": 1,
+                "session_id": "s1",
                 "assets": [
                     {
                         "asset_id": "raw-1",
@@ -29,7 +51,8 @@ def test_resolution_precedence_is_override_then_central_then_registry(tmp_path) 
         encoding="utf-8",
     )
     state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-    state["asset_registry_ref"] = str(registry_path)
+    state["data_dir"] = str(v2_run_dir(tmp_path, "s1"))
+    state["asset_registry_ref"] = _publish_registry_ref(state["data_dir"], "s1", registry_path)
     state["resource_refs"]["long_reads"] = ResourceRef(
         resource_type="long_reads",
         paths=["/central/clean.fastq.gz"],
@@ -59,6 +82,8 @@ def test_registry_fallback_honors_asset_type_priority_and_multiple(tmp_path) -> 
     registry_path.write_text(
         json.dumps(
             {
+                "schema_version": 1,
+                "session_id": "s1",
                 "assets": [
                     {
                         "asset_id": "raw-1",
@@ -81,7 +106,8 @@ def test_registry_fallback_honors_asset_type_priority_and_multiple(tmp_path) -> 
         encoding="utf-8",
     )
     state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-    state["asset_registry_ref"] = str(registry_path)
+    state["data_dir"] = str(v2_run_dir(tmp_path, "s1"))
+    state["asset_registry_ref"] = _publish_registry_ref(state["data_dir"], "s1", registry_path)
 
     resolved = resolve_stage_resource(
         state,
@@ -97,23 +123,46 @@ def test_registry_fallback_honors_asset_type_priority_and_multiple(tmp_path) -> 
     assert resolved.metadata["asset_types"] == ["clean_long_reads"]
 
 
-def test_inventory_resource_ref_honors_asset_type_priority() -> None:
+def test_inventory_resource_ref_honors_asset_type_priority(tmp_path) -> None:
     state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    raw_path = tmp_path / "raw" / "one.fastq.gz"
+    clean_path = tmp_path / "clean" / "one.fastq.gz"
+    raw_path.parent.mkdir()
+    clean_path.parent.mkdir()
+    raw_path.write_bytes(b"raw")
+    clean_path.write_bytes(b"clean")
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": "s1",
+                "assets": [
+                    {
+                        "asset_id": "raw-1",
+                        "asset_type": "raw_long_reads",
+                        "path": str(raw_path),
+                    },
+                    {
+                        "asset_id": "clean-1",
+                        "asset_type": "clean_long_reads",
+                        "path": str(clean_path),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state["data_dir"] = str(v2_run_dir(tmp_path, "s1"))
+    state["asset_registry_ref"] = _publish_registry_ref(state["data_dir"], "s1", registry_path)
     state["resource_refs"]["long_reads"] = ResourceRef(
         resource_type="long_reads",
-        paths=["/raw/one.fastq.gz", "/clean/one.fastq.gz"],
+        paths=[str(raw_path), str(clean_path)],
         source_stage=None,
         metadata={
-            "assets": [
-                {
-                    "asset_type": "raw_long_reads",
-                    "path": "/raw/one.fastq.gz",
-                },
-                {
-                    "asset_type": "clean_long_reads",
-                    "path": "/clean/one.fastq.gz",
-                },
-            ]
+            "asset_registry_ref": str(registry_path),
+            "asset_ids": ["raw-1", "clean-1"],
+            "member_count": 2,
         },
     ).to_dict()
 
@@ -126,7 +175,8 @@ def test_inventory_resource_ref_honors_asset_type_priority() -> None:
         ),
     )
 
-    assert resolved.paths == ["/clean/one.fastq.gz"]
+    assert resolved.paths == [str(clean_path)]
+    assert resolved.metadata["asset_ids"] == ["clean-1"]
 
 
 def test_update_resource_ref_returns_validated_replacement_without_mutation() -> None:

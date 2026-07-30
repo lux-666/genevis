@@ -32,6 +32,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_RESPONSE_PARSE,
     ArtifactMeta,
     ArtifactRef,
+    AssemblyCandidateBundle,
     ParameterAttempt,
     ParameterRecommendationCursor,
 )
@@ -72,7 +73,11 @@ from app.stages.assembly.parameters.catalog import (
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
 from app.stages.assembly.parameters.storage import (
     read_artifact as read_json_artifact,
+)
+from app.stages.assembly.parameters.storage import (
     write_artifact as write_attempt_json_artifact,
+)
+from app.stages.assembly.parameters.storage import (
     write_artifact as write_recommendation_json_artifact,
 )
 from app.stages.assembly.parameters.workflow import (
@@ -1236,7 +1241,6 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 "assembly_selection": {
                     "read_type": "ont_raw",
                     "primary_method": "assembly.candidate.hifiasm_ont",
-                    "fallback_method": None,
                     "source": "recommendation",
                     "rationale": "test",
                     "metadata": {},
@@ -1763,6 +1767,68 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
 
 class MethodFreezeParameterFailureTests(unittest.TestCase):
+    def _attach_planned_candidate(
+        self,
+        state: dict,
+        assembly: dict,
+        *,
+        method_name: str,
+    ) -> None:
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        short_name = method_name.rsplit(".", 1)[-1]
+        source = paths.work_path(
+            "assembly",
+            "fixture_candidate_planning",
+            f"{short_name}.planned.json",
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        bundle = AssemblyCandidateBundle(
+            session_id=state["session_id"],
+            candidate_id=f"{state['session_id']}:{method_name}:parameter_attempt_0",
+            method_name=method_name,
+            status="planned",
+            input_ref=assembly["input_ref"],
+            input_type=assembly["input_type"],
+            parameter_attempt_id=0,
+            expected_outputs={
+                "draft_assembly_fasta": str(
+                    paths.artifact_path(
+                        "assembly",
+                        "attempts",
+                        "000",
+                        "outputs",
+                        short_name,
+                        "draft_assembly.fasta",
+                    )
+                )
+            },
+        )
+        source.write_text(
+            json.dumps(bundle.model_dump(mode="json"), indent=2),
+            encoding="utf-8",
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="assembly",
+            method_name=method_name,
+            artifact_type="draft_assembly.candidate",
+        )
+        published = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            artifact,
+            destination=paths.artifact_path(
+                "assembly",
+                "attempts",
+                "000",
+                "candidates",
+                f"{short_name}.planned.json",
+            ),
+        )
+        assembly["planned_candidate_bundle_ref"] = published.ref.model_dump(
+            mode="json"
+        )
+
     def _parameter_attempt(
         self, state: dict, *, method_name: str, recommended_params=None
     ) -> dict:
@@ -1799,12 +1865,12 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             "assembly_selection": {
                 "read_type": "pacbio_hifi" if method == "hifiasm" else "ont_raw",
                 "primary_method": method_name,
-                "fallback_method": None,
                 "source": "run_config",
                 "rationale": "test fixture explicitly selects the assembly method",
             },
             param_key: {"threads": 1},
             "current_parameter_attempt_id": 0,
+            "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
         }
         if attempt_payload is not None:
             assembly["parameter_attempts"] = [attempt_payload]
@@ -1820,6 +1886,11 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             assembly,
             method_id=method_name,
         ).model_dump(mode="json")
+        self._attach_planned_candidate(
+            state,
+            assembly,
+            method_name=method_name,
+        )
         state["stage_outputs"] = {"assembly": assembly}
         return state
 
@@ -1841,7 +1912,6 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             "assembly_selection": {
                 "read_type": "ont_raw",
                 "primary_method": "assembly.candidate.nextdenovo",
-                "fallback_method": None,
                 "source": "run_config",
                 "rationale": "test fixture explicitly selects the assembly method",
             },
@@ -1849,6 +1919,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 "genome_size": 2_000_000,
                 "threads": 1,
             },
+            "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
             "resolved_genome_size": {
                 "value_bp": 2_000_000,
                 "source": "provided",
@@ -1870,6 +1941,11 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             assembly,
             method_id="assembly.candidate.nextdenovo",
         ).model_dump(mode="json")
+        self._attach_planned_candidate(
+            state,
+            assembly,
+            method_name="assembly.candidate.nextdenovo",
+        )
         state["stage_outputs"] = {"assembly": assembly}
         return state
 

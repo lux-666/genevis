@@ -13,6 +13,7 @@ from app.domains.assembly.selection import (
     AssemblySelectionSource,
     NormalizedReadType,
 )
+from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,
@@ -39,7 +40,6 @@ class AssemblySelectionCursor(TypedDict, total=False):
 
     read_type: str
     primary_method: str
-    fallback_method: str | None
     source: AssemblySelectionSource
     rationale: str
     metadata: JsonObject
@@ -79,12 +79,11 @@ class AssemblyCandidatePlanCursor(TypedDict, total=False):
 
     method_name: str
     status: Literal["compatible", "rejected", "selected"]
-    role: Literal["candidate", "primary", "fallback"]
+    role: Literal["candidate", "primary"]
     required_inputs: list[str]
     optional_inputs: list[str]
     requires_genome_size: bool
     rejection_reason: str | None
-    candidate_ref: str | None
     metadata: JsonObject
 
 
@@ -122,15 +121,24 @@ class AssemblyStageCursor(TypedDict, total=False):
     selected_route: Literal["cyclone", "ont", "hifi"]
     normalized_read_type: NormalizedReadType | None
     primary_method: str
-    fallback_method: str | None
     execution_mode: str
     method_application_notes: list[str]
 
     primary_long_reads_ref: str
+    primary_long_read_refs: list[str]
     primary_long_read_platform: str | None
     ont_reads_ref: str | None
+    ultralong_read_refs: list[str]
     hifi_reads_ref: str | None
+    hifi_read_refs: list[str]
     hic_reads_ref: str | None
+    hic_r1_reads: list[str]
+    hic_r2_reads: list[str]
+    assembly_input_member_ids: dict[str, list[str]]
+    assembly_input_member_platforms: dict[str, list[str]]
+    assembly_input_artifact_refs: dict[str, list[ArtifactRefJson | None]]
+    use_ultralong_ont: bool
+    use_hic_phasing: bool
     input_ref: str | list[str]
     input_type: str
     input_source: str
@@ -151,14 +159,11 @@ class AssemblyStageCursor(TypedDict, total=False):
     shared_parameters: JsonObject
 
     candidate_methods: list[str]
-    selected_methods: list[str]
     candidate_plans: list[AssemblyCandidatePlanCursor]
-    selected_candidate_plans: list[AssemblyCandidatePlanCursor]
     rejected_candidates: dict[str, str]
-    candidate_artifact_refs: list[str]
-    selected_candidate_refs: list[str]
-    executed_candidate_refs: list[str]
-    candidate_assembly_refs: list[str]
+    planned_candidate_bundle_ref: ArtifactRefJson
+    executed_candidate_bundle_ref: ArtifactRefJson
+
     artifact_refs: list[str]
     draft_assembly_ref: str
     substeps: dict[str, PydanticJsonValue]

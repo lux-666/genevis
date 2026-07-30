@@ -11,6 +11,7 @@ from app.llm.parameters.base import (
     build_adjustable_parameters,
 )
 from app.schemas.artifacts import ParameterAttemptTask
+from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     AutoHiCRecommendationContext,
     CanonicalRecommendationFacts,
@@ -51,14 +52,15 @@ def build_autohic_parameter_request(
     *,
     facts: CanonicalRecommendationFacts,
     context: AutoHiCRecommendationContext,
-    catalog: "app.schemas.parameter_catalog.MethodParameterCatalog",
+    catalog: MethodParameterCatalog,
     task: ParameterAttemptTask = "recommend_initial",
 ) -> AutoHiCParameterRequest:
     """Project typed recommendation inputs into the strict model-facing DTO."""
 
-    from app.schemas.parameter_catalog import MethodParameterCatalog  # local import avoids cycle
-
-    if not isinstance(catalog, MethodParameterCatalog) or catalog.method_id != AUTOHIC_METHOD:
+    if (
+        not isinstance(catalog, MethodParameterCatalog)
+        or catalog.method_id != AUTOHIC_METHOD
+    ):
         raise ValueError("AutoHiC model request requires the autohic catalog")
     adjustable = build_adjustable_parameters(catalog)
     if not adjustable:

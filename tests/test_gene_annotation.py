@@ -27,6 +27,9 @@ from app.stages.gene_annotation.nodes import (
     build_final_gene_set_review_payload,
     build_merge_review_payload,
 )
+from app.schemas.artifacts import ArtifactMeta
+from app.storage.artifacts import publish_artifact_record
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -116,6 +119,24 @@ class GeneAnnotationStageTests(unittest.TestCase):
         )
         return path
 
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
@@ -123,7 +144,11 @@ class GeneAnnotationStageTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "gene_annotation"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
+            if registry_ref is not None
+            else None
+        )
         state["requested_stages"] = [
             "assembly_review",
             "gene_annotation",
@@ -562,6 +587,24 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         )
         return path
 
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
+
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
@@ -569,7 +612,11 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "gene_annotation"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
+            if registry_ref is not None
+            else None
+        )
         state["requested_stages"] = [
             "assembly_review",
             "gene_annotation",

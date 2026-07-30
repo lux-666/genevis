@@ -1,4 +1,4 @@
-"""Staged planning helpers for `gene-agent ask`."""
+"""Staged planning helpers used by the TUI and annotation intake."""
 
 from __future__ import annotations
 
@@ -18,10 +18,13 @@ from app.schemas.ask_plan import (
     AskClarificationRequest,
     AskClarificationResponse,
     AskPlanState,
-    save_ask_plan,
 )
 from app.schemas.manifest import InputManifest
-from app.schemas.run_config import AutoHiCRunParameters, RunConfig
+from app.schemas.run_config import (
+    AutoHiCRunParameters,
+    HifiasmRunParameters,
+    RunConfig,
+)
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.warnings import PlanWarning as PlanWarning
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
@@ -147,22 +150,6 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
     return None
 
 
-def ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
-    from app.storage.paths import SessionPaths
-
-    return SessionPaths(data_dir, session_id).ask_plan_path
-
-
-def locate_ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
-    """Return the sole v2 location for a persisted clarification plan."""
-
-    return ask_plan_path(data_dir, session_id)
-
-
-def save_plan_to_default_path(plan: AskPlanState) -> Path:
-    return save_ask_plan(plan, ask_plan_path(plan.data_dir, plan.session_id))
-
-
 def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
     """Build an evidence-prefilled draft plan from the parsed workflow goal.
 
@@ -173,11 +160,10 @@ def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
 
     Contract: the result is a *candidate*, not committed state. The fields it
     reuses (selected_stages/selected_methods/...) carry recommended values, not
-    operator-confirmed ones. The caller must show it for approval and only treat
-    it as the live plan (persist it / feed it to next_clarification) once the
-    operator accepts; on reject it must be discarded, never saved. A dedicated
-    AskPlanDraft model is unnecessary because this value is an unpersisted view
-    of the existing plan schema.
+    operator-confirmed ones. The caller must show it for approval and only feed
+    it to next_clarification once the operator accepts; on reject it must be
+    discarded. A dedicated AskPlanDraft model is unnecessary because this value
+    is an uncommitted view of the existing plan schema.
     """
     target = _intent_requested_stages(plan)
     if not target:
@@ -399,7 +385,16 @@ def _build_assembly_execution_config(
     method_name = executable[0]
     config_method = method_name.rsplit(".", 1)[-1]
     supplied = dict((plan.method_parameters or {}).get(method_name) or {})
-    params = {"threads": supplied["threads"]} if "threads" in supplied else {}
+    allowed_parameter_fields = (
+        HifiasmRunParameters.model_fields
+        if config_method == "hifiasm"
+        else {"threads"}
+    )
+    params = {
+        name: value
+        for name, value in supplied.items()
+        if name in allowed_parameter_fields
+    }
     parameter_key = f"{config_method}_parameters"
     config: dict[str, Any] = {"assembly_method": config_method, parameter_key: params}
     if config_method == "hifiasm":
@@ -422,17 +417,6 @@ def _build_hic_scaffolding_config(plan: AskPlanState) -> dict[str, Any] | None:
     validated = AutoHiCRunParameters.model_validate(executor_params)
     payload = validated.model_dump(exclude_none=True)
     return {"autohic_parameters": payload} if payload else {}
-
-
-def write_ask_run_config(plan: AskPlanState) -> Path:
-    plan = _auto_fill_inferred_defaults(plan)
-    payload = build_run_config_payload(plan)
-    from app.storage.paths import SessionPaths
-
-    path = SessionPaths(plan.data_dir, plan.session_id).run_config_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
 
 
 def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
@@ -797,11 +781,8 @@ def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
 
 def _next_action(ask_plan_ref: str) -> dict[str, Any]:
     return {
-        "kind": "provide_clarification_response",
-        "command": (
-            f"gene-agent ask --ask-plan {ask_plan_ref} "
-            "--clarification-response <answers.json>"
-        ),
+        "kind": "continue_in_tui",
+        "plan_ref": ask_plan_ref,
     }
 
 
@@ -967,21 +948,15 @@ def _all_selectable_stages() -> list[str]:
 
 
 def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
+    from app.workflow import stages_through
+
     manifest = _load_manifest(manifest_ref)
     if manifest is None:
         return []
     asset_types = {asset.asset_type for asset in manifest.assets}
     recommended: list[str] = []
     if "raw_long_reads" in asset_types:
-        recommended.extend(
-            [
-                "read_qc",
-                "genome_survey",
-                "assembly",
-                "assembly_dedup",
-                "assembly_review",
-            ]
-        )
+        recommended.extend(stages_through("assembly_review"))
     if "assembly_fasta_registered" in asset_types:
         recommended.append("assembly_review")
     if {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:
@@ -1224,9 +1199,9 @@ def _build_t2t_config(plan: AskPlanState) -> dict[str, Any]:
         value = params.get(key)
         if value not in (None, ""):
             payload[key] = value
-    read_refs = params.get("ont_read_refs")
-    if isinstance(read_refs, list):
-        payload["ont_read_refs"] = list(read_refs)
+    read_inputs = params.get("read_inputs")
+    if isinstance(read_inputs, list):
+        payload["read_inputs"] = [dict(item) for item in read_inputs]
     return payload
 
 

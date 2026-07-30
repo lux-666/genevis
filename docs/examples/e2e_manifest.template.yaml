@@ -3,8 +3,8 @@
 # Copy this file to a server-local path and replace placeholder paths with
 # real files on the HPC. Do NOT commit the filled-in version with private paths.
 #
-# This manifest starts from raw long reads and includes a provided repeat
-# library so the full mainline can reach terminal completion in one session.
+# This manifest starts from raw long reads and includes the external files
+# consumed by RepeatMasker and DIAMOND.
 
 session_id: e2e-YYYYMMDD-a
 genome_size_estimate: 5000000  # replace with the operator-provided estimate
@@ -27,3 +27,10 @@ assets:
       source: provided
       trusted: true
       note: provided repeat library for RepeatMasker
+
+  - asset_type: function_database
+    paths:
+      - /abs/path/to/uniprot.dmnd
+    metadata:
+      source: operator-provided DIAMOND database
+      note: must match function_annotation.database_provenance.database_source_ref

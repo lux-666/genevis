@@ -90,9 +90,14 @@ from app.stages.hic_scaffolding.parameters.context import (
 )
 from app.stages.hic_scaffolding.parameters.storage import (
     ParameterPersistenceError,
-    publish_file as publish_autohic_parameter_file,
+)
+from app.stages.hic_scaffolding.parameters.storage import (
     read_artifact as read_autohic_parameter_artifact,
+)
+from app.stages.hic_scaffolding.parameters.storage import (
     recover_artifact as recover_autohic_parameter_artifact,
+)
+from app.stages.hic_scaffolding.parameters.storage import (
     write_artifact as write_autohic_parameter_artifact,
 )
 from app.stages.hic_scaffolding.state import HiCScaffoldingCursor

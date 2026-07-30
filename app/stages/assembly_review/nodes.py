@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -32,6 +33,7 @@ from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_COMPARISON,
+    ASSEMBLY_DRAFT_ASSEMBLY,
     ASSEMBLY_REVIEW_ACTION,
     ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
@@ -39,6 +41,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
     ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
     ArtifactMeta,
+    ArtifactRef,
     AssemblyEvalBundle,
     AssemblyEvalSignal,
     AssemblyReviewActionArtifact,
@@ -59,6 +62,9 @@ from app.stages.assembly.method_application.support import (
 )
 from app.stages.assembly_review.method_application.support import (
     read_eval_bundle as _read_eval_bundle,
+)
+from app.stages.assembly_review.method_application.support import (
+    verified_review_candidate as _verified_review_candidate,
 )
 from app.stages.assembly_review.method_application.support import (
     write_json_artifact as _write_json_artifact,
@@ -89,7 +95,16 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
-from app.storage.artifacts import publish_artifact_record, register_artifact_records
+from app.storage.artifacts import (
+    PublishedArtifact,
+    publish_artifact_record,
+    register_artifact_records,
+)
+from app.storage.assembly_candidates import (
+    VerifiedExecutedCandidate,
+    load_executed_candidate_bundle,
+    publish_derived_assembly_candidate,
+)
 from app.storage.ledger import Ledger
 from app.workflow import is_terminal_failure
 
@@ -100,30 +115,6 @@ ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
 def enter_assembly_review(state: TopLevelState) -> StateUpdate:
     """Mark assembly_review as running.  No side effects."""
-    stage_outputs = state.get("stage_outputs") or {}
-    assembly_out = stage_outputs.get("assembly") or {}
-    legacy_status = assembly_out.get("status")
-    has_legacy_request = assembly_out.get("rerun_request") is not None
-    if has_legacy_request or legacy_status in {
-        "flye_rerun_planned",
-        "flye_rerun_frozen",
-        "flye_rerun_ran",
-    }:
-        review_update = update_assembly_review_output(
-            state,
-            {
-                "status": "failed",
-                "reason": (
-                    "unsupported legacy Flye rerun lifecycle state or rerun_request "
-                    f"(status={legacy_status!r}); use the v3 Assembly parameter retry "
-                    "workflow"
-                ),
-            },
-        )
-        return {
-            "supervision_state": "running_stage",
-            **review_update,
-        }
     return {"supervision_state": "running_stage"}
 
 
@@ -134,60 +125,93 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
         state,
         resource_spec=ASSEMBLY_CANDIDATES_SPEC,
     )
-    bundle_refs = list(assembly.metadata.get("candidate_bundle_refs") or [])
-    assembly_candidates = _load_selected_candidate_refs(bundle_refs)
-    assembly_candidates.extend(
-        ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(bundle)
-        for bundle in assembly.metadata.get("candidate_bundles") or []
-        if isinstance(bundle, dict)
-    )
-    materialized_from_bundles: set[str] = set()
-    for bundle in assembly_candidates:
-        final_ref = (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta")
-        if final_ref:
-            materialized_from_bundles.add(str(final_ref))
-        candidates.append(
-            ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(
-                {
-                    "candidate_id": bundle.get("candidate_id", "unknown"),
-                    "method_name": bundle.get("method_name", "unknown"),
-                    "source": assembly.source,
-                    "bundle_ref": bundle.get("candidate_ref")
-                    or bundle.get("bundle_ref"),
-                    "status": bundle.get("status", "planned"),
-                    "final_assembly_ref": final_ref,
-                }
-            )
+    current_ref = assembly.metadata.get("candidate_bundle_ref")
+    if current_ref is None:
+        return update_assembly_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": "assembly resource has no executed candidate bundle ref",
+                "candidate_count": 0,
+                "candidates": [],
+            },
         )
-    for index, assembly_ref in enumerate(assembly.paths):
-        if assembly_ref in materialized_from_bundles:
-            continue
-        # Candidate metadata is authoritative for planned/non-materialized
-        # candidates.  Do not turn its locator paths into duplicate candidates.
-        if assembly_candidates and not Path(assembly_ref).is_file():
-            continue
-        is_registered_input = (
-            assembly.source_type == "asset"
-            or assembly.metadata.get("asset_type") == "assembly_fasta_registered"
-            or "assembly_fasta_registered"
-            in (assembly.metadata.get("asset_types") or [])
+
+    candidate_inputs = [
+        ("candidate_bundle_ref", current_ref, assembly.source),
+    ]
+    raw_ref = assembly.metadata.get("raw_candidate_bundle_ref")
+    if raw_ref is not None:
+        candidate_inputs.append(
+            ("raw_candidate_bundle_ref", raw_ref, f"{assembly.source}:raw")
         )
-        candidates.append(
-            ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(
-                {
-                    "candidate_id": (
-                        "existing_assembly"
-                        if is_registered_input and index == 0
-                        else f"{assembly.source}:{index}"
-                    ),
-                    "method_name": assembly.metadata.get(
-                        "method_name", "user_provided"
-                    ),
-                    "source": assembly.source,
-                    "status": "materialized",
-                    "final_assembly_ref": assembly_ref,
-                }
+    verified_by_id: dict[str, VerifiedExecutedCandidate] = {}
+    try:
+        for metadata_key, raw_candidate_ref, source in candidate_inputs:
+            verified = load_executed_candidate_bundle(
+                absolute_data_dir(state),
+                state["session_id"],
+                raw_candidate_ref,
             )
+            if verified.ref.artifact_id in verified_by_id:
+                continue
+            verified_by_id[verified.ref.artifact_id] = verified
+            candidates.append(
+                ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(
+                    {
+                        "candidate_id": verified.bundle.candidate_id,
+                        "method_name": verified.bundle.method_name,
+                        "source": source,
+                        "status": "executed",
+                        "bundle_ref": verified.ref.model_dump(mode="json"),
+                        "primary_output_ref": (
+                            verified.primary_output_ref.model_dump(mode="json")
+                        ),
+                    }
+                )
+            )
+            projected_primary_key = (
+                "primary_output_ref"
+                if metadata_key == "candidate_bundle_ref"
+                else "raw_primary_output_ref"
+            )
+            projected_primary = assembly.metadata.get(projected_primary_key)
+            if projected_primary is None:
+                raise ValueError(
+                    f"assembly resource has no {projected_primary_key}"
+                )
+            if (
+                ArtifactRef.model_validate(projected_primary)
+                != verified.primary_output_ref
+            ):
+                raise ValueError(
+                    f"assembly resource {projected_primary_key} does not match "
+                    f"{metadata_key}"
+                )
+    except (OSError, TypeError, ValueError) as exc:
+        return update_assembly_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": f"assembly candidate handoff is invalid: {exc}",
+                "candidate_count": 0,
+                "candidates": [],
+            },
+        )
+
+    current = verified_by_id[ArtifactRef.model_validate(current_ref).artifact_id]
+    if [str(current.primary_output_path)] != list(assembly.paths):
+        return update_assembly_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": (
+                    "assembly resource paths do not match the current executed "
+                    "candidate primary output"
+                ),
+                "candidate_count": 0,
+                "candidates": [],
+            },
         )
 
     # Build review plan
@@ -817,14 +841,72 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
     selected_candidate_id = ar_out.get("selected_candidate_id")
     rejected_candidates = ar_out.get("rejected_candidates", [])
     final_assembly_ref = ar_out.get("final_assembly_ref")
-    pre_action_ref = ar_out.get("pre_action_assembly_ref") or final_assembly_ref
     action_type = ar_out.get("action_type", "pass")
     action_execution_mode = ar_out.get("action_execution_mode", "none")
     method_name = ar_out.get("action_method_name")
     evidence_refs = list(ar_out.get("evidence_refs") or [])
     evidence_notes = list(ar_out.get("evidence_notes") or [])
 
-    output_assembly_ref = final_assembly_ref
+    selected_candidate = None
+    selected_verified = None
+    current_verified_candidate = None
+    current_primary_output_ref = None
+    if selected_candidate_id:
+        selected_candidate = next(
+            (
+                candidate
+                for candidate in ar_out.get("candidates") or []
+                if candidate.get("candidate_id") == selected_candidate_id
+            ),
+            None,
+        )
+        if selected_candidate is None:
+            raise ResumeValidationError(
+                "assembly_review selected candidate is absent from its cursor"
+            )
+        selected_verified = _verified_review_candidate(state, selected_candidate)
+        current_verified_candidate = selected_verified
+        selected_path = str(selected_verified.primary_output_path)
+        checkpoint_pre_action = ar_out.get("pre_action_assembly_ref")
+        if checkpoint_pre_action and checkpoint_pre_action != selected_path:
+            raise ResumeValidationError(
+                "assembly_review pre-action path does not match selected candidate"
+            )
+        if not final_assembly_ref:
+            raise ResumeValidationError(
+                "assembly_review selected decision has no final assembly path"
+            )
+        if Path(final_assembly_ref).resolve(strict=False) == (
+            selected_verified.primary_output_path.resolve(strict=False)
+        ):
+            output_assembly_ref = selected_path
+            current_primary_output_ref = selected_verified.primary_output_ref
+        else:
+            published_action = _publish_review_action_output(
+                state,
+                selected_verified,
+                final_assembly_ref,
+                action_type=action_type,
+                review_request_id=str(ar_out.get("review_request_id") or ""),
+            )
+            current_verified_candidate = publish_derived_assembly_candidate(
+                absolute_data_dir(state),
+                state["session_id"],
+                source_candidate=selected_verified,
+                primary_output_ref=published_action.ref,
+                stage="assembly_review",
+                method_name=f"assembly_review.{action_type}",
+                action_identity=str(ar_out.get("review_request_id") or ""),
+            )
+            output_assembly_ref = str(current_verified_candidate.primary_output_path)
+            final_assembly_ref = output_assembly_ref
+            current_primary_output_ref = (
+                current_verified_candidate.primary_output_ref
+            )
+        pre_action_ref = selected_path
+    else:
+        output_assembly_ref = final_assembly_ref
+        pre_action_ref = ar_out.get("pre_action_assembly_ref") or final_assembly_ref
     trace = append_route_trace(state, "assembly_review_stage")
     next_stage = next_stage_name(
         "assembly_review",
@@ -850,6 +932,11 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
         "evidence_notes": evidence_notes,
         "decided_by": decided_by,
         "rationale_artifact_ref": rationale_artifact_ref,
+        "primary_output_ref": (
+            current_primary_output_ref.model_dump(mode="json")
+            if current_primary_output_ref is not None
+            else None
+        ),
     }
 
     data_dir = state.get("data_dir", "data")
@@ -963,6 +1050,15 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
         review_update = update_assembly_review_output(state, committed_out)
         update["stage_outputs"] = review_update["stage_outputs"]
         if output_assembly_ref:
+            if (
+                selected_candidate is None
+                or selected_verified is None
+                or current_verified_candidate is None
+                or current_primary_output_ref is None
+            ):
+                raise ResumeValidationError(
+                    "assembly_review output is missing typed candidate provenance"
+                )
             update["resource_refs"] = update_resource_ref(
                 state,
                 "assembly",
@@ -972,6 +1068,12 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
                     "selected_candidate_id": selected_candidate_id,
                     "decision": decision,
                     "action_type": action_type,
+                    "candidate_bundle_ref": current_verified_candidate.ref.model_dump(
+                        mode="json"
+                    ),
+                    "primary_output_ref": current_primary_output_ref.model_dump(
+                        mode="json"
+                    ),
                 },
             )
 
@@ -1026,8 +1128,9 @@ def apply_assembly_review_resume_decision(
             f"unknown assembly_review candidate_id: {request.candidate_id}"
         )
 
-    candidate_final_ref = candidates_by_id[request.candidate_id].get(
-        "final_assembly_ref"
+    candidate_final_ref = _candidate_primary_output_path(
+        state,
+        candidates_by_id[request.candidate_id],
     )
     action_payload = _assembly_review_action_payload(request, candidate_final_ref)
 
@@ -1070,13 +1173,9 @@ def _assembly_review_action_payload(
     request: ResumeReviewRequest, candidate_final_ref: str | None
 ) -> dict[str, Any]:
     if request.decision in {"accept", "pass", "continue_low_confidence"}:
-        if not request.final_assembly_ref:
+        if not candidate_final_ref:
             raise ResumeValidationError(
-                "assembly_review resume requires final_assembly_ref"
-            )
-        if candidate_final_ref and request.final_assembly_ref != candidate_final_ref:
-            raise ResumeValidationError(
-                "assembly_review final_assembly_ref does not match selected candidate"
+                "assembly_review selected candidate has no verified primary output"
             )
         action_type = (
             "pass_low_confidence"
@@ -1084,8 +1183,8 @@ def _assembly_review_action_payload(
             else "pass"
         )
         return {
-            "final_assembly_ref": request.final_assembly_ref,
-            "pre_action_assembly_ref": request.final_assembly_ref,
+            "final_assembly_ref": candidate_final_ref,
+            "pre_action_assembly_ref": candidate_final_ref,
             "action_type": action_type,
             "action_execution_mode": "none",
             "evidence_refs": list(request.metadata.get("evidence_refs") or []),
@@ -1095,19 +1194,10 @@ def _assembly_review_action_payload(
     if not candidate_final_ref:
         raise ResumeValidationError(
             "assembly_review transform action requires selected candidate "
-            "final_assembly_ref"
+            "primary output"
         )
     metadata_output_ref = request.metadata.get("action_output_ref")
-    if (
-        metadata_output_ref
-        and request.final_assembly_ref
-        and metadata_output_ref != request.final_assembly_ref
-    ):
-        raise ResumeValidationError(
-            f"assembly_review {request.decision} action_output_ref must match "
-            "final_assembly_ref"
-        )
-    action_output_ref = metadata_output_ref or request.final_assembly_ref
+    action_output_ref = metadata_output_ref
     if not action_output_ref:
         raise ResumeValidationError(
             f"assembly_review {request.decision} requires action_output_ref"
@@ -1181,7 +1271,7 @@ def _stop_assembly_review(
         decision="stop_human_review",
         candidate_id=request.candidate_id,
         rejected_candidates=request.rejected_candidates,
-        final_assembly_ref=request.final_assembly_ref,
+        final_assembly_ref=None,
         notes=request.notes,
         metadata=request.metadata,
     )
@@ -1381,7 +1471,7 @@ def _ensure_assembly_review_reports(
             ar_out["related_species_evidence_pack_ref"]
         )
 
-    comparison_context = _candidate_comparison_context(updated)
+    comparison_context = _candidate_comparison_context(state, updated)
     return updated, report_refs, comparison_context
 
 
@@ -1403,7 +1493,7 @@ def _assembly_review_report_payload(
         "report_kind": report_kind,
         "candidate_count": len(candidates),
         "candidates": [
-            _candidate_report_row(candidate, signals, assembly_out)
+            _candidate_report_row(state, candidate, signals, assembly_out)
             for candidate in candidates
         ],
         "route_evidence": {
@@ -1431,6 +1521,7 @@ def _assembly_review_report_payload(
 
 
 def _candidate_report_row(
+    state: TopLevelState,
     candidate: AssemblyCandidateCursor,
     signals: list[AssemblyEvalSignalCursor],
     assembly_out: dict[str, Any],
@@ -1444,8 +1535,7 @@ def _candidate_report_row(
         "method_name": candidate.get("method_name"),
         "source": candidate.get("source"),
         "status": candidate.get("status", "unknown"),
-        "final_assembly_ref": candidate.get("final_assembly_ref")
-        or candidate.get("assembly_ref"),
+        "final_assembly_ref": _candidate_primary_output_path(state, candidate),
         "parameters": _candidate_parameters(candidate, assembly_out),
         "metrics": _candidate_metrics(candidate_id, signals),
         "signals": _signal_status_buckets(candidate_signals),
@@ -1481,7 +1571,10 @@ def _signal_status_buckets(
     return {key: sorted(values) for key, values in buckets.items()}
 
 
-def _candidate_comparison_context(ar_out: AssemblyReviewCursor) -> dict[str, Any]:
+def _candidate_comparison_context(
+    state: TopLevelState,
+    ar_out: AssemblyReviewCursor,
+) -> dict[str, Any]:
     candidates = ar_out.get("candidates", [])
     context: dict[str, Any] = {
         "candidate_ids": [
@@ -1489,13 +1582,12 @@ def _candidate_comparison_context(ar_out: AssemblyReviewCursor) -> dict[str, Any
             for candidate in candidates
             if candidate.get("candidate_id")
         ],
-        "candidate_final_assembly_refs": {
-            str(candidate.get("candidate_id")): str(
-                candidate.get("final_assembly_ref") or candidate.get("assembly_ref")
+        "candidate_primary_output_refs": {
+            str(candidate.get("candidate_id")): dict(
+                candidate["primary_output_ref"]
             )
             for candidate in candidates
             if candidate.get("candidate_id")
-            and (candidate.get("final_assembly_ref") or candidate.get("assembly_ref"))
         },
     }
     for key in ("candidate_comparison_ref",):
@@ -1746,36 +1838,25 @@ def _write_derived_report_text(
 def _candidate_parameters(
     candidate: AssemblyCandidateCursor, assembly_out: dict[str, Any]
 ) -> dict[str, Any]:
-    bundle_ref = candidate.get("bundle_ref")
-    if bundle_ref and Path(str(bundle_ref)).exists():
-        bundle = json.loads(Path(str(bundle_ref)).read_text(encoding="utf-8"))
-        metadata = bundle.get("metadata") or {}
-        params = {}
-        for key in ("read_profile", "estimated_genome_size", "threads", "rerun_index"):
-            if key in metadata:
-                params[key] = metadata[key]
-        if params:
-            return params
-    if candidate.get("source") == "assembly_stage":
-        read_type_prior = assembly_out.get("read_type_prior") or {}
-        execution_contract = assembly_out.get(ASSEMBLY_EXECUTION_CONTRACT_KEY)
-        threads = None
-        if execution_contract is not None:
-            validated_contract = AssemblyExecutionContract.model_validate(
-                execution_contract
-            )
-            if validated_contract.threads is not None:
-                threads = validated_contract.threads.value
-        return {
-            "read_profile": (
-                read_type_prior.get("flye")
-                if isinstance(read_type_prior, dict)
-                else None
-            ),
-            "estimated_genome_size": assembly_out.get("genome_size_prior"),
-            "threads": threads,
-        }
-    return {}
+    read_type_prior = assembly_out.get("read_type_prior") or {}
+    execution_contract = assembly_out.get(ASSEMBLY_EXECUTION_CONTRACT_KEY)
+    threads = None
+    if execution_contract is not None:
+        validated_contract = AssemblyExecutionContract.model_validate(
+            execution_contract
+        )
+        if validated_contract.threads is not None:
+            threads = validated_contract.threads.value
+    method_key = str(candidate.get("method_name") or "").rsplit(".", 1)[-1]
+    return {
+        "read_profile": (
+            read_type_prior.get(method_key)
+            if isinstance(read_type_prior, dict)
+            else None
+        ),
+        "estimated_genome_size": assembly_out.get("genome_size_prior"),
+        "threads": threads,
+    }
 
 
 def _candidate_metrics(
@@ -1812,39 +1893,75 @@ def fail_assembly_review(state: TopLevelState) -> StateUpdate:
     }
 
 
-def _load_selected_candidate_refs(
-    candidate_refs: list[str],
-) -> list[AssemblyCandidateCursor]:
-    candidates: list[AssemblyCandidateCursor] = []
-    for candidate_ref in candidate_refs:
-        path = Path(candidate_ref)
-        if not path.exists():
-            candidates.append(
-                ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(
-                    {
-                        "candidate_id": candidate_ref,
-                        "method_name": "unknown",
-                        "status": "missing",
-                        "bundle_ref": candidate_ref,
-                    }
-                )
-            )
-            continue
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["bundle_ref"] = str(path)
-        candidates.append(ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(payload))
-    return candidates
+def _publish_review_action_output(
+    state: TopLevelState,
+    selected: VerifiedExecutedCandidate,
+    source: str,
+    *,
+    action_type: str,
+    review_request_id: str,
+) -> PublishedArtifact:
+    """Publish one externally approved transformed assembly before handoff."""
+
+    source_path = Path(source).expanduser().resolve(strict=False)
+    if not source_path.is_file():
+        raise ResumeValidationError(
+            "assembly_review action output is not a materialized file"
+        )
+    if source_path.stat().st_size <= 0:
+        raise ResumeValidationError("assembly_review action output is empty")
+    safe_request_id = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in review_request_id
+    )
+    if not safe_request_id:
+        raise ResumeValidationError(
+            "assembly_review action output has no review request identity"
+        )
+    filename = f"{safe_request_id}.{action_type}.fasta"
+    destination = stage_artifacts_dir(
+        state,
+        "assembly_review",
+        "actions",
+    ) / filename
+    temporary = stage_work_dir(
+        state,
+        "assembly_review",
+        "actions",
+        f".{filename}.{uuid4().hex}.tmp",
+    )
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, temporary)
+    artifact = ArtifactMeta.from_file(
+        temporary,
+        stage="assembly_review",
+        method_name=f"assembly_review.{action_type}",
+        artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+        metadata={
+            "candidate_id": selected.bundle.candidate_id,
+            "candidate_bundle_ref": selected.ref.model_dump(mode="json"),
+            "dependency_refs": [
+                selected.primary_output_ref.model_dump(mode="json")
+            ],
+            "review_request_id": review_request_id,
+        },
+    )
+    try:
+        return publish_artifact_record(
+            absolute_data_dir(state),
+            state["session_id"],
+            artifact,
+            destination=destination,
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def _existing_assembly_ref(registry_ref: str) -> str | None:
-    path = Path(registry_ref)
-    if not path.exists():
-        return None
-    registry = json.loads(path.read_text(encoding="utf-8"))
-    for asset in registry.get("assets", []):
-        if asset.get("asset_type") == "assembly_fasta_registered":
-            return str(asset.get("path"))
-    return None
+def _candidate_primary_output_path(
+    state: TopLevelState,
+    candidate: AssemblyCandidateCursor,
+) -> str:
+    return str(_verified_review_candidate(state, candidate).primary_output_path)
 
 
 _EVAL_SIGNAL_NAMES = {"quast", "busco"}
@@ -1882,10 +1999,10 @@ def _available_review_inputs(
 ) -> tuple[bool, bool, set[str], set[str]]:
     available_inputs: set[str] = set()
     missing_inputs: set[str] = set()
-    registry_ref = state.get("asset_registry_ref")
-    if registry_ref and Path(registry_ref).exists():
-        registry = json.loads(Path(registry_ref).read_text(encoding="utf-8"))
-        asset_types = {asset.get("asset_type") for asset in registry.get("assets", [])}
+    if state.get("asset_registry_ref"):
+        from app.storage.asset_registry import load_asset_records
+
+        asset_types = {asset.asset_type for asset in load_asset_records(state)}
         for asset_type in ["clean_short_dna_reads", "clean_long_reads"]:
             if asset_type in asset_types:
                 available_inputs.add(asset_type)

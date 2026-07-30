@@ -16,6 +16,7 @@ from app.execution.attempt_owners import (
 )
 from app.execution.collect import collect_with_failure_boundary
 from app.execution.evidence import persist_execution_result, persist_frozen_attempt
+from app.execution.input_integrity import verify_input_dependencies
 from app.execution.method_runner import (
     RunnerResultIdentityError,
     bounded_failure_reason,
@@ -211,6 +212,16 @@ def run_method_attempts(
             state,
             lifecycle,
             f"{lifecycle.name} frozen attempt is invalid: {exc}",
+        )
+
+    try:
+        for attempt in attempts:
+            verify_input_dependencies(state, attempt.input_dependencies)
+    except (OSError, ValueError) as exc:
+        return _failure_update(
+            state,
+            lifecycle,
+            f"{lifecycle.name} input integrity check failed: {exc}",
         )
 
     current_output = dict(output)

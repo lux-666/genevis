@@ -84,10 +84,9 @@ checks their declared canary paths. It performs no downloads.
 
 ## Optional LLM Configuration
 
-`gene-agent ask`, TUI parameter recommendation, and model-assisted review read
-credentials from exported `GENE_AGENT_LLM_*` variables or the project-root
-`.env` file. Structured `run`, `inspect`, and storage audit do not require an LLM
-unless the selected workflow reaches a model-backed gate.
+TUI parameter recommendation and model-assisted review read credentials from
+exported `GENE_AGENT_LLM_*` variables or the project-root `.env` file.
+`inspect` and storage audit do not require an LLM.
 
 Example `.env`:
 

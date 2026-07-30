@@ -1,9 +1,0 @@
-profiles:
-  no_auto_retry:
-    max_attempts: 1
-    reason: side_effecting_bioinformatics_jobs_are_not_idempotent_by_default
-  transient_metadata:
-    max_attempts: 3
-    retry_on:
-      - filesystem_metadata_race
-      - temporary_lock

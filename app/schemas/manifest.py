@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.assets import AssetType
 
@@ -38,11 +38,14 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "gene_models",
     "predicted_proteins",
     "transcripts_fasta",
+    "function_database",
 }
 
 
 class InputAssetSpec(BaseModel):
     """One file or directory declared by the user in the input manifest."""
+
+    model_config = ConfigDict(extra="forbid")
 
     asset_type: AssetType
     paths: list[str] = Field(default_factory=list)
@@ -100,6 +103,8 @@ class PairedReadSpec(BaseModel):
 class InputManifest(BaseModel):
     """User-supplied manifest describing available inputs for a session."""
 
+    model_config = ConfigDict(extra="forbid")
+
     session_id: str
     sample_id: str | None = None
     assets: list[InputAssetSpec] = Field(default_factory=list)
@@ -122,6 +127,55 @@ class InputManifest(BaseModel):
                     if asset.platform == "unknown":
                         asset.metadata.setdefault("ambiguous", True)
         return self
+
+    @model_validator(mode="after")
+    def _reject_duplicate_declared_paths(self) -> InputManifest:
+        seen: dict[str, tuple[int, int]] = {}
+        for entry_ordinal, asset in enumerate(self.assets):
+            for path_ordinal, declared in enumerate(asset.paths):
+                canonical = str(
+                    Path(declared).expanduser().resolve(strict=False)
+                )
+                previous = seen.get(canonical)
+                if previous is not None:
+                    raise ValueError(
+                        "input manifest declares the same canonical path more "
+                        "than once: "
+                        f"{canonical} at assets[{previous[0]}].paths[{previous[1]}] "
+                        f"and assets[{entry_ordinal}].paths[{path_ordinal}]"
+                    )
+                seen[canonical] = (entry_ordinal, path_ordinal)
+        return self
+
+
+PlatformResolutionSource = Literal["manifest", "filename_or_metadata", "unknown"]
+
+
+class AssetPathInference(BaseModel):
+    """Per-file facts inferred for one manifest path."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path_ordinal: int = Field(ge=0)
+    declared_path: str
+    canonical_path: str
+    exists: bool
+    size_bytes: int | None = Field(default=None, ge=0)
+    compression: Compression
+    format: Format
+    platform: Platform
+    platform_resolution_source: PlatformResolutionSource
+
+
+class AssetEntryInference(BaseModel):
+    """Ordered inference facts bound to one manifest entry."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    manifest_entry_ordinal: int = Field(ge=0)
+    asset_type: AssetType
+    inferred_layout: Layout
+    path_facts: list[AssetPathInference]
 
 
 def _detect_compression(path: Path) -> Compression:
@@ -215,37 +269,46 @@ def _detect_layout(paths: list[Path]) -> Layout:
     return "single"
 
 
-def _infer_asset_properties(spec: InputAssetSpec) -> dict[str, Any]:
+def _infer_asset_properties(
+    spec: InputAssetSpec,
+    *,
+    manifest_entry_ordinal: int,
+) -> AssetEntryInference:
     """Infer lightweight properties from file paths.
 
     Does not read file contents except for existence and size.
     """
-    paths = [Path(p) for p in spec.paths]
-    props: dict[str, Any] = {
-        "paths_exist": [],
-        "paths_missing": [],
-        "sizes_bytes": {},
-        "detected_compression": {},
-        "detected_format": {},
-    }
-    for p in paths:
-        if p.exists():
-            props["paths_exist"].append(str(p))
-            props["sizes_bytes"][str(p)] = p.stat().st_size
-            props["detected_compression"][str(p)] = _detect_compression(p)
-            props["detected_format"][str(p)] = _detect_format(p)
+    paths = [Path(p).expanduser() for p in spec.paths]
+    path_facts: list[AssetPathInference] = []
+    for path_ordinal, path in enumerate(paths):
+        platform = _detect_platform(path, spec.platform, spec.metadata)
+        if spec.platform != "unknown":
+            platform_source: PlatformResolutionSource = "manifest"
+        elif platform != "unknown":
+            platform_source = "filename_or_metadata"
         else:
-            props["paths_missing"].append(str(p))
-
-    if paths:
-        first = paths[0]
-        props["inferred_compression"] = _detect_compression(first)
-        props["inferred_format"] = _detect_format(first)
-        props["inferred_platform"] = _detect_platform(
-            first, spec.platform, spec.metadata
+            platform_source = "unknown"
+        path_facts.append(
+            AssetPathInference(
+                path_ordinal=path_ordinal,
+                declared_path=spec.paths[path_ordinal],
+                canonical_path=str(path.resolve(strict=False)),
+                exists=path.exists(),
+                size_bytes=path.stat().st_size if path.exists() else None,
+                compression=_detect_compression(path),
+                format=_detect_format(path),
+                platform=platform,
+                platform_resolution_source=platform_source,
+            )
         )
-        props["inferred_layout"] = _detect_layout(paths)
-    return props
+    return AssetEntryInference(
+        manifest_entry_ordinal=manifest_entry_ordinal,
+        asset_type=spec.asset_type,
+        inferred_layout=(
+            spec.layout if spec.layout != "unknown" else _detect_layout(paths)
+        ),
+        path_facts=path_facts,
+    )
 
 
 def validate_manifest(
@@ -257,11 +320,11 @@ def validate_manifest(
     - valid: bool
     - errors: list[str]
     - warnings: list[str]
-    - inferred: dict mapping asset_type to inferred properties
+    - inferred: ordered list bound to manifest entry and path ordinals
     """
     errors: list[str] = []
     warnings: list[str] = []
-    inferred: dict[str, Any] = {}
+    inferred: list[dict[str, Any]] = []
 
     if not manifest.assets:
         errors.append("manifest must declare at least one asset")
@@ -278,19 +341,32 @@ def validate_manifest(
                 "entries"
             )
 
-    for spec in manifest.assets:
-        props = _infer_asset_properties(spec)
-        inferred[spec.asset_type] = props
+    entry_inferences: list[AssetEntryInference] = []
+    for entry_ordinal, spec in enumerate(manifest.assets):
+        entry = _infer_asset_properties(
+            spec,
+            manifest_entry_ordinal=entry_ordinal,
+        )
+        entry_inferences.append(entry)
+        inferred.append(entry.model_dump(mode="json"))
+        missing = [fact.declared_path for fact in entry.path_facts if not fact.exists]
+        if require_existing_files and missing:
+            errors.append(f"{spec.asset_type}: missing files {missing}")
 
-        if require_existing_files and props["paths_missing"]:
-            errors.append(f"{spec.asset_type}: missing files {props['paths_missing']}")
-
-        if props["paths_exist"] and props["inferred_format"] == "unknown":
+        unknown_formats = [
+            fact.declared_path
+            for fact in entry.path_facts
+            if fact.exists and fact.format == "unknown"
+        ]
+        if unknown_formats:
             warnings.append(
-                f"{spec.asset_type}: could not infer format from {spec.paths}"
+                f"{spec.asset_type}: could not infer format from {unknown_formats}"
             )
 
-        inferred_format = props.get("inferred_format")
+        inferred_formats = {fact.format for fact in entry.path_facts}
+        if spec.asset_type == "gene_models" and len(inferred_formats) > 1:
+            errors.append(f"{spec.asset_type}: paths have conflicting formats")
+        inferred_format = next(iter(inferred_formats), "unknown")
         if spec.asset_type == "gene_models" and inferred_format not in {
             "gff3",
             "gff",
@@ -316,7 +392,7 @@ def validate_manifest(
 
         if (
             spec.asset_type == "raw_long_reads"
-            and props["inferred_platform"] == "unknown"
+            and any(fact.platform == "unknown" for fact in entry.path_facts)
         ):
             warnings.append(f"{spec.asset_type}: platform unknown for {spec.paths}")
 
@@ -324,6 +400,30 @@ def validate_manifest(
             warnings.append(
                 f"{spec.asset_type}: ambiguous classification against "
                 "raw_isoseq_or_long_rna_reads; human review required"
+            )
+
+    long_read_entries = [
+        entry
+        for entry in entry_inferences
+        if entry.asset_type in {"raw_long_reads", "clean_long_reads"}
+    ]
+    for entry in long_read_entries:
+        platforms = {fact.platform for fact in entry.path_facts}
+        if len(platforms) > 1:
+            errors.append(
+                f"{entry.asset_type}: one manifest entry resolves to conflicting "
+                f"platforms {sorted(platforms)}; split platforms into separate entries"
+            )
+    if len(long_read_entries) > 1:
+        unresolved = [
+            entry.manifest_entry_ordinal
+            for entry in long_read_entries
+            if any(fact.platform == "unknown" for fact in entry.path_facts)
+        ]
+        if unresolved:
+            errors.append(
+                "mixed_long_read_platform_unresolved: explicit per-entry platform "
+                f"required for manifest assets {unresolved}"
             )
 
     return {

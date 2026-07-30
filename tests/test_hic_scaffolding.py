@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -22,6 +23,7 @@ from app.schemas.artifacts import (
     ParameterRecommendationCursor,
 )
 from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state
 from app.stages.hic_scaffolding.builder import build_stage
 from app.stages.hic_scaffolding.method_application.autohic import (
@@ -40,7 +42,11 @@ from app.stages.hic_scaffolding.parameters.workflow import (
     apply_autohic_parameter_approval_decision,
     recommend_autohic_parameters,
 )
-from app.storage.artifacts import publish_artifact_record
+from app.storage.artifacts import (
+    publish_artifact_record,
+    read_artifact_records,
+    resolve_artifact_ref,
+)
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from app.workflow import next_stage_name
@@ -119,7 +125,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "hic_scaffolding"
-        state["asset_registry_ref"] = registry_ref
+        state["asset_registry_ref"] = (
+            self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
+            if registry_ref is not None else None
+        )
         return state
 
     def _inputs(
@@ -156,6 +165,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "asset_id": "s1:assembly_fasta_registered:adopted",
                 "asset_type": "assembly_fasta_registered",
                 "path": str(assembly),
+                "checksum": hashlib.sha256(assembly.read_bytes()).hexdigest(),
+                "checksum_status": "ready",
+                "size_bytes": assembly.stat().st_size,
             }
         ]
         assets.extend(
@@ -163,11 +175,47 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "asset_id": f"s1:hic_reads_registered:{path.name}",
                 "asset_type": "hic_reads_registered",
                 "path": str(path),
-                "metadata": library_metadata or {},
+                "platform": "illumina",
+                "format": "fastq",
+                "checksum": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "checksum_status": "ready",
+                "size_bytes": path.stat().st_size,
+                "metadata": {
+                    **(library_metadata or {}),
+                    "manifest_entry_ordinal": 1,
+                    "path_ordinal": index,
+                    "pair_index": index // 2,
+                    "mate": "R1" if index % 2 == 0 else "R2",
+                },
             }
-            for path in reads
+            for index, path in enumerate(reads)
         )
         return self._write_registry(tmpdir, assets=assets)
+
+    def _publish_registry_ref(
+        self,
+        data_dir: str,
+        session_id: str,
+        registry_path: str | Path,
+    ) -> dict:
+        paths = SessionPaths.from_run_dir(data_dir)
+        source = paths.work_path(
+            "inventory",
+            f"asset_registry_{os.urandom(4).hex()}.json",
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        )
+        published = publish_artifact_record(data_dir, session_id, artifact)
+        return published.ref.model_dump(mode="json")
 
     def _configured_state(
         self,
@@ -177,17 +225,32 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         *,
         target_level: str = "chromosome",
     ) -> dict:
+        registry = self._registry_for_inputs(
+            tmpdir,
+            assembly,
+            reads,
+            library_metadata={"library_protocol": "in_situ_hic"},
+        )
         state = self._state(
             tmpdir,
-            str(
-                self._registry_for_inputs(
-                    tmpdir,
-                    assembly,
-                    reads,
-                    library_metadata={"library_protocol": "in_situ_hic"},
-                )
-            ),
+            str(registry),
         )
+        if reads:
+            state["resource_refs"]["hic_reads"] = ResourceRef(
+                resource_type="hic_reads",
+                paths=[str(path) for path in reads],
+                source_stage="inventory",
+                metadata={
+                    "asset_registry_ref": state["asset_registry_ref"],
+                    "asset_ids": [
+                        f"s1:hic_reads_registered:{path.name}" for path in reads
+                    ],
+                    "member_count": len(reads),
+                    "pair_count": len(reads) // 2,
+                    "platforms": ["illumina"],
+                    "formats": ["fastq"],
+                },
+            ).to_dict()
         state["stage_outputs"] = {
             "inventory": {"target_assembly_level": target_level},
             "assembly_review": {
@@ -469,12 +532,27 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, _, _ = self._inputs(tmpdir)
             state = self._configured_state(tmpdir, assembly, reads)
-            registry_path = Path(state["asset_registry_ref"])
-            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            _old_path = resolve_artifact_ref(
+                state["data_dir"], state["session_id"], state["asset_registry_ref"]
+            )
+            registry = json.loads(_old_path.read_text(encoding="utf-8"))
             for asset in registry["assets"]:
                 if asset["asset_type"] == "hic_reads_registered":
                     asset["metadata"]["arbitrary_raw_metadata"] = "must-not-leak"
-            registry_path.write_text(json.dumps(registry), encoding="utf-8")
+            _paths = SessionPaths.from_run_dir(state["data_dir"])
+            _source = _paths.work_path(
+                "inventory",
+                f"asset_registry_{os.urandom(4).hex()}.json",
+            )
+            _source.parent.mkdir(parents=True, exist_ok=True)
+            _source.write_text(json.dumps(registry), encoding="utf-8")
+            _artifact = ArtifactMeta.from_file(
+                _source, stage="inventory",
+                method_name="inventory.register_assets", artifact_type="asset_registry"
+            )
+            state["asset_registry_ref"] = publish_artifact_record(
+                state["data_dir"], state["session_id"], _artifact
+            ).ref.model_dump(mode="json")
             model = _FakeModel(
                 {
                     "parameters": {"restriction_enzyme": "MboI"},
@@ -578,9 +656,17 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                                     "asset_id": f"s1:hic_reads_registered:{read.name}",
                                     "asset_type": "hic_reads_registered",
                                     "path": str(read),
-                                    "metadata": {"library_protocol": "in_situ_hic"},
+                                    "platform": "illumina",
+                                    "format": "fastq",
+                                    "metadata": {
+                                        "library_protocol": "in_situ_hic",
+                                        "manifest_entry_ordinal": 1,
+                                        "path_ordinal": index,
+                                        "pair_index": index // 2,
+                                        "mate": "R1" if index % 2 == 0 else "R2",
+                                    },
                                 }
-                                for read in reads
+                                for index, read in enumerate(reads)
                             ],
                         ],
                     }
@@ -597,7 +683,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     artifact_type="asset_registry",
                 ),
             )
-            state["asset_registry_ref"] = str(published_registry.path)
+            state["asset_registry_ref"] = published_registry.ref.model_dump(mode="json")
 
             result = self._run_to_parameter_gate(state)
 
@@ -1013,6 +1099,61 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn("command.stderr", artifact_types)
 
             interrupt = result["active_interrupt"]
+            artifacts_before = read_artifact_records(result["data_dir"], "s1")
+            events_before = Ledger(result["data_dir"]).read_events("s1")
+            with self.assertRaisesRegex(
+                ResumeValidationError,
+                "requires a human review decision",
+            ):
+                apply_hic_scaffolding_resume_decision(
+                    result,
+                    ResumeReviewRequest(
+                        session_id="s1",
+                        stage="hic_scaffolding",
+                        gate_id="hic_scaffolding",
+                        decision="accept_candidate",
+                        review_request_id=interrupt["review_request_id"],
+                        review_request_hash=interrupt["request_hash"],
+                        decided_by="auto_rule",
+                        rationale_artifact_ref="auto-rule:autohic-adoption",
+                    ),
+                )
+
+            stale_result = {
+                **result,
+                "resource_refs": {
+                    **result["resource_refs"],
+                    "assembly": ResourceRef(
+                        resource_type="assembly",
+                        paths=[candidate["scaffold_fasta"]],
+                        source_stage="external_update",
+                    ).to_dict(),
+                },
+            }
+            with self.assertRaisesRegex(
+                ResumeValidationError,
+                "current assembly no longer matches",
+            ):
+                apply_hic_scaffolding_resume_decision(
+                    stale_result,
+                    ResumeReviewRequest(
+                        session_id="s1",
+                        stage="hic_scaffolding",
+                        gate_id="hic_scaffolding",
+                        decision="accept_candidate",
+                        review_request_id=interrupt["review_request_id"],
+                        review_request_hash=interrupt["request_hash"],
+                    ),
+                )
+
+            self.assertEqual(
+                read_artifact_records(result["data_dir"], "s1"),
+                artifacts_before,
+            )
+            self.assertEqual(
+                Ledger(result["data_dir"]).read_events("s1"),
+                events_before,
+            )
             adopted = apply_hic_scaffolding_resume_decision(
                 result,
                 ResumeReviewRequest(
@@ -1032,6 +1173,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(
                 adopted["stage_outputs"]["hic_scaffolding"]["output_assembly_ref"],
                 candidate["scaffold_fasta"],
+            )
+            assembly_resource = adopted["resource_refs"]["assembly"]
+            self.assertEqual(assembly_resource["paths"], [candidate["scaffold_fasta"]])
+            self.assertEqual(
+                assembly_resource["metadata"]["primary_output_ref"]["artifact_type"],
+                "hic_scaffolding.chromosome_scaffolded_assembly",
             )
             decision_ref = adopted["stage_outputs"]["hic_scaffolding"][
                 "review_decision_artifact_ref"
@@ -1077,6 +1224,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 kept["stage_outputs"]["hic_scaffolding"]["output_assembly_ref"],
                 str(assembly),
             )
+            self.assertNotIn("resource_refs", kept)
 
     def test_missing_models_after_approval_is_requirements_block_not_execution_failure(
         self,

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import TypeAliasType, TypedDict
 
+from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,
@@ -49,26 +50,16 @@ else:
     )
 
 
-class AssemblyCandidateCursor(TypedDict, total=False):
+@with_config(ConfigDict(extra="forbid"))
+class AssemblyCandidateCursor(TypedDict):
     """Compact candidate view retained for review and routing."""
 
     candidate_id: str
     method_name: str
     source: str
-    bundle_ref: str | None
-    candidate_ref: str | None
-    status: str
-    final_assembly_ref: str | None
-    assembly_ref: str | None
-    expected_outputs: dict[str, str]
-    metadata: dict[str, CursorJsonValue]
-    session_id: str
-    artifact_type: str
-    input_ref: str | list[str]
-    input_type: str
-    genome_size_prior: int | None
-    logs: dict[str, str]
-    rejection_reason: str | None
+    status: Literal["executed"]
+    bundle_ref: ArtifactRefJson
+    primary_output_ref: ArtifactRefJson
 
 
 class AssemblyEvalSignalCursor(TypedDict, total=False):

@@ -30,6 +30,8 @@ from app.stages.assembly.nodes import (
     resolve_extended_inputs,
     select_route,
 )
+from app.schemas.artifacts import ArtifactMeta
+from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
@@ -172,12 +174,19 @@ class InputProfilerTests(unittest.TestCase):
             data_dir=str(run_dir),
         )
         state["current_stage"] = "assembly"
-        registry = run_dir / "artifacts" / "inventory" / "asset_registry.json"
-        registry.parent.mkdir(parents=True, exist_ok=True)
-        registry.write_text(
+        _paths = SessionPaths.from_run_dir(str(run_dir))
+        _source = _paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        _source.parent.mkdir(parents=True, exist_ok=True)
+        _source.write_text(
             json.dumps({"session_id": "s1", "assets": assets or []}), encoding="utf-8"
         )
-        state["asset_registry_ref"] = str(registry)
+        _artifact = ArtifactMeta.from_file(
+            _source, stage="inventory",
+            method_name="inventory.register_assets", artifact_type="asset_registry"
+        )
+        state["asset_registry_ref"] = publish_artifact_record(
+            str(run_dir), "s1", _artifact
+        ).ref.model_dump(mode="json")
         return state
 
     def _blocked_route_state(self, state: dict, assembly: dict | None = None) -> dict:
@@ -257,7 +266,7 @@ class InputProfilerTests(unittest.TestCase):
                         "asset_id": "ont",
                         "asset_type": "clean_long_reads",
                         "path": str(reads),
-                        "platform": "cyclone",
+                        "platform": "cycloneseq",
                     }
                 ],
             )
@@ -266,7 +275,7 @@ class InputProfilerTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
 
             self.assertEqual(assembly["status"], "resolved_extended")
-            self.assertEqual(assembly["ont_reads_ref"], str(reads))
+            self.assertIsNone(assembly["ont_reads_ref"])
             self.assertEqual(assembly["primary_long_reads_ref"], str(reads))
             self.assertEqual(assembly["input_ref"], str(reads))
             self.assertEqual(assembly["input_type"], "clean_long_reads")
@@ -288,15 +297,18 @@ class InputProfilerTests(unittest.TestCase):
                     },
                     {
                         "asset_id": "hifi",
-                        "asset_type": "pacbio_hifi",
+                        "asset_type": "clean_long_reads",
                         "path": str(hifi_reads),
+                        "platform": "pacbio_hifi",
                     },
                 ],
             )
+            state["shared_parameters"] = {"read_type": "pacbio_hifi"}
 
             result = resolve_extended_inputs(state)
             assembly = result["stage_outputs"]["assembly"]
 
+            self.assertEqual(assembly["status"], "resolved_extended", assembly)
             self.assertTrue(assembly["has_hifi"])
             self.assertEqual(assembly["ont_reads_ref"], str(ont_reads))
             self.assertEqual(assembly["hifi_reads_ref"], str(hifi_reads))
@@ -396,7 +408,7 @@ class InputProfilerTests(unittest.TestCase):
             selection = assembly["assembly_selection"]
             self.assertEqual(selection["read_type"], "cyclone")
             self.assertEqual(selection["primary_method"], "assembly.candidate.flye")
-            self.assertIsNone(selection["fallback_method"])
+            self.assertNotIn("fallback_method", selection)
             self.assertEqual(selection["source"], "run_config")
             self.assertEqual(
                 selection["rationale"],
@@ -432,7 +444,7 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(
                 selection["primary_method"], "assembly.candidate.hifiasm_ont"
             )
-            self.assertIsNone(selection["fallback_method"])
+            self.assertNotIn("fallback_method", selection)
             self.assertEqual(selection["source"], "run_config")
             self.assertEqual(
                 selection["rationale"], "run_config explicitly selected ont read type"
@@ -612,7 +624,6 @@ class InputProfilerTests(unittest.TestCase):
                 "assembly_selection": {
                     "read_type": "pacbio_hifi",
                     "primary_method": "assembly.candidate.hifiasm",
-                    "fallback_method": None,
                     "source": "human",
                     "rationale": "human selected hifi read type",
                 },
@@ -624,7 +635,6 @@ class InputProfilerTests(unittest.TestCase):
                 "assembly_selection": {
                     "read_type": "ont_raw",
                     "primary_method": "assembly.candidate.hifiasm_ont",
-                    "fallback_method": None,
                     "source": "human",
                     "rationale": "human selected ont read type",
                 },
@@ -636,7 +646,6 @@ class InputProfilerTests(unittest.TestCase):
                 "assembly_selection": {
                     "read_type": "cyclone",
                     "primary_method": "assembly.candidate.flye",
-                    "fallback_method": None,
                     "source": "human",
                     "rationale": "human selected cyclone read type",
                 },
@@ -715,7 +724,7 @@ class InputProfilerTests(unittest.TestCase):
             selection = assembly["assembly_selection"]
             self.assertEqual(selection["read_type"], "pacbio_hifi")
             self.assertEqual(selection["primary_method"], "assembly.candidate.hifiasm")
-            self.assertIsNone(selection["fallback_method"])
+            self.assertNotIn("fallback_method", selection)
             self.assertEqual(selection["source"], "run_config")
             self.assertEqual(
                 selection["rationale"], "run_config explicitly selected hifi read type"

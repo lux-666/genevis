@@ -13,6 +13,11 @@ from pydantic import ValidationError
 
 from app.configuration import load_descriptor_registry
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+    file_input_dependency,
+)
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -27,6 +32,7 @@ from app.schemas.artifacts import (
     FunctionDatabaseProvenance,
     FunctionMethodResult,
 )
+from app.schemas.execution import InputDependency
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     append_route_trace,
@@ -41,9 +47,11 @@ from app.stages.function_annotation.state import (
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import PREDICTED_PROTEINS_SPEC
 from app.storage.artifacts import (
+    artifact_ref_for_path,
     publish_artifact_record,
     publish_or_recover_work_artifact,
 )
+from app.storage.asset_registry import load_asset_records
 from app.storage.ledger import Ledger
 from app.workflow import next_stage_name
 
@@ -166,7 +174,7 @@ def plan_function_methods(state: TopLevelState) -> StateUpdate:
             "notes": [
                 "execution_deferred_to_method_specific_task",
                 "database_provenance_required_before_commit",
-                "database_download_disabled_in_phase2",
+                "database_download_disabled",
             ],
         },
     )
@@ -259,6 +267,7 @@ def _freeze_func_method_attempt(
     method_name: str,
     cfg: dict[str, str],
     script_body: str,
+    input_dependencies: list[InputDependency],
     extra_metadata: dict[str, Any] | None = None,
 ) -> StateUpdate:
     function_out = _function_output(state)
@@ -295,6 +304,7 @@ def _freeze_func_method_attempt(
         expected_outputs=[output_tsv],
         env=function_out.get("env"),
         env_spec=env_spec,
+        input_dependencies=input_dependencies,
         metadata={
             "proteins_fasta_ref": str(function_out["proteins_fasta_ref"]),
             "output_tsv": str(output_tsv),
@@ -367,7 +377,7 @@ def freeze_diamond_attempt(state: TopLevelState) -> StateUpdate:
     if not db_path:
         return _update_function_output(state, {"status": "diamond_completed"})
 
-    database_source = Path(str(db_path)).expanduser()
+    database_source = Path(str(db_path)).expanduser().resolve(strict=False)
     if not database_source.is_file():
         return _fail_update(
             state, f"diamond database source not found: {database_source}"
@@ -409,11 +419,101 @@ def freeze_diamond_attempt(state: TopLevelState) -> StateUpdate:
         f"test -f {shlex.quote(str(output_tsv))}\n"
     )
 
+    try:
+        proteins_resolution = resolve_stage_resource(
+            state,
+            resource_spec=PREDICTED_PROTEINS_SPEC,
+        )
+        if (
+            not proteins_resolution.found
+            or proteins_resolution.path is None
+            or Path(proteins_resolution.path).resolve(strict=False)
+            != Path(str(proteins_ref)).resolve(strict=False)
+        ):
+            raise ValueError(
+                "resolved predicted proteins no longer match proteins_fasta_ref"
+            )
+        if proteins_resolution.asset_records:
+            proteins_dependencies = asset_input_dependencies(
+                state,
+                [record.asset_id for record in proteins_resolution.asset_records],
+                [record.path for record in proteins_resolution.asset_records],
+            )
+        elif proteins_resolution.metadata.get("primary_output_ref"):
+            proteins_dependencies = [
+                artifact_input_dependency(
+                    state,
+                    proteins_resolution.metadata["primary_output_ref"],
+                    proteins_ref,
+                )
+            ]
+        elif proteins_resolution.metadata.get("source_asset_ids"):
+            proteins_dependencies = asset_input_dependencies(
+                state,
+                [
+                    str(asset_id)
+                    for asset_id in proteins_resolution.metadata[
+                        "source_asset_ids"
+                    ]
+                ],
+                [proteins_ref],
+            )
+        else:
+            raise ValueError(
+                "predicted proteins resource lacks typed artifact or asset "
+                "provenance"
+            )
+
+        try:
+            database_artifact_ref = artifact_ref_for_path(
+                Path(state.get("data_dir", "data")),
+                state["session_id"],
+                database_source,
+            )
+        except (OSError, ValueError):
+            canonical_database = database_source.resolve(strict=False)
+            matching_records = [
+                record
+                for record in load_asset_records(state)
+                if Path(record.path).resolve(strict=False) == canonical_database
+            ]
+            if len(matching_records) > 1:
+                raise ValueError(
+                    "DIAMOND database source maps to multiple registered assets"
+                )
+            if matching_records:
+                database_dependencies = asset_input_dependencies(
+                    state,
+                    [matching_records[0].asset_id],
+                    [matching_records[0].path],
+                )
+            else:
+                database_dependencies = [
+                    file_input_dependency(database_source)
+                ]
+        else:
+            database_dependencies = [
+                artifact_input_dependency(
+                    state,
+                    database_artifact_ref,
+                    database_source,
+                )
+            ]
+    except (OSError, ValueError) as exc:
+        return _fail_update(
+            state,
+            f"DIAMOND input dependency is invalid: {exc}",
+        )
+
     return _freeze_func_method_attempt(
         state,
         method_name=DIAMOND_METHOD,
         cfg=cfg,
         script_body=script,
+        input_dependencies=[
+            *proteins_dependencies,
+            *database_dependencies,
+        ],
         extra_metadata={
             "database_source_ref": str(database_source),
             "database_index_ref": str(dmnd_index),
@@ -640,15 +740,41 @@ def _validate_provenance_records(
         if record.input_proteins_ref is None:
             record = record.model_copy(update={"input_proteins_ref": proteins_ref})
         elif record.input_proteins_ref != proteins_ref:
-            return (
-                [],
-                f"database_provenance[{index}].input_proteins_ref does not "
-                "match proteins_fasta_ref",
-            )
+            if not _same_local_file(
+                record.input_proteins_ref,
+                proteins_ref,
+            ):
+                return (
+                    [],
+                    f"database_provenance[{index}].input_proteins_ref does not "
+                    "match proteins_fasta_ref",
+                )
+            # Registry paths are canonicalized, while a run config may retain
+            # an equivalent symlink or /var -> /private/var spelling. Persist
+            # the actual resolved stage input so the evidence record is exact.
+            record = record.model_copy(update={"input_proteins_ref": proteins_ref})
         records.append(record)
     if not records:
         return [], "database_provenance must be a non-empty list"
     return records, None
+
+
+def _same_local_file(left: str, right: str) -> bool:
+    """Return whether two local path spellings identify the same file."""
+
+    if "://" in left or "://" in right:
+        return False
+    left_path = Path(left).expanduser()
+    right_path = Path(right).expanduser()
+    try:
+        return left_path.samefile(right_path)
+    except OSError:
+        return (
+            left_path.resolve(strict=False)
+            == right_path.resolve(strict=False)
+            and left_path.exists()
+            and right_path.exists()
+        )
 
 
 def _validated_provenance_records(

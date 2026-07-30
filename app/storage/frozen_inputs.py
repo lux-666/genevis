@@ -26,8 +26,17 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.integrity import sha256_file
-from app.schemas.manifest import InputManifest, validate_manifest
-from app.schemas.run_config import RunConfig
+from app.schemas.manifest import (
+    AssetEntryInference,
+    Compression,
+    Format,
+    InputAssetSpec,
+    InputManifest,
+    Layout,
+    Platform,
+    validate_manifest,
+)
+from app.schemas.run_config import RunConfig, canonicalize_run_config_paths
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 FROZEN_INPUTS_SCHEMA_VERSION = 1
@@ -45,15 +54,6 @@ _FILE_SCHEMA_VERSIONS = {
     "run_config": RUN_CONFIG_SCHEMA_VERSION,
     "dependency_manifest": 1,
 }
-_RUN_CONFIG_PATH_FIELDS = (
-    ("assembly", "hifi_reads_ref"),
-    ("assembly", "hic_reads_ref"),
-    ("assembly_review", "busco", "lineage_path"),
-    ("assembly_review", "related_species_reference_dir"),
-    ("t2t", "chromosome_list_ref"),
-    ("t2t", "assembly_fasta_ref"),
-)
-_RUN_CONFIG_PATH_LIST_FIELDS = (("t2t", "ont_read_refs"),)
 
 
 class FrozenInputError(ValueError):
@@ -138,6 +138,359 @@ class FrozenInputBundle:
             ) from exc
 
 
+@dataclass(frozen=True)
+class ReadDeclarationSource:
+    """One control-file field declaring a registered long-read path."""
+
+    declaration_source: Literal["manifest", "run_config"]
+    declaration_field: str
+    declared_path: str
+
+
+@dataclass(frozen=True)
+class RegisteredReadDeclaration:
+    """Canonical per-file facts shared by freeze validation and Inventory."""
+
+    path: str
+    asset_type: Literal["raw_long_reads", "clean_long_reads"]
+    platform: Platform
+    format: Format
+    compression: Compression
+    layout: Layout
+    size_bytes: int | None
+    sample_id: str | None
+    metadata: dict[str, Any]
+    manifest_entry_ordinal: int | None
+    path_ordinal: int | None
+    platform_resolution_source: str
+    sources: tuple[ReadDeclarationSource, ...]
+
+
+@dataclass(frozen=True)
+class CanonicalInputDeclarations:
+    """One canonical manifest plus its merged run-config read declarations."""
+
+    manifest: InputManifest
+    manifest_report: dict[str, Any]
+    read_declarations: tuple[RegisteredReadDeclaration, ...]
+
+
+def canonicalize_input_declarations(
+    manifest: InputManifest,
+    run_config: RunConfig,
+) -> CanonicalInputDeclarations:
+    """Merge manifest and supported run-config reads without inventing identities.
+
+    The manifest remains the schema authority for manifest-owned assets.  The
+    run config may add an Assembly HiFi selection and explicit T2T read inputs.
+    Compatible aliases reuse the manifest path; conflicting platform claims and
+    duplicate canonical paths within one run-config field fail the returned
+    validation report.
+    """
+
+    canonical_manifest = manifest.model_copy(deep=True)
+    shared_platform = (
+        run_config.shared_parameters.platform
+        if run_config.shared_parameters is not None
+        else None
+    )
+    shared_platform_entry = _apply_shared_long_read_platform(
+        canonical_manifest,
+        shared_platform,
+    )
+    report = validate_manifest(canonical_manifest)
+    errors = [
+        str(error)
+        for error in report["errors"]
+        if not _is_manifest_platform_relation_error(str(error))
+    ]
+    warnings = [
+        str(warning)
+        for warning in report["warnings"]
+        if not _is_manifest_unknown_platform_warning(str(warning))
+    ]
+    inferred = [
+        AssetEntryInference.model_validate(item)
+        for item in report["inferred"]
+    ]
+
+    manifest_owners: dict[str, tuple[int, int, str]] = {}
+    declarations: dict[str, dict[str, Any]] = {}
+    for entry_ordinal, (asset, entry) in enumerate(
+        zip(canonical_manifest.assets, inferred, strict=True)
+    ):
+        for path_ordinal, fact in enumerate(entry.path_facts):
+            canonical_path = str(
+                Path(fact.canonical_path).expanduser().resolve(strict=False)
+            )
+            manifest_owners[canonical_path] = (
+                entry_ordinal,
+                path_ordinal,
+                str(asset.asset_type),
+            )
+            if asset.asset_type not in {"raw_long_reads", "clean_long_reads"}:
+                continue
+            platform_source = (
+                "shared_parameters.platform"
+                if shared_platform_entry == entry_ordinal
+                else fact.platform_resolution_source
+            )
+            declarations[canonical_path] = {
+                "path": canonical_path,
+                "asset_type": asset.asset_type,
+                "platform": fact.platform,
+                "format": fact.format,
+                "compression": fact.compression,
+                "layout": entry.inferred_layout,
+                "size_bytes": fact.size_bytes,
+                "sample_id": asset.sample_id or canonical_manifest.sample_id,
+                "metadata": dict(asset.metadata),
+                "manifest_entry_ordinal": entry_ordinal,
+                "path_ordinal": path_ordinal,
+                "platform_resolution_source": platform_source,
+                "sources": [
+                    ReadDeclarationSource(
+                        declaration_source="manifest",
+                        declaration_field=(
+                            f"assets[{entry_ordinal}].paths[{path_ordinal}]"
+                        ),
+                        declared_path=fact.declared_path,
+                    )
+                ],
+            }
+
+    run_declarations: list[tuple[str, Platform, str, str]] = []
+    if run_config.assembly and run_config.assembly.hifi_reads_ref:
+        run_declarations.append(
+            (
+                run_config.assembly.hifi_reads_ref,
+                "pacbio_hifi",
+                "assembly.hifi_reads_ref",
+                "assembly.hifi_reads_ref",
+            )
+        )
+    if run_config.t2t:
+        run_declarations.extend(
+            (
+                item.path,
+                item.platform,
+                f"t2t.read_inputs[{index}].path",
+                "t2t.read_inputs",
+            )
+            for index, item in enumerate(run_config.t2t.read_inputs)
+        )
+
+    seen_by_field: set[tuple[str, str]] = set()
+    for declared_path, declared_platform, declaration_field, source_group in (
+        run_declarations
+    ):
+        path = Path(declared_path).expanduser()
+        if not path.is_absolute():
+            errors.append(
+                f"run-config {declaration_field} is not canonical absolute: "
+                f"{declared_path}"
+            )
+            continue
+        canonical_path = str(path.resolve(strict=False))
+        source_key = (source_group, canonical_path)
+        if source_key in seen_by_field:
+            errors.append(
+                f"run-config {source_group} repeats canonical path {canonical_path}"
+            )
+            continue
+        seen_by_field.add(source_key)
+
+        owner = manifest_owners.get(canonical_path)
+        if owner is not None and owner[2] not in {
+            "raw_long_reads",
+            "clean_long_reads",
+        }:
+            errors.append(
+                f"run-config {declaration_field} collides with manifest "
+                f"{owner[2]} path {canonical_path}"
+            )
+            continue
+
+        source = ReadDeclarationSource(
+            declaration_source="run_config",
+            declaration_field=declaration_field,
+            declared_path=declared_path,
+        )
+        existing = declarations.get(canonical_path)
+        if existing is not None:
+            existing_platform = str(existing["platform"])
+            if existing_platform not in {"unknown", declared_platform}:
+                errors.append(
+                    f"conflicting read platforms for {canonical_path}: "
+                    f"{existing_platform} vs {declared_platform} from "
+                    f"{declaration_field}"
+                )
+                continue
+            if existing_platform == "unknown":
+                existing["platform"] = declared_platform
+                existing["platform_resolution_source"] = declaration_field
+            existing["sources"].append(source)
+            continue
+
+        synthetic_manifest = InputManifest(
+            session_id=canonical_manifest.session_id,
+            sample_id=canonical_manifest.sample_id,
+            assets=[
+                InputAssetSpec(
+                    asset_type="raw_long_reads",
+                    paths=[canonical_path],
+                    platform=declared_platform,
+                )
+            ],
+        )
+        synthetic_report = validate_manifest(synthetic_manifest)
+        errors.extend(
+            f"{declaration_field}: {error}"
+            for error in synthetic_report["errors"]
+        )
+        warnings.extend(
+            f"{declaration_field}: {warning}"
+            for warning in synthetic_report["warnings"]
+        )
+        synthetic_entry = AssetEntryInference.model_validate(
+            synthetic_report["inferred"][0]
+        )
+        fact = synthetic_entry.path_facts[0]
+        declarations[canonical_path] = {
+            "path": canonical_path,
+            "asset_type": "raw_long_reads",
+            "platform": declared_platform,
+            "format": fact.format,
+            "compression": fact.compression,
+            "layout": synthetic_entry.inferred_layout,
+            "size_bytes": fact.size_bytes,
+            "sample_id": canonical_manifest.sample_id,
+            "metadata": {},
+            "manifest_entry_ordinal": None,
+            "path_ordinal": None,
+            "platform_resolution_source": declaration_field,
+            "sources": [source],
+        }
+
+    for entry_ordinal, asset in enumerate(canonical_manifest.assets):
+        if asset.asset_type not in {"raw_long_reads", "clean_long_reads"}:
+            continue
+        entry_declarations = [
+            declaration
+            for declaration in declarations.values()
+            if declaration["manifest_entry_ordinal"] == entry_ordinal
+        ]
+        platforms = {
+            str(declaration["platform"])
+            for declaration in entry_declarations
+        }
+        if len(platforms) > 1:
+            errors.append(
+                f"{asset.asset_type}: one manifest entry resolves to conflicting "
+                f"platforms {sorted(platforms)}; split platforms into separate "
+                "entries"
+            )
+        if asset.asset_type == "raw_long_reads" and "unknown" in platforms:
+            warnings.append(
+                f"{asset.asset_type}: platform unknown for {asset.paths}"
+            )
+
+    declaration_groups = {
+        (
+            "manifest",
+            declaration["manifest_entry_ordinal"],
+        )
+        if declaration["manifest_entry_ordinal"] is not None
+        else ("run_config", declaration["path"])
+        for declaration in declarations.values()
+    }
+    if len(declaration_groups) > 1:
+        unresolved_groups = {
+            (
+                "manifest",
+                declaration["manifest_entry_ordinal"],
+            )
+            if declaration["manifest_entry_ordinal"] is not None
+            else ("run_config", declaration["path"])
+            for declaration in declarations.values()
+            if declaration["platform"] == "unknown"
+        }
+        if unresolved_groups:
+            unresolved = [
+                str(declaration["path"])
+                for declaration in declarations.values()
+                if declaration["platform"] == "unknown"
+            ]
+            errors.append(
+                "mixed_long_read_platform_unresolved: explicit platform required "
+                f"for {unresolved}"
+            )
+
+    merged_report = {
+        **report,
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+    }
+    return CanonicalInputDeclarations(
+        manifest=canonical_manifest,
+        manifest_report=merged_report,
+        read_declarations=tuple(
+            RegisteredReadDeclaration(
+                path=str(item["path"]),
+                asset_type=item["asset_type"],
+                platform=item["platform"],
+                format=item["format"],
+                compression=item["compression"],
+                layout=item["layout"],
+                size_bytes=item["size_bytes"],
+                sample_id=item["sample_id"],
+                metadata=dict(item["metadata"]),
+                manifest_entry_ordinal=item["manifest_entry_ordinal"],
+                path_ordinal=item["path_ordinal"],
+                platform_resolution_source=str(
+                    item["platform_resolution_source"]
+                ),
+                sources=tuple(item["sources"]),
+            )
+            for item in declarations.values()
+        ),
+    )
+
+
+def _is_manifest_platform_relation_error(message: str) -> bool:
+    return message.startswith("mixed_long_read_platform_unresolved:") or (
+        message.startswith(("raw_long_reads:", "clean_long_reads:"))
+        and "one manifest entry resolves to conflicting platforms" in message
+    )
+
+
+def _is_manifest_unknown_platform_warning(message: str) -> bool:
+    return message.startswith("raw_long_reads: platform unknown for ")
+
+
+def _apply_shared_long_read_platform(
+    manifest: InputManifest,
+    platform: Platform | None,
+) -> int | None:
+    """Apply one shared hint only to one unresolved manifest read group."""
+
+    if platform in {None, "unknown"}:
+        return None
+    long_read_entries = [
+        (index, asset)
+        for index, asset in enumerate(manifest.assets)
+        if asset.asset_type in {"raw_long_reads", "clean_long_reads"}
+    ]
+    if len(long_read_entries) != 1:
+        return None
+    entry_ordinal, asset = long_read_entries[0]
+    if asset.platform != "unknown":
+        return None
+    asset.platform = platform
+    return entry_ordinal
+
+
 def freeze_session_inputs(
     paths: SessionPaths,
     *,
@@ -166,6 +519,18 @@ def freeze_session_inputs(
     _validate_parent_session_id(paths, parent_session_id)
     manifest = _load_manifest_draft(manifest_draft)
     run_config = _load_run_config_draft(run_config_draft)
+    declarations = canonicalize_input_declarations(manifest, run_config)
+    if not declarations.manifest_report["valid"]:
+        raise FrozenInputValidationError(
+            "input declarations cannot be frozen: "
+            + "; ".join(declarations.manifest_report["errors"])
+        )
+    manifest = declarations.manifest
+    _validate_assembly_input_contract(
+        manifest,
+        run_config,
+        declarations.read_declarations,
+    )
     dependency_stages, dependency_methods = _dependency_scope(
         run_config,
         selected_stages=selected_stages,
@@ -256,6 +621,16 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
             "frozen input manifest session_id does not match its run directory"
         )
     run_config = _load_frozen_run_config(paths.run_config_path)
+    declarations = canonicalize_input_declarations(manifest, run_config)
+    if not declarations.manifest_report["valid"]:
+        raise FrozenInputIntegrityError(
+            "frozen manifest/run-config declarations are invalid: "
+            + "; ".join(declarations.manifest_report["errors"])
+        )
+    if declarations.manifest != manifest:
+        raise FrozenInputIntegrityError(
+            "frozen manifest does not contain the canonical shared platform"
+        )
 
     # Parse the dependency manifest using its own strict schema.  The local
     # import keeps storage usable without importing execution during module load.
@@ -497,11 +872,6 @@ def _load_manifest_draft(
         raise FrozenInputValidationError(
             f"normalized manifest draft failed validation: {exc}"
         ) from exc
-    report = validate_manifest(manifest)
-    if not report["valid"]:
-        raise FrozenInputValidationError(
-            "manifest draft cannot be frozen: " + "; ".join(report["errors"])
-        )
     return manifest
 
 
@@ -509,17 +879,85 @@ def _load_run_config_draft(
     source: str | Path | RunConfig | Mapping[str, Any],
 ) -> RunConfig:
     payload, source_dir = _load_json_draft(source, label="run-config draft")
-    normalized = json.loads(json.dumps(payload))
-    for field_path in _RUN_CONFIG_PATH_FIELDS:
-        _normalize_payload_path(normalized, field_path, source_dir)
-    for field_path in _RUN_CONFIG_PATH_LIST_FIELDS:
-        _normalize_payload_path_list(normalized, field_path, source_dir)
     try:
+        normalized = canonicalize_run_config_paths(
+            payload,
+            source_dir=source_dir,
+        )
         return RunConfig.model_validate(normalized)
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         raise FrozenInputValidationError(
             f"run-config draft failed validation: {exc}"
         ) from exc
+
+
+def _validate_assembly_input_contract(
+    manifest: InputManifest,
+    run_config: RunConfig,
+    read_declarations: Sequence[RegisteredReadDeclaration],
+) -> None:
+    """Cross-validate method-owned read roles before freezing control files."""
+
+    assembly = run_config.assembly
+    if assembly is None:
+        return
+    from app.schemas.run_config import infer_assembly_method
+
+    method = infer_assembly_method(assembly)
+    hifi_paths = {
+        declaration.path
+        for declaration in read_declarations
+        if declaration.platform == "pacbio_hifi"
+    }
+    ont_paths = {
+        declaration.path
+        for declaration in read_declarations
+        if declaration.platform == "ont"
+    }
+    paired_entries = [
+        asset for asset in manifest.assets if asset.paired_reads
+    ]
+    if method == "hifiasm" and "assembly" in run_config.local_exec:
+        if not hifi_paths:
+            raise FrozenInputValidationError(
+                "HiFi Hifiasm execution requires registered pacbio_hifi reads"
+            )
+        params = assembly.hifiasm_parameters
+        if params and params.use_ultralong_ont and not ont_paths:
+            raise FrozenInputValidationError(
+                "hifiasm use_ultralong_ont requires registered ONT reads"
+            )
+        if params and params.use_hic_phasing and not paired_entries:
+            raise FrozenInputValidationError(
+                "hifiasm use_hic_phasing requires registered paired Hi-C reads"
+            )
+    if method == "hifiasm_ont" and "assembly" in run_config.local_exec:
+        if not ont_paths:
+            raise FrozenInputValidationError(
+                "Hifiasm ONT execution requires registered ONT reads"
+            )
+    if assembly.hifi_reads_ref:
+        selected = str(Path(assembly.hifi_reads_ref).resolve(strict=False))
+        if selected not in hifi_paths:
+            raise FrozenInputValidationError(
+                "assembly.hifi_reads_ref must select a registered HiFi member"
+            )
+    if assembly.hic_reads_ref:
+        selected = str(Path(assembly.hic_reads_ref).resolve(strict=False))
+        matching_entries = [
+            asset
+            for asset in paired_entries
+            if selected
+            in {
+                str(Path(path).resolve(strict=False))
+                for path in asset.paths
+            }
+        ]
+        if len(matching_entries) != 1:
+            raise FrozenInputValidationError(
+                "assembly.hic_reads_ref must select exactly one registered "
+                "paired-read group"
+            )
 
 
 def _load_yaml_draft(
@@ -569,65 +1007,6 @@ def _normalize_draft_path(
             f"{field} must be absolute when freezing an in-memory draft: {path_value}"
         )
     return str((source_dir / path).resolve(strict=False))
-
-
-def _normalize_payload_path(
-    payload: dict[str, Any], field_path: tuple[str, ...], source_dir: Path | None
-) -> None:
-    parent: Any = payload
-    for key in field_path[:-1]:
-        if not isinstance(parent, dict) or key not in parent:
-            return
-        parent = parent[key]
-    if not isinstance(parent, dict):
-        return
-    key = field_path[-1]
-    value = parent.get(key)
-    if value is None:
-        return
-    if not isinstance(value, str) or not value.strip():
-        raise FrozenInputValidationError(
-            f"run-config {'.'.join(field_path)} must be a non-empty path"
-        )
-    parent[key] = _normalize_draft_path(
-        value, source_dir, field=f"run-config {'.'.join(field_path)}"
-    )
-
-
-def _normalize_payload_path_list(
-    payload: dict[str, Any], field_path: tuple[str, ...], source_dir: Path | None
-) -> None:
-    parent: Any = payload
-    for key in field_path[:-1]:
-        if not isinstance(parent, dict) or key not in parent:
-            return
-        parent = parent[key]
-    if not isinstance(parent, dict):
-        return
-    key = field_path[-1]
-    values = parent.get(key)
-    if values is None:
-        return
-    if not isinstance(values, list):
-        raise FrozenInputValidationError(
-            f"run-config {'.'.join(field_path)} must be a list of paths"
-        )
-    parent[key] = [
-        _normalize_draft_path(
-            value,
-            source_dir,
-            field=f"run-config {'.'.join(field_path)}[{index}]",
-        )
-        if isinstance(value, str) and value.strip()
-        else _raise_invalid_path_list_member(field_path, index)
-        for index, value in enumerate(values)
-    ]
-
-
-def _raise_invalid_path_list_member(field_path: tuple[str, ...], index: int) -> str:
-    raise FrozenInputValidationError(
-        f"run-config {'.'.join(field_path)}[{index}] must be a non-empty path"
-    )
 
 
 def _manifest_bytes(manifest: InputManifest) -> bytes:

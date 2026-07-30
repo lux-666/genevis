@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.entrypoints.review_interactive import (
     _prompt_choice,
     build_decision_brief,
@@ -21,15 +23,20 @@ from app.entrypoints.review_interactive import (
     run_interactive_review,
 )
 from app.review.base import ResumeReviewRequest
+from app.schemas.artifacts import ArtifactRef
 from app.review.persistence import persist_review_request
 from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
 
 
-def _write_fasta(tmp: str, name: str = "draft.fasta") -> str:
-    path = Path(tmp) / name
-    path.write_text(">ctg1\nACGT\n", encoding="utf-8")
-    return str(path)
+def _primary_output_ref(candidate_id: str) -> dict:
+    return ArtifactRef(
+        artifact_id=f"artifact-{candidate_id}",
+        path_ref=f"artifacts/assembly/{candidate_id}.fasta",
+        sha256="a" * 64,
+        size_bytes=10,
+        artifact_type="assembly.draft_assembly",
+    ).model_dump(mode="json")
 
 
 def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
@@ -48,7 +55,7 @@ def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
             {
                 "candidate_id": "flye",
                 "method_name": "assembly.candidate.flye",
-                "final_assembly_ref": draft_ref,
+                "primary_output_ref": _primary_output_ref("flye"),
             },
         ],
         "signals": [],
@@ -149,39 +156,39 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertEqual(choice, "rerun")
 
     def test_accept_single_candidate_auto_selects(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            draft = _write_fasta(tmp)
-            requirements = {
-                "stage": "assembly_review",
-                "decisions_allowed": ["accept", "pass"],
-                "candidate_ids": ["flye"],
-                "candidate_final_assembly_refs": {"flye": draft},
-            }
-            inputs = iter(["1", ""])
-            with patch("builtins.input", side_effect=lambda _: next(inputs)):
-                result = prompt_assembly_review_decision(requirements)
+        requirements = {
+            "stage": "assembly_review",
+            "decisions_allowed": ["accept", "pass"],
+            "candidate_ids": ["flye"],
+            "candidate_primary_output_refs": {
+                "flye": _primary_output_ref("flye")
+            },
+        }
+        inputs = iter(["1", ""])
+        with patch("builtins.input", side_effect=lambda _: next(inputs)):
+            result = prompt_assembly_review_decision(requirements)
 
         self.assertIsNotNone(result)
         self.assertEqual(result["decision"], "accept")
         self.assertEqual(result["candidate_id"], "flye")
-        self.assertEqual(result["final_assembly_ref"], draft)
+        self.assertNotIn("final_assembly_ref", result)
 
     def test_decision_prompt_describes_hic_t2t_downstream(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            draft = _write_fasta(tmp)
-            requirements = {
-                "stage": "assembly_review",
-                "decisions_allowed": ["accept", "stop_human_review"],
-                "candidate_ids": ["flye"],
-                "candidate_final_assembly_refs": {"flye": draft},
-            }
-            inputs = iter(["1", ""])
-            out = io.StringIO()
-            with (
-                patch("builtins.input", side_effect=lambda _: next(inputs)),
-                patch("sys.stdout", out),
-            ):
-                result = prompt_assembly_review_decision(requirements)
+        requirements = {
+            "stage": "assembly_review",
+            "decisions_allowed": ["accept", "stop_human_review"],
+            "candidate_ids": ["flye"],
+            "candidate_primary_output_refs": {
+                "flye": _primary_output_ref("flye")
+            },
+        }
+        inputs = iter(["1", ""])
+        out = io.StringIO()
+        with (
+            patch("builtins.input", side_effect=lambda _: next(inputs)),
+            patch("sys.stdout", out),
+        ):
+            result = prompt_assembly_review_decision(requirements)
 
         self.assertIsNotNone(result)
         rendered = out.getvalue()
@@ -189,44 +196,40 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertIn("next: assembly_review -> hic_scaffolding -> t2t", rendered)
 
     def test_accept_multiple_candidates_prompts_choice(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            flye = _write_fasta(tmp, "flye.fasta")
-            canu = _write_fasta(tmp, "canu.fasta")
-            requirements = {
-                "stage": "assembly_review",
-                "decisions_allowed": ["accept"],
-                "candidate_ids": ["flye", "canu"],
-                "candidate_final_assembly_refs": {
-                    "flye": flye,
-                    "canu": canu,
-                },
-            }
-            inputs = iter(["1", "2", ""])
-            with patch("builtins.input", side_effect=lambda _: next(inputs)):
-                result = prompt_assembly_review_decision(requirements)
+        requirements = {
+            "stage": "assembly_review",
+            "decisions_allowed": ["accept"],
+            "candidate_ids": ["flye", "canu"],
+            "candidate_primary_output_refs": {
+                "flye": _primary_output_ref("flye"),
+                "canu": _primary_output_ref("canu"),
+            },
+        }
+        inputs = iter(["1", "2", ""])
+        with patch("builtins.input", side_effect=lambda _: next(inputs)):
+            result = prompt_assembly_review_decision(requirements)
 
         self.assertIsNotNone(result)
         self.assertEqual(result["decision"], "accept")
         self.assertEqual(result["candidate_id"], "canu")
         self.assertEqual(result["rejected_candidates"], ["flye"])
 
-    def test_accept_filters_missing_candidates_and_shows_reports(self):
+    def test_accept_shows_typed_candidates_and_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
-            flye = _write_fasta(tmp, "flye.fasta")
             report = str(Path(tmp) / "assembly_review.md")
             metric = str(Path(tmp) / "quast_summary.json")
             requirements = {
                 "stage": "assembly_review",
                 "decisions_allowed": ["accept"],
                 "candidate_ids": ["flye", "nextdenovo"],
-                "candidate_final_assembly_refs": {
-                    "flye": flye,
-                    "nextdenovo": str(Path(tmp) / "missing.fasta"),
+                "candidate_primary_output_refs": {
+                    "flye": _primary_output_ref("flye"),
+                    "nextdenovo": _primary_output_ref("nextdenovo"),
                 },
                 "candidate_report_refs": {"flye": [metric]},
                 "report_refs": {"assembly_review_report": report},
             }
-            inputs = iter(["1", ""])
+            inputs = iter(["1", "1", ""])
             out = io.StringIO()
             with (
                 patch("builtins.input", side_effect=lambda _: next(inputs)),
@@ -237,9 +240,12 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["candidate_id"], "flye")
         rendered = out.getvalue()
-        self.assertIn("unavailable_candidates", rendered)
         self.assertIn("nextdenovo", rendered)
         self.assertIn("candidate_evidence", rendered)
+        self.assertIn(
+            "assembly.draft_assembly:artifact-flye",
+            rendered,
+        )
         self.assertIn(metric, rendered)
         self.assertIn(report, rendered)
 
@@ -248,7 +254,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["accept"],
             "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/draft.fasta"},
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         with patch("builtins.input", side_effect=EOFError):
             result = prompt_assembly_review_decision(requirements)
@@ -260,7 +266,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["accept", "stop_human_review"],
             "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/draft.fasta"},
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         inputs = iter(["2", "stopping review"])
         with patch("builtins.input", side_effect=lambda _: next(inputs)):
@@ -275,7 +281,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["purge", "accept"],
             "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/draft.fasta"},
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         inputs = iter(
             [
@@ -292,7 +298,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["decision"], "purge")
         self.assertEqual(result["candidate_id"], "flye")
-        self.assertEqual(result["final_assembly_ref"], "/path/purged.fasta")
+        self.assertNotIn("final_assembly_ref", result)
         self.assertEqual(result["metadata"]["action_output_ref"], "/path/purged.fasta")
         self.assertTrue(result["metadata"]["human_approved_action"])
         self.assertEqual(result["metadata"]["method_name"], "purge_dups")
@@ -305,7 +311,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["rerun", "accept"],
             "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/draft.fasta"},
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         stderr = io.StringIO()
         with patch("builtins.input") as mock_input, patch("sys.stderr", stderr):
@@ -324,7 +330,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["purge"],
             "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/draft.fasta"},
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         inputs = iter(
             [
@@ -344,7 +350,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["purge"],
             "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/draft.fasta"},
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         inputs = iter(
             [
@@ -481,7 +487,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 stage="assembly_review",
                 decision="accept",
                 candidate_id="flye",
-                final_assembly_ref="draft.fasta",
             )
             raw_decision = request.model_dump(mode="json")
             with (
@@ -544,7 +549,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 gate_id="assembly_review",
                 decision="accept",
                 candidate_id="flye",
-                final_assembly_ref="draft.fasta",
             )
             raw_decision = request.model_dump(mode="json")
 
@@ -623,7 +627,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 stage="assembly_review",
                 decision="accept",
                 candidate_id="flye",
-                final_assembly_ref="draft.fasta",
             )
             raw_decision = request.model_dump(mode="json")
             decision_path = (
@@ -699,7 +702,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 stage="assembly_review",
                 decision="accept",
                 candidate_id="flye",
-                final_assembly_ref="draft.fasta",
             )
             raw_decision = request.model_dump(mode="json")
             intake_selection = type(
@@ -848,7 +850,9 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                 "stage": "assembly_review",
                 "decisions_allowed": ["accept", "stop_human_review"],
                 "candidate_ids": ["flye"],
-                "candidate_final_assembly_refs": {"flye": "/tmp/nonexistent.fasta"},
+                "candidate_primary_output_refs": {
+                    "flye": _primary_output_ref("flye")
+                },
                 "report_refs": {"report": "/tmp/report.json"},
                 "candidate_comparison_context": {"flye_n50": 10000},
             },
@@ -865,7 +869,9 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                 "stage": "assembly_review",
                 "decisions_allowed": ["accept", "stop_human_review"],
                 "candidate_ids": ["flye"],
-                "candidate_final_assembly_refs": {"flye": "/tmp/nonexistent.fasta"},
+                "candidate_primary_output_refs": {
+                    "flye": _primary_output_ref("flye")
+                },
             },
             "latest_review_request_artifact": None,
             "next_action": {},
@@ -895,6 +901,19 @@ class RenderBlockedSummaryTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_removed_final_assembly_ref_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            ResumeReviewRequest.model_validate(
+                {
+                    "session_id": "s1",
+                    "stage": "assembly_review",
+                    "decision": "accept",
+                    "candidate_id": "flye",
+                    "final_assembly_ref": "draft.fasta",
+                    "decided_by": "human",
+                }
+            )
+
     def test_unknown_decision_value_is_schema_valid(self):
         raw = {
             "session_id": "s1",
@@ -1014,7 +1033,9 @@ class DecisionBriefTests(unittest.TestCase):
                 "stage": "assembly_review",
                 "decisions_allowed": ["accept", "stop_human_review"],
                 "candidate_ids": ["flye"],
-                "candidate_final_assembly_refs": {"flye": "/tmp/draft.fasta"},
+                "candidate_primary_output_refs": {
+                    "flye": _primary_output_ref("flye")
+                },
                 "report_refs": {"quast": "/tmp/quast_report.json"},
                 "candidate_comparison_context": {
                     "flye_n50": 50000,
@@ -1033,8 +1054,11 @@ class DecisionBriefTests(unittest.TestCase):
         self.assertEqual(brief["review_request_ref"], "/tmp/request.json")
         self.assertEqual(len(brief["candidates"]), 1)
         self.assertEqual(brief["candidates"][0]["id"], "flye")
-        self.assertEqual(brief["candidates"][0]["ref"], "/tmp/draft.fasta")
-        self.assertIn("exists", brief["candidates"][0])
+        self.assertEqual(
+            brief["candidates"][0]["ref"],
+            "assembly.draft_assembly:artifact-flye",
+        )
+        self.assertNotIn("exists", brief["candidates"][0])
         self.assertEqual(brief["evidence"]["metrics"]["flye_n50"], 50000)
         self.assertEqual(
             brief["evidence"]["report_refs"]["quast"], "/tmp/quast_report.json"
@@ -1069,7 +1093,9 @@ class DecisionBriefTests(unittest.TestCase):
                     "stage": "assembly_review",
                     "decisions_allowed": ["accept"],
                     "candidate_ids": ["flye"],
-                    "candidate_final_assembly_refs": {"flye": "/tmp/draft.fasta"},
+                    "candidate_primary_output_refs": {
+                        "flye": _primary_output_ref("flye")
+                    },
                     "report_refs": {},
                     "candidate_comparison_context": {},
                 },

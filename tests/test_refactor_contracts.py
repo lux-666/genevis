@@ -17,7 +17,7 @@ from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import initial_state
-from app.stages.assembly_dedup.nodes import _read_mapping_preset
+from app.stages.assembly_dedup.nodes import _minimap2_preset
 from app.stages.assembly_dedup.routing import (
     route_after_enter,
     route_after_plan,
@@ -90,9 +90,15 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                         },
                         "t2t": {
                             "assembly_fasta_ref": "assembly/final.fasta",
-                            "ont_read_refs": [
-                                "reads/ont-a.fastq.gz",
-                                "../shared/ont-b.fastq.gz",
+                            "read_inputs": [
+                                {
+                                    "path": "reads/ont-a.fastq.gz",
+                                    "platform": "ont",
+                                },
+                                {
+                                    "path": "../shared/hifi-b.fastq.gz",
+                                    "platform": "pacbio_hifi",
+                                },
                             ],
                         },
                     }
@@ -121,13 +127,20 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 str((source_dir / "assembly/final.fasta").resolve()),
             )
             self.assertEqual(
-                canonical["t2t"]["ont_read_refs"],
+                canonical["t2t"]["read_inputs"],
                 [
-                    str((source_dir / "reads/ont-a.fastq.gz").resolve()),
-                    str((source_dir / "../shared/ont-b.fastq.gz").resolve()),
+                    {
+                        "path": str((source_dir / "reads/ont-a.fastq.gz").resolve()),
+                        "platform": "ont",
+                    },
+                    {
+                        "path": str(
+                            (source_dir / "../shared/hifi-b.fastq.gz").resolve()
+                        ),
+                        "platform": "pacbio_hifi",
+                    },
                 ],
             )
-            self.assertNotIn("ont_reads_ref", canonical["t2t"])
 
     def test_external_resume_decision_is_snapshotted_under_run_control(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -162,6 +175,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             script_path=Path("run.sh"),
             working_dir=Path("."),
             expected_outputs=[],
+            input_dependencies=[],
             env=None,
             env_spec=EnvSpec(conda_bin="conda-test", conda_env="gene-tools"),
         )
@@ -267,23 +281,11 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 self.assertEqual(route_after_plan(state), "fail")
                 self.assertEqual(route_after_purge_dups(state), "fail")
 
-    def test_hifi_reads_use_hifi_mapping_preset(self):
-        self.assertEqual(
-            _read_mapping_preset({"primary_long_read_platform": "pacbio_hifi"}),
-            "map-hifi",
-        )
-        self.assertEqual(
-            _read_mapping_preset({"primary_long_read_platform": "hifi"}),
-            "map-hifi",
-        )
-        self.assertEqual(
-            _read_mapping_preset({"primary_long_read_platform": "pacbio_clr"}),
-            "map-pb",
-        )
-        self.assertEqual(
-            _read_mapping_preset({"primary_long_read_platform": "ont"}),
-            "map-ont",
-        )
+    def test_long_read_platforms_use_matching_minimap2_presets(self):
+        self.assertEqual(_minimap2_preset("pacbio_hifi"), "map-hifi")
+        self.assertEqual(_minimap2_preset("pacbio_clr"), "map-pb")
+        self.assertEqual(_minimap2_preset("ont"), "map-ont")
+        self.assertEqual(_minimap2_preset("cycloneseq"), "map-ont")
 
 
 if __name__ == "__main__":

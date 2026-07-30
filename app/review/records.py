@@ -10,8 +10,8 @@ KNOWN_ORIGINS = ("human", "llm_provisional", "auto_rule")
 def decision_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Project review_decision events into a stable record shape.
 
-    Missing `decided_by` defaults to "human" — historical events written before
-    Phase 5 task 04 do not carry the field.
+    Missing `decided_by` defaults to "human" because older events do not carry
+    the field.
     """
     records: list[dict[str, Any]] = []
     for event in events:

@@ -117,6 +117,15 @@ and attempt identities must match. The retained script path and working
 directory must each still exist; the current loader does not impose a separate
 path-containment relation between them.
 
+Each frozen attempt also declares typed `input_dependencies`. Registry-owned
+external assets freeze their asset ID, canonical path, size, and SHA-256;
+run-owned inputs freeze their complete `ArtifactRef` plus the exact command
+path. Explicit unregistered files freeze path, size, and SHA-256, while
+external directories freeze a deterministic tree hash, file count, and total
+byte count. The shared run node verifies every dependency immediately before
+invoking the Runner, including after resume. Missing, re-registered,
+path-drifted, or byte-drifted input fails without starting the process.
+
 `run_frozen_attempt` owns Runner invocation, stdout/stderr publication,
 artifact-index registration, output cleanup policy, and attempt-started or
 attempt-failed ledger facts. The Runner result attempt ID is checked before any
@@ -141,29 +150,6 @@ are not converted into normal workflow outcomes.
 Collect adapters decide which biological outputs are required or optional and
 own attempt-succeeded facts after successful materialization.
 
-## Operator-Directed Assembly Rerun
-
-An Assembly Review decision may schedule a Flye rerun, but the decision applier
-does not execute it. It persists the operator parameters as a compact rerun
-request, clears the interrupt, and returns a running-stage update. The existing
-resume transaction checkpoints that update before invoking the graph.
-
-The rerun then uses the ordinary direct-attempt lifecycle under canonical stage
-`assembly`:
-
-```text
-flye_rerun_planned
-  -> freeze / execution_attempts[frozen]
-  -> run / execution_attempts[executed|execution_failed]
-  -> collect / candidate bundle
-  -> assembly review reevaluation
-```
-
-The `execution_attempts` cursor is the recovery relation for the frozen and
-execution refs. The review decision owns the operator parameters; the candidate
-bundle is the collected domain result and may project those refs for audit. No
-parameter-recommendation record is synthesized for this path.
-
 ## Conformance
 
 There is no legacy cursor reader, dual write, checkpoint migration, or
@@ -175,11 +161,12 @@ The current implementation requires:
    shared run kernel;
 2. Assembly, AutoHiC, and T2T parameterized methods use
    `ParameterAttemptOwner`;
-3. ordinary, batch, and operator-rerun methods use `DirectAttemptOwner`;
+3. ordinary and batch methods use `DirectAttemptOwner`;
 4. process success and failure persist canonical execution evidence;
 5. resume after freeze does not rebuild a command, and resume after run does
    not execute again;
-6. production code has no method-specific duplicate cursor key, wrapper
+6. every command input is bound through a typed frozen input dependency;
+7. production code has no method-specific duplicate cursor key, wrapper
    artifact, or stage-local lifecycle implementation.
 
 Parameterized retries use a new attempt ID and an attempt-specific work/output

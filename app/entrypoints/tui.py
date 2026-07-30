@@ -38,8 +38,8 @@ def _tui_main(data_dir: str) -> int:
     while True:
         print(
             "请描述本次运行目标（例如："
-            "“我想对 T2T-CHM13 做 T2T 级组装”或"
-            "“以卵鳎为目标物种进行染色体级组装”）。"
+            "\u201c我想对 T2T-CHM13 做 T2T 级组装\u201d或"
+            "\u201c以卵鳎为目标物种进行染色体级组装\u201d）。"
         )
         print("输入 /resume 可继续草稿、处理 review gate 或创建重跑草稿。")
         try:
@@ -199,6 +199,7 @@ def _continue_tui_draft(draft: Any) -> int:
 def _collect_sample_assets(draft: Any) -> Any | None:
     from app.entrypoints.tui_intake import (
         apply_asset_answer,
+        apply_batch_t2t_facts,
         confirm_no_hic_degradation,
         next_intake_clarification,
         save_tui_session_draft,
@@ -232,8 +233,31 @@ def _collect_sample_assets(draft: Any) -> Any | None:
             print("未确认降级；请改为提供明确的 Hi-C R1/R2。\n")
             continue
 
+        if clarification.kind == "t2t_batch":
+            if not answer:
+                print("未收到任何信息，请重新输入。\n")
+                continue
+            result = apply_batch_t2t_facts(
+                draft,
+                answer=answer,
+                llm_parser=_parse_assets_with_configured_llm,
+            )
+            if _would_replace_confirmed_asset(result) and _confirm(
+                "回答中包含已确认资产的新值，是否替换旧值？", default=False
+            ):
+                result = apply_batch_t2t_facts(
+                    draft,
+                    answer=answer,
+                    llm_parser=_parse_assets_with_configured_llm,
+                    replace_confirmed=True,
+                )
+            draft = result.draft
+            save_tui_session_draft(draft)
+            _render_batch_t2t_result(result)
+            continue
+
         if not answer:
-            print("未收到路径或明确的“没有 Hi-C”，请重新输入。\n")
+            print("未收到路径或明确的\u201c没有 Hi-C\u201d，请重新输入。\n")
             continue
 
         result = apply_asset_answer(
@@ -333,12 +357,45 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
     from app.schemas.ask_plan import AskPlanState
     from app.storage.paths import SessionPaths
 
+    has_hifi = draft.intake.hifi_reads is not None
+    has_ont = draft.intake.ont_reads is not None
+    platform = "pacbio_hifi" if has_hifi and not has_ont else "ont"
+    if has_hifi and has_ont:
+        platform = None
+
+    requested_method = draft.intent.requested_assembly_method
+    selected_methods = draft.selected_methods
+    method_parameters = (
+        {
+            method: dict(parameters)
+            for method, parameters in (draft.method_parameters or {}).items()
+        }
+        if draft.method_parameters is not None
+        else {}
+    )
+    if selected_methods is None and requested_method is not None:
+        selected_methods = {
+            "assembly": f"assembly.candidate.{requested_method}"
+        }
+    if requested_method == "hifiasm":
+        method_id = "assembly.candidate.hifiasm"
+        hifiasm_parameters = dict(method_parameters.get(method_id) or {})
+        hifiasm_parameters.setdefault(
+            "use_ultralong_ont",
+            draft.intent.use_ultralong_ont,
+        )
+        hifiasm_parameters.setdefault(
+            "use_hic_phasing",
+            draft.intent.use_hic_phasing,
+        )
+        method_parameters[method_id] = hifiasm_parameters
+
     entry_request: dict[str, Any] = {
         "command": "run",
         "session_id": draft.session_id,
         "data_dir": draft.data_dir,
         "requested_stages": _effective_requested_stages(draft),
-        "platform": "ont",
+        "platform": platform,
         "target_species": draft.intent.target_species,
         "source_paths": [],
         "intent_parse_source": "tui_intake",
@@ -353,9 +410,9 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         ),
         selected_stages=draft.selected_stages,
         resolved_execution_order=draft.resolved_execution_order,
-        selected_methods=draft.selected_methods,
+        selected_methods=selected_methods,
         shared_parameters=draft.shared_parameters,
-        method_parameters=draft.method_parameters,
+        method_parameters=method_parameters or None,
         stage_parameters=draft.stage_parameters,
         confirmed=False,
     )
@@ -363,6 +420,7 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
 
 def _effective_requested_stages(draft: Any) -> list[str]:
     from app.schemas.tui_intake import NoHiCFact
+    from app.workflow import stages_through
 
     stages = list(draft.intent.requested_stages)
     degraded = (
@@ -371,7 +429,7 @@ def _effective_requested_stages(draft: Any) -> list[str]:
         and draft.degradation_decision.confirmed
     )
     if degraded:
-        stages = [stage for stage in stages if stage not in {"hic_scaffolding", "t2t"}]
+        stages = stages_through("assembly_review")
     return stages
 
 
@@ -559,6 +617,7 @@ def _review_resumed_draft(draft: Any) -> Any | None:
         print("  2          修改本次目标")
         print("  3          替换 ONT reads")
         print("  4          替换 Hi-C reads / 声明没有 Hi-C")
+        print("  5          替换 HiFi reads")
         print("  0          返回")
         action = input("> ").strip().lower()
         if action in {"", "1", "continue", "继续"}:
@@ -571,6 +630,8 @@ def _review_resumed_draft(draft: Any) -> Any | None:
             draft = _replace_draft_asset(draft, role="ont_reads")
         elif action == "4":
             draft = _replace_draft_asset(draft, role="hic_reads")
+        elif action == "5":
+            draft = _replace_draft_asset(draft, role="hifi_reads")
         else:
             print("无法识别该选择。\n")
             continue
@@ -615,10 +676,12 @@ def _replace_draft_goal(draft: Any) -> Any:
 def _replace_draft_asset(draft: Any, *, role: str) -> Any:
     from app.entrypoints.tui_intake import apply_asset_answer
 
-    if role == "ont_reads":
+    if role == "hifi_reads":
+        print("请提供新的 PacBio HiFi 文件路径；可一次提供多个文件：")
+    elif role == "ont_reads":
         print("请提供新的 ONT 文件路径；可一次提供多个文件：")
     else:
-        print("请明确提供新的 Hi-C R1/R2；也可以回答“没有 Hi-C”：")
+        print("请明确提供新的 Hi-C R1/R2；也可以回答\u201c没有 Hi-C\u201d：")
     answer = input("> ").strip()
     if not answer:
         print("未修改。\n")
@@ -698,6 +761,7 @@ def _create_child_rerun(parent: Any) -> int:
     ):
         intake = child.intake.model_copy(
             update={
+                "hifi_reads": None,
                 "ont_reads": None,
                 "hic_reads": None,
                 "unresolved_candidates": [],
@@ -712,8 +776,28 @@ def _create_child_rerun(parent: Any) -> int:
     return _continue_tui_draft(child)
 
 
+def _render_batch_t2t_result(result: Any) -> None:
+    labels = {
+        "hifi_reads": "PacBio HiFi reads",
+        "ont_reads": "ONT reads",
+        "hic_reads": "Hi-C paired reads",
+        "no_hic": "无 Hi-C",
+        "species": "物种",
+        "telomere_motif": "telomere motif",
+        "assembly_only_switch": "已切换为 assembly-only 路线",
+    }
+    for role in result.accepted_roles:
+        print(f"已确认：{labels.get(role, role)}")
+    for issue in result.issues:
+        print(f"未接受：{issue}")
+    if not result.accepted_roles and not result.issues:
+        print("没有识别出可确认的信息。")
+    print()
+
+
 def _render_asset_result(result: Any) -> None:
     labels = {
+        "hifi_reads": "PacBio HiFi reads",
         "ont_reads": "ONT reads",
         "hic_reads": "Hi-C paired reads",
         "no_hic": "无 Hi-C",
@@ -734,6 +818,10 @@ def _would_replace_confirmed_asset(result: Any) -> bool:
 
 
 def _render_reused_assets(draft: Any) -> None:
+    if draft.intake.hifi_reads is not None:
+        print("\n可复用 PacBio HiFi reads：")
+        for path in draft.intake.hifi_reads.paths:
+            print(f"  - {path}")
     if draft.intake.ont_reads is not None:
         print("\n可复用 ONT reads：")
         for path in draft.intake.ont_reads.paths:
@@ -752,7 +840,11 @@ def _render_reused_assets(draft: Any) -> None:
 
 
 def _has_reused_assets(draft: Any) -> bool:
-    return draft.intake.ont_reads is not None or draft.intake.hic_reads is not None
+    return (
+        draft.intake.hifi_reads is not None
+        or draft.intake.ont_reads is not None
+        or draft.intake.hic_reads is not None
+    )
 
 
 def _confirm(message: str, *, default: bool) -> bool:
@@ -771,7 +863,9 @@ def _parse_goal_with_configured_llm(request_text: str) -> Mapping[str, Any]:
     system = (
         "Extract only explicit workflow-goal facts. Return one JSON object with "
         "goal_text, optional sample_id/target_species, target_assembly_level "
-        "(contig/scaffold/chromosome), and requested_stages. Do not invent paths, "
+        "(contig/scaffold/chromosome), requested_stages, optional explicit "
+        "requested_assembly_method (flye/nextdenovo/hifiasm/hifiasm_ont), and "
+        "explicit use_ultralong_ont/use_hic_phasing booleans. Do not invent paths, "
         "parameters, methods, or machine capabilities."
     )
     return _invoke_json_model(system, request_text)
@@ -782,7 +876,7 @@ def _parse_assets_with_configured_llm(
 ) -> Mapping[str, Any]:
     system = (
         "Extract explicitly stated sequencing asset roles from the answer. Return "
-        'JSON as {"candidates": [{"role": ont_reads|hic_r1|hic_r2|no_hic, '
+        'JSON as {"candidates": [{"role": hifi_reads|ont_reads|hic_r1|hic_r2|no_hic, '
         '"paths": [...], "explicit_role": true|false}]}. Preserve every path '
         "verbatim. Never invent a path, infer a mate from a filename, or mark a "
         "file as existing. The current focused role is "

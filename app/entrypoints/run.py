@@ -1,8 +1,7 @@
-"""Command-line entrypoint for gene-agent.
+"""Command-line entrypoint and internal frozen-session executor for gene-agent.
 
-Normal workflows start in ``gene-agent tui``.  The bootstrap command is an
-auxiliary machine-setup tool; direct run/ask parsing remains only for internal
-callers and existing automation.
+Normal workflows start in ``gene-agent tui``.  The remaining CLI commands
+inspect, resume, review, audit, or configure those TUI-owned runs.
 """
 
 from __future__ import annotations
@@ -54,7 +53,6 @@ from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
-    from app.schemas.ask_plan import AskPlanState
 
 
 _LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))
@@ -77,7 +75,11 @@ def _assembly_parameter_dump(
     method: str,
 ) -> dict[str, Any] | None:
     parameters = getattr(assembly, _ASSEMBLY_PARAMETER_ATTRS[method])
-    return parameters.model_dump(exclude_none=True) if parameters else None
+    return (
+        parameters.model_dump(exclude_none=True, exclude_defaults=True)
+        if parameters
+        else None
+    )
 
 
 def _build_assembly_selection(
@@ -145,144 +147,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(
         dest="command",
         metavar="{tui,bootstrap,inspect,storage-audit,resume,review}",
-    )
-
-    # Retain these parsers for tests and existing automation, but omit ``help``
-    # so argparse does not advertise them as normal user workflows.
-    run_parser = subparsers.add_parser(
-        "run",
-        description=(
-            "Internal compatibility command for tests and automation. "
-            "Normal workflows use 'gene-agent tui'."
-        ),
-    )
-    run_parser.add_argument(
-        "--session-id", help="Unique session identifier; generated when omitted"
-    )
-    run_parser.add_argument(
-        "--manifest", required=True, help="Path to input manifest YAML/JSON"
-    )
-    run_parser.add_argument(
-        "--data-dir", default=default_data_root(), help="Workflow data root"
-    )
-    run_parser.add_argument(
-        "--local-exec",
-        action="append",
-        default=[],
-        metavar="STAGE",
-        choices=_LOCAL_EXEC_STAGE_CHOICES,
-        help=(
-            "Opt a stage into local execution by seeding "
-            "stage_outputs[STAGE].execution_mode=local. Repeat the flag to "
-            "enable multiple stages."
-        ),
-    )
-    run_parser.add_argument(
-        "--run-config",
-        dest="run_config",
-        default=None,
-        help=(
-            "Path to a JSON run-config file that seeds approved stage_outputs "
-            "fields (local_exec stages, assembly method parameters, and "
-            "gene/function annotation execution hints)."
-        ),
-    )
-    run_parser.add_argument(
-        "--checkpointer",
-        choices=["sqlite", "memory"],
-        default=None,
-        help=(
-            "LangGraph checkpoint backend. 'sqlite' (default) persists "
-            "checkpoints under <data_dir>/checkpoints/ so a blocked "
-            "session can be resumed across processes; 'memory' is "
-            "in-process only and intended for tests. Falls back to the "
-            "GENE_AGENT_CHECKPOINTER env var when omitted."
-        ),
-    )
-
-    ask_parser = subparsers.add_parser(
-        "ask",
-        description=(
-            "Internal compatibility command for legacy ask plans. "
-            "Normal workflows use 'gene-agent tui'."
-        ),
-    )
-    ask_parser.add_argument(
-        "request_text",
-        nargs="?",
-        default=None,
-        help="Natural-language request; required unless --ask-plan is provided",
-    )
-    ask_parser.add_argument(
-        "--session-id", help="Default session identifier if omitted from the request"
-    )
-    ask_parser.add_argument(
-        "--data-dir", help="Default output data directory if omitted from the request"
-    )
-    ask_parser.add_argument(
-        "--ask-plan",
-        dest="ask_plan",
-        default=None,
-        help="Continue a previously emitted ask clarification plan",
-    )
-    ask_parser.add_argument(
-        "--clarification-response",
-        dest="clarification_response",
-        default=None,
-        help="JSON response to the current clarification request",
-    )
-    ask_parser.add_argument(
-        "--write-clarification-template",
-        dest="write_clarification_template",
-        default=None,
-        help="Write a clarification response template to a file",
-    )
-    ask_parser.add_argument(
-        "--json",
-        action="store_true",
-        default=False,
-        help="Emit clarification payloads as JSON",
-    )
-    ask_parser.add_argument(
-        "--run-config",
-        dest="run_config",
-        default=None,
-        help="Path to a JSON run-config file; bypasses clarification planning.",
-    )
-    ask_parser.add_argument(
-        "--local-exec",
-        action="append",
-        default=[],
-        metavar="STAGE",
-        choices=_LOCAL_EXEC_STAGE_CHOICES,
-        help="Opt a stage into local execution (used with --run-config bypass).",
-    )
-    ask_parser.add_argument(
-        "--non-interactive",
-        action="store_true",
-        default=False,
-        help="Exit after first clarification (for automation/scripts).",
-    )
-    ask_parser.add_argument(
-        "--resume",
-        dest="resume_session",
-        default=None,
-        metavar="SESSION_ID",
-        help="Resume an existing ask session by session ID.",
-    )
-    ask_parser.add_argument(
-        "--set",
-        dest="set_params",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="Pre-supply parameter values (e.g. --set genome_size=500m).",
-    )
-    ask_parser.add_argument(
-        "--checkpointer",
-        choices=["sqlite", "memory"],
-        default=None,
-        help="Checkpoint backend for the structured run launched by ask.",
     )
 
     inspect_parser = subparsers.add_parser(
@@ -443,10 +307,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _resolve_checkpointer_backend(args: argparse.Namespace) -> CheckpointerBackend:
     """Resolve the checkpoint backend with explicit > env var > default.
 
-    Lets `gene-agent run` and `gene-agent resume` default to durable
-    sqlite for operators while letting the test suite (and any caller
-    that exports ``GENE_AGENT_CHECKPOINTER=memory``) opt out without
-    threading kwargs through every call site.
+    Frozen-session execution and ``gene-agent resume`` default to durable
+    sqlite while tests may explicitly select the in-memory backend.
     """
     configured = (
         getattr(args, "checkpointer", None)
@@ -532,18 +394,17 @@ def execute_frozen_session(
                     "partial execution evidence exists without a resumable checkpoint"
                 )
 
-            args = argparse.Namespace(
+            return _run_session(
                 session_id=session_id,
                 manifest=str(paths.input_manifest_path),
                 data_dir=str(paths.data_root),
                 run_config=str(paths.run_config_path),
                 local_exec=[],
                 checkpointer=checkpointer,
-                _frozen_session=True,
-                _resume_checkpoint=progress == "checkpoint",
-                _interactive_gate=interactive_gate,
+                frozen_session=True,
+                resume_checkpoint=progress == "checkpoint",
+                interactive_gate=interactive_gate,
             )
-            return _run_session(args)
     except FrozenExecutionActiveError as exc:
         print(f"error: frozen session is already active: {exc}", file=sys.stderr)
         return 1
@@ -552,25 +413,49 @@ def execute_frozen_session(
         return 1
 
 
-def _run_session(args: argparse.Namespace) -> int:
-    frozen_session = bool(getattr(args, "_frozen_session", False))
-    resume_checkpoint = bool(getattr(args, "_resume_checkpoint", False))
+def _run_session(
+    *,
+    session_id: str | None,
+    manifest: str | Path | None,
+    data_dir: str | Path,
+    run_config: str | Path | None = None,
+    local_exec: list[str] | tuple[str, ...] = (),
+    checkpointer: CheckpointerBackend | None = None,
+    frozen_session: bool = False,
+    resume_checkpoint: bool = False,
+    interactive_gate: bool | None = None,
+) -> int:
+    """Execute one session from explicit, already-structured inputs."""
+
     try:
         request = EntryRequest(
-            session_id=args.session_id, manifest=args.manifest, data_dir=args.data_dir
+            session_id=session_id,
+            manifest=str(manifest) if manifest is not None else None,
+            data_dir=str(data_dir),
         )
     except ValueError as exc:
         print(f"error: invalid run request: {exc}", file=sys.stderr)
         return 1
 
-    backend = _resolve_checkpointer_backend(args)
+    configured_backend = (
+        checkpointer
+        or os.environ.get("GENE_AGENT_CHECKPOINTER")
+        or DEFAULT_CHECKPOINTER_BACKEND
+    )
+    if configured_backend not in {"sqlite", "memory"}:
+        print(
+            f"error: unsupported checkpointer backend: {configured_backend!r}",
+            file=sys.stderr,
+        )
+        return 1
+    backend = cast(CheckpointerBackend, configured_backend)
     data_dir = _resolve_data_dir(request.data_dir)
 
     if request.manifest is None:
         print("error: run request requires a manifest", file=sys.stderr)
         return 1
     manifest_path = Path(request.manifest)
-    run_config_path = getattr(args, "run_config", None)
+    run_config_path = str(run_config) if run_config is not None else None
     frozen_bundle = None
     frozen_paths: SessionPaths | None = None
     if frozen_session:
@@ -663,7 +548,7 @@ def _run_session(args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
-    cli_local_stages = list(getattr(args, "local_exec", []) or [])
+    cli_local_stages = list(local_exec)
     config_local_stages = list(run_config.local_exec) if run_config else []
     raw_local_stages = list(dict.fromkeys([*cli_local_stages, *config_local_stages]))
     invalid_local_stages = [
@@ -934,7 +819,6 @@ def _run_session(args: argparse.Namespace) -> int:
         print(f"error: workflow invoke failed: {error}", file=sys.stderr)
         return 1
 
-    interactive_gate = getattr(args, "_interactive_gate", None)
     if interactive_gate is None:
         interactive_gate = sys.stdin.isatty()
     supervision = result.get("supervision_state", "unknown")
@@ -1057,173 +941,6 @@ def _interactive_gate_loop(
         )
 
     return result
-
-
-def _run_ask(args: argparse.Namespace) -> int:
-    from app.entrypoints.ask_interactive import (
-        apply_set_params,
-        is_interactive,
-        run_interactive_loop,
-    )
-    from app.entrypoints.ask_planner import (
-        clarification_template,
-        locate_ask_plan_path,
-        merge_clarification_response,
-        next_clarification,
-        save_plan_to_default_path,
-    )
-    from app.schemas.ask_plan import load_ask_clarification_response, load_ask_plan
-
-    if getattr(args, "run_config", None):
-        return _run_ask_with_explicit_config(args)
-
-    if getattr(args, "local_exec", None):
-        print(
-            "error: --local-exec is only valid with --run-config in ask mode; "
-            "the clarification flow manages execution stages automatically",
-            file=sys.stderr,
-        )
-        return 1
-
-    try:
-        if getattr(args, "resume_session", None):
-            data_dir = args.data_dir or default_data_root()
-            ref = locate_ask_plan_path(data_dir, args.resume_session)
-            plan = load_ask_plan(ref)
-        elif getattr(args, "ask_plan", None):
-            plan = load_ask_plan(args.ask_plan)
-        else:
-            if not getattr(args, "request_text", None):
-                print(
-                    "error: request_text is required unless --ask-plan or "
-                    "--resume is provided",
-                    file=sys.stderr,
-                )
-                return 1
-            plan = _create_ask_plan(args)
-
-        if getattr(args, "clarification_response", None):
-            response = load_ask_clarification_response(args.clarification_response)
-            plan = merge_clarification_response(plan, response)
-
-        if getattr(args, "set_params", None):
-            plan = apply_set_params(plan, args.set_params)
-
-        plan_ref = save_plan_to_default_path(plan)
-    except (RuntimeError, ValueError, FileNotFoundError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    if is_interactive(args):
-        return run_interactive_loop(plan, args)
-
-    try:
-        clarification = next_clarification(plan, ask_plan_ref=plan_ref)
-    except (RuntimeError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    if clarification:
-        if getattr(args, "write_clarification_template", None):
-            template = clarification_template(clarification)
-            template_path = (
-                Path(args.write_clarification_template)
-                .expanduser()
-                .resolve(strict=False)
-            )
-            template_path.parent.mkdir(parents=True, exist_ok=True)
-            template_path.write_text(
-                json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    clarification.model_dump(mode="json"), ensure_ascii=False, indent=2
-                )
-            )
-        else:
-            print(f"status: {clarification.status}")
-            print(f"clarification.kind: {clarification.kind}")
-            print(f"session_id: {clarification.session_id}")
-            print(f"ask_plan_ref: {clarification.ask_plan_ref}")
-            print(f"manifest_ref: {clarification.manifest_ref}")
-            print(f"question: {clarification.question}")
-            if clarification.summary:
-                summary_json = json.dumps(
-                    clarification.summary,
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                )
-                print(f"summary: {summary_json}")
-            print(f"required_fields: {clarification.required_fields}")
-            print(f"next_action.command: {clarification.next_action.get('command')}")
-        return 0
-
-    from app.entrypoints.ask_execution import execute_confirmed_plan
-
-    return execute_confirmed_plan(plan, args)
-
-
-def _create_ask_plan(args: argparse.Namespace) -> "AskPlanState":
-    from app.entrypoints.intent import parse_request_with_llm
-    from app.entrypoints.manifest_materializer import materialize_entry_manifest
-    from app.schemas.ask_plan import AskPlanState
-
-    data_dir = args.data_dir or default_data_root()
-    defaults = {
-        "session_id": args.session_id or generate_session_id(data_dir),
-        "data_dir": data_dir,
-    }
-    request = parse_request_with_llm(args.request_text, defaults=defaults)
-    intent_parse_source = getattr(request, "_intent_parse_source", None)
-    request = materialize_entry_manifest(request)
-    if intent_parse_source:
-        request._intent_parse_source = intent_parse_source
-    stored_request = (
-        request.model_copy(update={"source_paths": []}) if request.manifest else request
-    )
-    entry_request = stored_request.model_dump(mode="json")
-    if intent_parse_source:
-        entry_request["intent_parse_source"] = intent_parse_source
-    return AskPlanState(
-        session_id=str(request.session_id),
-        data_dir=request.data_dir,
-        request_text=args.request_text,
-        entry_request=entry_request,
-        manifest_ref=str(request.manifest),
-    )
-
-
-def _run_ask_with_explicit_config(args: argparse.Namespace) -> int:
-    from app.entrypoints.intent import parse_request_with_llm
-    from app.entrypoints.manifest_materializer import materialize_entry_manifest
-
-    if not getattr(args, "request_text", None):
-        print(
-            "error: request_text is required for gene-agent ask --run-config",
-            file=sys.stderr,
-        )
-        return 1
-    data_dir = args.data_dir or default_data_root()
-    defaults = {
-        "session_id": args.session_id or generate_session_id(data_dir),
-        "data_dir": data_dir,
-    }
-    try:
-        request = parse_request_with_llm(args.request_text, defaults=defaults)
-        request = materialize_entry_manifest(request)
-    except (RuntimeError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    argv = request.to_cli_argv()
-    argv.extend(["--run-config", args.run_config])
-    for stage in getattr(args, "local_exec", []) or []:
-        argv.extend(["--local-exec", stage])
-    if getattr(args, "checkpointer", None):
-        argv.extend(["--checkpointer", args.checkpointer])
-    structured_args = _parse_args(argv)
-    return _run_session(structured_args)
 
 
 def generate_session_id(
@@ -1520,7 +1237,7 @@ def _run_resume(args: argparse.Namespace) -> int:
     if not db_path.exists():
         print(
             f"error: no durable checkpoint database at {db_path}; "
-            "check that --data-dir matches the original gene-agent run, "
+            "check that --data-dir matches the original workflow run, "
             "or run the workflow with --checkpointer sqlite before resuming",
             file=sys.stderr,
         )
@@ -1881,15 +1598,9 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
-    # Load .env once at the entry point so public tools and compatibility
-    # callers see the same secrets without re-implementing the loader in each
-    # branch. setdefault semantics mean already-exported variables still win.
+    # Load .env once so all public commands share setdefault-style configuration.
     _load_dotenv_without_override()
     args = _parse_args(argv)
-    if args.command == "run":
-        return _run_session(args)
-    if args.command == "ask":
-        return _run_ask(args)
     if args.command == "inspect":
         return _run_inspect(args)
     if args.command == "storage-audit":
