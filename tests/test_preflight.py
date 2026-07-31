@@ -48,11 +48,29 @@ class PreflightCheckTests(unittest.TestCase):
         published = publish_artifact_record(data_dir, session_id, artifact)
         return published.ref.model_dump(mode="json")
 
+    def _hic_assets(self, tmpdir: str) -> list[dict]:
+        assets: list[dict] = []
+        for mate in (1, 2):
+            path = Path(tmpdir) / f"hic_R{mate}.fastq.gz"
+            path.write_bytes(b"reads\n")
+            assets.append(
+                {
+                    "asset_id": f"s1:hic:{mate}",
+                    "asset_type": "hic_reads_registered",
+                    "path": str(path),
+                    "metadata": {"pair_index": 0, "mate": mate},
+                }
+            )
+        return assets
+
     def test_check_stage_prerequisites_missing_assembly(self):
         """测试缺少 assembly 时的检查"""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create registry with no assembly asset
-            registry = self._write_registry(tmpdir, assets=[])
+            registry = self._write_registry(
+                tmpdir,
+                assets=self._hic_assets(tmpdir),
+            )
 
             state = initial_state(
                 session_id="s1",
@@ -85,7 +103,8 @@ class PreflightCheckTests(unittest.TestCase):
                         "asset_id": "s1:assembly:1",
                         "asset_type": "assembly_fasta_registered",
                         "path": str(assembly_path),
-                    }
+                    },
+                    *self._hic_assets(tmpdir),
                 ],
             )
 
@@ -111,7 +130,10 @@ class PreflightCheckTests(unittest.TestCase):
             assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
 
             # Create registry without assembly (will use stage output)
-            registry = self._write_registry(tmpdir, assets=[])
+            registry = self._write_registry(
+                tmpdir,
+                assets=self._hic_assets(tmpdir),
+            )
 
             state = initial_state(
                 session_id="s1",
@@ -130,6 +152,68 @@ class PreflightCheckTests(unittest.TestCase):
 
             self.assertTrue(check.can_run)
             self.assertEqual(len(check.missing), 0)
+
+    def test_assembly_dedup_requires_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly_path = Path(tmpdir) / "assembly.fa"
+            assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:assembly:1",
+                        "asset_type": "assembly_fasta_registered",
+                        "path": str(assembly_path),
+                    }
+                ],
+            )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
+            )
+            state["asset_registry_ref"] = self._registry_ref(
+                state["data_dir"], state["session_id"], registry
+            )
+
+            check = check_stage_prerequisites(state, "assembly_dedup")
+
+            self.assertFalse(check.can_run)
+            self.assertEqual(
+                [resource.resource_name for resource in check.missing],
+                ["long reads"],
+            )
+
+    def test_t2t_requires_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly_path = Path(tmpdir) / "assembly.fa"
+            assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:assembly:1",
+                        "asset_type": "assembly_fasta_registered",
+                        "path": str(assembly_path),
+                    }
+                ],
+            )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
+            )
+            state["asset_registry_ref"] = self._registry_ref(
+                state["data_dir"], state["session_id"], registry
+            )
+
+            check = check_stage_prerequisites(state, "t2t")
+
+            self.assertFalse(check.can_run)
+            self.assertEqual(
+                [resource.resource_name for resource in check.missing],
+                ["long reads"],
+            )
 
     def test_gene_annotation_requires_softmask_without_fallback_reason(self):
         """Gene annotation should not pass with only an unmasked registered assembly."""
@@ -225,6 +309,21 @@ class PreflightValidationTests(unittest.TestCase):
         published = publish_artifact_record(data_dir, session_id, artifact)
         return published.ref.model_dump(mode="json")
 
+    def _hic_assets(self, tmpdir: str) -> list[dict]:
+        assets: list[dict] = []
+        for mate in (1, 2):
+            path = Path(tmpdir) / f"hic_R{mate}.fastq.gz"
+            path.write_bytes(b"reads\n")
+            assets.append(
+                {
+                    "asset_id": f"s1:hic:{mate}",
+                    "asset_type": "hic_reads_registered",
+                    "path": str(path),
+                    "metadata": {"pair_index": 0, "mate": mate},
+                }
+            )
+        return assets
+
     def test_validate_execution_plan_valid(self):
         """测试有效的执行计划"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -240,7 +339,8 @@ class PreflightValidationTests(unittest.TestCase):
                         "asset_id": "s1:assembly:1",
                         "asset_type": "assembly_fasta_registered",
                         "path": str(assembly_path),
-                    }
+                    },
+                    *self._hic_assets(tmpdir),
                 ],
             )
 
@@ -329,7 +429,8 @@ class PreflightValidationTests(unittest.TestCase):
                         "asset_id": "s1:assembly:1",
                         "asset_type": "assembly_fasta_registered",
                         "path": str(assembly_path),
-                    }
+                    },
+                    *self._hic_assets(tmpdir),
                 ],
             )
 

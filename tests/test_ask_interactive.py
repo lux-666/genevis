@@ -617,10 +617,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
                     "stage": "t2t",
                     "role": "executable",
                     "status": "no registered method yet",
-                    "inputs": [
-                        "T2T finishing usually needs Hi-C/contact-map or "
-                        "telomere evidence; none registered in manifest"
-                    ],
+                    "inputs": [],
                     "methods": [],
                 },
             ],

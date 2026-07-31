@@ -234,10 +234,17 @@ def resolve_t2t_inputs(state: TopLevelState) -> StateUpdate:
         resource_spec=assembly_resource_spec(),
     )
     configured_assembly_ref = config.get("assembly_fasta_ref")
-    assembly_ref = configured_assembly_ref or assembly.path
-    source_stage = "run_config" if configured_assembly_ref else assembly.source
+    assembly_ref = assembly.path
     if not assembly_ref:
         return _fail(state, "missing final assembly ref for t2t")
+    if configured_assembly_ref and _canonical_path(configured_assembly_ref) != (
+        _canonical_path(assembly_ref)
+    ):
+        return _fail(
+            state,
+            "t2t.assembly_fasta_ref must match the current adopted assembly",
+        )
+    source_stage = assembly.source
     assembly_path = Path(assembly_ref)
     try:
         assembly_dependency = _assembly_input_dependency(state, assembly_ref)

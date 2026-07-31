@@ -167,23 +167,27 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             )
 
     def test_frozen_attempt_receives_resolved_conda_fields(self):
-        attempt = build_frozen_attempt(
-            attempt_id="s1:assembly:flye",
-            session_id="s1",
-            stage="assembly",
-            method_name="assembly.candidate.flye",
-            script_path=Path("run.sh"),
-            working_dir=Path("."),
-            expected_outputs=[],
-            input_dependencies=[],
-            env=None,
-            env_spec=EnvSpec(conda_bin="conda-test", conda_env="gene-tools"),
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            working_dir = Path(tmpdir)
+            script_path = working_dir / "run.sh"
+            script_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            attempt = build_frozen_attempt(
+                attempt_id="s1:assembly:flye",
+                session_id="s1",
+                stage="assembly",
+                method_name="assembly.candidate.flye",
+                script_path=script_path,
+                working_dir=working_dir,
+                expected_outputs=[],
+                input_dependencies=[],
+                env=None,
+                env_spec=EnvSpec(conda_bin="conda-test", conda_env="gene-tools"),
+            )
 
-        self.assertIsInstance(attempt, FrozenAttemptSpec)
-        self.assertEqual(attempt.conda_bin, "conda-test")
-        self.assertEqual(attempt.conda_env, "gene-tools")
-        self.assertIsNone(attempt.conda_prefix)
+            self.assertIsInstance(attempt, FrozenAttemptSpec)
+            self.assertEqual(attempt.conda_bin, "conda-test")
+            self.assertEqual(attempt.conda_env, "gene-tools")
+            self.assertIsNone(attempt.conda_prefix)
 
     def test_undefined_package_tool_is_a_configuration_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:

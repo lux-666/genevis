@@ -430,6 +430,25 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(t2t["source_stage"], "hic_scaffolding")
             self.assertEqual(t2t["input_assembly_ref"], str(published_hic))
 
+    def test_run_config_assembly_cannot_bypass_current_adopted_assembly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            bypass = Path(tmpdir) / "bypass.fa"
+            bypass.write_text(">bypass\n" + "A" * 10_000 + "\n", encoding="utf-8")
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {
+                "assembly_fasta_ref": str(bypass),
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "t2t")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn(
+                "must match the current adopted assembly",
+                result["last_error"],
+            )
+
     def test_invalid_assembly_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "not_fasta.txt"

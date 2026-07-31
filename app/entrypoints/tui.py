@@ -288,11 +288,11 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
         _prompt_confirm,
         _prompt_for_answer,
         _render_confirm,
+        _review_plan_draft,
         _UserAbort,
     )
     from app.entrypoints.ask_planner import (
         _auto_fill_inferred_defaults,
-        build_initial_plan_draft,
         merge_clarification_response,
         next_clarification,
     )
@@ -300,16 +300,40 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
     from app.schemas.ask_plan import AskClarificationResponse
     from app.storage.paths import SessionPaths
 
-    plan = _planner_state_from_tui_draft(draft)
-    if plan.selected_stages is None:
-        inferred = build_initial_plan_draft(plan)
-        if inferred is not None:
-            plan = inferred
-            draft = _copy_planner_fields_to_draft(draft, plan, lifecycle="planning")
+    try:
+        plan = _planner_state_from_tui_draft(draft)
+        if draft.lifecycle == "planning":
+            if plan.selected_stages is None:
+                print("\n正在根据目标和已确认的样本事实生成 Plan Draft...\n")
+                try:
+                    plan = _generate_plan_draft_with_configured_llm(plan)
+                except Exception as exc:
+                    print(
+                        "error: LLM 未能生成合法的 Plan Draft；"
+                        "本次规划未使用固定规则回退："
+                        f"{exc}",
+                        file=sys.stderr,
+                    )
+                    print("请通过 /resume 重试该草稿。", file=sys.stderr)
+                    return None
+                draft = _copy_planner_fields_to_draft(
+                    draft, plan, lifecycle="planning"
+                )
+                save_tui_session_draft(draft)
+
+            reviewed = _review_plan_draft(plan)
+            if reviewed is None:
+                draft = _discard_generated_plan_fields(draft)
+                save_tui_session_draft(draft)
+                print("\n已丢弃生成的 Plan Draft；可通过 /resume 重新生成。")
+                return None
+            plan = reviewed
+            draft = _copy_planner_fields_to_draft(
+                draft, plan, lifecycle="ready_to_confirm"
+            )
             save_tui_session_draft(draft)
 
-    ref = SessionPaths(draft.data_dir, draft.session_id).tui_state_path
-    try:
+        ref = SessionPaths(draft.data_dir, draft.session_id).tui_state_path
         while True:
             clarification = next_clarification(plan, ask_plan_ref=ref)
             if clarification is None:
@@ -324,20 +348,17 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
                 plan = _auto_fill_inferred_defaults(plan)
                 _render_confirm(clarification)
                 if not _prompt_confirm("确认 manifest 和 run config 并开始执行？"):
-                    print("\n将重新选择本次运行的阶段和方法。\n")
-                    plan = plan.model_copy(
-                        update={
-                            "selected_stages": None,
-                            "resolved_execution_order": None,
-                            "selected_methods": None,
-                            "shared_parameters": None,
-                            "method_parameters": None,
-                            "stage_parameters": None,
-                            "confirmed": False,
-                        }
+                    print("\n返回 Plan Draft 继续编辑。\n")
+                    reviewed = _review_plan_draft(
+                        plan.model_copy(update={"confirmed": False})
                     )
+                    if reviewed is None:
+                        draft = _discard_generated_plan_fields(draft)
+                        save_tui_session_draft(draft)
+                        return None
+                    plan = reviewed
                     draft = _copy_planner_fields_to_draft(
-                        draft, plan, lifecycle="planning"
+                        draft, plan, lifecycle="ready_to_confirm"
                     )
                     save_tui_session_draft(draft)
                     continue
@@ -363,8 +384,6 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
     if has_hifi and has_ont:
         platform = None
 
-    requested_method = draft.intent.requested_assembly_method
-    selected_methods = draft.selected_methods
     method_parameters = (
         {
             method: dict(parameters)
@@ -373,32 +392,21 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         if draft.method_parameters is not None
         else {}
     )
-    if selected_methods is None and requested_method is not None:
-        selected_methods = {
-            "assembly": f"assembly.candidate.{requested_method}"
-        }
-    if requested_method == "hifiasm":
-        method_id = "assembly.candidate.hifiasm"
-        hifiasm_parameters = dict(method_parameters.get(method_id) or {})
-        hifiasm_parameters.setdefault(
-            "use_ultralong_ont",
-            draft.intent.use_ultralong_ont,
-        )
-        hifiasm_parameters.setdefault(
-            "use_hic_phasing",
-            draft.intent.use_hic_phasing,
-        )
-        method_parameters[method_id] = hifiasm_parameters
 
     entry_request: dict[str, Any] = {
         "command": "run",
         "session_id": draft.session_id,
         "data_dir": draft.data_dir,
-        "requested_stages": _effective_requested_stages(draft),
         "platform": platform,
         "target_species": draft.intent.target_species,
         "source_paths": [],
-        "intent_parse_source": "tui_intake",
+        "intent_parse_source": "llm_plan_draft",
+        "intake_goal": {
+            "target_assembly_level": draft.intent.target_assembly_level,
+            "requested_assembly_method": draft.intent.requested_assembly_method,
+            "use_ultralong_ont": draft.intent.use_ultralong_ont,
+            "use_hic_phasing": draft.intent.use_hic_phasing,
+        },
     }
     return AskPlanState(
         session_id=draft.session_id,
@@ -410,7 +418,7 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         ),
         selected_stages=draft.selected_stages,
         resolved_execution_order=draft.resolved_execution_order,
-        selected_methods=selected_methods,
+        selected_methods=draft.selected_methods,
         shared_parameters=draft.shared_parameters,
         method_parameters=method_parameters or None,
         stage_parameters=draft.stage_parameters,
@@ -418,19 +426,298 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
     )
 
 
-def _effective_requested_stages(draft: Any) -> list[str]:
-    from app.schemas.tui_intake import NoHiCFact
-    from app.workflow import stages_through
+def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
+    """Generate one editable AskPlanState draft from goal plus confirmed intake."""
 
-    stages = list(draft.intent.requested_stages)
-    degraded = (
-        isinstance(draft.intake.hic_reads, NoHiCFact)
-        and draft.degradation_decision is not None
-        and draft.degradation_decision.confirmed
+    context = _plan_draft_context(plan)
+    system = (
+        "You create one editable Gene Agent Plan Draft. Return exactly one JSON "
+        "object with selected_stages, selected_methods, and optional "
+        "shared_parameters, method_parameters, and stage_parameters. Use only "
+        "the stages, method IDs, and planning-time parameter names supplied in "
+        "the context. selected_stages must contain the complete ordered workflow "
+        "needed for every stated goal: combine multiple goals instead of stopping "
+        "at the first one. A T2T goal normally includes read_qc, genome_survey, "
+        "assembly, assembly_dedup, assembly_review, hic_scaffolding, and t2t. "
+        "When annotation is also requested, append repeat_annotation, "
+        "gene_annotation, and function_annotation as applicable. Choose methods "
+        "that match the confirmed input platforms. Include a method choice for "
+        "every selected stage that has selectable methods. For read_qc include "
+        "seqkit stats plus exactly one length-filter choice; for genome_survey "
+        "include both Jellyfish and GenomeScope2. Fill only parameters that are "
+        "explicit in the request/intake or are ordinary planning defaults. Never "
+        "invent paths, database provenance, species facts, genome size, or review "
+        "decisions. Do not fill runtime-derived catalog L2 parameters; omit them "
+        "so the existing UI can show them as deferred. Hi-C presence alone must "
+        "not enable hifiasm Hi-C phasing, and ONT presence alone must not enable "
+        "hifiasm ultra-long input. Do not return confirmation or execution fields."
     )
-    if degraded:
-        stages = stages_through("assembly_review")
-    return stages
+    payload = _invoke_json_model(
+        system,
+        json.dumps(context, ensure_ascii=False, indent=2, default=str),
+    )
+    return _apply_llm_plan_draft(plan, payload)
+
+
+def _plan_draft_context(plan: Any) -> dict[str, Any]:
+    from app.configuration import load_descriptor_registry
+    from app.entrypoints.ask_planner import _all_selectable_stages, _load_manifest
+    from app.entrypoints.planner_catalog import load_planner_method_catalog
+
+    available_stages = _all_selectable_stages()
+    catalog = load_planner_method_catalog()
+    registry = load_descriptor_registry()
+    executor_parameters = _executor_planning_parameters_by_method()
+    methods_by_stage: dict[str, list[dict[str, Any]]] = {}
+    for stage in available_stages:
+        methods: list[dict[str, Any]] = []
+        for item in catalog.methods_for_stage(stage):
+            method_name = str(item["method_name"])
+            descriptor = registry.methods.get(method_name)
+            required_parameters = list(item.get("required_parameters") or [])
+            parameter_defaults = dict(item.get("parameter_defaults") or {})
+            planning_parameters = set(required_parameters)
+            planning_parameters.update(parameter_defaults)
+            planning_parameters.update(executor_parameters.get(method_name, set()))
+            methods.append(
+                {
+                    "method_name": method_name,
+                    "goal": descriptor.goal if descriptor is not None else None,
+                    "planning_parameters": sorted(planning_parameters),
+                    "required_parameters": required_parameters,
+                    "conditional_required_parameters": list(
+                        item.get("conditional_required_parameters") or []
+                    ),
+                    "parameter_defaults": parameter_defaults,
+                    "selection_role": item.get("selection_role"),
+                }
+            )
+        if methods:
+            methods_by_stage[stage] = methods
+
+    manifest = _load_manifest(plan.manifest_ref)
+    return {
+        "original_request": plan.request_text,
+        "intake_goal_facts": (plan.entry_request or {}).get("intake_goal") or {},
+        "confirmed_manifest": (
+            manifest.model_dump(mode="json", exclude_none=True)
+            if manifest is not None
+            else None
+        ),
+        "existing_shared_parameters": (
+            plan.shared_parameters.model_dump(mode="json", exclude_none=True)
+            if plan.shared_parameters is not None
+            else {}
+        ),
+        "available_stages_in_order": available_stages,
+        "methods_by_stage": methods_by_stage,
+    }
+
+
+def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
+    from app.entrypoints.ask_planner import (
+        _STAGES_NEEDING_METHOD_SELECTION,
+        _all_selectable_stages,
+        _auto_fill_inferred_defaults,
+        merge_clarification_response,
+    )
+    from app.schemas.ask_plan import AskClarificationResponse, AskPlanState
+    from app.schemas.shared_parameters import SharedParameters
+
+    allowed_top_level = {
+        "selected_stages",
+        "selected_methods",
+        "shared_parameters",
+        "method_parameters",
+        "stage_parameters",
+    }
+    unknown = set(payload).difference(allowed_top_level)
+    if unknown:
+        raise ValueError(f"Plan Draft contains unknown fields: {sorted(unknown)}")
+
+    raw_stages = payload.get("selected_stages")
+    if not isinstance(raw_stages, list) or not raw_stages:
+        raise ValueError("Plan Draft selected_stages must be a non-empty list")
+    stages = [str(stage).strip() for stage in raw_stages]
+    if any(not stage for stage in stages) or len(stages) != len(set(stages)):
+        raise ValueError("Plan Draft selected_stages must be unique non-empty names")
+    invalid_stages = set(stages).difference(_all_selectable_stages())
+    if invalid_stages:
+        raise ValueError(
+            f"Plan Draft contains unknown stages: {sorted(invalid_stages)}"
+        )
+
+    candidate = merge_clarification_response(
+        plan,
+        AskClarificationResponse(kind="stage_selection", selected_stages=stages),
+    )
+
+    raw_methods = payload.get("selected_methods") or {}
+    if not isinstance(raw_methods, Mapping):
+        raise ValueError("Plan Draft selected_methods must be an object")
+    methods = {str(stage): value for stage, value in raw_methods.items()}
+    extra_method_stages = set(methods).difference(
+        candidate.resolved_execution_order or []
+    )
+    if extra_method_stages:
+        raise ValueError(
+            "Plan Draft selects methods for unselected stages: "
+            f"{sorted(extra_method_stages)}"
+        )
+    missing_method_stages = {
+        stage
+        for stage in candidate.resolved_execution_order or []
+        if stage in _STAGES_NEEDING_METHOD_SELECTION and stage not in methods
+    }
+    if missing_method_stages:
+        raise ValueError(
+            "Plan Draft is missing method choices for stages: "
+            f"{sorted(missing_method_stages)}"
+        )
+    if methods:
+        candidate = merge_clarification_response(
+            candidate,
+            AskClarificationResponse(
+                kind="method_selection",
+                selected_methods=dict(methods),
+            ),
+        )
+
+    raw_shared = payload.get("shared_parameters") or {}
+    raw_method_parameters = payload.get("method_parameters") or {}
+    raw_stage_parameters = payload.get("stage_parameters") or {}
+    if not isinstance(raw_shared, Mapping):
+        raise ValueError("Plan Draft shared_parameters must be an object")
+    if not isinstance(raw_method_parameters, Mapping):
+        raise ValueError("Plan Draft method_parameters must be an object")
+    if not isinstance(raw_stage_parameters, Mapping):
+        raise ValueError("Plan Draft stage_parameters must be an object")
+
+    method_parameters = {
+        str(method): dict(values)
+        for method, values in raw_method_parameters.items()
+        if isinstance(values, Mapping)
+    }
+    if len(method_parameters) != len(raw_method_parameters):
+        raise ValueError("Every Plan Draft method parameter block must be an object")
+    stage_parameters = {
+        str(stage): dict(values)
+        for stage, values in raw_stage_parameters.items()
+        if isinstance(values, Mapping)
+    }
+    if len(stage_parameters) != len(raw_stage_parameters):
+        raise ValueError("Every Plan Draft stage parameter block must be an object")
+    _validate_llm_plan_parameters(candidate, method_parameters, stage_parameters)
+
+    shared_parameters = (
+        SharedParameters.model_validate(dict(raw_shared)) if raw_shared else None
+    )
+    if shared_parameters or method_parameters or stage_parameters:
+        candidate = merge_clarification_response(
+            candidate,
+            AskClarificationResponse(
+                kind="parameter_values",
+                shared_parameters=shared_parameters,
+                method_parameters=method_parameters or None,
+                stage_parameters=stage_parameters or None,
+            ),
+        )
+    candidate = _auto_fill_inferred_defaults(candidate)
+    return AskPlanState.model_validate(candidate.model_dump(mode="python"))
+
+
+def _validate_llm_plan_parameters(
+    plan: Any,
+    method_parameters: Mapping[str, Mapping[str, Any]],
+    stage_parameters: Mapping[str, Mapping[str, Any]],
+) -> None:
+    from app.entrypoints.planner_catalog import load_planner_method_catalog
+    selected_methods = {
+        method
+        for value in (plan.selected_methods or {}).values()
+        for method in (value if isinstance(value, list) else [value])
+    }
+    catalog = load_planner_method_catalog()
+    executor_fields = _executor_planning_parameters_by_method()
+    for method, values in method_parameters.items():
+        if method not in selected_methods:
+            raise ValueError(
+                f"Plan Draft supplies parameters for unselected method {method!r}"
+            )
+        descriptor = catalog.descriptor_for_method(method) or {}
+        allowed = {
+            *list(descriptor.get("required_parameters") or []),
+            *list((descriptor.get("parameter_defaults") or {}).keys()),
+            *executor_fields.get(method, set()),
+        }
+        unknown = set(values).difference(allowed)
+        if unknown:
+            raise ValueError(
+                f"Plan Draft contains unsupported parameters for {method}: "
+                f"{sorted(unknown)}"
+            )
+
+    selected_stages = set(plan.resolved_execution_order or [])
+    allowed_stage_parameters = {
+        "function_annotation": {"database_provenance"},
+    }
+    for stage, values in stage_parameters.items():
+        if stage not in selected_stages:
+            raise ValueError(
+                f"Plan Draft supplies parameters for unselected stage {stage!r}"
+            )
+        unknown = set(values).difference(allowed_stage_parameters.get(stage, set()))
+        if unknown:
+            raise ValueError(
+                f"Plan Draft contains unsupported stage parameters for {stage}: "
+                f"{sorted(unknown)}"
+            )
+
+
+def _executor_planning_parameters_by_method() -> dict[str, set[str]]:
+    from app.schemas.run_config import (
+        FlyeRunParameters,
+        HifiasmOntRunParameters,
+        HifiasmRunParameters,
+        NextDenovoRunParameters,
+    )
+
+    return {
+        "assembly.candidate.flye": set(FlyeRunParameters.model_fields),
+        "assembly.candidate.nextdenovo": set(NextDenovoRunParameters.model_fields),
+        "assembly.candidate.hifiasm": set(HifiasmRunParameters.model_fields),
+        "assembly.candidate.hifiasm_ont": set(HifiasmOntRunParameters.model_fields),
+        "hic_scaffolding.candidate.autohic": {"threads"},
+        "t2t.alignment.minimap2": {"mode"},
+    }
+
+
+def _shared_parameters_from_intake(draft: Any) -> Any:
+    from app.schemas.shared_parameters import SharedParameters, SpeciesFacts
+
+    species = draft.intent.target_species
+    if species is None:
+        return None
+    return SharedParameters(
+        species_facts=SpeciesFacts(
+            scientific_name=species,
+            telomere_motif=draft.intent.telomere_motif,
+        )
+    )
+
+
+def _discard_generated_plan_fields(draft: Any) -> Any:
+    return draft.model_copy(
+        update={
+            "selected_stages": None,
+            "resolved_execution_order": None,
+            "selected_methods": None,
+            "shared_parameters": _shared_parameters_from_intake(draft),
+            "method_parameters": None,
+            "stage_parameters": None,
+            "lifecycle": "planning",
+        }
+    )
 
 
 def _copy_planner_fields_to_draft(draft: Any, plan: Any, *, lifecycle: str) -> Any:
@@ -708,7 +995,7 @@ def _reset_draft_planning(draft: Any) -> Any:
             "selected_stages": None,
             "resolved_execution_order": None,
             "selected_methods": None,
-            "shared_parameters": None,
+            "shared_parameters": _shared_parameters_from_intake(draft),
             "method_parameters": None,
             "stage_parameters": None,
             "lifecycle": lifecycle,

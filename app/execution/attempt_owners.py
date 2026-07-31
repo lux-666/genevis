@@ -37,6 +37,14 @@ class MethodExecution:
     evidence: ExecutionEvidence
 
 
+@dataclass(frozen=True, kw_only=True)
+class OwnedFrozenAttempt:
+    """Verified runner input paired with the exact owner-held frozen ref."""
+
+    attempt: FrozenAttemptSpec
+    frozen_attempt_ref: ArtifactRef
+
+
 class AttemptOwner(Protocol):
     """Own the compact cursor that binds a method run to durable evidence."""
 
@@ -56,8 +64,15 @@ class AttemptOwner(Protocol):
         state: TopLevelState,
         output: Mapping[str, Any],
         lifecycle: MethodExecutionLifecycle,
-    ) -> list[FrozenAttemptSpec]:
+    ) -> list[OwnedFrozenAttempt]:
         """Load only attempts whose owner cursor is ready to execute."""
+
+    def is_complete(
+        self,
+        output: Mapping[str, Any],
+        lifecycle: MethodExecutionLifecycle,
+    ) -> bool:
+        """Return whether every attempt owned by this lifecycle is completed."""
 
     def record_execution(
         self,
@@ -112,14 +127,40 @@ class DirectAttemptOwner:
         state: TopLevelState,
         output: Mapping[str, Any],
         lifecycle: MethodExecutionLifecycle,
-    ) -> list[FrozenAttemptSpec]:
+    ) -> list[OwnedFrozenAttempt]:
         cursors = _direct_attempt_cursors(output, lifecycle)
-        if any(cursor.status != "frozen" for cursor in cursors):
-            raise ValueError(f"{lifecycle.name} execution attempt cursor is not frozen")
-        return [
-            _load_frozen_attempt(state, cursor.frozen_attempt_ref, lifecycle, cursor)
-            for cursor in cursors
-        ]
+        pending: list[OwnedFrozenAttempt] = []
+        saw_pending = False
+        for cursor in cursors:
+            if cursor.status == "frozen":
+                saw_pending = True
+                pending.append(
+                    OwnedFrozenAttempt(
+                        attempt=_load_frozen_attempt(
+                            state,
+                            cursor.frozen_attempt_ref,
+                            lifecycle,
+                            cursor,
+                        ),
+                        frozen_attempt_ref=cursor.frozen_attempt_ref,
+                    )
+                )
+                continue
+            if saw_pending:
+                raise ValueError(
+                    f"{lifecycle.name} completed execution cursor follows a pending one"
+                )
+        return pending
+
+    def is_complete(
+        self,
+        output: Mapping[str, Any],
+        lifecycle: MethodExecutionLifecycle,
+    ) -> bool:
+        return all(
+            cursor.status in {"executed", "execution_failed"}
+            for cursor in _direct_attempt_cursors(output, lifecycle)
+        )
 
     def record_execution(
         self,
@@ -182,6 +223,7 @@ class DirectAttemptOwner:
                 expected_stage=lifecycle.stage,
                 expected_attempt_id=cursor.attempt_id,
                 expected_method_name=lifecycle.method_name,
+                expected_frozen_attempt_ref=cursor.frozen_attempt_ref,
             )
             executions.append(
                 MethodExecution(
@@ -238,10 +280,12 @@ class ParameterAttemptOwner:
         state: TopLevelState,
         output: Mapping[str, Any],
         lifecycle: MethodExecutionLifecycle,
-    ) -> list[FrozenAttemptSpec]:
+    ) -> list[OwnedFrozenAttempt]:
         current = current_parameter_attempt(
             output, method_id=lifecycle.method_name, label=lifecycle.name
         )
+        if current.status in {"executed", "execution_failed"}:
+            return []
         if current.status != "frozen":
             raise ParameterAttemptStateError(
                 f"{lifecycle.name} current parameter attempt is not frozen"
@@ -258,7 +302,22 @@ class ParameterAttemptOwner:
             expected_method_name=lifecycle.method_name,
         )
         _validate_parameter_attempt_identity(attempt, current, lifecycle)
-        return [attempt]
+        return [
+            OwnedFrozenAttempt(
+                attempt=attempt,
+                frozen_attempt_ref=current.frozen_attempt_ref,
+            )
+        ]
+
+    def is_complete(
+        self,
+        output: Mapping[str, Any],
+        lifecycle: MethodExecutionLifecycle,
+    ) -> bool:
+        current = current_parameter_attempt(
+            output, method_id=lifecycle.method_name, label=lifecycle.name
+        )
+        return current.status in {"executed", "execution_failed"}
 
     def record_execution(
         self,
@@ -318,6 +377,7 @@ class ParameterAttemptOwner:
             expected_stage=lifecycle.stage,
             expected_attempt_id=attempt.attempt_id,
             expected_method_name=lifecycle.method_name,
+            expected_frozen_attempt_ref=current.frozen_attempt_ref,
         )
         return [
             MethodExecution(

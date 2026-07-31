@@ -11,6 +11,7 @@ from app.graph.checkpoint_compaction import (
     compact_terminal_checkpoint,
 )
 from app.graph.checkpointer import get_checkpointer
+from app.integrity import sha256_file
 from app.reports.trace_writer import build_session_trace
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
@@ -308,14 +309,19 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 route_node="assembly_stage",
                 idempotency_key="stage-entered:assembly",
             )
+            script_path = paths.work_path("assembly", "run.sh")
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
             attempt = FrozenAttemptSpec(
                 attempt_id="assembly:attempt_000",
                 session_id=paths.session_id,
                 stage="assembly",
                 method_name="assembly.candidate.test",
-                script_path=paths.work_path("assembly", "run.sh"),
+                script_path=script_path,
+                script_sha256=sha256_file(script_path),
                 working_dir=paths.stage_work_dir("assembly"),
                 expected_outputs=[paths.work_path("assembly", "draft.fasta")],
+                input_dependencies=[],
             )
             ledger.record_attempt_failed(
                 paths.session_id,

@@ -114,9 +114,11 @@ the parent router and makes each stage independently testable.
 
 ## How To Run It
 
-正常用户只需要启动 TUI。TUI 收集本次样本事实、确认 manifest 和 run config，
-冻结输入后调用内部执行器；各 stage 再按已确认的输入和目标决定执行、跳过或
-进入人工 gate。`bootstrap` 只是初始化或修复本机配置的辅助工具。
+正常用户只需要启动 TUI。TUI 先围绕本次目标追问并确认样本事实，再让 LLM
+生成一个可编辑的 Plan Draft；用户确认 manifest、stages、methods 和 planning-time
+parameters 后，TUI 冻结 run config 并调用内部执行器。各 stage 再按已确认的输入
+和目标决定执行、跳过或进入人工 gate。`bootstrap` 只是初始化或修复本机配置的
+辅助工具。
 
 `bootstrap --apply` 在写入 `config/envs.yaml`、完成 Juicer conformance 后，
 还会在当前主机逐项检查配置中的全部 method。检查使用实际 method -> stage ->
@@ -151,21 +153,32 @@ Describe what you want to do (e.g. '对 /path/reads.fa 以卵鳎为目标物种�
 TUI 的实际流程是：
 
 1. 让用户用自然语言描述任务。
-2. 解析这句指令，生成内存中的 planner state，并 materialize manifest。
-3. 进入 `Plan Draft` 页面，展示 session、data dir、manifest、inputs、stages、methods、parameters 和 attention 项。
-4. 在 draft 里可以按 `Enter/c` 继续，按 stage 编号编辑单个 stage，按 `s` 编辑 stage list，按 `r` 重新手动规划。
-5. 进入单个 stage 后，可以按 `m` 改 method，按 `p` 改 parameters，按 `b` 返回 draft。
-6. draft 锁定后不会立刻执行；TUI 会再展示 final run plan 并询问 `Proceed?`。
-7. 用户确认后，TUI 写出 run config，把选中的 stage 写成 `requested_stages`，把可执行 stage 写成 `local_exec`。
-8. TUI 冻结输入后，在同一进程内调用 session executor；不会再拼装或启动另一个 CLI 命令。
-9. 如果运行中遇到 human gate，TUI 会启用 interactive gate loop，在 sqlite checkpoint 上收集决策、写 decision artifact、更新 checkpoint 并继续 graph。
+2. 用 LLM intent parser 和保守的本地识别器确定 intake 追问范围；这一步只决定还要问哪些样本事实，不决定最终 stages。
+3. 逐项确认当前 intake 支持的 HiFi、ONT、成对 Hi-C、物种和 telomere motif，并持续重建 `manifest_draft.yaml`。
+4. intake 完成后，把原始请求、确认后的 manifest 和现有 method catalog 交给 LLM，生成一个复用 `AskPlanState` 字段的 Plan Draft：stages、methods 和部分 planning-time parameters。
+5. 进入现有 `Plan Draft` 页面，展示 session、data dir、manifest、inputs、stages、methods、parameters 和 attention 项。
+6. 在 draft 里可以按 `Enter/c` 继续，按 stage 编号编辑单个 stage，按 `s` 编辑 stage list，按 `r` 丢弃当前 draft；丢弃后可通过 `/resume` 重新生成。
+7. 进入单个 stage 后，可以按 `m` 改 method，按 `p` 改 parameters，按 `b` 返回 draft。依赖上游结果的运行期推荐参数仍显示为 deferred，不在这里伪造数值。
+8. draft 锁定后不会立刻执行；TUI 会再展示 final run plan 并询问 `Proceed?`。拒绝时返回同一个 Plan Draft 继续编辑。
+9. 用户确认后，TUI 写出 run config，把选中的 stage 写成 `requested_stages`，把获准在本机启动工具的 stage 写成 `local_exec`。
+10. TUI 冻结输入后，在同一进程内调用 session executor；不会再拼装或启动另一个 CLI 命令。运行中遇到 human gate 时，TUI 在 sqlite checkpoint 上收集决策、写 decision artifact、更新 checkpoint 并继续 graph。
 
-Plan 层控制的是“这次项目要走哪些 stage”。例如只想从已有 assembly 开始做
-注释，可以只选择：
+当前 TUI intake 的输入范围是 PacBio HiFi、ONT 和显式成对的 Hi-C reads，外加
+物种及 telomere motif。CLR、CycloneSEQ、short reads、已有 assembly 和 annotation
+reference/evidence assets 尚未接入这段追问流程。后端已有的 annotation stages 不会
+因此删除；LLM 可以把它们放进 draft，用户也可以编辑，但所需资产仍必须由当前已接入
+的上游产物满足。规划 LLM 失败或返回非法 draft 时，本次规划中止并保留草稿供
+`/resume` 重试，不使用确定性 stage plan 回退。
+
+Plan 层控制的是“这次项目要走哪些 stage”。底层 planner 和 stage contract 可以
+表达从已有 assembly 开始做注释的计划，例如：
 
 ```text
 assembly_review -> repeat_annotation -> gene_annotation -> function_annotation
 ```
+
+但当前 TUI intake 尚未收集 existing-assembly asset，因此这条输入入口属于后续接入
+范围，不应把上面的 plan 表达能力理解为当前 TUI 已经能完成该资产登记。
 
 如果要从 raw long reads 做完整主线，可以选择：
 
@@ -200,8 +213,8 @@ TUI 最终会把选择落到 run config：
 `requested_stages` 只说明“要走哪些阶段”。是否真的运行本地工具，以及每个工具
 的参数，由 `local_exec` 和各 stage 的 config 控制。
 
-示例：从 long reads 做 read QC、Flye assembly、QUAST/BUSCO review，但暂时不
-执行 annotation 工具：
+示例：从 long reads 做 read QC、Flye assembly、purge_dups 和 QUAST/BUSCO
+review，但暂时不执行 annotation 工具：
 
 ```json
 {
@@ -219,6 +232,7 @@ TUI 最终会把选择落到 run config：
     "read_qc",
     "genome_survey",
     "assembly",
+    "assembly_dedup",
     "assembly_review"
   ],
   "shared_parameters": {
@@ -267,9 +281,10 @@ TUI 最终会把选择落到 run config：
 `genome_size_estimate`；RunConfig 不重复保存该值。运行中由 genome survey
 得到的测量值则保留为独立的 stage output。
 
-`local_exec` 是安全阀：只有列在这里的 stage 才会尝试执行本地工具。没有列入
-`local_exec` 的 stage 仍然可以参与规划、写 artifact、进入 review gate 或作为
-下游 contract 继续传递，但不会偷偷运行昂贵命令。
+`local_exec` 是本地执行授权边界：只有列在这里的 stage 才能启动本地工具，
+`assembly_dedup` 也遵守同一规则。一个 stage 可以出现在 `requested_stages` 但不在
+`local_exec`；此时它不得运行本地命令，具体是跳过、阻塞还是消费已有 evidence，
+由该 stage 的运行契约决定。
 
 `run` 和 `ask` 兼容命令已移除。新运行只有一个入口：
 `gene-agent tui`。TUI 负责收集输入、确认计划、冻结 manifest/run config，并调用

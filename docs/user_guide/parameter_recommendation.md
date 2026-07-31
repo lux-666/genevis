@@ -155,7 +155,7 @@ Each `t2t.read_inputs` entry requires both a path and an explicit platform:
 against the run-config file's directory while preserving list order. Legacy
 ONT-only read fields are not part of the current contract.
 
-T2T normally consumes the current logical `assembly` resource. An explicit
-`t2t.assembly_fasta_ref`, when used, must resolve to either a run-owned indexed
-artifact or an assembly asset already present in the immutable asset registry;
-an arbitrary bare path is rejected.
+T2T consumes the current logical `assembly` resource. An explicit
+`t2t.assembly_fasta_ref`, when retained in a run config, is only an equality
+assertion and must resolve to that same current assembly. It cannot select a
+parallel FASTA or bypass the assembly adopted by Hi-C scaffolding.

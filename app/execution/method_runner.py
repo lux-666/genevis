@@ -11,13 +11,16 @@ graph schema.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app.execution.env_resolver import EnvSpec
+from app.execution.evidence import validate_frozen_attempt_for_run
 from app.execution.local_runner import LocalRunner
 from app.execution.runner import Runner
+from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.execution import ExecutionResult, InputDependency
@@ -67,20 +70,30 @@ def build_frozen_attempt(
     expected_outputs: list[Path],
     env: dict[str, Any] | None,
     env_spec: EnvSpec | None,
-    input_dependencies: list[InputDependency | dict[str, Any]],
+    input_dependencies: Sequence[InputDependency | dict[str, Any]] = (),
     metadata: dict[str, Any] | None = None,
     interpreter: str = "/bin/bash",
 ) -> FrozenAttemptSpec:
     """Assemble a FrozenAttemptSpec with conda fields merged from ``env_spec``."""
+
+    declared_script = script_path.expanduser().absolute()
+    declared_working_dir = working_dir.expanduser().absolute()
+    if not declared_script.is_file():
+        raise FileNotFoundError(declared_script)
+    if not declared_working_dir.is_dir():
+        raise NotADirectoryError(declared_working_dir)
     attempt_kwargs: dict[str, Any] = {
         "attempt_id": attempt_id,
         "session_id": session_id,
         "stage": stage,
         "method_name": method_name,
-        "script_path": script_path,
-        "working_dir": working_dir,
+        "script_path": declared_script,
+        "script_sha256": sha256_file(declared_script),
+        "working_dir": declared_working_dir,
         "interpreter": interpreter,
-        "expected_outputs": expected_outputs,
+        "expected_outputs": [
+            path.expanduser().absolute() for path in expected_outputs
+        ],
         "env": {str(k): str(v) for k, v in (env or {}).items()},
         "input_dependencies": list(input_dependencies),
         "metadata": metadata or {},
@@ -130,6 +143,8 @@ def run_frozen_attempt(
     """
     result: ExecutionResult | None = None
     logs_published = False
+
+    validate_frozen_attempt_for_run(data_dir, attempt)
 
     try:
         ledger = ledger or Ledger(data_dir)

@@ -17,6 +17,7 @@ from app.execution.env_resolver import (
     preflight,
 )
 from app.execution.local_runner import LocalRunner
+from app.integrity import sha256_file
 from app.schemas.descriptors import FrozenAttemptSpec
 
 
@@ -345,9 +346,11 @@ class LocalRunnerCondaWrappingTests(unittest.TestCase):
             stage="read_qc",
             method_name="read_qc.long_read_stats.seqkit_stats",
             script_path=script,
+            script_sha256=sha256_file(script),
             working_dir=working,
             interpreter="/bin/bash",
             expected_outputs=[output],
+            input_dependencies=[],
             conda_bin=conda_bin,
             conda_env=conda_env,
             conda_prefix=conda_prefix,
@@ -387,6 +390,7 @@ class LocalRunnerCondaWrappingTests(unittest.TestCase):
             self.assertIn("run", argv_line)
             self.assertIn("-n", argv_line)
             self.assertIn("env_read_qc", argv_line)
+            self.assertIn(str(spec.script_path), argv_line)
             self.assertTrue((tmp_path / "work" / "touched.txt").exists())
 
     def test_runner_uses_prefix_flag_when_conda_prefix_set(self):
@@ -451,9 +455,11 @@ class LocalRunnerCondaWrappingTests(unittest.TestCase):
                 stage="read_qc",
                 method_name="read_qc.long_read_stats.seqkit_stats",
                 script_path=script,
+                script_sha256=sha256_file(script),
                 working_dir=working,
                 interpreter="/bin/bash",
                 expected_outputs=[],
+                input_dependencies=[],
             )
             result = LocalRunner().run(spec)
             self.assertFalse(result.success)
@@ -473,9 +479,11 @@ class LocalRunnerCondaWrappingTests(unittest.TestCase):
                     stage="read_qc",
                     method_name="read_qc.long_read_stats.seqkit_stats",
                     script_path=script,
+                    script_sha256=sha256_file(script),
                     working_dir=working,
                     interpreter="/bin/bash",
                     expected_outputs=[],
+                    input_dependencies=[],
                     conda_env="env_read_qc",
                     conda_prefix="/opt/envs/read_qc",
                 )

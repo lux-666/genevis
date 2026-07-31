@@ -104,6 +104,14 @@ def enter_assembly_dedup(state: TopLevelState) -> StateUpdate:
 
 
 def plan_purge_dups(state: TopLevelState) -> StateUpdate:
+    if _output(state).get("execution_mode") != "local":
+        return _update_output(
+            state,
+            {
+                "status": "skipped",
+                "skip_reason": "local_execution_not_enabled",
+            },
+        )
     try:
         candidate = _selected_assembly_candidate(state)
     except (OSError, TypeError, ValueError) as exc:

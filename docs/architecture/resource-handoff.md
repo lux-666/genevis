@@ -51,10 +51,13 @@ not path resources.
 All stages resolve inputs through
 `app.stages.resource_resolution.resolve_stage_resource` in this order:
 
-1. explicit run override;
-2. `state.resource_refs[logical_resource]`;
-3. initial asset-registry fallback;
-4. `found=False`.
+1. `state.resource_refs[logical_resource]`;
+2. the asset registry, using the `ResourceSpec` asset types and priorities;
+3. `found=False`.
+
+There is no separate explicit run-override layer in the resolver. A stage may
+still consume a run-config field at its own adapter boundary, but that is not a
+fourth cross-stage resource source.
 
 The resolver does not scan `stage_outputs`. Missing required resources are
 handled by stage preflight using the corresponding `ResourceSpec`; the resolver
@@ -74,15 +77,23 @@ table and never mutates the supplied state.
 |---|---|---|
 | `inventory` | — | `long_reads`, `short_reads`, `hic_reads`, `assembly`, according to the manifest |
 | `read_qc` | `long_reads` | `long_reads` |
-| `genome_survey` | `short_reads` or `long_reads` | scalar measurement evidence only |
+| `genome_survey` | `long_reads` for the ONT MVP; prefers `short_reads` when also present | scalar measurement evidence only |
 | `assembly` | `long_reads` | `assembly` |
 | `assembly_dedup` | `assembly`, `long_reads` | `assembly` |
 | `assembly_review` | `assembly` | `assembly` |
-| `hic_scaffolding` | `assembly`; `hic_reads` when the stage is entered | `assembly` |
-| `t2t` | `assembly`; optional `long_reads` | `assembly` |
+| `hic_scaffolding` | `assembly`, `hic_reads` | adopted chromosome-scale `assembly` |
+| `t2t` | current adopted `assembly`, `long_reads` | `assembly` |
 | `repeat_annotation` | `assembly` | `masked_assembly` |
 | `gene_annotation` | `masked_assembly`; explicit fallback to `assembly` | `predicted_proteins` |
 | `function_annotation` | `predicted_proteins` | no cross-stage path resource |
+
+The central stage contracts and planning preflight enforce these direct
+dependencies. In the first ONT MVP, a short-read-only survey is not admitted;
+general alternative-input planning remains a later contract extension.
+
+Hi-C reads stop at `hic_scaffolding`. After human adoption, that stage replaces
+the central `assembly` resource. T2T resolves this current assembly and the
+long-read set; it does not consume `hic_reads` or a contact map directly.
 
 Candidate bundles, review decisions, execution evidence, reports, and metrics
 remain artifacts. They may be referenced from resource metadata but do not form

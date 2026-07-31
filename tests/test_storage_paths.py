@@ -92,6 +92,159 @@ class SessionPathsTests(unittest.TestCase):
                     expected_method_name=attempt.method_name,
                 )
 
+    def test_resume_rejects_retained_script_byte_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = SessionPaths(tmpdir, "s1")
+            ensure_run_layout(paths)
+            work_dir = paths.work_path("read_qc", "attempt")
+            work_dir.mkdir(parents=True)
+            script = work_dir / "run.sh"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            attempt = build_frozen_attempt(
+                attempt_id="s1:read_qc:attempt",
+                session_id="s1",
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                script_path=script,
+                working_dir=work_dir,
+                expected_outputs=[],
+                env=None,
+                env_spec=None,
+            )
+            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            attempt_ref = persist_frozen_attempt(state, attempt)
+            script.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(DataLayoutError, "changed after freeze"):
+                load_frozen_attempt(
+                    state,
+                    attempt_ref,
+                    expected_stage="read_qc",
+                    expected_method_name=attempt.method_name,
+                )
+
+    def test_frozen_attempt_rejects_working_directory_outside_stage_work(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = SessionPaths(tmpdir, "s1")
+            ensure_run_layout(paths)
+            outside_work = Path(tmpdir) / "outside-work"
+            outside_work.mkdir()
+            script = outside_work / "run.sh"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            attempt = build_frozen_attempt(
+                attempt_id="s1:read_qc:outside-work",
+                session_id="s1",
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                script_path=script,
+                working_dir=outside_work,
+                expected_outputs=[],
+                env=None,
+                env_spec=None,
+            )
+
+            with self.assertRaisesRegex(DataLayoutError, "working directory is outside"):
+                persist_frozen_attempt(
+                    {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                    attempt,
+                )
+
+    def test_frozen_attempt_rejects_expected_output_outside_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = SessionPaths(tmpdir, "s1")
+            ensure_run_layout(paths)
+            work_dir = paths.work_path("read_qc", "attempt")
+            work_dir.mkdir(parents=True)
+            script = work_dir / "run.sh"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            attempt = build_frozen_attempt(
+                attempt_id="s1:read_qc:outside-output",
+                session_id="s1",
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                script_path=script,
+                working_dir=work_dir,
+                expected_outputs=[Path(tmpdir) / "outside-output.tsv"],
+                env=None,
+                env_spec=None,
+            )
+
+            with self.assertRaisesRegex(DataLayoutError, "expected output is outside"):
+                persist_frozen_attempt(
+                    {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                    attempt,
+                )
+
+    def test_frozen_attempt_rejects_work_script_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = SessionPaths(tmpdir, "s1")
+            ensure_run_layout(paths)
+            work_dir = paths.work_path("read_qc", "attempt")
+            work_dir.mkdir(parents=True)
+            external_script = Path(tmpdir) / "external.sh"
+            external_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script = work_dir / "run.sh"
+            script.symlink_to(external_script)
+            attempt = build_frozen_attempt(
+                attempt_id="s1:read_qc:symlink-escape",
+                session_id="s1",
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                script_path=script,
+                working_dir=work_dir,
+                expected_outputs=[],
+                env=None,
+                env_spec=None,
+            )
+
+            with self.assertRaisesRegex(DataLayoutError, "script resolves outside"):
+                persist_frozen_attempt(
+                    {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                    attempt,
+                )
+
+    def test_frozen_attempt_accepts_run_local_artifact_script_symlink(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = SessionPaths(tmpdir, "s1")
+            ensure_run_layout(paths)
+            work_dir = paths.work_path("hic_scaffolding", "autohic")
+            work_dir.mkdir(parents=True)
+            artifact_script = paths.artifact_path(
+                "hic_scaffolding", "attempts", "000", "run_autohic.sh"
+            )
+            artifact_script.parent.mkdir(parents=True)
+            artifact_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script = work_dir / "run_autohic.sh"
+            script.symlink_to(artifact_script)
+            expected_output = paths.artifact_path(
+                "hic_scaffolding", "outputs", "result.html"
+            )
+            attempt = build_frozen_attempt(
+                attempt_id="s1:hic_scaffolding:autohic",
+                session_id="s1",
+                stage="hic_scaffolding",
+                method_name="hic_scaffolding.autohic",
+                script_path=script,
+                working_dir=work_dir,
+                expected_outputs=[expected_output],
+                env=None,
+                env_spec=None,
+            )
+            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+
+            attempt_ref = persist_frozen_attempt(state, attempt)
+            loaded = load_frozen_attempt(
+                state,
+                attempt_ref,
+                expected_stage="hic_scaffolding",
+                expected_method_name=attempt.method_name,
+            )
+
+            self.assertEqual(loaded.script_path, script)
+            self.assertTrue(loaded.script_path.is_symlink())
+            self.assertEqual(loaded.script_sha256, attempt.script_sha256)
+            self.assertEqual(loaded.expected_outputs, [expected_output])
+
     def test_from_run_dir_is_strict_and_validates_session_id(self):
         paths = SessionPaths("/tmp/gene-agent-data", "s1")
 
@@ -441,17 +594,21 @@ class ImmutablePublishTests(unittest.TestCase):
                 + "penultimate diagnostic\nfinal diagnostic\n"
             )
             stderr.write_text(stderr_text, encoding="utf-8")
+            script = work / "run.sh"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             attempt = build_frozen_attempt(
                 attempt_id="s1:read_qc:seqkit_stats",
                 session_id="s1",
                 stage="read_qc",
                 method_name="read_qc.long_read_stats.seqkit_stats",
-                script_path=work / "run.sh",
+                script_path=script,
                 working_dir=work,
                 expected_outputs=[],
                 env=None,
                 env_spec=None,
             )
+            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            frozen_attempt_ref = persist_frozen_attempt(state, attempt)
 
             class StaticRunner:
                 def run(self, spec):
@@ -480,11 +637,11 @@ class ImmutablePublishTests(unittest.TestCase):
             )
             self.assertFalse(stdout.exists())
 
-            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
             execution_ref = persist_execution_result(
                 state,
                 stage="read_qc",
                 method_name=attempt.method_name,
+                frozen_attempt_ref=frozen_attempt_ref,
                 result=outcome.result,
             )
             record_path = resolve_artifact_ref(paths.run_dir, "s1", execution_ref)
@@ -522,6 +679,7 @@ class ImmutablePublishTests(unittest.TestCase):
                 expected_stage="read_qc",
                 expected_attempt_id=attempt.attempt_id,
                 expected_method_name=attempt.method_name,
+                expected_frozen_attempt_ref=frozen_attempt_ref,
             )
             _, loaded_stderr = execution_log_paths(state, loaded)
             self.assertEqual(loaded_stderr.read_text(encoding="utf-8"), stderr_text)

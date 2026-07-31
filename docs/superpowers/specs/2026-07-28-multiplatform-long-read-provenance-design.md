@@ -26,11 +26,22 @@ instead models one selected Assembly attempt with one canonical primary FASTA
 and zero or more method-native outputs in the existing executed candidate
 bundle.
 
-The current TUI intake has the same single-platform assumption: its typed draft
-contains ONT reads but no HiFi reads, and its planner entry request hard-codes
-ONT. The existing manifest, run-config, draft, and candidate-bundle structures
-are otherwise sufficient. This design extends those structures in place rather
-than adding a second input-selection or assembly-product protocol.
+At the time this design was written, TUI intake had the same single-platform
+assumption: its typed draft contained ONT reads but no HiFi reads, and its
+planner entry request hard-coded ONT. The existing manifest, run-config, draft,
+and candidate-bundle structures were otherwise sufficient. The implementation
+extends those structures in place rather than adding a second input-selection
+or assembly-product protocol.
+
+### Current implementation boundary
+
+The implemented TUI extension collects PacBio HiFi, ONT, and explicit paired
+Hi-C facts. It does not yet expose intake questions for CLR, CycloneSEQ, short
+reads, an existing assembly, or annotation reference/evidence assets. Runtime
+resolvers and frozen manifests may support a broader platform set, especially
+for T2T, but those capabilities must not be read as current TUI collection
+support. Annotation stages remain available in Plan Drafts; their dedicated
+asset intake is deferred.
 
 ## Goals
 
@@ -240,10 +251,13 @@ not select the first platform.
 
 ## Existing TUI Draft and Freeze Extension
 
-`TuiSessionDraft` remains the sole mutable pre-freeze authority.
-`manifest_draft.yaml` remains its rebuildable projection, and the planner
-continues to build the existing `RunConfig`. Natural-language parsing updates
-typed draft facts; it never edits frozen YAML or JSON directly.
+`TuiSessionDraft` remains the sole durable mutable pre-freeze authority.
+`manifest_draft.yaml` remains its rebuildable projection. After fact intake, a
+planning LLM produces one transient `AskPlanState` view and the existing Plan
+Draft editor updates it; the selected stage, method, and parameter fields are
+copied back into `TuiSessionDraft`. The planner continues to build the existing
+`RunConfig`. Natural-language parsing updates typed draft facts; it never edits
+frozen YAML or JSON directly.
 
 `AssetCollectionState` gains `hifi_reads: HifiReadsFact | None` beside the
 existing `ont_reads` and `hic_reads` facts. Both long-read facts contain a
@@ -260,11 +274,12 @@ needed to project current run-config fields:
 - explicit request to use ONT ultra-long reads in the HiFi Hifiasm method;
 - explicit request to use Hi-C phasing in the HiFi Hifiasm method.
 
-The parsers set those booleans only from explicit user language or a subsequent
-planner answer. Merely declaring ONT or Hi-C files does not silently enable a
-different Hifiasm mode. When Hifiasm and matching inputs are present, the
-planner may recommend the options, but the existing final manifest/run-config
-preview and confirmation remain the authorization boundary.
+The intake parser records those booleans only from explicit user language. The
+planning LLM receives the recorded facts and may place the corresponding
+planning-time parameters into the editable draft. Merely declaring ONT or Hi-C
+files does not silently enable a different Hifiasm mode. The existing Plan
+Draft and final manifest/run-config confirmation remain the authorization
+boundary; no second LLM review is added.
 
 `materialize_manifest_draft()` emits one existing `InputAssetSpec` for the
 confirmed HiFi paths, one for the confirmed ONT paths, and the existing
@@ -406,19 +421,18 @@ The runtime member list is not checkpointed. Stage freeze callbacks load it
 again from verified immutable refs and bind the exact selected paths and
 identities into the existing frozen attempt and parameter evidence.
 
-The resolver retains the normative Resource Handoff precedence:
+The shared Resource Handoff resolver retains this precedence:
 
-1. explicit run override;
-2. current `resource_refs["long_reads"]`;
-3. registry fallback.
+1. current `resource_refs["long_reads"]`;
+2. registry fallback.
 
-An override changes selection, not provenance ownership. Every override path
-must resolve to exactly one member in the verified asset registry or current
-read-set manifest. Frozen run-config overrides are therefore registered during
-inventory as described above. A runtime-only path that is absent from both
-authoritative records fails with `unregistered_long_read_override`; the
-resolver never synthesizes an asset record or bypasses external-input hash
-verification.
+Some stage adapters (not the shared cross-stage resolver) accept a run-config
+selection after that lookup. Such an override changes selection, not
+provenance ownership: every override path must resolve to exactly one member in
+the verified asset registry or current read-set manifest. A runtime-only path
+that is absent from both authoritative records fails with
+`unregistered_long_read_override`; the adapter never synthesizes an asset record
+or bypasses external-input hash verification.
 
 ## Assembly Input Selection
 

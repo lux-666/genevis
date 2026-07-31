@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
@@ -11,12 +12,14 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.execution import ExecutionResult, ExecutionStatus
 from app.storage.artifacts import (
     artifact_ref_for_path,
     publish_artifact_record,
+    read_artifact_records,
     resolve_artifact_ref,
 )
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
@@ -43,6 +46,15 @@ class ExecutionEvidence(BaseModel):
     error: str = Field(default="", max_length=2048)
     stdout_ref: ArtifactRef
     stderr_ref: ArtifactRef
+
+
+@dataclass(frozen=True, kw_only=True)
+class PersistedExecutionOutcome:
+    """One recoverable lifecycle outcome bound to its frozen runner input."""
+
+    execution_ref: ArtifactRef
+    evidence: ExecutionEvidence
+    boundary_failure: bool
 
 
 def build_execution_evidence(
@@ -165,7 +177,7 @@ def persist_frozen_attempt(
 
     if attempt.session_id != state.get("session_id"):
         raise DataLayoutError("frozen attempt session does not match the run state")
-    _require_retained_attempt_work(attempt)
+    validate_frozen_attempt_for_run(state.get("data_dir", ""), attempt)
     payload = {
         "schema_version": 2,
         "record_type": "frozen_attempt",
@@ -213,19 +225,64 @@ def load_frozen_attempt(
         raise DataLayoutError("attempt evidence identity mismatch")
     if expected_method_name is not None and attempt.method_name != expected_method_name:
         raise DataLayoutError("attempt evidence has the wrong method identity")
-    _require_retained_attempt_work(attempt)
+    validate_frozen_attempt_for_run(state.get("data_dir", ""), attempt)
     return attempt
 
 
-def _require_retained_attempt_work(attempt: FrozenAttemptSpec) -> None:
-    if not attempt.working_dir.exists() or not attempt.working_dir.is_dir():
+def validate_frozen_attempt_for_run(
+    data_dir: Path | str,
+    attempt: FrozenAttemptSpec,
+) -> None:
+    """Validate one frozen attempt against its current run-owned path boundary."""
+
+    paths = SessionPaths.from_run_dir(data_dir)
+    paths.require_session_id(attempt.session_id)
+    stage_work_dir = paths.stage_work_dir(attempt.stage).resolve(strict=False)
+    declared_working_dir = attempt.working_dir.expanduser().absolute()
+    working_dir = declared_working_dir.resolve(strict=False)
+    declared_script_path = attempt.script_path.expanduser().absolute()
+    script_path = declared_script_path.resolve(strict=False)
+    try:
+        working_dir.relative_to(stage_work_dir)
+    except ValueError as exc:
         raise DataLayoutError(
-            f"frozen attempt working directory is missing: {attempt.working_dir}"
-        )
-    if not attempt.script_path.exists() or not attempt.script_path.is_file():
+            f"frozen attempt working directory is outside {stage_work_dir}: "
+            f"{working_dir}"
+        ) from exc
+    if not declared_working_dir.exists() or not declared_working_dir.is_dir():
         raise DataLayoutError(
-            f"frozen attempt work script is missing: {attempt.script_path}"
+            f"frozen attempt working directory is missing: {declared_working_dir}"
         )
+    try:
+        declared_script_path.relative_to(declared_working_dir)
+    except ValueError as exc:
+        raise DataLayoutError(
+            "frozen attempt script is outside its working directory: "
+            f"{declared_script_path}"
+        ) from exc
+    try:
+        script_path.relative_to(paths.run_dir.resolve(strict=False))
+    except ValueError as exc:
+        raise DataLayoutError(
+            f"frozen attempt script resolves outside the run: {script_path}"
+        ) from exc
+    if not declared_script_path.exists() or not declared_script_path.is_file():
+        raise DataLayoutError(
+            f"frozen attempt work script is missing: {declared_script_path}"
+        )
+    if sha256_file(declared_script_path) != attempt.script_sha256:
+        raise DataLayoutError(
+            "frozen attempt work script changed after freeze: "
+            f"{declared_script_path}"
+        )
+    for output in attempt.expected_outputs:
+        resolved = output.expanduser().resolve(strict=False)
+        try:
+            resolved.relative_to(paths.run_dir)
+        except ValueError as exc:
+            raise DataLayoutError(
+                f"frozen attempt expected output is outside the run: {resolved}"
+            ) from exc
 
 
 def persist_execution_result(
@@ -233,17 +290,26 @@ def persist_execution_result(
     *,
     stage: str,
     method_name: str,
+    frozen_attempt_ref: ArtifactRef | Mapping[str, Any],
     result: ExecutionResult,
     error: str = "",
+    boundary_failure: bool = False,
 ) -> ArtifactRef:
     """Persist one structured process result and return its compact ref."""
 
+    frozen_ref = (
+        frozen_attempt_ref
+        if isinstance(frozen_attempt_ref, ArtifactRef)
+        else ArtifactRef.model_validate(frozen_attempt_ref)
+    )
     payload = {
         "schema_version": 2,
         "record_type": "execution_result",
         "stage": stage,
         "method_name": method_name,
         "attempt_id": result.attempt_id,
+        "frozen_attempt_ref": frozen_ref.model_dump(mode="json"),
+        "boundary_failure": boundary_failure,
         "result": build_execution_evidence(
             state,
             result,
@@ -258,6 +324,7 @@ def persist_execution_result(
         kind="execution",
         artifact_type=execution_result_artifact_type(stage),
         payload=payload,
+        metadata={"dependency_refs": [frozen_ref.model_dump(mode="json")]},
     )
 
 
@@ -268,6 +335,7 @@ def load_execution_evidence(
     expected_stage: str,
     expected_attempt_id: str | None = None,
     expected_method_name: str | None = None,
+    expected_frozen_attempt_ref: ArtifactRef | Mapping[str, Any] | None = None,
 ) -> ExecutionEvidence:
     """Integrity-check and load one path-free process result artifact."""
 
@@ -293,7 +361,86 @@ def load_execution_evidence(
         and payload.get("method_name") != expected_method_name
     ):
         raise DataLayoutError("execution evidence has the wrong method identity")
+    if expected_frozen_attempt_ref is not None:
+        expected_ref = (
+            expected_frozen_attempt_ref
+            if isinstance(expected_frozen_attempt_ref, ArtifactRef)
+            else ArtifactRef.model_validate(expected_frozen_attempt_ref)
+        )
+        actual_ref = ArtifactRef.model_validate(payload.get("frozen_attempt_ref"))
+        if actual_ref != expected_ref:
+            raise DataLayoutError("execution evidence has the wrong frozen attempt")
     return result
+
+
+def recover_execution_result(
+    state: Mapping[str, Any],
+    *,
+    stage: str,
+    method_name: str,
+    attempt_id: str,
+    frozen_attempt_ref: ArtifactRef | Mapping[str, Any],
+) -> PersistedExecutionOutcome | None:
+    """Recover one indexed execution result for an unadvanced owner cursor."""
+
+    session_id = str(state.get("session_id") or "")
+    frozen_ref = (
+        frozen_attempt_ref
+        if isinstance(frozen_attempt_ref, ArtifactRef)
+        else ArtifactRef.model_validate(frozen_attempt_ref)
+    )
+    candidates = [
+        record
+        for record in read_artifact_records(state.get("data_dir", ""), session_id)
+        if record.get("artifact_type") == execution_result_artifact_type(stage)
+        and record.get("stage") == stage
+        and record.get("method_id") == method_name
+        and record.get("attempt_id") == attempt_id
+    ]
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise DataLayoutError(f"execution evidence is ambiguous: {attempt_id}")
+    expected_dependency = frozen_ref.model_dump(mode="json")
+    record = candidates[0]
+    if list(record.get("dependency_refs") or []) != [expected_dependency]:
+        raise DataLayoutError(
+            f"execution evidence does not bind the frozen attempt: {attempt_id}"
+        )
+    execution_ref = ArtifactRef.model_validate(
+        {
+            key: record[key]
+            for key in (
+                "schema_version",
+                "artifact_id",
+                "path_ref",
+                "sha256",
+                "size_bytes",
+                "artifact_type",
+            )
+        }
+    )
+    payload = _load_record(
+        state,
+        execution_ref,
+        expected_type=execution_result_artifact_type(stage),
+    )
+    boundary_failure = payload.get("boundary_failure")
+    if not isinstance(boundary_failure, bool):
+        raise DataLayoutError("execution evidence has invalid boundary disposition")
+    evidence = load_execution_evidence(
+        state,
+        execution_ref,
+        expected_stage=stage,
+        expected_attempt_id=attempt_id,
+        expected_method_name=method_name,
+        expected_frozen_attempt_ref=frozen_ref,
+    )
+    return PersistedExecutionOutcome(
+        execution_ref=execution_ref,
+        evidence=evidence,
+        boundary_failure=boundary_failure,
+    )
 
 
 def _bounded_error(value: str, *, limit: int = 2048) -> str:
@@ -309,6 +456,7 @@ def _persist_record(
     kind: str,
     artifact_type: str,
     payload: Mapping[str, Any],
+    metadata: Mapping[str, Any] | None = None,
 ) -> ArtifactRef:
     session_id = str(state.get("session_id") or "")
     paths = SessionPaths.from_run_dir(state.get("data_dir", ""))
@@ -352,7 +500,7 @@ def _persist_record(
         stage=stage,
         method_name=method_name,
         artifact_type=artifact_type,
-        metadata={"attempt_id": attempt_id},
+        metadata={"attempt_id": attempt_id, **dict(metadata or {})},
     )
     return publish_artifact_record(
         paths.run_dir,

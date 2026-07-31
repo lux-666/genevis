@@ -14,6 +14,7 @@ from app.execution.evidence import (
     persist_frozen_attempt,
 )
 from app.execution.lifecycle import run_method_attempts
+from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.execution import ExecutionResult, MethodExecutionAttempt
@@ -27,17 +28,20 @@ from app.stages.gene_annotation.nodes import (
     freeze_augustus_attempt,
     freeze_miniprot_attempt,
 )
-from app.storage.artifacts import register_artifact_records
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
 from app.storage.publish import publish_execution_logs
 from tests.data_v2 import v2_run_dir
 
 
-def _v2_state(tmpdir: str) -> dict:
-    return initial_state(
+def _v2_state(tmpdir: str, *, inherit_from: dict | None = None) -> dict:
+    state = initial_state(
         session_id="s1",
         input_manifest_ref="control/manifest.yaml",
         data_dir=str(v2_run_dir(tmpdir, "s1")),
     )
+    if inherit_from is not None and inherit_from.get("asset_registry_ref") is not None:
+        state["asset_registry_ref"] = inherit_from["asset_registry_ref"]
+    return state
 
 
 def _gene_work_path(tmpdir: str, *parts: str) -> Path:
@@ -63,6 +67,67 @@ def _write_intake_plan(tmpdir: str) -> str:
     return str(path)
 
 
+def _publish_input_registry(
+    state: dict,
+    *,
+    genome_path: Path,
+    protein_paths: list[Path] | None = None,
+) -> dict:
+    protein_paths = protein_paths or []
+    genome_asset_id = "s1:softmasked_genome:test"
+    protein_asset_ids = [
+        f"s1:reference_proteins:test-{index}"
+        for index, _path in enumerate(protein_paths)
+    ]
+    assets = [
+        (genome_asset_id, "softmasked_genome", genome_path),
+        *[
+            (asset_id, "reference_proteins", path)
+            for asset_id, path in zip(protein_asset_ids, protein_paths, strict=True)
+        ],
+    ]
+    registry_path = (
+        Path(state["data_dir"]) / "work" / "inventory" / "asset_registry.json"
+    )
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": state["session_id"],
+                "assets": [
+                    {
+                        "asset_id": asset_id,
+                        "asset_type": asset_type,
+                        "path": str(path),
+                        "checksum": sha256_file(path),
+                        "checksum_status": "ready",
+                        "size_bytes": path.stat().st_size,
+                    }
+                    for asset_id, asset_type, path in assets
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    registry = publish_artifact_record(
+        state["data_dir"],
+        state["session_id"],
+        ArtifactMeta.from_file(
+            registry_path,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        ),
+    )
+    state["asset_registry_ref"] = registry.ref.model_dump(mode="json")
+    return {
+        "genome_input_asset_id": genome_asset_id,
+        "protein_evidence_asset_ids": protein_asset_ids,
+    }
+
+
 def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
     attempt.script_path.parent.mkdir(parents=True, exist_ok=True)
     if not attempt.script_path.exists():
@@ -73,6 +138,7 @@ def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
 def _persist_successful_execution(
     state: dict,
     attempt: FrozenAttemptSpec,
+    frozen_attempt_ref: dict,
     output_paths: list[Path],
 ) -> dict:
     stdout_path = (
@@ -115,6 +181,7 @@ def _persist_successful_execution(
         state,
         stage="gene_annotation",
         method_name=attempt.method_name,
+        frozen_attempt_ref=frozen_attempt_ref,
         result=result,
     ).model_dump(mode="json")
 
@@ -126,7 +193,7 @@ def _execution_cursor(
 ) -> dict:
     frozen_ref = _persist_attempt(state, attempt)
     execution_ref = (
-        _persist_successful_execution(state, attempt, output_paths)
+        _persist_successful_execution(state, attempt, frozen_ref, output_paths)
         if output_paths is not None
         else None
     )
@@ -213,6 +280,13 @@ def _pending_execution_state(tmpdir: str, **gene_updates):
     softmasked = Path(tmpdir) / "softmasked.fa"
     softmasked.write_text(">ctg1\nACGT\n", encoding="utf-8")
     state = _v2_state(tmpdir)
+    input_origins = _publish_input_registry(
+        state,
+        genome_path=softmasked,
+        protein_paths=[
+            Path(str(path)) for path in gene_updates.get("protein_evidence_refs", [])
+        ],
+    )
     state["current_stage"] = "gene_annotation"
     state["stage_outputs"] = {
         "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -229,6 +303,7 @@ def _pending_execution_state(tmpdir: str, **gene_updates):
             "candidate_gene_counts": {"gene_annotation.candidate.miniprot": 0},
             "executed_methods": [],
             "env": {"PATH": os.environ.get("PATH", "")},
+            **input_origins,
             **gene_updates,
         },
     }
@@ -305,8 +380,9 @@ class MiniprotRunTests(unittest.TestCase):
     def _run_state(
         self, tmpdir: str, bin_dir: Path, *, status: str = "miniprot_frozen"
     ):
-        output_gff3 = Path(tmpdir) / "miniprot.gff3"
-        script = Path(tmpdir) / "run_miniprot.sh"
+        output_gff3 = _gene_work_path(tmpdir, "miniprot", "miniprot.gff3")
+        working_dir = output_gff3.parent
+        script = working_dir / "run_miniprot.sh"
         script.write_text(
             "#!/bin/bash\nset -e\n"
             "miniprot --gff genome.fa proteins.fa > miniprot.gff3\n"
@@ -320,8 +396,10 @@ class MiniprotRunTests(unittest.TestCase):
             stage="gene_annotation",
             method_name="gene_annotation.candidate.miniprot",
             script_path=script,
-            working_dir=Path(tmpdir),
+            script_sha256=sha256_file(script),
+            working_dir=working_dir,
             expected_outputs=[output_gff3],
+            input_dependencies=[],
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
             metadata={
                 "output_gff3": str(output_gff3),
@@ -362,6 +440,10 @@ class MiniprotRunTests(unittest.TestCase):
                 gene["execution_attempts"][0]["execution_ref"],
                 expected_stage="gene_annotation",
                 expected_attempt_id="s1:gene_annotation:miniprot",
+                expected_method_name="gene_annotation.candidate.miniprot",
+                expected_frozen_attempt_ref=gene["execution_attempts"][0][
+                    "frozen_attempt_ref"
+                ],
             )
             self.assertTrue(execution.success)
 
@@ -402,14 +484,19 @@ class MiniprotCollectTests(unittest.TestCase):
                 "ctg1\tminiprot\tmRNA\t101\t200\t.\t-\t.\tID=m2;Parent=g2\n",
                 encoding="utf-8",
             )
+        working_dir = output_gff3.parent
+        script = working_dir / "run_miniprot.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         attempt = FrozenAttemptSpec(
             attempt_id="s1:gene_annotation:miniprot",
             session_id="s1",
             stage="gene_annotation",
             method_name="gene_annotation.candidate.miniprot",
-            script_path=Path(tmpdir) / "run_miniprot.sh",
-            working_dir=Path(tmpdir),
+            script_path=script,
+            script_sha256=sha256_file(script),
+            working_dir=working_dir,
             expected_outputs=[output_gff3],
+            input_dependencies=[],
             metadata={
                 "output_gff3": str(output_gff3),
                 "genome_input_ref": str(Path(tmpdir) / "genome.fa"),
@@ -420,6 +507,7 @@ class MiniprotCollectTests(unittest.TestCase):
         state["current_stage"] = "gene_annotation"
         genome = Path(tmpdir) / "genome.fa"
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        input_origins = _publish_input_registry(state, genome_path=genome)
         gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
             "assembly_review": {
@@ -428,6 +516,7 @@ class MiniprotCollectTests(unittest.TestCase):
             "gene_annotation": {
                 "status": "miniprot_ran",
                 "genome_input_ref": str(genome),
+                **input_origins,
                 "env": {
                     "PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                 },
@@ -604,7 +693,7 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 "miniprot_frozen",
             )
 
-            run_state = _v2_state(tmpdir)
+            run_state = _v2_state(tmpdir, inherit_from=freeze_state)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
                 "assembly_review": {
@@ -617,7 +706,7 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 run_result["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran"
             )
 
-            collect_state = _v2_state(tmpdir)
+            collect_state = _v2_state(tmpdir, inherit_from=run_state)
             collect_state["current_stage"] = "gene_annotation"
             collect_state["stage_outputs"] = {
                 "assembly_review": {
@@ -687,7 +776,7 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 "s1:gene_annotation:miniprot",
             )
 
-            run_state = _v2_state(tmpdir)
+            run_state = _v2_state(tmpdir, inherit_from=freeze_state)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
                 "assembly_review": {
@@ -706,6 +795,9 @@ class MiniprotFullSliceTests(unittest.TestCase):
                     run_state,
                     execution_ref,
                     expected_stage="gene_annotation",
+                    expected_attempt_id="s1:gene_annotation:miniprot",
+                    expected_method_name="gene_annotation.candidate.miniprot",
+                    expected_frozen_attempt_ref=attempt_ref,
                 ).success
             )
 
@@ -820,8 +912,9 @@ class AugustusRunTests(unittest.TestCase):
     def _run_state(
         self, tmpdir: str, bin_dir: Path, *, status: str = "augustus_frozen"
     ):
-        output_gff3 = Path(tmpdir) / "augustus.gff3"
-        script = Path(tmpdir) / "run_augustus.sh"
+        output_gff3 = _gene_work_path(tmpdir, "augustus", "augustus.gff3")
+        working_dir = output_gff3.parent
+        script = working_dir / "run_augustus.sh"
         script.write_text(
             "#!/bin/bash\nset -e\n"
             "augustus --species=fly genome.fa > augustus.gff3\n"
@@ -835,8 +928,10 @@ class AugustusRunTests(unittest.TestCase):
             stage="gene_annotation",
             method_name="gene_annotation.candidate.augustus",
             script_path=script,
-            working_dir=Path(tmpdir),
+            script_sha256=sha256_file(script),
+            working_dir=working_dir,
             expected_outputs=[output_gff3],
+            input_dependencies=[],
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
             metadata={
                 "output_gff3": str(output_gff3),
@@ -887,14 +982,19 @@ class AugustusCollectTests(unittest.TestCase):
                 "ctg1\tAUGUSTUS\tgene\t501\t1000\t.\t-\t.\tID=g2\n",
                 encoding="utf-8",
             )
+        working_dir = output_gff3.parent
+        script = working_dir / "run_augustus.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         attempt = FrozenAttemptSpec(
             attempt_id="s1:gene_annotation:augustus",
             session_id="s1",
             stage="gene_annotation",
             method_name="gene_annotation.candidate.augustus",
-            script_path=Path(tmpdir) / "run_augustus.sh",
-            working_dir=Path(tmpdir),
+            script_path=script,
+            script_sha256=sha256_file(script),
+            working_dir=working_dir,
             expected_outputs=[output_gff3],
+            input_dependencies=[],
             metadata={
                 "output_gff3": str(output_gff3),
                 "genome_input_ref": str(Path(tmpdir) / "genome.fa"),
@@ -905,6 +1005,7 @@ class AugustusCollectTests(unittest.TestCase):
         state["current_stage"] = "gene_annotation"
         genome = Path(tmpdir) / "genome.fa"
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        input_origins = _publish_input_registry(state, genome_path=genome)
         gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
             "assembly_review": {
@@ -913,6 +1014,7 @@ class AugustusCollectTests(unittest.TestCase):
             "gene_annotation": {
                 "status": "augustus_ran",
                 "genome_input_ref": str(genome),
+                **input_origins,
                 "env": {
                     "PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                 },
@@ -988,7 +1090,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             )
 
             # miniprot run
-            run_state = _v2_state(tmpdir)
+            run_state = _v2_state(tmpdir, inherit_from=state)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
                 "assembly_review": {
@@ -1002,7 +1104,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             )
 
             # miniprot collect
-            collect_state = _v2_state(tmpdir)
+            collect_state = _v2_state(tmpdir, inherit_from=run_state)
             collect_state["current_stage"] = "gene_annotation"
             collect_state["stage_outputs"] = {
                 "assembly_review": {
@@ -1042,7 +1144,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             )
 
             # Step 2: augustus freeze
-            aug_state = _v2_state(tmpdir)
+            aug_state = _v2_state(tmpdir, inherit_from=collect_state)
             aug_state["current_stage"] = "gene_annotation"
             aug_state["stage_outputs"] = {
                 "assembly_review": {
@@ -1057,7 +1159,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             )
 
             # augustus run
-            run2 = _v2_state(tmpdir)
+            run2 = _v2_state(tmpdir, inherit_from=aug_state)
             run2["current_stage"] = "gene_annotation"
             run2["stage_outputs"] = {
                 "assembly_review": {
@@ -1071,7 +1173,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             )
 
             # augustus collect
-            coll2 = _v2_state(tmpdir)
+            coll2 = _v2_state(tmpdir, inherit_from=run2)
             coll2["current_stage"] = "gene_annotation"
             coll2["stage_outputs"] = {
                 "assembly_review": {

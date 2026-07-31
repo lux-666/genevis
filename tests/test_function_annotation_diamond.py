@@ -9,14 +9,21 @@ from pathlib import Path
 from app.execution.collect import collect_with_failure_boundary
 from app.execution.evidence import load_execution_evidence, load_frozen_attempt
 from app.execution.lifecycle import run_method_attempts
+from app.schemas.artifacts import ArtifactMeta
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state
+from app.stages.base import stage_artifacts_dir, stage_work_dir
 from app.stages.function_annotation.nodes import (
     DIAMOND_LIFECYCLE,
     collect_diamond_artifacts,
     commit_function_annotation,
     freeze_diamond_attempt,
 )
-from app.storage.artifacts import read_artifact_records, resolve_artifact_ref
+from app.storage.artifacts import (
+    publish_artifact_record,
+    read_artifact_records,
+    resolve_artifact_ref,
+)
 from tests.data_v2 import v2_run_dir
 
 
@@ -59,16 +66,63 @@ def _fake_diamond_bin(tmpdir: str, *, fail: bool = False) -> str:
 
 def _provenance_state(tmpdir: str, **func_updates):
     """State after validate_database_provenance with a diamond database."""
-    proteins = Path(tmpdir) / "proteins.fa"
-    proteins.write_text(">prot1\nMKTLLLL\n", encoding="utf-8")
     db_fasta = Path(tmpdir) / "swissprot.fasta"
     db_fasta.write_text(">sp|P12345\nMKTLLLL\n", encoding="utf-8")
-    proteins_ref = str(proteins)
     state = initial_state(
         session_id="s1",
         input_manifest_ref="control/manifest.yaml",
         data_dir=str(v2_run_dir(tmpdir, "s1")),
     )
+    registry_path = stage_work_dir(state, "inventory", "asset_registry.json")
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": state["session_id"],
+                "assets": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    published_registry = publish_artifact_record(
+        state["data_dir"],
+        state["session_id"],
+        ArtifactMeta.from_file(
+            registry_path,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
+        ),
+    )
+    state["asset_registry_ref"] = published_registry.ref.model_dump(mode="json")
+    proteins = stage_work_dir(state, "gene_annotation", "proteins.fa")
+    proteins.parent.mkdir(parents=True, exist_ok=True)
+    proteins.write_text(">prot1\nMKTLLLL\n", encoding="utf-8")
+    published_proteins = publish_artifact_record(
+        state["data_dir"],
+        state["session_id"],
+        ArtifactMeta.from_file(
+            proteins,
+            stage="gene_annotation",
+            method_name="gene_annotation.contract",
+            artifact_type="gene_annotation.final_proteins",
+        ),
+        destination=stage_artifacts_dir(
+            state,
+            "gene_annotation",
+            "proteins.fa",
+        ),
+    )
+    proteins_ref = str(published_proteins.path)
+    state["resource_refs"]["predicted_proteins"] = ResourceRef(
+        resource_type="predicted_proteins",
+        paths=[proteins_ref],
+        source_stage="gene_annotation",
+        metadata={
+            "primary_output_ref": published_proteins.ref.model_dump(mode="json")
+        },
+    ).to_dict()
     state["current_stage"] = "function_annotation"
     state["stage_outputs"] = {
         "function_annotation": {
@@ -183,7 +237,7 @@ class DiamondFreezeTests(unittest.TestCase):
             )
             script = attempt.script_path.read_text(encoding="utf-8")
             self.assertNotIn("diamond makedb", script)
-            self.assertIn(f"diamond blastp --db {index}", script)
+            self.assertIn(f"diamond blastp --db {index.resolve()}", script)
             self.assertEqual(attempt.metadata["database_source_kind"], "diamond_index")
 
     def test_freeze_reports_missing_database_before_execution(self):
@@ -255,6 +309,9 @@ class DiamondRunTests(unittest.TestCase):
                 expected_stage="function_annotation",
                 expected_attempt_id="s1:function_annotation:diamond",
                 expected_method_name="function_annotation.candidate.diamond",
+                expected_frozen_attempt_ref=_execution_cursor(func_out)[
+                    "frozen_attempt_ref"
+                ],
             )
             self.assertTrue(execution.success)
             self.assertEqual(execution.stdout_ref.artifact_type, "command.stdout")

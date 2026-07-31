@@ -1026,11 +1026,16 @@ def _hydrate_parameter_attempt(
 
     execution: ParameterExecutionEvidence | None = None
     if attempt.execution_ref is not None:
+        if attempt.frozen_attempt_ref is None:
+            raise ValueError(
+                "AutoHiC execution evidence has no frozen-attempt binding"
+            )
         execution_evidence = load_execution_evidence(
             state,
             attempt.execution_ref,
             expected_stage="hic_scaffolding",
             expected_method_name=AUTOHIC_METHOD,
+            expected_frozen_attempt_ref=attempt.frozen_attempt_ref,
         )
         stderr_tail: str | None = None
         if include_execution_log and not execution_evidence.success:

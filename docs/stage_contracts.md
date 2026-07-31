@@ -75,8 +75,8 @@ Purpose: estimate genome size and related k-mer metrics.
 
 Logical inputs:
 
-- prefers `short_reads` when present;
-- otherwise uses `long_reads`.
+- requires `long_reads` for admission to the first ONT MVP;
+- prefers `short_reads` for k-mer counting when they are also present.
 
 Registered methods:
 
@@ -187,10 +187,15 @@ assembly ends without overwriting the input FASTA.
 
 Logical inputs and output:
 
-- requires `assembly`;
+- requires the current adopted `assembly` and `long_reads`;
 - consumes the complete ordered, platform-preserving long-read set, including
   ONT, PacBio HiFi, CLR, and CycloneSEQ inputs;
 - updates `assembly` only when a materialized result is selected.
+
+On the first HPC golden path, the current assembly is the product adopted by
+`hic_scaffolding`. T2T never consumes `hic_reads` directly. A configured
+`t2t.assembly_fasta_ref` is only an equality assertion against the current
+central assembly and cannot bypass the Hi-C adoption handoff.
 
 Registered method:
 

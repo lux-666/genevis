@@ -60,6 +60,7 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
     "read_qc": "read_qc_filter_choice",
     "genome_survey": "choose_many",
     "assembly": "choose_many",
+    "assembly_dedup": "pipeline",
     "assembly_review": "choose_many",
     "hic_scaffolding": "pipeline",
     "t2t": "choose_many",
@@ -927,19 +928,9 @@ def _stage_input_status(
 ) -> list[str]:
     if (
         stage == "hic_scaffolding"
-        and not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"}
-        & asset_types
+        and "hic_reads_registered" not in asset_types
     ):
-        return ["missing Hi-C reads/alignment/merged_nodups in manifest"]
-    if (
-        stage == "t2t"
-        and not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"}
-        & asset_types
-    ):
-        return [
-            "T2T finishing usually needs Hi-C/contact-map or telomere "
-            "evidence; none registered in manifest"
-        ]
+        return ["missing paired Hi-C reads in manifest"]
     return []
 
 
@@ -959,7 +950,7 @@ def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
         recommended.extend(stages_through("assembly_review"))
     if "assembly_fasta_registered" in asset_types:
         recommended.append("assembly_review")
-    if {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:
+    if "hic_reads_registered" in asset_types:
         recommended.append("hic_scaffolding")
     has_assembly_path = (
         "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types
@@ -1551,12 +1542,9 @@ def _plan_validation_warnings(plan: AskPlanState) -> list[str]:
     asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
     order = plan.resolved_execution_order or []
     if "hic_scaffolding" in order:
-        if (
-            not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"}
-            & asset_types
-        ):
+        if "hic_reads_registered" not in asset_types:
             warnings.append(
-                "hic_scaffolding: no Hi-C reads in manifest; selected stage "
+                "hic_scaffolding: no paired Hi-C reads in manifest; selected stage "
                 "will block on missing inputs"
             )
     assembly_available = (

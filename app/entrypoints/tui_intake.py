@@ -185,11 +185,11 @@ class AssetAnswerApplyResult:
 
 
 def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
-    """Return a conservative assembly-oriented intent without an LLM.
+    """Return conservative intake hints when the goal parser is unavailable.
 
     The recognizer intentionally has a small vocabulary. Unknown goals still
-    produce a usable draft instead of treating an unavailable LLM as a fatal
-    condition.
+    produce a usable intake draft. These hints select follow-up questions only;
+    they are not an execution plan or a fallback Plan Draft.
     """
 
     from app.workflow import stages_through
@@ -270,11 +270,11 @@ def parse_workflow_intent(
     *,
     llm_parser: Callable[[str], WorkflowIntent | Mapping[str, Any] | str] | None = None,
 ) -> WorkflowIntent:
-    """Parse a goal with an optional LLM and a deterministic safe fallback.
+    """Parse intake-routing facts with an optional LLM and a local fallback.
 
     A failing model, malformed JSON, or invalid model schema never prevents the
-    TUI from opening an intake draft.  The raw user goal remains authoritative
-    in ``goal_text`` even when the model successfully supplies structured hints.
+    TUI from asking its fixed sample questions. The result is not planning
+    authority: the editable Plan Draft is generated separately after intake.
     """
 
     fallback = deterministic_workflow_intent(request_text)
@@ -284,28 +284,22 @@ def parse_workflow_intent(
         parsed = _coerce_workflow_intent(llm_parser(request_text))
     except Exception:
         return fallback
-    # The deterministic result is the authority for every field it extracts:
-    # stages/assembly-level (when it recognised the goal) and target_species.
-    # The LLM may only supplement sample_id, which the deterministic parser
-    # does not attempt to extract.
-    det_recognised = bool(fallback.requested_stages)
+    # Keep the raw request authoritative and use deterministic recognition only
+    # to fill missing intake hints. It must never overwrite a model-supplied
+    # stage hint or become the later Plan Draft.
+    target_assembly_level = (
+        parsed.target_assembly_level
+        if "target_assembly_level" in parsed.model_fields_set
+        else fallback.target_assembly_level
+    )
     return WorkflowIntent(
         goal_text=fallback.goal_text,
         sample_id=parsed.sample_id if parsed.sample_id else fallback.sample_id,
-        target_species=fallback.target_species,
-        target_assembly_level=(
-            fallback.target_assembly_level
-            if det_recognised
-            else parsed.target_assembly_level
-        ),
-        requested_stages=(
-            fallback.requested_stages
-            if det_recognised
-            else parsed.requested_stages
-        ),
+        target_species=parsed.target_species or fallback.target_species,
+        target_assembly_level=target_assembly_level,
+        requested_stages=parsed.requested_stages or fallback.requested_stages,
         requested_assembly_method=(
-            fallback.requested_assembly_method
-            or parsed.requested_assembly_method
+            parsed.requested_assembly_method or fallback.requested_assembly_method
         ),
         use_ultralong_ont=(
             fallback.use_ultralong_ont or parsed.use_ultralong_ont
@@ -320,7 +314,7 @@ def required_roles_for_intent(intent: WorkflowIntent) -> list[IntakeRole]:
     """Compute sample facts required by this scope's assembly-oriented goals."""
 
     stages = set(intent.requested_stages)
-    requires_hic = bool({"hic_scaffolding", "t2t"} & stages) or (
+    requires_hic = "hic_scaffolding" in stages or (
         intent.target_assembly_level == "chromosome"
     )
     method = intent.requested_assembly_method
@@ -407,8 +401,8 @@ def next_intake_clarification(draft: TuiSessionDraft) -> IntakeClarification | N
                 kind="degradation_confirmation",
                 role="no_hic_degradation",
                 question=(
-                    "未提供 Hi-C 将降级为非 Hi-C/contig 路线，不能宣称完整 T2T "
-                    "scaffolding。确认继续吗？"
+                    "未提供 Hi-C 将降级为 contig 路线，不能完成 chromosome-scale "
+                    "scaffolding 及后续 T2T 主链。确认继续吗？"
                 ),
             )
 
@@ -437,9 +431,12 @@ def _build_t2t_batch_question(draft: TuiSessionDraft) -> str:
     hic_missing = needs_hic and draft.intake.hic_reads is None
     species_missing = needs_species and draft.intent.target_species is None
 
-    parts: list[str] = ["还缺少 T2T 所需信息，请按类似格式一次提供：\n"]
+    parts: list[str] = ["还缺少当前 Hi-C -> T2T 主链所需信息，请按类似格式一次提供：\n"]
     if hic_missing:
-        parts.append('Hi-C：R1="/data/hic_1.fastq.gz"，R2="/data/hic_2.fastq.gz"')
+        parts.append(
+            'Hi-C（供上游 scaffolding）：R1="/data/hic_1.fastq.gz"，'
+            'R2="/data/hic_2.fastq.gz"'
+        )
     if species_missing:
         parts.append('物种："人类"')
     if show_motif:

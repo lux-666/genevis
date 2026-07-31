@@ -29,6 +29,11 @@ method selection
 `app.execution.lifecycle.build_method_graph`. Parameter recommendation is an
 optional preparation capability, not a second execution track.
 
+One `run` transition advances at most one frozen attempt. If an ordered direct
+batch still has pending cursors, the method graph keeps the frozen stage status,
+checkpoints the completed prefix, and routes back to `run`. Collection begins
+only after every owned attempt has durable execution evidence.
+
 At method-subgraph entry, the current stage status determines the recovery
 boundary:
 
@@ -36,9 +41,10 @@ boundary:
 - the lifecycle's `ran_status` enters `collect` without executing again;
 - every other status enters the stage-owned freeze callback.
 
-After freeze and run, any status other than the lifecycle's expected next
-status exits the method subgraph. Parent-stage routing owns subsequent failure,
-review, retry, and commit decisions.
+After freeze and each run transition, a frozen status loops to the next pending
+attempt, the ran status enters collect, and any other status exits the method
+subgraph. Parent-stage routing owns subsequent failure, review, retry, and commit
+decisions.
 
 ## Lifecycle Specification
 
@@ -72,7 +78,8 @@ Both ownership strategies enter the same run kernel.
 ### Direct attempts
 
 `DirectAttemptOwner` stores a non-empty ordered `execution_attempts` cursor
-list on the stage output. Each typed cursor owns:
+list on the stage output. Stage-local adapters validate the cursor shape and
+own:
 
 - attempt and method identity;
 - `frozen` / `executed` / `execution_failed` status;
@@ -82,7 +89,8 @@ list on the stage output. Each typed cursor owns:
 One-command methods use a one-item list. Ordered evaluators such as QUAST and
 BUSCO use one item per candidate. Execution and collection preserve cursor
 order; each cursor's method, attempt identity, status, and refs are validated
-when loaded.
+when loaded. During execution, a completed prefix and frozen suffix are valid;
+one transition advances only the first frozen cursor.
 
 ### Parameter attempts
 
@@ -112,10 +120,18 @@ execution evidence, or create stage-local lifecycle factories.
 ## Run Boundary
 
 Before any process starts, the shared run node validates the owner cursor and
-loads each frozen attempt through its verified ref. Stage, method, session,
-and attempt identities must match. The retained script path and working
-directory must each still exist; the current loader does not impose a separate
-path-containment relation between them.
+loads the next frozen attempt through its verified ref. Stage, method, session,
+and attempt identities must match. The working directory must resolve below the
+current run's `work/<stage>/` tree; the declared absolute script path must be
+lexically below that working directory and resolve somewhere inside the run;
+every expected output must resolve inside the run. The retained script must
+exist and match its frozen SHA-256. The Runner executes that exact declared path
+with the frozen working directory as cwd.
+
+Before checking live inputs or invoking the Runner, the run node searches the
+artifact index for one execution record with the same stage, method, attempt ID,
+and exact frozen-attempt ref. A unique verified match advances the owner cursor
+without rerunning. A mismatched or ambiguous record fails closed.
 
 Each frozen attempt also declares typed `input_dependencies`. Registry-owned
 external assets freeze their asset ID, canonical path, size, and SHA-256;
@@ -132,9 +148,15 @@ attempt-failed ledger facts. The Runner result attempt ID is checked before any
 result-derived publication or persistence.
 
 Every process outcome is converted to canonical `ExecutionEvidence` and
-persisted before its owner cursor advances. Expected infrastructure failures
-become bounded failed stage deltas. Unexpected programming errors remain
-visible to the graph failure boundary.
+persisted in an outer record that binds the exact frozen-attempt ref and lifecycle
+boundary disposition before its owner cursor advances. Expected infrastructure
+failures become bounded failed stage deltas. Unexpected programming errors
+remain visible to the graph failure boundary.
+
+This prevents replay once canonical execution evidence is committed. It does
+not provide process-level exactly-once behavior if the machine fails after a
+process exits but before that evidence is published; local subprocess execution
+has no scheduler identity that can be queried or reattached.
 
 ## Collect Boundary
 
@@ -155,7 +177,10 @@ own attempt-succeeded facts after successful materialization.
 There is no legacy cursor reader, dual write, checkpoint migration, or
 stage-local lifecycle compatibility layer.
 
-The current implementation requires:
+The current implementation requires the following for methods using the shared
+lifecycle. The central checkpoint still supplies the common JSON/size boundary;
+these guarantees do not imply that every stage-local path projection is an
+`ArtifactRef` or that every cursor key is universally typed at that boundary:
 
 1. every executable production method reaches `build_method_graph` and the
    shared run kernel;
@@ -163,10 +188,11 @@ The current implementation requires:
    `ParameterAttemptOwner`;
 3. ordinary and batch methods use `DirectAttemptOwner`;
 4. process success and failure persist canonical execution evidence;
-5. resume after freeze does not rebuild a command, and resume after run does
-   not execute again;
+5. resume after freeze does not rebuild a command, and committed execution
+   evidence is recovered before any rerun;
 6. every command input is bound through a typed frozen input dependency;
-7. production code has no method-specific duplicate cursor key, wrapper
+7. ordered batches checkpoint after each attempt and retain a completed prefix;
+8. production code has no method-specific duplicate cursor key, wrapper
    artifact, or stage-local lifecycle implementation.
 
 Parameterized retries use a new attempt ID and an attempt-specific work/output

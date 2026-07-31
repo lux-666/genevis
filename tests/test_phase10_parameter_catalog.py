@@ -374,8 +374,15 @@ def _persist_parameter_attempt(
         request_hash=persisted_request.request_hash,
         artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     )
+    frozen_attempt_ref = (
+        _frozen_attempt_ref(attempt_id) if status != "recommended" else None
+    )
     execution_ref = None
     if execution_result is not None:
+        if frozen_attempt_ref is None:
+            raise AssertionError(
+                "execution_result fixture requires a frozen parameter attempt"
+            )
         paths = SessionPaths.from_run_dir(state["data_dir"])
         log_dir = paths.work_path("assembly", "parameter_test_logs")
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -425,11 +432,11 @@ def _persist_parameter_attempt(
             state,
             stage="assembly",
             method_name=method_id,
+            frozen_attempt_ref=frozen_attempt_ref,
             result=runtime_result,
             error=str(execution_result.get("error", "")),
         )
     frozen_parameters_ref = None
-    frozen_attempt_ref = None
     if status != "recommended":
         resolved = resolve_assembly_parameters(
             catalog=catalog,
@@ -454,7 +461,6 @@ def _persist_parameter_attempt(
             method_name=method_id,
             scope="attempt",
         )
-        frozen_attempt_ref = _frozen_attempt_ref(attempt_id)
     return ParameterAttempt(
         schema_version=3,
         attempt_id=attempt_id,
@@ -1183,6 +1189,23 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
     def _state(self, tmpdir: str):
         state = _v2_state(tmpdir)
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        reads = paths.work_path("inventory", "fixture_reads", "reads.fastq")
+        reads.parent.mkdir(parents=True, exist_ok=True)
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        published_reads = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            ArtifactMeta.from_file(
+                reads,
+                stage="inventory",
+                method_name="inventory.test_fixture",
+                artifact_type="input.long_reads",
+            ),
+            destination=paths.artifact_path(
+                "inventory", "long_reads", "reads.fastq"
+            ),
+        )
         state["shared_parameters"] = {
             "organism": "Example species",
             "target_level": "draft",
@@ -1231,8 +1254,13 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 "selected_route": "ont",
                 "assembly_route": "ont",
                 "target_level": "draft",
-                "input_ref": "reads.fastq",
+                "input_ref": str(published_reads.path),
                 "input_type": "clean_long_reads",
+                "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
+                "assembly_input_member_platforms": {"primary": ["ont"]},
+                "assembly_input_artifact_refs": {
+                    "primary": [published_reads.ref.model_dump(mode="json")]
+                },
                 "input_profile": {
                     "recommended_route": "ont",
                     "has_ont": True,
@@ -1395,6 +1423,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 assembly["parameter_retry_request"]["failure_ref"],
                 expected_stage="assembly",
                 expected_method_name="assembly.candidate.hifiasm_ont",
+                expected_frozen_attempt_ref=attempt["frozen_attempt_ref"],
             )
 
             self.assertEqual(
@@ -1638,7 +1667,6 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     "env": {"ASSEMBLY_TEST": "1"},
                     "hifiasm_ont_parameters": {"threads": 7},
                     "flye_parameters": {"threads": 99},
-                    "selected_methods": ["assembly.candidate.hifiasm_ont"],
                 }
             )
             initial_payload = _complete_hifiasm_ont_response(
@@ -1767,6 +1795,23 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
 
 class MethodFreezeParameterFailureTests(unittest.TestCase):
+    def _publish_reads(self, state: dict, reads: Path) -> tuple[str, dict]:
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        published = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            ArtifactMeta.from_file(
+                reads,
+                stage="inventory",
+                method_name="inventory.test_fixture",
+                artifact_type="input.long_reads",
+            ),
+            destination=paths.artifact_path(
+                "inventory", "long_reads", reads.name
+            ),
+        )
+        return str(published.path), published.ref.model_dump(mode="json")
+
     def _attach_planned_candidate(
         self,
         state: dict,
@@ -1787,21 +1832,13 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             candidate_id=f"{state['session_id']}:{method_name}:parameter_attempt_0",
             method_name=method_name,
             status="planned",
-            input_ref=assembly["input_ref"],
             input_type=assembly["input_type"],
+            input_member_ids=dict(assembly["assembly_input_member_ids"]),
+            input_member_platforms=dict(
+                assembly["assembly_input_member_platforms"]
+            ),
             parameter_attempt_id=0,
-            expected_outputs={
-                "draft_assembly_fasta": str(
-                    paths.artifact_path(
-                        "assembly",
-                        "attempts",
-                        "000",
-                        "outputs",
-                        short_name,
-                        "draft_assembly.fasta",
-                    )
-                )
-            },
+            expected_outputs=["primary_assembly"],
         )
         source.write_text(
             json.dumps(bundle.model_dump(mode="json"), indent=2),
@@ -1846,9 +1883,13 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         recommended_params=None,
         attempt_payload: dict | None = None,
     ):
-        reads = Path(tmpdir) / "reads.fastq"
-        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         state = _v2_state(tmpdir)
+        reads = SessionPaths.from_run_dir(state["data_dir"]).work_path(
+            "inventory", "fixture_reads", "reads.fastq"
+        )
+        reads.parent.mkdir(parents=True, exist_ok=True)
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        reads_ref, reads_artifact_ref = self._publish_reads(state, reads)
         if method == "hifiasm":
             status = "hifiasm_execution_planned"
             param_key = "hifiasm_parameters"
@@ -1859,7 +1900,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             method_name = "assembly.candidate.hifiasm_ont"
         assembly = {
             "status": status,
-            "input_ref": str(reads),
+            "input_ref": reads_ref,
             "input_type": "clean_long_reads",
             "env": {},
             "assembly_selection": {
@@ -1871,6 +1912,12 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             param_key: {"threads": 1},
             "current_parameter_attempt_id": 0,
             "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
+            "assembly_input_member_platforms": {
+                "primary": ["pacbio_hifi" if method == "hifiasm" else "ont"]
+            },
+            "assembly_input_artifact_refs": {
+                "primary": [reads_artifact_ref]
+            },
         }
         if attempt_payload is not None:
             assembly["parameter_attempts"] = [attempt_payload]
@@ -1901,12 +1948,16 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         recommended_params=None,
         attempt_payload: dict | None = None,
     ):
-        reads = Path(tmpdir) / "reads.fastq"
-        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         state = _v2_state(tmpdir)
+        reads = SessionPaths.from_run_dir(state["data_dir"]).work_path(
+            "inventory", "fixture_reads", "reads.fastq"
+        )
+        reads.parent.mkdir(parents=True, exist_ok=True)
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        reads_ref, reads_artifact_ref = self._publish_reads(state, reads)
         assembly = {
             "status": "nextdenovo_execution_planned",
-            "input_ref": str(reads),
+            "input_ref": reads_ref,
             "input_type": "clean_long_reads",
             "env": {},
             "assembly_selection": {
@@ -1920,6 +1971,10 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 "threads": 1,
             },
             "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
+            "assembly_input_member_platforms": {"primary": ["ont"]},
+            "assembly_input_artifact_refs": {
+                "primary": [reads_artifact_ref]
+            },
             "resolved_genome_size": {
                 "value_bp": 2_000_000,
                 "source": "provided",

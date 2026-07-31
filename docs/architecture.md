@@ -54,6 +54,11 @@ genome size. Hi-C scaffolding runs only when Hi-C assets exist and the user
 requests chromosome-level assembly. Parameter recommenders do not make any of
 these routing decisions.
 
+For the ONT-to-T2T golden path, Hi-C scaffolding publishes its adopted result as
+the current `resource_refs["assembly"]`. T2T consumes that current assembly plus
+long reads; it does not consume Hi-C reads directly or select a parallel assembly
+path from run config.
+
 The parent graph must stay thin. It should route by `current_stage`, call a
 compiled stage subgraph, then return to `route_controller`. It should not inspect
 FASTQ files, choose Flye vs NextDenovo, submit cluster jobs, or interpret BUSCO
@@ -162,7 +167,8 @@ Every registered method enters one shared lifecycle after method selection and
 any required parameter approval:
 
 ```text
-prepare and freeze -> run frozen attempt -> collect domain artifacts
+prepare and freeze -> run one frozen attempt -> checkpoint
+                   -> run next pending attempt -> collect domain artifacts
                    -> review -> commit compact refs
 ```
 

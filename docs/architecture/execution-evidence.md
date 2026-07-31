@@ -2,9 +2,11 @@
 
 ## Contract
 
-Process execution has one durable representation. Runtime code may use local
-paths while a process is running, but no checkpoint or durable execution record
-may persist those paths.
+Process outcomes have one canonical durable representation. Runtime code and
+stage cursors may use local/absolute paths while a process is running, but the
+canonical execution-evidence body does not persist `ExecutionResult` path
+fields. Frozen command inputs and some stage-local projections remain separate
+runtime/dependency records.
 
 ```text
 LocalRunner -> ExecutionResult (runtime paths)
@@ -59,6 +61,9 @@ authoritative process output.
 - The execution-evidence boundary converts those indexed logs to `ArtifactRef`
   values and validates both refs before writing or loading the immutable
   execution record.
+- The outer execution record binds the canonical body to the exact
+  `frozen_attempt_ref` and records whether the lifecycle encountered a boundary
+  failure. These fields do not extend `ExecutionEvidence` itself.
 - A stage may wrap the canonical result body in a stage-specific immutable
   record, but it may not change or extend the body schema.
 - For model-recommended parameterized execution after human approval, current
@@ -72,16 +77,19 @@ authoritative process output.
 - Collect resolves refs only when it needs log bytes. It registers biological
   outputs, reports, and other stage-owned artifacts, but never registers the
   runner logs again.
-- Candidate and review records may project the log `path_ref` for display, but
-  an absolute or work-directory path is never durable evidence.
+- Candidate and review records may project the log `path_ref` for display. An
+  absolute or work-directory path is not canonical execution evidence, although
+  some stage-local checkpoint cursors still retain such runtime projections.
 
 The frozen runner input is a separate pre-execution fact. Resume loads it from
 its immutable ref; it must not regenerate a command from current catalogs,
 configuration, or environment. The record contains the runner's paths,
 environment projection, expected outputs, and Conda selection. Its script path
-points into the retained run `work/` tree. If that file is manually removed,
-resume fails closed; no script hash, duplicate script artifact, or command
-regeneration is required. Data v2 owns that attempt boundary.
+is an absolute retained path below the attempt work directory and binds a
+SHA-256 digest. The working directory and expected outputs are constrained to
+the current run; a run-local script symlink may resolve to an immutable artifact
+inside that run. Missing or changed script bytes, path escape, or checksum drift
+fails closed. Resume never regenerates the command from current configuration.
 
 For model-recommended Assembly, AutoHiC, and T2T execution, the same
 `ParameterAttempt` owns both this `frozen_attempt_ref` and the later
@@ -106,3 +114,5 @@ so outside the v2 resume contract.
 4. Missing, mismatched, or checksum-invalid stdout/stderr refs fail closed.
 5. Each command log has one artifact-index registration, owned by the shared
    runner path.
+6. Each execution record binds exactly one frozen-attempt ref; recovery requires
+   that exact dependency and rejects ambiguous records.

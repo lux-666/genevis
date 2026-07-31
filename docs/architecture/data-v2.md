@@ -24,8 +24,9 @@ Biological and stage contracts remain governed by their current specifications.
 1. The project is still in development. Data v2 does not preserve compatibility
    with old sessions.
 2. Each `runs/<session_id>/` directory is the logical ownership boundary. Its
-   audit and decision replay must not depend on another session or a global
-   content-addressed object store.
+   run-owned audit and decision evidence must not depend on another session or
+   a global content-addressed object store; external inputs remain explicit
+   dependencies.
 3. Durable resume targets the latest safe frontier, especially a blocked human
    gate. Arbitrary historical-node time travel is not a product requirement.
 4. Existing report filenames and artifact types are not external compatibility
@@ -38,8 +39,10 @@ Biological and stage contracts remain governed by their current specifications.
 Data v2 distinguishes two forms of replay:
 
 - **Audit replay** reconstructs the exact inputs, model request, saved model
-  response, response-parse result, human decision, frozen command, execution outcome, and
-  causal ordering. Audit replay is mandatory from the run directory alone.
+  response, response-parse result, human decision, frozen command, execution
+  outcome, and causal ordering for run-owned evidence. The run records external
+  dependencies, but does not promise that those bytes are available from a
+  copied run directory alone.
 - **Execution replay** re-runs a command. It additionally requires tool
   environments, reference databases, and biological input bytes. The run must
   record immutable provenance and hashes for every such dependency, but shared
@@ -53,8 +56,10 @@ Data v2 distinguishes two forms of replay:
 - `audit_only`: the original command can be inspected but cannot be promised to
   execute again.
 
-“Self-contained run” always guarantees audit replay. It guarantees execution
-replay only when the declared capability says so.
+“Self-contained run” guarantees audit replay while its recorded run layout is
+intact. It guarantees execution replay only when the declared capability says
+so; relocating external dependencies or absolute stage cursor paths is outside
+that guarantee.
 
 ## 4. Fundamental Invariants
 
@@ -74,16 +79,22 @@ Evidence artifacts are immutable after publication. Publishing different bytes
 to an existing path is an error. A changed logical document receives a new ID
 and path.
 
-### 4.3 Session-relative references
+### 4.3 Storage-owned references
 
-Every durable internal reference is a POSIX path relative to the run root. It
-must not contain:
+Storage-owned immutable artifact references (`ArtifactRef.path_ref`, artifact
+index rows, and refs resolved through `SessionPaths`) are POSIX paths relative
+to the run root. They must not contain:
 
 - an absolute host path;
 - a `data/` prefix;
 - the current session ID below the run root;
 - `..` path traversal;
 - a symlink that escapes the run root.
+
+This rule is narrower than “every string ending in `_ref`”. The current runtime
+also persists canonical absolute paths for declared external inputs and for
+some stage-local execution cursors. Those paths are verified runtime or
+dependency projections, not portable run-owned artifact references.
 
 ### 4.4 Checkpoint is a recovery cursor
 
@@ -213,13 +224,14 @@ Rules:
 - There is no `data/artifacts/` global runtime namespace and no global object
   store in the logical reference contract.
 
-Physical hardlinks or reflinks may reduce disk use, but a run-local reference
-must still resolve inside the run. Copying the run must not leave a logical ref
-pointing at a global object.
+Physical hardlinks or reflinks may reduce disk use, but a run-local artifact
+reference must still resolve inside the run. Copying the run must not leave an
+ArtifactRef pointing at a global object. This does not rewrite absolute paths
+belonging to external-input manifests or stage-local runtime cursors.
 
 ## 7. Artifact Reference v2
 
-Every durable reference uses one typed contract:
+Every storage-owned immutable artifact reference uses one typed contract:
 
 ```json
 {
@@ -462,9 +474,12 @@ Checkpoint state must not contain:
 - report payloads;
 - unbounded route traces or review-note lists.
 
-`stage_outputs` becomes a typed map of compact stage cursors. It is not
-`dict[str, Any]` and must reject unknown large fields at the checkpoint
-boundary.
+The central checkpoint boundary treats `stage_outputs` as a bounded JSON map
+keyed by known stages. Current stage packages also provide typed cursor
+adapters and most writes go through those adapters, but the central boundary
+does not yet enforce one universal per-stage schema or reject every unknown
+cursor field. It does enforce JSON shape, known stage names, per-cursor and
+aggregate byte limits, and artifact-body/frozen-attempt embedding guards.
 
 Initial budgets:
 
@@ -591,8 +606,10 @@ Deletion policy:
 - Artifact-index compaction happens only after all approved artifact deletions
   succeed.
 
-Because runtime refs are session-local, deleting another run or a global cache
-cannot break the retained run.
+Run-owned ArtifactRefs are session-local, so deleting another run or a global
+cache cannot break those references. External-input manifests and stage-local
+absolute paths remain explicit dependencies and may still make execution replay
+unavailable after relocation or source removal.
 
 ## 20. Compatibility Boundary
 
@@ -615,7 +632,8 @@ artifact ref, and JSON report plus regenerable Markdown.
 The current implementation enforces the following:
 
 - A new run contains no repeated session ID below its run root.
-- Every durable internal ref is session-relative and hash-verifiable.
+- Storage-owned ArtifactRefs are session-relative and hash-verifiable; external
+  input manifests and some stage cursors retain canonical absolute paths.
 - Inventory emits a typed asset-registry `ArtifactRef`; new checkpoints and
   resource metadata do not use an absolute registry path or embedded asset
   records.
@@ -624,9 +642,11 @@ The current implementation enforces the following:
 - Assembly publishes one assembler-origin backbone. Planned bundles contain no
   output refs; executed bundles reference their plan, primary FASTA, and
   adapter-declared native outputs.
-- Copying a run to a different absolute path preserves audit replay.
-- A blocked review resumes from the latest frontier using only checkpoint plus
-  verified run-local refs.
+- Copying a run preserves run-owned audit artifacts, but is not a universal
+  portability guarantee for external dependencies or absolute cursor paths.
+- A blocked review resumes from the latest frontier using the checkpoint plus
+  verified run-local refs and any declared external dependencies required by
+  the stage.
 - Terminal compaction preserves reconstruction of stage order, skip reasons,
   decisions, failures, and terminal outcome while retaining one standalone
   checkpoint.

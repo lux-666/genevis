@@ -40,9 +40,8 @@ SHORT_READS_SPEC = ResourceSpec(
 )
 HIC_READS_SPEC = ResourceSpec(
     resource_type="hic_reads",
-    asset_types=["hic_reads", "hi_c_reads", "hic_reads_registered"],
+    asset_types=["hic_reads_registered"],
     allow_multiple=True,
-    required=False,
 )
 
 def assembly_resource_spec() -> ResourceSpec:
@@ -63,10 +62,19 @@ STAGE_CONTRACTS: dict[str, dict[str, list[str]]] = {
         "produces": [],
     },
     "assembly": {"requires": ["long_reads"], "produces": ["assembly"]},
-    "assembly_dedup": {"requires": ["assembly"], "produces": ["assembly"]},
+    "assembly_dedup": {
+        "requires": ["assembly", "long_reads"],
+        "produces": ["assembly"],
+    },
     "assembly_review": {"requires": ["assembly"], "produces": ["assembly"]},
-    "hic_scaffolding": {"requires": ["assembly"], "produces": ["assembly"]},
-    "t2t": {"requires": ["assembly"], "produces": ["assembly"]},
+    "hic_scaffolding": {
+        "requires": ["assembly", "hic_reads"],
+        "produces": ["assembly"],
+    },
+    "t2t": {
+        "requires": ["assembly", "long_reads"],
+        "produces": ["assembly"],
+    },
     "repeat_annotation": {
         "requires": ["assembly"],
         "produces": ["masked_assembly"],
@@ -86,12 +94,21 @@ STAGE_REQUIREMENTS = {
     "read_qc": [{"name": "raw reads", "spec": LONG_READS_SPEC}],
     "genome_survey": [{"name": "reads", "spec": LONG_READS_SPEC}],
     "assembly": [{"name": "reads", "spec": LONG_READS_SPEC}],
-    "assembly_dedup": [{"name": "draft assembly", "spec": ASSEMBLY_SPEC}],
+    "assembly_dedup": [
+        {"name": "draft assembly", "spec": ASSEMBLY_SPEC},
+        {"name": "long reads", "spec": LONG_READS_SPEC},
+    ],
     "assembly_review": [
         {"name": "assembly candidates", "spec": ASSEMBLY_CANDIDATES_SPEC}
     ],
-    "hic_scaffolding": [{"name": "assembly", "spec": ASSEMBLY_SPEC}],
-    "t2t": [{"name": "assembly", "spec": ASSEMBLY_SPEC}],
+    "hic_scaffolding": [
+        {"name": "assembly", "spec": ASSEMBLY_SPEC},
+        {"name": "Hi-C reads", "spec": HIC_READS_SPEC},
+    ],
+    "t2t": [
+        {"name": "assembly", "spec": ASSEMBLY_SPEC},
+        {"name": "long reads", "spec": LONG_READS_SPEC},
+    ],
     "repeat_annotation": [{"name": "assembly", "spec": ASSEMBLY_SPEC}],
     "gene_annotation": [
         {"name": "assembly", "spec": ASSEMBLY_SPEC},

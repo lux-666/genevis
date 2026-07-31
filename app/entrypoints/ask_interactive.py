@@ -102,6 +102,7 @@ _STAGE_DESCRIPTIONS: dict[str, str] = {
     "read_qc": "quality stats and optional length filtering",
     "genome_survey": "k-mer profiling and genome size estimation",
     "assembly": "de novo genome assembly",
+    "assembly_dedup": "haplotig and overlap removal with purge_dups",
     "assembly_review": "QUAST/BUSCO quality evaluation",
     "hic_scaffolding": "Hi-C based chromosome scaffolding",
     "repeat_annotation": "repeat element identification and masking",
@@ -215,7 +216,7 @@ def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
     for idx, stage in enumerate(order, start=1):
         print(f"  {idx:<10} edit {stage}")
     print("  s           edit stage list")
-    print("  r           restart manually")
+    print("  r           discard and regenerate draft")
     print("=" * 64)
 
 
@@ -514,7 +515,7 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
                 for idx, stage in enumerate(stages, 1)
             ],
             questionary.Choice("edit stage list", value="stages"),
-            questionary.Choice("restart manually", value="restart"),
+            questionary.Choice("discard and regenerate draft", value="restart"),
         ]
         answer = _safe_ask(
             questionary.select("Plan action:", choices=choices, default="continue")
@@ -803,6 +804,7 @@ def _render_plan_summary(
     if parse_source:
         parse_label = {
             "llm": "LLM",
+            "llm_plan_draft": "LLM Plan Draft",
             "deterministic_fallback": "local deterministic fallback",
         }.get(str(parse_source), str(parse_source))
         print(f"Intent parser: {parse_label}")

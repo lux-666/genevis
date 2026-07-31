@@ -13,6 +13,7 @@ from app.execution.evidence import (
     persist_frozen_attempt,
 )
 from app.execution.lifecycle import run_method_attempts
+from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.execution import ExecutionResult, MethodExecutionAttempt
@@ -44,6 +45,35 @@ def _gene_work_path(tmpdir: str, *parts: str) -> Path:
     return path
 
 
+def _run_artifact_path(tmpdir: str, *parts: str) -> Path:
+    path = v2_run_dir(tmpdir, "s1") / "artifacts" / Path(*parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _register_run_artifact(
+    state: dict,
+    path: Path,
+    *,
+    stage: str,
+    method_name: str,
+    artifact_type: str,
+) -> dict:
+    [ref] = register_artifact_records(
+        state["data_dir"],
+        state["session_id"],
+        [
+            ArtifactMeta.from_file(
+                path,
+                stage=stage,
+                method_name=method_name,
+                artifact_type=artifact_type,
+            )
+        ],
+    )
+    return ref.model_dump(mode="json")
+
+
 def _write_intake_plan(tmpdir: str) -> str:
     path = Path(tmpdir) / "annotation_intake_plan.json"
     path.write_text(
@@ -71,6 +101,7 @@ def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
 def _persist_successful_execution(
     state: dict,
     attempt: FrozenAttemptSpec,
+    frozen_attempt_ref: dict,
     output_paths: list[Path],
 ) -> dict:
     stdout_path = (
@@ -113,6 +144,7 @@ def _persist_successful_execution(
         state,
         stage="gene_annotation",
         method_name=attempt.method_name,
+        frozen_attempt_ref=frozen_attempt_ref,
         result=result,
     ).model_dump(mode="json")
 
@@ -124,7 +156,7 @@ def _execution_cursor(
 ) -> dict:
     frozen_ref = _persist_attempt(state, attempt)
     execution_ref = (
-        _persist_successful_execution(state, attempt, output_paths)
+        _persist_successful_execution(state, attempt, frozen_ref, output_paths)
         if output_paths is not None
         else None
     )
@@ -221,8 +253,12 @@ class EVMFreezeTests(unittest.TestCase):
 
     def test_multi_candidate_freezes_evm_script(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            gff1 = Path(tmpdir) / "augustus.gff3"
-            gff2 = Path(tmpdir) / "miniprot.gff3"
+            gff1 = _run_artifact_path(
+                tmpdir, "gene_annotation", "candidates", "augustus.gff3"
+            )
+            gff2 = _run_artifact_path(
+                tmpdir, "gene_annotation", "candidates", "miniprot.gff3"
+            )
             for gff in (gff1, gff2):
                 gff.write_text("##gff-version 3\n", encoding="utf-8")
             state = _merge_accepted_state(
@@ -236,6 +272,39 @@ class EVMFreezeTests(unittest.TestCase):
                     "gene_annotation.candidate.miniprot": str(gff2),
                 },
             )
+            genome = _run_artifact_path(
+                tmpdir, "repeat_annotation", "softmasked.fa"
+            )
+            genome.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            gene = state["stage_outputs"]["gene_annotation"]
+            gene.update(
+                {
+                    "genome_input_ref": str(genome),
+                    "genome_input_artifact_ref": _register_run_artifact(
+                        state,
+                        genome,
+                        stage="repeat_annotation",
+                        method_name="repeat_annotation.contract",
+                        artifact_type="repeat_annotation.softmasked_genome",
+                    ),
+                    "candidate_artifact_refs": {
+                        "gene_annotation.candidate.augustus": _register_run_artifact(
+                            state,
+                            gff1,
+                            stage="gene_annotation",
+                            method_name="gene_annotation.candidate.augustus",
+                            artifact_type="gene_annotation.candidate_gff",
+                        ),
+                        "gene_annotation.candidate.miniprot": _register_run_artifact(
+                            state,
+                            gff2,
+                            stage="gene_annotation",
+                            method_name="gene_annotation.candidate.miniprot",
+                            artifact_type="gene_annotation.candidate_gff",
+                        ),
+                    },
+                }
+            )
             result = freeze_evm_attempt(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
@@ -246,7 +315,14 @@ class EVMFreezeTests(unittest.TestCase):
                 expected_stage="gene_annotation",
             )
             script = attempt.script_path.read_text(encoding="utf-8")
-            weights = (attempt.working_dir / "weights.txt").read_text(encoding="utf-8")
+            weights_dependency = next(
+                dependency
+                for dependency in attempt.input_dependencies
+                if dependency.kind == "artifact"
+                and dependency.artifact_ref.artifact_type
+                == "gene_annotation.evm_weights"
+            )
+            weights = Path(weights_dependency.path).read_text(encoding="utf-8")
             self.assertIn("evidence_modeler.pl", script)
             self.assertIn("--weights", script)
             # augustus (ab initio) + native miniprot GFF both emit gene-model-like
@@ -293,8 +369,9 @@ class EVMRunTests(unittest.TestCase):
         return bin_dir
 
     def _run_state(self, tmpdir: str, bin_dir: Path, *, status: str = "evm_frozen"):
-        output_gff3 = Path(tmpdir) / "evm_merged.gff3"
-        script = Path(tmpdir) / "run_evm.sh"
+        output_gff3 = _gene_work_path(tmpdir, "evm", "evm_merged.gff3")
+        working_dir = output_gff3.parent
+        script = working_dir / "run_evm.sh"
         script.write_text(
             "#!/bin/bash\nset -e\n"
             "evidence_modeler.pl --genome genome.fa > evm_merged.gff3\n"
@@ -308,8 +385,10 @@ class EVMRunTests(unittest.TestCase):
             stage="gene_annotation",
             method_name="gene_annotation.merge.evm",
             script_path=script,
-            working_dir=Path(tmpdir),
+            script_sha256=sha256_file(script),
+            working_dir=working_dir,
             expected_outputs=[output_gff3],
+            input_dependencies=[],
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
             metadata={
                 "output_gff3": str(output_gff3),
@@ -358,14 +437,19 @@ class EVMCollectTests(unittest.TestCase):
                 "##gff-version 3\nctg1\tEVM\tgene\t1\t1000\t.\t+\t.\tID=g1\n",
                 encoding="utf-8",
             )
+        working_dir = output_gff3.parent
+        script = working_dir / "run_evm.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         attempt = FrozenAttemptSpec(
             attempt_id="s1:gene_annotation:evm",
             session_id="s1",
             stage="gene_annotation",
             method_name="gene_annotation.merge.evm",
-            script_path=Path(tmpdir) / "run_evm.sh",
-            working_dir=Path(tmpdir),
+            script_path=script,
+            script_sha256=sha256_file(script),
+            working_dir=working_dir,
             expected_outputs=[output_gff3],
+            input_dependencies=[],
             metadata={
                 "output_gff3": str(output_gff3),
                 "genome_input_ref": str(Path(tmpdir) / "genome.fa"),
@@ -460,14 +544,27 @@ class GeneBUSBOTests(unittest.TestCase):
     def test_freeze_with_lineage_uses_materialized_final_proteins(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             _, lineage = self._busco_inputs(tmpdir)
-            final_proteins = Path(tmpdir) / "final_proteins.fa"
-            final_proteins.write_text(">p1\nMKT\n", encoding="utf-8")
             state = _merge_accepted_state(
                 tmpdir,
                 status="evm_collected",
                 final_gff_ref=str(Path(tmpdir) / "final.gff3"),
-                final_proteins_ref=str(final_proteins),
                 lineage_or_species_hints={"busco_lineage": lineage},
+            )
+            final_proteins = _run_artifact_path(
+                tmpdir, "gene_annotation", "outputs", "evm", "proteins.fa"
+            )
+            final_proteins.write_text(">p1\nMKT\n", encoding="utf-8")
+            state["stage_outputs"]["gene_annotation"].update(
+                {
+                    "final_proteins_ref": str(final_proteins),
+                    "final_proteins_artifact_ref": _register_run_artifact(
+                        state,
+                        final_proteins,
+                        stage="gene_annotation",
+                        method_name="gene_annotation.materialize.gffread",
+                        artifact_type="gene_annotation.final_proteins",
+                    ),
+                }
             )
             result = freeze_gene_busco_attempt(state)
 
@@ -482,7 +579,7 @@ class GeneBUSBOTests(unittest.TestCase):
             self.assertIn("busco -i", script)
             self.assertEqual(attempt.metadata["busco_input"], str(final_proteins))
             self.assertIn("-m proteins", script)
-            self.assertIn(f"-l {lineage}", script)
+            self.assertIn(f"-l {Path(lineage).resolve()}", script)
 
     def test_freeze_requires_evm_collected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -502,7 +599,8 @@ class GeneBUSBOTests(unittest.TestCase):
             busco_bin.chmod(0o755)
 
             short_summary = _gene_work_path(tmpdir, "busco", "short_summary.txt")
-            script = Path(tmpdir) / "run_busco.sh"
+            working_dir = short_summary.parent
+            script = working_dir / "run_busco.sh"
             script.write_text(
                 "#!/bin/bash\nbusco -i input.fa -m proteins\n", encoding="utf-8"
             )
@@ -513,14 +611,16 @@ class GeneBUSBOTests(unittest.TestCase):
                 stage="gene_annotation",
                 method_name="gene_annotation.busco",
                 script_path=script,
-                working_dir=Path(tmpdir),
+                script_sha256=sha256_file(script),
+                working_dir=working_dir,
                 expected_outputs=[short_summary],
+                input_dependencies=[],
                 env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
                 metadata={
                     "short_summary_ref": str(short_summary),
                     "busco_mode": "proteins",
                     "busco_lineage": "/tmp/lineage",
-                    "busco_output_dir": str(tmpdir),
+                    "busco_output_dir": str(working_dir),
                 },
             )
             state = _v2_state(tmpdir)
@@ -558,19 +658,24 @@ class GeneBUSBOTests(unittest.TestCase):
                 "    3642    Total BUSCO groups searched\n",
                 encoding="utf-8",
             )
+            working_dir = short_summary.parent
+            script = working_dir / "run_busco.sh"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             attempt = FrozenAttemptSpec(
                 attempt_id="s1:gene_annotation:busco",
                 session_id="s1",
                 stage="gene_annotation",
                 method_name="gene_annotation.busco",
-                script_path=Path(tmpdir) / "run_busco.sh",
-                working_dir=Path(tmpdir),
+                script_path=script,
+                script_sha256=sha256_file(script),
+                working_dir=working_dir,
                 expected_outputs=[short_summary],
+                input_dependencies=[],
                 metadata={
                     "short_summary_ref": str(short_summary),
                     "busco_mode": "proteins",
                     "busco_lineage": "/tmp/l",
-                    "busco_output_dir": str(tmpdir),
+                    "busco_output_dir": str(working_dir),
                 },
             )
             state = _v2_state(tmpdir)
@@ -609,27 +714,66 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
 
     def test_full_path_single_candidate_passthrough_to_busco_signal(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            proteins = Path(tmpdir) / "proteins.fa"
-            proteins.write_text(">p1\nMKT\n", encoding="utf-8")
             lineage = Path(tmpdir) / "busco_lineage"
             lineage.mkdir()
+            bin_dir = Path(tmpdir) / "bin"
+            bin_dir.mkdir(exist_ok=True)
+            busco_bin = bin_dir / "busco"
+            busco_bin.write_text(
+                "#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8"
+            )
+            busco_bin.chmod(0o755)
 
             # Step 1: EVM freeze (single candidate → passthrough)
             state = _merge_accepted_state(
                 tmpdir,
-                candidate_bundles={
-                    "gene_annotation.candidate.augustus": {
-                        "method_name": "gene_annotation.candidate.augustus",
-                        "category": "ab_initio",
-                        "annotation_gff_ref": str(Path(tmpdir) / "augustus.gff3"),
-                        "proteins_fasta_ref": str(proteins),
-                        "cds_fasta_ref": None,
-                        "evm_evidence_class": "ABINITIO_PREDICTION",
-                        "evm_source_type": "augustus",
-                        "status": "materialized",
-                    }
-                },
+                env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
                 lineage_or_species_hints={"busco_lineage": str(lineage)},
+            )
+            candidate_gff = _run_artifact_path(
+                tmpdir, "gene_annotation", "candidates", "augustus.gff3"
+            )
+            candidate_gff.write_text("##gff-version 3\n", encoding="utf-8")
+            proteins = _run_artifact_path(
+                tmpdir, "gene_annotation", "outputs", "augustus", "proteins.fa"
+            )
+            proteins.write_text(">p1\nMKT\n", encoding="utf-8")
+            method_name = "gene_annotation.candidate.augustus"
+            candidate_gff_ref = _register_run_artifact(
+                state,
+                candidate_gff,
+                stage="gene_annotation",
+                method_name=method_name,
+                artifact_type="gene_annotation.candidate_gff",
+            )
+            proteins_ref = _register_run_artifact(
+                state,
+                proteins,
+                stage="gene_annotation",
+                method_name="gene_annotation.materialize.gffread",
+                artifact_type="gene_annotation.candidate_proteins",
+            )
+            state["stage_outputs"]["gene_annotation"].update(
+                {
+                    "candidate_refs": {method_name: str(candidate_gff)},
+                    "accepted_candidate_refs": {method_name: str(candidate_gff)},
+                    "candidate_artifact_refs": {method_name: candidate_gff_ref},
+                    "candidate_bundles": {
+                        method_name: {
+                            "method_name": method_name,
+                            "category": "ab_initio",
+                            "annotation_gff_ref": str(candidate_gff),
+                            "annotation_gff_artifact_ref": candidate_gff_ref,
+                            "proteins_fasta_ref": str(proteins),
+                            "proteins_fasta_artifact_ref": proteins_ref,
+                            "cds_fasta_ref": None,
+                            "cds_fasta_artifact_ref": None,
+                            "evm_evidence_class": "ABINITIO_PREDICTION",
+                            "evm_source_type": "augustus",
+                            "status": "materialized",
+                        }
+                    },
+                }
             )
             evm_result = freeze_evm_attempt(state)
             gene = evm_result["stage_outputs"]["gene_annotation"]
@@ -650,44 +794,12 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             self.assertEqual(gene["status"], "busco_frozen")
 
             # BUSCO freeze produces a script → run → fail → downgrade
-            bin_dir = Path(tmpdir) / "bin"
-            bin_dir.mkdir(exist_ok=True)
-            busco_bin = bin_dir / "busco"
-            busco_bin.write_text(
-                "#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8"
-            )
-            busco_bin.chmod(0o755)
-
-            attempt = load_frozen_attempt(
-                busco_state,
-                gene["execution_attempts"][0]["frozen_attempt_ref"],
-                expected_stage="gene_annotation",
-            )
-            attempt_dict = attempt.model_dump(mode="json")
-            fallback_path = os.environ.get("PATH", "")
-            attempt_dict["env"]["PATH"] = (
-                f"{bin_dir}{os.pathsep}{attempt_dict['env'].get('PATH', fallback_path)}"
-            )
-            updated_attempt = FrozenAttemptSpec.model_validate(attempt_dict)
-
-            run_state = _v2_state(tmpdir)
-            run_state["current_stage"] = "gene_annotation"
-            run_state["stage_outputs"] = {
-                "assembly_review": {
-                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
-                },
-                "gene_annotation": {
-                    "status": "busco_frozen",
-                    "execution_attempts": [
-                        _execution_cursor(run_state, updated_attempt)
-                    ],
-                },
-            }
-            busco_ran = run_method_attempts(run_state, GENE_BUSCO_LIFECYCLE)
-            run_state["stage_outputs"]["gene_annotation"] = busco_ran["stage_outputs"][
-                "gene_annotation"
-            ]
-            busco_run = collect_gene_busco_artifacts(run_state)
+            busco_state["stage_outputs"]["gene_annotation"] = gene
+            busco_ran = run_method_attempts(busco_state, GENE_BUSCO_LIFECYCLE)
+            busco_state["stage_outputs"]["gene_annotation"] = busco_ran[
+                "stage_outputs"
+            ]["gene_annotation"]
+            busco_run = collect_gene_busco_artifacts(busco_state)
             gene = busco_run["stage_outputs"]["gene_annotation"]
             # BUSCO fails → downgrades to missing
             self.assertEqual(gene["status"], "merge_accepted")

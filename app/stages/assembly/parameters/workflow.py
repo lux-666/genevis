@@ -1053,11 +1053,16 @@ def hydrate_parameter_attempt(
 
     execution: ParameterExecutionEvidence | None = None
     if attempt.execution_ref is not None:
+        if attempt.frozen_attempt_ref is None:
+            raise ValueError(
+                "Assembly execution evidence has no frozen-attempt binding"
+            )
         execution_record = load_execution_evidence(
             state,
             attempt.execution_ref,
             expected_stage="assembly",
             expected_method_name=attempt.method_id,
+            expected_frozen_attempt_ref=attempt.frozen_attempt_ref,
         )
         stderr_tail: str | None = None
         if include_execution_log and not execution_record.success:

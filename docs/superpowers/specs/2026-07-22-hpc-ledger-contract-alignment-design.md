@@ -55,11 +55,11 @@ index records.
 The shared run-config writer will set both `local_exec` and
 `requested_stages` to its supplied stages by default. This makes single-stage
 and selected-stage smoke tests stop after their declared targets instead of
-falling into an unconfigured next stage. Test 04 will then append
-`assembly_dedup` to `requested_stages` without adding it to `local_exec`, because
-dedup is an automatic stage rather than a `LocalExecStage`. Test 09 may continue
-to overwrite `requested_stages` with its explicit end-to-end plan. The dedicated
-genome-survey writer will request only read-QC and genome-survey.
+falling into an unconfigured next stage. `local_exec` is the authorization
+boundary for local tool execution; `assembly_dedup` is a normal `LocalExecStage`
+and must be included there when purge_dups is requested locally. Test 09 may
+continue to overwrite `requested_stages` with its explicit end-to-end plan. The
+dedicated genome-survey writer will request only read-QC and genome-survey.
 
 Raw ledger v2 stores method names below `summary` and attempt identity in
 `subject_id`. HPC assertions will read those fields, with compatibility fallback

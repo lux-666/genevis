@@ -15,7 +15,11 @@ from app.execution.attempt_owners import (
     MethodExecution,
 )
 from app.execution.collect import collect_with_failure_boundary
-from app.execution.evidence import persist_execution_result, persist_frozen_attempt
+from app.execution.evidence import (
+    persist_execution_result,
+    persist_frozen_attempt,
+    recover_execution_result,
+)
 from app.execution.input_integrity import verify_input_dependencies
 from app.execution.method_runner import (
     RunnerResultIdentityError,
@@ -27,6 +31,7 @@ from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.base import stage_output, update_stage_output
 from app.storage.ledger import LedgerConflictError
+from app.storage.paths import DataLayoutError
 
 ProcessFailurePolicy = Literal["fail", "collect"]
 StageNode = Callable[[TopLevelState], StateUpdate]
@@ -93,13 +98,8 @@ def build_method_graph(
     )
     graph.add_conditional_edges(
         "run",
-        lambda state: (
-            "collect"
-            if stage_output(state, lifecycle.stage).get("status")
-            == lifecycle.ran_status
-            else "done"
-        ),
-        {"collect": "collect", "done": "done"},
+        lambda state: _route_after_run(state, lifecycle),
+        {"run": "run", "collect": "collect", "done": "done"},
     )
     graph.add_edge("collect", "done")
     graph.add_edge("done", END)
@@ -121,6 +121,18 @@ def _route_method_entry(
 
 
 def _route_after_freeze(
+    state: TopLevelState,
+    lifecycle: MethodExecutionLifecycle,
+) -> str:
+    status = stage_output(state, lifecycle.stage).get("status")
+    if status == lifecycle.frozen_status:
+        return "run"
+    if status == lifecycle.ran_status:
+        return "collect"
+    return "done"
+
+
+def _route_after_run(
     state: TopLevelState,
     lifecycle: MethodExecutionLifecycle,
 ) -> str:
@@ -199,14 +211,14 @@ def run_method_attempts(
     *,
     runner: Runner | None = None,
 ) -> StateUpdate:
-    """Run every owner-frozen attempt through one durable execution kernel."""
+    """Advance at most one owner-frozen attempt through the run boundary."""
 
     output = stage_output(state, lifecycle.stage)
     if output.get("status") != lifecycle.frozen_status:
         return {}
     try:
-        # Validate every owner cursor and frozen artifact before any process starts.
-        attempts = lifecycle.owner.load_frozen_attempts(state, output, lifecycle)
+        pending = lifecycle.owner.load_frozen_attempts(state, output, lifecycle)
+        complete = lifecycle.owner.is_complete(output, lifecycle)
     except (OSError, ValueError) as exc:
         return _failure_update(
             state,
@@ -214,23 +226,49 @@ def run_method_attempts(
             f"{lifecycle.name} frozen attempt is invalid: {exc}",
         )
 
+    if not pending:
+        if not complete:
+            return _failure_update(
+                state,
+                lifecycle,
+                f"{lifecycle.name} has no pending execution attempt",
+            )
+        return update_stage_output(
+            state,
+            lifecycle.stage,
+            {"status": lifecycle.ran_status},
+        )
+
+    owned_attempt = pending[0]
+    attempt = owned_attempt.attempt
     try:
-        for attempt in attempts:
-            verify_input_dependencies(state, attempt.input_dependencies)
+        recovered = recover_execution_result(
+            state,
+            stage=lifecycle.stage,
+            method_name=lifecycle.method_name,
+            attempt_id=attempt.attempt_id,
+            frozen_attempt_ref=owned_attempt.frozen_attempt_ref,
+        )
     except (OSError, ValueError) as exc:
         return _failure_update(
             state,
             lifecycle,
-            f"{lifecycle.name} input integrity check failed: {exc}",
+            f"{lifecycle.name} execution evidence is invalid: {exc}",
         )
 
-    current_output = dict(output)
-    owner_updates: dict[str, JsonValue] = {}
-    for attempt in attempts:
+    if recovered is None:
+        try:
+            verify_input_dependencies(state, attempt.input_dependencies)
+        except (OSError, ValueError) as exc:
+            return _failure_update(
+                state,
+                lifecycle,
+                f"{lifecycle.name} input integrity check failed: {exc}",
+            )
+
         # run_frozen_attempt bounds every expected execution/storage error in
-        # its RunOutcome.  What escapes here is either the explicit runner
-        # identity contract or a programming bug; both must stay visible (the
-        # identity error aborts the batch, everything else propagates).
+        # its RunOutcome. What escapes is either the explicit runner identity
+        # contract or a programming bug, both of which must stay visible.
         try:
             outcome = run_frozen_attempt(
                 attempt,
@@ -245,7 +283,12 @@ def run_method_attempts(
                 state,
                 lifecycle,
                 str(exc),
-                owner_updates=owner_updates,
+            )
+        except (OSError, DataLayoutError) as exc:
+            return _failure_update(
+                state,
+                lifecycle,
+                f"{lifecycle.name} frozen attempt changed before execution: {exc}",
             )
 
         # The runner result is execution evidence for this exact frozen input.
@@ -260,7 +303,6 @@ def run_method_attempts(
                     f"expected {attempt.attempt_id!r}, got "
                     f"{outcome.result.attempt_id!r}"
                 ),
-                owner_updates=owner_updates,
             )
 
         try:
@@ -268,40 +310,58 @@ def run_method_attempts(
                 state,
                 stage=lifecycle.stage,
                 method_name=lifecycle.method_name,
+                frozen_attempt_ref=owned_attempt.frozen_attempt_ref,
                 result=outcome.result,
                 error=outcome.error,
-            )
-            update = lifecycle.owner.record_execution(
-                current_output,
-                lifecycle,
-                attempt,
-                execution_ref,
-                success=outcome.success,
+                boundary_failure=outcome.boundary_failure,
             )
         except (OSError, ValueError, LedgerConflictError) as exc:
             return _failure_update(
                 state,
                 lifecycle,
                 f"{lifecycle.name} execution evidence could not be persisted: {exc}",
-                owner_updates=owner_updates,
             )
-        current_output.update(update)
-        owner_updates.update(update)
-        if outcome.boundary_failure or (
-            not outcome.success and lifecycle.process_failure == "fail"
-        ):
-            return _failure_update(
-                state,
-                lifecycle,
-                outcome.error,
-                owner_updates=owner_updates,
-            )
+        success = outcome.success
+        error = outcome.error
+        boundary_failure = outcome.boundary_failure
+    else:
+        execution_ref = recovered.execution_ref
+        success = recovered.evidence.success
+        error = recovered.evidence.error
+        boundary_failure = recovered.boundary_failure
+
+    try:
+        owner_updates = lifecycle.owner.record_execution(
+            output,
+            lifecycle,
+            attempt,
+            execution_ref,
+            success=success,
+        )
+        current_output = {**dict(output), **owner_updates}
+        complete = lifecycle.owner.is_complete(current_output, lifecycle)
+    except (OSError, ValueError, LedgerConflictError) as exc:
+        return _failure_update(
+            state,
+            lifecycle,
+            f"{lifecycle.name} execution cursor could not be advanced: {exc}",
+        )
+
+    if boundary_failure or (not success and lifecycle.process_failure == "fail"):
+        return _failure_update(
+            state,
+            lifecycle,
+            error or f"{lifecycle.name} execution failed",
+            owner_updates=owner_updates,
+        )
 
     return update_stage_output(
         state,
         lifecycle.stage,
         {
-            "status": lifecycle.ran_status,
+            "status": (
+                lifecycle.ran_status if complete else lifecycle.frozen_status
+            ),
             **owner_updates,
         },
     )

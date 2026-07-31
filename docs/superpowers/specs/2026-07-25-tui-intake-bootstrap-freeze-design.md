@@ -6,12 +6,15 @@ This design replaces the user-facing `ask` and `run` workflow with one
 conversational `gene-agent tui` workflow. `gene-agent bootstrap` remains an
 auxiliary machine-setup tool, not a normal workflow entry point.
 
-The implementation covers assembly-oriented ONT and Hi-C sample intake,
+The implementation covers assembly-oriented HiFi, ONT, and Hi-C sample intake,
 bootstrap configuration already consumed by the repository, immutable run
 input freezing, and durable TUI recovery. It deliberately excludes annotation
-reference resources, download/install automation, directory scanning, multiple
-environment profiles, remote scheduling, and in-TUI machine-configuration
-commands. The only TUI command is `/resume`, which opens a session picker.
+reference resources, CLR, CycloneSEQ, short-read and existing-assembly intake,
+download/install automation, directory scanning, multiple environment profiles,
+remote scheduling, and in-TUI machine-configuration commands. Annotation stages
+remain part of the workflow; only their dedicated intake assets are outside the
+current TUI scope. The only TUI command is `/resume`, which opens a session
+picker.
 
 There is no AskPlan v1 migration, dual reader, or compatibility writer. A
 session without a TUI draft is never adopted as an editable intake draft; an
@@ -80,11 +83,13 @@ missing path is usable.
 
 ## TUI State Model
 
-The current `AskPlanState` is not repurposed: annotation review still uses it
-and annotation is outside this change. TUI receives an independent version-2
-durable draft state named `TuiSessionDraft` (also exposed as
-`TuiSessionState` for callers that describe the broader lifecycle). It is
-persisted at:
+TUI receives an independent version-2 durable draft state named
+`TuiSessionDraft` (also exposed as `TuiSessionState` for callers that describe
+the broader lifecycle). After intake, the existing `AskPlanState` is reused as
+a transient planner view: an LLM fills its stage, method, and planning-time
+parameter fields, and the existing Plan Draft UI edits that same view. There is
+no separately persisted AskPlan document and no third planning state machine.
+The durable TUI draft is persisted at:
 
 ```text
 runs/<session-id>/control/tui_state.json
@@ -123,6 +128,7 @@ as a second mutable source of truth.
 For this scope the confirmed fact types are:
 
 ```text
+HifiReadsFact(paths=[...])
 OntReadsFact(paths=[...])
 HiCPairedReadsFact(pairs=[{r1, r2}, ...])
 NoHiCFact()
@@ -178,22 +184,35 @@ plan must use the non-Hi-C/contig route, and requires an explicit degradation
 confirmation before continuing. It does not represent the plan as complete
 T2T scaffolding.
 
-If LLM intent or answer parsing is unavailable, TUI remains usable. A small
-deterministic intent recognizer and fixed question queue collect the goal and
-required roles. Exact path extraction assigns unlabelled paths only to the
-current focused role; explicit `ONT`, `Hi-C`, `R1`, and `R2` labels may
-still complete other roles. Everything else remains unresolved rather than
-guessed.
+If LLM intent or answer parsing is unavailable, TUI can still complete intake.
+A small deterministic intent recognizer and fixed question queue collect only
+the facts needed by the current HiFi/ONT/Hi-C scope. Exact path extraction
+assigns unlabelled paths only to the current focused role; explicit `HiFi`,
+`ONT`, `Hi-C`, `R1`, and `R2` labels may still complete other roles. These
+deterministic hints are intake routing only: they do not select final stages or
+construct a fallback Plan Draft.
 
-After intake completes, the existing stage, method, and parameter planner is
-reused behind the TUI. Its inputs are the typed intent and the draft manifest,
-not an early `EntryRequest`.
+After intake completes, one planning LLM call receives the original request,
+confirmed draft manifest, available stages, method catalog, and planning-time
+parameter names. It returns one editable draft using the existing
+`AskPlanState` fields. The existing Plan Draft UI then lets the operator edit
+stages, methods, and available parameters before the final confirmation. Values
+that are derived only after an upstream stage runs remain represented by the
+existing deferred/auto contracts.
+
+The planning LLM is required at this boundary. If it is unavailable, returns
+malformed JSON, names an unavailable stage or method, or supplies unsupported
+parameter fields, planning stops and the durable TUI draft remains resumable.
+`/resume` retries generation. TUI does not turn the intake recognizer into a
+deterministic plan generator and does not invoke a second LLM to review the
+first draft.
 
 ## Confirmation and Freeze
 
-Before any execution, TUI presents the derived draft manifest and run config
-for confirmation. Confirmation invokes one create-only freeze transaction that
-writes these final control files:
+Before any execution, TUI first presents the editable Plan Draft and then the
+derived manifest and run config for final confirmation. Rejecting the final
+confirmation returns to the same Plan Draft editor. Confirmation invokes one
+create-only freeze transaction that writes these final control files:
 
 ```text
 control/input_manifest.yaml
@@ -255,8 +274,9 @@ Reuse:
   package preflight, and Juicer conformance;
 - structured LLM binding and exact path lexer from `intent.py`, refactored to
   produce `WorkflowIntent` and asset candidates instead of `EntryRequest`;
-- existing stage/method/parameter planner after draft intake is complete,
-  through a short-lived adapter rather than a persisted `AskPlanState`;
+- existing `AskPlanState`, stage/method/parameter planner helpers, and Plan
+  Draft editor after intake is complete; the adapter is short-lived while the
+  selected fields remain durable in `TuiSessionDraft`;
 - session paths, durable review checkpoints, and execution graph.
 
 Replace or remove from the user path:
@@ -283,7 +303,9 @@ The implementation must add focused tests for:
 3. one response that supplies ONT and explicit Hi-C R1/R2 facts together;
 4. rejection of a fabricated LLM path, directory path, nonexistent path,
    unsupported suffix, and filename-derived Hi-C pairing;
-5. fixed-question operation when the LLM service fails;
+5. fixed-question intake operation when the intent/answer LLM fails, plus
+   resumable stop without deterministic plan fallback when Plan Draft generation
+   fails;
 6. `no Hi-C` requiring a confirmed degraded route;
 7. a final manifest/run-config review followed by exactly one immutable freeze;
 8. execution using the dependency snapshot after the live config changes;
@@ -294,7 +316,9 @@ The implementation must add focused tests for:
 
 ## Non-Goals
 
-This change does not add annotation databases or models, installers or
+This change does not add annotation databases or models, CLR, CycloneSEQ,
+short-read, existing-assembly, or annotation-asset intake, installers or
 downloaders, recursive path discovery, automatic biological classification,
 remote execution, multi-profile configuration, or arbitrary in-TUI command
-execution.
+execution. These intake omissions do not remove the corresponding backend
+stages or runtime contracts.

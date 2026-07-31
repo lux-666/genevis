@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 
+from app.integrity import sha256_file
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.execution import ExecutionResult
 
@@ -21,6 +22,10 @@ class LocalRunner:
     """
 
     def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
+        if sha256_file(spec.script_path) != spec.script_sha256:
+            raise ValueError(
+                f"frozen attempt script changed after freeze: {spec.script_path}"
+            )
         spec.working_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = spec.working_dir / "log"
         stderr_path = spec.working_dir / "err"
@@ -29,7 +34,7 @@ class LocalRunner:
         env.update(spec.env)
 
         use_conda = bool(spec.conda_env or spec.conda_prefix)
-        script_name = spec.script_path.name
+        script_path = str(spec.script_path)
         if use_conda:
             conda_bin = spec.conda_bin or "conda"
             target = (
@@ -44,14 +49,14 @@ class LocalRunner:
                 "--no-capture-output",
                 *target,
                 spec.interpreter,
-                script_name,
+                script_path,
             ]
             shell = False
         else:
             parts: list[str] = []
             if spec.env_setup:
                 parts.append(spec.env_setup)
-            parts.append(f"{shlex.quote(spec.interpreter)} {shlex.quote(script_name)}")
+            parts.append(f"{shlex.quote(spec.interpreter)} {shlex.quote(script_path)}")
             command = " && ".join(parts)
             shell = True
 

@@ -98,6 +98,7 @@ class FrozenAttemptSpec(BaseModel):
     stage: str
     method_name: str
     script_path: Path
+    script_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     working_dir: Path
     interpreter: str = "bash"
     expected_outputs: list[Path]
@@ -115,6 +116,17 @@ class FrozenAttemptSpec(BaseModel):
             raise ValueError(
                 "FrozenAttemptSpec.conda_env and .conda_prefix are mutually exclusive"
             )
+        paths = {
+            "script_path": self.script_path,
+            "working_dir": self.working_dir,
+            **{
+                f"expected_outputs[{index}]": path
+                for index, path in enumerate(self.expected_outputs)
+            },
+        }
+        for label, path in paths.items():
+            if not path.is_absolute():
+                raise ValueError(f"FrozenAttemptSpec.{label} must be absolute")
         return self
 
 
