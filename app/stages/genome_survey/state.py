@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import TypeAliasType, TypedDict
 
+from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,
@@ -55,6 +56,7 @@ class SurveyAssetCursor(TypedDict, total=False):
     platform: str | None
     format: str | None
     source: str
+    read_artifact_ref: ArtifactRefJson
 
 
 class ResolvedSurveyAssetsCursor(TypedDict, total=False):
@@ -113,8 +115,8 @@ class GenomeSurveyCursor(TypedDict, total=False):
 
     kmer_db_path: str
     kmer_hist_path: str
-    kmer_db_artifact_ref: str
-    kmer_hist_artifact_ref: str
+    kmer_db_artifact_ref: ArtifactRefJson | str
+    kmer_hist_artifact_ref: ArtifactRefJson | str
     genomescope2_summary_path: str
     genomescope2_summary_ref: str
     genomescope2_output_dir: str

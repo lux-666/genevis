@@ -32,6 +32,7 @@ from app.stages.genome_survey.state import (
     genome_survey_output,
     update_genome_survey_output,
 )
+from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
 from app.stages.resource_resolution import ResourceResolution, resolve_stage_resource
 from app.stages.resource_specs import LONG_READS_SPEC, SHORT_READS_SPEC
 from app.storage.artifacts import publish_artifact_record
@@ -144,12 +145,41 @@ def enter_genome_survey(state: TopLevelState) -> StateUpdate:
 def resolve_survey_inputs(state: TopLevelState) -> StateUpdate:
     """Resolve survey reads from the central table, then the initial registry."""
 
-    short_resolution = resolve_stage_resource(state, resource_spec=SHORT_READS_SPEC)
-    long_resolution = resolve_stage_resource(state, resource_spec=LONG_READS_SPEC)
+    resource_refs = state.get("resource_refs") or {}
+    if not state.get("asset_registry_ref") and not any(
+        resource_type in resource_refs
+        for resource_type in ("short_reads", "long_reads")
+    ):
+        return _update_genome_survey_output(
+            state,
+            {
+                "status": "resolved",
+                "clean_short_dna_read_refs": [],
+                "raw_short_dna_read_refs": [],
+                "long_read_refs": [],
+                "resolved_assets": {
+                    "clean_short_dna_reads": [],
+                    "raw_short_dna_reads": [],
+                    "clean_long_reads": [],
+                    "raw_long_reads": [],
+                    "long_reads": [],
+                },
+            },
+        )
+    try:
+        short_resolution = resolve_stage_resource(state, resource_spec=SHORT_READS_SPEC)
+        long_resolution = resolve_stage_resource(state, resource_spec=LONG_READS_SPEC)
+    except (OSError, ValueError) as exc:
+        return _fail_update(state, f"genome survey input resolution failed: {exc}")
     short_assets, short_error = _resolution_assets(short_resolution, "short_reads")
-    long_assets, long_error = _resolution_assets(long_resolution, "long_reads")
+    _, long_error = _resolution_assets(long_resolution, "long_reads")
     if short_error or long_error:
         return _fail_update(state, short_error or long_error or "survey input error")
+    try:
+        long_members = resolve_long_read_members(state) if long_resolution.found else []
+    except (OSError, ValueError) as exc:
+        return _fail_update(state, f"genome survey input resolution failed: {exc}")
+    long_assets = _runtime_read_assets(long_members, long_resolution.source)
 
     short_types = set(short_resolution.metadata.get("asset_types") or [])
     long_types = set(long_resolution.metadata.get("asset_types") or [])
@@ -217,6 +247,27 @@ def _resolution_assets(
             }
         )
     return assets, None
+
+
+def _runtime_read_assets(
+    members: list[RuntimeReadMember], source: str
+) -> list[SurveyAssetCursor]:
+    assets: list[SurveyAssetCursor] = []
+    for member in members:
+        asset: SurveyAssetCursor = {
+            "asset_id": member.source_asset_id,
+            "asset_type": "long_reads",
+            "path": member.path,
+            "platform": member.platform,
+            "format": member.format,
+            "source": source,
+        }
+        if member.read_artifact_ref is not None:
+            asset["read_artifact_ref"] = member.read_artifact_ref.model_dump(
+                mode="json"
+            )
+        assets.append(asset)
+    return assets
 
 
 def _optional_string(value: object) -> str | None:

@@ -9,20 +9,49 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.execution.evidence import load_frozen_attempt
+from app.integrity import sha256_file
+from app.schemas.artifacts import (
+    GENOME_SURVEY_KMER_DB,
+    GENOME_SURVEY_KMER_HIST,
+    READ_QC_FILTERED_LONG_READS,
+    READ_QC_READ_SET_MANIFEST,
+    ArtifactMeta,
+    ArtifactRef,
+)
+from app.schemas.assets import ReadSetManifest, ReadSetMember
 from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.execution import ArtifactInputDependency
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state
 from app.stages.genome_survey.builder import build_stage
 from app.stages.genome_survey.method_application.genomescope2 import (
     build_genomescope2_graph,
+    freeze_genomescope2_attempt,
 )
 from app.stages.genome_survey.method_application.jellyfish import build_jellyfish_graph
 from app.stages.genome_survey.nodes import _parse_genomescope_summary
+from app.stages.genome_survey.routing import route_after_jellyfish
+from app.storage.artifacts import (
+    artifact_ref_for_path,
+    publish_artifact_record,
+    resolve_artifact_ref,
+)
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
-from app.schemas.artifacts import ArtifactMeta
-from app.storage.artifacts import publish_artifact_record
-from app.storage.paths import SessionPaths
+
+def _ready_assets(assets: list[dict]) -> list[dict]:
+    ready: list[dict] = []
+    for raw_asset in assets:
+        asset = dict(raw_asset)
+        path = Path(str(asset.get("path", "")))
+        if path.is_file():
+            asset.setdefault("checksum", sha256_file(path))
+            asset.setdefault("checksum_status", "ready")
+            asset.setdefault("size_bytes", path.stat().st_size)
+        ready.append(asset)
+    return ready
 
 
 class GenomeSurveyDescriptorTests(unittest.TestCase):
@@ -90,19 +119,27 @@ class GenomeSurveyStageTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            json.dumps({"session_id": "s1", "assets": _ready_assets(assets)}, indent=2),
             encoding="utf-8",
         )
         return path
 
-    def _publish_registry_ref(self, data_dir: str, session_id: str, registry_path: str | Path) -> dict:
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source = paths.work_path(
+            "inventory", f"asset_registry_{os.urandom(4).hex()}.json"
+        )
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8")
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
         artifact = ArtifactMeta.from_file(
-            source, stage="inventory",
-            method_name="inventory.register_assets", artifact_type="asset_registry"
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
         )
         published = publish_artifact_record(data_dir, session_id, artifact)
         return published.ref.model_dump(mode="json")
@@ -116,9 +153,61 @@ class GenomeSurveyStageTests(unittest.TestCase):
         state["current_stage"] = "genome_survey"
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
-            if registry_ref is not None else None
+            if registry_ref is not None
+            else None
         )
         return state
+
+    def _publish_filtered_read_set(
+        self,
+        state: dict,
+        source: Path,
+        *,
+        source_asset_id: str,
+    ):
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        read_source = paths.work_path("read_qc", source.name)
+        read_source.parent.mkdir(parents=True, exist_ok=True)
+        read_source.write_bytes(source.read_bytes())
+        published_read = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            ArtifactMeta.from_file(
+                read_source,
+                stage="read_qc",
+                method_name="read_qc.filter.seqkit_length_filter",
+                artifact_type=READ_QC_FILTERED_LONG_READS,
+            ),
+        )
+        manifest = ReadSetManifest(
+            session_id=state["session_id"],
+            source_registry_ref=ArtifactRef.model_validate(state["asset_registry_ref"]),
+            members=[
+                ReadSetMember(
+                    output_ref=published_read.ref,
+                    source_asset_id=source_asset_id,
+                    platform="ont",
+                    format="fastq",
+                    transformation_method="read_qc.filter.seqkit_length_filter",
+                    attempt_id="s1:read_qc:length_filter:test",
+                )
+            ],
+        )
+        manifest_source = paths.work_path("read_qc", "read_set_manifest.json")
+        manifest_source.write_text(
+            json.dumps(manifest.model_dump(mode="json"), indent=2), encoding="utf-8"
+        )
+        published_manifest = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            ArtifactMeta.from_file(
+                manifest_source,
+                stage="read_qc",
+                method_name="read_qc.filter.seqkit_length_filter",
+                artifact_type=READ_QC_READ_SET_MANIFEST,
+            ),
+        )
+        return published_read, published_manifest
 
     def _fake_survey_bin(
         self,
@@ -170,6 +259,121 @@ class GenomeSurveyStageTests(unittest.TestCase):
         jellyfish.chmod(0o755)
         genomescope.chmod(0o755)
         return bin_dir
+
+    def _legacy_genomescope_state(self, tmpdir: str):
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
+        )
+        state["current_stage"] = "genome_survey"
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        work_dir = paths.work_path("genome_survey", "legacy_jellyfish")
+        work_dir.mkdir(parents=True, exist_ok=True)
+        sources = [
+            (work_dir / "jellyfish_kmers.jf", GENOME_SURVEY_KMER_DB, "fake-jf\n"),
+            (work_dir / "kmer_hist.tsv", GENOME_SURVEY_KMER_HIST, "1\t10\n"),
+        ]
+        published = []
+        for source, artifact_type, content in sources:
+            source.write_text(content, encoding="utf-8")
+            published.append(
+                publish_artifact_record(
+                    state["data_dir"],
+                    state["session_id"],
+                    ArtifactMeta.from_file(
+                        source,
+                        stage="genome_survey",
+                        method_name="genome_survey.kmer_count.jellyfish",
+                        artifact_type=artifact_type,
+                    ),
+                )
+            )
+        db_artifact, histogram_artifact = published
+        fake_bin = self._fake_survey_bin(tmpdir)
+        state["stage_outputs"] = {
+            "genome_survey": {
+                "status": "jellyfish_collected",
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "survey_parameters": {
+                    "kmer_size": 21,
+                    "hash_size": "10M",
+                    "threads": 1,
+                },
+                "kmer_db_path": str(db_artifact.path),
+                "kmer_hist_path": str(histogram_artifact.path),
+                "kmer_db_artifact_ref": str(db_artifact.path),
+                "kmer_hist_artifact_ref": str(histogram_artifact.path),
+            }
+        }
+        return state, db_artifact, histogram_artifact
+
+    def test_legacy_jellyfish_paths_upgrade_during_genomescope2_freeze(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state, db_artifact, histogram_artifact = self._legacy_genomescope_state(
+                tmpdir
+            )
+
+            self.assertEqual(route_after_jellyfish(state), "genomescope2")
+            update = freeze_genomescope2_attempt(state)
+
+            output = update["stage_outputs"]["genome_survey"]
+            self.assertEqual(output["status"], "genomescope2_frozen")
+            self.assertEqual(
+                ArtifactRef.model_validate(output["kmer_db_artifact_ref"]),
+                db_artifact.ref,
+            )
+            self.assertEqual(
+                ArtifactRef.model_validate(output["kmer_hist_artifact_ref"]),
+                histogram_artifact.ref,
+            )
+            attempt = load_frozen_attempt(
+                {**state, **update},
+                output["execution_attempts"][0]["frozen_attempt_ref"],
+                expected_stage="genome_survey",
+                expected_method_name="genome_survey.model.genomescope2",
+            )
+            [dependency] = attempt.input_dependencies
+            self.assertIsInstance(dependency, ArtifactInputDependency)
+            self.assertEqual(dependency.artifact_ref, histogram_artifact.ref)
+            self.assertEqual(dependency.path, str(histogram_artifact.path))
+
+    def test_legacy_jellyfish_artifact_failures_fail_closed(self):
+        cases = {
+            "unindexed": "not present in the index",
+            "missing": "kmer_hist.tsv",
+            "wrong_type": "expected 'genome_survey.kmer_hist'",
+            "byte_drift": "artifact ref integrity mismatch",
+        }
+        for case, expected in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
+                state, db_artifact, histogram_artifact = self._legacy_genomescope_state(
+                    tmpdir
+                )
+                survey = state["stage_outputs"]["genome_survey"]
+                if case == "unindexed":
+                    paths = SessionPaths.from_run_dir(state["data_dir"])
+                    unindexed = paths.artifact_path(
+                        "genome_survey", "legacy_unindexed.tsv"
+                    )
+                    unindexed.parent.mkdir(parents=True, exist_ok=True)
+                    unindexed.write_text("1\t1\n", encoding="utf-8")
+                    survey["kmer_hist_path"] = str(unindexed)
+                    survey["kmer_hist_artifact_ref"] = str(unindexed)
+                elif case == "missing":
+                    histogram_artifact.path.unlink()
+                elif case == "wrong_type":
+                    survey["kmer_hist_path"] = str(db_artifact.path)
+                    survey["kmer_hist_artifact_ref"] = str(db_artifact.path)
+                else:
+                    histogram_artifact.path.write_text("changed\n", encoding="utf-8")
+
+                update = freeze_genomescope2_attempt(state)
+
+                output = update["stage_outputs"]["genome_survey"]
+                self.assertEqual(output["status"], "failed")
+                self.assertIn(expected, output["reason"])
 
     def test_missing_resources_fail_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -392,7 +596,13 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(payload["metadata"]["input_family"], "raw_short_dna_reads")
             self.assertEqual(survey["estimates"]["heterozygosity"], 0.001)
             self.assertEqual(survey["estimates"]["repeat_fraction"], 0.2)
-            self.assertTrue(Path(survey["kmer_hist_artifact_ref"]).exists())
+            histogram_ref = ArtifactRef.model_validate(survey["kmer_hist_artifact_ref"])
+            self.assertEqual(histogram_ref.artifact_type, GENOME_SURVEY_KMER_HIST)
+            self.assertTrue(
+                resolve_artifact_ref(
+                    result["data_dir"], result["session_id"], histogram_ref
+                ).exists()
+            )
             self.assertTrue(Path(survey["genomescope2_summary_ref"]).exists())
             self.assertTrue(Path(survey["result_artifact_ref"]).exists())
             self.assertIn("executed_jellyfish_and_genomescope2", survey["notes"])
@@ -605,7 +815,12 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["estimates"]["genome_size"], 12345)
             self.assertEqual(survey["genome_size_prior"], 12345)
             self.assertEqual(survey["genome_size_source"], "survey")
-            self.assertTrue(Path(survey["kmer_hist_artifact_ref"]).exists())
+            self.assertEqual(
+                ArtifactRef.model_validate(
+                    survey["kmer_hist_artifact_ref"]
+                ).artifact_type,
+                GENOME_SURVEY_KMER_HIST,
+            )
             self.assertTrue(Path(survey["genomescope2_summary_ref"]).exists())
 
     def test_prefers_read_qc_filtered_long_reads_over_raw_registry(self):
@@ -628,13 +843,22 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_survey_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
+            source_asset_id = "s1:raw_long_reads:raw.fastq.gz"
+            published_read, published_manifest = self._publish_filtered_read_set(
+                state,
+                filtered,
+                source_asset_id=source_asset_id,
+            )
             state["stage_outputs"] = {
                 "read_qc": {
                     "status": "completed",
                     "platform": "ont",
                     "format": "fastq",
-                    "filtered_long_reads_ref": str(filtered),
-                    "filtered_long_reads_refs": [str(filtered)],
+                    "filtered_long_reads_ref": str(published_read.path),
+                    "filtered_long_reads_refs": [str(published_read.path)],
+                    "read_set_manifest_ref": published_manifest.ref.model_dump(
+                        mode="json"
+                    ),
                 },
                 "genome_survey": {
                     "execution_mode": "local",
@@ -650,12 +874,15 @@ class GenomeSurveyStageTests(unittest.TestCase):
             }
             state["resource_refs"]["long_reads"] = ResourceRef(
                 resource_type="long_reads",
-                paths=[str(filtered)],
+                paths=[str(published_read.path)],
                 source_stage="read_qc",
                 metadata={
                     "platforms": ["ont"],
                     "formats": ["fastq"],
-                    "input_asset_ids": [f"s1:clean_long_reads:read_qc:{filtered.name}"],
+                    "read_set_manifest_ref": published_manifest.ref.model_dump(
+                        mode="json"
+                    ),
+                    "source_asset_ids": [source_asset_id],
                 },
             ).to_dict()
 
@@ -665,10 +892,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "clean_long_reads")
-            self.assertEqual(
-                survey["survey_input_refs"],
-                [f"s1:clean_long_reads:read_qc:{filtered.name}"],
-            )
+            self.assertEqual(survey["survey_input_refs"], [source_asset_id])
             # Jellyfish must have been pointed at filtered path, not raw gz.
             script = (
                 Path(result["data_dir"])
@@ -679,8 +903,30 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
             self.assertTrue(script.exists(), "expected jellyfish script under work/")
             script_text = script.read_text(encoding="utf-8")
-            self.assertIn(str(filtered), script_text)
+            self.assertIn(str(published_read.path), script_text)
             self.assertNotIn(str(raw_reads), script_text)
+            [attempt_path] = (
+                Path(result["data_dir"])
+                / "artifacts"
+                / "genome_survey"
+                / "attempts"
+                / "jellyfish"
+            ).glob("attempt.*.json")
+            jellyfish_attempt = load_frozen_attempt(
+                result,
+                artifact_ref_for_path(
+                    result["data_dir"],
+                    result["session_id"],
+                    attempt_path,
+                    expected_type="genome_survey.frozen_attempt",
+                ),
+                expected_stage="genome_survey",
+                expected_method_name="genome_survey.kmer_count.jellyfish",
+            )
+            [dependency] = jellyfish_attempt.input_dependencies
+            self.assertIsInstance(dependency, ArtifactInputDependency)
+            self.assertEqual(dependency.artifact_ref, published_read.ref)
+            self.assertEqual(dependency.path, str(published_read.path))
 
     def test_read_qc_declared_missing_paths_fail_without_raw_fallback(self):
         """Declared QC long-read refs must not silently fall back to raw registry."""
@@ -753,11 +999,22 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_survey_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
+            source_asset_id = "s1:raw_long_reads:raw.fastq.gz"
+            published_read, published_manifest = self._publish_filtered_read_set(
+                state,
+                filtered,
+                source_asset_id=source_asset_id,
+            )
             state["stage_outputs"] = {
                 "read_qc": {
                     "status": "completed",
                     "platform": "ont",
                     "format": "fastq",
+                    "filtered_long_reads_ref": str(published_read.path),
+                    "filtered_long_reads_refs": [str(published_read.path)],
+                    "read_set_manifest_ref": published_manifest.ref.model_dump(
+                        mode="json"
+                    ),
                 },
                 "genome_survey": {
                     "execution_mode": "local",
@@ -773,9 +1030,16 @@ class GenomeSurveyStageTests(unittest.TestCase):
             }
             state["resource_refs"]["long_reads"] = ResourceRef(
                 resource_type="long_reads",
-                paths=[str(filtered.resolve())],
+                paths=[str(published_read.path)],
                 source_stage="read_qc",
-                metadata={"platforms": ["ont"], "formats": ["fastq"]},
+                metadata={
+                    "platforms": ["ont"],
+                    "formats": ["fastq"],
+                    "read_set_manifest_ref": published_manifest.ref.model_dump(
+                        mode="json"
+                    ),
+                    "source_asset_ids": [source_asset_id],
+                },
             ).to_dict()
 
             result = build_stage().invoke(state)
@@ -792,7 +1056,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 / "run_jellyfish.sh"
             )
             script_text = script.read_text(encoding="utf-8")
-            self.assertIn(str(filtered.resolve()), script_text)
+            self.assertIn(str(published_read.path), script_text)
             self.assertNotIn(str(raw_reads), script_text)
 
     def test_short_dna_still_preferred_over_read_qc_long(self):
@@ -1059,19 +1323,27 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            json.dumps({"session_id": "s1", "assets": _ready_assets(assets)}, indent=2),
             encoding="utf-8",
         )
         return path
 
-    def _publish_registry_ref(self, data_dir: str, session_id: str, registry_path: str | Path) -> dict:
+    def _publish_registry_ref(
+        self, data_dir: str, session_id: str, registry_path: str | Path
+    ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source = paths.work_path(
+            "inventory", f"asset_registry_{os.urandom(4).hex()}.json"
+        )
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8")
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
+        )
         artifact = ArtifactMeta.from_file(
-            source, stage="inventory",
-            method_name="inventory.register_assets", artifact_type="asset_registry"
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
         )
         published = publish_artifact_record(data_dir, session_id, artifact)
         return published.ref.model_dump(mode="json")

@@ -16,7 +16,12 @@ from app.execution.lifecycle import (
     load_method_executions,
 )
 from app.execution.method_runner import build_frozen_attempt
-from app.schemas.artifacts import GENOME_SURVEY_MODEL_SUMMARY
+from app.schemas.artifacts import (
+    GENOME_SURVEY_KMER_DB,
+    GENOME_SURVEY_KMER_HIST,
+    GENOME_SURVEY_MODEL_SUMMARY,
+)
+from app.schemas.execution import ArtifactInputDependency
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.genome_survey.method_application.support import (
@@ -25,6 +30,7 @@ from app.stages.genome_survey.method_application.support import (
     survey_output,
     update_survey_output,
 )
+from app.storage.artifacts import artifact_ref_for_path
 
 METHOD_NAME = "genome_survey.model.genomescope2"
 FROZEN_STATUS = "genomescope2_frozen"
@@ -86,10 +92,17 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> StateUpdate:
     script_path.chmod(0o755)
 
     try:
-        input_dependency = artifact_input_dependency(
+        db_dependency = _artifact_dependency(
+            state,
+            output["kmer_db_artifact_ref"],
+            output["kmer_db_path"],
+            expected_type=GENOME_SURVEY_KMER_DB,
+        )
+        input_dependency = _artifact_dependency(
             state,
             output["kmer_hist_artifact_ref"],
             output["kmer_hist_path"],
+            expected_type=GENOME_SURVEY_KMER_HIST,
         )
     except (OSError, ValueError) as exc:
         return update_survey_output(
@@ -97,7 +110,7 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> StateUpdate:
             {
                 "status": "failed",
                 "failure_kind": "invalid_input",
-                "reason": f"GenomeScope2 histogram dependency is invalid: {exc}",
+                "reason": f"GenomeScope2 artifact dependency is invalid: {exc}",
             },
         )
     attempt = build_frozen_attempt(
@@ -121,6 +134,10 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> StateUpdate:
         LIFECYCLE,
         [attempt],
         stage_updates={
+            "kmer_db_artifact_ref": db_dependency.artifact_ref.model_dump(mode="json"),
+            "kmer_hist_artifact_ref": input_dependency.artifact_ref.model_dump(
+                mode="json"
+            ),
             "genomescope2_summary_path": str(summary_path),
             "genomescope2_output_dir": str(output_dir),
         },
@@ -168,3 +185,26 @@ def collect_genomescope2_artifacts(state: TopLevelState) -> StateUpdate:
             "substeps": substeps,
         },
     )
+
+
+def _artifact_dependency(
+    state: TopLevelState,
+    raw_ref: object,
+    path: str,
+    *,
+    expected_type: str,
+) -> ArtifactInputDependency:
+    if isinstance(raw_ref, str):
+        raw_ref = artifact_ref_for_path(
+            absolute_data_dir(state),
+            state["session_id"],
+            raw_ref,
+            expected_type=expected_type,
+        )
+    dependency = artifact_input_dependency(state, raw_ref, path)
+    if dependency.artifact_ref.artifact_type != expected_type:
+        raise ValueError(
+            "artifact dependency has type "
+            f"{dependency.artifact_ref.artifact_type!r}, expected {expected_type!r}"
+        )
+    return dependency

@@ -8,7 +8,10 @@ from pathlib import Path
 from langgraph.graph.state import CompiledStateGraph
 
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.input_integrity import asset_input_dependencies
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+)
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -29,6 +32,7 @@ from app.stages.genome_survey.state import (
     ResolvedSurveyAssetsCursor,
     SurveyAssetCursor,
 )
+from app.storage.artifacts import artifact_ref_for_path
 
 METHOD_NAME = "genome_survey.kmer_count.jellyfish"
 FROZEN_STATUS = "jellyfish_frozen"
@@ -123,12 +127,18 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
     script_path.chmod(0o755)
 
     try:
-        input_dependencies = asset_input_dependencies(
-            state,
-            [str(asset["asset_id"]) for asset in assets],
-            read_paths,
-        )
-    except ValueError as exc:
+        input_dependencies = []
+        for asset, path in zip(assets, read_paths, strict=True):
+            read_artifact_ref = asset.get("read_artifact_ref")
+            if read_artifact_ref is not None:
+                input_dependencies.append(
+                    artifact_input_dependency(state, read_artifact_ref, path)
+                )
+            else:
+                input_dependencies.extend(
+                    asset_input_dependencies(state, [str(asset["asset_id"])], [path])
+                )
+    except (OSError, ValueError) as exc:
         return update_survey_output(
             state,
             {"status": "failed", "reason": f"jellyfish input dependency error: {exc}"},
@@ -182,8 +192,20 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> StateUpdate:
         },
     )
     record_attempt_success(state, attempt, artifacts)
-    kmer_db_ref = str(artifacts[0].file_path)
-    kmer_hist_ref = str(artifacts[1].file_path)
+    kmer_db_path = str(artifacts[0].file_path)
+    kmer_hist_path = str(artifacts[1].file_path)
+    kmer_db_ref = artifact_ref_for_path(
+        absolute_data_dir(state),
+        state["session_id"],
+        kmer_db_path,
+        expected_type=GENOME_SURVEY_KMER_DB,
+    ).model_dump(mode="json")
+    kmer_hist_ref = artifact_ref_for_path(
+        absolute_data_dir(state),
+        state["session_id"],
+        kmer_hist_path,
+        expected_type=GENOME_SURVEY_KMER_HIST,
+    ).model_dump(mode="json")
 
     substeps = dict(output.get("substeps") or {})
     kmer_count = substeps.get("kmer_count") or {}
@@ -192,15 +214,15 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> StateUpdate:
         "name": "kmer_count",
         "status": "executed",
         "method_name": attempt.method_name,
-        "kmer_db_ref": kmer_db_ref,
-        "kmer_hist_ref": kmer_hist_ref,
+        "kmer_db_ref": kmer_db_path,
+        "kmer_hist_ref": kmer_hist_path,
     }
     return update_survey_output(
         state,
         {
             "status": COLLECTED_STATUS,
-            "kmer_db_path": kmer_db_ref,
-            "kmer_hist_path": kmer_hist_ref,
+            "kmer_db_path": kmer_db_path,
+            "kmer_hist_path": kmer_hist_path,
             "kmer_db_artifact_ref": kmer_db_ref,
             "kmer_hist_artifact_ref": kmer_hist_ref,
             "artifact_refs": [
