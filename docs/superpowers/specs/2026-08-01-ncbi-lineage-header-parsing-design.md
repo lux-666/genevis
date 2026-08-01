@@ -37,10 +37,11 @@ unchanged.
 
 Unreadable files continue to raise `OSError` for the caller's existing
 non-blocking unavailable-pack handling. An empty file, a header without
-`Organism Taxonomic ID`, or a header with an unsupported non-empty lineage
-column name raises `ValueError`; the existing caller converts that into an
-explainable unavailable pack. Row handling otherwise remains unchanged, and
-the parser will not guess a taxid or lineage column by content.
+`Organism Taxonomic ID`, a header without a second column, or a header with an
+unsupported non-empty lineage column name raises `ValueError`; the existing
+caller converts that into an explainable unavailable pack. Row handling
+otherwise remains unchanged, and the parser will not guess a taxid or lineage
+column by content.
 
 ## Tests
 
@@ -56,8 +57,10 @@ assert:
   snapshot-integrity validation does not short-circuit the parser test.
 
 The malformed-header coverage includes an empty lineage file, a missing or
-wrong first header, and a valid first header with an unsupported non-empty
-second header.
+wrong first header, a valid first header without a second column, and a valid
+first header with an unsupported non-empty second header. A duplicate-taxid
+fixture with conflicting rows confirms that the final row replaces, rather
+than unions with, the earlier lineage set.
 
 Run the targeted evidence/statistics tests and directly verify the pinned
 snapshot now has non-zero same-family and same-order tier counts for
