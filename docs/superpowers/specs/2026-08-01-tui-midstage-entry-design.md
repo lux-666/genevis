@@ -28,18 +28,28 @@ are absent.
 
 ## Intake Contract
 
-`WorkflowIntent` gains a durable entry-mode field. The deterministic intent
-parser recognizes explicit wording such as "clean reads", "skip read QC",
+`WorkflowIntent` gains a durable entry-mode field whose schema default is
+`raw_reads`, preserving deserialization of existing version-2 drafts. The
+deterministic intent parser recognizes explicit wording such as "clean reads",
+"skip read QC",
 "start from assembly", "existing contig", and "start from assembly review".
 The optional LLM intent result may provide this same typed field, with the raw
 user request remaining authoritative for the goal text.
 
+Detection uses this precedence: an explicit existing-contig, existing-assembly,
+or assembly-review statement selects `existing_assembly`; otherwise an
+explicit cleaned-read, skip-read-QC, or start-at-assembly statement selects
+`clean_long_reads`; otherwise behavior remains `raw_reads`. A plain request to
+"do assembly" does not imply a midstage entry.
+
 The mutable TUI draft gains typed facts for the two new resources. A cleaned
 read fact includes the declared long-read platform; the system does not infer
 ONT versus HiFi from a filename. An existing-assembly fact contains one or
-more readable FASTA paths. Both facts participate in the existing append-only
-answer history, unresolved-candidate reporting, replacement confirmation, and
-revision-checked persistence.
+exactly one readable FASTA path. A response containing several assembly FASTA
+paths is rejected as unresolved rather than choosing one or creating an
+implicit candidate-selection workflow. Both facts participate in the existing
+append-only answer history, unresolved-candidate reporting, replacement
+confirmation, and revision-checked persistence.
 
 The intake requirement queue derives from the entry mode:
 
@@ -77,6 +87,12 @@ and recommended-stage construction consistent with the manifest. Since no
 genome-survey stage precedes a clean-read `assembly` entry, assembly still asks
 for a supplied genome-size estimate when the selected assembler requires one.
 
+For clean reads, inventory retains its existing `raw_inputs` entry mode because
+the input is still a read resource. It first commits to `read_qc`; the parent
+router then uses `requested_stages=["assembly", ...]` to record `read_qc` and
+`genome_survey` as `not_requested` skips and enters `assembly` without invoking
+either upstream stage. No new inventory entry mode is introduced.
+
 For an existing assembly, the existing inventory behavior remains authoritative:
 it registers the FASTA as the central `assembly` resource, records the three
 upstream stages as `existing_assembly_input` skips, and routes to
@@ -91,6 +107,8 @@ upstream stages as `existing_assembly_input` skips, and routes to
 - The planner must not produce a `clean_long_reads` assembly plan with no
   platform/read type or an `existing_assembly` review plan with no registered
   FASTA.
+- The existing-assembly intake accepts exactly one FASTA and never silently
+  selects among multiple external assemblies.
 - Freeze, immutable dependency capture, execution locks, review gates, reruns,
   and inventory provenance retain their current behavior.
 - Existing raw-read TUI sessions and serialized draft fields remain valid.
@@ -100,9 +118,9 @@ upstream stages as `existing_assembly_input` skips, and routes to
 Focused tests will cover deterministic intent detection, requirement queues,
 platform-explicit cleaned-read parsing and rejection of ambiguous input,
 existing-assembly parsing, mutable manifest projection, TUI planner defaults,
-and frozen execution inputs. Existing inventory tests already verify the
-existing-assembly skip route; an intake-to-planner test will bind that route to
-the TUI contract.
+frozen execution inputs, and parent-router skip evidence for a clean-read
+assembly entry. Existing inventory tests already verify the existing-assembly
+skip route; an intake-to-planner test will bind that route to the TUI contract.
 
 The README TUI guide will describe both entry phrases and the assets they
 register. It will remove the statement that existing assemblies are outside
