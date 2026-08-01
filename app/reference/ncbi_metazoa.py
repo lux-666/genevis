@@ -397,15 +397,24 @@ def _load_tsv(path: Path) -> list[dict[str, str]]:
 def _load_lineage(path: Path) -> dict[str, set[str]]:
     if not path.exists():
         raise OSError(2, "NCBI lineage table not found", str(path))
-    result: dict[str, set[str]] = {}
-    for row in _load_tsv(path):
-        taxid = str(row.get("Organism Taxonomic ID") or "").strip()
-        lineage = str(row.get("Lineage") or "")
-        if taxid:
-            result[taxid] = {
-                _normalise(term) for term in lineage.split(";") if term.strip()
-            }
-    return result
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = reader.fieldnames or []
+        if not fieldnames or fieldnames[0] != "Organism Taxonomic ID":
+            raise ValueError("NCBI lineage table has an invalid taxid header")
+        if len(fieldnames) < 2 or fieldnames[1] not in ("Lineage", ""):
+            raise ValueError("NCBI lineage table has an invalid lineage header")
+
+        lineage_column = fieldnames[1]
+        result: dict[str, set[str]] = {}
+        for row in reader:
+            taxid = str(row.get("Organism Taxonomic ID") or "").strip()
+            lineage = str(row.get(lineage_column) or "")
+            if taxid:
+                result[taxid] = {
+                    _normalise(term) for term in lineage.split(";") if term.strip()
+                }
+        return result
 
 
 def _resolve_target(species_name: str, aliases: list[dict[str, str]]) -> dict[str, Any]:

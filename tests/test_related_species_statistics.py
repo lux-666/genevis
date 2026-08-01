@@ -66,7 +66,12 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
         return root
 
     def _write_records(
-        self, root: Path, rows: list[dict[str, str]], lineage: dict[str, str]
+        self,
+        root: Path,
+        rows: list[dict[str, str]],
+        lineage: dict[str, str],
+        *,
+        lineage_header: str = "Lineage",
     ) -> None:
         with (root / "Metazoa.ncbi.tsv").open(
             "w", encoding="utf-8", newline=""
@@ -78,11 +83,18 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
             "w", encoding="utf-8", newline=""
         ) as handle:
             writer = csv.DictWriter(
-                handle, fieldnames=["Organism Taxonomic ID", "Lineage"], delimiter="\t"
+                handle,
+                fieldnames=["Organism Taxonomic ID", lineage_header],
+                delimiter="\t",
             )
             writer.writeheader()
             for taxid, value in lineage.items():
-                writer.writerow({"Organism Taxonomic ID": taxid, "Lineage": value})
+                writer.writerow(
+                    {"Organism Taxonomic ID": taxid, lineage_header: value}
+                )
+        self._write_manifest(root)
+
+    def _write_manifest(self, root: Path) -> None:
         files = {
             name: {
                 "sha256": self._sha256(root / name),
@@ -217,6 +229,90 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                     "same_order": "4",
                 },
             )
+
+    def test_blank_second_header_preserves_cross_tier_collection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._reference_dir(tmpdir)
+            self._write_records(
+                root,
+                [
+                    self._row("GCA_000000001.1", "Targetus absentus", "1"),
+                    self._row("GCA_000000002.1", "Targetus relative", "2"),
+                    self._row("GCA_000000003.1", "Otherus familymember", "3"),
+                    self._row("GCA_000000004.1", "Yetanother ordermember", "4"),
+                ],
+                {
+                    "1": "Metazoa;Targetiformes;Targetidae;Targetus;Targetus absentus",
+                    "2": "Metazoa;Targetiformes;Targetidae;Targetus;Targetus relative",
+                    "3": (
+                        "Metazoa;Targetiformes;Targetidae;Otherus;"
+                        "Otherus familymember"
+                    ),
+                    "4": (
+                        "Metazoa;Targetiformes;Otheridae;Yetanother;"
+                        "Yetanother ordermember"
+                    ),
+                },
+                lineage_header="",
+            )
+
+            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+
+            self.assertEqual(
+                pack["tier_counts"],
+                {"exact": 1, "same_genus": 1, "same_family": 1, "same_order": 1},
+            )
+
+    def test_duplicate_taxid_uses_last_lineage_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._reference_dir(tmpdir)
+            self._write_records(
+                root,
+                [self._row("GCA_000000003.1", "Otherus familymember", "3")],
+                {"3": "Metazoa;Otheridae;Otherus"},
+            )
+            (root / "Metazoa.ncbi.lineage").write_text(
+                "Organism Taxonomic ID\tLineage\n"
+                "3\tMetazoa;Targetiformes;Targetidae;Otherus\n"
+                "3\t\n",
+                encoding="utf-8",
+            )
+            self._write_manifest(root)
+
+            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+
+            self.assertEqual(pack["tier_counts"]["same_family"], 0)
+            self.assertEqual(pack["tier_counts"]["same_order"], 0)
+
+    def test_malformed_lineage_headers_are_unreadable(self):
+        malformed_headers = {
+            "empty_file": "",
+            "wrong_first_header": "Wrong Taxonomic ID\tLineage\n",
+            "missing_second_header": "Organism Taxonomic ID\n",
+            "unsupported_second_header": "Organism Taxonomic ID\tUnexpected\n",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._reference_dir(tmpdir)
+            self._write_records(
+                root,
+                [self._row("GCA_000000003.1", "Otherus familymember", "3")],
+                {"3": "Metazoa;Targetiformes;Targetidae;Otherus"},
+            )
+            for label, contents in malformed_headers.items():
+                with self.subTest(header=label):
+                    (root / "Metazoa.ncbi.lineage").write_text(
+                        contents, encoding="utf-8"
+                    )
+                    self._write_manifest(root)
+
+                    pack = build_related_species_statistics_pack(
+                        "目标鱼", reference_dir=root
+                    )
+
+                    self.assertEqual(pack["status"], "unavailable")
+                    self.assertIn(
+                        "reference_source_unreadable:ValueError", pack["notes"]
+                    )
 
     def test_taxid_priority_dedup_across_tiers(self):
         # Taxid 2 organism name also matches genus criterion; it must be assigned to

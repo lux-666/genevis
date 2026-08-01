@@ -86,7 +86,12 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
         return root
 
     def _write_records(
-        self, root: Path, rows: list[dict[str, str]], lineage: dict[str, str]
+        self,
+        root: Path,
+        rows: list[dict[str, str]],
+        lineage: dict[str, str],
+        *,
+        lineage_header: str = "Lineage",
     ) -> None:
         with (root / "Metazoa.ncbi.tsv").open(
             "w", encoding="utf-8", newline=""
@@ -98,11 +103,18 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             "w", encoding="utf-8", newline=""
         ) as handle:
             writer = csv.DictWriter(
-                handle, fieldnames=["Organism Taxonomic ID", "Lineage"], delimiter="\t"
+                handle,
+                fieldnames=["Organism Taxonomic ID", lineage_header],
+                delimiter="\t",
             )
             writer.writeheader()
             for taxid, value in lineage.items():
-                writer.writerow({"Organism Taxonomic ID": taxid, "Lineage": value})
+                writer.writerow(
+                    {"Organism Taxonomic ID": taxid, lineage_header: value}
+                )
+        self._write_manifest(root)
+
+    def _write_manifest(self, root: Path) -> None:
         files = {
             name: {
                 "sha256": self._sha256(root / name),
@@ -309,6 +321,27 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
 
             self.assertEqual(pack["matching_mode"], "same_order")
             self.assertEqual(pack["selected_records"][0]["taxid"], "3")
+
+    def test_blank_second_header_supports_family_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._reference_dir(tmpdir)
+            self._write_records(
+                root,
+                [
+                    self._row("GCA_000000003.1", "Otherus familymember", "2"),
+                ],
+                {
+                    "2": "Metazoa;Targetiformes;Targetidae;Otherus;Otherus familymember"
+                },
+                lineage_header="",
+            )
+
+            pack = build_related_species_evidence_pack(
+                "Targetus absentus", reference_dir=root
+            )
+
+            self.assertEqual(pack["matching_mode"], "same_family")
+            self.assertEqual(pack["selected_records"][0]["taxid"], "2")
 
     def test_missing_target_is_non_blocking_and_exposes_source_provenance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
