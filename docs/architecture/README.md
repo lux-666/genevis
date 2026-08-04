@@ -41,6 +41,7 @@ it. Do not collapse these lifecycles.
 | Question | Start here | Follow when needed |
 |---|---|---|
 | What is the whole system? | [`topics/system-map.md`](topics/system-map.md) | Runtime, data, and stage contracts linked from that page |
+| Which graph nodes, methods, and parameter flows are actually implemented? | [`topics/langgraph-implementation-map.md`](topics/langgraph-implementation-map.md) | Builders, registry, focused tests, and conformance links named by each status row |
 | How does a user request become a run? | [`topics/tui-and-planning.md`](topics/tui-and-planning.md) | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md), frozen data contract |
 | How does the parent graph route work? | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md) | Stage contracts and review/resume |
 | How is a command frozen, run, and collected? | [`topics/execution.md`](topics/execution.md) | Execution lifecycle and evidence references |
@@ -77,15 +78,25 @@ A topic must not describe planned behavior as implemented. A reference contract
 must not silently absorb an implementation exception; record the gap in
 [`reference/conformance.md`](reference/conformance.md).
 
+The finer-grained `wired`, `executable`, `partial`, `placeholder`, and `absent`
+labels belong only to the maintained
+[`LangGraph implementation map`](topics/langgraph-implementation-map.md). They
+classify current nodes and methods without replacing the three topic/contract
+statuses above.
+
 ## Loading rules
 
 1. Start here and select one topic from the router.
-2. Read adjacent topics only when the current page names them as an incoming or
+2. When implementation maturity matters, check the LangGraph implementation
+   map before assuming that a compiled stage or registered descriptor is a
+   complete executable capability.
+3. Read adjacent topics only when the current page names them as an incoming or
    outgoing edge.
-3. Load a reference page only when exact fields, paths, ownership, or invariants
+4. Load a reference page only when exact fields, paths, ownership, or invariants
    matter to the task.
-4. Verify behavior claims against the `Code evidence` paths on the topic page.
-5. Update the single owning reference and every affected edge in the same
+5. Verify behavior claims against the `Code evidence` paths on the topic page.
+6. Update the single owning reference, the implementation map when its status
+   changes, and every affected edge in the same
    change.
 
 Git history retains superseded designs and implementation records. The working
