@@ -4,7 +4,15 @@ This directory is a graph of current design, not a linear manual. Start with
 the question you are trying to answer, read one topic node, and follow only the
 contract edges needed for that task.
 
-The documentation has two disclosure layers:
+The architecture root exposes two complementary indexes before the detailed
+disclosure layers:
+
+- [`topics/system-map.md`](topics/system-map.md) explains system ownership and
+  the shortest complete runtime flow;
+- [`langgraph-implementation-map.md`](langgraph-implementation-map.md) records
+  current graph-node, method, parameter-flow, verification, and debt status.
+
+Detailed documentation then has two disclosure layers:
 
 - [`topics/`](topics/system-map.md) explains system behavior and how subsystems connect;
 - [`reference/`](reference/data-contract.md) owns exact contracts, schemas, invariants, and
@@ -12,7 +20,8 @@ The documentation has two disclosure layers:
 
 Folder placement controls reading depth, not dependency direction. Every topic
 declares what feeds it, what it feeds, and which reference contracts own its
-precise rules.
+precise rules. The implementation map is a cross-cutting projection beside this
+router, not a topic and not a contract owner.
 
 ## System graph
 
@@ -41,7 +50,6 @@ it. Do not collapse these lifecycles.
 | Question | Start here | Follow when needed |
 |---|---|---|
 | What is the whole system? | [`topics/system-map.md`](topics/system-map.md) | Runtime, data, and stage contracts linked from that page |
-| Which graph nodes, methods, and parameter flows are actually implemented? | [`topics/langgraph-implementation-map.md`](topics/langgraph-implementation-map.md) | Builders, registry, focused tests, and conformance links named by each status row |
 | How does a user request become a run? | [`topics/tui-and-planning.md`](topics/tui-and-planning.md) | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md), frozen data contract |
 | How does the parent graph route work? | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md) | Stage contracts and review/resume |
 | How is a command frozen, run, and collected? | [`topics/execution.md`](topics/execution.md) | Execution lifecycle and evidence references |
@@ -80,24 +88,42 @@ must not silently absorb an implementation exception; record the gap in
 
 The finer-grained `wired`, `executable`, `partial`, `placeholder`, and `absent`
 labels belong only to the maintained
-[`LangGraph implementation map`](topics/langgraph-implementation-map.md). They
+[`LangGraph implementation map`](langgraph-implementation-map.md). They
 classify current nodes and methods without replacing the three topic/contract
 statuses above.
 
 ## Loading rules
 
-1. Start here and select one topic from the router.
-2. When implementation maturity matters, check the LangGraph implementation
-   map before assuming that a compiled stage or registered descriptor is a
-   complete executable capability.
-3. Read adjacent topics only when the current page names them as an incoming or
+1. Start here, then read the system map for ownership and the LangGraph
+   implementation map for current maturity.
+2. Select the affected subsystem topic from the router.
+3. Do not assume that a compiled stage or registered descriptor is a complete
+   executable capability; verify its node, method, and evidence rows in the
+   implementation map.
+4. Read adjacent topics only when the current page names them as an incoming or
    outgoing edge.
-4. Load a reference page only when exact fields, paths, ownership, or invariants
+5. Load a reference page only when exact fields, paths, ownership, or invariants
    matter to the task.
-5. Verify behavior claims against the `Code evidence` paths on the topic page.
-6. Update the single owning reference, the implementation map when its status
-   changes, and every affected edge in the same
-   change.
+6. Verify behavior claims against the `Code evidence` paths on the topic page
+   and implementation map.
+
+## Synchronization rules
+
+The maintenance direction follows implementation ownership rather than the
+reading order:
+
+```text
+code or behavior change
+  -> owning reference contract
+  -> each affected topic
+  -> implementation map when wiring, status, evidence, or debt changes
+  -> this router or docs/README.md only when navigation changes
+```
+
+Synchronize the implementation map in the same change when a graph node,
+canonical stage, registered method, execution adapter, collection boundary,
+parameter flow, human gate, resource commit, verification classification, or
+cited conformance status changes.
 
 Git history retains superseded designs and implementation records. The working
 tree keeps current topics, accepted planned nodes, explicit conformance debt,

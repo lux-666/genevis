@@ -8,17 +8,17 @@
 > registry, method adapters, focused tests, and architecture conformance review.
 > **Feeds into:** implementation planning, code review, method onboarding, and
 > updates to the exact architecture contracts.
-> **Contract dependencies:** [Runtime orchestration](runtime-orchestration.md),
-> [Stage contracts](../reference/stage-contracts.md),
-> [Descriptors](../reference/descriptors.md),
-> [Parameter recommendation](../reference/parameter-recommendation.md), and
-> [Architecture conformance](../reference/conformance.md).
+> **Contract dependencies:** [Runtime orchestration](topics/runtime-orchestration.md),
+> [Stage contracts](reference/stage-contracts.md),
+> [Descriptors](reference/descriptors.md),
+> [Parameter recommendation](reference/parameter-recommendation.md), and
+> [Architecture conformance](reference/conformance.md).
 > **Code evidence:** `app/workflow.py`, `app/graph/`, every
 > `app/stages/*/builder.py`, `app/execution/`, `descriptors/registry.yaml`, and
 > the focused test files named below.
 
 This page answers a narrower question than the
-[system map](system-map.md): **what is wired, executable, verified, partial, or
+[system map](topics/system-map.md): **what is wired, executable, verified, partial, or
 absent in the current tree?** It is not a roadmap or a historical progress log.
 Exact behavioral rules remain owned by the linked reference contracts.
 
@@ -89,7 +89,7 @@ events and writes blocked or failed operator reports.
 | `route_controller` and `route_from_current_stage` | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py` |
 | Requested-stage skipping and canonical precedence | `wired` | `implemented-no-process` | `tested` | `none` | `app/workflow.py`; `tests/test_graph_routing.py`, `tests/test_ask_plan.py` |
 | SQLite/memory checkpoint selection and durable resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`, `app/control/lifecycle.py`; `tests/test_checkpointer.py`, `tests/test_durable_resume.py` |
-| Terminal reporting and checkpoint compaction | `wired` | `partial` | `tested` | `contract-drift` | `app/graph/checkpoint_compaction.py`, `app/reports/`; live-state report and replay gaps in [conformance](../reference/conformance.md) |
+| Terminal reporting and checkpoint compaction | `wired` | `partial` | `tested` | `contract-drift` | `app/graph/checkpoint_compaction.py`, `app/reports/`; live-state report and replay gaps in [conformance](reference/conformance.md) |
 
 ## Cross-cutting implementation boundaries
 
@@ -99,12 +99,12 @@ the exact behavioral contract.
 
 | Boundary | Current implementation | Code and test evidence | Contract owner |
 |---|---|---|---|
-| Stage resource resolution | Stage adapters query canonical `ResourceSpec` objects through `resource_resolution.py`. There is no separate repository planning-preflight API or duplicate stage-requirement table. Method/environment preflight occurs at frozen-attempt construction. | `app/stages/resource_specs.py`, `app/stages/resource_resolution.py`; `tests/test_project_scaffold.py`, stage-focused tests | [Resource handoff](../reference/resource-handoff.md) |
-| Genome Survey logical inputs | The stage boundary exposes only `short_reads` and `long_reads`, prefers the short-read family, and leaves clean/raw lifecycle priority to each resource spec. No-read execution is permitted only when an explicit genome size supports the documented skip path. | `app/stages/genome_survey/nodes.py`, `app/stages/genome_survey/state.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` | [Stage contracts](../reference/stage-contracts.md) |
-| Executable artifact dependencies | Genome Survey k-mer products cross the Jellyfish/GenomeScope2 boundary as indexed `ArtifactRefJson` values. The consumer has no path-string upgrade branch. | `app/stages/genome_survey/method_application/jellyfish.py`, `genomescope2.py`; `tests/test_genome_survey.py` | [Data contract](../reference/data-contract.md) |
-| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The committed registry loads as 18 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](../reference/descriptors.md) |
-| Registered execution classes | The registry is partitioned into 17 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](../reference/descriptors.md) |
-| AutoHiC output collection | After process success and before the first new publication, collection requires all four frozen products or matching attempt-local indexed recovery records. Missing products fail collection; a later publication failure may leave an indexed orphan without success semantic events. | `app/stages/hic_scaffolding/method_application/support.py`; `tests/test_hic_scaffolding.py` | [AutoHiC](autohic.md), [Stage contracts](../reference/stage-contracts.md) |
+| Stage resource resolution | Stage adapters query canonical `ResourceSpec` objects through `resource_resolution.py`. There is no separate repository planning-preflight API or duplicate stage-requirement table. Method/environment preflight occurs at frozen-attempt construction. | `app/stages/resource_specs.py`, `app/stages/resource_resolution.py`; `tests/test_project_scaffold.py`, stage-focused tests | [Resource handoff](reference/resource-handoff.md) |
+| Genome Survey logical inputs | The stage boundary exposes only `short_reads` and `long_reads`, prefers the short-read family, and leaves clean/raw lifecycle priority to each resource spec. No-read execution is permitted only when an explicit genome size supports the documented skip path. | `app/stages/genome_survey/nodes.py`, `app/stages/genome_survey/state.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` | [Stage contracts](reference/stage-contracts.md) |
+| Executable artifact dependencies | Genome Survey k-mer products cross the Jellyfish/GenomeScope2 boundary as indexed `ArtifactRefJson` values. The consumer has no path-string upgrade branch. | `app/stages/genome_survey/method_application/jellyfish.py`, `genomescope2.py`; `tests/test_genome_survey.py` | [Data contract](reference/data-contract.md) |
+| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The committed registry loads as 18 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](reference/descriptors.md) |
+| Registered execution classes | The registry is partitioned into 17 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](reference/descriptors.md) |
+| AutoHiC output collection | After process success and before the first new publication, collection requires all four frozen products or matching attempt-local indexed recovery records. Missing products fail collection; a later publication failure may leave an indexed orphan without success semantic events. | `app/stages/hic_scaffolding/method_application/support.py`; `tests/test_hic_scaffolding.py` | [AutoHiC](topics/autohic.md), [Stage contracts](reference/stage-contracts.md) |
 
 ## Stage node inventory
 
@@ -231,13 +231,18 @@ would contradict the current graph and registry.
 | Automated base polishing | `unwired` | `absent` | `untested` | `known-gap` | Assembly Review can adopt an operator-produced polished FASTA; it does not run NextPolish, Racon, Medaka, Pilon, or another polishing tool |
 | Final integrated post-polish QA | `unwired` | `absent` | `untested` | `known-gap` | QUAST/BUSCO Assembly Review and later stage-local evidence exist, but there is no terminal comprehensive QA stage after polishing |
 | De-novo repeat-library discovery | `unwired` | `absent` | `untested` | `known-gap` | RepeatMasker execution exists only with an operator-registered repeat library |
-| TUI midstage entry from clean reads or an existing assembly | `unwired` in the public TUI | `placeholder` as accepted design | `partially-tested` | `known-gap` | See [TUI midstage entry](tui-midstage-entry.md) |
+| TUI midstage entry from clean reads or an existing assembly | `unwired` in the public TUI | `placeholder` as accepted design | `partially-tested` | `known-gap` | See [TUI midstage entry](topics/tui-midstage-entry.md) |
 
 This is why `assembly_review` should not be renamed to “final QA,” and why an
 operator-provided polished assembly must not be counted as an automated base
 polishing method.
 
 ## Maintenance rule
+
+Follow this synchronization order for behavior changes: update code, then the
+unique owning reference contract, each affected topic, and this map when its
+wiring, status, evidence, or debt projection changes. Update `docs/README.md`
+or the architecture router only when navigation relationships change.
 
 Update this page in the same change whenever code adds, removes, or rewires any
 of the following:
