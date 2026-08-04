@@ -1,7 +1,6 @@
 # Descriptor Contract
 
-> **Status:** implemented, with the inert-field gap recorded in
-> [Architecture conformance](conformance.md).  
+> **Status:** implemented.
 > **Read when:** package capability, method identity, required inputs, expected
 > outputs, or planner metadata must be checked.  
 > **Comes from:** planning, bootstrap, and stage method selection.  
@@ -96,7 +95,7 @@ parameters match the descriptor and run configuration.
 Descriptors do not authorize process execution. Execution requires the stage to
 be enabled for local execution and a complete frozen attempt.
 
-## Current validation boundary
+## Validation boundary
 
 The registry loader currently proves that every referenced package exists and
 that every `by_stage` method exists and declares the same stage. The committed
@@ -104,10 +103,22 @@ registry also has matching registry keys and descriptor names, and every method
 record appears in exactly one stage list. Those last identity/completeness facts
 are true of the current files, but the loader does not enforce them explicitly.
 
-`PackageDescriptor`, `MethodDescriptor`, and `IOSpec` currently use Pydantic's
-default handling for undeclared fields: unknown YAML keys are ignored rather
-than rejected or retained. Consequently, a field not declared in
-`app/schemas/descriptors.py` is not runtime capability metadata merely because
-it appears in YAML. The current Flye input contains two such inert keys;
-[Architecture conformance](conformance.md) records the required cleanup or
-schema decision.
+Descriptor YAML is lossless and fail-closed: every registry, package, method,
+planner, input/output, and resource field must be declared by its schema.
+Unknown keys are rejected during loading; they are never silently ignored or
+treated as capability metadata. Free-form method defaults and planner parameter
+names and values remain explicitly contained in `defaults`,
+`parameter_defaults`, and conditional `condition` mappings.
+
+## Executable coverage evidence
+
+`tests/test_registry_executable_invariant.py` derives all local method IDs from
+the imported `MethodExecutionLifecycle` instances, rather than maintaining a
+method-name whitelist. For every local descriptor it verifies the adapter builds
+the shared freeze/run/collect graph with that exact lifecycle, the outer stage
+builder contains the method node, and a frozen cursor calls the shared run
+boundary with the same lifecycle. The test derives planner-only IDs from the
+production planner catalog, proves the two categories are disjoint and cover
+the registry, and follows `read_qc.length_filter.skip` through its intentional
+planner-to-runtime `skip` translation. That route preserves raw paths and
+creates no length-filter frozen attempt or runner call.

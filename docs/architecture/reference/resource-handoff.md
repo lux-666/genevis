@@ -71,16 +71,14 @@ fourth cross-stage resource source.
 
 The resolver does not scan `stage_outputs`. The calling stage owns the decision
 to fail, skip, or use an explicitly allowed fallback when a resource is absent;
-the resolver itself remains a non-throwing query for absence. A separate
-read-only planning-preflight helper also consumes declarative requirements, but
-it is not wired into the production TUI and is not runtime authority. Its
-current Genome Survey declaration is stale, as recorded in
-[Architecture conformance](conformance.md).
+the resolver itself remains a non-throwing query for absence. Environment and
+method preflight occur when a method attempt is frozen; there is no separate
+stage-planning preflight authority.
 
 When inventory contains clean and raw assets for one logical resource,
-`ResourceSpec.asset_types` determines the preferred type. Once a later stage
-publishes a central resource ref, resolution must not silently fall back to an
-older inventory asset.
+`ResourceSpec.asset_type_priority_groups` determines the preferred type. Once a
+later stage publishes a central resource ref, resolution must not silently fall
+back to an older inventory asset.
 
 Stages publish with `update_resource_ref(...)`, which returns a new validated
 table and never mutates the supplied state.
@@ -91,7 +89,7 @@ table and never mutates the supplied state.
 |---|---|---|
 | `inventory` | — | `long_reads`, `short_reads`, `hic_reads`, `assembly`, according to the manifest |
 | `read_qc` | `long_reads` | `long_reads` |
-| `genome_survey` | for a full survey, at least one of `short_reads` or `long_reads`, preferring clean short, raw short, clean long, then raw long; an explicit genome size permits the no-read skip path | scalar measurement evidence only |
+| `genome_survey` | for a full survey, at least one of `short_reads` or `long_reads`, preferring the `short_reads` family; each family's clean/raw priority is resolved before the stage boundary; an explicit genome size permits the no-read skip path | scalar measurement evidence only |
 | `assembly` | `long_reads` | `assembly` |
 | `assembly_dedup` | `assembly`, `long_reads` | `assembly` |
 | `assembly_review` | `assembly` | `assembly` |
@@ -103,9 +101,8 @@ table and never mutates the supplied state.
 
 Runtime stage adapters enforce these direct dependencies. Genome Survey
 already admits a short-read-only run and prefers short DNA reads when both
-families are present. The central `STAGE_CONTRACTS`/`STAGE_REQUIREMENTS`
-metadata still describes that stage as long-read-only; callers must not treat
-that stale table as stronger authority than the implemented stage boundary.
+families are present. `resource_specs.py` owns only canonical resource
+resolution; stages do not share a second declarative planning table.
 
 Hi-C reads stop at `hic_scaffolding`. After human adoption, that stage replaces
 the central `assembly` resource. T2T resolves this current assembly and the

@@ -27,6 +27,7 @@ from app.stages.hic_scaffolding.state import (
 )
 from app.storage.artifacts import (
     publish_or_recover_work_artifact,
+    read_artifact_records,
     register_artifact_records,
 )
 from app.storage.ledger import Ledger
@@ -69,65 +70,74 @@ def collect_method_artifacts(
     execution_succeeded = result.success
     execution_error = result.error
     if execution_succeeded:
-        scaffold_fasta = Path(str(attempt.metadata["scaffold_fasta"]))
-        published = publish_or_recover_work_artifact(
-            data_dir,
-            attempt.session_id,
-            scaffold_fasta,
-            stage="hic_scaffolding",
-            method_name=lifecycle.method_name,
-            artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
-            metadata={
-                "attempt_id": attempt.attempt_id,
-                "review_required": True,
-            },
-        )
-        published_paths["scaffold_fasta"] = published.path
-        artifacts.append(
-            ArtifactMeta.from_file(
-                published.path,
+        required_product_specs = [
+            ("scaffold_fasta", HIC_SCAFFOLDED_ASSEMBLY),
+            *extra_artifacts,
+        ]
+        try:
+            required_products = [
+                (key, Path(str(attempt.metadata[key])), artifact_type)
+                for key, artifact_type in required_product_specs
+            ]
+        except KeyError as exc:
+            raise FileNotFoundError(
+                f"AutoHiC expected output metadata is missing: {exc.args[0]}"
+            ) from exc
+        source_paths = {source for _, source, _ in required_products}
+        expected_output_paths = set(attempt.expected_outputs)
+        if (
+            len(required_products) != len(attempt.expected_outputs)
+            or source_paths != expected_output_paths
+        ):
+            raise FileNotFoundError(
+                "AutoHiC required product sources do not match frozen expected outputs"
+            )
+
+        indexed_records = read_artifact_records(data_dir, attempt.session_id)
+        missing_required_products = [
+            source
+            for _, source, artifact_type in required_products
+            if not source.is_file()
+            and not any(
+                record.get("stage") == "hic_scaffolding"
+                and record.get("method_id") == lifecycle.method_name
+                and record.get("attempt_id") == attempt.attempt_id
+                and record.get("artifact_type") == artifact_type
+                for record in indexed_records
+            )
+        ]
+        if missing_required_products:
+            raise FileNotFoundError(
+                "AutoHiC expected output is missing or is not recoverably published: "
+                + ", ".join(str(path) for path in missing_required_products)
+            )
+
+        for key, source, artifact_type in required_products:
+            published = publish_or_recover_work_artifact(
+                data_dir,
+                attempt.session_id,
+                source,
                 stage="hic_scaffolding",
                 method_name=lifecycle.method_name,
-                artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
+                artifact_type=artifact_type,
                 metadata={
                     "attempt_id": attempt.attempt_id,
                     "review_required": True,
                 },
             )
-        )
-
-    if execution_succeeded:
-        for key, artifact_type in extra_artifacts:
-            path_value = attempt.metadata.get(key)
-            if path_value:
-                try:
-                    published = publish_or_recover_work_artifact(
-                        data_dir,
-                        attempt.session_id,
-                        Path(str(path_value)),
-                        stage="hic_scaffolding",
-                        method_name=lifecycle.method_name,
-                        artifact_type=artifact_type,
-                        metadata={
-                            "attempt_id": attempt.attempt_id,
-                            "review_required": True,
-                        },
-                    )
-                except FileNotFoundError:
-                    continue
-                published_paths[key] = published.path
-                artifacts.append(
-                    ArtifactMeta.from_file(
-                        published.path,
-                        stage="hic_scaffolding",
-                        method_name=lifecycle.method_name,
-                        artifact_type=artifact_type,
-                        metadata={
-                            "attempt_id": attempt.attempt_id,
-                            "review_required": True,
-                        },
-                    )
+            published_paths[key] = published.path
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    published.path,
+                    stage="hic_scaffolding",
+                    method_name=lifecycle.method_name,
+                    artifact_type=artifact_type,
+                    metadata={
+                        "attempt_id": attempt.attempt_id,
+                        "review_required": True,
+                    },
                 )
+            )
 
         review_bundle_source = work_output_dir / "hic_review_bundle.json"
         review_bundle_source.write_text(

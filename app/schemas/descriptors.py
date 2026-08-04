@@ -6,12 +6,18 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.execution import InputDependency
 
 
-class ResourceHints(BaseModel):
+class StrictDescriptorModel(BaseModel):
+    """Base model for descriptor YAML that rejects undeclared keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ResourceHints(StrictDescriptorModel):
     """Execution resource hints from package and method descriptors."""
 
     cpu_cores: int = 1
@@ -21,7 +27,7 @@ class ResourceHints(BaseModel):
     queue: str | None = None
 
 
-class IOSpec(BaseModel):
+class IOSpec(StrictDescriptorModel):
     """Input/output descriptor for a method."""
 
     name: str
@@ -30,14 +36,14 @@ class IOSpec(BaseModel):
     required: bool = True
 
 
-class PlannerConditionalRequirement(BaseModel):
+class PlannerConditionalRequirement(StrictDescriptorModel):
     """Planner parameter requirements triggered by other parameter values."""
 
     condition: dict[str, Any] = Field(default_factory=dict)
     required: list[str] = Field(default_factory=list)
 
 
-class PlannerMetadata(BaseModel):
+class PlannerMetadata(StrictDescriptorModel):
     """Planner-facing method metadata declared by method descriptors."""
 
     required_parameters: list[str] = Field(default_factory=list)
@@ -50,7 +56,7 @@ class PlannerMetadata(BaseModel):
     execution_kind: Literal["local", "planner_only"] = "local"
 
 
-class PackageDescriptor(BaseModel):
+class PackageDescriptor(StrictDescriptorModel):
     """Tool-level capability descriptor."""
 
     package_name: str
@@ -63,7 +69,7 @@ class PackageDescriptor(BaseModel):
     resource_defaults: ResourceHints = Field(default_factory=ResourceHints)
 
 
-class MethodDescriptor(BaseModel):
+class MethodDescriptor(StrictDescriptorModel):
     """Method-level business descriptor."""
 
     method_name: str
@@ -75,6 +81,7 @@ class MethodDescriptor(BaseModel):
     optional_inputs: list[IOSpec] = Field(default_factory=list)
     review_rules: list[str] = Field(default_factory=list)
     human_review_triggers: list[str] = Field(default_factory=list)
+    defaults: dict[str, Any] = Field(default_factory=dict)
     resource_hints: ResourceHints = Field(default_factory=ResourceHints)
     # Gene-annotation taxonomy / candidate-bundle contract (all optional so
     # existing descriptors stay valid). category groups methods (ab_initio,
@@ -130,6 +137,14 @@ class FrozenAttemptSpec(BaseModel):
         return self
 
 
+class RegistryDocument(StrictDescriptorModel):
+    """On-disk registry shape and descriptor-file references."""
+
+    packages: dict[str, str]
+    methods: dict[str, str]
+    by_stage: dict[str, list[str]]
+
+
 class DescriptorRegistry(BaseModel):
     """Loaded descriptor registry with validated package/method references."""
 
@@ -145,15 +160,16 @@ class DescriptorRegistry(BaseModel):
         root_dir = registry_path.parent
         with registry_path.open("r", encoding="utf-8") as handle:
             raw = yaml.safe_load(handle) or {}
+        document = RegistryDocument.model_validate(raw)
 
         packages = _load_descriptors(
             root_dir / "packages",
-            raw.get("packages") or {},
+            document.packages,
             PackageDescriptor,
         )
         methods = _load_descriptors(
             root_dir / "methods",
-            raw.get("methods") or {},
+            document.methods,
             MethodDescriptor,
         )
 
@@ -164,7 +180,7 @@ class DescriptorRegistry(BaseModel):
                     f"{descriptor.package_ref!r}"
                 )
 
-        by_stage = raw.get("by_stage") or {}
+        by_stage = document.by_stage
         for stage, method_names in by_stage.items():
             for method_name in method_names or []:
                 if method_name not in methods:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
+from typing import cast
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -19,7 +20,12 @@ from app.execution.lifecycle import (
     load_method_executions,
 )
 from app.execution.method_runner import build_frozen_attempt
-from app.schemas.artifacts import GENOME_SURVEY_KMER_DB, GENOME_SURVEY_KMER_HIST
+from app.schemas.artifacts import (
+    GENOME_SURVEY_KMER_DB,
+    GENOME_SURVEY_KMER_HIST,
+    ArtifactRefJson,
+)
+from app.schemas.execution import ArtifactInputDependency, AssetInputDependency
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.genome_survey.method_application.support import (
@@ -31,6 +37,7 @@ from app.stages.genome_survey.method_application.support import (
 from app.stages.genome_survey.state import (
     ResolvedSurveyAssetsCursor,
     SurveyAssetCursor,
+    SurveyInputFamily,
 )
 from app.storage.artifacts import artifact_ref_for_path
 
@@ -64,7 +71,7 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
         return {}
 
     params = output["survey_parameters"]
-    input_family = output.get("survey_input_family") or "clean_short_dna_reads"
+    input_family: SurveyInputFamily = output.get("survey_input_family") or "short_reads"
     resolved_assets = output.get("resolved_assets") or {}
     assets = _assets_for_family(resolved_assets, input_family)
     read_paths = [str(Path(asset["path"])) for asset in assets if asset.get("path")]
@@ -127,7 +134,7 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
     script_path.chmod(0o755)
 
     try:
-        input_dependencies = []
+        input_dependencies: list[ArtifactInputDependency | AssetInputDependency] = []
         for asset, path in zip(assets, read_paths, strict=True):
             read_artifact_ref = asset.get("read_artifact_ref")
             if read_artifact_ref is not None:
@@ -194,18 +201,24 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> StateUpdate:
     record_attempt_success(state, attempt, artifacts)
     kmer_db_path = str(artifacts[0].file_path)
     kmer_hist_path = str(artifacts[1].file_path)
-    kmer_db_ref = artifact_ref_for_path(
-        absolute_data_dir(state),
-        state["session_id"],
-        kmer_db_path,
-        expected_type=GENOME_SURVEY_KMER_DB,
-    ).model_dump(mode="json")
-    kmer_hist_ref = artifact_ref_for_path(
-        absolute_data_dir(state),
-        state["session_id"],
-        kmer_hist_path,
-        expected_type=GENOME_SURVEY_KMER_HIST,
-    ).model_dump(mode="json")
+    kmer_db_ref = cast(
+        ArtifactRefJson,
+        artifact_ref_for_path(
+            absolute_data_dir(state),
+            state["session_id"],
+            kmer_db_path,
+            expected_type=GENOME_SURVEY_KMER_DB,
+        ).model_dump(mode="json"),
+    )
+    kmer_hist_ref = cast(
+        ArtifactRefJson,
+        artifact_ref_for_path(
+            absolute_data_dir(state),
+            state["session_id"],
+            kmer_hist_path,
+            expected_type=GENOME_SURVEY_KMER_HIST,
+        ).model_dump(mode="json"),
+    )
 
     substeps = dict(output.get("substeps") or {})
     kmer_count = substeps.get("kmer_count") or {}
@@ -214,8 +227,8 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> StateUpdate:
         "name": "kmer_count",
         "status": "executed",
         "method_name": attempt.method_name,
-        "kmer_db_ref": kmer_db_path,
-        "kmer_hist_ref": kmer_hist_path,
+        "kmer_db_ref": kmer_db_ref,
+        "kmer_hist_ref": kmer_hist_ref,
     }
     return update_survey_output(
         state,
@@ -236,14 +249,6 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> StateUpdate:
 
 def _assets_for_family(
     assets: ResolvedSurveyAssetsCursor,
-    family: str,
+    family: SurveyInputFamily,
 ) -> list[SurveyAssetCursor]:
-    if family == "clean_short_dna_reads":
-        return list(assets.get("clean_short_dna_reads") or [])
-    if family == "raw_short_dna_reads":
-        return list(assets.get("raw_short_dna_reads") or [])
-    if family == "clean_long_reads":
-        return list(assets.get("clean_long_reads") or [])
-    if family == "raw_long_reads":
-        return list(assets.get("raw_long_reads") or [])
-    return []
+    return list(assets.get(family) or [])

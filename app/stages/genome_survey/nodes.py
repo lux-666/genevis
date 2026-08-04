@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 from typing_extensions import TypedDict
 
@@ -13,6 +14,7 @@ from app.configuration import load_descriptor_registry
 from app.domains.genome_size import resolve_explicit_genome_size
 from app.schemas.artifacts import (
     ArtifactMeta,
+    ArtifactRefJson,
     GenomeSurveyResult,
 )
 from app.schemas.state import StateUpdate, TopLevelState, validate_stage_outputs
@@ -111,14 +113,10 @@ def _fail_update(state: TopLevelState, reason: str) -> StateUpdate:
 def _survey_input_family(
     assets: ResolvedSurveyAssetsCursor,
 ) -> SurveyInputFamily | None:
-    if assets.get("clean_short_dna_reads"):
-        return "clean_short_dna_reads"
-    if assets.get("raw_short_dna_reads"):
-        return "raw_short_dna_reads"
-    if assets.get("clean_long_reads"):
-        return "clean_long_reads"
-    if assets.get("raw_long_reads"):
-        return "raw_long_reads"
+    if assets.get("short_reads"):
+        return "short_reads"
+    if assets.get("long_reads"):
+        return "long_reads"
     return None
 
 
@@ -126,14 +124,8 @@ def _survey_input_assets(
     assets: ResolvedSurveyAssetsCursor,
 ) -> list[SurveyAssetCursor]:
     family = _survey_input_family(assets)
-    if family == "clean_short_dna_reads":
-        return list(assets.get("clean_short_dna_reads") or [])
-    if family == "raw_short_dna_reads":
-        return list(assets.get("raw_short_dna_reads") or [])
-    if family == "clean_long_reads":
-        return list(assets.get("clean_long_reads") or [])
-    if family == "raw_long_reads":
-        return list(assets.get("raw_long_reads") or [])
+    if family is not None:
+        return list(assets.get(family) or [])
     return []
 
 
@@ -154,14 +146,8 @@ def resolve_survey_inputs(state: TopLevelState) -> StateUpdate:
             state,
             {
                 "status": "resolved",
-                "clean_short_dna_read_refs": [],
-                "raw_short_dna_read_refs": [],
-                "long_read_refs": [],
                 "resolved_assets": {
-                    "clean_short_dna_reads": [],
-                    "raw_short_dna_reads": [],
-                    "clean_long_reads": [],
-                    "raw_long_reads": [],
+                    "short_reads": [],
                     "long_reads": [],
                 },
             },
@@ -181,31 +167,13 @@ def resolve_survey_inputs(state: TopLevelState) -> StateUpdate:
         return _fail_update(state, f"genome survey input resolution failed: {exc}")
     long_assets = _runtime_read_assets(long_members, long_resolution.source)
 
-    short_types = set(short_resolution.metadata.get("asset_types") or [])
-    long_types = set(long_resolution.metadata.get("asset_types") or [])
-    clean_short = short_assets if "clean_short_dna_reads" in short_types else []
-    raw_short = [] if clean_short else short_assets
-    clean_long = (
-        long_assets
-        if long_resolution.source == "read_qc" or "clean_long_reads" in long_types
-        else []
-    )
-    raw_long = [] if clean_long else long_assets
-    long_reads = clean_long or raw_long
-
     return _update_genome_survey_output(
         state,
         {
             "status": "resolved",
-            "clean_short_dna_read_refs": _asset_ids(clean_short),
-            "raw_short_dna_read_refs": _asset_ids(raw_short),
-            "long_read_refs": _asset_ids(long_reads),
             "resolved_assets": {
-                "clean_short_dna_reads": clean_short,
-                "raw_short_dna_reads": raw_short,
-                "clean_long_reads": clean_long,
-                "raw_long_reads": raw_long,
-                "long_reads": long_reads,
+                "short_reads": short_assets,
+                "long_reads": long_assets,
             },
         },
     )
@@ -263,8 +231,9 @@ def _runtime_read_assets(
             "source": source,
         }
         if member.read_artifact_ref is not None:
-            asset["read_artifact_ref"] = member.read_artifact_ref.model_dump(
-                mode="json"
+            asset["read_artifact_ref"] = cast(
+                ArtifactRefJson,
+                member.read_artifact_ref.model_dump(mode="json"),
             )
         assets.append(asset)
     return assets

@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from app.execution.evidence import load_frozen_attempt
 from app.integrity import sha256_file
 from app.schemas.artifacts import (
@@ -260,7 +262,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
         genomescope.chmod(0o755)
         return bin_dir
 
-    def _legacy_genomescope_state(self, tmpdir: str):
+    def _indexed_genomescope_state(self, tmpdir: str):
         state = initial_state(
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
@@ -268,7 +270,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
         )
         state["current_stage"] = "genome_survey"
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        work_dir = paths.work_path("genome_survey", "legacy_jellyfish")
+        work_dir = paths.work_path("genome_survey", "indexed_jellyfish")
         work_dir.mkdir(parents=True, exist_ok=True)
         sources = [
             (work_dir / "jellyfish_kmers.jf", GENOME_SURVEY_KMER_DB, "fake-jf\n"),
@@ -303,15 +305,17 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 },
                 "kmer_db_path": str(db_artifact.path),
                 "kmer_hist_path": str(histogram_artifact.path),
-                "kmer_db_artifact_ref": str(db_artifact.path),
-                "kmer_hist_artifact_ref": str(histogram_artifact.path),
+                "kmer_db_artifact_ref": db_artifact.ref.model_dump(mode="json"),
+                "kmer_hist_artifact_ref": histogram_artifact.ref.model_dump(
+                    mode="json"
+                ),
             }
         }
         return state, db_artifact, histogram_artifact
 
-    def test_legacy_jellyfish_paths_upgrade_during_genomescope2_freeze(self):
+    def test_indexed_kmer_artifact_refs_freeze_genomescope2(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state, db_artifact, histogram_artifact = self._legacy_genomescope_state(
+            state, db_artifact, histogram_artifact = self._indexed_genomescope_state(
                 tmpdir
             )
 
@@ -339,41 +343,16 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(dependency.artifact_ref, histogram_artifact.ref)
             self.assertEqual(dependency.path, str(histogram_artifact.path))
 
-    def test_legacy_jellyfish_artifact_failures_fail_closed(self):
-        cases = {
-            "unindexed": "not present in the index",
-            "missing": "kmer_hist.tsv",
-            "wrong_type": "expected 'genome_survey.kmer_hist'",
-            "byte_drift": "artifact ref integrity mismatch",
-        }
-        for case, expected in cases.items():
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
-                state, db_artifact, histogram_artifact = self._legacy_genomescope_state(
-                    tmpdir
-                )
-                survey = state["stage_outputs"]["genome_survey"]
-                if case == "unindexed":
-                    paths = SessionPaths.from_run_dir(state["data_dir"])
-                    unindexed = paths.artifact_path(
-                        "genome_survey", "legacy_unindexed.tsv"
-                    )
-                    unindexed.parent.mkdir(parents=True, exist_ok=True)
-                    unindexed.write_text("1\t1\n", encoding="utf-8")
-                    survey["kmer_hist_path"] = str(unindexed)
-                    survey["kmer_hist_artifact_ref"] = str(unindexed)
-                elif case == "missing":
-                    histogram_artifact.path.unlink()
-                elif case == "wrong_type":
-                    survey["kmer_hist_path"] = str(db_artifact.path)
-                    survey["kmer_hist_artifact_ref"] = str(db_artifact.path)
-                else:
-                    histogram_artifact.path.write_text("changed\n", encoding="utf-8")
+    def test_string_kmer_artifact_refs_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state, _db_artifact, histogram_artifact = self._indexed_genomescope_state(
+                tmpdir
+            )
+            survey = state["stage_outputs"]["genome_survey"]
+            survey["kmer_hist_artifact_ref"] = str(histogram_artifact.path)
 
-                update = freeze_genomescope2_attempt(state)
-
-                output = update["stage_outputs"]["genome_survey"]
-                self.assertEqual(output["status"], "failed")
-                self.assertIn(expected, output["reason"])
+            with self.assertRaises(ValidationError):
+                freeze_genomescope2_attempt(state)
 
     def test_missing_resources_fail_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -427,7 +406,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["confidence"], "high")
-            self.assertEqual(survey["survey_input_family"], "clean_short_dna_reads")
+            self.assertEqual(survey["survey_input_family"], "short_reads")
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
             self.assertEqual(survey["genome_size_source"], "provided")
             self.assertIsNone(survey["skip_reason"])
@@ -478,7 +457,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["confidence"], "high")
-            self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
+            self.assertEqual(survey["survey_input_family"], "short_reads")
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
             self.assertEqual(survey["genome_size_source"], "provided")
             self.assertEqual(
@@ -583,7 +562,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
-            self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
+            self.assertEqual(survey["survey_input_family"], "short_reads")
             self.assertEqual(
                 survey["survey_input_refs"], ["s1:raw_short_dna_reads:short.fq"]
             )
@@ -593,7 +572,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(
                 payload["input_asset_refs"], ["s1:raw_short_dna_reads:short.fq"]
             )
-            self.assertEqual(payload["metadata"]["input_family"], "raw_short_dna_reads")
+            self.assertEqual(payload["metadata"]["input_family"], "short_reads")
             self.assertEqual(survey["estimates"]["heterozygosity"], 0.001)
             self.assertEqual(survey["estimates"]["repeat_fraction"], 0.2)
             histogram_ref = ArtifactRef.model_validate(survey["kmer_hist_artifact_ref"])
@@ -808,7 +787,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
-            self.assertEqual(survey["survey_input_family"], "raw_long_reads")
+            self.assertEqual(survey["survey_input_family"], "long_reads")
             self.assertEqual(
                 survey["survey_input_refs"], ["s1:raw_long_reads:reads.fastq"]
             )
@@ -891,7 +870,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
-            self.assertEqual(survey["survey_input_family"], "clean_long_reads")
+            self.assertEqual(survey["survey_input_family"], "long_reads")
             self.assertEqual(survey["survey_input_refs"], [source_asset_id])
             # Jellyfish must have been pointed at filtered path, not raw gz.
             script = (
@@ -1047,7 +1026,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
-            self.assertEqual(survey["survey_input_family"], "clean_long_reads")
+            self.assertEqual(survey["survey_input_family"], "long_reads")
             script = (
                 Path(result["data_dir"])
                 / "work"
@@ -1103,7 +1082,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
-            self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
+            self.assertEqual(survey["survey_input_family"], "short_reads")
             script = (
                 Path(result["data_dir"])
                 / "work"
@@ -1127,9 +1106,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 "genome_survey": {
                     "status": "local_execution_planned",
                     "execution_mode": "local",
-                    "survey_input_family": "clean_long_reads",
+                    "survey_input_family": "long_reads",
                     "survey_input_refs": [],
-                    "resolved_assets": {"clean_long_reads": []},
+                    "resolved_assets": {"long_reads": []},
                     "survey_parameters": {
                         "kmer_size": 21,
                         "hash_size": "10M",

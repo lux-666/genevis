@@ -13,10 +13,14 @@ from unittest.mock import patch
 
 from app.control.lifecycle import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
-from app.execution.lifecycle import run_method_attempts
+from app.execution.lifecycle import load_method_executions, run_method_attempts
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
+    HIC_ASSEMBLY_FILE,
+    HIC_CONTACT_MAP,
+    HIC_HTML_REPORT,
+    HIC_SCAFFOLDED_ASSEMBLY,
     ArtifactMeta,
     ArtifactRef,
     ParameterAttempt,
@@ -44,6 +48,7 @@ from app.stages.hic_scaffolding.parameters.workflow import (
 )
 from app.storage.artifacts import (
     publish_artifact_record,
+    publish_or_recover_work_artifact,
     read_artifact_records,
     resolve_artifact_ref,
 )
@@ -127,7 +132,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         state["current_stage"] = "hic_scaffolding"
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
-            if registry_ref is not None else None
+            if registry_ref is not None
+            else None
         )
         return state
 
@@ -418,6 +424,23 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         )
         return {**blocked, **update}
 
+    def _ran_autohic_state(self, tmpdir: str) -> tuple[dict, object]:
+        assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+        envs_yaml = self._fake_autohic_environment(
+            tmpdir,
+            error_model,
+            chromosome_model,
+        )
+        approved = self._approve_parameters(
+            self._run_to_parameter_gate(self._configured_state(tmpdir, assembly, reads))
+        )
+        with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+            frozen = {**approved, **freeze_autohic_attempt(approved)}
+            ran = {**frozen, **run_method_attempts(frozen, LIFECYCLE)}
+        [execution] = load_method_executions(ran, LIFECYCLE)
+        self.assertTrue(execution.evidence.success)
+        return ran, execution.attempt
+
     def test_graph_has_direct_autohic_without_selection_or_skip_nodes(self):
         nodes = set(build_stage().get_graph().nodes)
         self.assertIn("autohic", nodes)
@@ -547,8 +570,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             _source.parent.mkdir(parents=True, exist_ok=True)
             _source.write_text(json.dumps(registry), encoding="utf-8")
             _artifact = ArtifactMeta.from_file(
-                _source, stage="inventory",
-                method_name="inventory.register_assets", artifact_type="asset_registry"
+                _source,
+                stage="inventory",
+                method_name="inventory.register_assets",
+                artifact_type="asset_registry",
             )
             state["asset_registry_ref"] = publish_artifact_record(
                 state["data_dir"], state["session_id"], _artifact
@@ -975,6 +1000,114 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 first_candidate,
             )
             self.assertEqual(replay_hic["parameter_attempts"][0]["status"], "executed")
+
+    def test_missing_frozen_expected_output_fails_collect_before_publication(self):
+        review_artifact_types = {
+            HIC_SCAFFOLDED_ASSEMBLY,
+            HIC_CONTACT_MAP,
+            HIC_ASSEMBLY_FILE,
+            HIC_HTML_REPORT,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_cases = (
+                ("scaffold", "scaffold_fasta"),
+                ("contact map", "contact_map"),
+                ("assembly", "assembly_file"),
+                ("HTML report", "html_report"),
+            )
+
+            for label, metadata_key in missing_cases:
+                with self.subTest(output=label):
+                    case_dir = Path(tmpdir) / label.replace(" ", "_")
+                    case_dir.mkdir()
+                    # Each case needs an independent run because collection does
+                    # not retry or recreate a missing immutable output.
+                    case_ran, case_attempt = self._ran_autohic_state(str(case_dir))
+                    expected_paths = {
+                        Path(str(case_attempt.metadata[key]))
+                        for _, key in missing_cases
+                    }
+                    self.assertEqual(
+                        set(case_attempt.expected_outputs),
+                        expected_paths,
+                    )
+                    case_path = Path(str(case_attempt.metadata[metadata_key]))
+                    self.assertTrue(case_path.is_file())
+                    records_before = read_artifact_records(case_ran["data_dir"], "s1")
+                    events_before = Ledger(case_ran["data_dir"]).read_events("s1")
+                    case_path.unlink()
+
+                    result = build_stage().invoke(case_ran)
+
+                    hic = result["stage_outputs"]["hic_scaffolding"]
+                    self.assertEqual(result["supervision_state"], "failed_terminal")
+                    self.assertEqual(hic["status"], "failed")
+                    self.assertEqual(hic["failure_kind"], "collect")
+                    self.assertIn(str(case_path), hic["reason"])
+                    self.assertNotIn("method_candidates", hic)
+                    self.assertNotIn("hic_review_bundle_ref", hic)
+                    self.assertNotIn("hic_qc_report_ref", hic)
+                    self.assertIsNone(result.get("active_interrupt"))
+                    self.assertEqual(len(hic["parameter_attempts"]), 1)
+
+                    records_after = read_artifact_records(result["data_dir"], "s1")
+                    new_records = records_after[len(records_before) :]
+                    self.assertFalse(
+                        review_artifact_types
+                        & {record["artifact_type"] for record in new_records}
+                    )
+                    events_after = Ledger(result["data_dir"]).read_events("s1")
+                    new_event_types = {
+                        event["event_type"]
+                        for event in events_after[len(events_before) :]
+                    }
+                    self.assertNotIn("attempt_succeeded", new_event_types)
+                    self.assertNotIn("artifact_registered", new_event_types)
+
+    def test_late_publication_failure_leaves_only_indexed_orphan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ran, _ = self._ran_autohic_state(tmpdir)
+            records_before = read_artifact_records(ran["data_dir"], "s1")
+            events_before = Ledger(ran["data_dir"]).read_events("s1")
+            publish_calls = 0
+
+            def publish_then_fail(*args, **kwargs):
+                nonlocal publish_calls
+                publish_calls += 1
+                if publish_calls == 1:
+                    return publish_or_recover_work_artifact(*args, **kwargs)
+                raise OSError("contact-map publication failed after scaffold publish")
+
+            with patch(
+                "app.stages.hic_scaffolding.method_application.support."
+                "publish_or_recover_work_artifact",
+                side_effect=publish_then_fail,
+            ):
+                result = build_stage().invoke(ran)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(publish_calls, 2)
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(hic["status"], "failed")
+            self.assertEqual(hic["failure_kind"], "collect")
+            self.assertNotIn("method_candidates", hic)
+            self.assertNotIn("hic_review_bundle_ref", hic)
+            self.assertNotIn("hic_qc_report_ref", hic)
+            self.assertIsNone(result.get("active_interrupt"))
+            self.assertEqual(len(hic["parameter_attempts"]), 1)
+
+            records_after = read_artifact_records(result["data_dir"], "s1")
+            new_records = records_after[len(records_before) :]
+            self.assertEqual(
+                [record["artifact_type"] for record in new_records],
+                [HIC_SCAFFOLDED_ASSEMBLY],
+            )
+            events_after = Ledger(result["data_dir"]).read_events("s1")
+            new_event_types = {
+                event["event_type"] for event in events_after[len(events_before) :]
+            }
+            self.assertNotIn("attempt_succeeded", new_event_types)
+            self.assertNotIn("artifact_registered", new_event_types)
 
     def test_approved_autohic_runs_then_blocks_at_separate_adoption_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:

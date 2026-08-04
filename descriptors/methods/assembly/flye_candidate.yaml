@@ -6,10 +6,6 @@ goal: "Plan a Flye candidate assembly bundle, with explicit opt-in local Flye ex
 required_inputs:
   - name: long_reads
     type: clean_long_reads_or_fofn
-    accepted_asset_types:
-      - clean_long_reads
-    accepted_refs:
-      - long_reads.fofn
     description: "Clean long reads or an approved long-read FOFN from read_qc."
 expected_outputs:
   - name: draft_assembly

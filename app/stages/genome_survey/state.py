@@ -40,10 +40,8 @@ else:
 EstimateValue = int | float | None
 EstimateSource = Literal["provided", "survey"]
 SurveyInputFamily = Literal[
-    "clean_short_dna_reads",
-    "raw_short_dna_reads",
-    "clean_long_reads",
-    "raw_long_reads",
+    "short_reads",
+    "long_reads",
 ]
 
 
@@ -60,10 +58,7 @@ class SurveyAssetCursor(TypedDict, total=False):
 
 
 class ResolvedSurveyAssetsCursor(TypedDict, total=False):
-    clean_short_dna_reads: list[SurveyAssetCursor]
-    raw_short_dna_reads: list[SurveyAssetCursor]
-    clean_long_reads: list[SurveyAssetCursor]
-    raw_long_reads: list[SurveyAssetCursor]
+    short_reads: list[SurveyAssetCursor]
     long_reads: list[SurveyAssetCursor]
 
 
@@ -77,8 +72,8 @@ class SurveySubstepCursor(TypedDict, total=False):
     name: str
     status: str
     method_name: str
-    kmer_db_ref: str
-    kmer_hist_ref: str
+    kmer_db_ref: ArtifactRefJson
+    kmer_hist_ref: ArtifactRefJson
     summary_ref: str
 
 
@@ -97,9 +92,6 @@ class GenomeSurveyCursor(TypedDict, total=False):
     method_name: str
     execution_attempts: list[dict[str, CursorJsonValue]]
 
-    clean_short_dna_read_refs: list[str]
-    raw_short_dna_read_refs: list[str]
-    long_read_refs: list[str]
     resolved_assets: ResolvedSurveyAssetsCursor
     selected_mode: Literal["full", "skipped_no_usable_reads"]
     survey_input_family: SurveyInputFamily
@@ -115,8 +107,8 @@ class GenomeSurveyCursor(TypedDict, total=False):
 
     kmer_db_path: str
     kmer_hist_path: str
-    kmer_db_artifact_ref: ArtifactRefJson | str
-    kmer_hist_artifact_ref: ArtifactRefJson | str
+    kmer_db_artifact_ref: ArtifactRefJson
+    kmer_hist_artifact_ref: ArtifactRefJson
     genomescope2_summary_path: str
     genomescope2_summary_ref: str
     genomescope2_output_dir: str

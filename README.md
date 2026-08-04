@@ -390,9 +390,11 @@ complete slice:
 5. expose the canonical method ID to the planner where user selection applies;
 6. add selection, execution, failure, and artifact tests.
 
-`tests/test_registry_executable_invariant.py` rejects a registered local method
-that does not have a wired execution path; descriptor/configuration tests cover
-the registered planner-only capability.
+`tests/test_registry_executable_invariant.py` derives registered local coverage
+from imported lifecycles, verifies each shared freeze/run/collect graph and
+outer stage node, and proves the planner-only Read-QC skip route cannot launch
+a filter attempt. Descriptor/configuration tests also fail closed on undeclared
+descriptor YAML fields.
 
 ## Verification
 

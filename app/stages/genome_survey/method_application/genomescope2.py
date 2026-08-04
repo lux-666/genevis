@@ -20,6 +20,7 @@ from app.schemas.artifacts import (
     GENOME_SURVEY_KMER_DB,
     GENOME_SURVEY_KMER_HIST,
     GENOME_SURVEY_MODEL_SUMMARY,
+    ArtifactRefJson,
 )
 from app.schemas.execution import ArtifactInputDependency
 from app.schemas.state import StateUpdate, TopLevelState
@@ -30,7 +31,6 @@ from app.stages.genome_survey.method_application.support import (
     survey_output,
     update_survey_output,
 )
-from app.storage.artifacts import artifact_ref_for_path
 
 METHOD_NAME = "genome_survey.model.genomescope2"
 FROZEN_STATUS = "genomescope2_frozen"
@@ -189,18 +189,11 @@ def collect_genomescope2_artifacts(state: TopLevelState) -> StateUpdate:
 
 def _artifact_dependency(
     state: TopLevelState,
-    raw_ref: object,
+    raw_ref: ArtifactRefJson,
     path: str,
     *,
     expected_type: str,
 ) -> ArtifactInputDependency:
-    if isinstance(raw_ref, str):
-        raw_ref = artifact_ref_for_path(
-            absolute_data_dir(state),
-            state["session_id"],
-            raw_ref,
-            expected_type=expected_type,
-        )
     dependency = artifact_input_dependency(state, raw_ref, path)
     if dependency.artifact_ref.artifact_type != expected_type:
         raise ValueError(

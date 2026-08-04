@@ -88,11 +88,27 @@ AutoHiC entry point; Gene Agent does not reimplement Juicer, 3D-DNA, error
 detection, or chromosome assignment inside the graph. There is no AutoHiC
 remote/scheduler Runner.
 
+Readiness and produced-output validation are separate boundaries. Freezing
+validates the declared executable, models, input material, and output paths,
+but does not require those output files to exist before the process runs. Once
+the process reports success, collection validates every frozen
+`expected_outputs` member before its first new publication. For AutoHiC, that
+is the chromosome FASTA, `.hic`, `.assembly`, and HTML report. Each required
+source must be a file, unless the immutable index already holds a matching
+attempt-local product that can be recovered during crash replay. A missing or
+non-file member without that record is a terminal `failure_kind: collect`
+result: it opens no review candidate or adoption gate and publishes none of the
+four review products, review bundle, or QC report.
+
 On the normal wrapper-success path, collection publishes the chromosome-scale
 FASTA and the `.hic`, `.assembly`, and HTML review products, together with
 compact review/QC bundles and the canonical execution ref. The shared runner
 already owns stdout, stderr, and process evidence; collection does not register
-those logs again.
+those logs again. Publication is deliberately not transactional. If a later
+publication fails after an earlier product was moved and indexed, that earlier
+product remains an indexed orphan; collection records no
+`attempt_succeeded` or `artifact_registered` semantic event for it, emits no
+review candidate or gate, and does not retry or roll back the publication.
 
 ## Adoption and retries
 
@@ -114,12 +130,6 @@ previous mapping or overwrites its artifacts.
 - The QC bundle explicitly records that automatic QC thresholds are not
   applied. Final biological adoption is a human decision, not an implemented
   auto-adopter.
-- The generated wrapper requires all four expected products before reporting
-  success, but the collection helper independently requires the FASTA and
-  tolerates absent declared review artifacts. Required-output enforcement
-  therefore relies on the wrapper-success boundary; do not claim that collect
-  performs a second complete output check. This mismatch is tracked in
-  [architecture conformance](../reference/conformance.md).
 - Production execution is local to the CLI host. Scheduler submission,
   process reattachment, and remote orchestration are not implemented.
 - Requirement failure, parameter rejection, exhausted retries, and execution

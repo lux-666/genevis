@@ -91,6 +91,21 @@ events and writes blocked or failed operator reports.
 | SQLite/memory checkpoint selection and durable resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`, `app/control/lifecycle.py`; `tests/test_checkpointer.py`, `tests/test_durable_resume.py` |
 | Terminal reporting and checkpoint compaction | `wired` | `partial` | `tested` | `contract-drift` | `app/graph/checkpoint_compaction.py`, `app/reports/`; live-state report and replay gaps in [conformance](../reference/conformance.md) |
 
+## Cross-cutting implementation boundaries
+
+These boundaries apply across multiple stage graphs. This table identifies the
+implemented owner and verification surface; the linked reference document owns
+the exact behavioral contract.
+
+| Boundary | Current implementation | Code and test evidence | Contract owner |
+|---|---|---|---|
+| Stage resource resolution | Stage adapters query canonical `ResourceSpec` objects through `resource_resolution.py`. There is no separate repository planning-preflight API or duplicate stage-requirement table. Method/environment preflight occurs at frozen-attempt construction. | `app/stages/resource_specs.py`, `app/stages/resource_resolution.py`; `tests/test_project_scaffold.py`, stage-focused tests | [Resource handoff](../reference/resource-handoff.md) |
+| Genome Survey logical inputs | The stage boundary exposes only `short_reads` and `long_reads`, prefers the short-read family, and leaves clean/raw lifecycle priority to each resource spec. No-read execution is permitted only when an explicit genome size supports the documented skip path. | `app/stages/genome_survey/nodes.py`, `app/stages/genome_survey/state.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` | [Stage contracts](../reference/stage-contracts.md) |
+| Executable artifact dependencies | Genome Survey k-mer products cross the Jellyfish/GenomeScope2 boundary as indexed `ArtifactRefJson` values. The consumer has no path-string upgrade branch. | `app/stages/genome_survey/method_application/jellyfish.py`, `genomescope2.py`; `tests/test_genome_survey.py` | [Data contract](../reference/data-contract.md) |
+| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The committed registry loads as 18 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](../reference/descriptors.md) |
+| Registered execution classes | The registry is partitioned into 17 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](../reference/descriptors.md) |
+| AutoHiC output collection | After process success and before the first new publication, collection requires all four frozen products or matching attempt-local indexed recovery records. Missing products fail collection; a later publication failure may leave an indexed orphan without success semantic events. | `app/stages/hic_scaffolding/method_application/support.py`; `tests/test_hic_scaffolding.py` | [AutoHiC](autohic.md), [Stage contracts](../reference/stage-contracts.md) |
+
 ## Stage node inventory
 
 These rows classify concrete node groups. Nested method nodes are expanded in
@@ -105,8 +120,8 @@ the method inventory rather than being hidden inside one stage-level color.
 | Read QC `enter`, `resolve_raw_long_reads`, planning, `commit`, `fail` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/read_qc/builder.py`; `tests/test_read_qc.py` |
 | Read QC `seqkit_stats` nested method node | `wired` | `executable` | `tested` | `none` | `app/stages/read_qc/method_application/seqkit_stats.py`; `tests/test_read_qc.py` |
 | Read QC `seqkit_length_filter` nested method node, including intentional skip | `wired` | `executable` plus `implemented-no-process` skip | `tested` | `none` | `app/stages/read_qc/method_application/seqkit_length_filter.py`, `app/stages/read_qc/nodes.py`; `tests/test_read_qc.py` |
-| Genome Survey input resolution and `select_survey_mode` | `wired` | `implemented-no-process` | `tested` | `contract-drift` | Runtime accepts short or long reads, while a legacy declarative prerequisite still lags; `tests/test_genome_survey.py`; [conformance](../reference/conformance.md) |
-| Genome Survey `jellyfish -> genomescope2` method chain | `wired` | `executable` | `tested` | `contract-drift` | `app/stages/genome_survey/method_application/`; legacy string artifact-ref window in [conformance](../reference/conformance.md) |
+| Genome Survey input resolution and `select_survey_mode` | `wired` | `implemented-no-process` | `tested` | `none` | Stage-owned `short_reads | long_reads` resolution and explicit-size skip; `app/stages/genome_survey/nodes.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` |
+| Genome Survey `jellyfish -> genomescope2` method chain | `wired` | `executable` | `tested` | `none` | Indexed k-mer `ArtifactRefJson` handoff with no string compatibility branch; `app/stages/genome_survey/method_application/`; `tests/test_genome_survey.py` |
 | Genome Survey `write_full_survey_result`, explicit-prior skip, `commit`, `fail` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/genome_survey/builder.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` |
 
 ### Assembly production, review, and chromosome finishing
@@ -124,7 +139,7 @@ the method inventory rather than being hidden inside one stage-level color.
 | Assembly Review `human_gate` and adoption/resume transaction | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly_review/builder.py`, `app/control/resume_transaction.py`; `tests/test_review_resume.py` |
 | Hi-C `resolve_hic_inputs` and requirement boundary | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/`; `tests/test_hic_scaffolding.py` |
 | Hi-C `recommend_autohic_parameters` and approval/retry gates | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`; `tests/test_hic_scaffolding.py`, `tests/test_parameter_resolution_validation.py` |
-| Hi-C `autohic` nested method node and collection | `wired` | `partial` | `partially-tested` | `contract-drift` | Runner is real, but collection does not independently require every declared review product; [conformance](../reference/conformance.md) |
+| Hi-C `autohic` nested method node and collection | `wired` | `executable` | `tested` | `none` | Real runner plus fail-closed validation of FASTA, `.hic`, `.assembly`, and HTML, including replay and late-publication failure coverage; `app/stages/hic_scaffolding/method_application/`; `tests/test_hic_scaffolding.py` |
 | Hi-C `chromosome_assembly_review`, block, and adoption resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/builder.py`, `app/control/lifecycle.py`; `tests/test_hic_scaffolding.py`, `tests/test_review_resume.py` |
 | T2T input and motif chain: `resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process` with conditional model call | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`; `tests/test_t2t_motif.py` |
 | T2T threshold recommendation, approval, and `prepare_parameters` | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/t2t/parameters/`; `tests/test_t2t.py`, `tests/test_parameter_recommendation_v3_contract.py` |
@@ -147,35 +162,41 @@ the method inventory rather than being hidden inside one stage-level color.
 ## Registered method inventory
 
 `descriptors/registry.yaml` currently contains 18 registered methods. Seventeen
-declare `execution_kind: local` and are included in the wired-runner invariant.
-The sole `planner_only` method is an intentional no-process choice, not a
-missing implementation. There are currently **no descriptor-only placeholder
-methods in the registry**.
+declare `execution_kind: local`; the executable invariant binds each ID to an
+imported lifecycle, nested method graph, and outer stage node. The sole
+`planner_only` method is an intentional no-process choice whose real
+planner-to-stage route is tested. There are currently **no descriptor-only
+placeholder methods in the registry**. Descriptor loading is strict at the
+registry and every nested YAML model boundary.
 
 | Registered method | Descriptor | Adapter/lifecycle | Collection | Verification | Debt or limitation |
 |---|---|---|---|---|---|
 | `read_qc.long_read_stats.seqkit_stats` | registered | `executable` | implemented | `tests/test_read_qc.py` | none |
 | `read_qc.length_filter.seqkit_seq` | registered | `executable` | implemented | `tests/test_read_qc.py` | requires explicit approved `min_len` |
 | `read_qc.length_filter.skip` | registered | `implemented-no-process` (`planner_only`) | not applicable | `tests/test_read_qc.py`, `tests/test_ask_plan.py` | deliberate raw-read pass-through |
-| `genome_survey.kmer_count.jellyfish` | registered | `executable` | implemented | `tests/test_genome_survey.py` | Genome Survey contract drift applies |
-| `genome_survey.model.genomescope2` | registered | `executable` | implemented | `tests/test_genome_survey.py` | Genome Survey contract drift applies |
-| `assembly.candidate.flye` | registered with catalog | `executable` | implemented | `tests/test_assembly.py` | inert descriptor input keys are recorded contract drift |
+| `genome_survey.kmer_count.jellyfish` | registered | `executable` | implemented | `tests/test_genome_survey.py` | typed k-mer artifact publication |
+| `genome_survey.model.genomescope2` | registered | `executable` | implemented | `tests/test_genome_survey.py` | typed k-mer artifact dependency |
+| `assembly.candidate.flye` | registered with catalog | `executable` | implemented | `tests/test_assembly.py`, `tests/test_configuration.py` | none |
 | `assembly.candidate.hifiasm` | registered with catalog | `executable` | implemented | `tests/test_assembly.py`, `tests/test_hifiasm_evidence_case.py` | richest current literature case coverage |
 | `assembly.candidate.hifiasm_ont` | registered with catalog | `executable` | implemented | `tests/test_assembly.py`, `tests/test_hifiasm_numeric_retrieval.py` | structured guidance exists; numeric case corpus is Hifiasm-centered |
 | `assembly.candidate.nextdenovo` | registered with catalog | `executable` | implemented | `tests/test_assembly.py` | catalog exists; no equivalent literature case corpus |
 | `assembly_dedup.purge_dups` | registered | `executable` | implemented | `tests/test_assembly_dedup.py` | none |
 | `assembly_review.eval.quast` | registered | `executable` | implemented | `tests/test_assembly_review.py` | stage-local review, not final integrated QA |
 | `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py` | requires operator-provided offline lineage provenance |
-| `hic_scaffolding.candidate.autohic` | registered with catalog | `executable` | `partial` | `tests/test_hic_scaffolding.py` | missing-product collection drift is open |
+| `hic_scaffolding.candidate.autohic` | registered with catalog | `executable` | implemented | `tests/test_hic_scaffolding.py` | all four review products are mandatory at collection |
 | `t2t.alignment.minimap2` | registered with catalog | `executable` | implemented | `tests/test_t2t.py` | none |
 | `repeat_annotation.masking.repeatmasker` | registered | `executable` | implemented | `tests/test_repeat_annotation.py` | requires an operator-registered repeat library |
 | `gene_annotation.candidate.augustus` | registered | `executable` | implemented | `tests/test_gene_annotation.py` | none |
 | `gene_annotation.candidate.miniprot` | registered | `executable` | implemented | `tests/test_gene_annotation_miniprot.py` | none |
 | `function_annotation.candidate.diamond` | registered | `executable` | implemented | `tests/test_function_annotation_diamond.py` | requires explicit database provenance |
 
-`tests/test_registry_executable_invariant.py` checks equality between registered
-local methods and the explicit wired-runner set. It deliberately excludes the
-one planner-only skip method from that local-runner equality.
+`tests/test_registry_executable_invariant.py` derives local IDs from imported
+`MethodExecutionLifecycle` bindings, proves those bindings cover exactly the 17
+registered local methods, and verifies each shared freeze/run/collect and outer
+stage route. It derives the planner-only set from the production planner catalog
+and exercises `read_qc.length_filter.skip` through raw-read commit while proving
+that no filter frozen attempt, runner call, or method-scoped attempt event is
+created. The two sets are disjoint and their union equals the complete registry.
 
 ## Parameter capability map
 
@@ -188,7 +209,7 @@ freeze binding, retry, and biological knowledge coverage are separate facts.
 | Assembly: Hifiasm | implemented | implemented | mandatory | implemented | implemented | current evidence retrieval is concentrated here |
 | Assembly: Hifiasm-ONT | implemented | implemented | mandatory | implemented | implemented | structured Hifiasm guidance exists; numeric cases remain Hifiasm-centered |
 | Assembly: NextDenovo | implemented | implemented | mandatory | implemented | implemented | catalog present; no equivalent literature case corpus |
-| AutoHiC | implemented | implemented | mandatory | implemented | implemented | method collection debt is downstream of parameter approval |
+| AutoHiC | implemented | implemented | mandatory | implemented | implemented | collection fail-closes on a missing declared product; terminal collect failure has no automatic retry |
 | T2T/minimap2 thresholds | implemented | implemented after motif resolution | mandatory | implemented | initial recommendation only | no T2T parameter-retry route |
 | Read QC, Survey, Dedup, Review | method/run configuration | not implemented as formal recommenders | not applicable | normal run-config freeze | not applicable | do not label these as stale recommenders |
 | Repeat/Gene/Function annotation | method/run configuration | not implemented as formal recommenders | stage review only where defined | normal run-config freeze | stage-specific | parameter recommendation is a future product decision, not an existing placeholder |
@@ -224,7 +245,7 @@ of the following:
 - a parent graph node or canonical stage;
 - a stage builder node or conditional route;
 - a registered method or planner execution kind;
-- a method adapter, collection contract, or wired-runner invariant;
+- a method adapter, collection contract, or registered execution-class invariant;
 - a parameter catalog, recommender, approval gate, retry, or attempt binding;
 - a human review gate or cross-stage resource commit;
 - a conformance entry cited by a status row.

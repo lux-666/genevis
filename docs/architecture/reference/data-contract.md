@@ -725,6 +725,6 @@ durable-record-only regeneration boundary; `work/` is reported but explicitly
 retained. There is no filesystem deletion executor for unreachable immutable
 artifacts and no post-GC artifact-index compaction. These gaps are conformance
 debt, not a reduction of the Data v2 contract.
-The localized Genome Survey string-reference compatibility window and other
-open implementation differences are listed in
-[Architecture conformance](conformance.md).
+Genome Survey k-mer handoffs are typed `ArtifactRef` values in the checkpoint
+cursor and in frozen method dependencies; legacy path strings are rejected at
+the stage boundary.

@@ -66,6 +66,29 @@ class ProjectScaffoldTests(unittest.TestCase):
         self.assertIsNone(state["asset_registry_ref"])
         self.assertEqual(state["route_trace"], [])
 
+    def test_removed_stage_planning_preflight_has_no_repository_references(self):
+        root = Path(__file__).resolve().parents[1]
+        stage_module = ".".join(("app", "stages", "preflight"))
+        table_names = ("STAGE_" + "CONTRACTS", "STAGE_" + "REQUIREMENTS")
+
+        self.assertFalse((root / "app" / "stages" / "preflight.py").exists())
+        self.assertFalse((root / "tests" / "test_preflight.py").exists())
+
+        tracked_sources = [
+            *sorted((root / "app").rglob("*.py")),
+            *sorted((root / "tests").rglob("*.py")),
+            *sorted((root / "docs" / "architecture").rglob("*.md")),
+        ]
+        tracked_sources = [
+            path for path in tracked_sources if path.name != "conformance.md"
+        ]
+        contents = "\n".join(
+            path.read_text(encoding="utf-8") for path in tracked_sources
+        )
+        self.assertNotIn(stage_module, contents)
+        for table_name in table_names:
+            self.assertNotIn(table_name, contents)
+
     def test_scaffold_includes_architecture_graph_and_descriptor_roots(self):
         root = Path(__file__).resolve().parents[1]
 
