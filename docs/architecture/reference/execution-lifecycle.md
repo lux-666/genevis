@@ -1,4 +1,15 @@
-# Execution Lifecycle
+# Method Execution Lifecycle Contract
+
+> **Status:** implemented.  
+> **Read when:** exact freeze/run/collect routing, attempt ownership, recovery,
+> or failure policy matters.  
+> **Comes from:** [Execution](../topics/execution.md).  
+> **Feeds into:** stage collection, review, and durable evidence.  
+> **Related contracts:** [Run data](data-contract.md),
+> [Execution evidence](execution-evidence.md),
+> [Parameter recommendation](parameter-recommendation.md).  
+> **Code evidence:** `app/execution/lifecycle.py`,
+> `app/execution/attempt_owners.py`.
 
 ## Scope
 
@@ -7,8 +18,9 @@ method. It defines graph boundaries, attempt ownership, recovery routing,
 process-failure behavior, and the division between the execution kernel and
 stage adapters.
 
-Data v2 owns durable fact placement and reference rules. Execution Evidence
-owns the canonical process-result body. Parameter Recommenders owns model
+The [run data contract](data-contract.md) owns durable fact placement and
+reference rules. [Execution Evidence](execution-evidence.md) owns the canonical
+process-result body. [Parameter Recommendation](parameter-recommendation.md) owns model
 request, response, parsing, and approval behavior. This specification connects
 those contracts without replacing them.
 

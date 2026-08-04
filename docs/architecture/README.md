@@ -1,54 +1,93 @@
-# Architecture Specifications
+# Gene Agent Architecture Map
 
-This directory contains the current cross-cutting contracts. Each topic has one
-owner; other documents link to it instead of restating its schema or flow.
-[`../architecture.md`](../architecture.md) is the system overview. Code and
-tests provide implementation evidence, while Git history retains superseded
-design and implementation records.
+This directory is a graph of current design, not a linear manual. Start with
+the question you are trying to answer, read one topic node, and follow only the
+contract edges needed for that task.
 
-## Specification registry
+The documentation has two disclosure layers:
 
-| Specification | Owns |
+- [`topics/`](topics/system-map.md) explains system behavior and how subsystems connect;
+- [`reference/`](reference/data-contract.md) owns exact contracts, schemas, invariants, and
+  conformance boundaries.
+
+Folder placement controls reading depth, not dependency direction. Every topic
+declares what feeds it, what it feeds, and which reference contracts own its
+precise rules.
+
+## System graph
+
+```mermaid
+flowchart LR
+    operator["Operator"] --> tui["TUI and planning"]
+    tui --> freeze["Whole-run input freeze"]
+    freeze --> orchestration["Runtime orchestration"]
+    orchestration --> stage["Compiled stage subgraph"]
+    stage --> execution["Method execution"]
+    execution --> data["Data and storage"]
+    data --> evidence["Execution evidence"]
+    data --> resources["Resource handoff"]
+    stage --> review["Human review"]
+    review --> resume["Resume saga"]
+    resume --> orchestration
+```
+
+Two distinct freeze boundaries appear in that graph. The TUI freezes the
+manifest, run configuration, and dependency snapshot for the whole run.
+Executable methods later freeze one exact attempt before a `Runner` may start
+it. Do not collapse these lifecycles.
+
+## Topic router
+
+| Question | Start here | Follow when needed |
+|---|---|---|
+| What is the whole system? | [`topics/system-map.md`](topics/system-map.md) | Runtime, data, and stage contracts linked from that page |
+| How does a user request become a run? | [`topics/tui-and-planning.md`](topics/tui-and-planning.md) | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md), frozen data contract |
+| How does the parent graph route work? | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md) | Stage contracts and review/resume |
+| How is a command frozen, run, and collected? | [`topics/execution.md`](topics/execution.md) | Execution lifecycle and evidence references |
+| Where does each fact live? | [`topics/data-and-storage.md`](topics/data-and-storage.md) | Data, resource, and evidence references |
+| How do human gates resume safely? | [`topics/review-and-resume.md`](topics/review-and-resume.md) | Data contract and runtime orchestration |
+| How are method parameters proposed and approved? | [`topics/parameter-recommendation.md`](topics/parameter-recommendation.md) | Parameter and execution references |
+| What does bootstrap own? | [`topics/bootstrap.md`](topics/bootstrap.md) | Descriptor and governance references |
+| How does the AutoHiC path differ? | [`topics/autohic.md`](topics/autohic.md) | Parameter, execution, and resource contracts |
+| Can the TUI start from clean reads or an assembly? | [`topics/tui-midstage-entry.md`](topics/tui-midstage-entry.md) | Planned behavior; current limitations are explicit |
+
+## Reference registry
+
+Read these only when a task needs the exact contract.
+
+| Contract owner | Owns |
 |---|---|
-| [`resource-handoff.md`](resource-handoff.md) | Cross-stage logical resources, resolver priority, central `resource_refs`, and FOFN boundary |
-| [`data-v2.md`](data-v2.md) | Run ownership, durable fact placement, artifact refs, checkpoint bounds and compaction, ledger/report authority, storage audit, and retention/GC |
-| [`execution-evidence.md`](execution-evidence.md) | Runtime `ExecutionResult`, durable `ExecutionEvidence`, process logs, and result cursors |
-| [`execution-lifecycle.md`](execution-lifecycle.md) | Shared freeze/run/collect graph, attempt owners, recovery routing, failure policies, and stage-adapter boundary |
-| [`parameter-recommenders.md`](parameter-recommenders.md) | Model-boundary DTOs, exact request/response flow, approval, persistence, and recommender responsibilities |
-| [`autohic-stage.md`](autohic-stage.md) | Parent/Hi-C boundary, AutoHiC-only execution, sparse multi-attempt parameter recommendation, retry, and result adoption |
-| [`bootstrap.md`](bootstrap.md) | Minimal initialization of `.env`, `config/envs.yaml`, and configured external-package conformance |
+| [`reference/data-contract.md`](reference/data-contract.md) | Run ownership, durable fact placement, checkpoint bounds, artifact refs, ledger/report authority, retention, and crash rules |
+| [`reference/execution-lifecycle.md`](reference/execution-lifecycle.md) | Freeze/run/collect graph, attempt owners, recovery routing, and stage-adapter boundary |
+| [`reference/execution-evidence.md`](reference/execution-evidence.md) | Runtime result versus durable process evidence and log refs |
+| [`reference/resource-handoff.md`](reference/resource-handoff.md) | Logical cross-stage resources, resolver priority, and FOFN boundary |
+| [`reference/parameter-recommendation.md`](reference/parameter-recommendation.md) | Exact model DTO, schema-3 evidence, sparse response, approval, and retry semantics |
+| [`reference/stage-contracts.md`](reference/stage-contracts.md) | Biological stage inputs, outputs, registered method roles, and review triggers |
+| [`reference/descriptors.md`](reference/descriptors.md) | Package and method capability metadata |
+| [`reference/governance.md`](reference/governance.md) | Source-of-truth, change-control, and quality-gate policy |
+| [`reference/conformance.md`](reference/conformance.md) | Explicit gaps between accepted design and the current working tree |
 
-## Ownership boundaries
+## Status vocabulary
 
-- Resource Handoff decides how materialized inputs move between stages.
-- Data v2 decides where durable facts live and what checkpoints may reference.
-- Execution Evidence defines the durable process-result body.
-- Execution Lifecycle defines how frozen attempts run, resume, and reach
-  stage-owned collection.
-- Parameter Recommenders defines how a selected method receives a reviewed
-  parameter recommendation.
-- Stage Contracts defines biological inputs, outputs, planning behavior, and
-  review triggers.
-- Descriptor Spec defines registered package and method capability metadata.
+- **implemented**: the linked code and tests implement the documented boundary;
+- **planned**: accepted design that is not yet available in the current product;
+- **conformance-debt**: accepted contract and implementation currently differ.
 
-No stage specification may create a second storage, execution, resource, or
-parameter-recommendation ownership model.
+A topic must not describe planned behavior as implemented. A reference contract
+must not silently absorb an implementation exception; record the gap in
+[`reference/conformance.md`](reference/conformance.md).
 
-## Vocabulary
+## Loading rules
 
-- **method selection** chooses a registered executable method;
-- **parameter recommendation** proposes values for an already selected method;
-- **parameter approval** is the human decision on that exact proposal;
-- **planning** creates bounded workflow or stage intent and does not authorize a
-  process;
-- **execution** consumes a persisted frozen attempt;
-- **report** is a regenerable operator projection and never controls workflow.
+1. Start here and select one topic from the router.
+2. Read adjacent topics only when the current page names them as an incoming or
+   outgoing edge.
+3. Load a reference page only when exact fields, paths, ownership, or invariants
+   matter to the task.
+4. Verify behavior claims against the `Code evidence` paths on the topic page.
+5. Update the single owning reference and every affected edge in the same
+   change.
 
-## Change rule
-
-1. Update the owning specification and implementation in the same change.
-2. Verify current code and tests against the changed invariant.
-3. Do not add compatibility branches for deleted development-only contracts.
-4. Register any new cross-cutting specification here.
-5. A test fixture or non-normative guide cannot create an architecture
-   exception.
+Git history retains superseded designs and implementation records. The working
+tree keeps current topics, accepted planned nodes, explicit conformance debt,
+and operational documentation only.

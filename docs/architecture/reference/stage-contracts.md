@@ -1,8 +1,19 @@
-# Stage Contracts
+# Stage Contract Reference
+
+> **Status:** implemented.  
+> **Read when:** exact biological stage inputs, outputs, methods, or review
+> triggers matter.  
+> **Comes from:** [Runtime orchestration](../topics/runtime-orchestration.md).  
+> **Feeds into:** resource validation, method planning, execution, and review.  
+> **Related contracts:** [Resource handoff](resource-handoff.md),
+> [Descriptors](descriptors.md),
+> [Execution lifecycle](execution-lifecycle.md).  
+> **Code evidence:** `app/workflow.py`, `app/graph/builder.py`,
+> `app/stages/`, `descriptors/registry.yaml`.
 
 This document defines the current biological inputs, outputs, executable
 methods, and review triggers for each workflow stage. Cross-stage file transport
-is owned by [`architecture/resource-handoff.md`](architecture/resource-handoff.md).
+is owned by [`resource-handoff.md`](resource-handoff.md).
 Registered method identities are owned by `descriptors/registry.yaml`.
 
 ## Shared stage shape
@@ -63,11 +74,13 @@ Registered methods:
 - `read_qc.length_filter.seqkit_seq`.
 
 SeqKit statistics always describe the selected long-read resource. Length
-filtering is optional and requires an explicit threshold/approval. A generated
-FOFN is an internal artifact; downstream stages consume the canonical path list.
-
-Review is required when filtering would discard excessive yield or when the
-input cannot be validated as readable long-read sequence data.
+filtering is optional and runs only when the frozen stage request already
+contains a positive `min_len` and an explicit approval flag. There is no
+stage-local Read QC review gate or implemented automatic excessive-yield-loss
+threshold; absent or unapproved thresholds select the registered skip behavior.
+A generated FOFN is an internal artifact; downstream stages consume the
+canonical path list. Missing or unusable inputs and execution failures terminate
+the stage rather than opening a Read QC review gate.
 
 ## 3. Genome Survey
 
@@ -75,8 +88,12 @@ Purpose: estimate genome size and related k-mer metrics.
 
 Logical inputs:
 
-- requires `long_reads` for admission to the first ONT MVP;
-- prefers `short_reads` for k-mer counting when they are also present.
+- a full k-mer survey requires at least one usable `short_reads` or
+  `long_reads` resource;
+- selects clean short DNA reads, then raw short DNA reads, then clean long
+  reads, then raw long reads for k-mer counting;
+- with no usable reads, an explicit operator genome size permits the
+  `skipped_no_usable_reads` evidence path; without either, the stage fails.
 
 Registered methods:
 
@@ -87,7 +104,10 @@ The stage publishes immutable survey evidence and compact scalar observations;
 it does not create a cross-stage path resource. An explicit operator genome size
 has priority over a survey estimate. If neither an explicit value nor a valid
 estimate exists when assembly requires one, the workflow fails with
-`GENOME_SIZE_UNAVAILABLE`.
+`GENOME_SIZE_UNAVAILABLE`. The stage implementation and tests support the
+alternative-input rule above; the older long-read-only declaration in
+`app/stages/resource_specs.py` is tracked in
+[Architecture conformance](conformance.md).
 
 ## 4. Assembly
 
@@ -171,8 +191,10 @@ Registered method:
 
 - `hic_scaffolding.candidate.autohic`.
 
-The parent graph bypasses this stage when chromosome-scale assembly is not
-requested or required inputs are absent. AutoHiC owns the Juicer/3D-DNA and
+The parent graph bypasses this stage only when `hic_scaffolding` is not in the
+requested stage set. If the stage was requested, missing assembly, paired Hi-C
+reads, or runtime configuration enters the stage and produces a terminal
+`blocked_missing_requirements` outcome. AutoHiC owns the Juicer/3D-DNA and
 model-assisted correction pipeline. Its adjustable L2 surface includes the
 restriction enzyme, edit rounds, correction switches, and error thresholds.
 Every shape-valid sparse recommendation requires parameter approval; successful
@@ -236,9 +258,11 @@ Registered method:
 
 - `repeat_annotation.masking.repeatmasker`.
 
-Execution requires an explicitly registered and trusted repeat library.
-RepeatMasker publishes masking output and annotation evidence. The stage does
-not claim that unregistered de-novo repeat tools ran.
+Current local execution requires an explicitly operator-registered
+`repeat_library` asset whose path is materialized; there is no separately
+enforced `metadata.trusted` flag. RepeatMasker publishes masking output and
+annotation evidence. De-novo library discovery is currently planning-only, so
+the stage does not claim that an unregistered EDTA or RepeatModeler process ran.
 
 ## 10. Gene Annotation
 

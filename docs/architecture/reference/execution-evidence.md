@@ -1,4 +1,15 @@
-# Execution Evidence
+# Execution Evidence Contract
+
+> **Status:** implemented.  
+> **Read when:** runtime results, persisted process outcomes, logs, or result
+> cursors must be distinguished exactly.  
+> **Comes from:** [Execution](../topics/execution.md).  
+> **Feeds into:** [Data and storage](../topics/data-and-storage.md), review, and
+> recovery.  
+> **Related contracts:** [Execution lifecycle](execution-lifecycle.md),
+> [Run data](data-contract.md).  
+> **Code evidence:** `app/schemas/execution.py`, `app/execution/evidence.py`,
+> `app/storage/publish.py`.
 
 ## Contract
 

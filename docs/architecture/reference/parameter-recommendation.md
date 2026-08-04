@@ -1,4 +1,15 @@
-# Stage Parameter Recommenders
+# Parameter Recommendation Contract
+
+> **Status:** implemented.  
+> **Read when:** exact model DTO, schema-3 persistence, sparse response,
+> approval, or retry semantics matter.  
+> **Comes from:** [Parameter recommendation](../topics/parameter-recommendation.md).  
+> **Feeds into:** approved method-attempt freezing and review.  
+> **Related contracts:** [Execution lifecycle](execution-lifecycle.md),
+> [Run data](data-contract.md).  
+> **Code evidence:** `app/domains/parameter_recommendation/`,
+> `app/schemas/parameter_recommendation.py`,
+> `app/schemas/parameter_catalog.py`.
 
 ## Definition
 
@@ -120,7 +131,8 @@ T2T `T2TParameterRequest` contains:
 - current task and fixed minimap2 method id;
 - canonical species facts;
 - typed `t2t_context` with the resolved telomere motif, its source, and the
-  exact ONT input count;
+  exact canonical long-read member count across the platform-preserving input
+  set;
 - the adjustable telomere and alignment threshold catalog.
 
 Before this threshold request, T2T performs a separate motif-resolution call

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sol-Luna"
+  short_description: "Orchestrate scoped Sol-Luna development with evidence"
+  default_prompt: "Use $sol-luna to plan, delegate, verify, and accept this development task."

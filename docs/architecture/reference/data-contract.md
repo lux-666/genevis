@@ -1,4 +1,18 @@
-# Data Architecture v2
+# Run Data Contract
+
+> **Status:** implemented; see [Architecture conformance](conformance.md) for
+> explicit gaps.  
+> **Read when:** exact fact ownership, run paths, checkpoint budgets, crash
+> behavior, replay, or retention matters.  
+> **Comes from:** [Data and storage](../topics/data-and-storage.md).  
+> **Feeds into:** [Execution](../topics/execution.md) and
+> [Review and resume](../topics/review-and-resume.md).  
+> **Related contracts:** [Resource handoff](resource-handoff.md),
+> [Execution evidence](execution-evidence.md).  
+> **Code evidence:** `app/storage/paths.py`, `app/storage/frozen_inputs.py`,
+> `app/storage/artifacts.py`, `app/storage/ledger.py`, `app/schemas/state.py`,
+> `app/graph/checkpoint_compaction.py`, `app/reports/`, and
+> `app/storage/audit.py`.
 
 **Scope:** Current workflow sessions
 
@@ -48,7 +62,7 @@ Data v2 distinguishes two forms of replay:
   record immutable provenance and hashes for every such dependency, but shared
   environments or reference databases do not have to be copied into the run.
 
-`control/run.json` must declare the execution-replay capability honestly:
+The accepted run-metadata vocabulary for execution-replay capability is:
 
 - `fully_materialized`: all required input bytes are owned by the run;
 - `verified_external_dependencies`: external inputs or databases are required,
@@ -56,10 +70,19 @@ Data v2 distinguishes two forms of replay:
 - `audit_only`: the original command can be inspected but cannot be promised to
   execute again.
 
+The current runtime does **not** publish `control/run.json` or another single
+run-level field carrying that enum. It persists the frozen input, machine
+dependency, and per-attempt dependency evidence needed to assess replay, but a
+consumer must inspect those records rather than trust a declared capability.
+That missing run-level declaration is explicit
+[conformance debt](conformance.md), not an implemented field.
+
 “Self-contained run” guarantees audit replay while its recorded run layout is
-intact. It guarantees execution replay only when the declared capability says
-so; relocating external dependencies or absolute stage cursor paths is outside
-that guarantee.
+intact. Execution replay additionally requires the frozen evidence to show that
+all required bytes and environments remain available; a future run-level
+capability declaration may summarize that evidence but cannot replace it.
+Relocating external dependencies or absolute stage cursor paths is outside that
+guarantee.
 
 ## 4. Fundamental Invariants
 
@@ -135,8 +158,10 @@ an object `compact` are not sufficient.
 | Fact | Authoritative owner | Allowed elsewhere |
 |---|---|---|
 | Run identity and requested configuration | `control/` | IDs and refs |
-| Imported input bytes | input artifacts | Ref, hash, size, provenance summary |
-| External input/database provenance | immutable dependency manifest | Ref and verification status |
+| Run-owned copied input bytes, when materialized | input artifacts | Ref, hash, size, provenance summary |
+| External biological input declaration and member identity | frozen input manifest plus immutable asset registry | Manifest/registry refs, ordered asset IDs, counts, and verification summary |
+| Machine environment and package selection | frozen dependency manifest | Ref and verification status |
+| Supplied reference/database provenance | frozen run configuration and the owning stage's immutable evidence record | Ref, bounded identity, and verification status |
 | Per-file sequencing identity, platform, format, and declaration provenance | immutable asset registry | Registry ArtifactRef, ordered member IDs, counts, platform/format sets |
 | Derived read-to-source correspondence | immutable read-set manifest | Manifest ArtifactRef, ordered source IDs, counts |
 | Assembly primary and method-native products | immutable executed candidate bundle plus artifact index | Executed bundle ArtifactRef, selected method/candidate IDs |
@@ -171,10 +196,12 @@ data/
 └── runs/
     └── <session_id>/
         ├── control/
-        │   ├── run.json
-        │   ├── manifest.yaml
+        │   ├── tui_state.json
+        │   ├── manifest_draft.yaml
+        │   ├── input_manifest.yaml
         │   ├── run_config.json
-        │   └── dependency_manifest.json
+        │   ├── dependency_manifest.json
+        │   └── frozen_inputs.json
         ├── ledger/
         │   └── events.jsonl
         ├── checkpoints/
@@ -214,6 +241,15 @@ Rules:
 
 - `layout.json` declares `schema_version: 2` and prevents old and new layouts
   from being mixed silently.
+- Public TUI execution uses `input_manifest.yaml`. `manifest_draft.yaml` is the
+  pre-freeze manifest projection, while `tui_state.json` remains a mutable UI
+  session/status record and never becomes executor authority. `manifest.yaml`
+  is retained by internal non-frozen materialization paths, not as the
+  authority for a frozen TUI session.
+- `frozen_inputs.json` binds the hashes of `input_manifest.yaml`,
+  `run_config.json`, and `dependency_manifest.json` and is published last.
+- `control/run.json` is an accepted future metadata owner but is not currently
+  created; see the replay-capability conformance entry.
 - Stage directories never repeat `<session_id>`.
 - Numeric recommendation and attempt directories use zero-padded, stage-local
   IDs such as `000`, `001`, and `002`.
@@ -289,16 +325,20 @@ Run snapshots preserve the exact basis used by parameter recommenders:
 - retry limits and approval policy;
 - relevant tool and reference-data provenance.
 
-Identical knowledge is snapshotted once per run and shared by run-local refs.
-Retries reference the initial snapshot and must not silently reload a changed
-catalog, policy, or evidence set.
+Retries derive from the initial immutable recommendation chain and must not
+silently reload a changed catalog, policy, or evidence set. A stage may either
+share the initial basis ref or publish an attempt-scoped copy derived from that
+verified basis: Assembly currently shares its initial ref, while AutoHiC writes
+a basis artifact for each recommendation ID after loading retry inputs from the
+initial chain. Attempt-scoped copies must remain content-consistent with the
+initial immutable basis except for explicitly modeled retry context.
 
 Cross-run physical deduplication is an implementation detail only. Runtime code
 must not replace a session-relative snapshot ref with a global hash-only ref.
 
 ## 10. Parameter-Recommendation Data Boundary
 
-[`parameter-recommenders.md`](parameter-recommenders.md) is normative for the
+[`parameter-recommendation.md`](parameter-recommendation.md) is normative for the
 model DTO, prompt rendering, response parsing, approval, and stage/model
 responsibility split. Data v2 owns only the durable placement of those facts.
 
@@ -460,6 +500,8 @@ Checkpoint state may contain:
 - compact active-interrupt ref;
 - current retry counters;
 - control/config refs;
+- bounded stage-owned review projections needed for routing or display, such as
+  Assembly Review candidate, signal, and metric summaries;
 - a bounded diagnostic route tail.
 
 Checkpoint state must not contain:
@@ -467,7 +509,7 @@ Checkpoint state must not contain:
 - parameter catalogs, rules, cases, or descriptor snapshots;
 - full input profiles or model contexts;
 - model responses or reasoning;
-- candidates, signals, metrics, or comparison tables;
+- full or unbounded candidate, signal, metric, or comparison-table bodies;
 - response-parse documents;
 - argv, script bodies, environment maps, or execution results;
 - stdout/stderr tails;
@@ -480,6 +522,8 @@ adapters and most writes go through those adapters, but the central boundary
 does not yet enforce one universal per-stage schema or reject every unknown
 cursor field. It does enforce JSON shape, known stage names, per-cursor and
 aggregate byte limits, and artifact-body/frozen-attempt embedding guards.
+Bounded stage-owned review summaries are routing projections, not durable
+business truth; their owning evidence remains in indexed immutable artifacts.
 
 Initial budgets:
 
@@ -503,8 +547,8 @@ Reports are read models:
 
 - `current_status.json` is atomically overwritten with the latest operator
   status and action;
-- `assembly_review.md` is a derived assembly-review view generated from
-  authoritative review, ledger, and artifact records;
+- `assembly_review.md` is a derived assembly-review view currently generated
+  from live stage state and its indexed review packet;
 - `session_summary.json` is the structured session outcome and timeline;
 - `session_summary.md` is an optional rendering of the same summary model.
 
@@ -513,22 +557,27 @@ decisions, failures, gaps, and artifact links as sections. Separate files must
 exist only when they represent a different immutable evidence record or a
 genuinely different audience contract.
 
-Every generated report records a source watermark containing at least the last
-ledger sequence and artifact-index digest. Reports may be deleted and
-regenerated. They are not ledger events, artifact-index rows, or resume inputs.
+The report subsystem's `current_status` and session-summary writers record a
+source watermark containing at least the last ledger sequence and
+artifact-index digest. Reports are not ledger events, artifact-index rows, or
+resume inputs. The accepted contract is that every report can be regenerated
+and carries an equivalent watermark; current-status and the stage-owned
+Assembly Review Markdown do not yet meet the full reconstruction/watermark
+boundary, as listed in [Architecture conformance](conformance.md).
 
 ## 16. Central Path Ownership
 
-Only the storage layer constructs run paths. Stage code requests paths through
-a shared API, conceptually:
+Only the storage layer constructs run paths. The current `SessionPaths` surface
+used directly or through stage/storage helpers is:
 
 ```python
-paths.stage_artifacts("assembly")
-paths.parameter_recommendation("assembly", 0)
-paths.attempt("assembly", 0)
-paths.review(review_request_id)
-paths.stage_work("assembly", 0)
-paths.reports()
+paths.stage_artifacts_dir("assembly")
+paths.artifact_path("assembly", "parameter_recommendations", "000", "...")
+paths.artifact_path("assembly", "attempts", "000", "...")
+paths.artifact_path("reviews", review_request_id, "request.json")
+paths.stage_work_dir("assembly")
+paths.work_path("assembly", "attempts", "000", "...")
+paths.report_path("session_summary.json")
 ```
 
 No stage may append `session_id` below `run_dir`, construct a `data/artifacts`
@@ -554,8 +603,10 @@ Crash rules:
 
 - An artifact/index row without a semantic event is an orphan candidate, not a
   completed transition.
-- A semantic event with a stale checkpoint is authoritative; resume
-  reconciliation may rebuild the latest safe cursor from the event and refs.
+- A semantic event with a stale checkpoint remains authoritative audit truth.
+  Current durable resume still requires the retained checkpoint, except for
+  narrowly implemented stage/evidence replay recovery; there is no generalized
+  Ledger-to-checkpoint reconstruction path.
 - Repeating a completed publish with the same path and hash succeeds
   idempotently.
 - Repeating it with different bytes fails closed.
@@ -592,7 +643,9 @@ Deletion policy:
 
 - `work/` is outside automatic cleanup and GC. An operator may remove it only
   by explicitly accepting that affected attempts can no longer resume.
-- `reports/` may be removed and regenerated.
+- A report may be removed only when an implemented durable-record-only path
+  can regenerate that report with an equivalent source watermark. This is
+  currently true for session summaries, not for every file under `reports/`.
 - Intermediate checkpoints may be pruned according to section 14.
 - Immutable artifacts may be deleted only when the session is terminal and
   they are unreachable from every retention root.
@@ -657,14 +710,21 @@ The current implementation enforces the following:
 - Assembly and Hi-C parameter recommenders share persistence and artifact
   cursors without sharing one biological/model DTO.
 - Checkpoint size budgets are enforced in tests.
-- Reports can be deleted and regenerated without changing audit facts.
+- Deleting reports does not change audit facts. Session summaries can be
+  regenerated from the Ledger and artifact index; current-status and Assembly
+  Review reconstruction limitations are listed in conformance debt.
 - The storage-audit command reports bytes by layer, largest checkpoint fields,
   duplicate content, unreachable artifacts, retained work bytes, and
   reclaimable report data.
 
 The deletion portion of section 19 is not implemented. `storage-audit` is
 read-only and has no `--apply` option. Its optional cleanup manifest is a
-dry-run projection: regenerable reports are deletion candidates, while `work/`
-is reported but explicitly retained. There is no filesystem deletion executor
-for unreachable immutable artifacts and no post-GC artifact-index compaction.
-These gaps are conformance debt, not a reduction of the Data v2 contract.
+dry-run projection: it currently labels every file under `reports/` as a
+regenerable deletion candidate, even though only session summaries meet the
+durable-record-only regeneration boundary; `work/` is reported but explicitly
+retained. There is no filesystem deletion executor for unreachable immutable
+artifacts and no post-GC artifact-index compaction. These gaps are conformance
+debt, not a reduction of the Data v2 contract.
+The localized Genome Survey string-reference compatibility window and other
+open implementation differences are listed in
+[Architecture conformance](conformance.md).

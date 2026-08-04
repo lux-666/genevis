@@ -53,14 +53,16 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 - **Shared execution boundary**：通过 `EnvResolver`、`env_dispatch`、`LocalRunner` 统一解析 conda 环境、做 preflight、冻结命令并收集产物。
 - **Durable resume**：基于 sqlite checkpointer、ledger 和 decision file，支持跨进程恢复 `assembly_review`、`hic_scaffolding` 等人工 gate。
 - **Human-in-the-loop review**：review registry 统一声明 gate、允许的决策、resume applier 和 prompt bundle，避免每个阶段各写一套暂停/恢复逻辑。
-- **Operator observability**：`inspect`、`review`、run trace、operator report 能从 durable records 里还原 session 状态、下一步动作和关键 artifact。
+- **Operator observability**：`inspect` 和 session run trace 从 durable records
+  还原状态、下一步动作和关键 artifact；blocked/failed operator report 是运行边界
+  写下的 live compact projection，当前重建限制见 architecture conformance。
 
-当前 descriptor registry 中的全部方法都具有可执行路径：
+当前 descriptor registry 中的全部方法都具有已接线的运行或规划语义：
 
-| Stage | Registered executable methods |
+| Stage | Registered capabilities |
 |---|---|
 | inventory | —（注册 manifest assets，不选择工具） |
-| read_qc | SeqKit stats、显式 skip、SeqKit length filter |
+| read_qc | SeqKit stats、显式 planner-only skip、SeqKit length filter |
 | genome_survey | Jellyfish、GenomeScope2 |
 | assembly | Flye、Hifiasm、Hifiasm-ONT、NextDenovo |
 | assembly_dedup | purge_dups |
@@ -93,11 +95,10 @@ app/
   entrypoints/  CLI boundaries, planner/TUI, review/resume commands
 
 docs/
-  architecture.md          system architecture and ownership boundaries
-  architecture/            current cross-cutting architecture specifications
-    resource-handoff.md     cross-stage logical resource contract
-    data-v2.md              run data and parameter-recommendation persistence contract
-  stage_contracts.md        current stage inputs, outputs, methods, and review triggers
+  architecture/
+    README.md               topic router and architecture graph
+    topics/                 system map and task-oriented subsystem design
+    reference/              exact contracts, governance, and conformance debt
   deployment/               installation and server-execution guidance
   user_guide/               current operator guides
 ```
@@ -371,22 +372,27 @@ gene-agent resume \
   --checkpointer sqlite
 ```
 
-## Adding an Executable Method
+## Adding a Registered Method Capability
 
-The invariant is **registered = executable**. A new method is added as one
+The invariant is **registered = wired behavior**: a local method needs a real
+execution adapter, while a `planner_only` method needs explicit, tested routing
+semantics and must not pretend to launch a process. A new method is added as one
 complete slice:
 
 1. add or reuse its package descriptor and add its method descriptor;
 2. register the package, method, and stage entry in
    `descriptors/registry.yaml`;
-3. implement a stage adapter that prepares `FrozenAttemptSpec` values and
-   collects biological outputs through the shared execution lifecycle;
+3. for `local` execution, implement a stage adapter that prepares
+   `FrozenAttemptSpec` values and collects biological outputs through the shared
+   execution lifecycle; for `planner_only`, implement the explicit no-process
+   stage behavior;
 4. add stage routing and run-config validation for its actual parameters;
 5. expose the canonical method ID to the planner where user selection applies;
 6. add selection, execution, failure, and artifact tests.
 
-`tests/test_registry_executable_invariant.py` rejects a registered method that
-does not have a wired execution path.
+`tests/test_registry_executable_invariant.py` rejects a registered local method
+that does not have a wired execution path; descriptor/configuration tests cover
+the registered planner-only capability.
 
 ## Verification
 
@@ -423,11 +429,12 @@ Intentional boundaries:
 
 ## Read More
 
-- `docs/architecture.md`：系统架构和模块边界
-- `docs/architecture/README.md`：当前规范注册表与职责边界
-- `docs/architecture/resource-handoff.md`：跨阶段逻辑资源交接
-- `docs/architecture/execution-lifecycle.md`：可执行方法的统一 freeze/run/collect 生命周期
-- `docs/architecture/data-v2.md`：新 session 的数据、参数推荐、审计、恢复与保留规范
-- `docs/stage_contracts.md`：各阶段输入/输出合同
+- `docs/architecture/README.md`：按问题选择主题、沿依赖边按需加载设计
+- `docs/architecture/topics/system-map.md`：系统地图与两级冻结边界
+- `docs/architecture/topics/tui-and-planning.md`：TUI、规划和整次运行输入冻结
+- `docs/architecture/topics/execution.md`：方法级 freeze/run/collect 生命周期
+- `docs/architecture/topics/data-and-storage.md`：状态、资源、artifact、ledger 和 checkpoint 的数据流
+- `docs/architecture/reference/stage-contracts.md`：各阶段输入/输出合同
+- `docs/architecture/reference/conformance.md`：已接受设计与当前实现之间的明确差距
 - `docs/deployment/migration.md`：新机器安装与验证
 - `docs/deployment/mac_dev_server_pull.md`：Mac 开发与服务器/HPC 执行边界

@@ -66,22 +66,34 @@ class ProjectScaffoldTests(unittest.TestCase):
         self.assertIsNone(state["asset_registry_ref"])
         self.assertEqual(state["route_trace"], [])
 
-    def test_scaffold_includes_contract_docs_and_descriptor_roots(self):
+    def test_scaffold_includes_architecture_graph_and_descriptor_roots(self):
         root = Path(__file__).resolve().parents[1]
 
         expected_paths = [
-            root / "docs" / "architecture.md",
             root / "docs" / "architecture" / "README.md",
-            root / "docs" / "architecture" / "resource-handoff.md",
-            root / "docs" / "architecture" / "data-v2.md",
-            root / "docs" / "architecture" / "execution-evidence.md",
-            root / "docs" / "architecture" / "execution-lifecycle.md",
-            root / "docs" / "architecture" / "parameter-recommenders.md",
-            root / "docs" / "architecture" / "autohic-stage.md",
-            root / "docs" / "architecture" / "bootstrap.md",
-            root / "docs" / "descriptor_spec.md",
-            root / "docs" / "stage_contracts.md",
-            root / "docs" / "governance.md",
+            root / "docs" / "architecture" / "topics" / "system-map.md",
+            root / "docs" / "architecture" / "topics" / "runtime-orchestration.md",
+            root / "docs" / "architecture" / "topics" / "tui-and-planning.md",
+            root / "docs" / "architecture" / "topics" / "execution.md",
+            root / "docs" / "architecture" / "topics" / "data-and-storage.md",
+            root / "docs" / "architecture" / "topics" / "review-and-resume.md",
+            root / "docs" / "architecture" / "topics" / "parameter-recommendation.md",
+            root / "docs" / "architecture" / "topics" / "bootstrap.md",
+            root / "docs" / "architecture" / "topics" / "autohic.md",
+            root / "docs" / "architecture" / "topics" / "tui-midstage-entry.md",
+            root / "docs" / "architecture" / "reference" / "data-contract.md",
+            root / "docs" / "architecture" / "reference" / "resource-handoff.md",
+            root / "docs" / "architecture" / "reference" / "execution-evidence.md",
+            root / "docs" / "architecture" / "reference" / "execution-lifecycle.md",
+            root
+            / "docs"
+            / "architecture"
+            / "reference"
+            / "parameter-recommendation.md",
+            root / "docs" / "architecture" / "reference" / "stage-contracts.md",
+            root / "docs" / "architecture" / "reference" / "descriptors.md",
+            root / "docs" / "architecture" / "reference" / "governance.md",
+            root / "docs" / "architecture" / "reference" / "conformance.md",
             root / "descriptors" / "registry.yaml",
         ]
 

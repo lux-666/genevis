@@ -1,7 +1,17 @@
-# Resource Handoff
+# Resource Handoff Contract
+
+> **Status:** implemented.  
+> **Read when:** a stage publishes or consumes a materialized biological file.  
+> **Comes from:** [Data and storage](../topics/data-and-storage.md) and stage
+> commit boundaries.  
+> **Feeds into:** downstream stage validation and method freezing.  
+> **Related contracts:** [Stage contracts](stage-contracts.md),
+> [Run data](data-contract.md).  
+> **Code evidence:** `app/stages/resource_specs.py`,
+> `app/stages/resource_resolution.py`, `app/schemas/resource_ref.py`.
 
 This specification owns cross-stage file handoff. Biological inputs, outputs,
-and review triggers remain in [`../stage_contracts.md`](../stage_contracts.md);
+and review triggers remain in [`stage-contracts.md`](stage-contracts.md);
 this document defines how materialized resources move between stages.
 
 ## State ownership
@@ -59,9 +69,13 @@ There is no separate explicit run-override layer in the resolver. A stage may
 still consume a run-config field at its own adapter boundary, but that is not a
 fourth cross-stage resource source.
 
-The resolver does not scan `stage_outputs`. Missing required resources are
-handled by stage preflight using the corresponding `ResourceSpec`; the resolver
-itself remains a non-throwing query for absence.
+The resolver does not scan `stage_outputs`. The calling stage owns the decision
+to fail, skip, or use an explicitly allowed fallback when a resource is absent;
+the resolver itself remains a non-throwing query for absence. A separate
+read-only planning-preflight helper also consumes declarative requirements, but
+it is not wired into the production TUI and is not runtime authority. Its
+current Genome Survey declaration is stale, as recorded in
+[Architecture conformance](conformance.md).
 
 When inventory contains clean and raw assets for one logical resource,
 `ResourceSpec.asset_types` determines the preferred type. Once a later stage
@@ -77,7 +91,7 @@ table and never mutates the supplied state.
 |---|---|---|
 | `inventory` | — | `long_reads`, `short_reads`, `hic_reads`, `assembly`, according to the manifest |
 | `read_qc` | `long_reads` | `long_reads` |
-| `genome_survey` | `long_reads` for the ONT MVP; prefers `short_reads` when also present | scalar measurement evidence only |
+| `genome_survey` | for a full survey, at least one of `short_reads` or `long_reads`, preferring clean short, raw short, clean long, then raw long; an explicit genome size permits the no-read skip path | scalar measurement evidence only |
 | `assembly` | `long_reads` | `assembly` |
 | `assembly_dedup` | `assembly`, `long_reads` | `assembly` |
 | `assembly_review` | `assembly` | `assembly` |
@@ -87,9 +101,11 @@ table and never mutates the supplied state.
 | `gene_annotation` | `masked_assembly`; explicit fallback to `assembly` | `predicted_proteins` |
 | `function_annotation` | `predicted_proteins` | no cross-stage path resource |
 
-The central stage contracts and planning preflight enforce these direct
-dependencies. In the first ONT MVP, a short-read-only survey is not admitted;
-general alternative-input planning remains a later contract extension.
+Runtime stage adapters enforce these direct dependencies. Genome Survey
+already admits a short-read-only run and prefers short DNA reads when both
+families are present. The central `STAGE_CONTRACTS`/`STAGE_REQUIREMENTS`
+metadata still describes that stage as long-read-only; callers must not treat
+that stale table as stronger authority than the implemented stage boundary.
 
 Hi-C reads stop at `hic_scaffolding`. After human adoption, that stage replaces
 the central `assembly` resource. T2T resolves this current assembly and the

@@ -1,4 +1,16 @@
-# Project Governance
+# Architecture Governance
+
+> **Status:** implemented policy; see
+> [Architecture conformance](conformance.md) for gates that are not currently
+> proven green.  
+> **Read when:** changing architecture ownership, documentation, descriptors,
+> review policy, or repository-wide gates.  
+> **Comes from:** accepted project design and current engineering policy.  
+> **Feeds into:** every architecture and implementation change.  
+> **Related contracts:** [Descriptors](descriptors.md),
+> [Run data](data-contract.md), [Stage contracts](stage-contracts.md).  
+> **Code evidence:** `CLAUDE.md`, `pyproject.toml`, and the tests relevant to the
+> changed boundary.
 
 This document describes how a coordinating agent should steer Gene Agent work.
 The coordinator is not expected to write every method implementation. The main
@@ -33,10 +45,11 @@ Do not force design authority, current implementation state, biological
 rationale, and coordination procedure into one linear ranking:
 
 - Direct user instruction governs the current task.
-- Accepted topic specifications under `docs/architecture/` govern intended
-  cross-cutting behavior; `docs/architecture.md` is only the system overview.
-- `docs/stage_contracts.md` and descriptor specifications govern stable domain
-  boundaries.
+- Accepted topic and reference nodes under `docs/architecture/` govern intended
+  cross-cutting behavior; `docs/architecture/README.md` routes readers to the
+  single owner for each boundary.
+- `docs/architecture/reference/stage-contracts.md` and
+  `docs/architecture/reference/descriptors.md` govern stable domain boundaries.
 - Code and tests are the evidence for what is implemented now. They do not
   silently amend an accepted design; a mismatch is recorded as conformance
   debt.
@@ -44,7 +57,8 @@ rationale, and coordination procedure into one linear ranking:
 - `docs/archive/deep-research-report.md` supplies biological rationale, not
   runtime storage or software-state facts.
 - Git history retains superseded implementation and design records; the working
-  tree keeps only current contracts and operational documentation.
+  tree keeps current contracts, accepted planned nodes, explicit conformance
+  debt, and operational documentation.
 
 ## Change Control
 
@@ -60,6 +74,23 @@ For each non-trivial change:
 Documentation-only changes do not need full runner tests, but they should keep
 the scaffold structure test passing when they add required documents or paths.
 
+### Repository quality gates
+
+The intended repository-wide gates are:
+
+```bash
+ruff format --check .
+ruff check .
+mypy app
+pytest -q
+```
+
+Do not call a command a passing gate unless it returns zero for the revision in
+question. Do not weaken configuration, add broad exclusions, or preserve a
+historical error-count baseline to manufacture a pass. Until all four gates are
+green and enforced, record that difference in
+[Architecture conformance](conformance.md).
+
 ## Boundary Rules
 
 ### Graph State
@@ -72,9 +103,10 @@ the scaffold structure test passing when they add required documents or paths.
 - asset registry reference
 - stage plan reference
 - compact interrupt request ref and hash
-- current parameter-recommendation / execution-attempt cursors
 - bounded diagnostic route tail
-- compact stage output references
+- compact `stage_outputs` cursors, which may select the current parameter
+  recommendation or execution attempt by ID/ref
+- the current logical-resource table in `resource_refs`
 
 Anything large or replay-sensitive belongs outside checkpointed state.
 
@@ -92,9 +124,11 @@ Ledger stores business execution facts:
 
 Ledger is append-oriented. Do not treat it as a mutable cache.
 
-### Artifact Registry
+### Asset registry and artifact index
 
-Artifacts store external world facts:
+The asset registry stores inventory identity and declaration facts for external
+inputs. The artifact index stores identity and integrity metadata for immutable
+run-owned artifacts. Between them they record:
 
 - file paths
 - file hashes
@@ -103,11 +137,11 @@ Artifacts store external world facts:
 - stage and method provenance
 - compact metadata
 
-The graph state should point to artifact registry outputs rather than embedding
-artifact content.
+The graph state should point to the asset registry and indexed artifact outputs
+rather than embedding either record body.
 
-The accepted Data Architecture v2 contract in
-`docs/architecture/data-v2.md` governs run-relative paths, exact fact ownership,
+The accepted [run data contract](data-contract.md) governs run-relative paths,
+exact fact ownership,
 parameter-recommendation persistence, checkpoint budgets, report derivation,
 and retention. No stage may introduce a conflicting local convention.
 
@@ -146,7 +180,8 @@ than regenerating it.
 Use human gates for decisions with biological or irreversible consequences:
 
 - ambiguous asset classification
-- aggressive long-read filtering
+- explicit operator approval for aggressive long-read filtering (currently a
+  frozen Read QC request flag, not a stage-local resume gate)
 - assembly quality interpretation
 - purge/keep decisions after BUSCO, depth, or Merqury review
 - Hi-C contact map review
