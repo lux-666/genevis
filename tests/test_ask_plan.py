@@ -1528,7 +1528,9 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             "assembly_dedup",
             "assembly_review",
             "hic_scaffolding",
+            "gapcloser",
             "t2t",
+            "base_polish",
             "repeat_annotation",
             "gene_annotation",
             "function_annotation",
@@ -1544,7 +1546,9 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             "assembly_dedup",
             "assembly_review",
             "hic_scaffolding",
+            "gapcloser",
             "t2t",
+            "base_polish",
             "repeat_annotation",
             "gene_annotation",
             "function_annotation",
@@ -1577,6 +1581,8 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             self.assertIn("read_qc", recommended)
             self.assertIn("assembly", recommended)
             self.assertIn("assembly_dedup", recommended)
+            self.assertNotIn("gapcloser", recommended)
+            self.assertNotIn("base_polish", recommended)
             self.assertIn("repeat_annotation", recommended)
             self.assertIn("gene_annotation", recommended)
             self.assertIn("function_annotation", recommended)

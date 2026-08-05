@@ -19,9 +19,11 @@ from app.stages.assembly_dedup.builder import build_stage as build_assembly_dedu
 from app.stages.assembly_review.builder import (
     build_stage as build_assembly_review_stage,
 )
+from app.stages.base_polish.builder import build_stage as build_base_polish_stage
 from app.stages.function_annotation.builder import (
     build_stage as build_function_annotation_stage,
 )
+from app.stages.gapcloser.builder import build_stage as build_gapcloser_stage
 from app.stages.gene_annotation.builder import (
     build_stage as build_gene_annotation_stage,
 )
@@ -190,7 +192,9 @@ def build_graph(
     graph.add_node("assembly_dedup_stage", build_assembly_dedup_stage())
     graph.add_node("assembly_review_stage", build_assembly_review_stage())
     graph.add_node("hic_scaffolding_stage", build_hic_scaffolding_stage())
+    graph.add_node("gapcloser_stage", build_gapcloser_stage())
     graph.add_node("t2t_stage", build_t2t_stage())
+    graph.add_node("base_polish_stage", build_base_polish_stage())
     graph.add_node("repeat_annotation_stage", build_repeat_annotation_stage())
     graph.add_node("gene_annotation_stage", build_gene_annotation_stage())
     graph.add_node("function_annotation_stage", build_function_annotation_stage())
@@ -207,7 +211,9 @@ def build_graph(
             "assembly_dedup_stage": "assembly_dedup_stage",
             "assembly_review_stage": "assembly_review_stage",
             "hic_scaffolding_stage": "hic_scaffolding_stage",
+            "gapcloser_stage": "gapcloser_stage",
             "t2t_stage": "t2t_stage",
+            "base_polish_stage": "base_polish_stage",
             "repeat_annotation_stage": "repeat_annotation_stage",
             "gene_annotation_stage": "gene_annotation_stage",
             "function_annotation_stage": "function_annotation_stage",
@@ -223,7 +229,9 @@ def build_graph(
         "assembly_dedup_stage",
         "assembly_review_stage",
         "hic_scaffolding_stage",
+        "gapcloser_stage",
         "t2t_stage",
+        "base_polish_stage",
         "repeat_annotation_stage",
         "gene_annotation_stage",
         "function_annotation_stage",

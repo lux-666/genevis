@@ -215,7 +215,30 @@ leave an earlier product indexed as an orphan. That orphan has neither
 `attempt_succeeded` nor `artifact_registered` semantic ledger evidence, does
 not create a review gate, and does not cause automatic retry or rollback.
 
-## 8. T2T Finishing
+## 8. GapCloser Placeholder
+
+Intended purpose: fill structural sequence gaps in the chromosome-scale
+assembly after Hi-C scaffolding and before T2T finishing.
+
+Current contract:
+
+- `gapcloser` is wired into the parent graph but has no registered method,
+  descriptor, local-execution configuration, artifact contract, or resource
+  handoff;
+- automatic prefix expansion and manifest-derived recommendations omit it;
+- when absent from an explicit `requested_stages` list, normal parent routing
+  skips it;
+- an explicit request writes only a strict `blocked_not_implemented` cursor and
+  terminates through the existing failed boundary;
+- a legacy `requested_stages = null` traversal records
+  `stage_skipped:not_implemented`, writes no stage cursor or completion trace,
+  and advances to T2T.
+
+This placeholder does not read or update the central `assembly` resource. Tool
+selection, input reads, expected products, validation, adoption, and provenance
+remain future contracts.
+
+## 9. T2T Finishing
 
 Purpose: inspect terminal telomere evidence and conservatively extend supported
 assembly ends without overwriting the input FASTA.
@@ -228,7 +251,9 @@ Logical inputs and output:
 - updates `assembly` only when a materialized result is selected.
 
 On the first HPC golden path, the current assembly is the product adopted by
-`hic_scaffolding`. T2T never consumes `hic_reads` directly. A configured
+`hic_scaffolding`. The present `gapcloser` placeholder cannot alter that
+handoff: an explicit GapCloser request stops before T2T, while an unrequested
+placeholder is skipped. T2T never consumes `hic_reads` directly. A configured
 `t2t.assembly_fasta_ref` is only an equality assertion against the current
 central assembly and cannot bypass the Hi-C adoption handoff.
 
@@ -258,7 +283,30 @@ non-zero junction distances trim the target before extension. Ambiguous,
 chimeric, overlapping, or conflicting evidence is never silently materialized,
 and the source FASTA is never overwritten.
 
-## 9. Repeat Annotation
+## 10. Base Polish Placeholder
+
+Intended purpose: correct base substitutions and small indels in the adopted
+T2T assembly before repeat annotation.
+
+Current contract:
+
+- `base_polish` is wired into the parent graph but has no registered method,
+  descriptor, local-execution configuration, artifact contract, or resource
+  handoff;
+- automatic stage recommendations omit it;
+- when absent from an explicit `requested_stages` list, normal parent routing
+  skips it;
+- an explicit request writes only a strict `blocked_not_implemented` cursor and
+  terminates through the existing failed boundary;
+- a legacy `requested_stages = null` traversal records
+  `stage_skipped:not_implemented`, writes no stage cursor or completion trace,
+  and advances to Repeat Annotation.
+
+This placeholder does not read or update the central `assembly` resource.
+Polishing-read choice, method selection, expected products, validation,
+adoption, and provenance remain future contracts.
+
+## 11. Repeat Annotation
 
 Purpose: mask repeats on the adopted assembly for downstream gene prediction.
 
@@ -277,7 +325,7 @@ enforced `metadata.trusted` flag. RepeatMasker publishes masking output and
 annotation evidence. De-novo library discovery is currently planning-only, so
 the stage does not claim that an unregistered EDTA or RepeatModeler process ran.
 
-## 10. Gene Annotation
+## 12. Gene Annotation
 
 Purpose: produce reviewed gene models and predicted proteins.
 
@@ -303,7 +351,7 @@ their evidence, optionally merges retained candidates, materializes proteins,
 and records gene-set completeness. Evidence conflicts and unmasked fallback are
 review signals, not implicit method-selection rules.
 
-## 11. Function Annotation
+## 13. Function Annotation
 
 Purpose: attach database-backed homology annotations to predicted proteins.
 

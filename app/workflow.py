@@ -15,11 +15,17 @@ STAGE_ORDER: list[DomainStage] = [
     "assembly_dedup",
     "assembly_review",
     "hic_scaffolding",
+    "gapcloser",
     "t2t",
+    "base_polish",
     "repeat_annotation",
     "gene_annotation",
     "function_annotation",
 ]
+
+MANUAL_ONLY_STAGES: frozenset[DomainStage] = frozenset(
+    {"gapcloser", "base_polish"}
+)
 
 TERMINAL_STAGE: DomainStage = "done"
 TERMINAL_FAILURE_STATUSES: frozenset[ExecutionFailureStatus] = frozenset(
@@ -38,11 +44,12 @@ def is_terminal_failure(
 
 
 def stages_through(endpoint: str) -> list[DomainStage]:
-    """Return the non-inventory prefix of STAGE_ORDER through *endpoint* (inclusive).
+    """Return the automatically planned prefix through *endpoint* (inclusive).
 
     This is the single canonical source for route expansion: both the TUI
     intake and the planner recommendation derive their stage lists from here
-    rather than maintaining independent literal arrays.
+    rather than maintaining independent literal arrays. Parent-registered
+    placeholders remain manual-only and are not inserted by prefix expansion.
 
     >>> stages_through("assembly_review")
     ['read_qc', 'genome_survey', 'assembly', 'assembly_dedup', 'assembly_review']
@@ -52,7 +59,11 @@ def stages_through(endpoint: str) -> list[DomainStage]:
     if endpoint not in STAGE_ORDER:
         raise ValueError(f"unknown stage endpoint: {endpoint!r}")
     stop = STAGE_ORDER.index(endpoint)
-    return [s for s in STAGE_ORDER[1 : stop + 1]]  # skip "inventory"
+    return [
+        stage
+        for stage in STAGE_ORDER[1 : stop + 1]
+        if stage not in MANUAL_ONLY_STAGES
+    ]
 
 
 def next_requested_stage(

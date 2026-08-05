@@ -93,7 +93,7 @@ class GraphRoutingTests(unittest.TestCase):
                     "function_annotation",
                 ],
             ),
-            ["hic_scaffolding", "t2t"],
+            ["hic_scaffolding", "gapcloser", "t2t", "base_polish"],
         )
 
 

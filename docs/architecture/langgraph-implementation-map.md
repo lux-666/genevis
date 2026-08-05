@@ -61,10 +61,12 @@ flowchart TB
     selector --> dedup["04 assembly_dedup_stage"]
     selector --> review["05 assembly_review_stage"]
     selector --> hic["06 hic_scaffolding_stage"]
-    selector --> t2t["07 t2t_stage"]
-    selector --> repeat["08 repeat_annotation_stage"]
-    selector --> gene["09 gene_annotation_stage"]
-    selector --> function["10 function_annotation_stage"]
+    selector --> gapcloser["07 gapcloser_stage"]
+    selector --> t2t["08 t2t_stage"]
+    selector --> basepolish["09 base_polish_stage"]
+    selector --> repeat["10 repeat_annotation_stage"]
+    selector --> gene["11 gene_annotation_stage"]
+    selector --> function["12 function_annotation_stage"]
 
     inventory --> controller
     readqc --> controller
@@ -73,7 +75,9 @@ flowchart TB
     dedup --> controller
     review --> controller
     hic --> controller
+    gapcloser --> controller
     t2t --> controller
+    basepolish --> controller
     repeat --> controller
     gene --> controller
     function --> controller
@@ -88,6 +92,7 @@ events and writes blocked or failed operator reports.
 |---|---|---|---|---|---|
 | `route_controller` and `route_from_current_stage` | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py` |
 | Requested-stage skipping and canonical precedence | `wired` | `implemented-no-process` | `tested` | `none` | `app/workflow.py`; `tests/test_graph_routing.py`, `tests/test_ask_plan.py` |
+| Manual-only GapCloser/Base Polish placeholder boundary | `wired` | `placeholder` | `tested` | `known-gap` | Strict cursors, explicit-request failure, and legacy unscoped skip only; `app/stages/gapcloser/`, `app/stages/base_polish/`; `tests/test_placeholder_stages.py` |
 | SQLite/memory checkpoint selection and durable resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`, `app/control/lifecycle.py`; `tests/test_checkpointer.py`, `tests/test_durable_resume.py` |
 | Terminal reporting and checkpoint compaction | `wired` | `partial` | `tested` | `contract-drift` | `app/graph/checkpoint_compaction.py`, `app/reports/`; live-state report and replay gaps in [conformance](reference/conformance.md) |
 
@@ -141,10 +146,12 @@ the method inventory rather than being hidden inside one stage-level color.
 | Hi-C `recommend_autohic_parameters` and approval/retry gates | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`; `tests/test_hic_scaffolding.py`, `tests/test_parameter_resolution_validation.py` |
 | Hi-C `autohic` nested method node and collection | `wired` | `executable` | `tested` | `none` | Real runner plus fail-closed validation of FASTA, `.hic`, `.assembly`, and HTML, including replay and late-publication failure coverage; `app/stages/hic_scaffolding/method_application/`; `tests/test_hic_scaffolding.py` |
 | Hi-C `chromosome_assembly_review`, block, and adoption resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/builder.py`, `app/control/lifecycle.py`; `tests/test_hic_scaffolding.py`, `tests/test_review_resume.py` |
+| GapCloser parent placeholder | `wired` | `placeholder` | `tested` | `known-gap` | Manual-only route position and strict fail-closed cursor; no method, artifact, or resource handoff; `app/stages/gapcloser/`; `tests/test_placeholder_stages.py` |
 | T2T input and motif chain: `resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process` with conditional model call | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`; `tests/test_t2t_motif.py` |
 | T2T threshold recommendation, approval, and `prepare_parameters` | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/t2t/parameters/`; `tests/test_t2t.py`, `tests/test_parameter_recommendation_v3_contract.py` |
 | T2T scans and minimap2 alignment | `wired` | `executable` | `tested` | `none` | `scan_assembly`, `prepare_reads`, `scan_reads`, `alignment`; `app/stages/t2t/nodes.py`; `tests/test_t2t.py` |
 | T2T patch, validation, report, adoption gate, commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | `apply_patches`, `validate_patched`, `report`, `gate_review`; `tests/test_t2t.py`, `tests/test_review_resume.py` |
+| Base Polish parent placeholder | `wired` | `placeholder` | `tested` | `known-gap` | Manual-only route position and strict fail-closed cursor; no method, artifact, or resource handoff; `app/stages/base_polish/`; `tests/test_placeholder_stages.py` |
 
 ### Annotation stages
 
@@ -211,6 +218,7 @@ freeze binding, retry, and biological knowledge coverage are separate facts.
 | Assembly: NextDenovo | implemented | implemented | mandatory | implemented | implemented | catalog present; no equivalent literature case corpus |
 | AutoHiC | implemented | implemented | mandatory | implemented | implemented | collection fail-closes on a missing declared product; terminal collect failure has no automatic retry |
 | T2T/minimap2 thresholds | implemented | implemented after motif resolution | mandatory | implemented | initial recommendation only | no T2T parameter-retry route |
+| GapCloser / Base Polish | no registered method | not implemented | not applicable | no executable attempt | not applicable | parent-only placeholders fail closed when explicitly requested |
 | Read QC, Survey, Dedup, Review | method/run configuration | not implemented as formal recommenders | not applicable | normal run-config freeze | not applicable | do not label these as stale recommenders |
 | Repeat/Gene/Function annotation | method/run configuration | not implemented as formal recommenders | stage review only where defined | normal run-config freeze | stage-specific | parameter recommendation is a future product decision, not an existing placeholder |
 | Inventory | not required | not required | input ambiguity review only | not applicable | not applicable | no recommender should be inferred |
@@ -220,22 +228,23 @@ implemented. The remaining gap is not “parameter recommendation is missing
 everywhere”; it is that method-specific biological knowledge depth is uneven
 and most other stages deliberately use static/operator configuration.
 
-## Product capabilities not represented by a registered stage
+## Product capabilities without a registered executable method
 
-These items belong in product planning, but drawing them as implemented stages
-would contradict the current graph and registry.
+Some items now have an explicit parent position without an executable closed
+loop. `placeholder` means the graph can represent and fail the request
+truthfully; it does not mean the biological capability runs.
 
 | Product capability | Wiring | Implementation | Verification | Debt | Exact current boundary |
 |---|---|---|---|---|---|
-| Gap closing after chromosome scaffolding | `unwired` | `absent` | `untested` | `known-gap` | No `gap_closing` stage, registered method, adapter, state cursor, or cross-stage resource contract exists |
-| Automated base polishing | `unwired` | `absent` | `untested` | `known-gap` | Assembly Review can adopt an operator-produced polished FASTA; it does not run NextPolish, Racon, Medaka, Pilon, or another polishing tool |
+| Gap closing after chromosome scaffolding | `wired` | `placeholder` | `tested` | `known-gap` | `gapcloser` has a parent subgraph, strict not-implemented cursor, and skip/failure evidence; it has no method descriptor, executable adapter, artifact contract, or resource handoff |
+| Automated base polishing | `wired` | `placeholder` | `tested` | `known-gap` | `base_polish` has the same parent-only boundary; Assembly Review can still adopt an operator-produced polished FASTA, but no NextPolish, Racon, Medaka, Pilon, or other polishing executor is registered |
 | Final integrated post-polish QA | `unwired` | `absent` | `untested` | `known-gap` | QUAST/BUSCO Assembly Review and later stage-local evidence exist, but there is no terminal comprehensive QA stage after polishing |
 | De-novo repeat-library discovery | `unwired` | `absent` | `untested` | `known-gap` | RepeatMasker execution exists only with an operator-registered repeat library |
 | TUI midstage entry from clean reads or an existing assembly | `unwired` in the public TUI | `placeholder` as accepted design | `partially-tested` | `known-gap` | See [TUI midstage entry](topics/tui-midstage-entry.md) |
 
-This is why `assembly_review` should not be renamed to “final QA,” and why an
-operator-provided polished assembly must not be counted as an automated base
-polishing method.
+This is why `assembly_review` should not be renamed to “final QA,” and why the
+Base Polish placeholder or an operator-provided polished assembly must not be
+counted as an automated polishing method.
 
 ## Maintenance rule
 

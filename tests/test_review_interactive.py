@@ -192,8 +192,12 @@ class PromptAssemblyReviewTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         rendered = out.getvalue()
-        self.assertIn("continue to Hi-C scaffolding, then T2T", rendered)
-        self.assertIn("next: assembly_review -> hic_scaffolding -> t2t", rendered)
+        self.assertIn("requested downstream finishing", rendered)
+        self.assertIn(
+            "next: assembly_review -> hic_scaffolding -> gapcloser -> t2t "
+            "-> base_polish",
+            rendered,
+        )
 
     def test_accept_multiple_candidates_prompts_choice(self):
         requirements = {
@@ -882,8 +886,12 @@ class RenderBlockedSummaryTests(unittest.TestCase):
 
         rendered = out.getvalue()
         self.assertIn("after_accepting_assembly", rendered)
-        self.assertIn("assembly_review -> hic_scaffolding -> t2t", rendered)
-        self.assertIn("continues to hic_scaffolding, then t2t", rendered)
+        self.assertIn(
+            "assembly_review -> hic_scaffolding -> gapcloser -> t2t "
+            "-> base_polish",
+            rendered,
+        )
+        self.assertIn("canonical order shown above", rendered)
 
     def test_renders_hic_scaffolding_without_error(self):
         summary = {

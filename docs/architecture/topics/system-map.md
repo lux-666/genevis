@@ -80,9 +80,12 @@ when deciding where a new fact belongs.
 ## Current product boundary
 
 The fixed stage order covers inventory, read QC, genome survey, assembly,
-assembly deduplication, assembly review, Hi-C scaffolding, T2T finishing,
-repeat annotation, gene annotation, and function annotation. The requested
-stage set may select a subset of that order.
+assembly deduplication, assembly review, Hi-C scaffolding, GapCloser, T2T
+finishing, Base Polish, repeat annotation, gene annotation, and function
+annotation. The requested stage set may select a subset of that order.
+GapCloser and Base Polish are wired manual-only placeholders, not executable
+biological capabilities; automatic recommendations omit them and explicit
+requests fail closed.
 
 Normal new runs enter through `gene-agent tui`. Other public commands inspect,
 audit, review, resume, or bootstrap. There is no public `gene-agent run`

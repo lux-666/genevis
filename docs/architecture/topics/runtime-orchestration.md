@@ -53,8 +53,15 @@ is incorrect.
 Each domain node in the parent is a compiled stage subgraph. Stages may resolve
 logical resources, plan registered methods, enter the shared method lifecycle,
 publish biological artifacts, open review gates, and commit a new resource.
-Those are available boundaries, not a mandatory identical sequence for all 11
+Those are available boundaries, not a mandatory identical sequence for all 13
 stages.
+
+The parent currently contains 13 domain stages. `gapcloser` and `base_polish`
+are manual-only placeholders: automatic prefix expansion and manifest-derived
+recommendations omit them, ordinary explicit stage sets skip them when absent,
+and an explicit request terminates with `blocked_not_implemented`. A legacy
+`requested_stages = null` traversal records `stage_skipped:not_implemented`
+and advances without a success cursor or completion trace.
 
 `requested_stages` is frozen as the initial operator plan, but it is not an
 eternally immutable checkpoint field. After Assembly Review, the approved

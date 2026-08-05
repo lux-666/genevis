@@ -382,8 +382,7 @@ def _collect_downstream_stage_selection(plan: AskPlanState) -> AskPlanState:
         manifest_ref=plan.manifest_ref,
         question=(
             "Which downstream stages should run after assembly_review? "
-            "Fixed order: hic_scaffolding -> t2t -> repeat_annotation -> "
-            "gene_annotation -> function_annotation."
+            f"Fixed order: {DOWNSTREAM_FLOW}."
         ),
         choices={
             "available_stages": list(DOWNSTREAM_STAGES),

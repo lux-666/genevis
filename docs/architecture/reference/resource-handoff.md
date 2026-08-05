@@ -94,7 +94,9 @@ table and never mutates the supplied state.
 | `assembly_dedup` | `assembly`, `long_reads` | `assembly` |
 | `assembly_review` | `assembly` | `assembly` |
 | `hic_scaffolding` | `assembly`, `hic_reads` | adopted chromosome-scale `assembly` |
+| `gapcloser` | none: registered placeholder with no executable input contract | none |
 | `t2t` | current adopted `assembly`, `long_reads` | `assembly` |
+| `base_polish` | none: registered placeholder with no executable input contract | none |
 | `repeat_annotation` | `assembly` | `masked_assembly` |
 | `gene_annotation` | `masked_assembly`; explicit fallback to `assembly` | `predicted_proteins` |
 | `function_annotation` | `predicted_proteins` | no cross-stage path resource |
@@ -105,8 +107,11 @@ families are present. `resource_specs.py` owns only canonical resource
 resolution; stages do not share a second declarative planning table.
 
 Hi-C reads stop at `hic_scaffolding`. After human adoption, that stage replaces
-the central `assembly` resource. T2T resolves this current assembly and the
-long-read set; it does not consume `hic_reads` or a contact map directly.
+the central `assembly` resource. The current `gapcloser` placeholder neither
+reads nor updates it; an explicit request stops before T2T. When GapCloser is
+not requested, T2T resolves the current assembly and the long-read set; it does
+not consume `hic_reads` or a contact map directly. The current `base_polish`
+placeholder likewise publishes no resource.
 
 Candidate bundles, review decisions, execution evidence, reports, and metrics
 remain artifacts. They may be referenced from resource metadata but do not form

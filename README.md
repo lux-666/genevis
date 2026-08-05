@@ -32,12 +32,18 @@ inventory
 -> assembly_dedup
 -> assembly_review
 -> hic_scaffolding
+-> gapcloser
 -> t2t
+-> base_polish
 -> repeat_annotation
 -> gene_annotation
 -> function_annotation
 -> done
 ```
+
+`gapcloser` 和 `base_polish` 当前只是父图中已注册的 manual-only
+placeholder：自动规划不会加入它们；显式请求会以
+`blocked_not_implemented` fail closed，不会伪装成已经执行。
 
 核心原则是保持 top-level state 很小：graph state 只保存 session、当前阶段、
 artifact ref、route trace、interrupt 信息等控制字段；大文件、日志、指标表和
@@ -72,6 +78,9 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 | repeat_annotation | RepeatMasker |
 | gene_annotation | AUGUSTUS、Miniprot |
 | function_annotation | DIAMOND blastp |
+
+`gapcloser` 和 `base_polish` 不在 descriptor registry 中，也不允许写入
+`local_exec`。它们目前只有父图位置、严格状态合同和显式失败边界，没有可执行方法。
 
 Gene Annotation 还会运行不可由操作员选择的内部 helper：gffread、EVM 和
 BUSCO；它们不属于 stage 的 `by_stage` 方法列表。
@@ -185,9 +194,13 @@ assembly_review -> repeat_annotation -> gene_annotation -> function_annotation
 
 ```text
 read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
--> hic_scaffolding -> t2t -> repeat_annotation -> gene_annotation
+-> hic_scaffolding -> gapcloser -> t2t -> base_polish
+-> repeat_annotation -> gene_annotation
 -> function_annotation
 ```
+
+上面展示 canonical parent order；自动计划会省略两个 manual-only
+placeholder，直到对应方法、资源交接和执行合同真正实现。
 
 TUI 最终会把选择落到 run config：
 

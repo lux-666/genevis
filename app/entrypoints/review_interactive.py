@@ -18,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 from app.review.gates import find_review_gate, registered_review_stage_label
 from app.schemas.state import ActiveInterrupt, validate_top_level_state
 from app.storage.paths import SessionPaths, locate_session_data_dir
+from app.workflow import STAGE_ORDER
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
@@ -29,19 +30,18 @@ _MAX_INVALID_PROMPT_ATTEMPTS = 3
 # Rendering
 # ---------------------------------------------------------------------------
 
-ASSEMBLY_REVIEW_DOWNSTREAM_FLOW = (
-    "assembly_review -> hic_scaffolding -> t2t -> "
-    "repeat_annotation -> gene_annotation -> function_annotation"
+ASSEMBLY_REVIEW_DOWNSTREAM_FLOW = " -> ".join(
+    STAGE_ORDER[STAGE_ORDER.index("assembly_review") :]
 )
 
 ASSEMBLY_REVIEW_DECISION_HELP = {
     "accept": (
-        "Approve the selected assembly and continue to Hi-C scaffolding, "
-        "then T2T, then annotation stages."
+        "Approve the selected assembly and continue through the requested "
+        "downstream finishing and annotation stages in canonical order."
     ),
     "pass": (
-        "Same as accept: pass the selected assembly downstream to Hi-C scaffolding, "
-        "then T2T, then annotation stages."
+        "Same as accept: pass the selected assembly through the requested "
+        "downstream stages in canonical order."
     ),
     "continue_low_confidence": (
         "Continue downstream despite weak or incomplete evidence; "
@@ -56,7 +56,7 @@ ASSEMBLY_REVIEW_DECISION_HELP = {
         "provide its output path and evidence."
     ),
     "stop_human_review": (
-        "Stop here and leave downstream Hi-C/T2T/annotation stages unstarted."
+        "Stop here and leave downstream finishing and annotation stages unstarted."
     ),
 }
 
@@ -183,8 +183,8 @@ def _render_assembly_review_downstream_context(decisions: list[str]) -> None:
     print("\nafter_accepting_assembly:")
     print(f"  flow: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
     print(
-        "  note: accepting an assembly continues to hic_scaffolding, then t2t, "
-        "before annotation."
+        "  note: accepting an assembly continues through requested downstream "
+        "stages in the canonical order shown above."
     )
     if decisions:
         _render_decision_meanings(decisions)
