@@ -30,6 +30,8 @@ placeholder boundary. It will:
 - add `gapcloser` and `base_polish` to the canonical domain-stage order;
 - add compiled stage subgraphs and parent-graph route targets;
 - permit both names in `requested_stages`;
+- keep both placeholders manual-only in automatic stage expansion and
+  manifest-derived recommendations;
 - keep both names out of `local_exec` because no executable method exists;
 - preserve ordinary requested-stage skipping;
 - stop with an explicit not-implemented stage status if either placeholder is
@@ -74,10 +76,23 @@ stage-specific branch.
 
 The public names are exactly `gapcloser` and `base_polish`.
 
+Both stages are manual-only planning capabilities. They remain visible in the
+operator-selectable stage inventory, but automatic prefix expansion and
+manifest-derived recommendations do not insert them. In particular,
+`stages_through("t2t")` must retain the currently executable T2T plan and must
+not begin requesting `gapcloser` merely because its canonical parent position
+precedes T2T. An operator can still name either placeholder explicitly in a
+structured plan.
+
 ## Placeholder behavior
 
-Each placeholder subgraph has one bounded node. When entered because the stage
-was explicitly requested, it writes a compact stage cursor:
+Each placeholder owns a strict stage-local cursor schema with `extra="forbid"`.
+The schema has exactly two required keys: the literal status and a non-empty
+reason. Stage-local validated read/update helpers are the only write boundary;
+the generic JSON budget validator is not treated as the stage contract.
+
+When entered because the stage was explicitly requested, the one-node subgraph
+writes this compact cursor:
 
 ```json
 {
@@ -92,13 +107,23 @@ implementation boundary, not a biological failure and not a human-review gate;
 using the existing terminal failure boundary avoids inventing a resumable gate
 without a method, artifact, or decision contract.
 
+The explicit-request branch appends `<stage>_stage` to `route_trace`. The parent
+wrapper therefore records `stage_failed` for the current placeholder and then a
+failed session terminal; it must not classify the trace marker as stage
+completion.
+
 Unrequested stages continue to be skipped by the parent controller according
 to `requested_stages`. Therefore assembly/contig-focused runs that do not
 request these stages retain their current behavior. A legacy run with
 `requested_stages = null` must also retain its pre-change traversal semantics:
 the placeholders are treated as unavailable optional capabilities rather than
 silently becoming mandatory. The implementation must record an explicit skip
-reason for this compatibility path and advance without claiming stage success.
+reason of `not_implemented` for this compatibility path and advance without
+claiming stage success. This branch writes no placeholder cursor and appends no
+`<stage>_stage` trace marker, so the parent records `stage_skipped` rather than
+`stage_completed`. Public deterministic new runs require an explicit
+`requested_stages` list; the `null` behavior remains necessary for legacy,
+internal, and resume compatibility.
 
 ## Configuration boundary
 
@@ -108,6 +133,8 @@ to `LocalExecStage`, `RunConfig` execution blocks, descriptor `by_stage`, or
 environment configuration. Consequently:
 
 - requesting a placeholder is valid planning input;
+- automatic goal expansion and manifest-derived recommendations omit both
+  placeholders;
 - authorizing it in `local_exec` is invalid configuration;
 - dependency snapshots do not invent method or environment requirements;
 - the registry remains an inventory of implemented/selectable methods only.
@@ -133,11 +160,15 @@ implementation:
   nodes;
 - the stage-contract reference adds numbered placeholder contracts that state
   their intended biological role and exact current failure boundary;
+- the resource-handoff reference records that both placeholders currently
+  require and produce no logical resource because their executable contracts
+  do not exist;
 - the implementation map changes gap closing and automated base polishing from
   `unwired / absent` to `wired / placeholder`, while leaving registered methods
   and execution verification absent;
 - flow descriptions in the README, review UI, and annotation-intake wording use
   the new canonical sequence where they describe downstream order;
+- the system map updates the canonical product-boundary stage list and count;
 - documentation must not imply that either stage produces an assembly today.
 
 The historical design spec that recorded these capabilities as absent remains
@@ -153,9 +184,16 @@ Focused tests must prove:
    `gapcloser`, `t2t`, and/or `base_polish` according to canonical precedence;
 4. a contig/assembly-only requested-stage plan never enters either placeholder;
 5. explicitly requesting either placeholder reaches its subgraph and terminates
-   with `blocked_not_implemented` evidence rather than successful completion;
-6. `requested_stages` accepts both names while `local_exec` rejects them;
-7. the relevant existing routing, run-config, state-schema, planner, and project
+   with a strict `blocked_not_implemented` cursor, a stage-failed Ledger event,
+   and a failed session terminal rather than successful completion;
+6. a `requested_stages = null` graph traversal records `stage_skipped` with
+   reason `not_implemented`, advances, and creates neither a placeholder cursor
+   nor a completion trace/event;
+7. unknown or incomplete placeholder cursor keys fail strict schema validation;
+8. deterministic T2T goal expansion and manifest recommendations omit both
+   placeholders, while an explicit plan can request them;
+9. `requested_stages` accepts both names while `local_exec` rejects them;
+10. the relevant existing routing, run-config, state-schema, planner, and project
    scaffold tests still pass.
 
 No test is considered passing until its process exits successfully and its
