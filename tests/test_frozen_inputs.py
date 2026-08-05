@@ -11,9 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.entrypoints.run import _run_session, execute_frozen_session
+from app.entrypoints.run import execute_frozen_session
 from app.execution.dependency_snapshot import (
     capture_dependency_snapshot,
+    load_dependency_snapshot,
     load_frozen_dependency_resolver,
 )
 from app.execution.env_dispatch import resolve_method_env
@@ -24,6 +25,7 @@ from app.storage.frozen_inputs import (
     FrozenInputValidationError,
     freeze_session_inputs,
     frozen_execution_lock,
+    prepare_session_inputs,
     validate_frozen_inputs,
 )
 from app.storage.paths import SessionPaths, ensure_run_layout
@@ -67,6 +69,528 @@ class FrozenInputTests(unittest.TestCase):
             encoding="utf-8",
         )
         return SessionPaths(root / "data", "s1"), manifest, run_config, envs
+
+    def test_prepare_is_no_write_and_preserves_file_supplied_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, _ = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": ["read_qc"],
+                        "shared_parameters": {"platform": "ont"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+
+            self.assertEqual(prepared.manifest.session_id, "s1")
+            self.assertEqual(
+                prepared.manifest.assets[0].paths,
+                [str((root / "reads.fastq").resolve())],
+            )
+            self.assertEqual(
+                prepared.explicit_run_config_fields,
+                frozenset({"requested_stages", "shared_parameters"}),
+            )
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_prepare_canonicalizes_relative_run_config_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, manifest, run_config, _ = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "t2t": {
+                            "read_inputs": [
+                                {"path": "reads.fastq", "platform": "ont"}
+                            ]
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+
+            self.assertEqual(
+                prepared.run_config.t2t.read_inputs[0].path,
+                str((root / "reads.fastq").resolve()),
+            )
+
+    def test_prepared_freeze_rejects_manifest_identity_before_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, _ = self._fixture(root)
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+            mismatched_paths = SessionPaths(paths.data_root, "s2")
+
+            with self.assertRaisesRegex(FrozenInputValidationError, "session_id"):
+                freeze_session_inputs(mismatched_paths, prepared_inputs=prepared)
+
+            self.assertFalse(mismatched_paths.data_root.exists())
+            self.assertFalse(mismatched_paths.run_dir.exists())
+
+    def test_prepared_freeze_publishes_the_prepared_canonical_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, manifest, run_config, envs = self._fixture(Path(tmp))
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+
+            bundle = freeze_session_inputs(
+                paths,
+                prepared_inputs=prepared,
+                config_path=envs,
+            )
+
+            self.assertEqual(bundle.manifest, prepared.manifest)
+            self.assertEqual(bundle.run_config, prepared.run_config)
+
+    def test_prepared_freeze_revalidates_mutation_before_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, manifest, run_config, _ = self._fixture(Path(tmp))
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+            prepared.manifest.session_id = "other-session"
+            prepared.run_config.local_exec.append("not-a-stage")  # type: ignore[arg-type]
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "run-config draft failed validation",
+            ):
+                freeze_session_inputs(paths, prepared_inputs=prepared)
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_prepared_freeze_deep_canonicalizes_mutated_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "t2t": {
+                            "read_inputs": [
+                                {"path": "reads.fastq", "platform": "ont"}
+                            ]
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+            noncanonical = str(root / "nested" / ".." / "reads.fastq")
+            prepared.manifest.assets[0].paths[0] = noncanonical
+            assert prepared.run_config.t2t is not None
+            prepared.run_config.t2t.read_inputs[0].path = noncanonical
+
+            bundle = freeze_session_inputs(
+                paths,
+                prepared_inputs=prepared,
+                config_path=envs,
+            )
+
+            canonical = str((root / "reads.fastq").resolve())
+            self.assertEqual(bundle.manifest.assets[0].paths, [canonical])
+            assert bundle.run_config.t2t is not None
+            self.assertEqual(bundle.run_config.t2t.read_inputs[0].path, canonical)
+            self.assertEqual(prepared.manifest.assets[0].paths, [noncanonical])
+            self.assertEqual(
+                prepared.run_config.t2t.read_inputs[0].path,
+                noncanonical,
+            )
+
+    def test_freeze_requires_exactly_one_input_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, manifest, run_config, _ = self._fixture(Path(tmp))
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+
+            with self.assertRaisesRegex(FrozenInputValidationError, "either"):
+                freeze_session_inputs(
+                    paths,
+                    prepared_inputs=prepared,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+            with self.assertRaisesRegex(FrozenInputValidationError, "requires"):
+                freeze_session_inputs(paths)
+
+            self.assertFalse(paths.data_root.exists())
+
+    def test_prepare_rejects_local_assembly_without_genome_size_before_layout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, _ = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "assembly_method": "flye",
+                            "flye_parameters": {},
+                            "assembly_route": "ont",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(FrozenInputValidationError, "genome size"):
+                prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_prepare_rejects_explicit_assembly_method_without_read_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, _ = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "assembly_method": "hifiasm_ont",
+                            "hifiasm_ont_parameters": {"threads": 4},
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "assembly.assembly_method is set but no read_type could be inferred",
+            ):
+                prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_freeze_rejects_inferred_local_method_without_read_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
+                ),
+                encoding="utf-8",
+            )
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {"flye_parameters": {}},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "local assembly method 'flye'.*no read_type could be inferred",
+            ):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                    config_path=envs,
+                )
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_freeze_rejects_local_flye_and_nextdenovo_without_reads(self) -> None:
+        for method in ("flye", "nextdenovo"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths, manifest, run_config, envs = self._fixture(root)
+                manifest.write_text(
+                    "session_id: s1\n"
+                    "genome_size_estimate: 1000\n"
+                    "assets:\n"
+                    "  - asset_type: raw_short_dna_reads\n"
+                    "    paths: [reads.fastq]\n"
+                    "    platform: illumina\n"
+                    "    format: fastq\n",
+                    encoding="utf-8",
+                )
+                run_config.write_text(
+                    json.dumps(
+                        {
+                            "local_exec": ["assembly"],
+                            "shared_parameters": {"read_type": "ont_raw"},
+                            "assembly": {f"{method}_parameters": {}},
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    FrozenInputValidationError,
+                    "requires registered long-read declarations",
+                ):
+                    freeze_session_inputs(
+                        paths,
+                        manifest_draft=manifest,
+                        run_config_draft=run_config,
+                        config_path=envs,
+                    )
+
+                self.assertFalse(paths.data_root.exists())
+                self.assertFalse(paths.run_dir.exists())
+
+    def test_freeze_rejects_local_methods_with_wrong_read_family(self) -> None:
+        for method in ("flye", "nextdenovo"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths, manifest, run_config, envs = self._fixture(root)
+                manifest.write_text(
+                    manifest.read_text(encoding="utf-8")
+                    .replace("platform: ont", "platform: pacbio_hifi")
+                    .replace(
+                        "assets:\n",
+                        "genome_size_estimate: 1000\nassets:\n",
+                    ),
+                    encoding="utf-8",
+                )
+                run_config.write_text(
+                    json.dumps(
+                        {
+                            "local_exec": ["assembly"],
+                            "shared_parameters": {"read_type": "ont_raw"},
+                            "assembly": {f"{method}_parameters": {}},
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    FrozenInputValidationError,
+                    "compatible with read_type 'ont_raw'",
+                ):
+                    freeze_session_inputs(
+                        paths,
+                        manifest_draft=manifest,
+                        run_config_draft=run_config,
+                        config_path=envs,
+                    )
+
+                self.assertFalse(paths.data_root.exists())
+                self.assertFalse(paths.run_dir.exists())
+
+    def test_prepare_accepts_registered_read_type_families(self) -> None:
+        cases = (
+            ("ont_raw", "ont"),
+            ("ont_hq", "ont"),
+            ("cyclone", "cycloneseq"),
+            ("pacbio_clr", "clr"),
+            ("pacbio_hifi", "pacbio_hifi"),
+        )
+        for read_type, platform in cases:
+            with (
+                self.subTest(read_type=read_type, platform=platform),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                paths, manifest, run_config, _ = self._fixture(root)
+                manifest.write_text(
+                    manifest.read_text(encoding="utf-8")
+                    .replace("platform: ont", f"platform: {platform}")
+                    .replace(
+                        "assets:\n",
+                        "genome_size_estimate: 1000\nassets:\n",
+                    ),
+                    encoding="utf-8",
+                )
+                run_config.write_text(
+                    json.dumps(
+                        {
+                            "local_exec": ["assembly"],
+                            "shared_parameters": {"read_type": read_type},
+                            "assembly": {"flye_parameters": {}},
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                prepared = prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+
+                self.assertEqual(
+                    prepared.declarations.read_declarations[0].platform,
+                    platform,
+                )
+                self.assertFalse(paths.data_root.exists())
+
+    def test_freeze_rejects_method_incompatible_shared_read_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "platform: ont",
+                    "platform: pacbio_hifi",
+                ),
+                encoding="utf-8",
+            )
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "shared_parameters": {"read_type": "ont_raw"},
+                        "assembly": {"hifiasm_parameters": {}},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "incompatible with inferred read_type 'ont_raw'",
+            ):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                    config_path=envs,
+                )
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_selected_stages_keep_order_and_must_include_local_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            bundle = freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+                selected_stages=["assembly", "read_qc"],
+                selected_methods={},
+            )
+            snapshot = load_dependency_snapshot(
+                paths.dependency_manifest_path,
+                expected_sha256=bundle.marker.files["dependency_manifest"].sha256,
+            )
+            self.assertEqual(snapshot.selected_stages, ["assembly", "read_qc"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps({"local_exec": ["read_qc"]}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(FrozenInputValidationError, "local_exec"):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                    config_path=envs,
+                    selected_stages=["assembly"],
+                )
+
+            self.assertFalse(paths.data_root.exists())
+
+    def test_raw_explicit_empty_scope_does_not_fall_back_to_local_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [],
+                        "local_exec": ["read_qc"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(FrozenInputValidationError, "local_exec"):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                    config_path=envs,
+                )
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_explicit_empty_scope_rejects_nonempty_selected_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps({"requested_stages": [], "local_exec": []}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "differ from run-config requested_stages",
+            ):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                    config_path=envs,
+                    selected_stages=["read_qc"],
+                )
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
 
     def test_freeze_is_create_only_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -325,8 +849,6 @@ class FrozenInputTests(unittest.TestCase):
                     "app.entrypoints.run.initial_state", side_effect=fake_initial_state
                 ),
                 patch("app.entrypoints.run.finalize_terminal_state", return_value=None),
-                patch("app.entrypoints.run.materialize_run_layout") as materialize,
-                patch("app.entrypoints.run.load_run_config") as load_run_config,
                 patch(
                     "app.execution.dependency_snapshot.EnvResolver",
                     side_effect=AssertionError("live config must not be loaded"),
@@ -343,8 +865,6 @@ class FrozenInputTests(unittest.TestCase):
 
             self.assertEqual(code, 0, stderr.getvalue())
             self.assertEqual(stderr.getvalue(), "")
-            materialize.assert_not_called()
-            load_run_config.assert_not_called()
             self.assertEqual(
                 captured["input_manifest_ref"],
                 "control/input_manifest.yaml",
@@ -562,7 +1082,6 @@ class FrozenInputTests(unittest.TestCase):
 
                 with (
                     patch("app.entrypoints.run.build_graph") as build_graph,
-                    patch("app.entrypoints.run.materialize_run_layout") as materialize,
                     contextlib.redirect_stderr(stderr),
                 ):
                     code = execute_frozen_session(
@@ -580,56 +1099,3 @@ class FrozenInputTests(unittest.TestCase):
                     detail,
                 )
                 build_graph.assert_not_called()
-                materialize.assert_not_called()
-
-    def test_frozen_run_branch_rejects_noncanonical_input_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            paths, manifest, run_config, envs = self._fixture(root)
-            freeze_session_inputs(
-                paths,
-                manifest_draft=manifest,
-                run_config_draft=run_config,
-                config_path=envs,
-            )
-            alternate_manifest = root / "alternate-manifest.yaml"
-            alternate_manifest.write_bytes(paths.input_manifest_path.read_bytes())
-            alternate_run_config = root / "alternate-run-config.json"
-            alternate_run_config.write_bytes(paths.run_config_path.read_bytes())
-            cases = (
-                (alternate_manifest, paths.run_config_path),
-                (paths.input_manifest_path, alternate_run_config),
-            )
-
-            for supplied_manifest, supplied_run_config in cases:
-                with self.subTest(
-                    manifest=supplied_manifest,
-                    run_config=supplied_run_config,
-                ):
-                    stderr = io.StringIO()
-                    with (
-                        patch("app.entrypoints.run.build_graph") as build_graph,
-                        patch(
-                            "app.entrypoints.run.materialize_run_layout"
-                        ) as materialize,
-                        patch("app.entrypoints.run.load_run_config") as load_run_config,
-                        contextlib.redirect_stderr(stderr),
-                    ):
-                        code = _run_session(
-                            **dict(
-                                session_id="s1",
-                                manifest=str(supplied_manifest),
-                                data_dir=str(paths.data_root),
-                                run_config=str(supplied_run_config),
-                                local_exec=[],
-                                checkpointer="memory",
-                                frozen_session=True,
-                                interactive_gate=False,
-                            )
-                        )
-
-                    self.assertEqual(code, 1)
-                    self.assertIn("frozen session cannot execute", stderr.getvalue())
-                    build_graph.assert_not_called()
-                    materialize.assert_not_called()
-                    load_run_config.assert_not_called()

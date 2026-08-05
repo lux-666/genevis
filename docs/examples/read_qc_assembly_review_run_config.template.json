@@ -1,4 +1,5 @@
 {
+  "requested_stages": ["read_qc", "assembly", "assembly_review"],
   "local_exec": ["read_qc", "assembly", "assembly_review"],
   "shared_parameters": {
     "read_type": "cyclone"

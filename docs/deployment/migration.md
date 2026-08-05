@@ -121,6 +121,27 @@ not commit private paths or real sample metadata.
 For the two assembly examples, the operator-provided genome-size estimate lives
 in the paired manifest. The run config contains execution choices only.
 
+## Start an Operator Run
+
+Copy a manifest and run-config template to a server-local directory, replace
+the placeholders, then run the deterministic structured-input boundary:
+
+```bash
+gene-agent run \
+  --manifest /absolute/path/to/manifest.yaml \
+  --run-config /absolute/path/to/run_config.json \
+  --data-dir /absolute/path/to/data
+```
+
+The manifest owns `session_id`; output is written to
+`<data-dir>/runs/<session_id>/`. The command validates and canonicalizes both
+files before freezing them and their dependency snapshot. It requires explicit
+JSON arrays for `requested_stages` and `local_exec` in the run config;
+`requested_stages: null` is rejected, while `[]` is valid. Use `--non-interactive`
+for automation: a human gate persists `blocked_human` and prints `inspect`,
+`review`, and `resume` continuation commands. The TUI is an optional
+conversational intake/planning alternative that uses the same frozen executor.
+
 ## Verification
 
 ```bash

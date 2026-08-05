@@ -60,15 +60,27 @@ bash scripts/server_check.sh
 bash scripts/server_test.sh
 ```
 
-Start the TUI inside the server checkout and provide server-owned input paths
-during intake:
+For a real server run, copy and fill the structured templates with server-owned
+paths, then use the deterministic boundary:
 
 ```bash
-gene-agent tui --data-dir data/server_run/out
+gene-agent run \
+  --manifest /absolute/path/to/manifest.yaml \
+  --run-config /absolute/path/to/run_config.json \
+  --data-dir data/server_run/out
 ```
 
-The TUI freezes the manifest and run config before execution. The server owns
-all real paths and generated output.
+The manifest owns `session_id`, and output is placed at
+`data/server_run/out/runs/<session_id>/`. The command validates/canonicalizes
+both files. The run config must explicitly contain JSON arrays for
+`requested_stages` and `local_exec`; `requested_stages: null` is rejected, while
+`[]` is valid. The command freezes that exact stage scope and dependency
+snapshot before SQLite execution. Add `--non-interactive` for automation; a
+human gate persists
+`blocked_human` and directs the operator to `inspect`, `review`, and `resume`.
+`gene-agent tui --data-dir data/server_run/out` remains an optional
+conversational intake/planning alternative using the same frozen executor. The
+server owns all real paths and generated output.
 
 ## Block and Resume
 

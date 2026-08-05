@@ -17,8 +17,8 @@
 
 ## Mutable draft boundary
 
-`gene-agent tui` is the normal new-run entry. Before confirmation it owns a
-versioned mutable draft with this lifecycle:
+`gene-agent tui` is an optional conversational new-run entry. Before
+confirmation it owns a versioned mutable draft with this lifecycle:
 
 ```text
 intake -> planning -> ready_to_confirm -> frozen
@@ -30,6 +30,15 @@ The draft is not a graph checkpoint and is not an executable contract. It can
 be revised or resumed while unfrozen. The only top-level TUI command during
 normal conversation is `/resume`, which selects an existing draft or blocked
 session through the appropriate recovery path.
+
+For real/operator runs with already prepared files, use the deterministic
+boundary instead: `gene-agent run --manifest PATH --run-config PATH --data-dir
+PATH [--non-interactive]`. Its file-authored run config must explicitly contain
+JSON arrays for `requested_stages` and `local_exec`; `requested_stages: null` is
+rejected, while `[]` is valid. The command validates/canonicalizes both files and
+converges on the same whole-run freeze and SQLite executor below. `session_id`
+belongs only to the manifest. Internal/TUI compatibility state may still use
+`None`, but that is not a legal public structured-run value.
 
 Current intake directly models PacBio HiFi reads, ONT reads, explicit paired
 Hi-C lanes, an explicit no-Hi-C fact, species facts, and a telomere motif when
@@ -54,7 +63,8 @@ not invent a deterministic fallback stage plan.
 
 ## Whole-run freeze
 
-Final confirmation invokes one transaction-like publication boundary:
+Final confirmation invokes the same transaction-like publication boundary used
+by the public structured `run` command:
 
 ```text
 confirmed draft

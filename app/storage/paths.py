@@ -32,10 +32,15 @@ def _resolved(path: str | Path) -> Path:
 def _validate_session_id(session_id: str) -> str:
     if not isinstance(session_id, str) or not session_id.strip():
         raise DataLayoutError("session_id must be a non-empty string")
+    if session_id != session_id.strip():
+        raise DataLayoutError("session_id must not have leading or trailing whitespace")
+    if "\\" in session_id:
+        raise DataLayoutError("session_id must not contain backslashes")
     candidate = Path(session_id)
     if (
         candidate.is_absolute()
         or len(candidate.parts) != 1
+        or str(candidate) != session_id
         or session_id in {".", ".."}
     ):
         raise DataLayoutError(f"session_id must be one path component: {session_id!r}")
@@ -134,9 +139,9 @@ class SessionPaths:
     def input_manifest_path(self) -> Path:
         """The immutable manifest published by the freeze transaction.
 
-        ``manifest_path`` is retained for the existing draft/materialization
-        callers.  New frozen execution must use this explicitly named path so
-        a mutable draft can never be mistaken for the execution contract.
+        ``manifest_path`` is retained for existing fixtures and non-executor
+        metadata callers. New frozen execution must use this explicitly named
+        path so a mutable file can never be mistaken for execution authority.
         """
         return self.control_dir / "input_manifest.yaml"
 

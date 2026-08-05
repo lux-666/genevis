@@ -25,8 +25,8 @@ from app.stages.assembly_dedup.routing import (
 )
 from app.stages.inventory.nodes import validate_inputs
 from app.storage.artifacts import artifact_ref_for_path, register_artifact_records
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
-from app.storage.materialization import materialize_run_layout
 from app.storage.paths import DataLayoutError, SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -49,19 +49,28 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 "    format: fastq\n",
                 encoding="utf-8",
             )
+            source_config = source_dir / "run_config.json"
+            source_config.write_text(
+                json.dumps({"requested_stages": [], "local_exec": []}),
+                encoding="utf-8",
+            )
             paths = SessionPaths(root / "data", "s1")
 
-            materialize_run_layout(
+            freeze_session_inputs(
                 paths,
-                manifest_path=source_manifest,
-                run_config_path=None,
+                manifest_draft=source_manifest,
+                run_config_draft=source_config,
+                selected_stages=[],
+                selected_methods={},
             )
 
-            canonical = yaml.safe_load(paths.manifest_path.read_text(encoding="utf-8"))
+            canonical = yaml.safe_load(
+                paths.input_manifest_path.read_text(encoding="utf-8")
+            )
             self.assertEqual(canonical["assets"][0]["paths"], [str(reads.resolve())])
             state = initial_state(
                 session_id="s1",
-                input_manifest_ref=paths.to_ref(paths.manifest_path),
+                input_manifest_ref=paths.to_ref(paths.input_manifest_path),
                 data_dir=str(paths.run_dir),
             )
             inventory = validate_inputs(state)["stage_outputs"]["inventory"]
@@ -72,12 +81,36 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             root = Path(tmpdir)
             source_dir = root / "source"
             source_dir.mkdir()
+            reads_dir = source_dir / "reads"
+            reads_dir.mkdir()
+            shared_dir = root / "shared"
+            shared_dir.mkdir()
+            assembly_dir = source_dir / "assembly"
+            assembly_dir.mkdir()
+            busco_dir = source_dir / "busco" / "metazoa"
+            busco_dir.mkdir(parents=True)
+            hifi_reads = reads_dir / "hifi.fastq"
+            hifi_reads.write_text("@hifi\nACGT\n+\n!!!!\n", encoding="utf-8")
+            (reads_dir / "hifi.fofn").write_text(f"{hifi_reads}\n", encoding="utf-8")
+            (reads_dir / "ont-a.fastq.gz").write_bytes(b"")
+            (shared_dir / "hifi-b.fastq.gz").write_bytes(b"")
+            (assembly_dir / "final.fasta").write_text(
+                ">contig\nACGT\n", encoding="utf-8"
+            )
             source_manifest = source_dir / "manifest.yaml"
-            source_manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            source_manifest.write_text(
+                "session_id: s1\n"
+                "assets:\n"
+                "  - asset_type: assembly_fasta_registered\n"
+                "    paths: [assembly/final.fasta]\n",
+                encoding="utf-8",
+            )
             source_config = source_dir / "run_config.json"
             source_config.write_text(
                 json.dumps(
                     {
+                        "requested_stages": [],
+                        "local_exec": [],
                         "assembly": {"hifi_reads_ref": "reads/hifi.fofn"},
                         "assembly_review": {
                             "busco": {
@@ -107,10 +140,12 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             )
             paths = SessionPaths(root / "data", "s1")
 
-            materialize_run_layout(
+            freeze_session_inputs(
                 paths,
-                manifest_path=source_manifest,
-                run_config_path=source_config,
+                manifest_draft=source_manifest,
+                run_config_draft=source_config,
+                selected_stages=[],
+                selected_methods={},
             )
 
             canonical = json.loads(paths.run_config_path.read_text(encoding="utf-8"))

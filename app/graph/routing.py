@@ -17,7 +17,7 @@ def route_controller(state: TopLevelState) -> StateUpdate:
     current = state.get("current_stage", "inventory")
     requested = state.get("requested_stages")
     if (
-        requested
+        requested is not None
         and current != "inventory"
         and current != TERMINAL_STAGE
         and current not in requested

@@ -18,7 +18,7 @@ from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import resolve_assembly_parameters
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.inventory.nodes import validate_inputs
-from app.storage.materialization import materialize_run_layout
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.paths import SessionPaths
 
 
@@ -224,15 +224,22 @@ def test_manifest_only_genome_size_reaches_assembly_l1_freeze(
             + "\n",
             encoding="utf-8",
         )
+        source_config = root / "run_config.json"
+        source_config.write_text(
+            '{"requested_stages": [], "local_exec": []}\n',
+            encoding="utf-8",
+        )
         paths = SessionPaths(root / "data", "s1")
-        materialize_run_layout(
+        freeze_session_inputs(
             paths,
-            manifest_path=source_manifest,
-            run_config_path=None,
+            manifest_draft=source_manifest,
+            run_config_draft=source_config,
+            selected_stages=[],
+            selected_methods={},
         )
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=paths.to_ref(paths.manifest_path),
+            input_manifest_ref=paths.to_ref(paths.input_manifest_path),
             data_dir=str(paths.run_dir),
         )
 

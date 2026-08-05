@@ -36,7 +36,11 @@ from app.schemas.manifest import (
     Platform,
     validate_manifest,
 )
-from app.schemas.run_config import RunConfig, canonicalize_run_config_paths
+from app.schemas.run_config import (
+    RunConfig,
+    canonicalize_run_config_paths,
+    validate_genome_size_execution_plan,
+)
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 FROZEN_INPUTS_SCHEMA_VERSION = 1
@@ -173,6 +177,22 @@ class CanonicalInputDeclarations:
     manifest: InputManifest
     manifest_report: dict[str, Any]
     read_declarations: tuple[RegisteredReadDeclaration, ...]
+
+
+@dataclass(frozen=True)
+class PreparedSessionInputs:
+    """Validated canonical inputs ready for a later create-only freeze.
+
+    Preparation deliberately has no ``SessionPaths`` argument and never
+    creates directories or control files.  The original run-config field set
+    is retained for the public-entrypoint presence rules, which are stricter
+    than generic freeze validation and therefore belong to that caller.
+    """
+
+    manifest: InputManifest
+    run_config: RunConfig
+    declarations: CanonicalInputDeclarations
+    explicit_run_config_fields: frozenset[str]
 
 
 def canonicalize_input_declarations(
@@ -491,11 +511,52 @@ def _apply_shared_long_read_platform(
     return entry_ordinal
 
 
-def freeze_session_inputs(
-    paths: SessionPaths,
+def prepare_session_inputs(
     *,
     manifest_draft: str | Path | InputManifest | Mapping[str, Any],
     run_config_draft: str | Path | RunConfig | Mapping[str, Any],
+) -> PreparedSessionInputs:
+    """Validate and canonicalize drafts without creating any run-owned path."""
+
+    try:
+        manifest = _load_manifest_draft(manifest_draft)
+        run_config, explicit_fields = _load_run_config_draft_with_fields(
+            run_config_draft
+        )
+        declarations = canonicalize_input_declarations(manifest, run_config)
+        if not declarations.manifest_report["valid"]:
+            raise FrozenInputValidationError(
+                "input declarations cannot be frozen: "
+                + "; ".join(declarations.manifest_report["errors"])
+            )
+        manifest = declarations.manifest
+        _validate_assembly_input_contract(
+            manifest,
+            run_config,
+            declarations.read_declarations,
+        )
+        validate_genome_size_execution_plan(run_config, manifest)
+    except FrozenInputValidationError:
+        raise
+    except (ValidationError, ValueError) as exc:
+        raise FrozenInputValidationError(
+            f"input preparation failed validation: {exc}"
+        ) from exc
+
+    return PreparedSessionInputs(
+        manifest=manifest,
+        run_config=run_config,
+        declarations=declarations,
+        explicit_run_config_fields=explicit_fields,
+    )
+
+
+def freeze_session_inputs(
+    paths: SessionPaths,
+    *,
+    manifest_draft: str | Path | InputManifest | Mapping[str, Any] | None = None,
+    run_config_draft: str | Path | RunConfig | Mapping[str, Any] | None = None,
+    prepared_inputs: PreparedSessionInputs | None = None,
     config_path: str | Path | None = None,
     parent_session_id: str | None = None,
     selected_stages: Sequence[str] | None = None,
@@ -505,37 +566,50 @@ def freeze_session_inputs(
 ) -> FrozenInputBundle:
     """Validate and commit one run's execution inputs exactly once.
 
-    The manifest/run-config source can be a draft file or an already parsed
-    mapping/model.  File-based drafts have their relative paths resolved once
-    against their own directory.  In-memory drafts must already use absolute
-    paths, preventing accidental dependence on the process working directory.
+    Supply either raw manifest/run-config drafts or a prepared input bundle,
+    but never both.  Raw drafts are prepared before layout creation; file-based
+    drafts have their relative paths resolved once against their own directory.
+    In-memory drafts must already use absolute paths, preventing accidental
+    dependence on the process working directory.
 
     Repeating the same freeze returns the already verified bundle.  Any partial
     publication, a changed draft, a changed parent identity, or a tampered
     frozen file fails closed and never overwrites historical control files.
     """
 
-    ensure_run_layout(paths)
-    _validate_parent_session_id(paths, parent_session_id)
-    manifest = _load_manifest_draft(manifest_draft)
-    run_config = _load_run_config_draft(run_config_draft)
-    declarations = canonicalize_input_declarations(manifest, run_config)
-    if not declarations.manifest_report["valid"]:
-        raise FrozenInputValidationError(
-            "input declarations cannot be frozen: "
-            + "; ".join(declarations.manifest_report["errors"])
+    raw_mode = manifest_draft is not None or run_config_draft is not None
+    if prepared_inputs is not None:
+        if raw_mode:
+            raise FrozenInputValidationError(
+                "freeze_session_inputs accepts either prepared_inputs or raw drafts"
+            )
+        prepared = prepare_session_inputs(
+            manifest_draft=prepared_inputs.manifest,
+            run_config_draft=prepared_inputs.run_config,
         )
-    manifest = declarations.manifest
-    _validate_assembly_input_contract(
-        manifest,
-        run_config,
-        declarations.read_declarations,
-    )
+    elif manifest_draft is not None and run_config_draft is not None:
+        prepared = prepare_session_inputs(
+            manifest_draft=manifest_draft,
+            run_config_draft=run_config_draft,
+        )
+    else:
+        raise FrozenInputValidationError(
+            "freeze_session_inputs requires prepared_inputs or both raw drafts"
+        )
+
+    if prepared.manifest.session_id != paths.session_id:
+        raise FrozenInputValidationError(
+            "prepared manifest session_id does not match its run directory"
+        )
+    _validate_parent_session_id(paths, parent_session_id)
+    manifest = prepared.manifest
+    run_config = prepared.run_config
     dependency_stages, dependency_methods = _dependency_scope(
         run_config,
         selected_stages=selected_stages,
         selected_methods=selected_methods,
     )
+    ensure_run_layout(paths)
     manifest_bytes = _manifest_bytes(manifest)
     run_config_bytes = _run_config_bytes(run_config)
 
@@ -631,6 +705,17 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
         raise FrozenInputIntegrityError(
             "frozen manifest does not contain the canonical shared platform"
         )
+    try:
+        _validate_assembly_input_contract(
+            manifest,
+            run_config,
+            declarations.read_declarations,
+        )
+        validate_genome_size_execution_plan(run_config, manifest)
+    except (FrozenInputValidationError, ValueError) as exc:
+        raise FrozenInputIntegrityError(
+            f"frozen manifest/run-config biological validation is invalid: {exc}"
+        ) from exc
 
     # Parse the dependency manifest using its own strict schema.  The local
     # import keeps storage usable without importing execution during module load.
@@ -757,11 +842,19 @@ def _dependency_scope(
     selected_stages: Sequence[str] | None,
     selected_methods: Mapping[str, str | Sequence[str]] | None,
 ) -> tuple[list[str], list[str]]:
-    requested = list(run_config.requested_stages or [])
-    stages = (
+    requested: list[str] | None = (
+        None
+        if run_config.requested_stages is None
+        else [str(stage) for stage in run_config.requested_stages]
+    )
+    stages: list[str] = (
         [str(stage).strip() for stage in selected_stages]
         if selected_stages is not None
-        else requested or [str(stage) for stage in run_config.local_exec]
+        else (
+            list(requested)
+            if requested is not None
+            else [str(stage) for stage in run_config.local_exec]
+        )
     )
     if any(not stage for stage in stages):
         raise FrozenInputValidationError(
@@ -771,7 +864,7 @@ def _dependency_scope(
         raise FrozenInputValidationError(
             "selected dependency stages must not contain duplicates"
         )
-    if requested and stages != requested:
+    if requested is not None and stages != requested:
         raise FrozenInputValidationError(
             "selected dependency stages differ from run-config requested_stages"
         )
@@ -875,16 +968,29 @@ def _load_manifest_draft(
     return manifest
 
 
-def _load_run_config_draft(
+def _load_run_config_draft_with_fields(
     source: str | Path | RunConfig | Mapping[str, Any],
-) -> RunConfig:
+) -> tuple[RunConfig, frozenset[str]]:
+    """Load canonical config plus the fields explicitly supplied by its author."""
+
+    model_fields = (
+        frozenset(source.model_fields_set) if isinstance(source, RunConfig) else None
+    )
     payload, source_dir = _load_json_draft(source, label="run-config draft")
     try:
+        file_validated = RunConfig.model_validate(payload)
         normalized = canonicalize_run_config_paths(
             payload,
             source_dir=source_dir,
         )
-        return RunConfig.model_validate(normalized)
+        return (
+            RunConfig.model_validate(normalized),
+            (
+                model_fields
+                if model_fields is not None
+                else frozenset(file_validated.model_fields_set)
+            ),
+        )
     except (ValidationError, ValueError) as exc:
         raise FrozenInputValidationError(
             f"run-config draft failed validation: {exc}"
@@ -901,9 +1007,79 @@ def _validate_assembly_input_contract(
     assembly = run_config.assembly
     if assembly is None:
         return
+    from app.domains.assembly.selection import (
+        is_method_read_type_compatible,
+        resolve_read_type,
+    )
     from app.schemas.run_config import infer_assembly_method
 
     method = infer_assembly_method(assembly)
+    local_assembly = "assembly" in run_config.local_exec
+    shared_parameters = run_config.shared_parameters
+    read_type = resolve_read_type(
+        ("assembly.assembly_route", assembly.assembly_route),
+        (
+            "shared_parameters.read_type",
+            shared_parameters.read_type if shared_parameters else None,
+        ),
+        (
+            "shared_parameters.platform",
+            None,
+            shared_parameters.platform if shared_parameters else None,
+        ),
+        context="storage.frozen_inputs.assembly_input_contract",
+    )
+    method_requires_read_type = method is not None and (
+        assembly.assembly_method is not None or local_assembly
+    )
+    if method_requires_read_type:
+        assert method is not None
+        if read_type is None:
+            if assembly.assembly_method is not None:
+                message = (
+                    "run_config: assembly.assembly_method is set but no "
+                    "read_type could be inferred"
+                )
+            else:
+                message = (
+                    f"run_config: local assembly method {method!r} was inferred "
+                    "but no read_type could be inferred"
+                )
+            raise FrozenInputValidationError(
+                message
+                + "; set assembly.assembly_route, shared_parameters.read_type, "
+                "or shared_parameters.platform"
+            )
+        if not is_method_read_type_compatible(method, read_type):
+            raise FrozenInputValidationError(
+                f"run_config: assembly method {method!r} is incompatible with "
+                f"inferred read_type {read_type!r}"
+            )
+    if local_assembly and method in {"flye", "nextdenovo"}:
+        registered_read_types = {
+            declaration_read_type
+            for declaration in read_declarations
+            if (
+                declaration_read_type := resolve_read_type(
+                    (
+                        "registered long-read declaration",
+                        None,
+                        declaration.platform,
+                    ),
+                    context="storage.frozen_inputs.registered_read_type",
+                )
+            )
+            is not None
+        }
+        compatible_declaration = read_type in registered_read_types or (
+            read_type in {"ont_raw", "ont_hq"}
+            and bool(registered_read_types.intersection({"ont_raw", "ont_hq"}))
+        )
+        if not compatible_declaration:
+            raise FrozenInputValidationError(
+                f"{method} execution requires registered long-read declarations "
+                f"compatible with read_type {read_type!r}"
+            )
     hifi_paths = {
         declaration.path
         for declaration in read_declarations
@@ -917,7 +1093,7 @@ def _validate_assembly_input_contract(
     paired_entries = [
         asset for asset in manifest.assets if asset.paired_reads
     ]
-    if method == "hifiasm" and "assembly" in run_config.local_exec:
+    if method == "hifiasm" and local_assembly:
         if not hifi_paths:
             raise FrozenInputValidationError(
                 "HiFi Hifiasm execution requires registered pacbio_hifi reads"
@@ -931,7 +1107,7 @@ def _validate_assembly_input_contract(
             raise FrozenInputValidationError(
                 "hifiasm use_hic_phasing requires registered paired Hi-C reads"
             )
-    if method == "hifiasm_ont" and "assembly" in run_config.local_exec:
+    if method == "hifiasm_ont" and local_assembly:
         if not ont_paths:
             raise FrozenInputValidationError(
                 "Hifiasm ONT execution requires registered ONT reads"

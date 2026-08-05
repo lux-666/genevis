@@ -1,3 +1,4 @@
 {
+  "requested_stages": ["repeat_annotation"],
   "local_exec": ["repeat_annotation"]
 }

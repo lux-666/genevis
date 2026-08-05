@@ -1,4 +1,5 @@
 {
+  "requested_stages": ["assembly_review"],
   "local_exec": ["assembly_review"],
   "assembly_review": {
     "busco": {

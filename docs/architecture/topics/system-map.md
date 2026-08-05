@@ -17,12 +17,13 @@
 
 ## What the system is
 
-Gene Agent is a durable genome-workflow coordinator with two nested
-lifecycles:
+Gene Agent is a durable genome-workflow coordinator with two public start
+boundaries that converge on the same nested lifecycles:
 
 ```text
-mutable TUI draft
-  -> whole-run input freeze
+structured manifest + run config --\
+                                -> whole-run input freeze
+optional mutable TUI draft -----/
   -> parent graph routes one compiled stage subgraph
   -> stage selects and prepares a method
   -> one method attempt is frozen, run, and collected
@@ -52,7 +53,7 @@ as a parameterized AutoHiC attempt.
 
 | Module | Owns |
 |---|---|
-| `app/entrypoints/` | Public CLI, mutable TUI, planning UI, whole-run freeze handoff, inspect/review/resume surfaces |
+| `app/entrypoints/` | Public structured `run` CLI, optional mutable TUI/planning UI, shared whole-run freeze handoff, and inspect/review/resume surfaces |
 | `app/workflow.py` and `app/graph/` | Canonical stage order, parent routing, checkpointer construction, and parent lifecycle event boundary |
 | `app/domains/` | Stage-neutral biological rules and shared typed input interpretation without workflow side effects |
 | `app/stages/` | Compiled biological subgraphs, method routing, command preparation, collection, review, and resource commit |
@@ -87,11 +88,19 @@ GapCloser and Base Polish are wired manual-only placeholders, not executable
 biological capabilities; automatic recommendations omit them and explicit
 requests fail closed.
 
-Normal new runs enter through `gene-agent tui`. Other public commands inspect,
-audit, review, resume, or bootstrap. There is no public `gene-agent run`
-command. Production method execution is a local subprocess on the CLI host;
-running on a server means starting the same CLI in the server checkout, not
-using an in-agent SSH or scheduler runner.
+Real/operator new runs enter through `gene-agent run --manifest PATH --run-config
+PATH --data-dir PATH [--non-interactive]`. The manifest solely owns
+`session_id`; `data-dir` is the layout root, so outputs live under
+`<data-dir>/runs/<session_id>/`. The command preflights both documents, freezes
+them with the exact requested stage set and dependency closure, and executes
+with SQLite. Its run config must explicitly contain JSON arrays for
+`requested_stages` and `local_exec`; `requested_stages: null` is rejected while
+`[]` is a valid empty biological-stage plan. `gene-agent tui` remains an
+optional conversational intake and planning path into that same freeze/executor.
+Other public commands inspect,
+audit, review, resume, or bootstrap. Production method execution is a local
+subprocess on the CLI host; running on a server means starting the same CLI in
+the server checkout, not using an in-agent SSH or scheduler runner.
 
 ## Navigate by edge
 

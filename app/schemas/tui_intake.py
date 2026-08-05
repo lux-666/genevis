@@ -1,8 +1,8 @@
 """Durable, sample-only intake contracts used by the conversational TUI.
 
-These models intentionally do not reuse :class:`EntryRequest` or
-``AskPlanState``.  A TUI draft exists before there is a complete manifest, so
-requiring a manifest at this boundary would force premature materialization.
+These models intentionally do not reuse the frozen execution input contract or
+``AskPlanState``. A TUI draft exists before there is a complete manifest, so
+requiring a manifest at this boundary would force premature publication.
 """
 
 from __future__ import annotations

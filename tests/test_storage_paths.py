@@ -143,7 +143,10 @@ class SessionPathsTests(unittest.TestCase):
                 env_spec=None,
             )
 
-            with self.assertRaisesRegex(DataLayoutError, "working directory is outside"):
+            with self.assertRaisesRegex(
+                DataLayoutError,
+                "working directory is outside",
+            ):
                 persist_frozen_attempt(
                     {"session_id": "s1", "data_dir": str(paths.run_dir)},
                     attempt,
@@ -255,6 +258,11 @@ class SessionPathsTests(unittest.TestCase):
             paths.require_session_id("s2")
         with self.assertRaises(DataLayoutError):
             SessionPaths("/tmp/gene-agent-data", "../escape")
+
+    def test_session_id_rejects_boundary_whitespace_and_backslashes(self):
+        for invalid in (" s1", "s1 ", "s\\1", "./s1", "s1/.", "s1/"):
+            with self.subTest(invalid=invalid), self.assertRaises(DataLayoutError):
+                SessionPaths("/tmp/gene-agent-data", invalid)
 
     def test_refs_are_normalized_and_contained_by_run_root(self):
         paths = SessionPaths("/tmp/gene-agent-data", "s1")

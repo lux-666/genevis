@@ -18,6 +18,7 @@ from app.schemas.run_config import (
     load_run_config,
     validate_genome_size_execution_plan,
 )
+from app.workflow import STAGE_ORDER
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = PROJECT_ROOT / "docs" / "examples"
@@ -107,9 +108,36 @@ class PublishedConfigurationContractTests(unittest.TestCase):
         templates = sorted(EXAMPLES_DIR.glob("*run_config.template.json"))
         self.assertTrue(templates)
 
+        canonical_positions = {
+            stage: position
+            for position, stage in enumerate(STAGE_ORDER)
+            if stage != "inventory"
+        }
+
         for path in templates:
             with self.subTest(path=path.name):
-                load_run_config(path)
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                self.assertIn("requested_stages", payload)
+                self.assertIn("local_exec", payload)
+
+                config = load_run_config(path)
+                self.assertIn("requested_stages", config.model_fields_set)
+                self.assertIn("local_exec", config.model_fields_set)
+
+                requested = list(config.requested_stages or [])
+                local_exec = list(config.local_exec)
+                self.assertTrue(requested)
+                self.assertEqual(len(requested), len(set(requested)))
+                self.assertEqual(len(local_exec), len(set(local_exec)))
+                self.assertTrue(set(local_exec).issubset(requested))
+                self.assertEqual(
+                    requested,
+                    sorted(requested, key=canonical_positions.__getitem__),
+                )
+                self.assertEqual(
+                    local_exec,
+                    sorted(local_exec, key=canonical_positions.__getitem__),
+                )
 
     def test_assembly_templates_pair_with_manifest_owned_genome_size(self):
         pairs = (
@@ -146,6 +174,24 @@ class PublishedConfigurationContractTests(unittest.TestCase):
         assert match is not None
 
         config = RunConfig.model_validate(json.loads(match.group("payload")))
+
+        self.assertIn("requested_stages", config.model_fields_set)
+        self.assertIn("local_exec", config.model_fields_set)
+        assert config.requested_stages is not None
+        canonical_positions = {
+            stage: position
+            for position, stage in enumerate(STAGE_ORDER)
+            if stage != "inventory"
+        }
+        self.assertEqual(
+            config.requested_stages,
+            sorted(config.requested_stages, key=canonical_positions.__getitem__),
+        )
+        self.assertEqual(
+            config.local_exec,
+            sorted(config.local_exec, key=canonical_positions.__getitem__),
+        )
+        self.assertTrue(set(config.local_exec).issubset(config.requested_stages))
 
         assert config.shared_parameters is not None
         self.assertEqual(config.shared_parameters.read_type, "ont_raw")

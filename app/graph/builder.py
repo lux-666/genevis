@@ -68,6 +68,19 @@ def build_graph(
         session_id = state.get("session_id")
         runtime_data_dir = state.get("data_dir", data_dir)
         supervision = state.get("supervision_state")
+        route_update = route_controller(state)
+        routed_stage = route_update.get(
+            "current_stage",
+            state.get("current_stage", "inventory"),
+        )
+        if (
+            routed_stage == TERMINAL_STAGE
+            and supervision not in {"failed_terminal", "blocked_human"}
+        ):
+            route_update["supervision_state"] = "completed"
+        routed_state = {**state, **route_update}
+        routed_supervision = route_update.get("supervision_state", supervision)
+        routed_error = route_update.get("last_error", state.get("last_error"))
         if session_id:
             from app.storage.ledger import Ledger
 
@@ -115,36 +128,15 @@ def build_graph(
                                 idempotency_key=f"stage-completed:{completed_stage}",
                             )
 
-            terminal_refs = ledger.references_from(
-                state,
-                role_prefix="terminal",
-            )
-
-            if supervision == "failed_terminal":
-                ledger.record_session_terminal(
-                    session_id,
-                    outcome="failed",
-                    stage=state.get("current_stage"),
-                    error=state.get("last_error"),
-                    refs=terminal_refs,
-                    idempotency_key="session-terminal:failed",
-                )
-            elif (
-                supervision == "completed"
-                or state.get("current_stage") == TERMINAL_STAGE
-            ):
-                ledger.record_session_terminal(
-                    session_id,
-                    outcome="completed",
-                    stage=state.get("current_stage"),
-                    refs=terminal_refs,
-                    idempotency_key="session-terminal:completed",
-                )
-            elif supervision != "blocked_human":
+            if supervision not in {
+                "failed_terminal",
+                "completed",
+                "blocked_human",
+            }:
                 current = state.get("current_stage", "inventory")
                 requested = state.get("requested_stages")
                 if (
-                    requested
+                    requested is not None
                     and current not in {"inventory", TERMINAL_STAGE}
                     and current not in requested
                 ):
@@ -174,6 +166,31 @@ def build_graph(
                         idempotency_key=f"stage-entered:{current}",
                     )
 
+            terminal_refs = ledger.references_from(
+                routed_state,
+                role_prefix="terminal",
+            )
+            if routed_supervision == "failed_terminal":
+                ledger.record_session_terminal(
+                    session_id,
+                    outcome="failed",
+                    stage=routed_stage,
+                    error=routed_error,
+                    refs=terminal_refs,
+                    idempotency_key="session-terminal:failed",
+                )
+            elif (
+                routed_supervision == "completed"
+                or routed_stage == TERMINAL_STAGE
+            ):
+                ledger.record_session_terminal(
+                    session_id,
+                    outcome="completed",
+                    stage=routed_stage,
+                    refs=terminal_refs,
+                    idempotency_key="session-terminal:completed",
+                )
+
         if supervision in {"failed_terminal", "blocked_human"} and session_id:
             from app.reports.review_report import write_operator_report
 
@@ -182,7 +199,7 @@ def build_graph(
                 session_id,
                 {**state, "checkpoint_persistence": backend},
             )
-        return route_controller(state)
+        return route_update
 
     graph.add_node("route_controller", operator_route_controller)
     graph.add_node("inventory_stage", build_inventory_stage())

@@ -1,7 +1,8 @@
-"""Command-line entrypoint and internal frozen-session executor for gene-agent.
+"""Command-line entrypoint and frozen-session executor for gene-agent.
 
-Normal workflows start in ``gene-agent tui``.  The remaining CLI commands
-inspect, resume, review, audit, or configure those TUI-owned runs.
+Structured workflows start deterministically with ``gene-agent run``.  The TUI
+remains an optional conversational intake/planning boundary; both entry paths
+publish the same immutable input contract and use the same frozen executor.
 """
 
 from __future__ import annotations
@@ -12,11 +13,12 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 from langchain_core.runnables import RunnableConfig
@@ -33,29 +35,21 @@ from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
     CheckpointerBackend,
 )
-from app.schemas.entry import EntryRequest
-from app.schemas.manifest import InputManifest
 from app.schemas.run_config import (
     AssemblyRunConfig,
-    LocalExecStage,
     ReviewPolicyStage,
-    RunConfig,
     infer_assembly_method,
-    load_run_config,
-    validate_genome_size_execution_plan,
-    validate_local_assembly_execution,
 )
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.state import DomainStage, initial_state
 from app.storage.ledger import Ledger
-from app.storage.materialization import RunMaterializationError, materialize_run_layout
 from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
+    from app.storage.frozen_inputs import FrozenInputBundle
 
 
-_LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))
 _ASSEMBLY_METHOD_NAMES = {
     "flye": "assembly.candidate.flye",
     "nextdenovo": "assembly.candidate.nextdenovo",
@@ -140,13 +134,40 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="gene-agent",
         description=(
-            "Start and run workflows with 'gene-agent tui'. Use bootstrap only "
-            "to initialize or repair this machine's configuration."
+            "Start deterministic workflows with 'gene-agent run', or use "
+            "'gene-agent tui' for conversational intake and planning."
         ),
     )
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{tui,bootstrap,inspect,storage-audit,resume,review}",
+        metavar="{run,tui,bootstrap,inspect,storage-audit,resume,review}",
+    )
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Start a deterministic workflow from structured input files",
+    )
+    run_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="Path to the input manifest YAML/JSON file",
+    )
+    run_parser.add_argument(
+        "--run-config",
+        dest="run_config",
+        required=True,
+        help="Path to the deterministic run-config JSON file",
+    )
+    run_parser.add_argument(
+        "--data-dir",
+        required=True,
+        help="Workflow data-layout root; outputs land below <root>/runs/<session_id>",
+    )
+    run_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        default=False,
+        help="Persist a human gate and exit instead of prompting",
     )
 
     inspect_parser = subparsers.add_parser(
@@ -325,40 +346,61 @@ def _resolve_data_dir(data_dir: str) -> str:
     return str(Path(data_dir).expanduser().resolve(strict=False))
 
 
-def _peek_manifest_session_id(manifest_path: Path) -> str | None:
-    """Return the manifest's top-level session_id field, or None.
+def _run(args: argparse.Namespace) -> int:
+    """Preflight, freeze, and execute one deterministic structured run."""
 
-    Used for an early-fail cross-check against the CLI --session-id. Full
-    manifest validation still runs later in the inventory stage; this peek
-    must not throw on malformed input.
-    """
+    from app.storage.frozen_inputs import (
+        FrozenInputError,
+        FrozenInputValidationError,
+        freeze_session_inputs,
+        prepare_session_inputs,
+    )
+
     try:
-        text = manifest_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    suffix = manifest_path.suffix.lower()
-    if suffix in {".yaml", ".yml"}:
-        import yaml
+        if not str(args.data_dir).strip():
+            raise FrozenInputValidationError("--data-dir must not be blank")
+        prepared = prepare_session_inputs(
+            manifest_draft=args.manifest,
+            run_config_draft=args.run_config,
+        )
+        required_fields = {"requested_stages", "local_exec"}
+        missing_fields = sorted(
+            required_fields.difference(prepared.explicit_run_config_fields)
+        )
+        if missing_fields:
+            raise FrozenInputValidationError(
+                "run config must explicitly provide top-level field(s): "
+                + ", ".join(missing_fields)
+            )
 
-        try:
-            data = yaml.safe_load(text)
-        except yaml.YAMLError:
-            return None
-    elif suffix == ".json":
-        import json
+        requested_stages = prepared.run_config.requested_stages
+        if requested_stages is None:
+            raise FrozenInputValidationError(
+                "run config field requested_stages must be a JSON array, not null"
+            )
 
-        try:
-            data = json.loads(text)
-        except ValueError:
-            return None
-    else:
-        return None
-    if not isinstance(data, dict):
-        return None
-    value = data.get("session_id")
-    if isinstance(value, str) and value:
-        return value
-    return None
+        data_dir = _resolve_data_dir(args.data_dir)
+        paths = SessionPaths(data_dir, prepared.manifest.session_id)
+        freeze_session_inputs(
+            paths,
+            prepared_inputs=prepared,
+            selected_stages=list(requested_stages),
+            selected_methods={},
+        )
+    except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
+        print(f"error: run preflight failed: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        return execute_frozen_session(
+            paths.session_id,
+            paths.data_root,
+            checkpointer="sqlite",
+            interactive_gate=not args.non_interactive,
+        )
+    except Exception as exc:
+        print(f"error: run execution failed: {exc}", file=sys.stderr)
+        return 1
 
 
 def execute_frozen_session(
@@ -368,11 +410,11 @@ def execute_frozen_session(
     checkpointer: CheckpointerBackend | None = None,
     interactive_gate: bool = True,
 ) -> int:
-    """Execute one verified TUI-frozen session without rematerializing inputs.
+    """Execute one verified frozen session without rematerializing inputs.
 
-    This is the internal executor used by the TUI.  It intentionally accepts a
-    session identity rather than user-supplied manifest/run-config paths: the
-    freeze marker is the only authority for those files.
+    Both public ``run`` and the TUI call this boundary.  It intentionally
+    accepts only session identity and data root: the freeze marker is the sole
+    authority for manifest, run config, and dependency inputs.
     """
 
     from app.storage.frozen_inputs import (
@@ -387,21 +429,16 @@ def execute_frozen_session(
     try:
         paths = SessionPaths(data_dir, session_id)
         with frozen_execution_lock(paths):
-            validate_frozen_inputs(paths)
+            bundle = validate_frozen_inputs(paths)
             progress = frozen_execution_progress(paths)
             if progress == "partial":
                 raise FrozenExecutionRecoveryError(
                     "partial execution evidence exists without a resumable checkpoint"
                 )
 
-            return _run_session(
-                session_id=session_id,
-                manifest=str(paths.input_manifest_path),
-                data_dir=str(paths.data_root),
-                run_config=str(paths.run_config_path),
-                local_exec=[],
+            return _execute_verified_frozen_session(
+                bundle,
                 checkpointer=checkpointer,
-                frozen_session=True,
                 resume_checkpoint=progress == "checkpoint",
                 interactive_gate=interactive_gate,
             )
@@ -411,31 +448,19 @@ def execute_frozen_session(
     except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
         print(f"error: frozen session cannot execute: {exc}", file=sys.stderr)
         return 1
-
-
-def _run_session(
-    *,
-    session_id: str | None,
-    manifest: str | Path | None,
-    data_dir: str | Path,
-    run_config: str | Path | None = None,
-    local_exec: list[str] | tuple[str, ...] = (),
-    checkpointer: CheckpointerBackend | None = None,
-    frozen_session: bool = False,
-    resume_checkpoint: bool = False,
-    interactive_gate: bool | None = None,
-) -> int:
-    """Execute one session from explicit, already-structured inputs."""
-
-    try:
-        request = EntryRequest(
-            session_id=session_id,
-            manifest=str(manifest) if manifest is not None else None,
-            data_dir=str(data_dir),
-        )
-    except ValueError as exc:
-        print(f"error: invalid run request: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"error: frozen session cannot execute: {exc}", file=sys.stderr)
         return 1
+
+
+def _execute_verified_frozen_session(
+    bundle: "FrozenInputBundle",
+    *,
+    checkpointer: CheckpointerBackend | None,
+    resume_checkpoint: bool,
+    interactive_gate: bool,
+) -> int:
+    """Seed and execute a graph from one already-verified frozen bundle."""
 
     configured_backend = (
         checkpointer
@@ -449,175 +474,23 @@ def _run_session(
         )
         return 1
     backend = cast(CheckpointerBackend, configured_backend)
-    data_dir = _resolve_data_dir(request.data_dir)
 
-    if request.manifest is None:
-        print("error: run request requires a manifest", file=sys.stderr)
-        return 1
-    manifest_path = Path(request.manifest)
-    run_config_path = str(run_config) if run_config is not None else None
-    frozen_bundle = None
-    frozen_paths: SessionPaths | None = None
-    if frozen_session:
-        from app.storage.frozen_inputs import (
-            FrozenInputError,
-            validate_frozen_inputs,
-        )
-
-        try:
-            if request.session_id is None:
-                raise ValueError("frozen execution requires a session_id")
-            frozen_paths = SessionPaths(data_dir, request.session_id)
-            expected_manifest = frozen_paths.input_manifest_path.resolve(strict=False)
-            supplied_manifest = manifest_path.expanduser().resolve(strict=False)
-            if supplied_manifest != expected_manifest:
-                raise ValueError(
-                    "frozen execution manifest must be the session input_manifest.yaml"
-                )
-            if run_config_path is None:
-                raise ValueError(
-                    "frozen execution requires the session run_config.json"
-                )
-            expected_run_config = frozen_paths.run_config_path.resolve(strict=False)
-            supplied_run_config = Path(run_config_path).expanduser().resolve(
-                strict=False
-            )
-            if supplied_run_config != expected_run_config:
-                raise ValueError(
-                    "frozen execution run config must be the session run_config.json"
-                )
-            frozen_bundle = validate_frozen_inputs(frozen_paths)
-            manifest_path = frozen_paths.input_manifest_path
-            run_config_path = str(frozen_paths.run_config_path)
-            request = EntryRequest(
-                session_id=request.session_id,
-                manifest=str(manifest_path),
-                data_dir=data_dir,
-            )
-        except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
-            print(f"error: frozen session cannot execute: {exc}", file=sys.stderr)
-            return 1
-    else:
-        if not manifest_path.exists():
-            print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
-            return 1
-
-        manifest_session_id = _peek_manifest_session_id(manifest_path)
-        if request.session_id is None:
-            adopted = manifest_session_id or generate_session_id(data_dir)
-            try:
-                request = EntryRequest(
-                    session_id=adopted,
-                    manifest=request.manifest,
-                    data_dir=data_dir,
-                )
-            except ValueError as exc:
-                print(f"error: invalid run request: {exc}", file=sys.stderr)
-                return 1
-        elif (
-            manifest_session_id is not None
-            and manifest_session_id != request.session_id
-        ):
-            print(
-                "error: manifest session_id "
-                f"{manifest_session_id!r} does not match CLI --session-id "
-                f"{request.session_id!r}; the asset registry would land under "
-                "the manifest id while every other stage would write under the "
-                "CLI id. Make them match (drop one, or align the values).",
-                file=sys.stderr,
-            )
-            return 1
-        else:
-            try:
-                request = EntryRequest(
-                    session_id=request.session_id,
-                    manifest=request.manifest,
-                    data_dir=data_dir,
-                )
-            except ValueError as exc:
-                print(f"error: invalid run request: {exc}", file=sys.stderr)
-                return 1
-
-    run_config: RunConfig | None = (
-        frozen_bundle.run_config if frozen_bundle is not None else None
-    )
-    if not frozen_session and run_config_path:
-        try:
-            run_config = load_run_config(run_config_path)
-        except (FileNotFoundError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
-    cli_local_stages = list(local_exec)
-    config_local_stages = list(run_config.local_exec) if run_config else []
-    raw_local_stages = list(dict.fromkeys([*cli_local_stages, *config_local_stages]))
-    invalid_local_stages = [
-        stage for stage in raw_local_stages if stage not in _LOCAL_EXEC_STAGE_CHOICES
-    ]
-    if invalid_local_stages:
-        print(
-            f"error: unsupported local execution stages: {invalid_local_stages}",
-            file=sys.stderr,
-        )
-        return 1
-    local_stages = [cast(LocalExecStage, stage) for stage in raw_local_stages]
-
-    if "assembly" in local_stages:
-        try:
-            validate_local_assembly_execution(
-                run_config.assembly if run_config else None
-            )
-            manifest = (
-                frozen_bundle.manifest
-                if frozen_bundle is not None
-                else InputManifest.model_validate(
-                    yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-                )
-            )
-            assert run_config is not None
-            validate_genome_size_execution_plan(
-                run_config, manifest, local_stages=local_stages
-            )
-        except (OSError, yaml.YAMLError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-    # From this point on every runtime writer receives the session-local
-    # directory.  Stage code can therefore keep its existing relative
-    # artifact/work layout without spilling files into the shared root.
-    session_id = request.session_id
-    if session_id is None:
-        print("error: run request could not resolve a session_id", file=sys.stderr)
-        return 1
-    paths = frozen_paths or SessionPaths(data_dir, session_id)
-    if frozen_session:
-        canonical_manifest_path = paths.input_manifest_path
-    else:
-        try:
-            materialize_run_layout(
-                paths,
-                manifest_path=manifest_path,
-                run_config_path=Path(run_config_path) if run_config_path else None,
-            )
-            if run_config is not None:
-                run_config = load_run_config(paths.run_config_path)
-            canonical_manifest_path = paths.manifest_path
-        except (RunMaterializationError, FileNotFoundError, ValueError, OSError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-    run_dir = paths.run_dir
-    request = request.model_copy(update={"data_dir": str(run_dir)})
-    manifest_ref = paths.to_ref(canonical_manifest_path)
-    Ledger(request.data_dir).create_session(session_id, manifest_ref)
+    paths = bundle.paths
+    session_id = paths.session_id
+    run_config = bundle.run_config
+    run_dir = str(paths.run_dir)
+    manifest_ref = paths.to_ref(paths.input_manifest_path)
+    Ledger(run_dir).create_session(session_id, manifest_ref)
 
     requested_stages = (
         list(run_config.requested_stages)
-        if run_config and run_config.requested_stages
+        if run_config.requested_stages is not None
         else None
     )
     state = initial_state(
         session_id=session_id,
         input_manifest_ref=manifest_ref,
-        data_dir=request.data_dir,
+        data_dir=run_dir,
         requested_stages=(
             [cast(DomainStage, stage) for stage in requested_stages]
             if requested_stages is not None
@@ -625,27 +498,24 @@ def _run_session(
         ),
     )
 
+    local_stages = list(run_config.local_exec)
     stage_outputs = dict(state.get("stage_outputs") or {})
     if local_stages:
         for stage_name in local_stages:
             existing = dict(stage_outputs.get(stage_name) or {})
             existing["execution_mode"] = "local"
             stage_outputs[stage_name] = existing
-    if run_config and run_config.shared_parameters:
+    if run_config.shared_parameters:
         state["shared_parameters"] = run_config.shared_parameters.model_dump(
             exclude_none=True
         )
-    if run_config and run_config.read_qc and run_config.read_qc.length_filter:
+    if run_config.read_qc and run_config.read_qc.length_filter:
         read_qc_out = dict(stage_outputs.get("read_qc") or {})
         read_qc_out["length_filter_request"] = (
             run_config.read_qc.length_filter.model_dump(mode="json")
         )
         stage_outputs["read_qc"] = read_qc_out
-    if (
-        run_config
-        and run_config.genome_survey
-        and run_config.genome_survey.survey_parameters
-    ):
+    if run_config.genome_survey and run_config.genome_survey.survey_parameters:
         survey_out = dict(stage_outputs.get("genome_survey") or {})
         survey_out["survey_parameters"] = (
             run_config.genome_survey.survey_parameters.model_dump(exclude_none=True)
@@ -657,7 +527,7 @@ def _run_session(
             "primary_method", "repeat_annotation.masking.repeatmasker"
         )
         stage_outputs["repeat_annotation"] = repeat_out
-    if run_config and run_config.assembly:
+    if run_config.assembly:
         assembly_out = dict(stage_outputs.get("assembly") or {})
         try:
             selection = _build_assembly_selection(
@@ -701,7 +571,7 @@ def _run_session(
                 assembly_out[key] = value
         if assembly_out:
             stage_outputs["assembly"] = assembly_out
-    if run_config and run_config.assembly_review:
+    if run_config.assembly_review:
         review_out = dict(stage_outputs.get("assembly_review") or {})
         if run_config.assembly_review.quast:
             review_out["quast_parameters"] = (
@@ -717,7 +587,7 @@ def _run_session(
                 run_config.assembly_review.related_species_reference_dir
             )
         stage_outputs["assembly_review"] = review_out
-    if run_config and run_config.hic_scaffolding:
+    if run_config.hic_scaffolding:
         hic_out = dict(stage_outputs.get("hic_scaffolding") or {})
         if run_config.hic_scaffolding.autohic_parameters:
             hic_out["autohic_parameters"] = (
@@ -733,11 +603,11 @@ def _run_session(
             "max_review_retries": run_config.hic_scaffolding.max_review_retries,
         }
         stage_outputs["hic_scaffolding"] = hic_out
-    if run_config and run_config.t2t:
+    if run_config.t2t:
         t2t_out = dict(stage_outputs.get("t2t") or {})
         t2t_out.update(run_config.t2t.model_dump(mode="json", exclude_none=True))
         stage_outputs["t2t"] = t2t_out
-    if run_config and run_config.review_policy:
+    if run_config.review_policy:
         review_stages: tuple[ReviewPolicyStage, ...] = (
             "assembly",
             "assembly_review",
@@ -750,8 +620,7 @@ def _run_session(
             )
             stage_outputs[review_stage] = stage_out
     if (
-        run_config
-        and run_config.gene_annotation
+        run_config.gene_annotation
         and run_config.gene_annotation.lineage_or_species_hints
     ):
         gene_out = dict(stage_outputs.get("gene_annotation") or {})
@@ -760,8 +629,7 @@ def _run_session(
         )
         stage_outputs["gene_annotation"] = gene_out
     if (
-        run_config
-        and run_config.function_annotation
+        run_config.function_annotation
         and run_config.function_annotation.database_provenance
     ):
         fn_out = dict(stage_outputs.get("function_annotation") or {})
@@ -773,7 +641,7 @@ def _run_session(
     if stage_outputs != (state.get("stage_outputs") or {}):
         state["stage_outputs"] = stage_outputs
 
-    graph = build_graph(backend=backend, data_dir=request.data_dir)
+    graph = build_graph(backend=backend, data_dir=run_dir)
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     try:
         result = graph.invoke(None if resume_checkpoint else state, config=config)
@@ -795,7 +663,7 @@ def _run_session(
         failure_result = {
             **latest_state,
             "session_id": session_id,
-            "data_dir": request.data_dir,
+            "data_dir": run_dir,
             "input_manifest_ref": manifest_ref,
             "supervision_state": "failed_terminal",
             "last_error": error,
@@ -806,7 +674,7 @@ def _run_session(
             config,
             failure_result,
             session_id,
-            request.data_dir,
+            run_dir,
             backend,
             report_kind="operator",
         )
@@ -819,15 +687,26 @@ def _run_session(
         print(f"error: workflow invoke failed: {error}", file=sys.stderr)
         return 1
 
-    if interactive_gate is None:
-        interactive_gate = sys.stdin.isatty()
     supervision = result.get("supervision_state", "unknown")
 
     terminal_finalized_by_resume = False
     if supervision == "blocked_human" and interactive_gate and backend == "sqlite":
-        result = _interactive_gate_loop(
-            graph, config, result, session_id, request.data_dir
-        )
+        from app.control.resume_transaction import ResumeTransactionError
+
+        try:
+            result = _interactive_gate_loop(
+                graph,
+                config,
+                result,
+                session_id,
+                run_dir,
+            )
+        except ResumeTransactionError as exc:
+            print(
+                f"error: resume {exc.phase} failed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
         supervision = result.get("supervision_state", "unknown")
         terminal_finalized_by_resume = supervision in {"completed", "failed_terminal"}
 
@@ -843,10 +722,13 @@ def _run_session(
     print(f"checkpoint_persistence: {backend}")
     if supervision == "blocked_human":
         if backend == "sqlite":
-            print(
-                "resume_note: use `gene-agent review` or `gene-agent resume` "
-                "to continue"
-            )
+            if interactive_gate:
+                print(
+                    "resume_note: use `gene-agent review` or `gene-agent resume` "
+                    "to continue"
+                )
+            else:
+                _print_noninteractive_gate_guidance(paths)
         else:
             print(
                 "resume_note: durable cross-process resume requires "
@@ -859,9 +741,7 @@ def _run_session(
         print(f"asset_registry_ref: {registry_ref}")
     if stage_plan_ref:
         print(f"stage_plan_ref: {stage_plan_ref}")
-    if run_config_path:
-        run_config_ref = Path(run_config_path).expanduser().resolve(strict=False)
-        print(f"run_config_ref: {run_config_ref}")
+    print(f"run_config_ref: {paths.run_config_path.resolve(strict=False)}")
 
     compaction_warning = None
     if not terminal_finalized_by_resume:
@@ -870,7 +750,7 @@ def _run_session(
             config,
             result,
             session_id,
-            request.data_dir,
+            run_dir,
             backend,
             report_kind="final",
         )
@@ -885,6 +765,51 @@ def _run_session(
         return 1
 
     return 0
+
+
+def _print_noninteractive_gate_guidance(paths: SessionPaths) -> None:
+    """Print shell-copyable continuation commands for one durable human gate."""
+
+    session_id = paths.session_id
+    data_root = str(paths.data_root)
+    decision_file = str(paths.data_root / "decisions" / f"{session_id}_decision.json")
+    commands = {
+        "inspect_command": [
+            "gene-agent",
+            "inspect",
+            "--session-id",
+            session_id,
+            "--data-dir",
+            data_root,
+            "--write-decision-template",
+            decision_file,
+        ],
+        "review_command": [
+            "gene-agent",
+            "review",
+            "--session-id",
+            session_id,
+            "--data-dir",
+            data_root,
+            "--checkpointer",
+            "sqlite",
+        ],
+        "resume_command": [
+            "gene-agent",
+            "resume",
+            "--session-id",
+            session_id,
+            "--decision-file",
+            decision_file,
+            "--data-dir",
+            data_root,
+            "--checkpointer",
+            "sqlite",
+        ],
+    }
+    print("resume_note: workflow is safely blocked; continue with one command below")
+    for label, command in commands.items():
+        print(f"{label}: {shlex.join(command)}")
 
 
 def _interactive_gate_loop(
@@ -983,8 +908,8 @@ def _run_storage_audit(args: argparse.Namespace) -> int:
 
 
 def _run_inspect(args: argparse.Namespace) -> int:
+    from app.control.errors import ResumeValidationError
     from app.control.lifecycle import (
-        ResumeValidationError,
         build_resume_decision_template,
         inspect_session,
     )
@@ -1601,6 +1526,8 @@ def main(argv: list[str] | None = None) -> int:
     # Load .env once so all public commands share setdefault-style configuration.
     _load_dotenv_without_override()
     args = _parse_args(argv)
+    if args.command == "run":
+        return _run(args)
     if args.command == "inspect":
         return _run_inspect(args)
     if args.command == "storage-audit":

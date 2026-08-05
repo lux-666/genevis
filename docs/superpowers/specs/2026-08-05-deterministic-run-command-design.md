@@ -78,8 +78,10 @@ loaders canonicalize them once before publication.
 ## Deterministic run-config requirements
 
 The existing strict `RunConfig` schema remains the field and type authority.
-The public `run` boundary adds one presence rule: the source JSON must explicitly
-contain both of these top-level fields, even when either list is empty:
+The public `run` boundary adds stricter presence/value rules: the source JSON
+must explicitly contain both top-level fields as JSON arrays, even when either
+list is empty. `requested_stages` must not be `null`; internal/TUI compatibility
+may retain `None`, but the public structured boundary rejects it:
 
 ```json
 {
@@ -105,7 +107,8 @@ The command uses one fail-closed flow:
 parse CLI paths
   -> load and canonicalize manifest
   -> load and canonicalize run config
-  -> require explicit requested_stages and local_exec
+  -> require explicit JSON arrays for requested_stages and local_exec
+  -> reject requested_stages: null
   -> obtain session_id from the validated manifest
   -> validate manifest/run-config declarations together
   -> validate local assembly method, read type, and genome-size prerequisites
@@ -228,8 +231,9 @@ input documents. Required categories are:
 
 - manifest missing, unreadable, malformed, or schema-invalid;
 - manifest missing or invalid `session_id`;
-- run config missing, unreadable, malformed JSON, schema-invalid, or missing
-  explicit `requested_stages`/`local_exec`;
+- run config missing, unreadable, malformed JSON, schema-invalid, missing
+  explicit `requested_stages`/`local_exec`, or carrying
+  `requested_stages: null`;
 - cross-file input declaration failure;
 - local method/read-type/genome-size prerequisite failure;
 - dependency snapshot or package configuration failure;
@@ -253,7 +257,8 @@ Focused tests must cover:
 3. manifest-owned session identity and output placement below
    `<data-dir>/runs/<session_id>`;
 4. manifest and run-config parsing occurs before freeze/executor invocation;
-5. missing explicit `requested_stages` or `local_exec` fails before publication;
+5. missing explicit `requested_stages`/`local_exec` or
+   `requested_stages: null` fails before publication;
 6. dependency scope equals `requested_stages`, rejects `local_exec` stages not
    in that list, adds no implicit biological stage, and snapshots every
    configured method/internal-helper environment owned by a requested stage;
@@ -324,7 +329,8 @@ The change is accepted only when:
 - both source files are fully validated together before graph execution;
 - the run uses manifest-owned identity, required data root, SQLite durability,
   and the approved interactive/noninteractive gate behavior;
-- public run-configs cannot omit `requested_stages` or `local_exec`;
+- public run-configs cannot omit `requested_stages` or `local_exec`, and cannot
+  set `requested_stages` to `null`;
 - all immutable frozen inputs and the dependency snapshot are verified before
   execution;
 - the old unfrozen public/direct-run compatibility path and its now-unreferenced

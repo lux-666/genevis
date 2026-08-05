@@ -2,7 +2,7 @@
 
 Provides shared primitives for prompting operator decisions at review gates,
 used by both `gene-agent review` (standalone) and the in-process gate loop
-in `_run_session`.
+in the frozen-session executor.
 """
 
 from __future__ import annotations

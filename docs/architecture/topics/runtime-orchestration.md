@@ -3,8 +3,7 @@
 > **Status:** implemented.  
 > **Read when:** tracing CLI dispatch, frozen-session startup, parent routing,
 > stage selection, or terminal behavior.  
-> **Comes from:** [TUI and planning](tui-and-planning.md) and a validated
-> whole-run frozen contract.  
+> **Comes from:** a structured public run or [TUI and planning](tui-and-planning.md), then a validated whole-run frozen contract.
 > **Feeds into:** compiled stage subgraphs, [method execution](execution.md),
 > [review and resume](review-and-resume.md), and terminal reports.  
 > **Contract dependencies:** [stage contracts](../reference/stage-contracts.md),
@@ -17,15 +16,34 @@
 ## Public entry boundary
 
 The installed `gene-agent` command dispatches to `app.entrypoints.run:main`.
-Its public subcommands are `tui`, `inspect`, `storage-audit`, `resume`,
-`review`, and `bootstrap`. New work starts through the TUI; the internal frozen
-executor is not a public `run` command.
+Real/operator new work uses exactly:
 
-`execute_frozen_session` validates the frozen control documents and obtains a
-per-session execution lock. `_run_session` then creates the Ledger session,
-constructs the small `TopLevelState`, projects run-config values into their
-owned stage cursors, builds the parent graph, and invokes it with the session ID
-as the LangGraph thread ID.
+```text
+gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interactive]
+```
+
+All three paths are required. The manifest solely owns `session_id`; the CLI
+does not expose session, checkpointer, local-execution, launch, or ask
+overrides. `data-dir` is the layout root and the run lives at
+`<data-dir>/runs/<session_id>/`. The handler validates and canonicalizes both
+source documents and requires explicit JSON arrays for `requested_stages` and
+`local_exec`. `requested_stages` must not be `null`; `[]` is the valid empty
+biological-stage plan. The handler then freezes that exact stage set plus its
+conservative dependency closure.
+It publishes `input_manifest.yaml`, `run_config.json`, and
+`dependency_manifest.json` before publishing `frozen_inputs.json` last.
+
+`gene-agent tui` is an optional conversational intake/planning boundary that
+uses the same frozen publication and executor. Other public subcommands are
+`inspect`, `storage-audit`, `resume`, `review`, and `bootstrap`.
+
+`execute_frozen_session` validates the frozen control documents, obtains a
+per-session execution lock, creates the Ledger session, constructs the small
+`TopLevelState`, projects run-config values into their owned stage cursors,
+builds the parent graph, and invokes it with the session ID as the LangGraph
+thread ID. The public run always uses SQLite. With `--non-interactive`, a human
+gate persists `blocked_human` and prints `inspect`, `review`, and `resume`
+continuations instead of prompting.
 
 ## Parent graph
 
@@ -59,9 +77,11 @@ stages.
 The parent currently contains 13 domain stages. `gapcloser` and `base_polish`
 are manual-only placeholders: automatic prefix expansion and manifest-derived
 recommendations omit them, ordinary explicit stage sets skip them when absent,
-and an explicit request terminates with `blocked_not_implemented`. A legacy
-`requested_stages = null` traversal records `stage_skipped:not_implemented`
-and advances without a success cursor or completion trace.
+and an explicit request terminates with `blocked_not_implemented`. Internal/TUI
+legacy state may still carry `requested_stages = null`; that compatibility
+traversal records `stage_skipped:not_implemented` and advances without a success
+cursor or completion trace. Public `gene-agent run` rejects JSON `null` before
+freeze or execution.
 
 `requested_stages` is frozen as the initial operator plan, but it is not an
 eternally immutable checkpoint field. After Assembly Review, the approved

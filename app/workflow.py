@@ -85,7 +85,7 @@ def skipped_stages_until_next(
     requested_stages: Sequence[str] | None,
 ) -> list[str]:
     """Return unrequested stages bypassed by an immediate resume handoff."""
-    if not requested_stages or current_stage not in STAGE_ORDER:
+    if requested_stages is None or current_stage not in STAGE_ORDER:
         return []
     next_stage = next_requested_stage(current_stage, requested_stages)
     start = STAGE_ORDER.index(current_stage) + 1
@@ -101,7 +101,7 @@ def unrequested_stages_from_current(
 ) -> list[str]:
     """Return the current unrequested stage and any following skipped stages."""
 
-    if not requested_stages or current_stage not in STAGE_ORDER:
+    if requested_stages is None or current_stage not in STAGE_ORDER:
         return []
     next_stage = next_requested_stage(current_stage, requested_stages)
     start = STAGE_ORDER.index(current_stage)
@@ -116,7 +116,7 @@ def next_stage_name(
     requested_stages: Sequence[str] | None = None,
 ) -> DomainStage:
     """Return the next applicable domain stage, or the terminal stage."""
-    if requested_stages:
+    if requested_stages is not None:
         return next_requested_stage(current_stage, requested_stages)
     if current_stage not in STAGE_ORDER:
         return TERMINAL_STAGE

@@ -1,4 +1,12 @@
 {
+  "requested_stages": [
+    "read_qc",
+    "assembly",
+    "assembly_review",
+    "repeat_annotation",
+    "gene_annotation",
+    "function_annotation"
+  ],
   "local_exec": ["read_qc", "assembly", "assembly_review", "repeat_annotation"],
   "shared_parameters": {
     "read_type": "cyclone"

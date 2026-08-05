@@ -230,9 +230,9 @@ Current contract:
   skips it;
 - an explicit request writes only a strict `blocked_not_implemented` cursor and
   terminates through the existing failed boundary;
-- a legacy `requested_stages = null` traversal records
+- an internal/TUI legacy `requested_stages = null` traversal records
   `stage_skipped:not_implemented`, writes no stage cursor or completion trace,
-  and advances to T2T.
+  and advances to T2T; public `gene-agent run` rejects JSON `null` before freeze.
 
 This placeholder does not read or update the central `assembly` resource. Tool
 selection, input reads, expected products, validation, adoption, and provenance
@@ -298,9 +298,10 @@ Current contract:
   skips it;
 - an explicit request writes only a strict `blocked_not_implemented` cursor and
   terminates through the existing failed boundary;
-- a legacy `requested_stages = null` traversal records
+- an internal/TUI legacy `requested_stages = null` traversal records
   `stage_skipped:not_implemented`, writes no stage cursor or completion trace,
-  and advances to Repeat Annotation.
+  and advances to Repeat Annotation; public `gene-agent run` rejects JSON
+  `null` before freeze.
 
 This placeholder does not read or update the central `assembly` resource.
 Polishing-read choice, method selection, expected products, validation,

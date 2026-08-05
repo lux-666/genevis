@@ -47,6 +47,14 @@ Biological and stage contracts remain governed by their current specifications.
    contracts.
 5. “Planner” in current parameter code means a stage parameter recommender. It
    does not mean method selection or parent-graph planning.
+6. Public deterministic runs use `gene-agent run --manifest PATH --run-config
+   PATH --data-dir PATH [--non-interactive]`. The manifest solely owns the
+   session identity; `data-dir` owns layout placement at
+   `runs/<session_id>/`. The run config must explicitly contain JSON arrays for
+   `requested_stages` and `local_exec`. `requested_stages` must not be `null`;
+   `[]` is the valid empty biological-stage plan. Internal/TUI compatibility
+   state may retain `None`, but the public structured boundary rejects it before
+   freeze or execution.
 
 ## 3. Replay Terminology
 
@@ -196,8 +204,8 @@ data/
 └── runs/
     └── <session_id>/
         ├── control/
-        │   ├── tui_state.json
-        │   ├── manifest_draft.yaml
+        │   ├── tui_state.json (TUI only)
+        │   ├── manifest_draft.yaml (TUI only)
         │   ├── input_manifest.yaml
         │   ├── run_config.json
         │   ├── dependency_manifest.json
@@ -241,11 +249,10 @@ Rules:
 
 - `layout.json` declares `schema_version: 2` and prevents old and new layouts
   from being mixed silently.
-- Public TUI execution uses `input_manifest.yaml`. `manifest_draft.yaml` is the
-  pre-freeze manifest projection, while `tui_state.json` remains a mutable UI
-  session/status record and never becomes executor authority. `manifest.yaml`
-  is retained by internal non-frozen materialization paths, not as the
-  authority for a frozen TUI session.
+- Both public structured runs and confirmed TUI plans execute only from frozen
+  `input_manifest.yaml` and `run_config.json`. TUI-only `manifest_draft.yaml`
+  and `tui_state.json`, when present, are mutable intake records and never
+  executor authority. There is no mutable `manifest.yaml` execution authority.
 - `frozen_inputs.json` binds the hashes of `input_manifest.yaml`,
   `run_config.json`, and `dependency_manifest.json` and is published last.
 - `control/run.json` is an accepted future metadata owner but is not currently

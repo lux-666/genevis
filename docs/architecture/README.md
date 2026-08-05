@@ -27,8 +27,10 @@ router, not a topic and not a contract owner.
 
 ```mermaid
 flowchart LR
-    operator["Operator"] --> tui["TUI and planning"]
-    tui --> freeze["Whole-run input freeze"]
+    operator["Operator"] --> run["Structured gene-agent run"]
+    operator --> tui["Optional TUI and planning"]
+    run --> freeze["Whole-run input freeze"]
+    tui --> freeze
     freeze --> orchestration["Runtime orchestration"]
     orchestration --> stage["Compiled stage subgraph"]
     stage --> execution["Method execution"]
@@ -40,8 +42,9 @@ flowchart LR
     resume --> orchestration
 ```
 
-Two distinct freeze boundaries appear in that graph. The TUI freezes the
-manifest, run configuration, and dependency snapshot for the whole run.
+Two distinct freeze boundaries appear in that graph. The public structured
+`run` boundary and the optional TUI both freeze the manifest, run configuration,
+and dependency snapshot for the whole run.
 Executable methods later freeze one exact attempt before a `Runner` may start
 it. Do not collapse these lifecycles.
 
@@ -50,7 +53,7 @@ it. Do not collapse these lifecycles.
 | Question | Start here | Follow when needed |
 |---|---|---|
 | What is the whole system? | [`topics/system-map.md`](topics/system-map.md) | Runtime, data, and stage contracts linked from that page |
-| How does a user request become a run? | [`topics/tui-and-planning.md`](topics/tui-and-planning.md) | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md), frozen data contract |
+| How do structured files or a TUI request become a run? | [`topics/tui-and-planning.md`](topics/tui-and-planning.md) | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md), frozen data contract |
 | How does the parent graph route work? | [`topics/runtime-orchestration.md`](topics/runtime-orchestration.md) | Stage contracts and review/resume |
 | How is a command frozen, run, and collected? | [`topics/execution.md`](topics/execution.md) | Execution lifecycle and evidence references |
 | Where does each fact live? | [`topics/data-and-storage.md`](topics/data-and-storage.md) | Data, resource, and evidence references |

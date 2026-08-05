@@ -54,7 +54,7 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 已实现的核心能力：
 
 - **LangGraph stage orchestration**：thin parent graph 负责路由，每个生信阶段封装成独立 subgraph。
-- **Conversational workflow entry**：正常用户从 `gene-agent tui` 描述目标、补齐样本事实、确认运行输入并启动或恢复工作流。
+- **Deterministic workflow entry**：操作员可用结构化 manifest 和 run config 通过 `gene-agent run` 启动可复现运行；TUI 仍提供可选的对话式 intake 与规划。
 - **Opt-in local execution**：只有显式批准的 stage 才会真正运行本地工具；未批准或未满足条件时输出计划、blocked state 或 review gate。
 - **Shared execution boundary**：通过 `EnvResolver`、`env_dispatch`、`LocalRunner` 统一解析 conda 环境、做 preflight、冻结命令并收集产物。
 - **Durable resume**：基于 sqlite checkpointer、ledger 和 decision file，支持跨进程恢复 `assembly_review`、`hic_scaffolding` 等人工 gate。
@@ -124,10 +124,35 @@ the parent router and makes each stage independently testable.
 
 ## How To Run It
 
-正常用户只需要启动 TUI。TUI 先围绕本次目标追问并确认样本事实，再让 LLM
-生成一个可编辑的 Plan Draft；用户确认 manifest、stages、methods 和 planning-time
-parameters 后，TUI 冻结 run config 并调用内部执行器。各 stage 再按已确认的输入
-和目标决定执行、跳过或进入人工 gate。`bootstrap` 只是初始化或修复本机配置的
+真实/操作员运行从确定性的结构化输入边界开始：
+
+```text
+gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interactive]
+```
+
+`manifest` 是唯一的 `session_id` 所有者；`data-dir` 是布局根目录，运行输出固定在
+`<data-dir>/runs/<session_id>/`。命令在写出任何运行输入之前校验并规范化两个文件，
+要求 run config 显式提供 JSON 数组 `requested_stages` 和 `local_exec`；其中
+`requested_stages` 不得为 `null`，但 `[]` 是有效的空业务阶段计划。随后命令冻结请求
+stages 及保守的依赖闭包，并以 SQLite 执行已冻结的会话。冻结发布顺序为
+`input_manifest.yaml`、`run_config.json`、`dependency_manifest.json`，最后才是提交标记
+`frozen_inputs.json`。
+
+例如，复制并填写 `docs/examples/` 的模板后：
+
+```bash
+gene-agent run \
+  --manifest /absolute/path/to/manifest.yaml \
+  --run-config /absolute/path/to/run_config.json \
+  --data-dir /absolute/path/to/data
+```
+
+默认运行会在人工 gate 与操作员交互。自动化使用 `--non-interactive`；若到达 gate，
+运行会持久化 `blocked_human`，输出 `inspect`、`review` 和 `resume` 的继续命令，而不是
+伪造批准或继续执行。
+
+`gene-agent tui` 是可选的对话式 intake/规划入口：它收集样本事实、生成可编辑 Plan
+Draft，并在确认后进入同一冻结和执行边界。`bootstrap` 只是初始化或修复本机配置的
 辅助工具。
 
 `bootstrap --apply` 在写入 `config/envs.yaml`、完成 Juicer conformance 后，
@@ -137,7 +162,7 @@ AutoHiC、Juicer、3D-DNA、juicer-tools 的安装目录、canary 和模型路�
 preflight 检查。任何失败都会列出具体 method、conda target、缺失工具或路径以及
 修复提示；修好后重新运行 bootstrap 即可。
 
-### 1. TUI / Plan Layer: choose stages
+### 1. Optional TUI / Plan Layer: choose stages
 
 TUI 的入口就是启动一个交互式对话框：
 
@@ -215,12 +240,20 @@ TUI 最终会把选择落到 run config：
     "repeat_annotation",
     "gene_annotation",
     "function_annotation"
+  ],
+  "local_exec": [
+    "read_qc",
+    "genome_survey",
+    "assembly",
+    "assembly_dedup",
+    "assembly_review"
   ]
 }
 ```
 
 `requested_stages` 决定 parent graph 需要推进哪些业务阶段；未请求的阶段由路由
-和 stage contract 跳过或不进入。
+和 stage contract 跳过或不进入。对公共 `gene-agent run`，它必须是显式、非 `null`
+的 JSON 数组；`null` 只保留给内部/TUI 兼容状态，不能作为结构化运行输入。
 
 ### 2. RunConfig Layer: choose execution and parameters
 
@@ -300,9 +333,9 @@ review，但暂时不执行 annotation 工具：
 `local_exec`；此时它不得运行本地命令，具体是跳过、阻塞还是消费已有 evidence，
 由该 stage 的运行契约决定。
 
-`run` 和 `ask` 兼容命令已移除。新运行只有一个入口：
-`gene-agent tui`。TUI 负责收集输入、确认计划、冻结 manifest/run config，并调用
-内部 session executor；自动化不应绕过这条冻结边界。
+`run` 是公开的确定性新运行边界；它不接受 `session-id`、checkpointer 或
+`local-exec` 覆盖参数。TUI 负责可选的对话式输入、确认计划和冻结 handoff；两条路径
+都只通过同一 frozen-session executor 运行。
 
 ### 3. Stage selection and gates
 
