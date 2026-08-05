@@ -142,6 +142,25 @@ class AnnotationIntakeTests(unittest.TestCase):
             )
             self.assertNotIn("assembly_review", plan.resolved_execution_order)
 
+    def test_legacy_unscoped_recommendation_omits_manual_only_placeholders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = _state(Path(tmp), "legacy", None)
+
+            plan = build_recommended_annotation_plan(state)
+
+            self.assertEqual(
+                plan.resolved_execution_order,
+                [
+                    "hic_scaffolding",
+                    "t2t",
+                    "repeat_annotation",
+                    "gene_annotation",
+                    "function_annotation",
+                ],
+            )
+            self.assertNotIn("gapcloser", plan.resolved_execution_order)
+            self.assertNotIn("base_polish", plan.resolved_execution_order)
+
     def test_accept_as_is_persists_intake_artifact_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

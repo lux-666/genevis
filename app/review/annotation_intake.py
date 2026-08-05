@@ -35,7 +35,7 @@ from app.stages.base import resolve_run_ref
 from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-from app.workflow import STAGE_ORDER
+from app.workflow import MANUAL_ONLY_STAGES, STAGE_ORDER
 
 ANNOTATION_INTAKE_PLAN = "annotation.intake_plan"
 ANNOTATION_INTAKE_METHOD = "annotation.intake"
@@ -509,7 +509,11 @@ def _plan_payload(plan: AskPlanState) -> dict[str, Any]:
 def _prior_downstream_requested_stages(state: TopLevelState) -> list[str]:
     requested = state.get("requested_stages")
     if requested is None:
-        return list(DOWNSTREAM_STAGES)
+        return [
+            stage
+            for stage in DOWNSTREAM_STAGES
+            if stage not in MANUAL_ONLY_STAGES
+        ]
     if ASSEMBLY_REVIEW_STAGE not in requested:
         return [stage for stage in requested if stage in DOWNSTREAM_STAGES]
     idx = list(requested).index(ASSEMBLY_REVIEW_STAGE)
