@@ -131,6 +131,22 @@ The existing `publish_derived_assembly_candidate` boundary is reused. It binds:
 No stage fabricates a candidate DTO directly or copies the prior candidate ref
 while changing the primary path.
 
+The candidate loader and derived publisher currently accept only
+`assembly.draft_assembly` as a primary output type. This change deliberately
+expands the canonical candidate-primary type set to exactly:
+
+- `assembly.draft_assembly`;
+- `hic_scaffolding.chromosome_scaffolded_assembly`;
+- `t2t.patched_assembly`.
+
+Both publication and loading validate against the same central type set. The
+bundle artifact type remains `draft_assembly.candidate` for this change; it is
+the existing compatibility identity of the generic Assembly candidate manifest,
+not a requirement to duplicate every derived FASTA under a draft-assembly
+artifact. Hi-C and T2T therefore retain their biologically specific primary
+artifact refs and do not republish or copy the same bytes merely to satisfy the
+candidate wrapper.
+
 ## T2T Commit
 
 When T2T keeps the prior assembly unchanged, it preserves the existing central
@@ -149,6 +165,10 @@ When an adopted patch changes the assembly:
 
 Candidate publication occurs only after the existing T2T adoption decision has
 authorized the output. A rejected patch leaves the prior resource unchanged.
+The derived candidate `action_identity` is the immutable artifact ID of the
+persisted T2T adoption decision. An adopted output without that verified
+decision identity fails closed, ensuring replay derives the same candidate ID
+and same-occurrence conflicts remain detectable.
 
 ## Hi-C Adoption
 
@@ -162,6 +182,9 @@ Accepted AutoHiC scaffolding follows the same contract:
 
 `keep_prior_assembly` preserves the current resource unchanged. Parameter retry
 and stop decisions do not publish a derived candidate.
+The derived candidate `action_identity` is the immutable artifact ID of the
+persisted Hi-C adoption decision. Accepted scaffolding without that verified
+decision identity fails before candidate publication or resource replacement.
 
 ## Assembly Review Reuse
 
@@ -203,6 +226,8 @@ occurrence routing and is outside this implementation plan.
   before candidate publication.
 - A derived candidate whose published primary output drifts from the supplied
   artifact fails through the existing candidate publication boundary.
+- A candidate primary artifact outside the exact Assembly, Hi-C-scaffolded, and
+  T2T-patched type set fails both publication and loading.
 - An already-published identical derived candidate is recovered idempotently;
   conflicting content at the same occurrence identity fails closed.
 - Assembly Review continues to reject a resource/path/candidate mismatch rather
@@ -235,6 +260,10 @@ Focused tests must prove:
 - structured RunConfig order is not automatically expanded or rewritten;
 - T2T adopted patch publication creates a derived candidate bundle whose primary
   output matches the central resource;
+- candidate publication and loading accept the three canonical primary assembly
+  artifact types and reject unrelated artifact types;
+- adopted T2T and Hi-C candidates derive deterministic identity from the exact
+  persisted adoption-decision artifact;
 - T2T keep-prior behavior preserves the existing candidate resource unchanged;
 - accepted Hi-C scaffolding creates the same canonical derived candidate handoff;
 - Hi-C keep-prior behavior publishes no new candidate;
