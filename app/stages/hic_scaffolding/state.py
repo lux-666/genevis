@@ -134,9 +134,6 @@ class HiCScaffoldingCursor(TypedDict, total=False):
     active_interrupt: HiCInterruptJson | None
     review_request_artifact_ref: ArtifactRefJson
     review_decision_artifact_ref: ArtifactRefJson
-    review_policy_outcome: JsonObject
-    auto_decidable: bool
-    pending_human_confirmation: bool
     decision: str
     decided_by: str
     rationale_artifact_ref: str | None

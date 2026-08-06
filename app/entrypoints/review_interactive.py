@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import select
 import sys
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, TextIO, cast
 
 from langchain_core.runnables import RunnableConfig
 
@@ -24,6 +27,8 @@ if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
 
 _MAX_INVALID_PROMPT_ATTEMPTS = 3
+GateClaimResult = Literal["claimed", "expired", "cancelled"]
+InputWaiter = Callable[[TextIO, float], bool]
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +269,56 @@ def _render_generic_gate(requirements: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Prompting
 # ---------------------------------------------------------------------------
+
+
+def wait_for_gate_claim(
+    *,
+    stage: str,
+    gate_id: str,
+    automatic_resolver: str,
+    remaining_seconds: float,
+    input_stream: TextIO | None = None,
+    output_stream: TextIO | None = None,
+    clock: Callable[[], float] | None = None,
+    input_waiter: InputWaiter | None = None,
+) -> GateClaimResult:
+    """Wait in the foreground for Enter or countdown expiry."""
+
+    source = input_stream or sys.stdin
+    output = output_stream or sys.stdout
+    monotonic = clock or time.monotonic
+    wait_for_input = input_waiter or _select_input_ready
+    deadline = monotonic() + max(0.0, remaining_seconds)
+    while True:
+        remaining = max(0.0, deadline - monotonic())
+        if remaining <= 0:
+            print(file=output, flush=True)
+            return "expired"
+        display_seconds = max(1, math.ceil(remaining))
+        print(
+            "\rreview countdown: "
+            f"stage={stage} gate={gate_id} automatic={automatic_resolver} "
+            f"in {display_seconds}s; press Enter to review",
+            end="",
+            file=output,
+            flush=True,
+        )
+        try:
+            if not wait_for_input(source, min(1.0, remaining)):
+                continue
+            line = source.readline()
+        except (EOFError, KeyboardInterrupt, OSError, ValueError):
+            print(file=output, flush=True)
+            return "cancelled"
+        print(file=output, flush=True)
+        if line == "":
+            return "cancelled"
+        return "claimed"
+
+
+def _select_input_ready(stream: TextIO, timeout: float) -> bool:
+    ready, _writable, _exceptional = select.select([stream], [], [], timeout)
+    return bool(ready)
 
 
 def prompt_assembly_review_decision(
@@ -1071,6 +1126,9 @@ def _brief_generic_evidence(
 def collect_gate_decision(
     session_id: str,
     data_dir: str,
+    *,
+    summary: dict[str, Any] | None = None,
+    render_brief: bool = True,
 ) -> tuple["ResumeReviewRequest", dict[str, Any]] | None:
     """Inspect a blocked session, prompt operator, validate request schema.
 
@@ -1078,12 +1136,9 @@ def collect_gate_decision(
     or None on cancel/error. The registered gate applier persists the sole
     authoritative decision only after full resume validation succeeds.
     """
-    from app.control.lifecycle import inspect_session
     from app.review.base import ResumeReviewRequest
 
-    summary = _checkpoint_blocked_summary(session_id, data_dir) or inspect_session(
-        session_id, data_dir
-    )
+    summary = summary or load_blocked_gate_summary(session_id, data_dir)
     if summary.get("error"):
         print(f"error: {summary['error']}", file=sys.stderr)
         return None
@@ -1107,8 +1162,9 @@ def collect_gate_decision(
         )
         return None
 
-    brief = build_decision_brief(summary, data_dir)
-    render_decision_brief(brief)
+    if render_brief:
+        brief = build_decision_brief(summary, data_dir)
+        render_decision_brief(brief)
 
     if gate.prompt_adapter == "assembly_review":
         raw_decision = prompt_assembly_review_decision(requirements)
@@ -1139,6 +1195,16 @@ def collect_gate_decision(
         return None
 
     return request, raw_decision
+
+
+def load_blocked_gate_summary(session_id: str, data_dir: str) -> dict[str, Any]:
+    """Load the verified checkpoint summary used by foreground and manual review."""
+
+    from app.control.lifecycle import inspect_session
+
+    return _checkpoint_blocked_summary(session_id, data_dir) or inspect_session(
+        session_id, data_dir
+    )
 
 
 def _checkpoint_blocked_summary(

@@ -67,6 +67,20 @@ class ResumeTransactionTests(unittest.TestCase):
         )
         return run_dir, state, request
 
+    @staticmethod
+    def _auto_request(request: ResumeReviewRequest) -> ResumeReviewRequest:
+        return request.model_copy(
+            update={
+                "decided_by": "auto_rule",
+                "rationale_artifact_ref": "artifacts/reviews/request.json",
+                "metadata": {
+                    "source": "foreground_countdown",
+                    "configured_seconds": 300,
+                    "elapsed_seconds": 300,
+                },
+            }
+        )
+
     def test_success_owns_update_invoke_and_standard_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir, state, request = self._setup(tmpdir)
@@ -135,6 +149,79 @@ class ResumeTransactionTests(unittest.TestCase):
             ]
             self.assertEqual(len(failed), 1)
             self.assertEqual(failed[0]["phase"], "validation")
+
+    def test_auto_rule_requires_foreground_countdown_transaction_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir, state, human_request = self._setup(tmpdir)
+            request = self._auto_request(human_request)
+            graph = _Graph(state)
+            with (
+                patch(
+                    "app.control.resume_transaction.validate_resume_review_state"
+                ) as validate,
+                patch("app.control.resume_transaction.resume_review_state") as resume,
+                self.assertRaisesRegex(
+                    ResumeTransactionError,
+                    "auto_rule.*foreground_countdown",
+                ),
+            ):
+                execute_resume_transaction(
+                    graph=graph,
+                    config={"configurable": {"thread_id": "s1"}},
+                    session_id="s1",
+                    data_dir=run_dir,
+                    request=request,
+                    source="review",
+                    checkpointer="sqlite",
+                    blocked_timeout_seconds=300,
+                )
+
+            validate.assert_not_called()
+            resume.assert_not_called()
+            self.assertEqual(graph.updates, [])
+            self.assertEqual(graph.invocations, 0)
+            failed = [
+                event
+                for event in Ledger(run_dir).read_events("s1")
+                if event["event_type"] == "resume_failed"
+            ]
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0]["phase"], "validation")
+
+    def test_auto_rule_accepts_foreground_countdown_transaction_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir, state, human_request = self._setup(tmpdir)
+            request = self._auto_request(human_request)
+            graph = _Graph(state)
+            with (
+                patch(
+                    "app.control.resume_transaction.validate_resume_review_state"
+                ) as validate,
+                patch(
+                    "app.control.resume_transaction.resume_review_state",
+                    return_value={"supervision_state": "running_stage"},
+                ) as resume,
+            ):
+                execute_resume_transaction(
+                    graph=graph,
+                    config={"configurable": {"thread_id": "s1"}},
+                    session_id="s1",
+                    data_dir=run_dir,
+                    request=request,
+                    source="foreground_countdown",
+                    checkpointer="sqlite",
+                    blocked_timeout_seconds=300,
+                )
+
+            validate.assert_called_once_with(state, request)
+            resume.assert_called_once_with(
+                state,
+                request,
+                blocked_timeout_seconds=300,
+                decision_source="foreground_countdown",
+            )
+            self.assertEqual(len(graph.updates), 1)
+            self.assertEqual(graph.invocations, 1)
 
     def test_false_update_result_is_audited_and_never_invoked(self):
         with tempfile.TemporaryDirectory() as tmpdir:

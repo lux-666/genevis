@@ -15,7 +15,6 @@ from app.stages.base import (
     validated_stage_output,
 )
 
-
 InventoryStatus = Literal[
     "validated",
     "completed",
@@ -40,6 +39,7 @@ class InventoryStageCursor(TypedDict, total=False):
     genome_size_estimate: int | None
     target_assembly_level: Literal["contig", "scaffold", "chromosome"]
     registered_assets: list[str]
+    review_policy: dict[str, int]
     review_request_artifact_ref: ArtifactRefJson
     review_decision_artifact_ref: ArtifactRefJson
 

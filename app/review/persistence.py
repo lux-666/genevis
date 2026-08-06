@@ -12,12 +12,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 from uuid import uuid4
 
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
-from app.schemas.state import TopLevelState
+from app.schemas.run_config import DEFAULT_REVIEW_MAX_BLOCKED_SECONDS
+from app.schemas.state import DOMAIN_STAGES, DomainStage, TopLevelState
 from app.storage.artifacts import publish_artifact_record
 from app.storage.paths import DataLayoutError, SessionPaths
 
@@ -98,6 +99,14 @@ def persist_review_request(
         gate_id=gate_id,
         reason=reason,
     )
+    effective_wait = _effective_review_max_blocked_seconds(state, stage)
+    provided_wait = request_body.get("max_blocked_seconds")
+    if provided_wait is not None and provided_wait != effective_wait:
+        raise ReviewPersistenceError(
+            "review request max_blocked_seconds does not match the effective "
+            "frozen RunConfig policy"
+        )
+    request_body["max_blocked_seconds"] = effective_wait
     portable_payload = _portable_value(paths, request_body)
     portable_bindings = _portable_value(paths, dict(bindings or {}))
     identity_payload = {
@@ -394,6 +403,31 @@ def _dump_payload(payload: Mapping[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(dumped, dict):
         raise ReviewPersistenceError("review payload must be a JSON object")
     return dumped
+
+
+def _effective_review_max_blocked_seconds(
+    state: TopLevelState,
+    stage: str,
+) -> int:
+    stage_outputs = state.get("stage_outputs") or {}
+    stage_output = (
+        stage_outputs.get(cast(DomainStage, stage)) or {}
+        if stage in DOMAIN_STAGES
+        else {}
+    )
+    policy = (
+        stage_output.get("review_policy") if isinstance(stage_output, dict) else None
+    )
+    raw_value = (
+        policy.get("max_blocked_seconds", DEFAULT_REVIEW_MAX_BLOCKED_SECONDS)
+        if isinstance(policy, dict)
+        else DEFAULT_REVIEW_MAX_BLOCKED_SECONDS
+    )
+    if not isinstance(raw_value, int) or isinstance(raw_value, bool) or raw_value < -1:
+        raise ReviewPersistenceError(
+            "effective review max_blocked_seconds must be an integer >= -1"
+        )
+    return raw_value
 
 
 def _review_request_body(

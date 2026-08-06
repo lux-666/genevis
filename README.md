@@ -147,9 +147,10 @@ gene-agent run \
   --data-dir /absolute/path/to/data
 ```
 
-默认运行会在人工 gate 与操作员交互。自动化使用 `--non-interactive`；若到达 gate，
-运行会持久化 `blocked_human`，输出 `inspect`、`review` 和 `resume` 的继续命令，而不是
-伪造批准或继续执行。
+默认运行只在 stdin/stdout 都连接真实 TTY 时于人工 gate 与操作员交互。自动化使用
+`--non-interactive`；管道、CI 或关闭 stdin 的运行即使没有该参数也按非交互处理。若
+到达 gate，运行会持久化 `blocked_human`，输出 `inspect`、`review` 和 `resume` 的继续
+命令，而不是伪造批准或继续执行。
 
 `gene-agent tui` 是可选的对话式 intake/规划入口：它收集样本事实、生成可编辑 Plan
 Draft，并在确认后进入同一冻结和执行边界。`bootstrap` 只是初始化或修复本机配置的
@@ -332,6 +333,22 @@ review，但暂时不执行 annotation 工具：
 `assembly_dedup` 也遵守同一规则。一个 stage 可以出现在 `requested_stages` 但不在
 `local_exec`；此时它不得运行本地命令，具体是跳过、阻塞还是消费已有 evidence，
 由该 stage 的运行契约决定。
+
+`review_policy.max_blocked_seconds` 的默认值是 `300`。可在
+`review_policy.stages.<stage>.max_blocked_seconds` 为已注册的 review stage 覆盖；
+未注册 stage 会被拒绝。`-1` 表示无限等待人工决定；`0` 表示在前台交互运行中立即
+触发该 gate 已有且仍满足资格的自动 resolver；正整数则给出按 Enter 可接管的倒计时，
+并在到期时触发同一 resolver。timer 本身不提供决定，也不会从 registry 默认项伪造
+批准。当前 Assembly Review 保留原有的 evidence eligibility + LLM recommendation
+链，assembly route selection 保留原有的推荐路线 timeout applier；没有既有自动
+resolver 的 gate 仍直接进入人工处理。resolver 无资格、失败或校验不通过时保持
+`blocked_human`。倒计时只存在于原始 `gene-agent run` 仍在前台且可交互时：按 Enter
+会取消倒计时并打开人工决策提示；
+Ctrl-C、EOF、进程退出、无 TTY 或 `--non-interactive` 都只留下 durable
+`blocked_human` checkpoint。之后必须用 `review` 或带 decision file 的 `resume` 人工
+处理；重新执行同一 frozen session 也只显示这些人工恢复命令，不调用 blocked graph、
+不按旧的 `blocked_at` 或已流逝的时间自动采纳，也没有 daemon/background wake。公共
+`resume` 没有 review timeout 覆盖，且不存在 strict/auto review mode。
 
 `run` 是公开的确定性新运行边界；它不接受 `session-id`、checkpointer 或
 `local-exec` 覆盖参数。TUI 负责可选的对话式输入、确认计划和冻结 handoff；两条路径

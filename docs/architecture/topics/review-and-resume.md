@@ -28,12 +28,43 @@ The prompt shown to a person is a projection of the request, not the recovery
 authority. A checkpoint must not embed the full request or decision body, and a
 Ledger event must not replace either artifact.
 
-Gate definitions centralize allowed decisions, prompt construction, policy,
+Gate definitions centralize allowed decisions, prompt construction, timing,
 and resume application. The external resume DTO is one strict
 `ResumeReviewRequest` with a string decision field; parameter approval,
 assembly adoption, Hi-C adoption, T2T adoption, and annotation intake remain
 different gate-scoped decision vocabularies because each registered gate and
 stage applier validates its own allowed values and bindings.
+
+## Foreground review policy
+
+`RunConfig.review_policy.max_blocked_seconds` defaults to `300`. A frozen
+configuration may override it per registry-backed review stage through
+`review_policy.stages.<stage>.max_blocked_seconds`; an unregistered stage is
+invalid. The effective value is copied into the immutable request so the gate
+can be verified without consulting mutable current configuration.
+
+The values have exactly these meanings during the original foreground,
+interactive `gene-agent run`:
+
+- `-1`: wait indefinitely for an operator decision.
+- `0`: immediately trigger that gate's existing automatic resolver, if eligible.
+- a positive integer: display an Enter-claim countdown, then trigger the same
+  resolver if it expires.
+
+The timer never supplies a decision. Assembly Review retains its existing
+evidence eligibility and bound LLM recommendation artifact; assembly route
+selection retains its recommendation timeout applier. A gate with no existing
+automatic resolver, an ineligible resolver, or a failed resolver remains
+`blocked_human` and keeps the manual path. Enter claims the gate, cancels the
+timer, and opens the normal manual prompts.
+The timer is not a durable scheduler: Ctrl-C, EOF, process exit, missing
+stdin/stdout TTY capability, and `--non-interactive` leave the request and
+`blocked_human` checkpoint intact. There is no daemon or background wake-up.
+Re-running the same frozen session detects the already-blocked checkpoint,
+does not invoke it, and prints manual recovery commands. A later `review` or
+`resume` is always a manual recovery action; it never reconstructs or expires
+a countdown from the prior `blocked_at` time. Strict/auto review modes and a
+public resume timeout override are not part of the interface.
 
 ## Resume validation
 
@@ -43,6 +74,16 @@ identity, and any recommendation/attempt bindings. Missing, stale,
 cross-session, conflicting, or already-consumed input fails closed. Republishing
 the identical immutable bytes is idempotent, but it does not authorize applying
 an already-consumed gate a second time.
+
+Resume does not use elapsed wall time from a previous foreground invocation.
+It waits for the supplied manual decision (interactive `review` or a verified
+decision file) and never turns a durable block into an automatic approval.
+A countdown-triggered automatic decision is accepted only when the resume
+transaction's trusted source and hash-bound countdown metadata identify the
+active `foreground_countdown`. The decision origin and rationale still come
+from the gate's resolver (`llm_provisional` for Assembly Review or `auto_rule`
+for the route timeout); a manual `review` or `resume` source cannot impersonate
+the route timeout even if a decision file claims otherwise.
 
 The resume flow is:
 

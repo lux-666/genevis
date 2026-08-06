@@ -87,8 +87,6 @@ def _compact_active_interrupt(
         "gate_id",
         "reason",
         "decisions_allowed",
-        "auto_decidable",
-        "pending_human_confirmation",
         "blocked_at",
         "review_request_id",
         "request_hash",
@@ -165,7 +163,7 @@ def _selected_result_refs(
     return refs
 
 
-def _pending_confirmations(
+def _pending_review_requests(
     events: list[dict[str, Any]],
     decisions: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -180,11 +178,6 @@ def _pending_confirmations(
     for event in events:
         if event.get("event_type") != "review_requested":
             continue
-        if not (
-            event.get("pending_human_confirmation")
-            or event.get("auto_decidable") is False
-        ):
-            continue
         request_id = str(event.get("review_request_id") or event.get("subject_id"))
         pending.append(
             {
@@ -193,8 +186,6 @@ def _pending_confirmations(
                 "stage": event.get("stage"),
                 "reason": event.get("reason"),
                 "review_request_artifact_ref": event.get("review_request_artifact_ref"),
-                "auto_decidable": event.get("auto_decidable"),
-                "policy_mode": event.get("policy_mode"),
                 "resolved": request_id in decided_request_ids,
             }
         )

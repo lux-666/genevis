@@ -35,9 +35,9 @@ from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
     CheckpointerBackend,
 )
+from app.review.gates import registered_review_stages
 from app.schemas.run_config import (
     AssemblyRunConfig,
-    ReviewPolicyStage,
     infer_assembly_method,
 )
 from app.schemas.shared_parameters import SharedParameters
@@ -239,15 +239,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-dir", default=default_data_root(), help="Workflow data root"
     )
     resume_parser.add_argument(
-        "--max-blocked-seconds",
-        type=float,
-        default=None,
-        help=(
-            "Reject/convert a blocked resume if the gate has been blocked for "
-            "at least this many seconds"
-        ),
-    )
-    resume_parser.add_argument(
         "--checkpointer",
         choices=["sqlite", "memory"],
         default=None,
@@ -346,6 +337,15 @@ def _resolve_data_dir(data_dir: str) -> str:
     return str(Path(data_dir).expanduser().resolve(strict=False))
 
 
+def _foreground_review_available() -> bool:
+    """Return whether this process has a real foreground terminal for review."""
+
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def _run(args: argparse.Namespace) -> int:
     """Preflight, freeze, and execute one deterministic structured run."""
 
@@ -396,7 +396,9 @@ def _run(args: argparse.Namespace) -> int:
             paths.session_id,
             paths.data_root,
             checkpointer="sqlite",
-            interactive_gate=not args.non_interactive,
+            interactive_gate=(
+                not args.non_interactive and _foreground_review_available()
+            ),
         )
     except Exception as exc:
         print(f"error: run execution failed: {exc}", file=sys.stderr)
@@ -607,18 +609,14 @@ def _execute_verified_frozen_session(
         t2t_out = dict(stage_outputs.get("t2t") or {})
         t2t_out.update(run_config.t2t.model_dump(mode="json", exclude_none=True))
         stage_outputs["t2t"] = t2t_out
-    if run_config.review_policy:
-        review_stages: tuple[ReviewPolicyStage, ...] = (
-            "assembly",
-            "assembly_review",
-            "hic_scaffolding",
-        )
-        for review_stage in review_stages:
-            stage_out = dict(stage_outputs.get(review_stage) or {})
-            stage_out["review_policy"] = run_config.review_policy.effective_for_stage(
-                review_stage
+    for review_stage in registered_review_stages():
+        stage_out = dict(stage_outputs.get(review_stage) or {})
+        stage_out["review_policy"] = {
+            "max_blocked_seconds": (
+                run_config.review_policy.effective_max_blocked_seconds(review_stage)
             )
-            stage_outputs[review_stage] = stage_out
+        }
+        stage_outputs[review_stage] = stage_out
     if (
         run_config.gene_annotation
         and run_config.gene_annotation.lineage_or_species_hints
@@ -643,8 +641,23 @@ def _execute_verified_frozen_session(
 
     graph = build_graph(backend=backend, data_dir=run_dir)
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+    resumed_from_blocked_checkpoint = False
     try:
-        result = graph.invoke(None if resume_checkpoint else state, config=config)
+        result: dict[str, Any] | None = None
+        if resume_checkpoint:
+            get_state = getattr(graph, "get_state", None)
+            if callable(get_state):
+                checkpoint = get_state(config)
+                checkpoint_values = getattr(checkpoint, "values", None)
+                if (
+                    isinstance(checkpoint_values, dict)
+                    and checkpoint_values.get("session_id") == session_id
+                    and checkpoint_values.get("supervision_state") == "blocked_human"
+                ):
+                    result = dict(checkpoint_values)
+                    resumed_from_blocked_checkpoint = True
+        if result is None:
+            result = graph.invoke(None if resume_checkpoint else state, config=config)
     except Exception as exc:
         # A stage bug must still leave an operator-readable durable terminal
         # record.  Prefer the latest checkpoint values because the in-memory
@@ -690,7 +703,12 @@ def _execute_verified_frozen_session(
     supervision = result.get("supervision_state", "unknown")
 
     terminal_finalized_by_resume = False
-    if supervision == "blocked_human" and interactive_gate and backend == "sqlite":
+    if (
+        supervision == "blocked_human"
+        and interactive_gate
+        and backend == "sqlite"
+        and not resumed_from_blocked_checkpoint
+    ):
         from app.control.resume_transaction import ResumeTransactionError
 
         try:
@@ -722,7 +740,13 @@ def _execute_verified_frozen_session(
     print(f"checkpoint_persistence: {backend}")
     if supervision == "blocked_human":
         if backend == "sqlite":
-            if interactive_gate:
+            if resumed_from_blocked_checkpoint:
+                print(
+                    "resume_note: existing blocked checkpoint remains blocked; "
+                    "the foreground countdown is not restored across processes"
+                )
+                _print_noninteractive_gate_guidance(paths)
+            elif interactive_gate:
                 print(
                     "resume_note: use `gene-agent review` or `gene-agent resume` "
                     "to continue"
@@ -818,22 +842,169 @@ def _interactive_gate_loop(
     result: dict[str, Any],
     session_id: str,
     data_dir: str,
+    *,
+    claim_waiter: Any | None = None,
 ) -> dict[str, Any]:
-    """Loop on human gates: prompt operator, resume, repeat until not blocked."""
+    """Loop on foreground human gates until completion, cancellation, or failure."""
+    from app.control.errors import ResumeValidationError
+    from app.control.lifecycle import (
+        _blocked_timeout_status,
+        build_foreground_auto_resume_request,
+        foreground_automatic_decision_label,
+        review_max_blocked_seconds,
+    )
     from app.control.resume_transaction import (
         ResumeTransactionError,
         execute_resume_transaction,
     )
-    from app.entrypoints.review_interactive import collect_gate_decision
+    from app.entrypoints.review_interactive import (
+        build_decision_brief,
+        collect_gate_decision,
+        load_blocked_gate_summary,
+        render_decision_brief,
+        wait_for_gate_claim,
+    )
     from app.review.annotation_intake import collect_annotation_intake_selection
 
+    waiter = claim_waiter or wait_for_gate_claim
+
     while result.get("supervision_state") == "blocked_human":
-        gate_result = collect_gate_decision(session_id, data_dir)
-        if gate_result is None:
-            print("review skipped; session remains blocked")
+        summary = load_blocked_gate_summary(session_id, data_dir)
+        if summary.get("error") or summary.get("review_request_verification_error"):
+            error = summary.get("review_request_verification_error") or summary.get(
+                "error"
+            )
+            print(
+                f"error: review request could not be verified: {error}",
+                file=sys.stderr,
+            )
+            break
+        requirements = summary.get("decision_requirements") or {}
+        stage = str(requirements.get("stage") or "unknown")
+        gate_id = str(requirements.get("gate_id") or "unknown")
+        try:
+            wait_seconds = review_max_blocked_seconds(summary)
+        except ResumeValidationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             break
 
-        request, _raw_decision = gate_result
+        request = None
+        source = "interactive_gate"
+        blocked_timeout_seconds: float | None = None
+        event_context: dict[str, Any] | None = None
+        automatic_label = foreground_automatic_decision_label(summary)
+        if wait_seconds == -1 or automatic_label is None:
+            gate_result = collect_gate_decision(
+                session_id,
+                data_dir,
+                summary=summary,
+            )
+            if gate_result is not None:
+                request, _raw_decision = gate_result
+        else:
+            timeout = _blocked_timeout_status(
+                summary.get("active_interrupt"),
+                float(wait_seconds),
+            )
+            if timeout is None or timeout.get("reason") in {
+                "blocked_at_missing",
+                "blocked_at_invalid",
+            }:
+                print(
+                    "error: foreground countdown requires a valid blocked_at; "
+                    "continuing with manual review",
+                    file=sys.stderr,
+                )
+                gate_result = collect_gate_decision(
+                    session_id,
+                    data_dir,
+                    summary=summary,
+                )
+                if gate_result is not None:
+                    request, _raw_decision = gate_result
+            else:
+                initial_elapsed = float(timeout.get("elapsed_seconds") or 0.0)
+                brief = build_decision_brief(summary, data_dir)
+                render_decision_brief(brief)
+                if timeout.get("expired") or wait_seconds == 0:
+                    claim = "expired"
+                else:
+                    remaining = max(0.0, wait_seconds - initial_elapsed)
+                    claim = waiter(
+                        stage=stage,
+                        gate_id=gate_id,
+                        automatic_resolver=automatic_label,
+                        remaining_seconds=remaining,
+                    )
+                if claim == "claimed":
+                    gate_result = collect_gate_decision(
+                        session_id,
+                        data_dir,
+                        summary=summary,
+                        render_brief=False,
+                    )
+                    if gate_result is not None:
+                        request, _raw_decision = gate_result
+                elif claim == "cancelled":
+                    print("review countdown cancelled; session remains blocked")
+                    break
+                else:
+                    final_timeout = (
+                        _blocked_timeout_status(
+                            summary.get("active_interrupt"),
+                            float(wait_seconds),
+                        )
+                        or timeout
+                    )
+                    elapsed = float(
+                        final_timeout.get("elapsed_seconds") or wait_seconds
+                    )
+                    try:
+                        request = build_foreground_auto_resume_request(
+                            summary,
+                            configured_seconds=wait_seconds,
+                            elapsed_seconds=elapsed,
+                            data_dir=data_dir,
+                        )
+                    except ResumeValidationError as exc:
+                        Ledger(data_dir).record_event(
+                            session_id,
+                            "automatic_review_failed",
+                            {
+                                "stage": stage,
+                                "gate_id": gate_id,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "configured_seconds": wait_seconds,
+                                "elapsed_seconds": elapsed,
+                            },
+                        )
+                        print(
+                            f"error: automatic review failed: {exc}; "
+                            "continuing with manual review",
+                            file=sys.stderr,
+                        )
+                        gate_result = collect_gate_decision(
+                            session_id,
+                            data_dir,
+                            summary=summary,
+                            render_brief=False,
+                        )
+                        if gate_result is not None:
+                            request, _raw_decision = gate_result
+                    else:
+                        source = "foreground_countdown"
+                        blocked_timeout_seconds = float(wait_seconds)
+                        event_context = {
+                            "foreground_countdown": {
+                                "configured_seconds": wait_seconds,
+                                "elapsed_seconds": elapsed,
+                            }
+                        }
+
+        if request is None:
+            print("review skipped; session remains blocked")
+            break
 
         try:
             transaction = execute_resume_transaction(
@@ -842,9 +1013,11 @@ def _interactive_gate_loop(
                 session_id=session_id,
                 data_dir=data_dir,
                 request=request,
-                source="interactive_gate",
+                source=source,
                 checkpointer="sqlite",
                 annotation_intake_collector=collect_annotation_intake_selection,
+                blocked_timeout_seconds=blocked_timeout_seconds,
+                event_context=event_context,
             )
         except ResumeTransactionError as exc:
             print(
@@ -1193,7 +1366,6 @@ def _run_resume(args: argparse.Namespace) -> int:
             request=decision,
             source="cli",
             checkpointer=backend,
-            blocked_timeout_seconds=getattr(args, "max_blocked_seconds", None),
             collect_default_annotation_intake=True,
             event_context=event_context,
         )

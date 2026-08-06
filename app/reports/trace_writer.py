@@ -8,7 +8,7 @@ from typing import Any
 
 from app.control.lifecycle import inspect_session
 from app.reports._projection import atomic_write_text, source_watermark
-from app.reports.review_report import _pending_confirmations
+from app.reports.review_report import _pending_review_requests
 from app.review.records import counts_by_origin
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
@@ -91,7 +91,7 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
         "stages": stages,
         "decisions": [_decision_record(decision) for decision in decisions],
         "decisions_by_origin": counts_by_origin(decisions),
-        "pending_human_confirmations": _pending_confirmations(events),
+        "pending_review_requests": _pending_review_requests(events),
         "open_first": _open_first_artifacts(artifacts),
         "failures": _failures(events),
         "blocked": _blocked_summary(summary),
@@ -274,11 +274,6 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
             entry["reason"] = event.get("reason")
             entry["review_request_artifact_ref"] = event.get(
                 "review_request_artifact_ref"
-            )
-            entry["auto_decidable"] = event.get("auto_decidable")
-            entry["policy_mode"] = event.get("policy_mode")
-            entry["pending_human_confirmation"] = event.get(
-                "pending_human_confirmation"
             )
         elif event_type == "review_decision":
             entry = requests.setdefault(

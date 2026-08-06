@@ -315,23 +315,54 @@ def resume_review_state(
     request: ResumeReviewRequest,
     *,
     blocked_timeout_seconds: float | None = None,
+    decision_source: str = "manual",
     now: datetime | None = None,
 ) -> StateUpdate:
     """Apply a validated human review decision to an in-memory blocked state."""
 
     active_interrupt, request_record = _validated_resume_context(state, request)
     ensure_decision_allowed(request_record, request)
-    blocked_timeout_seconds, timeout_source = _resolve_blocked_timeout_seconds(
-        request_record,
-        blocked_timeout_seconds,
-    )
+    if blocked_timeout_seconds is not None:
+        if decision_source != "foreground_countdown":
+            raise ResumeValidationError(
+                "foreground review decisions require foreground_countdown "
+                "decision source"
+            )
+        if (
+            isinstance(blocked_timeout_seconds, bool)
+            or not isinstance(blocked_timeout_seconds, (int, float))
+        ):
+            raise ResumeValidationError(
+                "foreground review decisions require a numeric countdown timeout"
+            )
+        configured_seconds = _review_request_max_blocked_seconds(request_record)
+        if blocked_timeout_seconds != configured_seconds:
+            raise ResumeValidationError(
+                "foreground countdown timeout does not match the verified "
+                "review request"
+            )
+        if request.decided_by == "human":
+            raise ResumeValidationError(
+                "foreground review countdown requires an automatic decision origin"
+            )
+        _validate_foreground_automatic_request(
+            active_interrupt,
+            request,
+            configured_seconds=configured_seconds,
+        )
+    elif request.decided_by == "auto_rule":
+        raise ResumeValidationError(
+            "auto_rule decisions are only valid in the foreground countdown path"
+        )
 
     timeout = _blocked_timeout_status(
         active_interrupt, blocked_timeout_seconds, now=now
     )
-    if timeout and timeout.get("expired"):
-        timeout = _with_timeout_source(timeout, timeout_source)
-        return _timeout_failed_update(state, request, timeout)
+    if blocked_timeout_seconds is not None:
+        if not timeout or not timeout.get("expired"):
+            raise ResumeValidationError("foreground review countdown has not expired")
+        if request.decided_by == "auto_rule":
+            return _timeout_expired_update(state, request, timeout)
 
     try:
         return apply_review_gate_decision(state, request)
@@ -435,64 +466,10 @@ def _validated_resume_context(
     return active_interrupt, request_record
 
 
-def _resolve_blocked_timeout_seconds(
-    request_record: dict[str, Any],
-    blocked_timeout_seconds: float | None,
-) -> tuple[float | None, dict[str, Any]]:
-    policy_timeout = _review_policy_outcome_timeout_seconds(request_record)
-    if blocked_timeout_seconds is None:
-        return (
-            policy_timeout,
-            {"source": "review_request.review_policy_outcome.max_blocked_seconds"}
-            if policy_timeout is not None
-            else {},
-        )
-
-    source: dict[str, Any] = {"source": "blocked_timeout_seconds"}
-    if policy_timeout is not None and policy_timeout != blocked_timeout_seconds:
-        source.update(
-            {
-                "warning": (
-                    "blocked_timeout_seconds overrides "
-                    "review_request.review_policy_outcome.max_blocked_seconds"
-                ),
-                "review_policy_outcome_max_blocked_seconds": policy_timeout,
-            }
-        )
-    return blocked_timeout_seconds, source
-
-
-def _review_policy_outcome_timeout_seconds(
-    request_record: dict[str, Any],
-) -> float | None:
-    payload = request_record.get("payload") or {}
-    if not isinstance(payload, dict):
-        return None
-    review_policy_outcome = payload.get("review_policy_outcome") or {}
-    if not isinstance(review_policy_outcome, dict):
-        return None
-    timeout = review_policy_outcome.get("max_blocked_seconds")
-    if timeout is None:
-        return None
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
-        raise ResumeValidationError(
-            "review_policy_outcome.max_blocked_seconds must be numeric"
-        )
-    return float(timeout)
-
-
-def _with_timeout_source(
-    timeout: dict[str, Any], source: dict[str, Any]
-) -> dict[str, Any]:
-    if not source:
-        return timeout
-    return {**timeout, **source}
-
-
-def _timeout_failed_update(
+def _timeout_expired_update(
     state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
 ) -> StateUpdate:
-    """Handle timeout through the review-gate registry, then fall back to stop."""
+    """Apply one gate-specific foreground timeout resolver."""
     try:
         timeout_update = apply_review_gate_timeout(state, request, timeout)
     except KeyError as exc:
@@ -501,52 +478,51 @@ def _timeout_failed_update(
         ) from exc
     if timeout_update is not None:
         return timeout_update
-
-    # Fall back to stop_human_review for other gates or when no recommendation
-    timeout_request = request.model_copy(
-        update={
-            "decision": "stop_human_review",
-            "notes": [*request.notes, "blocked timeout expired"],
-            "metadata": {**request.metadata, "blocked_timeout": timeout},
-        }
+    raise ResumeValidationError(
+        f"review gate {request.stage}/{request.gate_id or '<default>'} has no "
+        "automatic timeout resolver"
     )
-    try:
-        update = apply_review_gate_decision(state, timeout_request)
-    except KeyError as exc:
+
+
+def _review_request_max_blocked_seconds(request_record: Mapping[str, Any]) -> int:
+    payload = request_record.get("payload")
+    value = payload.get("max_blocked_seconds") if isinstance(payload, dict) else None
+    if not isinstance(value, int) or isinstance(value, bool) or value < -1:
         raise ResumeValidationError(
-            f"Unsupported timeout stage: {request.stage}"
-        ) from exc
-    update["last_error"] = f"{request.stage} blocked timeout expired"
-    return update
+            "verified review request max_blocked_seconds must be an integer >= -1"
+        )
+    return value
 
 
-def terminal_failure_update(
-    state: TopLevelState,
-    stage: str,
-    error: str,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    update = {
-        "current_stage": stage,
-        "supervision_state": "failed_terminal",
-        "active_interrupt": None,
-        "last_error": error,
-        "stage_outputs": state.get("stage_outputs") or {},
-    }
-    if metadata:
-        update.update(metadata)
-    return update
-
-
-def timeout_terminal_update(
-    state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
-) -> dict[str, Any]:
-    return terminal_failure_update(
-        state,
-        request.stage,
-        f"{request.stage} blocked timeout expired",
-        metadata={"blocked_timeout": timeout},
+def _validate_foreground_automatic_request(
+    active_interrupt: Mapping[str, Any],
+    request: ResumeReviewRequest,
+    *,
+    configured_seconds: int,
+) -> None:
+    request_ref = active_interrupt.get("request_ref")
+    expected_rationale = (
+        request_ref.get("path_ref") if isinstance(request_ref, dict) else None
     )
+    metadata = request.metadata
+    elapsed_seconds = metadata.get("elapsed_seconds")
+    if (
+        metadata.get("source") != "foreground_countdown"
+        or metadata.get("configured_seconds") != configured_seconds
+        or not isinstance(elapsed_seconds, (int, float))
+        or isinstance(elapsed_seconds, bool)
+        or elapsed_seconds < configured_seconds
+    ):
+        raise ResumeValidationError(
+            "automatic decision is not bound to the verified foreground countdown"
+        )
+    if (
+        request.decided_by == "auto_rule"
+        and request.rationale_artifact_ref != expected_rationale
+    ):
+        raise ResumeValidationError(
+            "auto_rule decision is not bound to the verified review request"
+        )
 
 
 def _stage_statuses(state: Mapping[str, Any]) -> dict[str, str]:
@@ -619,7 +595,7 @@ def _decision_requirements(
     else:
         extra = generic_interrupt_context(active_interrupt)
 
-    return _with_review_policy_requirements(
+    return _with_review_requirements(
         active_interrupt,
         {
             "stage": stage,
@@ -679,7 +655,7 @@ def _runtime_proposal_requirements(gate: Any) -> dict[str, Any]:
     return proposal
 
 
-def _with_review_policy_requirements(
+def _with_review_requirements(
     active_interrupt: dict[str, Any], requirements: dict[str, Any]
 ) -> dict[str, Any]:
     enriched = dict(requirements)
@@ -696,7 +672,7 @@ def _with_review_policy_requirements(
                 enriched[key] = active_interrupt.get(key)
     for key in (
         "auto_decidable",
-        "pending_human_confirmation",
+        "max_blocked_seconds",
         "review_request_artifact_ref",
         "review_request_id",
         "request_ref",
@@ -704,9 +680,6 @@ def _with_review_policy_requirements(
     ):
         if key in active_interrupt:
             enriched[key] = active_interrupt.get(key)
-    policy = active_interrupt.get("review_policy")
-    if isinstance(policy, dict) and policy.get("mode"):
-        enriched["review_policy.mode"] = policy.get("mode")
     return enriched
 
 
@@ -718,6 +691,12 @@ def _blocked_timeout_status(
 ) -> dict[str, Any] | None:
     if not active_interrupt or blocked_timeout_seconds is None:
         return None
+    if blocked_timeout_seconds < 0:
+        return {
+            "configured_seconds": blocked_timeout_seconds,
+            "expired": False,
+            "reason": "wait_indefinitely",
+        }
     blocked_at_raw = active_interrupt.get("blocked_at")
     if not blocked_at_raw:
         return {
@@ -890,8 +869,6 @@ def _durable_interrupt_projection(
         or request.get("subject_id"),
         "reason": request.get("reason"),
         "review_request_artifact_ref": request.get("review_request_artifact_ref"),
-        "auto_decidable": request.get("auto_decidable"),
-        "pending_human_confirmation": request.get("pending_human_confirmation"),
     }
     if requirements:
         projected["gate_id"] = requirements.get("gate_id")
@@ -1022,6 +999,12 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
 
     decisions_allowed = list(requirements.get("decisions_allowed") or [])
     decision = _preferred_template_decision(gate, decisions_allowed)
+    recommended_route = requirements.get("recommended_route")
+    recommended_route_decision = (
+        f"select_{recommended_route}" if isinstance(recommended_route, str) else None
+    )
+    if gate.timeout_applier and recommended_route_decision in decisions_allowed:
+        decision = str(recommended_route_decision)
     guidance = {
         "decisions_allowed": decisions_allowed,
         "review_request_artifact_ref": requirements.get("review_request_artifact_ref"),
@@ -1068,7 +1051,165 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
         template["method_name"] = (
             candidate_methods[0] if candidate_methods else "<method_name>"
         )
+    recommended_selection = requirements.get("recommended_assembly_selection")
+    if gate.timeout_applier and isinstance(recommended_selection, dict):
+        recommended_method = recommended_selection.get("primary_method")
+        if recommended_method:
+            template["method_name"] = str(recommended_method)
     return template
+
+
+def review_max_blocked_seconds(summary: dict[str, Any]) -> int:
+    """Return the verified per-request foreground review wait."""
+
+    requirements = summary.get("decision_requirements") or {}
+    value = requirements.get("max_blocked_seconds")
+    if not isinstance(value, int) or isinstance(value, bool) or value < -1:
+        raise ResumeValidationError(
+            "verified review request max_blocked_seconds must be an integer >= -1"
+        )
+    return value
+
+
+def foreground_automatic_decision_label(
+    summary: dict[str, Any],
+) -> str | None:
+    """Describe the gate's existing automatic resolver, if one is eligible."""
+
+    requirements = summary.get("decision_requirements") or {}
+    stage = requirements.get("stage")
+    gate_id = requirements.get("gate_id")
+    if not isinstance(stage, str):
+        return None
+    gate = find_review_gate(stage, gate_id if isinstance(gate_id, str) else None)
+    if gate is None:
+        return None
+    if gate.timeout_applier:
+        return str(build_resume_decision_template(summary).get("decision") or "rule")
+    if gate.prompt_bundle and requirements.get("auto_decidable") is True:
+        return "LLM review recommendation"
+    return None
+
+
+def build_foreground_auto_resume_request(
+    summary: dict[str, Any],
+    *,
+    configured_seconds: int,
+    elapsed_seconds: float,
+    data_dir: str | Path | None = None,
+) -> ResumeReviewRequest:
+    """Run the gate's existing automatic resolver after countdown expiry."""
+
+    if configured_seconds < 0:
+        raise ResumeValidationError(
+            "an indefinite review wait cannot build an automatic decision"
+        )
+    requirements = summary.get("decision_requirements") or {}
+    stage = requirements.get("stage")
+    gate_id = requirements.get("gate_id")
+    if not isinstance(stage, str):
+        raise ResumeValidationError("foreground review gate is not registered")
+    try:
+        gate = get_review_gate(
+            stage,
+            gate_id if isinstance(gate_id, str) else None,
+        )
+    except KeyError as exc:
+        raise ResumeValidationError("foreground review gate is not registered") from exc
+
+    countdown_metadata = {
+        "source": "foreground_countdown",
+        "configured_seconds": configured_seconds,
+        "elapsed_seconds": elapsed_seconds,
+    }
+    if gate.prompt_bundle and requirements.get("auto_decidable") is True:
+        if data_dir is None:
+            raise ResumeValidationError(
+                "LLM review recommendation requires the frozen session data directory"
+            )
+        review_request_id = requirements.get("review_request_id")
+        request_ref = requirements.get("request_ref")
+        request_hash = requirements.get("request_hash")
+        if (
+            not isinstance(review_request_id, str)
+            or not review_request_id
+            or not isinstance(request_ref, Mapping)
+            or not isinstance(request_hash, str)
+            or not request_hash
+        ):
+            raise ResumeValidationError(
+                "LLM review recommendation requires a verified immutable request"
+            )
+        from app.review.recommender import (
+            RecommendationError,
+            recommend_review_decision,
+        )
+
+        try:
+            recommendation = recommend_review_decision(
+                session_id=str(summary.get("session_id") or ""),
+                stage=stage,
+                review_request_id=review_request_id,
+                request_ref=request_ref,
+                request_hash=request_hash,
+                data_dir=data_dir,
+            )
+        except (RecommendationError, ValueError) as exc:
+            raise ResumeValidationError(
+                f"automatic review recommendation failed: {exc}"
+            ) from exc
+        return recommendation.model_copy(
+            update={
+                "notes": [
+                    *recommendation.notes,
+                    "foreground review countdown expired",
+                ],
+                "metadata": {
+                    **recommendation.metadata,
+                    **countdown_metadata,
+                },
+            }
+        )
+
+    if not gate.timeout_applier:
+        raise ResumeValidationError(
+            f"review gate {stage}/{gate.gate_id} has no eligible automatic resolver"
+        )
+
+    template = build_resume_decision_template(summary)
+    for field_name in gate.required_resume_fields:
+        field_value = template.get(field_name)
+        if not field_value or (
+            isinstance(field_value, str)
+            and field_value.startswith("<")
+            and field_value.endswith(">")
+        ):
+            raise ResumeValidationError(
+                "foreground automatic resolver request is missing required field "
+                f"{field_name!r}"
+            )
+    rationale_ref = requirements.get("review_request_artifact_ref")
+    if not isinstance(rationale_ref, str) or not rationale_ref:
+        raise ResumeValidationError(
+            "foreground automatic resolver requires the verified review request "
+            "artifact"
+        )
+    payload = {
+        **template,
+        "notes": ["accepted by the foreground review countdown"],
+        "metadata": {
+            **dict(template.get("metadata") or {}),
+            **countdown_metadata,
+        },
+        "decided_by": "auto_rule",
+        "rationale_artifact_ref": rationale_ref,
+    }
+    try:
+        return ResumeReviewRequest.model_validate(payload)
+    except Exception as exc:
+        raise ResumeValidationError(
+            f"foreground automatic resolver request failed validation: {exc}"
+        ) from exc
 
 
 def _preferred_template_decision(

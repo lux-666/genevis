@@ -159,6 +159,10 @@ class RunHandlerTests(unittest.TestCase):
                 patch(
                     "app.entrypoints.run.execute_frozen_session", return_value=0
                 ) as execute,
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
             ):
                 code = run_entry._run(args)
 
@@ -200,6 +204,34 @@ class RunHandlerTests(unittest.TestCase):
                     return_value=prepared,
                 ),
                 patch("app.storage.frozen_inputs.freeze_session_inputs"),
+                patch(
+                    "app.entrypoints.run.execute_frozen_session", return_value=0
+                ) as execute,
+            ):
+                code = run_entry._run(args)
+
+        self.assertEqual(code, 0)
+        self.assertFalse(execute.call_args.kwargs["interactive_gate"])
+
+    def test_non_tty_run_does_not_start_foreground_review(self):
+        prepared = _prepared_inputs(requested_stages=["read_qc"])
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                manifest="manifest.yaml",
+                run_config="run.json",
+                data_dir=tmp,
+                non_interactive=False,
+            )
+            with (
+                patch(
+                    "app.storage.frozen_inputs.prepare_session_inputs",
+                    return_value=prepared,
+                ),
+                patch("app.storage.frozen_inputs.freeze_session_inputs"),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=False,
+                ),
                 patch(
                     "app.entrypoints.run.execute_frozen_session", return_value=0
                 ) as execute,
@@ -555,6 +587,65 @@ class FrozenExecutionBoundaryTests(unittest.TestCase):
 
 
 class FrozenHelperTests(unittest.TestCase):
+    def test_frozen_run_injects_effective_wait_into_every_registered_review_stage(self):
+        from app.review.gates import registered_review_stages
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "frozen-session")
+            bundle = SimpleNamespace(
+                paths=paths,
+                run_config=RunConfig.model_validate(
+                    {
+                        "requested_stages": [],
+                        "review_policy": {
+                            "max_blocked_seconds": 300,
+                            "stages": {
+                                "hic_scaffolding": {"max_blocked_seconds": -1},
+                                "t2t": {"max_blocked_seconds": 0},
+                            },
+                        },
+                    }
+                ),
+            )
+            graph = Mock()
+            graph.invoke.return_value = {
+                "current_stage": "done",
+                "supervision_state": "completed",
+                "route_trace": [],
+            }
+            with (
+                patch("app.entrypoints.run.Ledger"),
+                patch(
+                    "app.entrypoints.run.initial_state",
+                    return_value={"stage_outputs": {}},
+                ),
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch("app.entrypoints.run.finalize_terminal_state", return_value=None),
+            ):
+                code, _stdout, stderr = _capture_call(
+                    run_entry._execute_verified_frozen_session,
+                    bundle,
+                    checkpointer="sqlite",
+                    resume_checkpoint=False,
+                    interactive_gate=False,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        invoked_state = graph.invoke.call_args.args[0]
+        stage_outputs = invoked_state["stage_outputs"]
+        self.assertEqual(set(stage_outputs), set(registered_review_stages()))
+        for stage in registered_review_stages():
+            expected = 300
+            if stage == "hic_scaffolding":
+                expected = -1
+            elif stage == "t2t":
+                expected = 0
+            self.assertEqual(
+                stage_outputs[stage]["review_policy"]["max_blocked_seconds"],
+                expected,
+            )
+
     def test_noninteractive_block_uses_frozen_authority_and_prints_guidance(self):
         with tempfile.TemporaryDirectory(prefix="gene agent ") as tmp:
             paths = SessionPaths(tmp, "frozen-session")
@@ -704,6 +795,54 @@ class FrozenHelperTests(unittest.TestCase):
             "error: resume validation failed: stale review decision\n",
         )
         finalize.assert_not_called()
+
+    def test_existing_blocked_checkpoint_does_not_restore_foreground_countdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "frozen-session")
+            bundle = SimpleNamespace(
+                paths=paths,
+                run_config=RunConfig(requested_stages=[]),
+            )
+            blocked_state = {
+                "session_id": "frozen-session",
+                "current_stage": "assembly_review",
+                "supervision_state": "blocked_human",
+                "route_trace": [],
+                "active_interrupt": {
+                    "stage": "assembly_review",
+                    "gate_id": "assembly_review",
+                    "review_request_id": "review-existing",
+                },
+            }
+            graph = Mock()
+            graph.get_state.return_value = SimpleNamespace(values=blocked_state)
+            with (
+                patch("app.entrypoints.run.Ledger"),
+                patch(
+                    "app.entrypoints.run.initial_state",
+                    return_value={"stage_outputs": {}},
+                ),
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch("app.entrypoints.run._interactive_gate_loop") as gate_loop,
+                patch(
+                    "app.entrypoints.run.finalize_terminal_state",
+                    return_value=None,
+                ),
+            ):
+                code, stdout, stderr = _capture_call(
+                    run_entry._execute_verified_frozen_session,
+                    bundle,
+                    checkpointer="sqlite",
+                    resume_checkpoint=True,
+                    interactive_gate=True,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        graph.invoke.assert_not_called()
+        gate_loop.assert_not_called()
+        self.assertIn("countdown is not restored across processes", stdout)
+        self.assertIn("review_command: gene-agent review", stdout)
 
     def test_graph_exception_persists_normalized_terminal_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

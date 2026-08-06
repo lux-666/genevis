@@ -831,7 +831,7 @@ class AssemblyRouteDecision(BaseModel):
 
     session_id: str
     selected_route: Literal["cyclone", "ont", "hifi"]
-    decided_by: Literal["llm_auto", "human_override", "run_config_explicit"]
+    decided_by: Literal["auto_rule", "human_override", "run_config_explicit"]
     rationale: str
     metadata: dict[str, Any] = Field(default_factory=dict)
 

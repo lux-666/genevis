@@ -193,7 +193,6 @@ def prepare_autohic_adoption_review(state: TopLevelState) -> StateUpdate:
         review_request_artifact_ref=persisted.request_ref.path_ref,
         review_request_id=persisted.review_request_id,
         auto_decidable=False,
-        pending_human_confirmation=True,
     )
     return _update_hic_output(
         state,

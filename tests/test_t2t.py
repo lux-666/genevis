@@ -996,8 +996,8 @@ class T2TStageTests(unittest.TestCase):
                         review_request_hash=blocked["active_interrupt"][
                             "request_hash"
                         ],
-                        decided_by="auto_rule",
-                        rationale_artifact_ref="auto-rule:t2t-adoption",
+                        decided_by="llm_provisional",
+                        rationale_artifact_ref="llm:t2t-adoption",
                     ),
                 )
 

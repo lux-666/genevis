@@ -1247,8 +1247,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                         decision="accept_candidate",
                         review_request_id=interrupt["review_request_id"],
                         review_request_hash=interrupt["request_hash"],
-                        decided_by="auto_rule",
-                        rationale_artifact_ref="auto-rule:autohic-adoption",
+                        decided_by="llm_provisional",
+                        rationale_artifact_ref="llm:autohic-adoption",
                     ),
                 )
 

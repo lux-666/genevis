@@ -51,7 +51,6 @@ from app.review.persistence import (
     persist_review_decision,
     persist_review_request,
 )
-from app.review.policy import evaluate
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_INPUT_PROFILE,
@@ -66,7 +65,6 @@ from app.schemas.state import (
     ActiveInterrupt,
     JsonValue,
     StageCursor,
-    StageOutputs,
     StateUpdate,
     TopLevelState,
 )
@@ -132,17 +130,6 @@ class RouteRecommendation(TypedDict):
     reasoning: str
     uncertainty_notes: list[str]
     source: str
-
-
-class AssemblyTimeoutUpdate(TypedDict):
-    """Resume update shape including lifecycle timeout diagnostics."""
-
-    current_stage: Literal["assembly"]
-    supervision_state: Literal["failed_terminal"]
-    active_interrupt: None
-    last_error: str
-    stage_outputs: StageOutputs
-    blocked_timeout: dict[str, JsonValue]
 
 
 def _fail_update(state: TopLevelState, reason: str) -> StateUpdate:
@@ -643,8 +630,8 @@ def apply_route_decision(
     except ValueError as exc:
         raise ResumeValidationError(str(exc)) from exc
 
-    decided_by: Literal["llm_auto", "human_override"] = (
-        "llm_auto" if _selection_source == "timeout" else "human_override"
+    decided_by: Literal["auto_rule", "human_override"] = (
+        "auto_rule" if _selection_source == "timeout" else "human_override"
     )
 
     decision = AssemblyRouteDecision(
@@ -727,7 +714,7 @@ def _route_review_binding(
 
 def apply_selection_timeout(
     state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
-) -> StateUpdate | AssemblyTimeoutUpdate:
+) -> StateUpdate:
     """Commit the current assembly recommendation after a configured timeout."""
     active_interrupt: Mapping[str, object] = state.get("active_interrupt") or {}
     request_ref = active_interrupt.get("request_ref")
@@ -737,23 +724,31 @@ def apply_selection_timeout(
             request_ref if isinstance(request_ref, dict) else {},
             session_id=state["session_id"],
         )
-    except (KeyError, ReviewPersistenceError, ValueError):
-        return _timeout_stop_update(state, request, timeout)
+    except (KeyError, ReviewPersistenceError, ValueError) as exc:
+        raise ResumeValidationError(
+            "assembly route timeout request is missing or changed"
+        ) from exc
     request_payload = request_record.get("payload") or {}
     selection_payload = request_payload.get("recommended_assembly_selection")
     if not isinstance(selection_payload, dict):
-        return _timeout_stop_update(state, request, timeout)
+        raise ResumeValidationError(
+            "assembly route timeout has no recommended assembly selection"
+        )
     try:
         route = _route_from_read_type(str(selection_payload.get("read_type")))
-    except ValueError:
-        return _timeout_stop_update(state, request, timeout)
+    except ValueError as exc:
+        raise ResumeValidationError(
+            "assembly route timeout recommendation has an invalid read type"
+        ) from exc
     decision = {
         "hifi": "select_hifi",
         "ont": "select_ont",
         "cyclone": "select_cyclone",
     }.get(route)
     if not decision:
-        return _timeout_stop_update(state, request, timeout)
+        raise ResumeValidationError(
+            "assembly route timeout recommendation has no registered decision"
+        )
     timeout_request = request.model_copy(
         update={
             "decision": decision,
@@ -1246,7 +1241,6 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
         recommended_selection_value if recommended_selection_value is not None else {}
     )
 
-    # Construct ReviewPayload for policy evaluation
     payload = ReviewPayload(
         stage="assembly",
         gate_id="route_selection",
@@ -1266,9 +1260,6 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
         + list(profile.get("uncertainty_notes", [])),
         auto_decidable=False,
     )
-
-    # Evaluate policy
-    outcome = evaluate("assembly", payload, assembly_out.get("review_policy"))
 
     request_payload = {
         **payload.model_dump(mode="json"),
@@ -1302,8 +1293,6 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
                 ],
             )
         },
-        "review_policy": assembly_out.get("review_policy") or {"mode": outcome.mode},
-        "review_policy_outcome": outcome.model_dump(mode="json"),
     }
     persisted_request = persist_review_request(
         state,
@@ -1324,8 +1313,6 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
             mode="json"
         ),
         auto_decidable=False,
-        policy_mode=outcome.mode,
-        pending_human_confirmation=True,
         review_request_id=persisted_request.review_request_id,
     )
     interrupt = persisted_request.compact_interrupt(
@@ -1342,7 +1329,6 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
             "active_interrupt": validated_assembly_stage_payload(
                 {"active_interrupt": interrupt}
             ).get("active_interrupt"),
-            "review_policy_outcome": outcome.model_dump(mode="json"),
         },
     )
 
@@ -1441,24 +1427,6 @@ def _requested_method(
         return default_primary_method(read_type)
     except ValueError as exc:
         raise ResumeValidationError(str(exc)) from exc
-
-
-def _timeout_stop_update(
-    state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
-) -> AssemblyTimeoutUpdate:
-    return {
-        "current_stage": "assembly",
-        "supervision_state": "failed_terminal",
-        "active_interrupt": None,
-        "last_error": f"{request.stage} blocked timeout expired",
-        "stage_outputs": state.get("stage_outputs") or {},
-        "blocked_timeout": timeout,
-    }
-
-
-def _assembly_review_policy_mode(assembly_out: AssemblyStageCursor) -> str:
-    policy = dict(assembly_out.get("review_policy") or {})
-    return str(policy.get("mode") or "strict")
 
 
 def _write_assembly_json_artifact(

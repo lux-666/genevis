@@ -138,7 +138,7 @@ class ReviewReportTests(unittest.TestCase):
             with self.assertRaisesRegex(ResumeValidationError, "integrity mismatch"):
                 resume_review_state(state, request)
 
-    def test_unified_summary_lists_pending_confirmations_and_decisions(self):
+    def test_unified_summary_lists_pending_review_requests_and_decisions(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
@@ -157,9 +157,6 @@ class ReviewReportTests(unittest.TestCase):
                 reason="hic_scaffolding_human_decision_required",
                 review_request_artifact_ref=persisted.request_ref,
                 review_request_id=persisted.review_request_id,
-                auto_decidable=False,
-                policy_mode="auto",
-                pending_human_confirmation=True,
             )
             ledger.record_review_decision(
                 "s1",
@@ -181,7 +178,7 @@ class ReviewReportTests(unittest.TestCase):
             )
             self.assertEqual(report["report_type"], "session_summary")
             self.assertEqual(
-                report["pending_human_confirmations"][0]["review_request_id"],
+                report["pending_review_requests"][0]["review_request_id"],
                 persisted.review_request_id,
             )
             self.assertEqual(report["decisions_by_origin"]["llm_provisional"], 1)

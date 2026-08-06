@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +9,9 @@ from unittest.mock import patch
 
 from app.control.lifecycle import (
     ResumeValidationError,
+    build_foreground_auto_resume_request,
     build_resume_decision_template,
+    foreground_automatic_decision_label,
     inspect_session,
     resume_review_state,
 )
@@ -20,15 +21,14 @@ from app.review.gates import (
     ReviewGateDeclaration,
     get_review_gate,
     register_review_gate,
+    review_prompt_bundle,
 )
 from app.review.persistence import (
     ReviewPersistenceError,
     load_review_request,
     persist_review_request,
 )
-from app.review.recommender import recommend_review_decision
 from app.storage.ledger import Ledger
-from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -53,11 +53,10 @@ def _apply_unit_gate_decision(state: dict, request: ResumeReviewRequest) -> dict
 try:
     register_review_gate(
         ReviewGateDeclaration(
-            stage="unit_review_gate",
+            stage="inventory",
             gate_id="unit_review_gate",
-            decisions_allowed=("accept", "defer_annotation", "stop_human_review"),
+            decisions_allowed=("accept", "defer", "stop_human_review"),
             decision_applier="tests.test_review_gates:_apply_unit_gate_decision",
-            prompt_bundle="review.assembly_review_recommend",
             template_preferred_decision="accept",
             required_resume_fields=("candidate_id",),
         )
@@ -65,30 +64,16 @@ try:
 except ValueError:
     pass
 
-for _gate_id in ("gate_a", "gate_b"):
-    try:
-        register_review_gate(
-            ReviewGateDeclaration(
-                stage="unit_multi_stage",
-                gate_id=_gate_id,
-                decisions_allowed=("accept", "stop_human_review"),
-                decision_applier="tests.test_review_gates:_apply_unit_gate_decision",
-                prompt_bundle="review.assembly_review_recommend",
-            )
-        )
-    except ValueError:
-        pass
-
 
 class ReviewGateRegistryTests(unittest.TestCase):
     def test_registered_gate_exposes_declaration(self):
-        gate = get_review_gate("unit_review_gate")
+        gate = get_review_gate("inventory", "unit_review_gate")
 
         self.assertEqual(gate.gate_id, "unit_review_gate")
         self.assertEqual(
-            gate.decisions_allowed, ("accept", "defer_annotation", "stop_human_review")
+            gate.decisions_allowed, ("accept", "defer", "stop_human_review")
         )
-        self.assertEqual(gate.prompt_bundle, "review.assembly_review_recommend")
+        self.assertEqual(gate.template_preferred_decision, "accept")
 
     def test_registered_gate_dispatches_resume_applier(self):
         state = _blocked_unit_state()
@@ -96,7 +81,8 @@ class ReviewGateRegistryTests(unittest.TestCase):
         assert interrupt is not None
         request = ResumeReviewRequest(
             session_id="s1",
-            stage="unit_review_gate",
+            stage="inventory",
+            gate_id="unit_review_gate",
             review_request_id=interrupt["review_request_id"],
             review_request_hash=interrupt["request_hash"],
             decision="accept",
@@ -108,30 +94,26 @@ class ReviewGateRegistryTests(unittest.TestCase):
         self.assertIsNone(update["active_interrupt"])
         self.assertEqual(update["current_stage"], "done")
         self.assertEqual(
-            update["stage_outputs"]["unit_review_gate"]["candidate_id"], "candidate-a"
+            update["stage_outputs"]["inventory"]["candidate_id"], "candidate-a"
         )
 
     def test_registered_gate_can_use_local_decision_verb(self):
-        state = _blocked_unit_state(
-            decisions_allowed=["defer_annotation", "stop_human_review"]
-        )
+        state = _blocked_unit_state(decisions_allowed=["defer", "stop_human_review"])
         interrupt = state["active_interrupt"]
         assert interrupt is not None
         request = ResumeReviewRequest(
             session_id="s1",
-            stage="unit_review_gate",
+            stage="inventory",
             gate_id="unit_review_gate",
             review_request_id=interrupt["review_request_id"],
             review_request_hash=interrupt["request_hash"],
-            decision="defer_annotation",
+            decision="defer",
             candidate_id="candidate-a",
         )
 
         update = resume_review_state(state, request)
 
-        self.assertEqual(
-            update["stage_outputs"]["unit_review_gate"]["decision"], "defer_annotation"
-        )
+        self.assertEqual(update["stage_outputs"]["inventory"]["decision"], "defer")
 
     def test_unknown_gate_is_rejected_by_registry_not_schema(self):
         state = _blocked_unit_state(
@@ -149,98 +131,6 @@ class ReviewGateRegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ResumeValidationError, "Unsupported resume stage"):
             resume_review_state(state, request)
-
-    def test_recommender_uses_registry_prompt_bundle(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = v2_run_dir(tmp, "s1")
-            request = ReviewPayload(
-                stage="unit_review_gate",
-                reason="review",
-                candidates=[{"candidate_id": "candidate-a"}],
-                decisions_allowed=["accept", "stop_human_review"],
-            )
-            chat = _FakeChat(
-                json.dumps(
-                    {
-                        "session_id": "s1",
-                        "stage": "unit_review_gate",
-                        "decision": "accept",
-                        "candidate_id": "candidate-a",
-                    }
-                )
-            )
-            persisted = persist_review_request(
-                {"session_id": "s1", "data_dir": str(run_dir)},
-                stage="unit_review_gate",
-                gate_id="unit_review_gate",
-                reason="review",
-                payload=request,
-            )
-
-            decision = recommend_review_decision(
-                session_id="s1",
-                stage="unit_review_gate",
-                review_request_id=persisted.review_request_id,
-                request_ref=persisted.request_ref,
-                request_hash=persisted.request_hash,
-                data_dir=run_dir,
-                chat_model=chat,
-            )
-
-            self.assertEqual(decision.stage, "unit_review_gate")
-            artifact_path = SessionPaths.from_run_dir(run_dir).resolve_ref(
-                decision.rationale_artifact_ref or ""
-            )
-            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                artifact["prompt_bundle"], "review.assembly_review_recommend"
-            )
-
-    def test_recommender_uses_gate_id_when_stage_has_multiple_gates(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = v2_run_dir(tmp, "s1")
-            request = ReviewPayload(
-                stage="unit_multi_stage",
-                gate_id="gate_b",
-                reason="review",
-                decisions_allowed=["accept", "stop_human_review"],
-            )
-            chat = _FakeChat(
-                json.dumps(
-                    {
-                        "session_id": "s1",
-                        "stage": "unit_multi_stage",
-                        "decision": "accept",
-                    }
-                )
-            )
-            persisted = persist_review_request(
-                {"session_id": "s1", "data_dir": str(run_dir)},
-                stage="unit_multi_stage",
-                gate_id="gate_b",
-                reason="review",
-                payload=request,
-            )
-
-            decision = recommend_review_decision(
-                session_id="s1",
-                stage="unit_multi_stage",
-                review_request_id=persisted.review_request_id,
-                request_ref=persisted.request_ref,
-                request_hash=persisted.request_hash,
-                data_dir=run_dir,
-                chat_model=chat,
-            )
-
-            self.assertEqual(decision.stage, "unit_multi_stage")
-            self.assertEqual(decision.gate_id, "gate_b")
-            artifact_path = SessionPaths.from_run_dir(run_dir).resolve_ref(
-                decision.rationale_artifact_ref or ""
-            )
-            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-            self.assertEqual(artifact["review_request_id"], persisted.review_request_id)
-            self.assertEqual(artifact["request_hash"], persisted.request_hash)
-            self.assertNotIn("review_request", artifact)
 
     def test_review_request_envelope_is_the_only_owner_of_gate_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,21 +212,261 @@ class ReviewGateRegistryTests(unittest.TestCase):
             summary = inspect_session(session_id, data_dir)
             template = build_resume_decision_template(summary)
 
-            self.assertEqual(
-                summary["decision_requirements"]["stage"], "unit_review_gate"
-            )
+            self.assertEqual(summary["decision_requirements"]["stage"], "inventory")
             self.assertEqual(
                 summary["decision_requirements"]["gate_id"], "unit_review_gate"
             )
             self.assertEqual(
                 summary["decision_requirements"]["decisions_allowed"],
-                ["accept", "defer_annotation", "stop_human_review"],
+                ["accept", "defer", "stop_human_review"],
             )
-            self.assertEqual(template["stage"], "unit_review_gate")
+            self.assertEqual(template["stage"], "inventory")
             self.assertEqual(template["gate_id"], "unit_review_gate")
             self.assertEqual(template["decision"], "accept")
             self.assertEqual(template["candidate_id"], "candidate-a")
             self.assertIn("candidate_id", summary["next_action"]["required_fields"])
+
+    def test_parameter_approval_gates_default_templates_to_approval(self):
+        for stage in ("assembly", "hic_scaffolding", "t2t"):
+            with self.subTest(stage=stage):
+                gate = get_review_gate(stage, "parameter_approval")
+                self.assertEqual(
+                    gate.decisions_allowed,
+                    ("approve_parameters", "reject_parameters"),
+                )
+                template = build_resume_decision_template(
+                    {
+                        "session_id": "s1",
+                        "decision_requirements": {
+                            "stage": stage,
+                            "gate_id": "parameter_approval",
+                            "decisions_allowed": list(gate.decisions_allowed),
+                            "review_request_id": "request-1",
+                            "request_hash": "hash-1",
+                        },
+                    }
+                )
+
+                self.assertEqual(template["decision"], "approve_parameters")
+
+    def test_every_production_gate_freezes_the_effective_wait(self):
+        production_gates = (
+            ("assembly", "parameter_approval"),
+            ("inventory", "inventory_review"),
+            ("assembly_review", "assembly_review"),
+            ("assembly", "route_selection"),
+            ("hic_scaffolding", "parameter_approval"),
+            ("hic_scaffolding", "hic_scaffolding"),
+            ("t2t", "parameter_approval"),
+            ("t2t", "t2t_review"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
+            for stage, gate_id in production_gates:
+                with self.subTest(stage=stage, gate_id=gate_id):
+                    gate = get_review_gate(stage, gate_id)
+                    state = {
+                        "session_id": "s1",
+                        "data_dir": str(run_dir),
+                        "stage_outputs": {
+                            stage: {"review_policy": {"max_blocked_seconds": 17}}
+                        },
+                    }
+                    persisted = persist_review_request(
+                        state,
+                        stage=stage,
+                        gate_id=gate_id,
+                        reason="registry timeout contract",
+                        payload={
+                            "decisions_allowed": list(gate.decisions_allowed),
+                        },
+                    )
+                    record = load_review_request(
+                        run_dir,
+                        persisted.request_ref,
+                        session_id="s1",
+                    )
+
+                    self.assertEqual(record["payload"]["max_blocked_seconds"], 17)
+                    with self.assertRaisesRegex(
+                        ReviewPersistenceError,
+                        "does not match the effective frozen RunConfig policy",
+                    ):
+                        persist_review_request(
+                            state,
+                            stage=stage,
+                            gate_id=gate_id,
+                            reason="registry timeout mismatch",
+                            payload={
+                                "decisions_allowed": list(gate.decisions_allowed),
+                                "max_blocked_seconds": 18,
+                            },
+                        )
+
+    def test_foreground_auto_request_requires_a_registered_resolver(self):
+        """The wait is only a trigger; template defaults are never an accept rule."""
+        base = {
+            "session_id": "s1",
+            "decision_requirements": {
+                "review_request_id": "request-1",
+                "request_hash": "a" * 64,
+                "review_request_artifact_ref": (
+                    "artifacts/reviews/request-1/request.json"
+                ),
+                "max_blocked_seconds": 0,
+            },
+        }
+        manual_gates = (
+            ("inventory", "inventory_review"),
+            ("assembly", "parameter_approval"),
+            ("hic_scaffolding", "parameter_approval"),
+            ("hic_scaffolding", "hic_scaffolding"),
+            ("t2t", "parameter_approval"),
+            ("t2t", "t2t_review"),
+        )
+        for stage, gate_id in manual_gates:
+            with self.subTest(stage=stage, gate_id=gate_id):
+                gate = get_review_gate(stage, gate_id)
+                summary = {
+                    **base,
+                    "decision_requirements": {
+                        **base["decision_requirements"],
+                        "stage": stage,
+                        "gate_id": gate_id,
+                        "decisions_allowed": list(gate.decisions_allowed),
+                    },
+                }
+                with self.assertRaisesRegex(
+                    ResumeValidationError, "no eligible automatic resolver"
+                ):
+                    build_foreground_auto_resume_request(
+                        summary,
+                        configured_seconds=0,
+                        elapsed_seconds=0,
+                        data_dir="/tmp/run",
+                    )
+
+    def test_route_selection_builds_foreground_auto_request_from_its_resolver(self):
+        summary = {
+            "session_id": "s1",
+            "decision_requirements": {
+                "stage": "assembly",
+                "gate_id": "route_selection",
+                "decisions_allowed": ["select_hifi", "stop_human_review"],
+                "review_request_id": "request-1",
+                "request_hash": "a" * 64,
+                "review_request_artifact_ref": (
+                    "artifacts/reviews/request-1/request.json"
+                ),
+                "request_ref": {
+                    "path_ref": "artifacts/reviews/request-1/request.json",
+                    "sha256": "a" * 64,
+                },
+                "max_blocked_seconds": 0,
+                "recommended_route": "hifi",
+                "recommended_assembly_selection": {
+                    "primary_method": "assembly.candidate.hifiasm"
+                },
+            },
+        }
+
+        request = build_foreground_auto_resume_request(
+            summary,
+            configured_seconds=0,
+            elapsed_seconds=0,
+            data_dir="/tmp/run",
+        )
+
+        self.assertEqual(request.decision, "select_hifi")
+        self.assertEqual(request.method_name, "assembly.candidate.hifiasm")
+        self.assertEqual(request.decided_by, "auto_rule")
+
+    def test_assembly_review_expiry_uses_llm_provisional_recommendation(self):
+        summary = {
+            "session_id": "s1",
+            "decision_requirements": {
+                "stage": "assembly_review",
+                "gate_id": "assembly_review",
+                "decisions_allowed": ["accept", "stop_human_review"],
+                "review_request_id": "request-1",
+                "request_hash": "a" * 64,
+                "review_request_artifact_ref": (
+                    "artifacts/reviews/request-1/request.json"
+                ),
+                "request_ref": {
+                    "path_ref": "artifacts/reviews/request-1/request.json",
+                    "sha256": "a" * 64,
+                },
+                "max_blocked_seconds": 0,
+                "auto_decidable": True,
+            },
+        }
+        recommendation = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            gate_id="assembly_review",
+            decision="accept",
+            candidate_id="candidate-a",
+            review_request_id="request-1",
+            review_request_hash="a" * 64,
+            decided_by="llm_provisional",
+            rationale_artifact_ref="artifacts/reviews/request-1/recommendation.json",
+        )
+
+        with patch(
+            "app.review.recommender.recommend_review_decision",
+            return_value=recommendation,
+        ) as recommend:
+            request = build_foreground_auto_resume_request(
+                summary,
+                configured_seconds=0,
+                elapsed_seconds=0,
+                data_dir="/tmp/run",
+            )
+
+        recommend.assert_called_once_with(
+            session_id="s1",
+            stage="assembly_review",
+            review_request_id="request-1",
+            request_ref={
+                "path_ref": "artifacts/reviews/request-1/request.json",
+                "sha256": "a" * 64,
+            },
+            request_hash="a" * 64,
+            data_dir="/tmp/run",
+        )
+        self.assertEqual(request.decided_by, "llm_provisional")
+        self.assertEqual(request.candidate_id, "candidate-a")
+        self.assertEqual(
+            request.rationale_artifact_ref,
+            "artifacts/reviews/request-1/recommendation.json",
+        )
+        self.assertEqual(request.metadata["source"], "foreground_countdown")
+
+    def test_ineligible_assembly_review_has_no_foreground_automatic_label(self):
+        summary = {
+            "decision_requirements": {
+                "stage": "assembly_review",
+                "gate_id": "assembly_review",
+                "auto_decidable": False,
+            }
+        }
+
+        self.assertIsNone(foreground_automatic_decision_label(summary))
+
+    def test_only_assembly_review_declares_an_llm_recommendation_bundle(self):
+        self.assertEqual(
+            review_prompt_bundle("assembly_review", "assembly_review"),
+            "review.assembly_review_recommend",
+        )
+        for stage, gate_id in (
+            ("inventory", "inventory_review"),
+            ("assembly", "parameter_approval"),
+            ("hic_scaffolding", "hic_scaffolding"),
+            ("t2t", "t2t_review"),
+        ):
+            with self.subTest(stage=stage, gate_id=gate_id):
+                self.assertIsNone(review_prompt_bundle(stage, gate_id))
 
     def test_generic_prompt_collects_candidate_and_notes(self):
         requirements = {
@@ -358,29 +488,13 @@ class ReviewGateRegistryTests(unittest.TestCase):
         self.assertEqual(decision["notes"], ["reviewed evidence"])
 
 
-class _FakeResponse:
-    def __init__(self, content: str) -> None:
-        self.content = content
-
-
-class _FakeChat:
-    def __init__(self, content: str) -> None:
-        self.content = content
-        self.model_name = "fake-model"
-
-    def bind(self, **kwargs):
-        return self
-
-    def invoke(self, messages):
-        return _FakeResponse(self.content)
-
-
 def _blocked_unit_state(
     *,
-    stage: str = "unit_review_gate",
+    stage: str = "inventory",
     decisions_allowed: list[str] | None = None,
 ) -> dict:
     allowed = decisions_allowed or ["accept", "stop_human_review"]
+    gate_id = "unit_review_gate" if stage == "inventory" else stage
     run_dir = v2_run_dir(tempfile.mkdtemp(), "s1")
     state = {
         "session_id": "s1",
@@ -407,7 +521,7 @@ def _blocked_unit_state(
     }
     payload = ReviewPayload(
         stage=stage,
-        gate_id=stage,
+        gate_id=gate_id,
         reason="unit review",
         decisions_allowed=allowed,
         candidates=[{"candidate_id": "candidate-a"}],
@@ -415,13 +529,13 @@ def _blocked_unit_state(
     persisted = persist_review_request(
         state,
         stage=stage,
-        gate_id=stage,
+        gate_id=gate_id,
         reason="unit review",
         payload=payload,
     )
     state["active_interrupt"] = persisted.compact_interrupt(
         stage=stage,
-        gate_id=stage,
+        gate_id=gate_id,
         reason="unit review",
     )
     return state
@@ -435,15 +549,15 @@ def _blocked_unit_session(tmp: str) -> tuple[str, str]:
         "data_dir": str(data_dir),
     }
     payload = ReviewPayload(
-        stage="unit_review_gate",
+        stage="inventory",
         gate_id="unit_review_gate",
         reason="unit review",
         candidates=[{"candidate_id": "candidate-a"}],
-        decisions_allowed=["accept", "defer_annotation", "stop_human_review"],
+        decisions_allowed=["accept", "defer", "stop_human_review"],
     )
     persisted = persist_review_request(
         state,
-        stage="unit_review_gate",
+        stage="inventory",
         gate_id="unit_review_gate",
         reason="unit review",
         payload=payload,
@@ -454,7 +568,7 @@ def _blocked_unit_session(tmp: str) -> tuple[str, str]:
     ledger.create_session(session_id, "control/manifest.yaml")
     ledger.record_review_requested(
         session_id,
-        "unit_review_gate",
+        "inventory",
         reason="unit review",
         candidates=[{"candidate_id": "candidate-a"}],
         review_request_artifact_ref=persisted.request_ref,

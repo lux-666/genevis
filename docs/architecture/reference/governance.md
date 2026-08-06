@@ -190,6 +190,20 @@ Use human gates for decisions with biological or irreversible consequences:
 
 Do not interrupt for ordinary local validation or deterministic file collection.
 
+The review wait is an operator-interface policy, not a scheduler. Keep the
+frozen RunConfig default at `review_policy.max_blocked_seconds: 300`; accept
+per-stage overrides only for registry-backed review stages. `-1` waits
+indefinitely, `0` immediately triggers an existing eligible automatic resolver,
+and a positive value provides an Enter-claim countdown only to the foreground
+interactive run before triggering that same resolver. The timer must never
+invent a decision from registry defaults. Preserve each resolver's immutable
+request bindings, evidence eligibility, decision origin, and rationale artifact;
+if no resolver exists or validation fails, retain the human block. Do not add
+daemon/background wake-ups, deadline
+reconstruction on later resume, strict/auto review modes, or a public resume
+timeout override. Any interruption or non-interactive run must retain the
+durable manual-review checkpoint.
+
 ## Documentation Standard
 
 Each current architecture or domain contract has one owning document. Update

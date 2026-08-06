@@ -86,6 +86,11 @@ def execute_resume_transaction(
     ledger.record_event(session_id, "resume_started", payload)
 
     try:
+        if request.decided_by == "auto_rule" and source != "foreground_countdown":
+            raise ResumeTransactionError(
+                "validation",
+                "auto_rule decisions require source='foreground_countdown'",
+            )
         snapshot = graph.get_state(config)
         if (
             snapshot is None
@@ -131,6 +136,7 @@ def execute_resume_transaction(
                 state,
                 request,
                 blocked_timeout_seconds=blocked_timeout_seconds,
+                decision_source=source,
             )
         except (
             ResumeValidationError,

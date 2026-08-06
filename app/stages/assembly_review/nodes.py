@@ -29,8 +29,6 @@ from app.reference.ncbi_metazoa import (
 from app.reference.ncbi_metazoa import species_name_from_metadata
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.persistence import persist_review_decision, persist_review_request
-from app.review.policy import evaluate
-from app.review.recommender import RecommendationError, recommend_review_decision
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_DRAFT_ASSEMBLY,
@@ -735,8 +733,6 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
         artifact_type="assembly_review.request",
     )
     request_ref = persisted_request.request_ref
-    outcome = evaluate("assembly_review", payload, ar_out.get("review_policy"))
-    pending_confirmation = outcome.action == "BLOCK_PENDING_CONFIRM"
     data_dir = state.get("data_dir", "data")
     ledger = Ledger(data_dir)
     ledger.record_review_requested(
@@ -747,8 +743,7 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
         candidates=candidate_payloads,
         review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=payload.auto_decidable,
-        policy_mode=outcome.mode,
-        pending_human_confirmation=pending_confirmation,
+        review_request_id=persisted_request.review_request_id,
     )
 
     review_update = update_assembly_review_output(
@@ -757,9 +752,7 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
             **ar_out,
             "status": "blocked_human",
             "review_request_artifact_ref": request_ref.model_dump(mode="json"),
-            "review_policy_outcome": outcome.model_dump(mode="json"),
             "auto_decidable": payload.auto_decidable,
-            "pending_human_confirmation": pending_confirmation,
         },
     )
     blocked_update: StateUpdate = {
@@ -774,61 +767,7 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
         "supervision_state": "blocked_human",
         **review_update,
     }
-    if outcome.action == "BLOCK_WITH_TIMEOUT":
-        ledger.record_event(
-            state["session_id"],
-            "blocked_with_timeout",
-            {
-                "stage": "assembly_review",
-                "max_blocked_seconds": outcome.max_blocked_seconds,
-                "review_request_artifact_ref": request_ref.model_dump(mode="json"),
-                "policy_mode": outcome.mode,
-            },
-        )
-    if outcome.action != "AUTO_DECIDE_NOW":
-        return blocked_update
-
-    try:
-        recommendation = recommend_review_decision(
-            session_id=state["session_id"],
-            stage="assembly_review",
-            review_request_id=persisted_request.review_request_id,
-            request_ref=persisted_request.request_ref,
-            request_hash=persisted_request.request_hash,
-            data_dir=data_dir,
-        )
-        from app.control.lifecycle import resume_review_state
-
-        blocked_state = state.copy()
-        blocked_state.update(blocked_update)
-        auto_update = resume_review_state(blocked_state, recommendation)
-    except (RecommendationError, ResumeValidationError, ValueError) as exc:
-        ledger.record_event(
-            state["session_id"],
-            "auto_recommendation_failed",
-            {
-                "stage": "assembly_review",
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-                "review_request_artifact_ref": request_ref.model_dump(mode="json"),
-                "policy_mode": outcome.mode,
-            },
-        )
-        return blocked_update
-    ledger.record_event(
-        state["session_id"],
-        "auto_decision_committed",
-        {
-            "stage": "assembly_review",
-            "decision": recommendation.decision,
-            "candidate_id": recommendation.candidate_id,
-            "decided_by": recommendation.decided_by,
-            "rationale_artifact_ref": recommendation.rationale_artifact_ref,
-            "review_request_artifact_ref": request_ref.model_dump(mode="json"),
-            "policy_mode": outcome.mode,
-        },
-    )
-    return auto_update
+    return blocked_update
 
 
 def commit_assembly_review(state: TopLevelState) -> StateUpdate:

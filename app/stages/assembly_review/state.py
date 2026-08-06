@@ -145,9 +145,7 @@ class AssemblyReviewCursor(TypedDict, total=False):
 
     review_policy: dict[str, CursorJsonValue]
     review_request_artifact_ref: dict[str, CursorJsonValue]
-    review_policy_outcome: dict[str, CursorJsonValue]
     auto_decidable: bool
-    pending_human_confirmation: bool
     assembly_review_report_ref: str
     assembly_review_packet_ref: str
 

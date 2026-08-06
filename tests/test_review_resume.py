@@ -8,16 +8,19 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
 from app.control.lifecycle import (
     ResumeValidationError,
     _decision_requirements_from_artifact,
+    build_foreground_auto_resume_request,
     build_resume_decision_template,
     inspect_session,
     inspect_state,
     resume_review_state,
+    review_max_blocked_seconds,
 )
 from app.reports.review_report import write_operator_report
 from app.review.base import ResumeReviewRequest, load_resume_review_request
@@ -564,30 +567,72 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertNotIn("hic_scaffolding.skip", artifact_types)
         self.assertIn("hic_scaffolding.adoption_review.decision", artifact_types)
 
-    def test_blocked_timeout_is_checked_synchronously(self):
+    def test_manual_resume_does_not_infer_expired_foreground_deadline(self):
         state = _assembly_blocked_state()
         state["active_interrupt"]["blocked_at"] = "2026-05-08T10:00:00+00:00"
         request = ResumeReviewRequest(
             session_id="s1",
             stage="assembly_review",
-            decision="stop_human_review",
+            decision="accept",
+            candidate_id="flye",
             **_review_binding(state),
         )
 
-        update = resume_review_state(
-            state,
-            request,
-            blocked_timeout_seconds=1,
-            now=datetime(2026, 5, 8, 10, 0, 2, tzinfo=timezone.utc),
-        )
+        update = resume_review_state(state, request)
 
-        self.assertEqual(update["supervision_state"], "failed_terminal")
-        self.assertIn("timeout", update["last_error"])
+        self.assertEqual(update["supervision_state"], "running_stage")
+        self.assertEqual(update["current_stage"], "hic_scaffolding")
         ar_out = update["stage_outputs"]["assembly_review"]
         self.assertTrue(
             _artifact_path(state, ar_out["review_decision_artifact_ref"]).exists()
         )
-        self.assertEqual(ar_out["decision"], "stop_human_review")
+        self.assertEqual(ar_out["decision"], "accept")
+        self.assertNotIn("blocked_timeout", ar_out)
+
+    def test_foreground_timeout_applies_bound_llm_recommendation(self):
+        state = _assembly_blocked_state()
+        state["active_interrupt"]["blocked_at"] = "2026-05-08T10:00:00+00:00"
+        summary = inspect_state(state)
+        configured = review_max_blocked_seconds(summary)
+        recommendation = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="accept",
+            candidate_id="flye",
+            decided_by="llm_provisional",
+            rationale_artifact_ref=(
+                "artifacts/reviews/review_assembly/recommendation.json"
+            ),
+            **_review_binding(state),
+        )
+        with patch(
+            "app.review.recommender.recommend_review_decision",
+            return_value=recommendation,
+        ):
+            request = build_foreground_auto_resume_request(
+                summary,
+                configured_seconds=configured,
+                elapsed_seconds=301.0,
+                data_dir=state["data_dir"],
+            )
+
+        update = resume_review_state(
+            state,
+            request,
+            blocked_timeout_seconds=configured,
+            decision_source="foreground_countdown",
+            now=datetime(2026, 5, 8, 10, 5, 1, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(update["supervision_state"], "running_stage")
+        ar_out = update["stage_outputs"]["assembly_review"]
+        self.assertEqual(ar_out["decision"], "accept")
+        self.assertEqual(ar_out["decided_by"], "llm_provisional")
+        self.assertEqual(
+            ar_out["rationale_artifact_ref"],
+            "artifacts/reviews/review_assembly/recommendation.json",
+        )
+        self.assertEqual(ar_out["selected_candidate_id"], "flye")
 
     def test_resume_request_rejects_extra_fields(self):
         with self.assertRaises(ValidationError):
@@ -1174,6 +1219,7 @@ def _assembly_blocked_state(
             "candidate_ids": ["flye", "canu"],
             "candidate_comparison_ref": "candidate_comparison.json",
         },
+        "auto_decidable": True,
     }
     from app.storage.ledger import Ledger
 

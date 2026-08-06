@@ -41,9 +41,28 @@ uses the same frozen publication and executor. Other public subcommands are
 per-session execution lock, creates the Ledger session, constructs the small
 `TopLevelState`, projects run-config values into their owned stage cursors,
 builds the parent graph, and invokes it with the session ID as the LangGraph
-thread ID. The public run always uses SQLite. With `--non-interactive`, a human
-gate persists `blocked_human` and prints `inspect`, `review`, and `resume`
-continuations instead of prompting.
+thread ID. The public run always uses SQLite. Foreground review additionally
+requires stdin and stdout to be real TTYs. With `--non-interactive` or without
+that TTY capability, a human gate persists `blocked_human` and prints
+`inspect`, `review`, and `resume` continuations instead of prompting.
+
+The frozen RunConfig review policy defaults to
+`review_policy.max_blocked_seconds: 300` and permits per-stage overrides only
+for stages registered with the review registry. `-1` waits indefinitely; `0`
+immediately triggers the gate's existing automatic resolver when it is eligible;
+a positive value starts an Enter-claim countdown that triggers the same resolver
+at expiry. The timer never chooses from registry defaults. Assembly Review keeps
+its evidence-qualified LLM recommender, assembly route selection keeps its
+recommendation timeout applier, and gates without an existing resolver remain
+manual. Resolver failure leaves the checkpoint blocked for manual review.
+This mechanism exists only while the originating run is foreground and
+interactive. Enter cancels it and opens manual prompts. Ctrl-C, EOF, process
+exit, missing TTY capability, or `--non-interactive` preserve a durable human
+block; there is no daemon/background timer. Starting the frozen session again
+does not invoke an already-blocked checkpoint or restore its timer. Subsequent
+`review` and `resume` commands are manual and must not infer a deadline from the
+original block time. The public interfaces have no strict/auto review mode or
+resume-timeout override.
 
 ## Parent graph
 

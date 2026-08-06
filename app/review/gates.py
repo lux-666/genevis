@@ -263,7 +263,6 @@ register_review_gate(
             "app.review.interrupt_context:assembly_route_selection_interrupt_context"
         ),
         timeout_applier="app.stages.assembly.nodes:apply_selection_timeout",
-        prompt_bundle="assembly.route_selector",
         prompt_adapter="generic",
         template_preferred_decision="select_ont",
         plan_order=10,

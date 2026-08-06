@@ -1,4 +1,4 @@
-"""Tests for route-selection timeout behavior on v2 review evidence."""
+"""Foreground countdown behavior for the assembly route-selection gate."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import app.control.lifecycle as lifecycle
 from app.control.lifecycle import (
     ResumeValidationError,
+    _blocked_timeout_status,
+    build_foreground_auto_resume_request,
+    inspect_state,
     resume_review_state,
-    timeout_terminal_update,
+    review_max_blocked_seconds,
 )
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
@@ -42,11 +44,9 @@ def _blocked_route_state(
     *,
     recommended_route: str = "hifi",
     recommended_selection: dict | None = None,
-    policy_seconds: float | None = 300,
+    wait_seconds: int = 300,
     elapsed_seconds: float = 400,
 ) -> dict:
-    """Create the gate through the production route selector and persistence path."""
-
     run_dir = v2_run_dir(tmpdir, session_id)
     Ledger(run_dir).create_session(session_id, "control/manifest.yaml")
     state = initial_state(
@@ -55,39 +55,30 @@ def _blocked_route_state(
         input_manifest_ref="control/manifest.yaml",
     )
     state["current_stage"] = "assembly"
-
     if recommended_selection is None and recommended_route in _RECOMMENDED_SELECTIONS:
         recommended_selection = {
             **_RECOMMENDED_SELECTIONS[recommended_route],
             "source": "recommendation",
             "rationale": f"{recommended_route} route recommended",
         }
-
-    policy = {"mode": "strict"}
-    if policy_seconds is not None:
-        policy["max_blocked_seconds"] = policy_seconds
-    assembly = {
-        "status": "profile_ready",
-        "review_policy": policy,
-        "input_profile": {
-            "recommended_route": recommended_route,
-            "recommendation_reasoning": f"{recommended_route} reads available",
-            "uncertainty_notes": (
-                ["No usable reads available"]
-                if recommended_route == "insufficient_data"
-                else []
+    state["stage_outputs"] = {
+        "assembly": {
+            "status": "profile_ready",
+            "review_policy": {"max_blocked_seconds": wait_seconds},
+            "input_profile": {
+                "recommended_route": recommended_route,
+                "recommendation_reasoning": f"{recommended_route} reads available",
+                "uncertainty_notes": [],
+            },
+            "recommended_assembly_selection": recommended_selection,
+            "has_hifi": recommended_route == "hifi",
+            "ont_reads_ref": (
+                "artifacts/inputs/ont.fastq"
+                if recommended_route in {"ont", "cyclone"}
+                else None
             ),
-        },
-        "recommended_assembly_selection": recommended_selection,
-        "has_hifi": recommended_route == "hifi",
-        "ont_reads_ref": (
-            "artifacts/inputs/ont.fastq"
-            if recommended_route in {"ont", "cyclone"}
-            else None
-        ),
+        }
     }
-    state["stage_outputs"] = {"assembly": assembly}
-
     routed = {**state, **select_route(state)}
     blocked = {**routed, **block_assembly_for_human(routed)}
     blocked["active_interrupt"] = {
@@ -97,25 +88,6 @@ def _blocked_route_state(
         ).isoformat(),
     }
     return blocked
-
-
-def _request(
-    state: dict,
-    decision: str,
-    *,
-    session_id: str | None = None,
-    stage: str = "assembly",
-    gate_id: str = "route_selection",
-) -> ResumeReviewRequest:
-    interrupt = state["active_interrupt"]
-    return ResumeReviewRequest(
-        session_id=session_id or state["session_id"],
-        stage=stage,
-        gate_id=gate_id,
-        decision=decision,
-        review_request_id=interrupt["review_request_id"],
-        review_request_hash=interrupt["request_hash"],
-    )
 
 
 def _request_payload(state: dict) -> dict:
@@ -128,144 +100,212 @@ def _request_payload(state: dict) -> dict:
     return record["payload"]
 
 
-def test_route_selection_timeout_auto_accepts_recommendation():
+def _human_request(state: dict, decision: str) -> ResumeReviewRequest:
+    interrupt = state["active_interrupt"]
+    return ResumeReviewRequest(
+        session_id=state["session_id"],
+        stage="assembly",
+        gate_id="route_selection",
+        decision=decision,
+        review_request_id=interrupt["review_request_id"],
+        review_request_hash=interrupt["request_hash"],
+    )
+
+
+def _auto_request(state: dict) -> ResumeReviewRequest:
+    summary = inspect_state(state)
+    wait_seconds = review_max_blocked_seconds(summary)
+    return build_foreground_auto_resume_request(
+        summary,
+        configured_seconds=wait_seconds,
+        elapsed_seconds=float(wait_seconds),
+    )
+
+
+def test_route_request_persists_effective_wait_without_policy_mode():
     with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(tmpdir, "timeout_test")
+        state = _blocked_route_state(tmpdir, "persist_wait", wait_seconds=600)
         payload = _request_payload(state)
-        assert payload["recommended_route"] == "hifi"
-        assert payload["recommended_assembly_selection"]["read_type"] == "pacbio_hifi"
 
-        result = resume_review_state(
-            state,
-            _request(state, "select_hifi"),
-            blocked_timeout_seconds=300,
-        )
-
-        assembly = result["stage_outputs"]["assembly"]
-        assert assembly["status"] == "route_selected"
-        assert assembly["selected_route"] == "hifi"
-        assert result["supervision_state"] == "running_stage"
-        assert assembly["route_decision"]["decided_by"] == "llm_auto"
-        assert assembly["route_decision"]["metadata"]["auto_accepted"] is True
+    assert payload["max_blocked_seconds"] == 600
+    assert "review_policy" not in payload
+    assert "review_policy_outcome" not in payload
 
 
-def test_route_selection_timeout_with_insufficient_data_fails():
+@pytest.mark.parametrize(
+    ("recommended_route", "expected_decision", "expected_method"),
+    [
+        ("hifi", "select_hifi", "assembly.candidate.hifiasm"),
+        ("ont", "select_ont", "assembly.candidate.hifiasm_ont"),
+        ("cyclone", "select_cyclone", "assembly.candidate.flye"),
+    ],
+)
+def test_route_countdown_accepts_registered_recommendation(
+    recommended_route: str,
+    expected_decision: str,
+    expected_method: str,
+):
     with tempfile.TemporaryDirectory() as tmpdir:
         state = _blocked_route_state(
             tmpdir,
-            "timeout_test_fail",
-            recommended_route="insufficient_data",
+            f"timeout_{recommended_route}",
+            recommended_route=recommended_route,
         )
-        assert _request_payload(state)["recommended_assembly_selection"] == {}
+        request = _auto_request(state)
 
+        assert request.decision == expected_decision
+        assert request.method_name == expected_method
         result = resume_review_state(
             state,
-            _request(state, "select_hifi"),
+            request,
             blocked_timeout_seconds=300,
+            decision_source="foreground_countdown",
         )
 
-        assert result["supervision_state"] == "failed_terminal"
-        assert "timeout expired" in result["last_error"]
+    assembly = result["stage_outputs"]["assembly"]
+    assert assembly["selected_route"] == recommended_route
+    assert assembly["route_decision"]["decided_by"] == "auto_rule"
+    assert assembly["route_decision"]["metadata"]["auto_accepted"] is True
+    assert result["supervision_state"] == "running_stage"
 
 
-def test_route_selection_timeout_within_limit_proceeds_normally():
+def test_manual_resume_after_deadline_uses_human_decision_without_timeout():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = _blocked_route_state(tmpdir, "manual_after_deadline")
+        result = resume_review_state(state, _human_request(state, "select_ont"))
+
+    assembly = result["stage_outputs"]["assembly"]
+    assert assembly["selected_route"] == "ont"
+    assert assembly["route_decision"]["decided_by"] == "human_override"
+    assert "blocked_timeout" not in assembly["route_decision"]["metadata"]
+
+
+def test_auto_rule_request_without_foreground_timeout_is_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = _blocked_route_state(tmpdir, "auto_without_foreground")
+        request = _auto_request(state)
+
+        with pytest.raises(ResumeValidationError, match="foreground countdown"):
+            resume_review_state(
+                state,
+                request,
+                decision_source="foreground_countdown",
+            )
+
+
+def test_auto_rule_request_requires_foreground_decision_source():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = _blocked_route_state(tmpdir, "auto_without_source")
+        request = _auto_request(state)
+
+        with pytest.raises(ResumeValidationError, match="decision source"):
+            resume_review_state(
+                state,
+                request,
+                blocked_timeout_seconds=300,
+            )
+
+
+def test_auto_rule_request_before_foreground_deadline_is_rejected():
     with tempfile.TemporaryDirectory() as tmpdir:
         state = _blocked_route_state(
             tmpdir,
-            "timeout_test_normal",
-            elapsed_seconds=100,
+            "auto_before_deadline",
+            elapsed_seconds=0,
         )
+        request = _auto_request(state)
 
-        result = resume_review_state(
-            state,
-            _request(state, "select_ont"),
-            blocked_timeout_seconds=300,
-        )
-
-        assembly = result["stage_outputs"]["assembly"]
-        assert assembly["status"] == "route_selected"
-        assert assembly["selected_route"] == "ont"
-        assert result["supervision_state"] == "running_stage"
-        assert assembly["route_decision"]["decided_by"] == "human_override"
-        assert "auto_accepted" not in assembly["route_decision"]["metadata"]
+        with pytest.raises(ResumeValidationError, match="has not expired"):
+            resume_review_state(
+                state,
+                request,
+                blocked_timeout_seconds=300,
+                decision_source="foreground_countdown",
+            )
 
 
-def test_route_selection_timeout_reads_from_review_policy_outcome():
+def test_auto_rule_timeout_must_match_verified_request():
     with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(tmpdir, "timeout_from_policy")
-        payload = _request_payload(state)
-        assert payload["review_policy_outcome"]["max_blocked_seconds"] == 300
+        state = _blocked_route_state(tmpdir, "auto_timeout_mismatch")
+        request = _auto_request(state)
 
-        result = resume_review_state(
-            state,
-            _request(state, "select_hifi"),
-            blocked_timeout_seconds=None,
-        )
-
-        assembly = result["stage_outputs"]["assembly"]
-        timeout = assembly["route_decision"]["metadata"]["blocked_timeout"]
-        assert assembly["selected_route"] == "hifi"
-        assert assembly["route_decision"]["decided_by"] == "llm_auto"
-        assert (
-            timeout["source"]
-            == "review_request.review_policy_outcome.max_blocked_seconds"
-        )
+        with pytest.raises(ResumeValidationError, match="does not match"):
+            resume_review_state(
+                state,
+                request,
+                blocked_timeout_seconds=0,
+                decision_source="foreground_countdown",
+            )
 
 
-def test_route_selection_timeout_conflict_explicit_arg_wins_and_warns():
+def test_auto_rule_request_requires_verified_foreground_metadata():
     with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(
-            tmpdir,
-            "timeout_conflict",
-            policy_seconds=600,
-        )
+        state = _blocked_route_state(tmpdir, "auto_metadata_missing")
+        request = _auto_request(state).model_copy(update={"metadata": {}})
 
-        result = resume_review_state(
-            state,
-            _request(state, "select_ont"),
-            blocked_timeout_seconds=300,
-        )
-
-        assembly = result["stage_outputs"]["assembly"]
-        assert assembly["selected_route"] == "hifi"
-        timeout = assembly["route_decision"]["metadata"]["blocked_timeout"]
-        assert timeout["configured_seconds"] == 300
-        assert timeout["source"] == "blocked_timeout_seconds"
-        assert timeout["review_policy_outcome_max_blocked_seconds"] == 600
-        assert "overrides" in timeout["warning"]
+        with pytest.raises(ResumeValidationError, match="not bound"):
+            resume_review_state(
+                state,
+                request,
+                blocked_timeout_seconds=300,
+                decision_source="foreground_countdown",
+            )
 
 
-def test_route_selection_timeout_auto_accept_preserves_ont_route():
+def test_indefinite_wait_rejects_auto_rule_even_with_internal_timeout():
     with tempfile.TemporaryDirectory() as tmpdir:
         state = _blocked_route_state(
             tmpdir,
-            "timeout_ont",
-            recommended_route="ont",
+            "auto_indefinite",
+            wait_seconds=-1,
         )
-        assert _request_payload(state)["recommended_assembly_selection"] == {
-            "read_type": "ont_raw",
-            "primary_method": "assembly.candidate.hifiasm_ont",
-            "source": "recommendation",
-            "rationale": "ont route recommended",
-        }
-
-        result = resume_review_state(
-            state,
-            _request(state, "select_cyclone"),
-            blocked_timeout_seconds=300,
+        interrupt = state["active_interrupt"]
+        request = ResumeReviewRequest(
+            session_id=state["session_id"],
+            stage="assembly",
+            gate_id="route_selection",
+            decision="select_hifi",
+            method_name="assembly.candidate.hifiasm",
+            review_request_id=interrupt["review_request_id"],
+            review_request_hash=interrupt["request_hash"],
+            decided_by="auto_rule",
+            rationale_artifact_ref=interrupt["request_ref"]["path_ref"],
+            metadata={
+                "source": "foreground_countdown",
+                "configured_seconds": -1,
+                "elapsed_seconds": 0,
+            },
         )
 
-        assembly = result["stage_outputs"]["assembly"]
-        assert assembly["selected_route"] == "ont"
-        assert assembly["route_decision"]["selected_route"] == "ont"
-        assert assembly["assembly_selection"]["read_type"] == "ont_raw"
+        with pytest.raises(ResumeValidationError, match="has not expired"):
+            resume_review_state(
+                state,
+                request,
+                blocked_timeout_seconds=-1,
+                decision_source="foreground_countdown",
+            )
 
 
-def test_route_selection_timeout_invalid_recommendation_fails_terminal():
+def test_expired_timeout_rejects_human_request():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = _blocked_route_state(tmpdir, "human_timeout")
+
+        with pytest.raises(
+            ResumeValidationError,
+            match="foreground_countdown decision source",
+        ):
+            resume_review_state(
+                state,
+                _human_request(state, "select_hifi"),
+                blocked_timeout_seconds=300,
+            )
+
+
+def test_invalid_route_recommendation_leaves_gate_blocked():
     with tempfile.TemporaryDirectory() as tmpdir:
         state = _blocked_route_state(
             tmpdir,
-            "timeout_bad_recommendation",
+            "invalid_recommendation",
             recommended_selection={
                 "read_type": "not-a-read-type",
                 "primary_method": "assembly.candidate.hifiasm",
@@ -273,83 +313,29 @@ def test_route_selection_timeout_invalid_recommendation_fails_terminal():
                 "rationale": "bad recommendation payload",
             },
         )
+        request = _auto_request(state)
 
-        result = resume_review_state(
-            state,
-            _request(state, "select_hifi"),
-            blocked_timeout_seconds=None,
-        )
+        with pytest.raises(ResumeValidationError, match="invalid read type"):
+            resume_review_state(
+                state,
+                request,
+                blocked_timeout_seconds=300,
+                decision_source="foreground_countdown",
+            )
 
-        assert result["supervision_state"] == "failed_terminal"
-        assert result["last_error"] == "assembly blocked timeout expired"
-        assert result["blocked_timeout"]["source"] == (
-            "review_request.review_policy_outcome.max_blocked_seconds"
-        )
+    assert state["supervision_state"] == "blocked_human"
+    assert state["active_interrupt"] is not None
 
 
-def test_timeout_terminal_update_delegates_shared_terminal_failure_shape():
-    state = {"stage_outputs": {"assembly": {"status": "blocked_human"}}}
-    request = ResumeReviewRequest(
-        session_id="timeout_terminal",
-        stage="assembly",
-        gate_id="route_selection",
-        decision="select_hifi",
+def test_indefinite_wait_never_expires():
+    timeout = _blocked_timeout_status(
+        {"blocked_at": "2026-05-08T10:00:00+00:00"},
+        -1,
+        now=datetime(2026, 5, 8, 20, 0, 0, tzinfo=timezone.utc),
     )
-    timeout = {"configured_seconds": 300, "expired": True}
 
-    result = timeout_terminal_update(state, request, timeout)
-
-    assert result == {
-        "current_stage": "assembly",
-        "supervision_state": "failed_terminal",
-        "active_interrupt": None,
-        "last_error": "assembly blocked timeout expired",
-        "stage_outputs": {"assembly": {"status": "blocked_human"}},
-        "blocked_timeout": timeout,
+    assert timeout == {
+        "configured_seconds": -1,
+        "expired": False,
+        "reason": "wait_indefinitely",
     }
-
-
-def test_route_selection_timeout_rejects_invalid_decision_before_timeout_resolution(
-    monkeypatch,
-):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(tmpdir, "timeout_invalid_decision")
-        request = _request(state, "invalid_choice")
-
-        def fail_if_timeout_resolution_runs(*args, **kwargs):
-            raise AssertionError("timeout resolution ran before decision validation")
-
-        monkeypatch.setattr(
-            lifecycle,
-            "_resolve_blocked_timeout_seconds",
-            fail_if_timeout_resolution_runs,
-        )
-        with pytest.raises(ResumeValidationError, match="not allowed"):
-            resume_review_state(state, request, blocked_timeout_seconds=None)
-
-
-def test_route_selection_timeout_rejects_wrong_session_before_auto_accept():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(tmpdir, "timeout_identity")
-        request = _request(state, "select_hifi", session_id="wrong_session")
-
-        with pytest.raises(ResumeValidationError, match="session_id"):
-            resume_review_state(state, request, blocked_timeout_seconds=None)
-
-
-def test_route_selection_timeout_rejects_wrong_gate_before_auto_accept():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(tmpdir, "timeout_gate")
-        request = _request(state, "select_hifi", gate_id="different_gate")
-
-        with pytest.raises(ResumeValidationError, match="gate_id"):
-            resume_review_state(state, request, blocked_timeout_seconds=None)
-
-
-def test_route_selection_timeout_rejects_wrong_stage_before_auto_accept():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(tmpdir, "timeout_stage")
-        request = _request(state, "select_hifi", stage="assembly_review")
-
-        with pytest.raises(ResumeValidationError, match="stage"):
-            resume_review_state(state, request, blocked_timeout_seconds=None)

@@ -31,6 +31,7 @@ from app.domains.assembly.selection import (
     is_method_read_type_compatible,
     normalize_read_type,
 )
+from app.review.gates import registered_review_stages
 from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.manifest import InputManifest, Platform
 from app.schemas.shared_parameters import SpeciesFacts
@@ -69,9 +70,9 @@ ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
 ]
-ReviewPolicyMode = Literal["strict", "auto"]
-ReviewPolicyStage = Literal["assembly", "assembly_review", "hic_scaffolding"]
 T2TReadPlatform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi"]
+
+DEFAULT_REVIEW_MAX_BLOCKED_SECONDS = 300
 
 _RUN_CONFIG_PATH_FIELDS = (
     ("assembly", "hifi_reads_ref"),
@@ -129,33 +130,43 @@ class T2TRunConfig(BaseModel):
 
 
 class StageReviewPolicyConfig(BaseModel):
-    """Per-stage review policy override."""
+    """Per-stage foreground review countdown override."""
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: ReviewPolicyMode | None = None
-    max_blocked_seconds: int | None = Field(default=None, ge=0)
+    max_blocked_seconds: int | None = Field(default=None, ge=-1)
 
 
-class ReviewPolicyConfig(StageReviewPolicyConfig):
-    """Run-level review policy defaults plus optional stage overrides."""
+class ReviewPolicyConfig(BaseModel):
+    """Run-level foreground review countdown plus optional stage overrides."""
 
-    mode: ReviewPolicyMode = "strict"
-    stages: dict[ReviewPolicyStage, StageReviewPolicyConfig] = Field(
-        default_factory=dict
+    model_config = ConfigDict(extra="forbid")
+
+    max_blocked_seconds: int = Field(
+        default=DEFAULT_REVIEW_MAX_BLOCKED_SECONDS,
+        ge=-1,
     )
+    stages: dict[str, StageReviewPolicyConfig] = Field(default_factory=dict)
 
-    def effective_for_stage(self, stage: ReviewPolicyStage) -> dict[str, Any]:
-        payload: dict[str, Any] = {"mode": self.mode}
-        if self.max_blocked_seconds is not None:
-            payload["max_blocked_seconds"] = self.max_blocked_seconds
+    @field_validator("stages")
+    @classmethod
+    def _stage_overrides_must_target_registered_review_stages(
+        cls, value: dict[str, StageReviewPolicyConfig]
+    ) -> dict[str, StageReviewPolicyConfig]:
+        registered = set(registered_review_stages())
+        unknown = sorted(set(value) - registered)
+        if unknown:
+            raise ValueError(
+                "review_policy.stages contains unregistered review stages: "
+                + ", ".join(unknown)
+            )
+        return value
+
+    def effective_max_blocked_seconds(self, stage: str) -> int:
         override = self.stages.get(stage)
-        if override:
-            if override.mode is not None:
-                payload["mode"] = override.mode
-            if override.max_blocked_seconds is not None:
-                payload["max_blocked_seconds"] = override.max_blocked_seconds
-        return payload
+        if override is not None and override.max_blocked_seconds is not None:
+            return override.max_blocked_seconds
+        return self.max_blocked_seconds
 
 
 class FlyeRunParameters(BaseModel):
@@ -539,7 +550,7 @@ class RunConfig(BaseModel):
     t2t: T2TRunConfig | None = None
     gene_annotation: GeneAnnotationRunConfig | None = None
     function_annotation: FunctionAnnotationRunConfig | None = None
-    review_policy: ReviewPolicyConfig | None = None
+    review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
 
     @model_validator(mode="after")
     def _require_method_parameters_when_assembly_local(self) -> "RunConfig":

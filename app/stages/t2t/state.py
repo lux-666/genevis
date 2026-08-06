@@ -185,6 +185,7 @@ class T2TStageCursor(TypedDict, total=False):
     bundle_ref: str
     finishing_evidence_phase: Literal["pre_review", "final"]
     artifact_refs: list[str]
+    review_policy: dict[str, int]
     review_request_artifact_ref: ArtifactRefJson
     auto_decidable: bool
     decision: Literal[

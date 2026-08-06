@@ -196,7 +196,6 @@ class AssemblyStageCursor(TypedDict, total=False):
     retry_counts: dict[str, int]
     review_metrics: JsonObject
     review_policy: JsonObject
-    review_policy_outcome: JsonObject
     active_interrupt: AssemblyActiveInterruptCursor | None
 
 

@@ -564,47 +564,43 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly.flye_parameters is not None
         self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
-    def test_review_policy_accepts_strict_auto_and_stage_override(self):
+    def test_review_policy_defaults_to_five_minute_countdown_and_stage_override(self):
         config = RunConfig.model_validate(
             {
+                "requested_stages": [],
                 "review_policy": {
-                    "mode": "auto",
-                    "max_blocked_seconds": 0,
                     "stages": {
-                        "assembly": {"mode": "strict"},
-                        "hic_scaffolding": {
-                            "mode": "strict",
-                            "max_blocked_seconds": 3600,
-                        },
+                        "assembly": {"max_blocked_seconds": -1},
+                        "hic_scaffolding": {"max_blocked_seconds": 0},
                     },
                 }
             }
         )
 
         assert config.review_policy is not None
+        self.assertEqual(config.review_policy.max_blocked_seconds, 300)
         self.assertEqual(
-            config.review_policy.effective_for_stage("assembly_review"),
-            {"mode": "auto", "max_blocked_seconds": 0},
+            config.review_policy.effective_max_blocked_seconds("assembly_review"), 300
         )
         self.assertEqual(
-            config.review_policy.effective_for_stage("assembly"),
-            {"mode": "strict", "max_blocked_seconds": 0},
+            config.review_policy.effective_max_blocked_seconds("assembly"), -1
         )
         self.assertEqual(
-            config.review_policy.effective_for_stage("hic_scaffolding"),
-            {"mode": "strict", "max_blocked_seconds": 3600},
+            config.review_policy.effective_max_blocked_seconds("hic_scaffolding"), 0
         )
 
-    def test_review_policy_rejects_unknown_mode(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate({"review_policy": {"mode": "relaxed"}})
-
-        self.assertIn("review_policy", str(ctx.exception))
-
-    def test_review_policy_rejects_negative_timeout(self):
+    def test_review_policy_rejects_removed_mode(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
-                {"review_policy": {"mode": "strict", "max_blocked_seconds": -1}}
+                {"requested_stages": [], "review_policy": {"mode": "auto"}}
+            )
+
+        self.assertIn("mode", str(ctx.exception))
+
+    def test_review_policy_rejects_timeout_below_indefinite(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {"requested_stages": [], "review_policy": {"max_blocked_seconds": -2}}
             )
 
         self.assertIn("max_blocked_seconds", str(ctx.exception))
@@ -613,14 +609,14 @@ class RunConfigSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
                 {
+                    "requested_stages": [],
                     "review_policy": {
-                        "mode": "auto",
-                        "stages": {"gene_annotation": {"mode": "strict"}},
+                        "stages": {"removed_stage": {"max_blocked_seconds": 1}},
                     }
                 }
             )
 
-        self.assertIn("gene_annotation", str(ctx.exception))
+        self.assertIn("removed_stage", str(ctx.exception))
 
     def test_assembly_review_busco_parameters_accepted(self):
         cfg = RunConfig.model_validate(
