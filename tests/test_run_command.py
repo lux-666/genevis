@@ -17,6 +17,7 @@ import app.entrypoints.run as run_entry
 from app.control.resume_transaction import ResumeTransactionError
 from app.graph.builder import build_graph
 from app.schemas.run_config import RunConfig
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 
 
@@ -442,6 +443,18 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             self.assertIn("current_stage: assembly_review", stdout)
             self.assertIn("supervision_state: blocked_human", stdout)
+            events = Ledger(
+                SessionPaths(root / "data", session_id).run_dir
+            ).read_events(session_id)
+            registered = [
+                event
+                for event in events
+                if event["event_type"] == "registered_assembly_candidate_bound"
+            ]
+            self.assertEqual(len(registered), 1)
+            self.assertEqual(
+                registered[0]["workflow_step_id"], "step-000-inventory"
+            )
 
     def test_noninteractive_run_persists_and_reopens_blocked_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -754,7 +767,11 @@ class FrozenHelperTests(unittest.TestCase):
         ledger.return_value.create_session.assert_called_once_with(
             "frozen-session", "control/input_manifest.yaml"
         )
-        build.assert_called_once_with(backend="sqlite", data_dir=str(paths.run_dir))
+        build.assert_called_once_with(
+            backend="sqlite",
+            data_dir=str(paths.run_dir),
+            verified_inputs=bundle,
+        )
         graph.invoke.assert_called_once_with(
             seeded_state,
             config={"configurable": {"thread_id": "frozen-session"}},
@@ -842,7 +859,7 @@ class FrozenHelperTests(unittest.TestCase):
                         "validation",
                         "stale review decision",
                     ),
-                ),
+                ) as gate_loop,
                 patch(
                     "app.entrypoints.run.finalize_terminal_state",
                     return_value=None,
@@ -861,6 +878,10 @@ class FrozenHelperTests(unittest.TestCase):
         self.assertEqual(
             stderr,
             "error: resume validation failed: stale review decision\n",
+        )
+        self.assertIs(
+            gate_loop.call_args.kwargs["verified_inputs"],
+            bundle,
         )
         finalize.assert_not_called()
 

@@ -47,6 +47,15 @@ class ResourceRef:
             or not self.workflow_step_id.strip()
         ):
             raise ValueError("workflow_step_id must be a non-empty string or None")
+        if self.source_stage is not None and (
+            not isinstance(self.source_stage, str) or not self.source_stage.strip()
+        ):
+            raise ValueError("source_stage must be a non-empty string or None")
+        if (self.source_stage is None) != (self.workflow_step_id is None):
+            raise ValueError(
+                "source_stage and workflow_step_id must either both be set "
+                "or both be None"
+            )
         if not isinstance(self.metadata, dict):
             raise TypeError("metadata must be a dictionary")
 

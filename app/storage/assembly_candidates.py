@@ -16,6 +16,8 @@ from app.integrity import sha256_file
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
+    HIC_SCAFFOLDED_ASSEMBLY,
+    T2T_PATCHED_ASSEMBLY,
     ArtifactMeta,
     ArtifactRef,
     AssemblyCandidateBundle,
@@ -26,6 +28,16 @@ from app.storage.paths import SessionPaths
 
 class AssemblyCandidateBundleError(ValueError):
     """An Assembly candidate ref or bundle failed closed validation."""
+
+
+CANONICAL_ASSEMBLY_CANDIDATE_PRIMARY_TYPES: frozenset[str] = frozenset(
+    {
+        ASSEMBLY_DRAFT_ASSEMBLY,
+        HIC_SCAFFOLDED_ASSEMBLY,
+        T2T_PATCHED_ASSEMBLY,
+    }
+)
+"""Artifact types permitted as the primary output of an Assembly candidate."""
 
 
 @dataclass(frozen=True)
@@ -116,11 +128,14 @@ def load_executed_candidate_bundle(
     _validate_plan_identity(bundle, plan.bundle)
 
     primary_output_ref = bundle.primary_output
-    if primary_output_ref.artifact_type != ASSEMBLY_DRAFT_ASSEMBLY:
+    if (
+        primary_output_ref.artifact_type
+        not in CANONICAL_ASSEMBLY_CANDIDATE_PRIMARY_TYPES
+    ):
         raise AssemblyCandidateBundleError(
             "executed candidate primary output has artifact type "
-            f"{primary_output_ref.artifact_type!r}, expected "
-            f"{ASSEMBLY_DRAFT_ASSEMBLY!r}"
+            f"{primary_output_ref.artifact_type!r}, expected one of "
+            f"{sorted(CANONICAL_ASSEMBLY_CANDIDATE_PRIMARY_TYPES)!r}"
         )
     primary_output_path = _resolve_embedded_ref(
         data_dir,
@@ -390,7 +405,10 @@ def publish_derived_assembly_candidate(
         source_ref,
     )
     derived_primary_ref = ArtifactRef.model_validate(primary_output_ref)
-    if derived_primary_ref.artifact_type != ASSEMBLY_DRAFT_ASSEMBLY:
+    if (
+        derived_primary_ref.artifact_type
+        not in CANONICAL_ASSEMBLY_CANDIDATE_PRIMARY_TYPES
+    ):
         raise AssemblyCandidateBundleError(
             "derived candidate primary output has the wrong artifact type"
         )

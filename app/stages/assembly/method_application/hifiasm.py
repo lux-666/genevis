@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from app.configuration import load_descriptor_registry
+from app.control.workflow_plan import current_workflow_step_id
 from app.domains.assembly.constants import HIFIASM_METHOD
 from app.domains.read_inputs import (
     AssemblyInputError,
@@ -92,6 +93,7 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
         {"env": execution_contract.environment.values},
         stage="assembly",
         method_name=HIFIASM_METHOD,
+        workflow_step_id=current_workflow_step_id(state, expected_stage="assembly"),
         session_id=session_id,
         data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),

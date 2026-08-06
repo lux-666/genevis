@@ -10,6 +10,7 @@ from typing import Any
 
 from langgraph.graph.state import CompiledStateGraph
 
+from app.control.workflow_plan import current_workflow_step_id
 from app.execution.attempt_owners import DIRECT_ATTEMPTS_KEY
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
@@ -129,6 +130,9 @@ def freeze_busco_attempts(state: TopLevelState) -> StateUpdate:
         dict(output),
         stage="assembly_review",
         method_name=BUSCO_METHOD,
+        workflow_step_id=current_workflow_step_id(
+            state, expected_stage="assembly_review"
+        ),
         session_id=session_id,
         data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),

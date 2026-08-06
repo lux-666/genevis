@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -31,12 +33,16 @@ from app.stages.read_qc.builder import build_stage as build_read_qc_stage
 from app.stages.t2t.builder import build_stage as build_t2t_stage
 from app.workflow import TERMINAL_STAGE
 
+if TYPE_CHECKING:
+    from app.storage.frozen_inputs import FrozenInputBundle
+
 
 def build_graph(
     *,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     backend: CheckpointerBackend = DEFAULT_CHECKPOINTER_BACKEND,
     data_dir: str = "data",
+    verified_inputs: "FrozenInputBundle | None" = None,
 ) -> CompiledStateGraph[
     TopLevelState,
     None,
@@ -183,7 +189,9 @@ def build_graph(
         return route_update
 
     graph.add_node("route_controller", operator_route_controller)
-    graph.add_node("inventory_stage", build_inventory_stage())
+    graph.add_node(
+        "inventory_stage", build_inventory_stage(verified_inputs=verified_inputs)
+    )
     graph.add_node("read_qc_stage", build_read_qc_stage())
     graph.add_node("genome_survey_stage", build_genome_survey_stage())
     graph.add_node("assembly_stage", build_assembly_stage())

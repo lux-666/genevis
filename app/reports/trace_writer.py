@@ -11,8 +11,8 @@ from app.control.workflow_plan import workflow_steps_from_run_config
 from app.reports._projection import atomic_write_text, source_watermark
 from app.reports.review_report import _pending_review_requests
 from app.review.records import counts_by_origin
-from app.schemas.run_config import RunConfig
 from app.storage.artifacts import read_artifact_records
+from app.storage.frozen_inputs import validate_frozen_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 
@@ -163,22 +163,24 @@ def _workflow_steps_for_trace(
     sessions without inventing a stage order from a global registry.
     """
 
-    if paths.run_config_path.is_file():
-        try:
-            run_config = RunConfig.model_validate_json(
-                paths.run_config_path.read_text(encoding="utf-8")
-            )
-            return [dict(step) for step in workflow_steps_from_run_config(run_config)]
-        except (OSError, ValueError, TypeError):
-            pass
+    try:
+        bundle = validate_frozen_inputs(paths)
+        return [
+            dict(step) for step in workflow_steps_from_run_config(bundle.run_config)
+        ]
+    except (OSError, ValueError, TypeError):
+        pass
 
     steps: dict[str, dict[str, Any]] = {}
+    conflicted_step_ids: set[str] = set()
     for record in [*events, *artifacts]:
         step_id = record.get("workflow_step_id")
         stage = record.get("stage")
         if not isinstance(step_id, str) or not step_id:
             continue
         if not isinstance(stage, str) or not stage:
+            continue
+        if step_id in conflicted_step_ids:
             continue
         existing = steps.get(step_id)
         if existing is None:
@@ -189,8 +191,9 @@ def _workflow_steps_for_trace(
             }
         elif existing["stage"] != stage:
             # A conflicting durable occurrence cannot be safely projected.
-            continue
-    return list(steps.values())
+            del steps[step_id]
+            conflicted_step_ids.add(step_id)
+    return [steps[step_id] for step_id in sorted(steps)]
 
 
 def _methods_by_workflow_step(

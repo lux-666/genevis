@@ -877,6 +877,8 @@ def _render_plan_summary(
             role = roles[index] if index < len(roles) else ""
             label = _ROLE_LABELS.get(role, role)
             print(f"  [{label:>9}] {stage}")
+    else:
+        print("\nStages: Inventory only")
 
     methods = summary.get("selected_methods", {})
     method_note = "  (recommended)" if draft is not None else ""
@@ -1268,8 +1270,10 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
         print(f"  {i}. {stage}{desc_str}")
     if suggested_names:
         print(f"\n  Recommended: {', '.join(suggested_names)}")
+    else:
+        print("\n  Recommended: Inventory only (no biological stages)")
     print("\n  Enter numbers or names, e.g. 1,3,1 or t2t,assembly_review,t2t")
-    print("  Press Enter to accept recommended.")
+    print("  Press Enter to accept the recommendation, including Inventory only.")
     if _HAS_QUESTIONARY:
         raw = str(
             _safe_ask(

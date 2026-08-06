@@ -76,6 +76,20 @@ remain deferred. If the planning model fails or returns an invalid draft, the
 planning attempt stops and the durable draft remains resumable; the TUI does
 not invent a deterministic fallback stage plan.
 
+The draft uses three distinct selection states:
+
+```text
+None  -> stage sequence unanswered; ask the stage-selection question
+[]    -> explicit Inventory-only plan; ask neither consent, methods, nor parameters
+[...] -> exact ordered biological occurrences; continue normal planning
+```
+
+Both plain-text and questionary stage prompts show an empty recommendation as
+`Inventory only`; Enter accepts it. The LLM Plan Draft payload likewise requires
+a JSON list rather than a non-empty list. An empty accepted list clears stale
+method and parameter choices, renders `Inventory only` in the final summary,
+and freezes as `requested_stages: []`.
+
 ## Whole-run freeze
 
 Final confirmation invokes the same transaction-like publication boundary used

@@ -14,9 +14,9 @@ from app.reports.trace_writer import (
     STAGE_STATUS_BLOCKED_HUMAN,
     STAGE_STATUS_EXECUTED,
     STAGE_STATUS_FAILED,
-    STAGE_STATUS_NO_EVIDENCE,
     STAGE_STATUS_PLANNED_ONLY,
     STAGE_STATUS_SKIPPED,
+    _workflow_steps_for_trace,
     build_session_trace,
     write_session_trace,
 )
@@ -26,6 +26,7 @@ from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.schemas.state import initial_state
 from app.storage.artifacts import read_artifact_records, register_artifact_records
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
 
@@ -60,6 +61,41 @@ def _run(
             encoding="utf-8",
         )
         Ledger(paths.run_dir).create_session(session_id, str(paths.manifest_path))
+    return paths
+
+
+def _frozen_run_with_read_qc(tmp: str) -> SessionPaths:
+    paths = SessionPaths(tmp, "s1")
+    reads = Path(tmp) / "reads.fastq"
+    reads.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+    manifest_draft = Path(tmp) / "manifest.yaml"
+    manifest_draft.write_text(
+        "session_id: s1\n"
+        "assets:\n"
+        "  - asset_type: raw_long_reads\n"
+        f"    paths: [{reads}]\n"
+        "    platform: ont\n"
+        "    format: fastq\n",
+        encoding="utf-8",
+    )
+    run_config_draft = Path(tmp) / "run_config.json"
+    run_config_draft.write_text(
+        json.dumps(
+            {
+                "requested_stages": [
+                    {"stage": "read_qc", "allow_local_execution": False}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    freeze_session_inputs(
+        paths,
+        manifest_draft=manifest_draft,
+        run_config_draft=run_config_draft,
+        selected_methods={},
+    )
+    Ledger(paths.run_dir).create_session(session_id="s1", input_manifest_ref="")
     return paths
 
 
@@ -169,6 +205,54 @@ def _workflow_state(paths: SessionPaths, *, workflow_step_index: int) -> dict:
 
 
 class SessionSummaryBuildTests(unittest.TestCase):
+    def test_hash_invalid_run_config_uses_only_durable_occurrences(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _frozen_run_with_read_qc(tmp)
+            Ledger(paths.run_dir).record_stage_entered(
+                "s1",
+                "read_qc",
+                workflow_step_id="step-durable-read-qc",
+            )
+            paths.run_config_path.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [
+                            {"stage": "assembly", "allow_local_execution": False}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            trace = build_session_trace(paths.run_dir, "s1")
+
+            self.assertEqual(
+                [record["workflow_step_id"] for record in trace["stages"]],
+                ["step-durable-read-qc"],
+            )
+            self.assertEqual(trace["stages"][0]["stage"], "read_qc")
+
+    def test_durable_conflicts_are_removed_and_fallback_order_is_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp, create=False)
+
+            steps = _workflow_steps_for_trace(
+                paths,
+                [
+                    {"workflow_step_id": "step-010-z", "stage": "assembly"},
+                    {"workflow_step_id": "step-conflict", "stage": "read_qc"},
+                    {"workflow_step_id": "step-002-a", "stage": "inventory"},
+                ],
+                [
+                    {"workflow_step_id": "step-conflict", "stage": "assembly"},
+                    {"workflow_step_id": "step-002-a", "stage": "inventory"},
+                ],
+            )
+
+            self.assertEqual(
+                [step["step_id"] for step in steps],
+                ["step-002-a", "step-010-z"],
+            )
     def test_inspect_route_trace_keeps_only_latest_sixteen_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
@@ -243,8 +327,8 @@ class SessionSummaryBuildTests(unittest.TestCase):
             trace = build_session_trace(paths.run_dir, "s1")
 
             self.assertEqual(_stage(trace, "read_qc")["status"], STAGE_STATUS_EXECUTED)
-            self.assertEqual(
-                _stage(trace, "inventory")["status"], STAGE_STATUS_NO_EVIDENCE
+            self.assertFalse(
+                any(stage["stage"] == "inventory" for stage in trace["stages"])
             )
             self.assertEqual(trace["decisions"][0]["review_request_id"], "review_001")
             self.assertEqual(trace["decisions_by_origin"]["human"], 1)

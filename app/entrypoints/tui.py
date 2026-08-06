@@ -447,7 +447,8 @@ def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
         "shared_parameters, method_parameters, and stage_parameters. Use only "
         "the stages, method IDs, and planning-time parameter names supplied in "
         "the context. selected_stage_occurrences must contain the complete ordered "
-        "workflow, with each object containing stage and allow_local_execution. "
+        "workflow JSON list, which may be empty for an Inventory-only run; each "
+        "non-empty item contains stage and allow_local_execution. "
         "needed for every stated goal: combine multiple goals instead of stopping "
         "at the first one. Preserve the literal order and duplicate occurrences "
         "given in requested_stage_scope. When requested_stage_scope is non-empty, "
@@ -558,10 +559,8 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
         raise ValueError(f"Plan Draft contains unknown fields: {sorted(unknown)}")
 
     raw_occurrences = payload.get("selected_stage_occurrences")
-    if not isinstance(raw_occurrences, list) or not raw_occurrences:
-        raise ValueError(
-            "Plan Draft selected_stage_occurrences must be a non-empty list"
-        )
+    if not isinstance(raw_occurrences, list):
+        raise ValueError("Plan Draft selected_stage_occurrences must be a JSON list")
     from app.schemas.ask_plan import PlanStageOccurrence
 
     occurrences = [

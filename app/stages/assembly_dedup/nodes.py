@@ -10,7 +10,7 @@ from pathlib import Path
 from langgraph.graph.state import CompiledStateGraph
 
 from app.configuration import load_descriptor_registry
-from app.control.workflow_plan import advance_workflow_step
+from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
     artifact_input_dependency,
@@ -167,6 +167,9 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         dict(dedup_out),
         stage="assembly_dedup",
         method_name=ASSEMBLY_DEDUP_METHOD,
+        workflow_step_id=current_workflow_step_id(
+            state, expected_stage="assembly_dedup"
+        ),
         session_id=session_id,
         data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),

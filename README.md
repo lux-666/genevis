@@ -22,7 +22,7 @@ Agent。它把传统生信 pipeline 中分散的脚本、参数、人工判断�
 Gene Agent 的目标不是“替代所有生信专家”，而是把一个多阶段 genome project
 变成一个有状态、有证据、有恢复能力的工作流系统。
 
-## Workflow
+## Stage Registry And Planning Recommendations
 
 ```text
 inventory
@@ -38,6 +38,20 @@ inventory
 -> done
 ```
 
+This is the unique stage registry/display order, not an automatic planning
+template or runtime successor table. It includes the manual-only `gapcloser`
+and `base_polish` placeholders. Runtime order comes only from the literal
+frozen `requested_stages` occurrence list. The actual automatic T2T template
+omits those placeholders and explicitly repeats `assembly_review` after `t2t`:
+
+```text
+read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
+-> hic_scaffolding -> t2t -> assembly_review
+```
+
+The parent graph is composable but statically registered in `app/graph/builder.py`;
+it does not dynamically discover stage plugins or insert successor stages.
+
 `gapcloser` 和 `base_polish` 当前只是父图中已注册的 manual-only
 placeholder：自动规划不会加入它们；显式请求会以
 `blocked_not_implemented` fail closed，不会伪装成已经执行。
@@ -52,10 +66,12 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 
 - **LangGraph stage orchestration**：thin parent graph 负责路由，每个生信阶段封装成独立 subgraph。
 - **Deterministic workflow entry**：操作员可用结构化 manifest 和 run config 通过 `gene-agent run` 启动可复现运行；TUI 仍提供可选的对话式 intake 与规划。
-- **Opt-in local execution**：只有显式批准的 stage 才会真正运行本地工具；未批准或未满足条件时输出计划、blocked state 或 review gate。
+- **Verified frozen-input consumption**：executor 在建图前验证完整冻结事务；Inventory 只消费该 in-memory verified bundle，trace 也不会信任 hash-invalid 的 run config。
+- **Opt-in local execution**：只有显式批准的 occurrence 才会真正运行本地工具；同一 stage 的重复 occurrence 可分别授权或拒绝。未批准或未满足条件时输出计划、blocked state 或 review gate。
 - **Shared execution boundary**：通过 `EnvResolver`、`env_dispatch`、`LocalRunner` 统一解析 conda 环境、做 preflight、冻结命令并收集产物。
 - **Durable resume**：基于 sqlite checkpointer、ledger 和 decision file，支持跨进程恢复 `assembly_review`、`hic_scaffolding` 等人工 gate。
 - **Human-in-the-loop review**：review registry 统一声明 gate、允许的决策、resume applier 和 prompt bundle，避免每个阶段各写一套暂停/恢复逻辑。
+- **Reusable assembly review**：每个已采纳的 Assembly、Hi-C 或 T2T assembly revision 都有当前 executed candidate handoff；后续 `assembly_review` occurrence 复用同一合同。
 - **Operator observability**：`inspect` 和 session run trace 从 durable records
   还原状态、下一步动作和关键 artifact；blocked/failed operator report 是运行边界
   写下的 live compact projection，当前重建限制见 architecture conformance。
@@ -148,8 +164,10 @@ gene-agent run \
 命令，而不是伪造批准或继续执行。
 
 `gene-agent tui` 是可选的对话式 intake/规划入口：它收集样本事实、生成可编辑 Plan
-Draft，并在确认后进入同一冻结和执行边界。`bootstrap` 只是初始化或修复本机配置的
-辅助工具。
+Draft，并在确认后进入同一冻结和执行边界。未回答 stage selection 是 `None`；明确选择
+Inventory-only 是 `[]`。当推荐为空时，stage prompt 的 Enter 明确接受这个
+Inventory-only 推荐，跳过 occurrence-local consent、method 与 parameter 问题，随后进入
+final confirmation。`bootstrap` 只是初始化或修复本机配置的辅助工具。
 
 `bootstrap --apply` 在写入 `config/envs.yaml`、完成 Juicer conformance 后，
 还会在当前主机逐项检查配置中的全部 method。检查使用实际 method -> stage ->
@@ -199,16 +217,11 @@ TUI 的实际流程是：
 这段追问流程。规划 LLM 失败或返回非法 draft 时，本次规划中止并保留草稿供
 `/resume` 重试，不使用确定性 stage plan 回退。
 
-如果要从 raw long reads 做完整主线，可以选择：
-
-```text
-read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
--> hic_scaffolding -> gapcloser -> t2t -> base_polish
-```
-
-上面只是默认推荐顺序，不是运行时 successor 表；冻结的 run config 可以重排或重复
-stage。自动计划会省略两个 manual-only placeholder，直到对应方法、资源交接和执行
-合同真正实现。
+上方展示的自动 T2T template 是由
+`recommended_workflow_template("t2t")` 给出的 occurrence recommendation；它不会修改
+文件提供的 RunConfig。冻结的 run config 可以重排或重复 stage。`gapcloser` 与
+`base_polish` 只存在于 registry/display order，自动计划会省略它们，直到对应方法、
+资源交接和执行合同真正实现。
 
 TUI 最终会把选择落到 run config：
 

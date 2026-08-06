@@ -26,6 +26,7 @@ from app.stages.t2t.nodes import (
     _CANDIDATE_FIELDS,
     _candidate_rows,
     _materialize_t2t_patches,
+    _t2t_adoption_decision_ref,
     build_t2t_candidates,
     scan_read_telomeres,
 )
@@ -35,6 +36,11 @@ from app.stages.t2t.parameters.execution import (
     T2TFrozenExecutionInputs,
 )
 from app.storage.artifacts import publish_artifact_record, read_artifact_records
+from app.storage.assembly_candidates import (
+    AssemblyCandidateBundleError,
+    load_executed_candidate_bundle,
+    publish_registered_assembly_candidate,
+)
 from app.storage.asset_registry import load_asset_registry
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
@@ -273,10 +279,29 @@ class T2TStageTests(unittest.TestCase):
         state["asset_registry_ref"] = self._publish_registry_ref(
             state, json.dumps({"session_id": "s1", "assets": assets})
         )
+        source_candidate = publish_registered_assembly_candidate(
+            state["data_dir"],
+            state["session_id"],
+            workflow_step_id="step-000-inventory",
+            asset_id="test-assembly-input",
+            source_path=published_assembly,
+            expected_sha256=sha256_file(published_assembly),
+            expected_size_bytes=published_assembly.stat().st_size,
+            asset_registry_ref=state["asset_registry_ref"],
+        )
         state["resource_refs"]["assembly"] = ResourceRef(
             resource_type="assembly",
-            paths=[str(published_assembly)],
-            source_stage="assembly_review",
+            paths=[str(source_candidate.primary_output_path)],
+            source_stage="inventory",
+            workflow_step_id="step-000-inventory",
+            metadata={
+                "candidate_bundle_ref": source_candidate.ref.model_dump(
+                    mode="json"
+                ),
+                "primary_output_ref": source_candidate.primary_output_ref.model_dump(
+                    mode="json"
+                ),
+            },
         ).to_dict()
         state["shared_parameters"] = {
             "species_facts": {"scientific_name": "Homo sapiens", "taxon_id": 9606}
@@ -452,6 +477,7 @@ class T2TStageTests(unittest.TestCase):
                 resource_type="assembly",
                 paths=[str(published_hic)],
                 source_stage="hic_scaffolding",
+                workflow_step_id="step-001-hic_scaffolding",
             ).to_dict()
 
             result = self._invoke_with_parameter_approval(state)
@@ -538,6 +564,31 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(
                 resumed["resource_refs"]["assembly"]["paths"],
                 [t2t["patched_assembly_ref"]],
+            )
+            assembly_resource = resumed["resource_refs"]["assembly"]
+            derived_candidate = load_executed_candidate_bundle(
+                blocked["data_dir"],
+                blocked["session_id"],
+                assembly_resource["metadata"]["candidate_bundle_ref"],
+            )
+            self.assertEqual(
+                derived_candidate.primary_output_path,
+                Path(t2t["patched_assembly_ref"]),
+            )
+            self.assertEqual(
+                derived_candidate.primary_output_ref.model_dump(mode="json"),
+                assembly_resource["metadata"]["primary_output_ref"],
+            )
+            decision_ref = t2t["review_decision_artifact_ref"]
+            candidate_record = next(
+                record
+                for record in read_artifact_records(
+                    blocked["data_dir"], blocked["session_id"]
+                )
+                if record["artifact_id"] == derived_candidate.ref.artifact_id
+            )
+            self.assertEqual(
+                candidate_record["producer_event_id"], decision_ref["artifact_id"]
             )
 
     def test_approved_two_read_threshold_still_blocks_single_read_evidence(self):
@@ -820,7 +871,6 @@ class T2TStageTests(unittest.TestCase):
                 review_request_id=blocked["active_interrupt"]["review_request_id"],
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
-
             resumed = resume_review_state(blocked, request)
 
             self.assertEqual(resumed["current_stage"], "base_polish")
@@ -862,6 +912,10 @@ class T2TStageTests(unittest.TestCase):
                 review_request_id=blocked["active_interrupt"]["review_request_id"],
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
+            source_candidate_count = sum(
+                record["artifact_type"] == "draft_assembly.candidate"
+                for record in read_artifact_records(blocked["data_dir"], "s1")
+            )
 
             resumed = resume_review_state(blocked, request)
 
@@ -878,6 +932,54 @@ class T2TStageTests(unittest.TestCase):
                 ],
                 [expected_assembly],
             )
+            self.assertNotIn("resource_refs", resumed)
+            resumed_candidate_count = sum(
+                record["artifact_type"] == "draft_assembly.candidate"
+                for record in read_artifact_records(blocked["data_dir"], "s1")
+            )
+            self.assertEqual(resumed_candidate_count, source_candidate_count)
+
+    def test_adopted_patch_rejects_non_decision_artifact_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "mode": "manual_review",
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
+            }
+            blocked = self._invoke_with_parameter_approval(state)
+            resumed = resume_review_state(
+                blocked,
+                ResumeReviewRequest(
+                    session_id="s1",
+                    stage="t2t",
+                    gate_id="t2t_review",
+                    decision="accept_selected_candidates",
+                    candidate_ids=["chr1:right"],
+                    review_request_id=blocked["active_interrupt"]["review_request_id"],
+                    review_request_hash=blocked["active_interrupt"]["request_hash"],
+                ),
+            )
+            tampered_out = {
+                **resumed["stage_outputs"]["t2t"],
+                "review_decision_artifact_ref": {
+                    **resumed["stage_outputs"]["t2t"][
+                        "review_decision_artifact_ref"
+                    ],
+                    "artifact_type": "t2t.not_a_decision",
+                },
+            }
+
+            with self.assertRaisesRegex(
+                AssemblyCandidateBundleError,
+                "persisted review decision artifact",
+            ):
+                _t2t_adoption_decision_ref(resumed, tampered_out)
 
     def test_manual_review_resume_rejects_changed_candidate_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -967,7 +1069,8 @@ class T2TStageTests(unittest.TestCase):
                 blocked["resource_refs"]["assembly"] = ResourceRef(
                     resource_type="assembly",
                     paths=[str(published_stale)],
-                    source_stage="external_update",
+                    source_stage="t2t",
+                    workflow_step_id="step-001-t2t",
                 ).to_dict()
                 request = ResumeReviewRequest(
                     session_id="s1",

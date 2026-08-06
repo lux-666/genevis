@@ -69,6 +69,39 @@ class AskPlanSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "selected_stage_occurrences"):
             AskClarificationResponse(kind="stage_selection")
 
+    def test_inventory_only_stage_selection_requires_an_explicit_empty_list(self):
+        response = AskClarificationResponse(
+            kind="stage_selection", selected_stage_occurrences=[]
+        )
+        self.assertEqual(response.selected_stage_occurrences, [])
+
+    def test_inventory_only_selection_clears_stale_choices_and_advances_to_confirm(
+        self,
+    ):
+        plan = _base_plan(
+            stage_names=["assembly"],
+            selected_methods={"assembly": "assembly.candidate.flye"},
+            method_parameters={"assembly.candidate.flye": {"threads": 4}},
+            stage_parameters={"assembly": {"unused": "value"}},
+        )
+
+        updated = merge_clarification_response(
+            plan,
+            AskClarificationResponse(
+                kind="stage_selection", selected_stage_occurrences=[]
+            ),
+        )
+
+        self.assertEqual(updated.selected_stage_occurrences, [])
+        self.assertIsNone(updated.selected_methods)
+        self.assertIsNone(updated.method_parameters)
+        self.assertIsNone(updated.stage_parameters)
+        self.assertEqual(
+            next_clarification(updated, ask_plan_ref="/tmp/plan.json").kind,
+            "confirm",
+        )
+        self.assertEqual(build_run_config_payload(updated)["requested_stages"], [])
+
     def test_method_selection_requires_selected_methods(self):
         with self.assertRaisesRegex(ValueError, "selected_methods"):
             AskClarificationResponse(kind="method_selection")
@@ -1680,6 +1713,26 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             self.assertIn("assembly_dedup", recommended)
             self.assertNotIn("gapcloser", recommended)
             self.assertNotIn("base_polish", recommended)
+
+    def test_registered_assembly_recommendation_keeps_manifest_sensitive_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            assembly = Path(tmp) / "assembly.fasta"
+            assembly.write_text(">contig\nACGT\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\nassets:\n"
+                "  - asset_type: assembly_fasta_registered\n"
+                f"    paths:\n      - {assembly}\n"
+                "    format: fasta\n    platform: unknown\n",
+                encoding="utf-8",
+            )
+
+            recommended = _recommended_stages_from_manifest(str(manifest))
+
+            self.assertEqual(
+                recommended,
+                ["assembly_review", "t2t", "assembly_review"],
+            )
     def test_recommended_stages_empty_for_missing_manifest(self):
         recommended = _recommended_stages_from_manifest("/nonexistent/manifest.yaml")
         self.assertEqual(recommended, [])

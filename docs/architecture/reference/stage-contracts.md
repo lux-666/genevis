@@ -177,7 +177,10 @@ existing assembly through the same central `assembly` `ResourceRef` used by
 upstream-produced assemblies. When an Assembly Review occurrence is reached,
 the stage validates the assembly and the candidate/evidence required by its
 current operation; it must not bypass the resource contract with a bare
-`fasta_path`.
+`fasta_path`. The same contract is reusable after Assembly, Dedup, a changed
+accepted Hi-C assembly, a changed accepted T2T patch, or a previous Review
+action. A repeated occurrence starts with its own frozen stage seed and remains
+separate by step-scoped artifacts, attempts, review records, and Ledger facts.
 
 Registered methods:
 
@@ -215,6 +218,12 @@ Every shape-valid sparse recommendation requires parameter approval; successful
 execution then opens an adoption gate. The operator may adopt the chromosome
 assembly, retain the previous assembly, or request a fresh parameter attempt.
 Execution-failure retries require explicit operator policy and retry budget.
+
+An accepted scaffolding adoption verifies the current assembly candidate and
+the adopted primary artifact, then publishes a derived executed candidate in
+the active Hi-C occurrence before replacing the central resource. The immutable
+adoption-decision artifact identifies that derived candidate. Retaining the
+prior assembly publishes no candidate and leaves the current resource unchanged.
 
 Freeze-time readiness validation covers inputs, local tools, models, and the
 declared output locations; it does not preflight files that AutoHiC has not yet
@@ -291,6 +300,12 @@ changed until adoption. Reverse-strand tails are oriented target-forward;
 non-zero junction distances trim the target before extension. Ambiguous,
 chimeric, overlapping, or conflicting evidence is never silently materialized,
 and the source FASTA is never overwritten.
+
+When an adopted patch changes the assembly, T2T verifies the current candidate
+and exact patched primary artifact, then publishes a derived executed candidate
+bound to the immutable adoption-decision artifact before replacing the central
+resource. It retains the predecessor candidate and primary output as lineage.
+Keeping the prior assembly leaves that candidate relation untouched.
 
 ## 10. Base Polish Placeholder
 

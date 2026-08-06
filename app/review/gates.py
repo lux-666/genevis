@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from app.control.workflow_plan import current_workflow_step_id
 from app.schemas.state import (
@@ -14,6 +14,9 @@ from app.schemas.state import (
     StateUpdate,
     TopLevelState,
 )
+
+if TYPE_CHECKING:
+    from app.storage.frozen_inputs import FrozenInputBundle
 
 DecisionApplier = Callable[[TopLevelState, Any], StateUpdate]
 TimeoutApplier = Callable[[TopLevelState, Any, dict[str, Any]], StateUpdate]
@@ -183,6 +186,8 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
 def apply_review_gate_decision(
     state: TopLevelState,
     request: Any,
+    *,
+    verified_inputs: "FrozenInputBundle | None" = None,
 ) -> StateUpdate:
     _validate_review_occurrence(state, request)
     gate_id = getattr(request, "gate_id", None)
@@ -195,7 +200,16 @@ def apply_review_gate_decision(
     elif active_interrupt:
         gate_id = active_interrupt.get("gate_id") or gate_id
     gate = get_review_gate(request.stage, gate_id)
-    return gate.load_decision_applier()(state, request)
+    applier = gate.load_decision_applier()
+    if gate.decision_applier == (
+        "app.stages.inventory.nodes:apply_inventory_resume_decision"
+    ):
+        return cast(Callable[..., StateUpdate], applier)(
+            state,
+            request,
+            verified_inputs=verified_inputs,
+        )
+    return applier(state, request)
 
 
 def apply_review_gate_timeout(

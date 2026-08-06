@@ -157,6 +157,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
         claim: str | None = None,
         collected: tuple[ResumeReviewRequest, dict] | None = None,
         summary: dict | None = None,
+        verified_inputs: object | None = None,
     ) -> tuple[dict, Mock, Mock, Mock]:
         summary = summary or _summary(wait_seconds)
         execute = Mock(
@@ -196,6 +197,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
                 "s1",
                 "/tmp/run",
                 claim_waiter=waiter,
+                verified_inputs=verified_inputs,
             )
         return final, execute, collect, waiter
 
@@ -208,9 +210,11 @@ class ForegroundGateLoopTests(unittest.TestCase):
         execute.assert_not_called()
 
     def test_zero_immediately_runs_existing_route_resolver(self):
+        verified_inputs = object()
         final, execute, collect, waiter = self._run_loop(
             0,
             summary=_route_summary(0),
+            verified_inputs=verified_inputs,
         )
 
         self.assertEqual(final["supervision_state"], "completed")
@@ -221,6 +225,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
         self.assertEqual(call["blocked_timeout_seconds"], 0.0)
         self.assertEqual(call["request"].decision, "select_hifi")
         self.assertEqual(call["request"].decided_by, "auto_rule")
+        self.assertIs(call["verified_inputs"], verified_inputs)
 
     def test_zero_falls_back_to_manual_when_existing_resolver_fails(self):
         with patch(

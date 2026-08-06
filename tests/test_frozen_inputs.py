@@ -19,6 +19,9 @@ from app.execution.dependency_snapshot import (
 )
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.env_resolver import PreflightResult
+from app.schemas.state import initial_state
+from app.stages.inventory.nodes import register_assets, validate_inputs
+from app.storage.artifacts import resolve_artifact_ref
 from app.storage.frozen_inputs import (
     FrozenInputConflictError,
     FrozenInputIntegrityError,
@@ -59,6 +62,98 @@ class _FrozenExecutionGraph:
 
 
 class FrozenInputTests(unittest.TestCase):
+    def test_inventory_uses_verified_bundle_after_control_file_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [],
+                        "shared_parameters": {"platform": "ont"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+            )
+            bundle = validate_frozen_inputs(paths)
+            paths.run_config_path.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [],
+                        "shared_parameters": {"platform": "pacbio_hifi"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            tampered_reads = root / "tampered.fastq"
+            tampered_reads.write_text("@tampered\nTGCA\n+\n!!!!\n", encoding="utf-8")
+            paths.input_manifest_path.write_text(
+                "session_id: s1\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths: [{tampered_reads}]\n"
+                "    platform: pacbio_hifi\n"
+                "    format: fastq\n",
+                encoding="utf-8",
+            )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=paths.to_ref(paths.input_manifest_path),
+                data_dir=str(paths.run_dir),
+                workflow_steps=[
+                    {
+                        "step_id": "step-000-inventory",
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    }
+                ],
+            )
+
+            with (
+                patch(
+                    "app.storage.frozen_inputs._load_frozen_manifest",
+                    side_effect=AssertionError("Inventory must not reload manifest"),
+                ),
+                patch(
+                    "app.storage.frozen_inputs._load_frozen_run_config",
+                    side_effect=AssertionError("Inventory must not reload RunConfig"),
+                ),
+            ):
+                validated = {
+                    **state,
+                    **validate_inputs(state, verified_inputs=bundle),
+                }
+                registered = {
+                    **validated,
+                    **register_assets(validated, verified_inputs=bundle),
+                }
+
+            self.assertEqual(validated["shared_parameters"]["platform"], "ont")
+            inventory = validated["stage_outputs"]["inventory"]
+            self.assertEqual(inventory["asset_count"], 1)
+            registry_path = resolve_artifact_ref(
+                registered["data_dir"],
+                registered["session_id"],
+                registered["asset_registry_ref"],
+            )
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            asset = registry["assets"][0]
+            self.assertEqual(asset["platform"], "ont")
+            self.assertEqual(
+                asset["provenance"]["manifest_ref"],
+                paths.to_ref(paths.input_manifest_path),
+            )
+            self.assertEqual(
+                asset["provenance"]["declarations"][0]["declared_path"],
+                str((root / "reads.fastq").resolve()),
+            )
+
     def test_method_env_rejects_unfrozen_implicit_active_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(Path(tmp), "s1")
@@ -72,6 +167,7 @@ class FrozenInputTests(unittest.TestCase):
                     {},
                     stage="assembly",
                     method_name="assembly.candidate.flye",
+                    workflow_step_id="step-000-assembly",
                     session_id="s1",
                     data_dir=paths.run_dir,
                     input_manifest_ref="control/input_manifest.yaml",
@@ -856,6 +952,7 @@ class FrozenInputTests(unittest.TestCase):
                     {},
                     stage="assembly",
                     method_name="assembly.unknown",
+                    workflow_step_id="step-000-assembly",
                     session_id="s1",
                     data_dir=paths.run_dir,
                     input_manifest_ref="control/input_manifest.yaml",
@@ -893,7 +990,9 @@ class FrozenInputTests(unittest.TestCase):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with (
-                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.build_graph", return_value=graph
+                ) as build_graph,
                 patch(
                     "app.entrypoints.run.initial_state", side_effect=fake_initial_state
                 ),
@@ -914,6 +1013,12 @@ class FrozenInputTests(unittest.TestCase):
 
             self.assertEqual(code, 0, stderr.getvalue())
             self.assertEqual(stderr.getvalue(), "")
+            verified_bundle = build_graph.call_args.kwargs["verified_inputs"]
+            self.assertEqual(verified_bundle.paths, paths)
+            self.assertEqual(
+                verified_bundle.declarations.manifest,
+                verified_bundle.manifest,
+            )
             self.assertEqual(
                 captured["input_manifest_ref"],
                 "control/input_manifest.yaml",

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.entrypoints.tui import (
+    _apply_llm_plan_draft,
     _freeze_and_execute,
     _resume_tui_session,
     _start_tui_session,
@@ -44,6 +45,32 @@ class TuiWorkflowTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         return path
+
+    def test_llm_plan_draft_accepts_inventory_only_json_list(self):
+        plan = AskPlanState(
+            session_id="s1",
+            data_dir="data",
+            entry_request={},
+            manifest_ref="test.yaml",
+        )
+
+        result = _apply_llm_plan_draft(
+            plan, {"selected_stage_occurrences": []}
+        )
+
+        self.assertEqual(result.selected_stage_occurrences, [])
+
+    def test_llm_plan_draft_requires_a_json_list_for_stage_occurrences(self):
+        plan = AskPlanState(
+            session_id="s1",
+            data_dir="data",
+            entry_request={},
+            manifest_ref="test.yaml",
+        )
+        for payload in ({}, {"selected_stage_occurrences": None}):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "JSON list"):
+                    _apply_llm_plan_draft(plan, payload)
 
     def test_initial_goal_can_confirm_ont_and_hic_assets_inline(self):
         with tempfile.TemporaryDirectory() as tmp:

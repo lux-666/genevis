@@ -150,6 +150,7 @@ def _set_long_reads(state: dict, *paths: Path, platform: str = "cycloneseq") -> 
         resource_type="long_reads",
         paths=[str(path) for path in paths],
         source_stage="read_qc",
+        workflow_step_id="step-001-read_qc",
         metadata={
             "asset_registry_ref": state["asset_registry_ref"],
             "asset_ids": asset_ids,

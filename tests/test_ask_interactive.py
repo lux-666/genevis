@@ -6,7 +6,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.entrypoints.ask_interactive import (
     _draft_attention_items,
@@ -200,6 +200,70 @@ class InteractiveLoopTests(unittest.TestCase):
                 {"stage": "t2t", "allow_local_execution": True},
             ],
         )
+
+    def test_stage_sequence_prompt_accepts_inventory_only_recommendation(self):
+        request = AskClarificationRequest(
+            status="clarification_required",
+            kind="stage_selection",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Which stages?",
+            choices={
+                "available_stages": ["assembly"],
+                "suggested_stage_occurrences": [],
+            },
+            required_fields=["selected_stage_occurrences"],
+            response_schema={"kind": "stage_selection"},
+            next_action={},
+        )
+        with (
+            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
+            patch("builtins.input", return_value=""),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            response = _prompt_stage_selection(request)
+
+        self.assertEqual(response.selected_stage_occurrences, [])
+        self.assertIn("Recommended: Inventory only", stdout.getvalue())
+
+    def test_questionary_stage_sequence_accepts_inventory_only_recommendation(self):
+        request = AskClarificationRequest(
+            status="clarification_required",
+            kind="stage_selection",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Which stages?",
+            choices={
+                "available_stages": ["assembly"],
+                "suggested_stage_occurrences": [],
+            },
+            required_fields=["selected_stage_occurrences"],
+            response_schema={"kind": "stage_selection"},
+            next_action={},
+        )
+        questionary = MagicMock()
+        questionary.text.return_value.ask.return_value = ""
+        with (
+            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", True),
+            patch("app.entrypoints.ask_interactive.questionary", questionary),
+        ):
+            response = _prompt_stage_selection(request)
+
+        self.assertEqual(response.selected_stage_occurrences, [])
+
+    def test_plan_summary_renders_inventory_only(self):
+        summary = {
+            "session_id": "s1",
+            "data_dir": "data",
+            "manifest_ref": "test.yaml",
+            "selected_stage_names": [],
+        }
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_plan_summary(summary, title="Execution Plan")
+
+        self.assertIn("Stages: Inventory only", stdout.getvalue())
 
     """Tests exercise the plain-text fallback path (questionary disabled)."""
 

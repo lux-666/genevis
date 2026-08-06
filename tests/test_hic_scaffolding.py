@@ -52,6 +52,10 @@ from app.storage.artifacts import (
     read_artifact_records,
     resolve_artifact_ref,
 )
+from app.storage.assembly_candidates import (
+    load_executed_candidate_bundle,
+    publish_registered_assembly_candidate,
+)
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
@@ -271,6 +275,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 resource_type="hic_reads",
                 paths=[str(path) for path in reads],
                 source_stage="inventory",
+                workflow_step_id="step-000-inventory",
                 metadata={
                     "asset_registry_ref": state["asset_registry_ref"],
                     "asset_ids": [
@@ -282,11 +287,35 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     "formats": ["fastq"],
                 },
             ).to_dict()
+        source_candidate = publish_registered_assembly_candidate(
+            state["data_dir"],
+            state["session_id"],
+            workflow_step_id="step-000-inventory",
+            asset_id="s1:assembly_fasta_registered:adopted",
+            source_path=assembly,
+            expected_sha256=hashlib.sha256(assembly.read_bytes()).hexdigest(),
+            expected_size_bytes=assembly.stat().st_size,
+            asset_registry_ref=state["asset_registry_ref"],
+        )
+        state["resource_refs"]["assembly"] = ResourceRef(
+            resource_type="assembly",
+            paths=[str(source_candidate.primary_output_path)],
+            source_stage="inventory",
+            workflow_step_id="step-000-inventory",
+            metadata={
+                "candidate_bundle_ref": source_candidate.ref.model_dump(
+                    mode="json"
+                ),
+                "primary_output_ref": source_candidate.primary_output_ref.model_dump(
+                    mode="json"
+                ),
+            },
+        ).to_dict()
         state["stage_outputs"] = {
             "inventory": {"target_assembly_level": target_level},
             "assembly_review": {
                 "status": "completed",
-                "final_assembly_ref": str(assembly),
+                "final_assembly_ref": str(source_candidate.primary_output_path),
             },
             "hic_scaffolding": {
                 "execution_mode": "local",
@@ -787,7 +816,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 snapshot["dependency_refs"]["stage_input_refs"],
                 [
                     published_registry.ref.model_dump(mode="json"),
-                    published_assembly.ref.model_dump(mode="json"),
+                    state["resource_refs"]["assembly"]["metadata"][
+                        "primary_output_ref"
+                    ],
                 ],
             )
 
@@ -1327,6 +1358,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                         resource_type="assembly",
                         paths=[candidate["scaffold_fasta"]],
                         source_stage="external_update",
+                        workflow_step_id="step-002-hic_scaffolding",
                     ).to_dict(),
                 },
             }
@@ -1392,6 +1424,29 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 decision_record["request_ref"]["sha256"],
                 interrupt["request_hash"],
             )
+            derived_candidate = load_executed_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
+                assembly_resource["metadata"]["candidate_bundle_ref"],
+            )
+            self.assertEqual(
+                derived_candidate.primary_output_path,
+                Path(candidate["scaffold_fasta"]),
+            )
+            self.assertEqual(
+                derived_candidate.primary_output_ref.model_dump(mode="json"),
+                assembly_resource["metadata"]["primary_output_ref"],
+            )
+            candidate_record = next(
+                record
+                for record in read_artifact_records(
+                    result["data_dir"], result["session_id"]
+                )
+                if record["artifact_id"] == derived_candidate.ref.artifact_id
+            )
+            self.assertEqual(
+                candidate_record["producer_event_id"], decision_ref["artifact_id"]
+            )
 
     def test_final_review_can_keep_prior_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1409,6 +1464,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
                 result = build_stage().invoke(approved)
             interrupt = result["active_interrupt"]
+            source_candidate_count = sum(
+                record["artifact_type"] == "draft_assembly.candidate"
+                for record in read_artifact_records(result["data_dir"], "s1")
+            )
             kept = apply_hic_scaffolding_resume_decision(
                 result,
                 ResumeReviewRequest(
@@ -1422,9 +1481,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 kept["stage_outputs"]["hic_scaffolding"]["output_assembly_ref"],
-                str(assembly),
+                result["resource_refs"]["assembly"]["paths"][0],
             )
             self.assertNotIn("resource_refs", kept)
+            kept_candidate_count = sum(
+                record["artifact_type"] == "draft_assembly.candidate"
+                for record in read_artifact_records(result["data_dir"], "s1")
+            )
+            self.assertEqual(kept_candidate_count, source_candidate_count)
 
     def test_missing_models_after_approval_is_requirements_block_not_execution_failure(
         self,
@@ -1493,7 +1557,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertEqual(hic["status"], "failed")
             self.assertEqual(hic["failure_kind"], "execution")
-            self.assertEqual(hic["output_assembly_ref"], str(assembly))
+            self.assertEqual(
+                hic["output_assembly_ref"],
+                result["resource_refs"]["assembly"]["paths"][0],
+            )
             self.assertEqual(
                 hic["parameter_attempts"][0]["status"],
                 "execution_failed",

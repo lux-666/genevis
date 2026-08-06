@@ -138,12 +138,13 @@ class ResumeTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir, state, request = self._setup(tmpdir)
             graph = _Graph(state)
+            verified_inputs = object()
             with (
                 patch("app.control.resume_transaction.validate_resume_review_state"),
                 patch(
                     "app.control.resume_transaction.resume_review_state",
                     return_value={"supervision_state": "running_stage"},
-                ),
+                ) as resume,
             ):
                 result = execute_resume_transaction(
                     graph=graph,
@@ -153,9 +154,14 @@ class ResumeTransactionTests(unittest.TestCase):
                     request=request,
                     source="test",
                     checkpointer="sqlite",
+                    verified_inputs=verified_inputs,
                 )
 
             self.assertEqual(result.state["current_stage"], "hic_scaffolding")
+            self.assertIs(
+                resume.call_args.kwargs["verified_inputs"],
+                verified_inputs,
+            )
             self.assertEqual(len(graph.updates), 1)
             self.assertEqual(graph.invocations, 1)
             events = Ledger(run_dir).read_events("s1")

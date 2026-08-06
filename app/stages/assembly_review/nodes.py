@@ -1376,7 +1376,11 @@ def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
     )
 
     ledger = Ledger(state.get("data_dir", "data"))
-    ledger.record_event(
+    workflow_step_id = current_workflow_step_id(
+        state,
+        expected_stage="assembly_review",
+    )
+    ledger.record_occurrence_event(
         state["session_id"],
         "candidate_comparison_generated",
         {
@@ -1384,6 +1388,12 @@ def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
             "candidate_count": len(comparison_candidates),
             "comparison_artifact_ref": comparison_ref,
         },
+        stage="assembly_review",
+        workflow_step_id=workflow_step_id,
+        subject_id=comparison_ref,
+        idempotency_key=(
+            f"candidate-comparison:{workflow_step_id}:{comparison_ref}"
+        ),
     )
 
     return update_assembly_review_output(

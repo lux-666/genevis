@@ -67,3 +67,17 @@ def stages_through(endpoint: str) -> list[DomainStage]:
         for stage in STAGE_ORDER[1 : stop + 1]
         if stage not in MANUAL_ONLY_STAGES
     ]
+
+
+def recommended_workflow_template(endpoint: str) -> list[DomainStage]:
+    """Return the explicit recommended occurrence sequence through *endpoint*.
+
+    This is a planning-only template, deliberately distinct from the unique
+    stage registry.  It may repeat a stage, while a validated ``RunConfig``
+    continues to preserve the operator-provided literal occurrence list.
+    """
+
+    template = stages_through(endpoint)
+    if endpoint == "t2t":
+        template.append("assembly_review")
+    return template

@@ -6,7 +6,7 @@ registers assets, and routes to success / review / failure.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -26,6 +26,9 @@ from app.stages.inventory.state import (
     update_inventory_stage_output,
 )
 from app.storage.ledger import Ledger
+
+if TYPE_CHECKING:
+    from app.storage.frozen_inputs import FrozenInputBundle
 
 
 def _review_gate(state: TopLevelState) -> StateUpdate:
@@ -100,7 +103,10 @@ def _fail_inventory(state: TopLevelState) -> StateUpdate:
     }
 
 
-def build_stage() -> CompiledStateGraph[
+def build_stage(
+    *,
+    verified_inputs: "FrozenInputBundle | None" = None,
+) -> CompiledStateGraph[
     TopLevelState,
     None,
     TopLevelState,
@@ -110,8 +116,14 @@ def build_stage() -> CompiledStateGraph[
     graph = StateGraph(TopLevelState)
 
     graph.add_node("enter", enter_inventory)
-    graph.add_node("validate_inputs", validate_inputs)
-    graph.add_node("register_assets", register_assets)
+    graph.add_node(
+        "validate_inputs",
+        lambda state: validate_inputs(state, verified_inputs=verified_inputs),
+    )
+    graph.add_node(
+        "register_assets",
+        lambda state: register_assets(state, verified_inputs=verified_inputs),
+    )
     graph.add_node("review_gate", _review_gate)
     graph.add_node("fail", _fail_inventory)
     graph.add_node("commit", commit_inventory)

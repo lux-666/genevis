@@ -21,6 +21,8 @@ from app.stages.t2t.parameters.execution import (
     load_chromosome_names_snapshot,
 )
 from app.storage.artifacts import resolve_artifact_ref
+from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -84,9 +86,19 @@ class MultiplatformLongReadTests(unittest.TestCase):
                 yaml.safe_dump(manifest, sort_keys=False),
                 encoding="utf-8",
             )
+            run_config_path = root / "run_config.json"
+            run_config_path.write_text('{"requested_stages": []}\n', encoding="utf-8")
+            freeze_session_inputs(
+                SessionPaths.from_run_dir(run_dir),
+                manifest_draft=manifest_path,
+                run_config_draft=run_config_path,
+                selected_methods={},
+            )
             state = initial_state(
                 session_id=session_id,
-                input_manifest_ref="control/manifest.yaml",
+                input_manifest_ref=SessionPaths.from_run_dir(run_dir).to_ref(
+                    SessionPaths.from_run_dir(run_dir).input_manifest_path
+                ),
                 data_dir=str(run_dir),
                 workflow_steps=[
                     {
@@ -103,7 +115,9 @@ class MultiplatformLongReadTests(unittest.TestCase):
             )
             state["entered_workflow_step_index"] = 0
 
-            registered = build_inventory_stage().invoke(state)
+            registered = build_inventory_stage(
+                verified_inputs=validate_frozen_inputs(SessionPaths.from_run_dir(run_dir))
+            ).invoke(state)
             registry = json.loads(
                 resolve_artifact_ref(
                     registered["data_dir"],

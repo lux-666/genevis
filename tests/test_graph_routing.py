@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.control.workflow_plan import workflow_steps_from_run_config
@@ -12,8 +13,35 @@ from app.graph.builder import build_graph
 from app.graph.routing import route_controller, route_from_current_stage
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
+from app.storage.frozen_inputs import (
+    FrozenInputBundle,
+    freeze_session_inputs,
+    validate_frozen_inputs,
+)
 from app.storage.ledger import Ledger
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
+
+
+def _freeze_verified_inputs(
+    run_dir: Path,
+    manifest: Path,
+    run_config: RunConfig,
+) -> tuple[SessionPaths, FrozenInputBundle]:
+    paths = SessionPaths.from_run_dir(run_dir)
+    envs = paths.control_dir / "test_envs.yaml"
+    envs.write_text(
+        "default:\n  fallback_env: test-env\npackages: {}\n",
+        encoding="utf-8",
+    )
+    freeze_session_inputs(
+        paths,
+        manifest_draft=manifest,
+        run_config_draft=run_config,
+        config_path=envs,
+        probe_environments=False,
+    )
+    return paths, validate_frozen_inputs(paths)
 
 
 class GraphRoutingTests(unittest.TestCase):
@@ -61,15 +89,29 @@ class GraphRoutingTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            config = RunConfig.model_validate({"requested_stages": []})
+            paths, verified_inputs = _freeze_verified_inputs(
+                run_dir,
+                manifest,
+                config,
+            )
+            input_manifest_ref = paths.to_ref(paths.input_manifest_path)
             ledger = Ledger(run_dir)
-            ledger.create_session("empty-plan", "control/manifest.yaml")
+            ledger.create_session("empty-plan", input_manifest_ref)
             state = initial_state(
                 session_id="empty-plan",
-                input_manifest_ref="control/manifest.yaml",
+                input_manifest_ref=input_manifest_ref,
                 data_dir=str(run_dir),
+                workflow_steps=workflow_steps_from_run_config(
+                    verified_inputs.run_config
+                ),
             )
 
-            result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
+            result = build_graph(
+                backend="memory",
+                data_dir=str(run_dir),
+                verified_inputs=verified_inputs,
+            ).invoke(
                 state,
                 config={"configurable": {"thread_id": "empty-plan"}},
             )
@@ -120,13 +162,21 @@ class GraphRoutingTests(unittest.TestCase):
                     ]
                 }
             )
+            paths, verified_inputs = _freeze_verified_inputs(
+                run_dir,
+                manifest,
+                config,
+            )
+            input_manifest_ref = paths.to_ref(paths.input_manifest_path)
             ledger = Ledger(run_dir)
-            ledger.create_session("repeat-read-qc", "control/manifest.yaml")
+            ledger.create_session("repeat-read-qc", input_manifest_ref)
             state = initial_state(
                 session_id="repeat-read-qc",
-                input_manifest_ref="control/manifest.yaml",
+                input_manifest_ref=input_manifest_ref,
                 data_dir=str(run_dir),
-                workflow_steps=workflow_steps_from_run_config(config),
+                workflow_steps=workflow_steps_from_run_config(
+                    verified_inputs.run_config
+                ),
             )
 
             recorded_completed_steps: list[str] = []
@@ -154,7 +204,11 @@ class GraphRoutingTests(unittest.TestCase):
                 "record_stage_completed",
                 new=record_stage_completed_once,
             ):
-                result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
+                result = build_graph(
+                    backend="memory",
+                    data_dir=str(run_dir),
+                    verified_inputs=verified_inputs,
+                ).invoke(
                     state,
                     config={"configurable": {"thread_id": "repeat-read-qc"}},
                 )

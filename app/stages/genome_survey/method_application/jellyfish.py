@@ -8,6 +8,7 @@ from typing import cast
 
 from langgraph.graph.state import CompiledStateGraph
 
+from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
     artifact_input_dependency,
@@ -108,6 +109,9 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
         dict(output),
         stage="genome_survey",
         method_name=METHOD_NAME,
+        workflow_step_id=current_workflow_step_id(
+            state, expected_stage="genome_survey"
+        ),
         session_id=session_id,
         data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),

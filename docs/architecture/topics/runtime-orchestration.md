@@ -43,8 +43,13 @@ uses the same frozen publication and executor. Other public subcommands are
 `execute_frozen_session` validates the frozen control documents, obtains a
 per-session execution lock, creates the Ledger session, constructs the small
 `TopLevelState`, projects run-config values into their owned stage cursors,
-builds the parent graph, and invokes it with the session ID as the LangGraph
-thread ID. The public run always uses SQLite. Foreground review additionally
+builds the parent graph with the resulting executor-owned `FrozenInputBundle`,
+and invokes it with the session ID as the LangGraph thread ID. Inventory
+validation and asset registration consume this already verified in-memory
+manifest, RunConfig, canonical declarations, and run-owned paths; they do not
+reopen an unchecked control file. The bundle is closure context, not a graph
+channel or checkpoint payload. A new process validates again before building
+its graph. The public run always uses SQLite. Foreground review additionally
 requires stdin and stdout to be real TTYs. With `--non-interactive` or without
 that TTY capability, a human gate persists `blocked_human` and prints
 `inspect`, `review`, and `resume` continuations instead of prompting.
@@ -85,8 +90,11 @@ position at a time, stops on a human block or terminal failure, and never
 appends, reorders, deduplicates, or fills in stages.
 
 `app.workflow.STAGE_ORDER` is a registration/default-planning/display aid. It
-is not runtime order. The controller does not inspect FASTQ contents, choose
-an assembler, build a command, or interpret biological metrics.
+is not runtime order or a successor table. `recommended_workflow_template` is
+a separate planning helper and may include repeated occurrences (the T2T
+template appends `assembly_review` after `t2t`). Neither helper rewrites a
+literal RunConfig. The controller does not inspect FASTQ contents, choose an
+assembler, build a command, or interpret biological metrics.
 
 The controller wrapper is thin but not pure. It records stage-entered,
 stage-completed, stage-failed, and session-terminal Ledger events, and writes
@@ -103,7 +111,9 @@ publish biological artifacts, open review gates, and commit a new resource.
 Those are available boundaries, not a mandatory identical sequence for all ten
 stages.
 
-The parent registers ten domain stages. `gapcloser` and `base_polish` are
+The parent registers ten domain stages explicitly in `app/graph/builder.py`; the
+subgraphs are composable but there is no dynamic plugin registry. `gapcloser` and
+`base_polish` are
 manual-only placeholders: automatic recommendations omit them, while a frozen
 occurrence of either terminates with `blocked_not_implemented`. An absent stage
 has no runtime occurrence and is not skipped. `None` is only an unfinished

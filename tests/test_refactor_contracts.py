@@ -25,7 +25,7 @@ from app.stages.assembly_dedup.routing import (
 )
 from app.stages.inventory.nodes import validate_inputs
 from app.storage.artifacts import artifact_ref_for_path, register_artifact_records
-from app.storage.frozen_inputs import freeze_session_inputs
+from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths
 from tests.data_v2 import v2_run_dir
@@ -72,7 +72,10 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 input_manifest_ref=paths.to_ref(paths.input_manifest_path),
                 data_dir=str(paths.run_dir),
             )
-            inventory = validate_inputs(state)["stage_outputs"]["inventory"]
+            inventory = validate_inputs(
+                state,
+                verified_inputs=validate_frozen_inputs(paths),
+            )["stage_outputs"]["inventory"]
             self.assertTrue(inventory["valid"])
 
     def test_run_config_paths_resolve_against_source_config_directory(self):
@@ -264,6 +267,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 {"env": {"PATH": "/tmp/fake-bin"}},
                 stage="assembly_dedup",
                 method_name="assembly_dedup.purge_dups",
+                workflow_step_id="step-001-assembly_dedup",
                 session_id="s1",
                 data_dir=run_dir,
                 input_manifest_ref="control/manifest.yaml",
@@ -277,15 +281,31 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             self.assertEqual(blocked["status"], "missing_tool")
             self.assertEqual(blocked["method_name"], "assembly_dedup.purge_dups")
 
+            _spec, _packages, second_blocked = resolve_method_env(
+                {"env": {"PATH": "/tmp/fake-bin"}},
+                stage="assembly_dedup",
+                method_name="assembly_dedup.purge_dups",
+                workflow_step_id="step-002-assembly_dedup",
+                session_id="s1",
+                data_dir=run_dir,
+                input_manifest_ref="control/manifest.yaml",
+                config_path=config,
+            )
+            self.assertIsNotNone(second_blocked)
+
             events = Ledger(run_dir).read_events("s1")
             blocked_events = [
                 event
                 for event in events
                 if event["event_type"] == "env_preflight_blocked"
             ]
-            self.assertEqual(len(blocked_events), 1)
+            self.assertEqual(len(blocked_events), 2)
             self.assertEqual(blocked_events[0]["stage"], "assembly_dedup")
             self.assertEqual(blocked_events[0]["summary"]["status"], "missing_tool")
+            self.assertEqual(
+                [event["workflow_step_id"] for event in blocked_events],
+                ["step-001-assembly_dedup", "step-002-assembly_dedup"],
+            )
 
     def test_wrong_artifact_type_fails_with_data_layout_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:

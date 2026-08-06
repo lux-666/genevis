@@ -37,6 +37,11 @@ from app.stages.read_resolution import resolve_hic_pairs
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
 from app.storage.artifacts import artifact_ref_for_path
+from app.storage.assembly_candidates import (
+    AssemblyCandidateBundleError,
+    load_executed_candidate_bundle,
+    publish_derived_assembly_candidate,
+)
 from app.storage.ledger import Ledger
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
@@ -417,6 +422,72 @@ def apply_hic_scaffolding_resume_decision(
         raise ResumeValidationError(
             "AutoHiC adoption decision could not be persisted"
         ) from exc
+    if request.decision == "accept_candidate":
+        if adoption_resource_metadata is None:
+            raise ResumeValidationError("AutoHiC adoption metadata is unavailable")
+        try:
+            current_assembly = resolve_stage_resource(
+                state,
+                resource_spec=assembly_resource_spec(),
+            )
+            source_candidate_ref = current_assembly.metadata.get(
+                "candidate_bundle_ref"
+            )
+            if source_candidate_ref is None:
+                raise AssemblyCandidateBundleError(
+                    "accepted AutoHiC scaffolding requires the current "
+                    "candidate_bundle_ref"
+                )
+            source_candidate = load_executed_candidate_bundle(
+                absolute_data_dir(state), state["session_id"], source_candidate_ref
+            )
+            if (
+                current_assembly.path is None
+                or source_candidate.primary_output_path.resolve(strict=False)
+                != Path(current_assembly.path).resolve(strict=False)
+            ):
+                raise AssemblyCandidateBundleError(
+                    "current candidate primary output does not match the "
+                    "pre-Hi-C assembly"
+                )
+            primary_output_ref = ArtifactRef.model_validate(
+                adoption_resource_metadata["primary_output_ref"]
+            )
+            derived_candidate = publish_derived_assembly_candidate(
+                absolute_data_dir(state),
+                state["session_id"],
+                workflow_step_id=current_workflow_step_id(
+                    state, expected_stage="hic_scaffolding"
+                ),
+                source_candidate=source_candidate,
+                primary_output_ref=primary_output_ref,
+                stage="hic_scaffolding",
+                method_name=HIC_CONTRACT_METHOD,
+                action_identity=decision_ref.artifact_id,
+            )
+        except (
+            AssemblyCandidateBundleError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ResumeValidationError(
+                f"AutoHiC adopted candidate publication failed: {exc}"
+            ) from exc
+        adoption_resource_metadata.update(
+            {
+                "candidate_bundle_ref": derived_candidate.ref.model_dump(mode="json"),
+                "primary_output_ref": derived_candidate.primary_output_ref.model_dump(
+                    mode="json"
+                ),
+                "input_candidate_bundle_ref": source_candidate.ref.model_dump(
+                    mode="json"
+                ),
+                "input_primary_output_ref": (
+                    source_candidate.primary_output_ref.model_dump(mode="json")
+                ),
+            }
+        )
     Ledger(absolute_data_dir(state)).record_review_decision(
         state["session_id"],
         "hic_scaffolding",

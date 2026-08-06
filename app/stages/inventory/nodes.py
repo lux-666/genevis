@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
-import yaml
 from typing_extensions import TypedDict
 
 from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
@@ -27,7 +26,7 @@ from app.schemas.artifacts import ArtifactMeta, ArtifactRef, ArtifactRefJson
 from app.schemas.assets import AssetRecord, AssetRegistryDocument
 from app.schemas.manifest import AssetEntryInference, InputManifest
 from app.schemas.resource_ref import ResourceRef
-from app.schemas.run_config import RunConfig, RunConfigSharedParameters, load_run_config
+from app.schemas.run_config import RunConfig
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.state import (
     ResourceRefs,
@@ -35,7 +34,7 @@ from app.schemas.state import (
     TopLevelState,
     validate_top_level_state,
 )
-from app.stages.base import append_route_trace, resolve_run_ref
+from app.stages.base import append_route_trace
 from app.stages.inventory.state import (
     read_inventory_stage_output,
     update_inventory_stage_output,
@@ -47,39 +46,11 @@ from app.storage.artifacts import (
 )
 from app.storage.assembly_candidates import publish_registered_assembly_candidate
 from app.storage.frozen_inputs import (
+    FrozenInputBundle,
     RegisteredReadDeclaration,
-    canonicalize_input_declarations,
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-
-
-def _load_manifest(manifest_ref: str) -> InputManifest:
-    """Load the canonical runtime manifest.
-
-    Entry materialization owns path normalization. Runtime consumers reject
-    relative paths instead of guessing whether they belong to the source
-    manifest directory, the run control directory, or the current process.
-    """
-    path = Path(manifest_ref)
-    with path.open("r", encoding="utf-8") as handle:
-        if path.suffix == ".json":
-            raw = json.load(handle)
-        else:
-            raw = yaml.safe_load(handle) or {}
-    manifest = InputManifest.model_validate(raw)
-    relative_paths = [
-        declared
-        for asset in manifest.assets
-        for declared in asset.paths
-        if not Path(declared).is_absolute()
-    ]
-    if relative_paths:
-        raise ValueError(
-            "runtime manifest contains non-canonical relative asset paths: "
-            f"{relative_paths}"
-        )
-    return manifest
 
 
 def _build_asset_records(
@@ -397,27 +368,21 @@ def enter_inventory(state: TopLevelState) -> StateUpdate:
     return {"supervision_state": "running_stage"}
 
 
-def validate_inputs(state: TopLevelState) -> StateUpdate:
+def validate_inputs(
+    state: TopLevelState,
+    *,
+    verified_inputs: FrozenInputBundle | None = None,
+) -> StateUpdate:
     """Load and validate the input manifest.
 
     Returns state updates that the routing node will use to decide
     success, failure, or review-required.
     """
-    manifest_ref = state.get("input_manifest_ref")
-    if not manifest_ref:
-        return update_inventory_stage_output(
-            state,
-            {
-                "status": "failed",
-                "reason": "missing input_manifest_ref",
-            },
-        )
-
     try:
-        manifest = _load_manifest(str(resolve_run_ref(state, manifest_ref)))
-        run_config, _ = _load_inventory_run_config(state)
-        declarations = canonicalize_input_declarations(manifest, run_config)
-        manifest = declarations.manifest
+        bundle = _require_verified_inputs(verified_inputs, state=state)
+        manifest = bundle.declarations.manifest
+        run_config = bundle.run_config
+        declarations = bundle.declarations
         report = declarations.manifest_report
         canonical_shared = _canonical_shared_parameters(
             state,
@@ -501,17 +466,21 @@ def _canonical_shared_parameters(
     return SharedParameters.model_validate(shared).model_dump(exclude_none=True)
 
 
-def register_assets(state: TopLevelState) -> StateUpdate:
+def register_assets(
+    state: TopLevelState,
+    *,
+    verified_inputs: FrozenInputBundle | None = None,
+) -> StateUpdate:
     """Register assets, write registry artifact, and record ledger events."""
     inventory_out = read_inventory_stage_output(state)
     if inventory_out.get("status") != "validated" or not inventory_out.get("valid"):
         return {}
 
-    manifest_ref = state["input_manifest_ref"]
-    manifest = _load_manifest(str(resolve_run_ref(state, manifest_ref)))
-    run_config, run_config_ref = _load_inventory_run_config(state)
-    declarations = canonicalize_input_declarations(manifest, run_config)
-    manifest = declarations.manifest
+    bundle = _require_verified_inputs(verified_inputs, state=state)
+    manifest_ref = bundle.paths.to_ref(bundle.paths.input_manifest_path)
+    run_config_ref = bundle.paths.to_ref(bundle.paths.run_config_path)
+    manifest = bundle.declarations.manifest
+    declarations = bundle.declarations
     report = declarations.manifest_report
     if not report["valid"]:
         raise ValueError(
@@ -587,19 +556,20 @@ def register_assets(state: TopLevelState) -> StateUpdate:
         resource_refs["assembly"] = ResourceRef(
             resource_type="assembly",
             paths=[str(bound_candidate.primary_output_path)],
-            source_stage="inventory_registered_assembly",
+            source_stage="inventory",
             workflow_step_id=workflow_step_id,
             metadata={
                 **source_metadata,
                 "source_asset_ids": source_asset_ids,
                 "source_asset_registry_ref": source_registry_ref,
+                "source_description": "inventory_registered_assembly",
                 "candidate_bundle_ref": bound_candidate.ref.model_dump(mode="json"),
                 "primary_output_ref": (
                     bound_candidate.primary_output_ref.model_dump(mode="json")
                 ),
             },
         ).to_dict()
-        ledger.record_event(
+        ledger.record_occurrence_event(
             manifest.session_id,
             "registered_assembly_candidate_bound",
             {
@@ -609,6 +579,13 @@ def register_assets(state: TopLevelState) -> StateUpdate:
                     bound_candidate.primary_output_ref.model_dump(mode="json")
                 ),
             },
+            stage="inventory",
+            workflow_step_id=workflow_step_id,
+            subject_id=registered_assembly.asset_id,
+            idempotency_key=(
+                f"registered-assembly-candidate:{workflow_step_id}:"
+                f"{registered_assembly.asset_id}"
+            ),
         )
 
     update = update_inventory_stage_output(
@@ -623,37 +600,31 @@ def register_assets(state: TopLevelState) -> StateUpdate:
     return update
 
 
-def _load_inventory_run_config(
+def _require_verified_inputs(
+    verified_inputs: FrozenInputBundle | None,
+    *,
     state: TopLevelState,
-) -> tuple[RunConfig, str | None]:
-    """Load the run-owned declaration source used by frozen validation."""
+) -> FrozenInputBundle:
+    """Return the bundle only when it belongs to this exact runtime state."""
 
-    paths = SessionPaths.from_run_dir(Path(state.get("data_dir", "data")))
-    if paths.run_config_path.is_file():
-        return (
-            load_run_config(paths.run_config_path),
-            paths.to_ref(paths.run_config_path),
+    if verified_inputs is None:
+        raise ValueError(
+            "Inventory requires a verified FrozenInputBundle; graph construction "
+            "must validate frozen inputs before execution"
         )
-    raw_shared = state.get("shared_parameters")
-    if isinstance(raw_shared, SharedParameters):
-        shared = raw_shared.model_dump(mode="json", exclude_none=True)
-    elif isinstance(raw_shared, dict):
-        shared = dict(raw_shared)
-    elif raw_shared is None:
-        shared = None
-    else:
-        raise ValueError("shared_parameters must be a mapping")
-    return (
-        RunConfig(
-            requested_stages=[],
-            shared_parameters=(
-                RunConfigSharedParameters.model_validate(shared)
-                if shared is not None
-                else None
-            ),
-        ),
-        None,
-    )
+    state_session_id = state.get("session_id")
+    if verified_inputs.paths.session_id != state_session_id:
+        raise ValueError(
+            "Inventory verified inputs session_id does not match runtime state: "
+            f"{verified_inputs.paths.session_id!r} != {state_session_id!r}"
+        )
+    runtime_paths = SessionPaths.from_run_dir(state.get("data_dir", "data"))
+    if verified_inputs.paths.run_dir != runtime_paths.run_dir:
+        raise ValueError(
+            "Inventory verified inputs run_dir does not match runtime state: "
+            f"{verified_inputs.paths.run_dir} != {runtime_paths.run_dir}"
+        )
+    return verified_inputs
 
 
 def commit_inventory(state: TopLevelState) -> StateUpdate:
@@ -665,10 +636,20 @@ def commit_inventory(state: TopLevelState) -> StateUpdate:
     }
 
 
-def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> StateUpdate:
+def apply_inventory_resume_decision(
+    state: TopLevelState,
+    request: Any,
+    *,
+    verified_inputs: FrozenInputBundle | None = None,
+) -> StateUpdate:
     """Apply a human inventory review decision."""
     review_request_id, review_request_hash, review_request_ref = (
         _inventory_review_binding(state, request)
+    )
+    resume_inputs = (
+        _require_verified_inputs(verified_inputs, state=state)
+        if request.decision in {"continue", "accept"}
+        else None
     )
     decision_ref = persist_review_decision(
         state["data_dir"],
@@ -709,7 +690,10 @@ def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> State
     # state transition only; no validation or selection policy is repeated.
     restored = update_inventory_stage_output(state, {"status": "validated"})
     validated_state = validate_top_level_state({**state, **dict(restored)})
-    register_update = register_assets(validated_state)
+    register_update = register_assets(
+        validated_state,
+        verified_inputs=resume_inputs,
+    )
     registered_state = validate_top_level_state(
         {**validated_state, **dict(register_update)}
     )

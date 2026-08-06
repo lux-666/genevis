@@ -894,6 +894,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 resource_type="long_reads",
                 paths=[str(published_read.path)],
                 source_stage="read_qc",
+                workflow_step_id="step-001-read_qc",
                 metadata={
                     "platforms": ["ont"],
                     "formats": ["fastq"],
@@ -982,6 +983,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 resource_type="long_reads",
                 paths=[str(missing)],
                 source_stage="read_qc",
+                workflow_step_id="step-001-read_qc",
                 metadata={"platforms": ["ont"], "formats": ["fastq"]},
             ).to_dict()
 
@@ -1047,6 +1049,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 resource_type="long_reads",
                 paths=[str(published_read.path)],
                 source_stage="read_qc",
+                workflow_step_id="step-001-read_qc",
                 metadata={
                     "platforms": ["ont"],
                     "formats": ["fastq"],

@@ -1337,6 +1337,36 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             self.assertIn("does not match current cursor 0", output["reason"])
             self.assertEqual(runner.executed_commands, [])
 
+    def test_stale_same_stage_attempt_fails_before_recovery_or_runner(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            state = _merge(state, _freeze_contract(state))
+            state["workflow_steps"].append(
+                {
+                    "step_id": "step-002-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                }
+            )
+            state["workflow_step_index"] = 2
+            state["entered_workflow_step_index"] = 2
+
+            with (
+                patch("app.execution.lifecycle.recover_execution_result") as recover,
+                patch("app.execution.lifecycle.run_frozen_attempt") as run,
+            ):
+                update = run_method_attempts(
+                    state,
+                    DIRECT_LIFECYCLE,
+                    runner=FakeRunner(),
+                )
+
+            output = update["stage_outputs"]["assembly_review"]
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("does not match the active occurrence", output["reason"])
+            recover.assert_not_called()
+            run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

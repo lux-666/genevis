@@ -52,7 +52,11 @@ Current constraints:
 
 - the table key and `resource_type` must match;
 - `paths` contains at least one non-empty string;
-- a stage-produced resource records the exact producing `workflow_step_id`;
+- `source_stage is None` if and only if `workflow_step_id is None`;
+- a present `source_stage` and `workflow_step_id` are each non-empty strings;
+- manifest/external resources leave both provenance fields absent, while a
+  stage-produced resource records its canonical producing stage and exact
+  workflow occurrence;
 - the complete table is JSON-only and at most 128 KiB;
 - reducers validate and replace the complete table;
 - stage nodes return a delta and do not mutate input state;
@@ -119,6 +123,23 @@ current `base_polish` placeholder likewise publishes no resource.
 Candidate bundles, review decisions, execution evidence, reports, and metrics
 remain artifacts. They may be referenced from resource metadata but do not form
 a second cross-stage file table.
+
+## Current assembly candidate lineage
+
+Every central, stage-produced `assembly` resource carries a current executed
+candidate bundle and its exact primary-output ref. When Assembly Dedup, an
+accepted Hi-C adoption, an accepted T2T patch, or an Assembly Review corrective
+action changes the assembly path, it publishes a new executed candidate in that
+active occurrence. The previous current candidate and primary output remain as
+`input_candidate_bundle_ref` and `input_primary_output_ref` lineage metadata.
+
+The generic candidate wrapper accepts exactly these primary artifact types:
+`assembly.draft_assembly`, `hic_scaffolding.chromosome_scaffolded_assembly`,
+and `t2t.patched_assembly`. The wrapper itself remains
+`draft_assembly.candidate`; no derived FASTA is copied under a draft-only type.
+Assembly Review consumes the same current candidate contract after each of
+those producers and has no Hi-C- or T2T-specific fallback path. An unchanged
+Hi-C/T2T decision preserves the current resource and candidate relation.
 
 ## Sequencing-member identity
 

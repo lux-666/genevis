@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from langchain_core.runnables import RunnableConfig
 
@@ -22,6 +22,9 @@ from app.schemas.state import validate_top_level_state
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+
+if TYPE_CHECKING:
+    from app.storage.frozen_inputs import FrozenInputBundle
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ def execute_resume_transaction(
     checkpointer: str,
     blocked_timeout_seconds: float | None = None,
     event_context: Mapping[str, Any] | None = None,
+    verified_inputs: "FrozenInputBundle | None" = None,
 ) -> ResumeTransactionResult:
     """Validate, apply, checkpoint, invoke, report, and audit one resume.
 
@@ -133,12 +137,13 @@ def execute_resume_transaction(
             ) from exc
 
         try:
-            update = resume_review_state(
-                state,
-                request,
-                blocked_timeout_seconds=blocked_timeout_seconds,
-                decision_source=source,
-            )
+            resume_kwargs: dict[str, Any] = {
+                "blocked_timeout_seconds": blocked_timeout_seconds,
+                "decision_source": source,
+            }
+            if verified_inputs is not None:
+                resume_kwargs["verified_inputs"] = verified_inputs
+            update = resume_review_state(state, request, **resume_kwargs)
         except (
             ResumeValidationError,
             DurableResumeUnavailableError,

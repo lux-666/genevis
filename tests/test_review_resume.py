@@ -1387,6 +1387,67 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
             "selected_assembly.fasta",
         ),
     )
+    candidate_dir = paths.workflow_step_artifact_path(
+        "step-001-assembly_review",
+        "assembly_review",
+        "selected_candidate",
+    )
+    candidate_work_dir = paths.workflow_step_work_path(
+        "step-001-assembly_review",
+        "assembly_review",
+        "selected_candidate",
+    )
+    candidate_work_dir.mkdir(parents=True, exist_ok=True)
+    planned_candidate = AssemblyCandidateBundle(
+        session_id=session_id,
+        candidate_id="reviewed-pre-hic",
+        method_name="assembly_review.contract",
+        status="planned",
+        input_type="reviewed_assembly",
+        input_member_ids={"primary": ["reviewed-pre-hic"]},
+        input_member_platforms={"primary": ["reviewed"]},
+        parameter_attempt_id=0,
+        expected_outputs=["primary_assembly"],
+    )
+    planned_source = candidate_work_dir / "candidate.planned.json"
+    planned_source.write_text(
+        json.dumps(planned_candidate.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+    published_plan = publish_artifact_record(
+        data_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            planned_source,
+            stage="assembly_review",
+            method_name="assembly_review.contract",
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+        destination=candidate_dir / "candidate.planned.json",
+    )
+    executed_candidate = planned_candidate.model_copy(
+        update={
+            "status": "executed",
+            "plan_ref": published_plan.ref,
+            "primary_output": published_pre_hic.ref,
+        }
+    )
+    executed_source = candidate_work_dir / "candidate.executed.json"
+    executed_source.write_text(
+        json.dumps(executed_candidate.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+    published_candidate = publish_artifact_record(
+        data_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            executed_source,
+            stage="assembly_review",
+            method_name="assembly_review.contract",
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+        destination=candidate_dir / "candidate.executed.json",
+    )
     published_scaffold = publish_artifact_record(
         data_dir,
         session_id,
@@ -1438,8 +1499,12 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
                 resource_type="assembly",
                 paths=[str(pre_hic)],
                 source_stage="assembly_review",
+                workflow_step_id="step-001-assembly_review",
                 metadata={
-                    "primary_output_ref": published_pre_hic.ref.model_dump(mode="json")
+                    "candidate_bundle_ref": published_candidate.ref.model_dump(
+                        mode="json"
+                    ),
+                    "primary_output_ref": published_pre_hic.ref.model_dump(mode="json"),
                 },
             ).to_dict()
         },

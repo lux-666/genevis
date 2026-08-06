@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.control.workflow_plan import workflow_steps_from_run_config
 from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
 from app.graph.checkpointer import checkpoint_db_path
@@ -34,11 +35,71 @@ from app.schemas.artifacts import (
     ArtifactMeta,
     AssemblyCandidateBundle,
 )
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.storage.artifacts import publish_artifact_record
+from app.storage.frozen_inputs import (
+    FrozenInputBundle,
+    freeze_session_inputs,
+    validate_frozen_inputs,
+)
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
+
+
+def _freeze_durable_inputs(run_dir: Path) -> FrozenInputBundle:
+    paths = SessionPaths.from_run_dir(run_dir)
+    reads = paths.run_dir / "fixture_reads.fastq"
+    reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    paths.manifest_path.write_text(
+        json.dumps(
+            {
+                "session_id": paths.session_id,
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(reads)],
+                        "platform": "ont",
+                        "format": "fastq",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    envs = paths.control_dir / "test_envs.yaml"
+    envs.write_text(
+        "default:\n  fallback_env: test-env\npackages: {}\n",
+        encoding="utf-8",
+    )
+    run_config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": False},
+                {
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                },
+            ]
+        }
+    )
+    freeze_session_inputs(
+        paths,
+        manifest_draft=paths.manifest_path,
+        run_config_draft=run_config,
+        config_path=envs,
+        probe_environments=False,
+    )
+    return validate_frozen_inputs(paths)
+
+
+def _build_frozen_graph(run_dir: Path):
+    return build_graph(
+        backend="sqlite",
+        data_dir=str(run_dir),
+        verified_inputs=validate_frozen_inputs(SessionPaths.from_run_dir(run_dir)),
+    )
 
 
 def _build_blocked_state(
@@ -47,8 +108,8 @@ def _build_blocked_state(
     session_id: str = "s1",
 ) -> tuple[dict, PersistedReviewRequest, Path]:
     paths = SessionPaths.from_run_dir(run_dir)
+    verified_inputs = _freeze_durable_inputs(run_dir)
     assembly_step_id = "step-001-assembly"
-    review_step_id = "step-002-assembly_review"
     draft_path = paths.workflow_step_work_path(
         assembly_step_id, "assembly", "draft.fasta"
     )
@@ -146,25 +207,10 @@ def _build_blocked_state(
     )
     state = initial_state(
         session_id=session_id,
-        input_manifest_ref=paths.to_ref(paths.manifest_path),
+        input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(run_dir),
-        workflow_steps=[
-            {
-                "step_id": "step-000-inventory",
-                "stage": "inventory",
-                "allow_local_execution": False,
-            },
-            {
-                "step_id": assembly_step_id,
-                "stage": "assembly",
-                "allow_local_execution": False,
-            },
-            {
-                "step_id": review_step_id,
-                "stage": "assembly_review",
-                "allow_local_execution": False,
-            },
-        ],
+        workflow_steps=workflow_steps_from_run_config(verified_inputs.run_config),
+        stage_plan_ref=paths.to_ref(paths.run_config_path),
     )
     state.update(
         {
@@ -183,7 +229,7 @@ def _build_blocked_state(
         artifact_type="assembly_review.request",
     )
     ledger = Ledger(run_dir)
-    ledger.create_session(session_id, str(paths.manifest_path))
+    ledger.create_session(session_id, paths.to_ref(paths.input_manifest_path))
     ledger.record_review_requested(
         session_id,
         "assembly_review",
@@ -230,7 +276,7 @@ def _seed_blocked_checkpoint(data_dir: Path, state: dict) -> None:
     routing entirely and produces a checkpoint with the same shape as
     a real blocked run.
     """
-    graph = build_graph(backend="sqlite", data_dir=str(data_dir))
+    graph = _build_frozen_graph(data_dir)
     cfg = {"configurable": {"thread_id": state["session_id"]}}
     graph.update_state(cfg, state)
     saver = graph.checkpointer
@@ -368,7 +414,7 @@ class DurableResumeTests(unittest.TestCase):
                 event_types.index("resume_completed"),
             )
 
-            graph = build_graph(backend="sqlite", data_dir=str(run_dir))
+            graph = _build_frozen_graph(run_dir)
             snap = graph.get_state({"configurable": {"thread_id": "s1"}})
             advanced_past_assembly_review = snap.values["current_stage"] not in {
                 "assembly_review"
@@ -423,7 +469,7 @@ class DurableResumeTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("resume rejected", stderr)
 
-            graph = build_graph(backend="sqlite", data_dir=str(run_dir))
+            graph = _build_frozen_graph(run_dir)
             snap = graph.get_state({"configurable": {"thread_id": "s1"}})
             self.assertEqual(snap.values["supervision_state"], "blocked_human")
             self.assertEqual(snap.values["current_stage"], "assembly_review")

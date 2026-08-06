@@ -131,16 +131,26 @@ execution evidence, or create stage-local lifecycle factories.
 
 ## Run Boundary
 
-Before any process starts, the shared run node validates the owner cursor and
-loads the next frozen attempt through its verified ref. Stage, method, session,
-and attempt identities must match. The working directory must resolve below the
+Before any recovery lookup, dependency check, or process starts, the shared run
+node validates the lifecycle status and owner cursor, then requires every
+pending frozen attempt to name the exact active `workflow_step_id` for the
+lifecycle stage. A missing or stale occurrence identity becomes the lifecycle's
+bounded failure update. It does not search for recoverable execution evidence,
+invoke the Runner, publish logs, or append attempt lifecycle events. Generic
+artifact loaders may inspect historical attempts, but execution may not
+reinterpret a historical attempt as the active occurrence.
+
+Only after that gate does the run node load the next frozen attempt through its
+verified ref. Stage, method, session, and attempt identities must match. The
+working directory must resolve below the
 current run's `work/steps/<workflow_step_id>/<stage>/` tree; the declared absolute script path must be
 lexically below that working directory and resolve somewhere inside the run;
 every expected output must resolve inside the run. The retained script must
 exist and match its frozen SHA-256. The Runner executes that exact declared path
 with the frozen working directory as cwd.
 
-Before checking live inputs or invoking the Runner, the run node searches the
+After the occurrence gate and before checking live inputs or invoking the
+Runner, the run node searches the
 artifact index for one execution record with the same stage, method, attempt ID,
 and exact frozen-attempt ref. A unique verified match advances the owner cursor
 without rerunning. A mismatched or ambiguous record fails closed.

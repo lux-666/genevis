@@ -68,6 +68,10 @@ _OCCURRENCE_EVENT_TYPES = frozenset(
         "stage_skipped",
         "stage_completed",
         "stage_failed",
+        "env_preflight_blocked",
+        "candidate_comparison_generated",
+        "registered_assembly_candidate_bound",
+        "automatic_review_failed",
     }
 )
 
@@ -556,7 +560,9 @@ class Ledger:
             workflow_step_id = _optional_text(raw.pop("workflow_step_id", None))
         else:
             raw.pop("workflow_step_id", None)
-        if event_type in _OCCURRENCE_EVENT_TYPES:
+        if event_type in _OCCURRENCE_EVENT_TYPES or (
+            stage is not None and event_type != "session_terminal"
+        ):
             workflow_step_id = _require_workflow_step_id(workflow_step_id)
         elif workflow_step_id is not None:
             workflow_step_id = _require_workflow_step_id(workflow_step_id)
@@ -619,6 +625,37 @@ class Ledger:
                 return row
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def record_occurrence_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None,
+        *,
+        stage: str,
+        workflow_step_id: str,
+        subject_id: str | None = None,
+        refs: Iterable[Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a stage-runtime fact bound to one frozen occurrence."""
+
+        if not isinstance(stage, str) or not stage:
+            raise ValueError("occurrence event stage must be a non-empty string")
+        if subject_id is None and idempotency_key is None:
+            raise ValueError(
+                "occurrence event requires a subject_id or idempotency_key"
+            )
+        return self.record_event(
+            session_id,
+            event_type,
+            payload,
+            stage=stage,
+            workflow_step_id=_require_workflow_step_id(workflow_step_id),
+            subject_id=subject_id,
+            refs=refs,
+            idempotency_key=idempotency_key,
+        )
 
     def references_from(
         self,
@@ -689,7 +726,13 @@ class Ledger:
                 f"invalid workflow_step_id in ledger row at line {line_number}"
             )
         if (
-            row["event_type"] in _OCCURRENCE_EVENT_TYPES
+            (
+                row["event_type"] in _OCCURRENCE_EVENT_TYPES
+                or (
+                    row["stage"] is not None
+                    and row["event_type"] != "session_terminal"
+                )
+            )
             and not isinstance(workflow_step_id, str)
         ):
             raise LedgerFormatError(

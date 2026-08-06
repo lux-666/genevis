@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 
@@ -31,6 +31,9 @@ from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+
+if TYPE_CHECKING:
+    from app.storage.frozen_inputs import FrozenInputBundle
 
 ResumeValidationError = control_errors.ResumeValidationError
 UnsupportedLifecycleOperationError = control_errors.UnsupportedLifecycleOperationError
@@ -319,6 +322,7 @@ def resume_review_state(
     blocked_timeout_seconds: float | None = None,
     decision_source: str = "manual",
     now: datetime | None = None,
+    verified_inputs: "FrozenInputBundle | None" = None,
 ) -> StateUpdate:
     """Apply a validated human review decision to an in-memory blocked state."""
 
@@ -367,7 +371,13 @@ def resume_review_state(
             return _timeout_expired_update(state, request, timeout)
 
     try:
-        return apply_review_gate_decision(state, request)
+        if verified_inputs is None:
+            return apply_review_gate_decision(state, request)
+        return apply_review_gate_decision(
+            state,
+            request,
+            verified_inputs=verified_inputs,
+        )
     except KeyError as exc:
         raise ResumeValidationError(
             f"Unsupported resume stage: {request.stage}"

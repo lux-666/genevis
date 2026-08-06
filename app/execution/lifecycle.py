@@ -9,7 +9,10 @@ from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.control.workflow_plan import bind_attempt_to_current_workflow_step
+from app.control.workflow_plan import (
+    bind_attempt_to_current_workflow_step,
+    current_workflow_step_id,
+)
 from app.execution.attempt_owners import (
     AttemptOwner,
     DirectAttemptOwner,
@@ -243,6 +246,30 @@ def run_method_attempts(
             state,
             lifecycle.stage,
             {"status": lifecycle.ran_status},
+        )
+
+    try:
+        active_workflow_step_id = current_workflow_step_id(
+            state,
+            expected_stage=lifecycle.stage,
+        )
+        for owned_attempt in pending:
+            attempt_step_id = (owned_attempt.attempt.metadata or {}).get(
+                "workflow_step_id"
+            )
+            if not isinstance(attempt_step_id, str) or not attempt_step_id:
+                raise ValueError("frozen attempt is missing workflow_step_id metadata")
+            if attempt_step_id != active_workflow_step_id:
+                raise ValueError(
+                    "frozen attempt workflow_step_id does not match the active "
+                    f"occurrence: expected {active_workflow_step_id!r}, got "
+                    f"{attempt_step_id!r}"
+                )
+    except ValueError as exc:
+        return _failure_update(
+            state,
+            lifecycle,
+            f"{lifecycle.name} frozen attempt is invalid: {exc}",
         )
 
     owned_attempt = pending[0]

@@ -6,7 +6,11 @@ import pytest
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import RESOURCE_REFS_MAX_BYTES
 from app.schemas.resource_ref import ResourceRef
-from app.schemas.state import initial_state, validate_resource_refs
+from app.schemas.state import (
+    initial_state,
+    validate_resource_refs,
+    validate_top_level_state,
+)
 from app.stages.resource_resolution import (
     ResourceSpec,
     resolve_stage_resource,
@@ -60,6 +64,7 @@ def test_resolution_precedence_is_central_then_registry(tmp_path) -> None:
         resource_type="long_reads",
         paths=["/central/clean.fastq.gz"],
         source_stage="read_qc",
+        workflow_step_id="step-001-read_qc",
         metadata={"quality": "filtered"},
     ).to_dict()
     spec = ResourceSpec(
@@ -218,6 +223,34 @@ def test_update_resource_ref_returns_validated_replacement_without_mutation() ->
 def test_resource_table_rejects_invalid_and_oversized_entries() -> None:
     with pytest.raises(ValueError, match="at least one"):
         ResourceRef(resource_type="assembly", paths=[])
+    with pytest.raises(ValueError, match="both be set"):
+        ResourceRef(
+            resource_type="assembly",
+            paths=["/assembly.fasta"],
+            source_stage="assembly",
+        )
+    with pytest.raises(ValueError, match="both be set"):
+        ResourceRef(
+            resource_type="assembly",
+            paths=["/assembly.fasta"],
+            workflow_step_id="step-001-assembly",
+        )
+    assert ResourceRef(
+        resource_type="long_reads",
+        paths=["/reads.fastq.gz"],
+    ).source_stage is None
+    state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    state["resource_refs"] = {
+        "assembly": {
+            "resource_type": "assembly",
+            "paths": ["/assembly.fasta"],
+            "source_stage": "assembly",
+            "workflow_step_id": None,
+            "metadata": {},
+        }
+    }
+    with pytest.raises(ValueError, match="both be set"):
+        validate_top_level_state(state)
     with pytest.raises(ValueError, match="must match"):
         validate_resource_refs(
             {

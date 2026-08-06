@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import unittest
+from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from pydantic import ValidationError
 
 from app.schemas.artifacts import (
+    ASSEMBLY_DRAFT_ASSEMBLY,
+    HIC_SCAFFOLDED_ASSEMBLY,
+    T2T_PATCHED_ASSEMBLY,
+    ArtifactMeta,
     ArtifactRef,
     AssemblyCandidateBundle,
     AssemblyNativeOutput,
 )
+from app.storage.artifacts import publish_artifact_record
+from app.storage.assembly_candidates import (
+    publish_derived_assembly_candidate,
+    publish_registered_assembly_candidate,
+)
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
 
 
 def _ref(name: str, artifact_type: str) -> ArtifactRef:
@@ -142,6 +156,159 @@ class AssemblyCandidateBundleTests(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             AssemblyCandidateBundle.model_validate(payload)
+
+    def test_derived_candidates_accept_each_canonical_primary_type(self):
+        for artifact_type in (
+            ASSEMBLY_DRAFT_ASSEMBLY,
+            HIC_SCAFFOLDED_ASSEMBLY,
+            T2T_PATCHED_ASSEMBLY,
+        ):
+            with (
+                self.subTest(artifact_type=artifact_type),
+                TemporaryDirectory() as tmpdir,
+            ):
+                data_dir = v2_run_dir(tmpdir, "s1")
+                source = Path(tmpdir) / "source.fasta"
+                source.write_text(">source\nACGT\n", encoding="utf-8")
+                paths = SessionPaths.from_run_dir(data_dir)
+                registry_source = paths.workflow_step_work_path(
+                    "step-000-inventory", "inventory", "registry.json"
+                )
+                registry_source.parent.mkdir(parents=True, exist_ok=True)
+                registry_source.write_text("{}\n", encoding="utf-8")
+                registry_ref = publish_artifact_record(
+                    data_dir,
+                    "s1",
+                    ArtifactMeta.from_file(
+                        registry_source,
+                        stage="inventory",
+                        method_name="test.registry",
+                        artifact_type="asset_registry",
+                    ),
+                ).ref
+                source_candidate = publish_registered_assembly_candidate(
+                    data_dir,
+                    "s1",
+                    workflow_step_id="step-000-inventory",
+                    asset_id="source",
+                    source_path=source,
+                    expected_sha256=sha256(source.read_bytes()).hexdigest(),
+                    expected_size_bytes=source.stat().st_size,
+                    asset_registry_ref=registry_ref,
+                )
+                primary_source = paths.workflow_step_work_path(
+                    "step-001-derived", "t2t", "primary.fasta"
+                )
+                primary_source.parent.mkdir(parents=True, exist_ok=True)
+                primary_source.write_text(">derived\nACGTA\n", encoding="utf-8")
+                primary_ref = publish_artifact_record(
+                    data_dir,
+                    "s1",
+                    ArtifactMeta.from_file(
+                        primary_source,
+                        stage="t2t",
+                        method_name="test.derived",
+                        artifact_type=artifact_type,
+                    ),
+                ).ref
+
+                derived = publish_derived_assembly_candidate(
+                    data_dir,
+                    "s1",
+                    workflow_step_id="step-001-derived",
+                    source_candidate=source_candidate,
+                    primary_output_ref=primary_ref,
+                    stage="t2t",
+                    method_name="test.derived",
+                    action_identity="decision-artifact-id",
+                )
+
+                self.assertEqual(derived.primary_output_ref, primary_ref)
+
+    def test_derived_candidate_replay_is_stable_and_conflicts_fail_closed(self):
+        with TemporaryDirectory() as tmpdir:
+            data_dir = v2_run_dir(tmpdir, "s1")
+            source = Path(tmpdir) / "source.fasta"
+            source.write_text(">source\nACGT\n", encoding="utf-8")
+            paths = SessionPaths.from_run_dir(data_dir)
+            registry_source = paths.workflow_step_work_path(
+                "step-000-inventory", "inventory", "registry.json"
+            )
+            registry_source.parent.mkdir(parents=True, exist_ok=True)
+            registry_source.write_text("{}\n", encoding="utf-8")
+            registry_ref = publish_artifact_record(
+                data_dir,
+                "s1",
+                ArtifactMeta.from_file(
+                    registry_source,
+                    stage="inventory",
+                    method_name="test.registry",
+                    artifact_type="asset_registry",
+                ),
+            ).ref
+            source_candidate = publish_registered_assembly_candidate(
+                data_dir,
+                "s1",
+                workflow_step_id="step-000-inventory",
+                asset_id="source",
+                source_path=source,
+                expected_sha256=sha256(source.read_bytes()).hexdigest(),
+                expected_size_bytes=source.stat().st_size,
+                asset_registry_ref=registry_ref,
+            )
+
+            def primary_ref(name: str, contents: str) -> ArtifactRef:
+                primary_source = paths.workflow_step_work_path(
+                    "step-001-derived", "t2t", name
+                )
+                primary_source.parent.mkdir(parents=True, exist_ok=True)
+                primary_source.write_text(contents, encoding="utf-8")
+                return publish_artifact_record(
+                    data_dir,
+                    "s1",
+                    ArtifactMeta.from_file(
+                        primary_source,
+                        stage="t2t",
+                        method_name="test.derived",
+                        artifact_type=T2T_PATCHED_ASSEMBLY,
+                    ),
+                ).ref
+
+            first_primary = primary_ref("first.fasta", ">one\nACGTA\n")
+            first = publish_derived_assembly_candidate(
+                data_dir,
+                "s1",
+                workflow_step_id="step-001-derived",
+                source_candidate=source_candidate,
+                primary_output_ref=first_primary,
+                stage="t2t",
+                method_name="test.derived",
+                action_identity="persisted-decision",
+            )
+            replay = publish_derived_assembly_candidate(
+                data_dir,
+                "s1",
+                workflow_step_id="step-001-derived",
+                source_candidate=source_candidate,
+                primary_output_ref=first_primary,
+                stage="t2t",
+                method_name="test.derived",
+                action_identity="persisted-decision",
+            )
+            self.assertEqual(replay.ref, first.ref)
+
+            conflicting_primary = primary_ref("conflict.fasta", ">two\nACGTAA\n")
+            with self.assertRaises(OSError):
+                publish_derived_assembly_candidate(
+                    data_dir,
+                    "s1",
+                    workflow_step_id="step-001-derived",
+                    source_candidate=source_candidate,
+                    primary_output_ref=conflicting_primary,
+                    stage="t2t",
+                    method_name="test.derived",
+                    action_identity="persisted-decision",
+                )
 
 
 if __name__ == "__main__":

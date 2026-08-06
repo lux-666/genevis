@@ -201,7 +201,7 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
     they are not an execution plan or a fallback Plan Draft.
     """
 
-    from app.workflow import stages_through
+    from app.workflow import recommended_workflow_template, stages_through
 
     text = request_text.strip()
     if not text:
@@ -210,7 +210,7 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
     requested_stages: list[str]
     target_assembly_level: Literal["contig", "scaffold", "chromosome"]
     if any(token in lower for token in ("t2t", "telomere-to-telomere", "端粒到端粒")):
-        requested_stages = list(stages_through("t2t"))
+        requested_stages = list(recommended_workflow_template("t2t"))
         target_assembly_level = "chromosome"
     elif any(token in lower for token in ("hi-c", "hic", "染色体级", "chromosome")):
         requested_stages = list(stages_through("hic_scaffolding"))

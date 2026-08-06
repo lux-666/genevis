@@ -10,6 +10,7 @@ from typing import Any
 from langgraph.graph.state import CompiledStateGraph
 
 from app.configuration import load_descriptor_registry
+from app.control.workflow_plan import current_workflow_step_id
 from app.domains.parameter_recommendation.resolution import (
     render_config_keys,
     resolve_parameters,
@@ -120,6 +121,9 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
         dict(output),
         stage="hic_scaffolding",
         method_name=METHOD,
+        workflow_step_id=current_workflow_step_id(
+            state, expected_stage="hic_scaffolding"
+        ),
         session_id=session_id,
         data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),

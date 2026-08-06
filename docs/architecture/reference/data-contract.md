@@ -150,6 +150,16 @@ The ledger records what happened, in what order, and which immutable records
 prove it. It does not embed candidate tables, signal arrays, asset registries,
 model payloads, response-parse documents, or execution results.
 
+Every stage-runtime fact is occurrence-bound: it carries the canonical stage,
+a non-empty `workflow_step_id`, and an occurrence-aware subject or idempotency
+identity. Run-level facts such as session creation, terminal outcome, and
+checkpoint compaction remain explicit exceptions. The typed
+`record_occurrence_event` boundary is the normal writer for domain facts, while
+the central Ledger rejects a missing step ID for every runtime envelope that
+carries `stage`. `session_terminal` is the explicit diagnostic exception: it
+may retain a stage label without attributing the run-level outcome to one
+occurrence.
+
 ### 4.6 Reports are projections
 
 Reports are generated from authoritative artifacts and ledger events. Workflow
@@ -494,6 +504,11 @@ Requirements:
 - `summary` contains only bounded query fields.
 - Review events bind by workflow-step ID and review request ID, never only by
   stage name.
+- `env_preflight_blocked`, `candidate_comparison_generated`,
+  `registered_assembly_candidate_bound`, and `automatic_review_failed` are
+  stage-runtime facts and require the exact producing occurrence. Their
+  idempotency identities include that occurrence, so two same-stage failures
+  cannot collapse into one event.
 - Route facts use `stage_entered`, `stage_completed`, and `session_terminal`.
   A `stage_skipped` event is valid only for an explicit stage-local decision;
   absent frozen occurrences never produce one.
@@ -586,6 +601,13 @@ resume inputs. The accepted contract is that every report can be regenerated
 and carries an equivalent watermark; current-status and the stage-owned
 Assembly Review Markdown do not yet meet the full reconstruction/watermark
 boundary, as listed in [Architecture conformance](conformance.md).
+
+Trace reconstruction validates the complete frozen-input transaction and uses
+only the resulting verified RunConfig to project `workflow_steps`. If marker,
+hash, schema, or biological validation fails, it does not parse the changed
+RunConfig directly: it falls back to occurrence-bearing Ledger and artifact
+facts, reporting gaps when those durable facts are insufficient rather than
+inventing a registry order.
 
 ## 16. Central Path Ownership
 

@@ -612,7 +612,11 @@ def _execute_verified_frozen_session(
     if shared_parameters:
         state["shared_parameters"] = shared_parameters
 
-    graph = build_graph(backend=backend, data_dir=run_dir)
+    graph = build_graph(
+        backend=backend,
+        data_dir=run_dir,
+        verified_inputs=bundle,
+    )
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     resumed_from_blocked_checkpoint = False
     try:
@@ -691,6 +695,7 @@ def _execute_verified_frozen_session(
                 result,
                 session_id,
                 run_dir,
+                verified_inputs=bundle,
             )
         except ResumeTransactionError as exc:
             print(
@@ -809,6 +814,35 @@ def _print_noninteractive_gate_guidance(paths: SessionPaths) -> None:
         print(f"{label}: {shlex.join(command)}")
 
 
+def _record_automatic_review_failure(
+    *,
+    data_dir: str | Path,
+    session_id: str,
+    stage: str,
+    workflow_step_id: str,
+    gate_id: str,
+    error: Exception,
+    configured_seconds: int,
+    elapsed_seconds: float,
+) -> None:
+    """Record one automatic-review failure without folding distinct evidence."""
+
+    Ledger(data_dir).record_occurrence_event(
+        session_id,
+        "automatic_review_failed",
+        {
+            "gate_id": gate_id,
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "configured_seconds": configured_seconds,
+            "elapsed_seconds": elapsed_seconds,
+        },
+        stage=stage,
+        workflow_step_id=workflow_step_id,
+        subject_id=gate_id,
+    )
+
+
 def _interactive_gate_loop(
     graph: Any,
     config: RunnableConfig,
@@ -817,6 +851,7 @@ def _interactive_gate_loop(
     data_dir: str,
     *,
     claim_waiter: Any | None = None,
+    verified_inputs: "FrozenInputBundle | None" = None,
 ) -> dict[str, Any]:
     """Loop on foreground human gates until completion, cancellation, or failure."""
     from app.control.errors import ResumeValidationError
@@ -939,17 +974,21 @@ def _interactive_gate_loop(
                             data_dir=data_dir,
                         )
                     except ResumeValidationError as exc:
-                        Ledger(data_dir).record_event(
-                            session_id,
-                            "automatic_review_failed",
-                            {
-                                "stage": stage,
-                                "gate_id": gate_id,
-                                "error_type": type(exc).__name__,
-                                "error": str(exc),
-                                "configured_seconds": wait_seconds,
-                                "elapsed_seconds": elapsed,
-                            },
+                        interrupt = summary.get("active_interrupt") or {}
+                        workflow_step_id = str(
+                            interrupt.get("workflow_step_id")
+                            or summary.get("current_workflow_step_id")
+                            or ""
+                        )
+                        _record_automatic_review_failure(
+                            data_dir=data_dir,
+                            session_id=session_id,
+                            stage=stage,
+                            workflow_step_id=workflow_step_id,
+                            gate_id=gate_id,
+                            error=exc,
+                            configured_seconds=wait_seconds,
+                            elapsed_seconds=elapsed,
                         )
                         print(
                             f"error: automatic review failed: {exc}; "
@@ -989,6 +1028,7 @@ def _interactive_gate_loop(
                 checkpointer="sqlite",
                 blocked_timeout_seconds=blocked_timeout_seconds,
                 event_context=event_context,
+                verified_inputs=verified_inputs,
             )
         except ResumeTransactionError as exc:
             print(
@@ -1308,10 +1348,17 @@ def _run_resume(args: argparse.Namespace) -> int:
         )
         return 1
 
-    graph = build_graph(backend=backend, data_dir=str(data_dir))
     config: RunnableConfig = {"configurable": {"thread_id": args.session_id}}
     try:
         paths = SessionPaths.from_run_dir(data_dir)
+        from app.storage.frozen_inputs import validate_frozen_inputs
+
+        verified_inputs = validate_frozen_inputs(paths)
+        graph = build_graph(
+            backend=backend,
+            data_dir=str(data_dir),
+            verified_inputs=verified_inputs,
+        )
         decision_path = _snapshot_resume_decision(
             Path(args.decision_file), paths, decision
         )
@@ -1334,6 +1381,7 @@ def _run_resume(args: argparse.Namespace) -> int:
             source="cli",
             checkpointer=backend,
             event_context=event_context,
+            verified_inputs=verified_inputs,
         )
     except ResumeTransactionError as exc:
         if exc.phase == "validation":

@@ -25,6 +25,7 @@ from app.storage.paths import SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
+    from app.storage.frozen_inputs import FrozenInputBundle
 
 _MAX_INVALID_PROMPT_ATTEMPTS = 3
 GateClaimResult = Literal["claimed", "expired", "cancelled"]
@@ -1128,6 +1129,7 @@ def collect_gate_decision(
     *,
     summary: dict[str, Any] | None = None,
     render_brief: bool = True,
+    verified_inputs: "FrozenInputBundle | None" = None,
 ) -> tuple["ResumeReviewRequest", dict[str, Any]] | None:
     """Inspect a blocked session, prompt operator, validate request schema.
 
@@ -1137,7 +1139,11 @@ def collect_gate_decision(
     """
     from app.review.base import ResumeReviewRequest
 
-    summary = summary or load_blocked_gate_summary(session_id, data_dir)
+    summary = summary or load_blocked_gate_summary(
+        session_id,
+        data_dir,
+        verified_inputs=verified_inputs,
+    )
     if summary.get("error"):
         print(f"error: {summary['error']}", file=sys.stderr)
         return None
@@ -1196,18 +1202,28 @@ def collect_gate_decision(
     return request, raw_decision
 
 
-def load_blocked_gate_summary(session_id: str, data_dir: str) -> dict[str, Any]:
+def load_blocked_gate_summary(
+    session_id: str,
+    data_dir: str,
+    *,
+    verified_inputs: "FrozenInputBundle | None" = None,
+) -> dict[str, Any]:
     """Load the verified checkpoint summary used by foreground and manual review."""
 
     from app.control.lifecycle import inspect_session
 
-    return _checkpoint_blocked_summary(session_id, data_dir) or inspect_session(
-        session_id, data_dir
-    )
+    return _checkpoint_blocked_summary(
+        session_id,
+        data_dir,
+        verified_inputs=verified_inputs,
+    ) or inspect_session(session_id, data_dir)
 
 
 def _checkpoint_blocked_summary(
-    session_id: str, data_dir: str
+    session_id: str,
+    data_dir: str,
+    *,
+    verified_inputs: "FrozenInputBundle | None" = None,
 ) -> dict[str, Any] | None:
     """Return a blocked-state summary from sqlite checkpoint state, if present."""
     try:
@@ -1217,7 +1233,16 @@ def _checkpoint_blocked_summary(
 
         if not checkpoint_db_path(data_dir).exists():
             return None
-        graph = build_graph(backend="sqlite", data_dir=data_dir)
+        paths = SessionPaths.from_run_dir(data_dir)
+        if verified_inputs is None:
+            from app.storage.frozen_inputs import validate_frozen_inputs
+
+            verified_inputs = validate_frozen_inputs(paths)
+        graph = build_graph(
+            backend="sqlite",
+            data_dir=data_dir,
+            verified_inputs=verified_inputs,
+        )
         snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
     except Exception:
         return None
@@ -1324,7 +1349,20 @@ def run_interactive_review(
     )
     from app.graph.checkpointer import checkpoint_db_path
 
-    result = collect_gate_decision(session_id, data_dir)
+    try:
+        paths = SessionPaths.from_run_dir(data_dir)
+        from app.storage.frozen_inputs import validate_frozen_inputs
+
+        verified_inputs = validate_frozen_inputs(paths)
+    except (OSError, ValueError) as exc:
+        print(f"error: frozen inputs could not be verified: {exc}", file=sys.stderr)
+        return 1
+
+    result = collect_gate_decision(
+        session_id,
+        data_dir,
+        verified_inputs=verified_inputs,
+    )
     if result is None:
         return 1
     request, raw_decision = result
@@ -1344,7 +1382,15 @@ def run_interactive_review(
 
     from app.graph.builder import build_graph
 
-    graph = build_graph(backend="sqlite", data_dir=data_dir)
+    try:
+        graph = build_graph(
+            backend="sqlite",
+            data_dir=data_dir,
+            verified_inputs=verified_inputs,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"error: frozen inputs could not be verified: {exc}", file=sys.stderr)
+        return 1
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
 
     try:
@@ -1356,6 +1402,7 @@ def run_interactive_review(
             request=request,
             source="interactive_review",
             checkpointer="sqlite",
+            verified_inputs=verified_inputs,
         )
     except ResumeTransactionError as exc:
         if exc.phase == "validation":

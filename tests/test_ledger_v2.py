@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.entrypoints.run import _record_automatic_review_failure
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.artifacts import register_artifact_records
@@ -302,6 +303,90 @@ class LedgerV2Tests(unittest.TestCase):
                     "terminal.completed.stage_outputs.read_qc.summary_artifact_ref"
                 ]["path_ref"],
                 "artifacts/steps/step-001-read_qc/read_qc/summary.json",
+            )
+
+    def test_stage_runtime_event_requires_an_occurrence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+
+            with self.assertRaisesRegex(ValueError, "workflow_step_id"):
+                ledger.record_event(
+                    "s1",
+                    "env_preflight_blocked",
+                    {"method_name": "read_qc.long_read_stats.seqkit_stats"},
+                    stage="read_qc",
+                )
+
+            event = ledger.record_occurrence_event(
+                "s1",
+                "env_preflight_blocked",
+                {"method_name": "read_qc.long_read_stats.seqkit_stats"},
+                stage="read_qc",
+                workflow_step_id="step-001-read_qc",
+                subject_id="read_qc.long_read_stats.seqkit_stats:seqkit",
+            )
+            self.assertEqual(event["workflow_step_id"], "step-001-read_qc")
+
+    def test_raw_custom_stage_event_requires_an_occurrence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+
+            with self.assertRaisesRegex(ValueError, "workflow_step_id"):
+                ledger.record_event(
+                    "s1",
+                    "custom_stage_runtime_fact",
+                    {"detail": "unbound"},
+                    stage="assembly",
+                )
+
+            ledger.record_event(
+                "s1",
+                "custom_stage_runtime_fact",
+                {"detail": "bound"},
+                stage="assembly",
+                workflow_step_id="step-001-assembly",
+            )
+            terminal = ledger.record_session_terminal(
+                "s1",
+                outcome="failed",
+                stage="assembly",
+            )
+            self.assertIsNone(terminal)
+            rows = ledger.read_event_rows("s1")
+            self.assertEqual(rows[-2]["workflow_step_id"], "step-001-assembly")
+            self.assertIsNone(rows[-1]["workflow_step_id"])
+
+    def test_automatic_review_failure_replays_without_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            kwargs = {
+                "data_dir": paths.run_dir,
+                "session_id": "s1",
+                "stage": "assembly_review",
+                "workflow_step_id": "step-001-assembly_review",
+                "gate_id": "assembly_review",
+                "error": ValueError("review request is malformed"),
+                "configured_seconds": 30,
+                "elapsed_seconds": 30.0,
+            }
+
+            _record_automatic_review_failure(**kwargs)
+            _record_automatic_review_failure(**kwargs)
+            _record_automatic_review_failure(
+                **{**kwargs, "elapsed_seconds": 31.0}
+            )
+
+            events = [
+                event
+                for event in Ledger(paths.run_dir).read_events("s1")
+                if event["event_type"] == "automatic_review_failed"
+            ]
+            self.assertEqual(len(events), 2)
+            self.assertEqual(
+                {event["workflow_step_id"] for event in events},
+                {"step-001-assembly_review"},
             )
 
 

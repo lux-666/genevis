@@ -132,6 +132,7 @@ class FrozenInputBundle:
     marker: FrozenInputsMarker
     manifest: InputManifest
     run_config: RunConfig
+    declarations: CanonicalInputDeclarations
 
     def file_sha256(self, key: str) -> str:
         try:
@@ -726,6 +727,7 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
         marker=marker,
         manifest=manifest,
         run_config=run_config,
+        declarations=declarations,
     )
 
 

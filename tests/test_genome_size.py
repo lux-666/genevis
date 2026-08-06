@@ -18,7 +18,7 @@ from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import resolve_assembly_parameters
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.inventory.nodes import validate_inputs
-from app.storage.frozen_inputs import freeze_session_inputs
+from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
 from app.storage.paths import SessionPaths
 
 
@@ -246,7 +246,10 @@ def test_manifest_only_genome_size_reaches_assembly_l1_freeze(
             data_dir=str(paths.run_dir),
         )
 
-        state = {**state, **validate_inputs(state)}
+        state = {
+            **state,
+            **validate_inputs(state, verified_inputs=validate_frozen_inputs(paths)),
+        }
         assert state["shared_parameters"] == {
             "estimated_genome_size": 2_000_000,
         }

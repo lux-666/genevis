@@ -187,6 +187,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
         candidate_bundle_ref: dict,
         primary_output_ref: dict,
         source_stage: str,
+        workflow_step_id: str,
         raw_candidate_bundle_ref: dict | None = None,
         raw_primary_output_ref: dict | None = None,
     ) -> None:
@@ -202,6 +203,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             resource_type="assembly",
             paths=[str(primary_path)],
             source_stage=source_stage,
+            workflow_step_id=workflow_step_id,
             metadata=metadata,
         ).to_dict()
 
@@ -269,6 +271,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 candidate_bundle_ref=purged_bundle_ref,
                 primary_output_ref=purged_primary_ref,
                 source_stage="assembly_dedup",
+                workflow_step_id="step-002-assembly_dedup",
                 raw_candidate_bundle_ref=raw_bundle_ref,
                 raw_primary_output_ref=raw_primary_ref,
             )
@@ -321,11 +324,13 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 candidate_bundle_ref=raw_bundle_ref,
                 primary_output_ref=raw_primary_ref,
                 source_stage="assembly",
+                workflow_step_id="step-001-assembly",
             )
             state["resource_refs"]["long_reads"] = ResourceRef(
                 resource_type="long_reads",
                 paths=[str(reads)],
                 source_stage="read_qc",
+                workflow_step_id="step-001-read_qc",
                 metadata={
                     "asset_registry_ref": state["asset_registry_ref"],
                     "asset_ids": [member_id],

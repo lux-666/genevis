@@ -94,6 +94,13 @@ from app.stages.t2t.state import (
 from app.storage.artifacts import (
     artifact_ref_for_path,
     publish_or_recover_work_artifact,
+    resolve_artifact_ref,
+)
+from app.storage.assembly_candidates import (
+    AssemblyCandidateBundleError,
+    VerifiedExecutedCandidate,
+    load_executed_candidate_bundle,
+    publish_derived_assembly_candidate,
 )
 from app.storage.asset_registry import load_asset_registry
 from app.storage.ledger import Ledger
@@ -585,6 +592,7 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
         env_dispatch_input,
         stage="t2t",
         method_name=T2T_ALIGNMENT_METHOD,
+        workflow_step_id=current_workflow_step_id(state, expected_stage="t2t"),
         session_id=state["session_id"],
         data_dir=absolute_data_dir(state),
         input_manifest_ref=state.get("input_manifest_ref", ""),
@@ -1037,6 +1045,26 @@ def commit_t2t(state: TopLevelState) -> StateUpdate:
             == _canonical_path(str(input_assembly_ref))
         )
         if current_assembly_matches_output:
+            if adopted_patch:
+                try:
+                    _verify_t2t_adopted_candidate(
+                        state,
+                        current_assembly_metadata=current_assembly.metadata,
+                        assembly_path=str(assembly_ref),
+                    )
+                except (
+                    AssemblyCandidateBundleError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    reason = f"t2t adopted candidate provenance is invalid: {exc}"
+                    return {
+                        **_fail(state, reason),
+                        "current_stage": "t2t",
+                        "supervision_state": "failed_terminal",
+                        "last_error": reason,
+                    }
             return update
         if not current_assembly_matches_input:
             reason = (
@@ -1102,15 +1130,59 @@ def commit_t2t(state: TopLevelState) -> StateUpdate:
                 }
             )
 
-        if adopted_patch and current_assembly_matches_input:
-            if current_assembly.metadata.get("candidate_bundle_ref") is not None:
-                metadata["input_candidate_bundle_ref"] = (
-                    current_assembly.metadata["candidate_bundle_ref"]
+        if adopted_patch:
+            try:
+                if assembly_dependency.kind != "artifact":
+                    raise AssemblyCandidateBundleError(
+                        "adopted t2t patch has no persisted primary output artifact"
+                    )
+                source_candidate = _verify_t2t_adopted_candidate(
+                    state,
+                    current_assembly_metadata=current_assembly.metadata,
+                    assembly_path=str(input_assembly_ref),
                 )
-            if current_assembly.metadata.get("primary_output_ref") is not None:
-                metadata["input_primary_output_ref"] = (
-                    current_assembly.metadata["primary_output_ref"]
+                decision_ref = _t2t_adoption_decision_ref(state, out)
+                derived_candidate = publish_derived_assembly_candidate(
+                    absolute_data_dir(state),
+                    state["session_id"],
+                    workflow_step_id=current_workflow_step_id(
+                        state, expected_stage="t2t"
+                    ),
+                    source_candidate=source_candidate,
+                    primary_output_ref=assembly_dependency.artifact_ref,
+                    stage="t2t",
+                    method_name=T2T_CONTRACT_METHOD,
+                    action_identity=decision_ref.artifact_id,
                 )
+            except (
+                AssemblyCandidateBundleError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                reason = f"t2t adopted candidate publication failed: {exc}"
+                return {
+                    **_fail(state, reason),
+                    "current_stage": "t2t",
+                    "supervision_state": "failed_terminal",
+                    "last_error": reason,
+                }
+            metadata.update(
+                {
+                    "candidate_bundle_ref": derived_candidate.ref.model_dump(
+                        mode="json"
+                    ),
+                    "primary_output_ref": (
+                        derived_candidate.primary_output_ref.model_dump(mode="json")
+                    ),
+                    "input_candidate_bundle_ref": source_candidate.ref.model_dump(
+                        mode="json"
+                    ),
+                    "input_primary_output_ref": (
+                        source_candidate.primary_output_ref.model_dump(mode="json")
+                    ),
+                }
+            )
         update["resource_refs"] = update_resource_ref(
             state,
             "assembly",
@@ -1451,6 +1523,46 @@ def apply_t2t_review_decision(
         **commit_update,
         "active_interrupt": None,
     }
+
+
+def _verify_t2t_adopted_candidate(
+    state: TopLevelState,
+    *,
+    current_assembly_metadata: Mapping[str, Any],
+    assembly_path: str,
+) -> VerifiedExecutedCandidate:
+    """Load the exact current candidate that produced the T2T input assembly."""
+
+    candidate_ref = current_assembly_metadata.get("candidate_bundle_ref")
+    if candidate_ref is None:
+        raise AssemblyCandidateBundleError(
+            "adopted t2t patch requires the current candidate_bundle_ref"
+        )
+    source_candidate = load_executed_candidate_bundle(
+        absolute_data_dir(state), state["session_id"], candidate_ref
+    )
+    if _canonical_path(str(source_candidate.primary_output_path)) != _canonical_path(
+        assembly_path
+    ):
+        raise AssemblyCandidateBundleError(
+            "current candidate primary output does not match the t2t input assembly"
+        )
+    return source_candidate
+
+
+def _t2t_adoption_decision_ref(
+    state: TopLevelState,
+    out: T2TStageCursor,
+) -> ArtifactRef:
+    """Resolve the immutable decision used as derived-candidate identity."""
+
+    decision_ref = ArtifactRef.model_validate(out.get("review_decision_artifact_ref"))
+    if decision_ref.artifact_type != "t2t.review_decision":
+        raise AssemblyCandidateBundleError(
+            "adopted t2t patch requires its persisted review decision artifact"
+        )
+    resolve_artifact_ref(absolute_data_dir(state), state["session_id"], decision_ref)
+    return decision_ref
 
 
 def _t2t_review_binding(

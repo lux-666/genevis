@@ -49,6 +49,23 @@ class TuiIntakeTests(unittest.TestCase):
         self.assertIsNone(draft.intake.ont_reads)
         self.assertEqual(next_intake_clarification(draft).role, "ont_reads")
 
+    def test_t2t_goal_recommends_distinct_post_t2t_assembly_review(self):
+        intent = deterministic_workflow_intent("为该样本做 T2T 组装")
+
+        self.assertEqual(
+            intent.requested_stages,
+            [
+                "read_qc",
+                "genome_survey",
+                "assembly",
+                "assembly_dedup",
+                "assembly_review",
+                "hic_scaffolding",
+                "t2t",
+                "assembly_review",
+            ],
+        )
+
     def test_hifiasm_goal_collects_primary_and_enabled_companion_roles(self):
         intent = deterministic_workflow_intent(
             "用 Hifiasm 做 assembly，HiFi 作为主输入，"

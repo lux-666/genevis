@@ -20,11 +20,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.execution.evidence import load_frozen_attempt
+from app.integrity import sha256_file
 from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
     ASSEMBLY_REVIEW_PACKET,
+    HIC_SCAFFOLDED_ASSEMBLY,
+    T2T_PATCHED_ASSEMBLY,
     ArtifactMeta,
     AssemblyCandidateBundle,
     ReviewDecisionArtifact,
@@ -41,7 +44,12 @@ from app.stages.assembly_review.method_application.quast import (
     build_quast_graph,
     freeze_quast_attempts,
 )
+from app.stages.assembly_review.nodes import resolve_candidates
 from app.storage.artifacts import publish_artifact_record
+from app.storage.assembly_candidates import (
+    publish_derived_assembly_candidate,
+    publish_registered_assembly_candidate,
+)
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -113,6 +121,159 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
         self.assertEqual(freeze_quast_attempts(state), {})
         self.assertEqual(freeze_busco_attempts(state), {})
+
+    def test_resolves_t2t_and_hic_derived_current_candidates_without_fallback(self):
+        producer_cases = (
+            ("t2t", T2T_PATCHED_ASSEMBLY, "t2t.contract"),
+            (
+                "hic_scaffolding",
+                HIC_SCAFFOLDED_ASSEMBLY,
+                "hic_scaffolding.contract",
+            ),
+        )
+        for producer_stage, primary_type, method_name in producer_cases:
+            with (
+                self.subTest(producer_stage=producer_stage),
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
+                session_id = "s1"
+                producer_step_id = f"step-002-{producer_stage}"
+                data_dir = v2_run_dir(tmpdir, session_id)
+                state = initial_state(
+                    session_id=session_id,
+                    input_manifest_ref="control/manifest.yaml",
+                    data_dir=str(data_dir),
+                    workflow_steps=[
+                        {
+                            "step_id": "step-000-inventory",
+                            "stage": "inventory",
+                            "allow_local_execution": False,
+                        },
+                        {
+                            "step_id": "step-001-assembly",
+                            "stage": "assembly",
+                            "allow_local_execution": True,
+                        },
+                        {
+                            "step_id": producer_step_id,
+                            "stage": producer_stage,
+                            "allow_local_execution": True,
+                        },
+                        {
+                            "step_id": "step-003-assembly_review",
+                            "stage": "assembly_review",
+                            "allow_local_execution": True,
+                        },
+                    ],
+                )
+                state["workflow_step_index"] = 3
+                state["entered_workflow_step_index"] = 3
+                state["current_stage"] = "assembly_review"
+                state["stage_outputs"] = {"assembly_review": {}}
+
+                paths = SessionPaths.from_run_dir(data_dir)
+                registry_source = paths.workflow_step_work_path(
+                    "step-000-inventory", "inventory", "asset_registry.json"
+                )
+                registry_source.parent.mkdir(parents=True, exist_ok=True)
+                registry_source.write_text(
+                    json.dumps({"session_id": session_id, "assets": []}),
+                    encoding="utf-8",
+                )
+                registry_ref = publish_artifact_record(
+                    data_dir,
+                    session_id,
+                    ArtifactMeta.from_file(
+                        registry_source,
+                        stage="inventory",
+                        method_name="inventory.register_assets",
+                        artifact_type="asset_registry",
+                    ),
+                ).ref
+                source_assembly = Path(tmpdir) / "source.fasta"
+                source_assembly.write_text(">source\nACGT\n", encoding="utf-8")
+                source_candidate = publish_registered_assembly_candidate(
+                    data_dir,
+                    session_id,
+                    workflow_step_id="step-000-inventory",
+                    asset_id="source-assembly",
+                    source_path=source_assembly,
+                    expected_sha256=sha256_file(source_assembly),
+                    expected_size_bytes=source_assembly.stat().st_size,
+                    asset_registry_ref=registry_ref,
+                )
+
+                derived_source = paths.workflow_step_work_path(
+                    producer_step_id,
+                    producer_stage,
+                    "derived_assembly.fasta",
+                )
+                derived_source.parent.mkdir(parents=True, exist_ok=True)
+                derived_source.write_text(">derived\nACGTAC\n", encoding="utf-8")
+                primary_ref = publish_artifact_record(
+                    data_dir,
+                    session_id,
+                    ArtifactMeta.from_file(
+                        derived_source,
+                        stage=producer_stage,
+                        method_name=method_name,
+                        artifact_type=primary_type,
+                    ),
+                ).ref
+                derived_candidate = publish_derived_assembly_candidate(
+                    data_dir,
+                    session_id,
+                    workflow_step_id=producer_step_id,
+                    source_candidate=source_candidate,
+                    primary_output_ref=primary_ref,
+                    stage=producer_stage,
+                    method_name=method_name,
+                    action_identity=f"decision:{producer_stage}",
+                )
+                state["resource_refs"]["assembly"] = ResourceRef(
+                    resource_type="assembly",
+                    paths=[str(derived_candidate.primary_output_path)],
+                    source_stage=producer_stage,
+                    workflow_step_id=producer_step_id,
+                    metadata={
+                        "candidate_bundle_ref": derived_candidate.ref.model_dump(
+                            mode="json"
+                        ),
+                        "primary_output_ref": (
+                            derived_candidate.primary_output_ref.model_dump(
+                                mode="json"
+                            )
+                        ),
+                        "input_candidate_bundle_ref": source_candidate.ref.model_dump(
+                            mode="json"
+                        ),
+                        "input_primary_output_ref": (
+                            source_candidate.primary_output_ref.model_dump(mode="json")
+                        ),
+                    },
+                ).to_dict()
+
+                update = resolve_candidates(state)
+                review = update["stage_outputs"]["assembly_review"]
+
+                self.assertEqual(review["status"], "resolved")
+                self.assertEqual(review["candidate_count"], 1)
+                self.assertEqual(len(review["candidates"]), 1)
+                candidate = review["candidates"][0]
+                self.assertEqual(candidate["source"], producer_stage)
+                self.assertEqual(
+                    candidate["bundle_ref"],
+                    derived_candidate.ref.model_dump(mode="json"),
+                )
+                self.assertEqual(
+                    candidate["primary_output_ref"],
+                    derived_candidate.primary_output_ref.model_dump(mode="json"),
+                )
+                self.assertEqual(
+                    Path(state["resource_refs"]["assembly"]["paths"][0]),
+                    derived_candidate.primary_output_path,
+                )
+                self.assertNotIn(producer_stage, state["stage_outputs"])
 
     def test_metric_graphs_resume_ran_checkpoint_at_collect(self):
         for module_name, build_graph, ran_status in [
@@ -422,6 +583,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             resource_type="assembly",
             paths=[str(paths.resolve_ref(current_primary.path_ref))],
             source_stage="assembly",
+            workflow_step_id="step-001-assembly",
             metadata=metadata,
         ).to_dict()
 
@@ -1681,6 +1843,16 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
                 state["data_dir"], state["session_id"]
             )
             events_before = Ledger(state["data_dir"]).read_events(state["session_id"])
+            comparison_events = [
+                event
+                for event in events_before
+                if event["event_type"] == "candidate_comparison_generated"
+            ]
+            self.assertEqual(len(comparison_events), 1)
+            self.assertEqual(
+                comparison_events[0]["workflow_step_id"],
+                "step-002-assembly_review",
+            )
             mtime_before = Path(first_ref).stat().st_mtime_ns
 
             replay_update = generate_candidate_comparison(merged)

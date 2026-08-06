@@ -10,12 +10,21 @@ from pathlib import Path
 
 import yaml
 
+from app.control.lifecycle import resume_review_state
+from app.control.workflow_plan import workflow_steps_from_run_config
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.inventory.builder import build_stage
-from app.stages.inventory.nodes import apply_inventory_resume_decision
 from app.storage.artifacts import resolve_artifact_ref
+from app.storage.frozen_inputs import (
+    FrozenInputBundle,
+    FrozenInputValidationError,
+    freeze_session_inputs,
+    validate_frozen_inputs,
+)
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -41,7 +50,12 @@ class InventoryStageTests(unittest.TestCase):
         return path
 
     @staticmethod
-    def _state(session_id: str, manifest_path: Path):
+    def _frozen_state(
+        session_id: str,
+        manifest_path: Path,
+        *,
+        shared_parameters: dict[str, object] | None = None,
+    ) -> tuple[dict, FrozenInputBundle]:
         manifest = (
             yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
             if manifest_path.exists()
@@ -55,31 +69,64 @@ class InventoryStageTests(unittest.TestCase):
             )
             else "read_qc"
         )
-        state = initial_state(
-            session_id=session_id,
-            input_manifest_ref="control/manifest.yaml",
-            data_dir=str(manifest_path.parents[1]),
-            workflow_steps=[
+        run_config_payload: dict[str, object] = {
+            "requested_stages": [
                 {
-                    "step_id": "step-000-inventory",
-                    "stage": "inventory",
-                    "allow_local_execution": False,
-                },
-                {
-                    "step_id": f"step-001-{next_stage}",
                     "stage": next_stage,
                     "allow_local_execution": False,
-                },
-            ],
+                }
+            ]
+        }
+        if shared_parameters is not None:
+            run_config_payload["shared_parameters"] = shared_parameters
+        run_config = RunConfig.model_validate(run_config_payload)
+        paths = SessionPaths.from_run_dir(manifest_path.parents[1])
+        envs = paths.control_dir / "test_envs.yaml"
+        envs.write_text(
+            "default:\n  fallback_env: test-env\npackages: {}\n",
+            encoding="utf-8",
         )
+        freeze_session_inputs(
+            paths,
+            manifest_draft=manifest_path,
+            run_config_draft=run_config,
+            config_path=envs,
+            probe_environments=False,
+        )
+        verified_inputs = validate_frozen_inputs(paths)
+        state = initial_state(
+            session_id=session_id,
+            input_manifest_ref=paths.to_ref(paths.input_manifest_path),
+            data_dir=str(manifest_path.parents[1]),
+            workflow_steps=workflow_steps_from_run_config(
+                verified_inputs.run_config
+            ),
+        )
+        if shared_parameters is not None:
+            state["shared_parameters"] = dict(shared_parameters)
         state["entered_workflow_step_index"] = 0
-        return state
+        return state, verified_inputs
 
-    def test_inventory_fails_without_manifest_ref(self):
+    def _invoke_inventory(
+        self,
+        session_id: str,
+        manifest_path: Path,
+        *,
+        shared_parameters: dict[str, object] | None = None,
+    ) -> tuple[dict, dict]:
+        state, verified_inputs = self._frozen_state(
+            session_id,
+            manifest_path,
+            shared_parameters=shared_parameters,
+        )
+        result = build_stage(verified_inputs=verified_inputs).invoke(state)
+        return state, result
+
+    def test_inventory_fails_without_verified_inputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = initial_state(
                 session_id="test",
-                input_manifest_ref="",
+                input_manifest_ref="control/input_manifest.yaml",
                 data_dir=str(v2_run_dir(tmpdir, "test")),
             )
             graph = build_stage()
@@ -87,18 +134,54 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             inventory_out = result["stage_outputs"]["inventory"]
             self.assertEqual(inventory_out["status"], "failed")
+            self.assertIn("verified FrozenInputBundle", result["last_error"])
 
-    def test_inventory_fails_with_missing_manifest_file(self):
+    def test_inventory_rejects_verified_inputs_from_another_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = {
+                "session_id": "s1",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(reads)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state, verified_inputs = self._frozen_state("s1", path)
+            other_run = v2_run_dir(Path(tmpdir) / "other-data", "s1")
+            cases = (
+                ("session_id", {**state, "session_id": "other-session"}),
+                ("run_dir", {**state, "data_dir": str(other_run)}),
+            )
+
+            for mismatch, mismatched_state in cases:
+                with self.subTest(mismatch=mismatch):
+                    result = build_stage(
+                        verified_inputs=verified_inputs
+                    ).invoke(mismatched_state)
+
+                    self.assertEqual(
+                        result["supervision_state"],
+                        "failed_terminal",
+                    )
+                    self.assertIn(
+                        f"verified inputs {mismatch} does not match runtime state",
+                        result["last_error"],
+                    )
+                    self.assertIsNone(result.get("asset_registry_ref"))
+
+    def test_freeze_fails_with_missing_manifest_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest = {"session_id": "s1", "assets": []}
             path = self._build_manifest_file(tmpdir, manifest, session_id="test")
             path.unlink()
-            state = self._state("test", path)
-            graph = build_stage()
-            result = graph.invoke(state)
-            self.assertEqual(result["supervision_state"], "failed_terminal")
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "manifest draft is not readable",
+            ):
+                self._frozen_state("test", path)
 
-    def test_inventory_fails_before_read_qc_when_asset_path_is_missing(self):
+    def test_freeze_fails_before_inventory_when_asset_path_is_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             missing = Path(tmpdir) / "missing.fastq"
             manifest = {
@@ -108,20 +191,12 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("s1", path)
-            graph = build_stage()
-            result = graph.invoke(state)
-
-            self.assertEqual(result["current_stage"], "inventory")
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIsNone(result.get("asset_registry_ref"))
-            self.assertEqual(
-                result["stage_outputs"]["inventory"]["status"], "validated"
-            )
-            self.assertFalse(result["stage_outputs"]["inventory"]["valid"])
-            self.assertIn("inventory validation failed", result["last_error"])
-            self.assertIn("raw_long_reads: missing files", result["last_error"])
-            self.assertIn(str(missing), result["last_error"])
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "raw_long_reads: missing files",
+            ) as raised:
+                self._frozen_state("s1", path)
+            self.assertIn(str(missing), str(raised.exception))
 
     def test_inventory_succeeds_with_valid_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -134,9 +209,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("s1", path)
-            graph = build_stage()
-            result = graph.invoke(state)
+            _, result = self._invoke_inventory("s1", path)
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertIn("asset_registry_ref", result)
             self.assertIsNotNone(result["asset_registry_ref"])
@@ -147,11 +220,12 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(len(registry["assets"]), 1)
             asset = registry["assets"][0]
             self.assertEqual(
-                asset["provenance"]["manifest_ref"], "control/manifest.yaml"
+                asset["provenance"]["manifest_ref"],
+                "control/input_manifest.yaml",
             )
             self.assertEqual(
                 asset["provenance"]["declarations"][0]["declared_path"],
-                str(fq),
+                str(fq.resolve()),
             )
             self.assertNotIn("manifest", result["stage_outputs"]["inventory"])
 
@@ -166,9 +240,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("unknown-platform", path)
-
-            result = build_stage().invoke(state)
+            _, result = self._invoke_inventory("unknown-platform", path)
 
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "running_stage")
@@ -191,10 +263,11 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("override-platform", path)
-            state["shared_parameters"] = {"platform": "ont"}
-
-            result = build_stage().invoke(state)
+            _, result = self._invoke_inventory(
+                "override-platform",
+                path,
+                shared_parameters={"platform": "ont"},
+            )
 
             registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(registry["assets"][0]["platform"], "ont")
@@ -222,9 +295,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("cyclone-s1", path)
-            graph = build_stage()
-            result = graph.invoke(state)
+            _, result = self._invoke_inventory("cyclone-s1", path)
             self.assertEqual(result["current_stage"], "read_qc")
             registry = json.loads(_registry_path(result).read_text())
             asset = registry["assets"][0]
@@ -252,9 +323,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("s2", path)
-            graph = build_stage()
-            result = graph.invoke(state)
+            _, result = self._invoke_inventory("s2", path)
             registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(len(registry["assets"]), 3)
             asset_types = {a["asset_type"] for a in registry["assets"]}
@@ -277,9 +346,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("s3", path)
-            graph = build_stage()
-            result = graph.invoke(state)
+            _, result = self._invoke_inventory("s3", path)
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "inventory")
             self.assertEqual(result["active_interrupt"]["gate_id"], "inventory_review")
@@ -308,8 +375,8 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("s3-continue", path)
-            blocked = build_stage().invoke(state)
+            state, verified_inputs = self._frozen_state("s3-continue", path)
+            blocked = build_stage(verified_inputs=verified_inputs).invoke(state)
             decision = ResumeReviewRequest(
                 session_id="s3-continue",
                 stage="inventory",
@@ -320,7 +387,13 @@ class InventoryStageTests(unittest.TestCase):
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
-            update = apply_inventory_resume_decision(blocked, decision)
+            with self.assertRaisesRegex(ValueError, "verified FrozenInputBundle"):
+                resume_review_state(blocked, decision)
+            update = resume_review_state(
+                blocked,
+                decision,
+                verified_inputs=verified_inputs,
+            )
 
             self.assertIsNone(update["active_interrupt"])
             self.assertEqual(update["current_stage"], "read_qc")
@@ -339,9 +412,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("s4", path)
-            graph = build_stage()
-            result = graph.invoke(state)
+            _, result = self._invoke_inventory("s4", path)
             self.assertEqual(result["current_stage"], "assembly_review")
             self.assertEqual(
                 result["stage_outputs"]["inventory"]["target_assembly_level"],
@@ -383,9 +454,7 @@ class InventoryStageTests(unittest.TestCase):
                     ],
                 }
                 path = self._build_manifest_file(tmpdir, manifest)
-                state = self._state(manifest["session_id"], path)
-
-                result = build_stage().invoke(state)
+                _, result = self._invoke_inventory(manifest["session_id"], path)
 
                 self.assertEqual(result["current_stage"], "assembly_review")
                 self.assertEqual(
@@ -409,9 +478,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = self._state("s5", path)
-            graph = build_stage()
-            graph.invoke(state)
+            state, _ = self._invoke_inventory("s5", path)
             events_path = Path(state["data_dir"]) / "ledger" / "events.jsonl"
             self.assertTrue(events_path.exists())
             lines = events_path.read_text().strip().split("\n")

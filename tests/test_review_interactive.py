@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -446,6 +447,64 @@ class PromptHicScaffoldingTests(unittest.TestCase):
 
 
 class RunInteractiveReviewTests(unittest.TestCase):
+    def test_review_threads_one_verified_bundle_to_graph_and_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_id = "review-bundle"
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, session_id)
+            checkpoint_db = run_dir / "checkpoints" / "checkpoints.sqlite"
+            checkpoint_db.write_text("", encoding="utf-8")
+            request = ResumeReviewRequest(
+                session_id=session_id,
+                stage="assembly_review",
+                gate_id="assembly_review",
+                decision="accept",
+                candidate_id="flye",
+            )
+            verified_inputs = object()
+            graph = object()
+            transaction_result = SimpleNamespace(
+                state={
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                },
+                decision_artifact_path=None,
+            )
+
+            with (
+                patch(
+                    "app.entrypoints.review_interactive.collect_gate_decision",
+                    return_value=(request, request.model_dump(mode="json")),
+                ) as collect,
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=verified_inputs,
+                ) as validate,
+                patch(
+                    "app.graph.builder.build_graph",
+                    return_value=graph,
+                ) as build,
+                patch(
+                    "app.control.resume_transaction.execute_resume_transaction",
+                    return_value=transaction_result,
+                ) as execute,
+            ):
+                code = run_interactive_review(session_id, str(data_root))
+
+        self.assertEqual(code, 0)
+        validate.assert_called_once()
+        self.assertEqual(validate.call_args.args[0].run_dir, run_dir)
+        self.assertIs(
+            collect.call_args.kwargs["verified_inputs"],
+            verified_inputs,
+        )
+        self.assertIs(build.call_args.kwargs["verified_inputs"], verified_inputs)
+        self.assertIs(
+            execute.call_args.kwargs["verified_inputs"],
+            verified_inputs,
+        )
+
     def test_session_not_found_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_id = "nonexistent"
@@ -572,6 +631,10 @@ class RunInteractiveReviewTests(unittest.TestCase):
                     "app.entrypoints.review_interactive.collect_gate_decision",
                     return_value=(request, raw_decision),
                 ),
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=SimpleNamespace(),
+                ),
                 patch("app.graph.builder.build_graph", return_value=graph),
                 patch("app.control.resume_transaction.validate_resume_review_state"),
                 patch(
@@ -587,13 +650,50 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 any(event["event_type"] == "resume_failed" for event in events)
             )
 
+    def test_dry_run_rejects_invalid_frozen_inputs_before_any_side_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_id = "review-invalid-frozen"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+            stderr = io.StringIO()
+
+            with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    side_effect=ValueError("frozen input hash mismatch"),
+                ),
+                patch(
+                    "app.entrypoints.review_interactive.collect_gate_decision"
+                ) as collect,
+                patch(
+                    "app.entrypoints.review_interactive.persist_decision_artifact"
+                ) as persist,
+                patch("sys.stderr", stderr),
+            ):
+                code = run_interactive_review(
+                    session_id,
+                    str(data_dir),
+                    dry_run=True,
+                )
+
+        self.assertEqual(code, 1)
+        self.assertIn("frozen input hash mismatch", stderr.getvalue())
+        collect.assert_not_called()
+        persist.assert_not_called()
+
     def test_dry_run_writes_decision_without_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_id, data_dir = _assembly_blocked_session(tmp)
             inputs = iter(["1", ""])
-            with patch("builtins.input", side_effect=lambda _: next(inputs)):
+            with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=SimpleNamespace(),
+                ) as validate,
+                patch("builtins.input", side_effect=lambda _: next(inputs)),
+            ):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
+            validate.assert_called_once()
             decision_dir = Path(data_dir) / "work" / "steps"
             decisions = list(decision_dir.glob("*/*/reviews/*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)
@@ -606,9 +706,16 @@ class RunInteractiveReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session_id, data_dir = _hic_blocked_session(tmp)
             inputs = iter(["2", "skipping scaffolding"])
-            with patch("builtins.input", side_effect=lambda _: next(inputs)):
+            with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=SimpleNamespace(),
+                ) as validate,
+                patch("builtins.input", side_effect=lambda _: next(inputs)),
+            ):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
+            validate.assert_called_once()
             decision_dir = Path(data_dir) / "work" / "steps"
             decisions = list(decision_dir.glob("*/*/reviews/*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)
@@ -675,6 +782,10 @@ class RunInteractiveReviewTests(unittest.TestCase):
             inputs = iter(["1", "continue inventory"])
 
             with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=SimpleNamespace(),
+                ),
                 patch("app.graph.builder.build_graph", return_value=graph),
                 patch("builtins.input", side_effect=lambda _: next(inputs)),
             ):

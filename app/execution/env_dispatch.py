@@ -63,6 +63,7 @@ def resolve_method_env(
     *,
     stage: str,
     method_name: str,
+    workflow_step_id: str,
     session_id: str,
     data_dir: str | Path,
     input_manifest_ref: str,
@@ -79,6 +80,8 @@ def resolve_method_env(
     ``env_target`` / ``missing_tools`` / ``method_name`` so callers can merge
     it into their stage output dict and route to the terminal failure edge.
     """
+    if not isinstance(workflow_step_id, str) or not workflow_step_id:
+        raise ValueError("workflow_step_id must be a non-empty string")
     if has_explicit_path_override(stage_out):
         # PATH override: skip conda preflight, but still resolve and preflight
         # external packages (filesystem-only, independent of conda/PATH) so the
@@ -102,6 +105,7 @@ def resolve_method_env(
                             input_manifest_ref=input_manifest_ref,
                             stage=stage,
                             method_name=method_name,
+                            workflow_step_id=workflow_step_id,
                             status="missing_tool",
                             env_target=package.install_root,
                             missing_tools=check.missing_paths,
@@ -129,6 +133,7 @@ def resolve_method_env(
                 input_manifest_ref=input_manifest_ref,
                 stage=stage,
                 method_name=method_name,
+                workflow_step_id=workflow_step_id,
                 status=conda_result.status,
                 env_target=conda_result.env_target,
                 missing_tools=conda_result.missing_tools,
@@ -159,6 +164,7 @@ def resolve_method_env(
                 input_manifest_ref=input_manifest_ref,
                 stage=stage,
                 method_name=method_name,
+                workflow_step_id=workflow_step_id,
                 status="missing_tool",
                 env_target=packages[0].install_root,
                 missing_tools=all_missing,
@@ -207,13 +213,13 @@ def _record_preflight_block(
     input_manifest_ref: str,
     stage: str,
     method_name: str,
+    workflow_step_id: str,
     status: str,
     env_target: str,
     missing_tools: list[str],
     detail: str,
 ) -> MethodEnvBlock:
     event = {
-        "stage": stage,
         "method_name": method_name,
         "status": status,
         "env_target": env_target,
@@ -222,7 +228,17 @@ def _record_preflight_block(
     }
     ledger = Ledger(Path(data_dir))
     ledger.create_session(session_id, input_manifest_ref)
-    ledger.record_event(session_id, "env_preflight_blocked", event)
+    ledger.record_occurrence_event(
+        session_id,
+        "env_preflight_blocked",
+        event,
+        stage=stage,
+        workflow_step_id=workflow_step_id,
+        subject_id=f"{method_name}:{env_target}",
+        idempotency_key=(
+            f"env-preflight-blocked:{workflow_step_id}:{method_name}:{env_target}"
+        ),
+    )
     return {
         "status": status,
         "reason": detail,

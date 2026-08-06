@@ -978,7 +978,7 @@ def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
     if "hic_reads_registered" in asset_types:
         recommended.append("hic_scaffolding")
     if "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types:
-        recommended.append("t2t")
+        return [*dict.fromkeys(recommended), "t2t", "assembly_review"]
     return list(dict.fromkeys(recommended))
 
 

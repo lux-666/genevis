@@ -894,6 +894,58 @@ class ResumeCLITests(unittest.TestCase):
         self.assertFalse((data_dir / "checkpoints").exists())
         self.assertFalse((data_dir / "ledger").exists())
 
+    def test_resume_threads_one_verified_bundle_to_graph_and_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            paths = SessionPaths.from_run_dir(run_dir)
+            paths.checkpoint_db_path.write_text("", encoding="utf-8")
+            decision = self._write_decision(Path(tmp) / "decision.json")
+            verified_inputs = object()
+            graph = object()
+            transaction_result = SimpleNamespace(
+                state={
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                    "active_interrupt": None,
+                },
+                decision_artifact_path=None,
+            )
+
+            with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=verified_inputs,
+                ) as validate,
+                patch(
+                    "app.entrypoints.run.build_graph",
+                    return_value=graph,
+                ) as build,
+                patch(
+                    "app.control.resume_transaction.execute_resume_transaction",
+                    return_value=transaction_result,
+                ) as execute,
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id="s1",
+                        decision_file=str(decision),
+                        data_dir=str(data_root),
+                        checkpointer="sqlite",
+                    ),
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        validate.assert_called_once_with(paths)
+        self.assertIs(build.call_args.kwargs["verified_inputs"], verified_inputs)
+        self.assertIs(
+            execute.call_args.kwargs["verified_inputs"],
+            verified_inputs,
+        )
+
     def test_resume_started_records_resolved_session_data_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -945,6 +997,12 @@ class ResumeCLITests(unittest.TestCase):
             graph = _FakeResumeGraph(state)
 
             with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=SimpleNamespace(
+                        run_config=RunConfig(requested_stages=[])
+                    ),
+                ),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
                     "app.control.resume_transaction.resume_review_state",
