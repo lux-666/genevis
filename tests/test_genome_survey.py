@@ -63,6 +63,15 @@ def _genome_survey_workflow_steps() -> list[dict]:
             "stage": "assembly",
             "allow_local_execution": False,
         },
+        {
+            "step_id": "step-003-assembly_review",
+            "stage": "assembly_review",
+            "allow_local_execution": False,
+            "review_target": {
+                "resource_type": "assembly",
+                "producer_step_id": "step-002-assembly",
+            },
+        },
     ]
 
 
@@ -924,8 +933,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIn(str(published_read.path), script_text)
             self.assertNotIn(str(raw_reads), script_text)
             [attempt_path] = (
-                SessionPaths.from_run_dir(result["data_dir"])
-                .workflow_step_artifacts_dir("step-001-genome_survey", "genome_survey")
+                SessionPaths.from_run_dir(
+                    result["data_dir"]
+                ).workflow_step_artifacts_dir("step-001-genome_survey", "genome_survey")
                 / "attempts"
             ).glob("genome_survey_jellyfish/attempt.*.json")
             jellyfish_attempt = load_frozen_attempt(
@@ -1610,9 +1620,7 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
                 f"{conda_stub_dir}{os.pathsep}{jelly_stub_dir}{os.pathsep}{old_path}"
             )
             try:
-                injected_resolver = partial(
-                    resolve_method_env, config_path=envs_path
-                )
+                injected_resolver = partial(resolve_method_env, config_path=envs_path)
                 with (
                     patch(
                         "app.stages.genome_survey.method_application.jellyfish."

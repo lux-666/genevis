@@ -142,6 +142,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     "step_id": "step-001-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-000-inventory",
+                    },
                 },
                 {
                     "step_id": "step-002-hic_scaffolding",
@@ -303,9 +307,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             source_stage="inventory",
             workflow_step_id="step-000-inventory",
             metadata={
-                "candidate_bundle_ref": source_candidate.ref.model_dump(
-                    mode="json"
-                ),
+                "candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
                 "primary_output_ref": source_candidate.primary_output_ref.model_dump(
                     mode="json"
                 ),
@@ -1259,8 +1261,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertTrue(
                 executed_attempt["execution_ref"]["path_ref"].startswith(
-                    "artifacts/steps/step-002-hic_scaffolding/hic_scaffolding/"
-                    "attempts/"
+                    "artifacts/steps/step-002-hic_scaffolding/hic_scaffolding/attempts/"
                 )
             )
             self.assertEqual(
@@ -1278,10 +1279,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 self.assertTrue(Path(candidate[key]).is_file(), key)
 
             config = SessionPaths.from_run_dir(result["data_dir"])
-            config = config.workflow_step_work_dir(
-                "step-002-hic_scaffolding",
-                "hic_scaffolding",
-            ) / "autohic" / "cfg-autohic.txt"
+            config = (
+                config.workflow_step_work_dir(
+                    "step-002-hic_scaffolding",
+                    "hic_scaffolding",
+                )
+                / "autohic"
+                / "cfg-autohic.txt"
+            )
             config = config.read_text(encoding="utf-8")
             self.assertIn("ENZYME=MboI", config)
             self.assertIn(f"ERROR_PRETRAINED_MODEL={error_model.resolve()}", config)
@@ -1483,7 +1488,22 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 kept["stage_outputs"]["hic_scaffolding"]["output_assembly_ref"],
                 result["resource_refs"]["assembly"]["paths"][0],
             )
-            self.assertNotIn("resource_refs", kept)
+            self.assertEqual(
+                kept["resource_refs"]["assembly"]["paths"],
+                result["resource_refs"]["assembly"]["paths"],
+            )
+            self.assertEqual(
+                kept["resource_refs"]["assembly"]["source_stage"],
+                "hic_scaffolding",
+            )
+            self.assertEqual(
+                kept["resource_refs"]["assembly"]["workflow_step_id"],
+                "step-002-hic_scaffolding",
+            )
+            self.assertEqual(
+                kept["resource_refs"]["assembly"]["metadata"]["candidate_bundle_ref"],
+                result["resource_refs"]["assembly"]["metadata"]["candidate_bundle_ref"],
+            )
             kept_candidate_count = sum(
                 record["artifact_type"] == "draft_assembly.candidate"
                 for record in read_artifact_records(result["data_dir"], "s1")

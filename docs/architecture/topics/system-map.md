@@ -61,7 +61,7 @@ as a parameterized AutoHiC attempt.
 | `app/schemas/` | Cross-module state, plan, descriptor, artifact, execution, and manifest contracts |
 | `app/execution/` | Attempt freeze/run/collect kernel, Runner boundary, environment selection, and durable process evidence |
 | `app/storage/` | Run layout, immutable publication/index, Ledger, frozen inputs, and durable evidence records |
-| `app/review/` | Gate registry, immutable request/decision handling, and gate-specific approval semantics |
+| `app/review/` | Gate declarations, allowed decisions, occurrence validation, dispatch, timing metadata, and immutable request/decision handling; stage code owns payload semantics, prompt branches, and resume effects |
 | `app/control/` | Inspect, resume, timeout, terminalization, and other lifecycle coordination |
 | `app/reports/` | Operator-status and session-trace projections without control authority; only the session summary currently has a durable-record-only regeneration path |
 
@@ -87,8 +87,12 @@ ordered sequence of occurrences: stages may be repeated and need not follow
 registry order. Freeze adds one implicit inventory occurrence as
 `step-000-inventory`, then assigns every requested occurrence a position-based
 `step_id`. The frozen `workflow_steps` sequence—not registry order—is runtime
-authority. GapCloser and Base Polish remain manual-only placeholders; an
-occurrence of either fails closed.
+authority. Before freeze, sequence validation rejects an unclosed Assembly or
+T2T Review boundary and never inserts Review; a refining occurrence may become
+the handoff Review closes. GapCloser and Base Polish remain manual-only
+placeholders; an occurrence of either fails closed. Exact rules belong to
+[Runtime orchestration](runtime-orchestration.md) and
+[Stage contracts](../reference/stage-contracts.md).
 
 Real/operator new runs enter through `gene-agent run --manifest PATH --run-config
 PATH --data-dir PATH [--non-interactive]`. The manifest solely owns

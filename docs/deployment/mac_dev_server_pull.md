@@ -75,8 +75,11 @@ The manifest owns `session_id`, and output is placed at
 both files. The run config must explicitly contain one `requested_stages` list
 of `{stage, allow_local_execution}` objects; the boolean authorizes local
 process execution for that occurrence. `requested_stages: null` is rejected, while
-`[]` is valid. The command freezes that exact stage scope and dependency
-snapshot before SQLite execution. Add `--non-interactive` for automation; a
+`[]` is valid. Literal order and repeats are preserved, but unclosed mandatory
+Assembly/T2T Review boundaries are rejected rather than repaired or auto-filled;
+see [Runtime orchestration](../architecture/topics/runtime-orchestration.md).
+The command then freezes that exact stage scope and dependency snapshot before
+SQLite execution. Add `--non-interactive` for automation; a
 human gate persists
 `blocked_human` and directs the operator to `inspect`, `review`, and `resume`.
 `gene-agent tui --data-dir data/server_run/out` remains an optional
@@ -107,6 +110,11 @@ gene-agent resume \
 
 Resume validates session identity, review-request bindings, the decision body,
 checkpoint availability, and durable refs before changing workflow state.
+
+This pre-release runtime has no checkpoint migration. Before pulling upgraded
+code over an active server checkout, complete active sessions or retain the
+previous checkout and environment for their resumes; newer code can be unable
+to read an older SQLite checkpoint.
 
 ## Environment Expectations
 

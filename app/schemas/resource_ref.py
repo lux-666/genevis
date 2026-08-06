@@ -87,6 +87,15 @@ class ResourceRef:
             )
         if "resource_type" not in data:
             raise ValueError("ResourceRef.resource_type is required")
+        resource_type = data["resource_type"]
+        if not isinstance(resource_type, str):
+            raise TypeError("ResourceRef.resource_type must be a string")
+        source_stage = data.get("source_stage")
+        if source_stage is not None and not isinstance(source_stage, str):
+            raise TypeError("ResourceRef.source_stage must be a string or None")
+        workflow_step_id = data.get("workflow_step_id")
+        if workflow_step_id is not None and not isinstance(workflow_step_id, str):
+            raise TypeError("ResourceRef.workflow_step_id must be a string or None")
         paths = data.get("paths")
         if not isinstance(paths, list):
             raise TypeError("ResourceRef.paths must be a list")
@@ -94,18 +103,10 @@ class ResourceRef:
         if not isinstance(metadata, dict):
             raise TypeError("ResourceRef.metadata must be a dictionary")
         return cls(
-            resource_type=str(data["resource_type"]),
+            resource_type=resource_type,
             paths=list(paths),
-            source_stage=(
-                str(data["source_stage"])
-                if data.get("source_stage") is not None
-                else None
-            ),
-            workflow_step_id=(
-                str(data["workflow_step_id"])
-                if data.get("workflow_step_id") is not None
-                else None
-            ),
+            source_stage=source_stage,
+            workflow_step_id=workflow_step_id,
             metadata=dict(metadata),
         )
 

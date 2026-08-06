@@ -599,6 +599,8 @@ def _review_state(run_dir: Path, *, stage: str) -> dict:
     """Minimal frozen occurrence state for review persistence tests."""
 
     stages = ["inventory"] if stage == "inventory" else ["inventory", stage]
+    if stage in {"assembly", "t2t"}:
+        stages.append("assembly_review")
     step_index = stages.index(stage)
     return {
         "session_id": "s1",
@@ -612,6 +614,18 @@ def _review_state(run_dir: Path, *, stage: str) -> dict:
                 "step_id": f"step-{index:03d}-{item}",
                 "stage": item,
                 "allow_local_execution": False,
+                **(
+                    {
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": (
+                                f"step-{index - 1:03d}-{stages[index - 1]}"
+                            ),
+                        }
+                    }
+                    if item == "assembly_review"
+                    else {}
+                ),
             }
             for index, item in enumerate(stages)
         ],

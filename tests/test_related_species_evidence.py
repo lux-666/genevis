@@ -54,6 +54,10 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         "step_id": "step-002-assembly_review",
         "stage": "assembly_review",
         "allow_local_execution": True,
+        "review_target": {
+            "resource_type": "assembly",
+            "producer_step_id": "step-001-assembly",
+        },
     },
     {
         "step_id": "step-003-hic_scaffolding",
@@ -176,9 +180,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             )
             writer.writeheader()
             for taxid, value in lineage.items():
-                writer.writerow(
-                    {"Organism Taxonomic ID": taxid, lineage_header: value}
-                )
+                writer.writerow({"Organism Taxonomic ID": taxid, lineage_header: value})
         self._write_manifest(root)
 
     def _write_manifest(self, root: Path) -> None:
@@ -397,9 +399,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 [
                     self._row("GCA_000000003.1", "Otherus familymember", "2"),
                 ],
-                {
-                    "2": "Metazoa;Targetiformes;Targetidae;Otherus;Otherus familymember"
-                },
+                {"2": "Metazoa;Targetiformes;Targetidae;Otherus;Otherus familymember"},
                 lineage_header="",
             )
 
@@ -471,8 +471,9 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             self.assertTrue(ref.exists())
             self.assertEqual(
                 ref.parent,
-                SessionPaths.from_run_dir(state["data_dir"])
-                .workflow_step_artifacts_dir(
+                SessionPaths.from_run_dir(
+                    state["data_dir"]
+                ).workflow_step_artifacts_dir(
                     "step-002-assembly_review", "assembly_review"
                 ),
             )

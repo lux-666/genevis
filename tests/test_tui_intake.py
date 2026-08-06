@@ -26,6 +26,7 @@ from app.entrypoints.tui_intake import (
 )
 from app.schemas.ask_plan import PlanStageOccurrence
 from app.schemas.manifest import InputAssetSpec, PairedReadSpec
+from app.schemas.run_config import RunConfig
 from app.schemas.tui_intake import HiCPairedReadsFact, HiCReadPair, HifiReadsFact
 
 
@@ -65,6 +66,33 @@ class TuiIntakeTests(unittest.TestCase):
                 "assembly_review",
             ],
         )
+
+    def test_assembly_defaults_close_the_mandatory_review_boundary(self):
+        for request_text, target_level in (
+            ("assemble a genome", "contig"),
+            ("scaffold this genome", "scaffold"),
+        ):
+            with self.subTest(request_text=request_text):
+                intent = deterministic_workflow_intent(request_text)
+
+                self.assertEqual(intent.target_assembly_level, target_level)
+                self.assertEqual(
+                    intent.requested_stages,
+                    [
+                        "read_qc",
+                        "genome_survey",
+                        "assembly",
+                        "assembly_review",
+                    ],
+                )
+                RunConfig.model_validate(
+                    {
+                        "requested_stages": [
+                            {"stage": stage, "allow_local_execution": False}
+                            for stage in intent.requested_stages
+                        ]
+                    }
+                )
 
     def test_hifiasm_goal_collects_primary_and_enabled_companion_roles(self):
         intent = deterministic_workflow_intent(
@@ -214,7 +242,7 @@ class TuiIntakeTests(unittest.TestCase):
                 ],
             )
 
-    def test_llm_cannot_expand_deterministic_t2t_intent(self):
+    def test_llm_cannot_narrow_t2t_intent_to_unreviewed_assembly(self):
         request = "sample CHM13 做 T2T 组装"
 
         intent = parse_workflow_intent(
@@ -232,7 +260,24 @@ class TuiIntakeTests(unittest.TestCase):
         self.assertEqual(intent.sample_id, "CHM13")
         self.assertIsNone(intent.target_species)
         self.assertEqual(intent.target_assembly_level, "chromosome")
-        self.assertEqual(intent.requested_stages, ["assembly"])
+        self.assertEqual(
+            intent.requested_stages,
+            deterministic_workflow_intent(request).requested_stages,
+        )
+
+    def test_llm_cannot_drop_mandatory_review_from_assembly_intent(self):
+        intent = parse_workflow_intent(
+            "assembly",
+            llm_parser=lambda _request: {
+                "goal_text": "ignored",
+                "requested_stages": ["assembly"],
+            },
+        )
+
+        self.assertEqual(
+            intent.requested_stages,
+            deterministic_workflow_intent("assembly").requested_stages,
+        )
 
     def test_llm_intent_cannot_expand_explicit_stage_scope(self):
         intent = parse_workflow_intent(
@@ -249,15 +294,34 @@ class TuiIntakeTests(unittest.TestCase):
         )
 
     def test_llm_preserves_custom_order_and_repeated_stages_without_scope(self):
+        custom_sequence = [
+            "t2t",
+            "assembly_review",
+            "assembly",
+            "assembly_review",
+            "t2t",
+            "assembly_review",
+        ]
         intent = parse_workflow_intent(
             "custom workflow",
             llm_parser=lambda _request: {
                 "goal_text": "ignored",
-                "requested_stages": ["t2t", "assembly", "t2t"],
+                "requested_stages": custom_sequence,
             },
         )
 
-        self.assertEqual(intent.requested_stages, ["t2t", "assembly", "t2t"])
+        self.assertEqual(intent.requested_stages, custom_sequence)
+
+    def test_llm_invalid_custom_sequence_falls_back_to_inventory_only(self):
+        intent = parse_workflow_intent(
+            "custom workflow",
+            llm_parser=lambda _request: {
+                "goal_text": "ignored",
+                "requested_stages": ["t2t"],
+            },
+        )
+
+        self.assertEqual(intent.requested_stages, [])
 
     def test_path_extraction_keeps_invalid_path_for_local_validation(self):
         spans = extract_path_spans("ONT: /tmp/missing.fastq.gz, /tmp/a-directory")

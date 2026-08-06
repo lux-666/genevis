@@ -135,7 +135,11 @@ def _write_assembly_review_request(
                 "step_id": "step-001-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,
-            }
+                "review_target": {
+                    "resource_type": "assembly",
+                    "producer_step_id": "step-000-inventory",
+                },
+            },
         ],
         "workflow_step_index": 1,
     }
@@ -704,7 +708,8 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
         run_config = RunConfig.model_validate(
             {
                 "requested_stages": [
-                    {"stage": "assembly", "allow_local_execution": True}
+                    {"stage": "assembly", "allow_local_execution": True},
+                    {"stage": "assembly_review", "allow_local_execution": False},
                 ],
                 "shared_parameters": {"platform": "ont"},
                 "assembly": {
@@ -730,7 +735,8 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
         run_config = RunConfig.model_validate(
             {
                 "requested_stages": [
-                    {"stage": "assembly", "allow_local_execution": True}
+                    {"stage": "assembly", "allow_local_execution": True},
+                    {"stage": "assembly_review", "allow_local_execution": False},
                 ],
                 "assembly": {
                     "assembly_method": "hifiasm_ont",
@@ -975,6 +981,10 @@ class ResumeCLITests(unittest.TestCase):
                         "step_id": "step-001-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-000-inventory",
+                        },
                     },
                 ],
             )
@@ -989,9 +999,7 @@ class ResumeCLITests(unittest.TestCase):
                         gate_id="assembly_review",
                         reason="needs_review",
                     ),
-                    "stage_outputs": {
-                        "assembly_review": {"status": "blocked_human"}
-                    },
+                    "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
                 }
             )
             graph = _FakeResumeGraph(state)
@@ -1029,6 +1037,7 @@ class ResumeCLITests(unittest.TestCase):
                 event for event in events if event["event_type"] == "resume_started"
             ]
             self.assertEqual(started[0]["data_dir"], str(run_dir))
+
 
 class CheckpointerBackendResolutionTests(unittest.TestCase):
     def test_explicit_arg_wins_over_env_var(self):

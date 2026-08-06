@@ -61,6 +61,12 @@ Biological and stage contracts remain governed by their current specifications.
    `workflow_steps`, beginning with implicit `step-000-inventory` followed by
    position-derived IDs such as `step-001-t2t`. Runtime cannot append, reorder,
    or replace that sequence.
+7. Before the projection is frozen, `analyze_review_sequence` rejects a plan
+   that does not close an Assembly or T2T boundary with `assembly_review`; it
+   never synthesizes a Review occurrence. Each frozen Review step carries
+   `review_target = {resource_type: "assembly", producer_step_id: "..."}` for
+   the exact earlier assembly-handoff occurrence it must consume. A refining
+   handoff reached before closure may become that target.
 
 ## 3. Replay Terminology
 
@@ -474,6 +480,11 @@ internal resume transaction source and bound countdown metadata to identify the
 current `foreground_countdown`; its decision origin remains resolver-owned
 (`llm_provisional` or `auto_rule`), and request metadata cannot authorize itself.
 
+The review registry is the sole declaration and dispatch point for gate IDs,
+allowed decisions, occurrence validation, and timing metadata. It does not own
+stage payload meaning, prompt branches, or the state/resource effects of a
+decision; those remain with the registered stage applier and interactive code.
+
 ## 13. Ledger v2
 
 Each `ledger/events.jsonl` row contains a common envelope:
@@ -525,6 +536,8 @@ Checkpoint state may contain:
 - session and thread IDs;
 - immutable `workflow_steps`, active occurrence index, current stage, and
   supervision state;
+- immutable stage-scoped seeds; each repeated occurrence receives a fresh copy
+  of its stage seed rather than an occurrence-specific method configuration;
 - current stage status cursor;
 - current parameter-recommendation ref;
 - current parameter-attempt ID and compact ordered `ParameterAttempt` chain, or
@@ -716,6 +729,10 @@ Each pre-release session has one representation:
 - no runtime migration or alternate-layout lookup;
 - no aliases for report filenames or artifact types;
 - runtime code does not mix layouts within one run root.
+
+There is no checkpoint migration for this pre-release representation. A code
+upgrade can make an older checkpoint unreadable; complete active sessions before
+upgrading or retain the matching older checkout to resume them.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus

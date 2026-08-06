@@ -37,12 +37,17 @@ def _prepared_inputs(
     session_id: str = "manifest-session",
     requested_stages: list[str] | None = None,
 ):
+    stages = list(requested_stages or [])
+    if (
+        any(stage in {"assembly", "t2t"} for stage in stages)
+        and stages[-1] != "assembly_review"
+    ):
+        stages.append("assembly_review")
     return SimpleNamespace(
         manifest=SimpleNamespace(session_id=session_id),
         run_config=RunConfig(
             requested_stages=[
-                {"stage": stage, "allow_local_execution": False}
-                for stage in (requested_stages or [])
+                {"stage": stage, "allow_local_execution": False} for stage in stages
             ],
         ),
     )
@@ -452,9 +457,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                 if event["event_type"] == "registered_assembly_candidate_bound"
             ]
             self.assertEqual(len(registered), 1)
-            self.assertEqual(
-                registered[0]["workflow_step_id"], "step-000-inventory"
-            )
+            self.assertEqual(registered[0]["workflow_step_id"], "step-000-inventory")
 
     def test_noninteractive_run_persists_and_reopens_blocked_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -635,6 +638,10 @@ class FrozenHelperTests(unittest.TestCase):
                                 "allow_local_execution": False,
                             },
                             {"stage": "t2t", "allow_local_execution": True},
+                            {
+                                "stage": "assembly_review",
+                                "allow_local_execution": False,
+                            },
                         ],
                         "t2t": {"mode": "manual_review"},
                         "review_policy": {
@@ -685,11 +692,24 @@ class FrozenHelperTests(unittest.TestCase):
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-001-t2t",
+                    },
                 },
                 {
                     "step_id": "step-003-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-004-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-003-t2t",
+                    },
                 },
             ],
         )
@@ -940,7 +960,8 @@ class FrozenHelperTests(unittest.TestCase):
                 paths=paths,
                 run_config=RunConfig(
                     requested_stages=[
-                        {"stage": "assembly", "allow_local_execution": False}
+                        {"stage": "assembly", "allow_local_execution": False},
+                        {"stage": "assembly_review", "allow_local_execution": False},
                     ]
                 ),
             )

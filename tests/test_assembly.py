@@ -379,6 +379,15 @@ class AssemblyStageTests(unittest.TestCase):
                     "stage": "assembly_dedup",
                     "allow_local_execution": True,
                 },
+                {
+                    "step_id": "step-003-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-002-assembly_dedup",
+                    },
+                },
             ],
         )
         state["workflow_step_index"] = 1
@@ -1674,6 +1683,15 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                     "step_id": "step-002-assembly_dedup",
                     "stage": "assembly_dedup",
                     "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-003-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-002-assembly_dedup",
+                    },
                 },
             ],
         )

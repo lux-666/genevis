@@ -37,7 +37,7 @@ from app.review.gates import registered_review_stages
 from app.schemas.manifest import InputManifest, Platform
 from app.schemas.shared_parameters import SpeciesFacts
 from app.schemas.state import MAX_WORKFLOW_STEPS
-from app.workflow import MANUAL_ONLY_STAGES
+from app.workflow import MANUAL_ONLY_STAGES, analyze_review_sequence
 
 RequestableStage = Literal[
     "read_qc",
@@ -524,9 +524,7 @@ class RunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    requested_stages: list[RequestedStage] = Field(
-        max_length=MAX_WORKFLOW_STEPS - 1
-    )
+    requested_stages: list[RequestedStage] = Field(max_length=MAX_WORKFLOW_STEPS - 1)
     shared_parameters: RunConfigSharedParameters | None = None
     read_qc: ReadQCRunConfig | None = None
     genome_survey: GenomeSurveyRunConfig | None = None
@@ -556,15 +554,20 @@ class RunConfig(BaseModel):
         invalid_local = [
             request.stage
             for request in self.requested_stages
-            if request.allow_local_execution
-            and request.stage in MANUAL_ONLY_STAGES
+            if request.allow_local_execution and request.stage in MANUAL_ONLY_STAGES
         ]
         if invalid_local:
             raise ValueError(
                 "run_config.requested_stages allow_local_execution is unsupported "
-                "for manual-only/non-local stage(s): "
-                + ", ".join(invalid_local)
+                "for manual-only/non-local stage(s): " + ", ".join(invalid_local)
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_mandatory_assembly_reviews(self) -> "RunConfig":
+        """Reject an occurrence sequence with an unclosed assembly handoff."""
+
+        analyze_review_sequence(self.requested_stage_names())
         return self
 
     @model_validator(mode="after")

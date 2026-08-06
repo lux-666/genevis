@@ -184,6 +184,38 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             [{"stage": "assembly", "allow_local_execution": True}],
         )
 
+    def test_no_intent_or_manifest_recommendation_defaults_to_inventory_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\nassets:\n"
+                "  - asset_type: raw_short_dna_reads\n"
+                f"    paths:\n      - {reads}\n"
+                "    format: fastq\n    platform: illumina\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(manifest_ref=str(manifest), entry_request={})
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+            self.assertEqual(result.kind, "stage_selection")
+            self.assertEqual(
+                result.choices["available_stages"], _all_selectable_stages()
+            )
+            self.assertEqual(result.choices["suggested_stage_occurrences"], [])
+            selected = merge_clarification_response(
+                plan,
+                AskClarificationResponse(
+                    kind="stage_selection", selected_stage_occurrences=[]
+                ),
+            )
+            self.assertEqual(
+                next_clarification(selected, ask_plan_ref="/tmp/plan.json").kind,
+                "confirm",
+            )
+
     def test_stage_selection_keeps_requested_execution_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
@@ -245,7 +277,6 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             )
             updated = merge_clarification_response(plan, response)
             self.assertEqual(updated.selected_stage_names, ["t2t"])
-
 
     def test_plan_summary_includes_input_assets_from_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -342,7 +373,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                entry_request={"requested_stages": ["assembly"]},
+                entry_request={"requested_stages": ["assembly", "assembly_review"]},
             )
 
             draft = build_initial_plan_draft(plan)
@@ -1076,7 +1107,7 @@ class AskPlannerConfirmTests(unittest.TestCase):
 class AskPlannerRunConfigTests(unittest.TestCase):
     def test_build_run_config_from_confirmed_plan_with_advanced_flye_overrides(self):
         plan = _base_plan(
-            stage_names=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly", "assembly_review"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -1090,7 +1121,8 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         )
         payload = build_run_config_payload(plan)
         self.assertEqual(
-            sorted(_local_execution_stage_names(payload)), ["assembly", "read_qc"]
+            sorted(_local_execution_stage_names(payload)),
+            ["assembly", "assembly_review", "read_qc"],
         )
         self.assertEqual(
             payload["review_policy"],
@@ -1103,7 +1135,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_executes_selected_nextdenovo_method(self):
         plan = _base_plan(
-            stage_names=["assembly"],
+            stage_names=["assembly", "assembly_review"],
             selected_methods={"assembly": "assembly.candidate.nextdenovo"},
             shared_parameters={
                 "platform": "ont",
@@ -1116,7 +1148,9 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
+        self.assertEqual(
+            _local_execution_stage_names(payload), ["assembly", "assembly_review"]
+        )
         self.assertEqual(
             payload["assembly"],
             {
@@ -1129,7 +1163,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_executes_selected_hifiasm_method(self):
         plan = _base_plan(
-            stage_names=["assembly"],
+            stage_names=["assembly", "assembly_review"],
             selected_methods={"assembly": "assembly.candidate.hifiasm"},
             shared_parameters={
                 "platform": "pacbio_hifi",
@@ -1142,7 +1176,9 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
+        self.assertEqual(
+            _local_execution_stage_names(payload), ["assembly", "assembly_review"]
+        )
         self.assertEqual(
             payload["assembly"],
             {
@@ -1154,7 +1190,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_executes_selected_hifiasm_ont_method(self):
         plan = _base_plan(
-            stage_names=["assembly"],
+            stage_names=["assembly", "assembly_review"],
             selected_methods={"assembly": "assembly.candidate.hifiasm_ont"},
             shared_parameters={
                 "platform": "ont",
@@ -1167,7 +1203,9 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
+        self.assertEqual(
+            _local_execution_stage_names(payload), ["assembly", "assembly_review"]
+        )
         self.assertEqual(
             payload["assembly"],
             {
@@ -1203,7 +1241,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_uses_shared_assembly_parameters(self):
         plan = _base_plan(
-            stage_names=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly", "assembly_review"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -1262,6 +1300,9 @@ class AskPlannerRunConfigTests(unittest.TestCase):
                     stage="assembly_review", allow_local_execution=True
                 ),
                 PlanStageOccurrence(stage="t2t", allow_local_execution=True),
+                PlanStageOccurrence(
+                    stage="assembly_review", allow_local_execution=True
+                ),
             ],
             selected_methods={
                 "assembly_review": "assembly_review.eval.quast",
@@ -1278,11 +1319,12 @@ class AskPlannerRunConfigTests(unittest.TestCase):
                 {"stage": "t2t", "allow_local_execution": False},
                 {"stage": "assembly_review", "allow_local_execution": True},
                 {"stage": "t2t", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": True},
             ],
         )
         self.assertEqual(
             build_run_plan_summary(plan)["stage_roles"],
-            ["dependency", "executable", "executable"],
+            ["dependency", "executable", "executable", "executable"],
         )
 
     def test_only_locally_enabled_occurrences_require_method_selection(self):
@@ -1298,7 +1340,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_for_assembly_goal_uses_requested_boundary(self):
         plan = _base_plan(
-            stage_names=["assembly"],
+            stage_names=["assembly", "assembly_review"],
             selected_methods={"assembly": "assembly.candidate.flye"},
             shared_parameters={
                 "platform": "ont",
@@ -1311,15 +1353,18 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(_requested_stage_names(payload), ["assembly"])
-        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
+        self.assertEqual(
+            _requested_stage_names(payload), ["assembly", "assembly_review"]
+        )
+        self.assertEqual(
+            _local_execution_stage_names(payload), ["assembly", "assembly_review"]
+        )
         self.assertNotIn("read_qc", _requested_stage_names(payload))
-        self.assertNotIn("assembly_review", _requested_stage_names(payload))
         self.assertNotIn("base_polish", _requested_stage_names(payload))
 
     def test_build_run_config_excludes_t2t_recommendation_parameters(self):
         plan = _base_plan(
-            stage_names=["t2t"],
+            stage_names=["t2t", "assembly_review"],
             selected_methods={"t2t": "t2t.alignment.minimap2"},
             method_parameters={
                 "t2t.alignment.minimap2": {
@@ -1338,7 +1383,9 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(_local_execution_stage_names(payload), ["t2t"])
+        self.assertEqual(
+            _local_execution_stage_names(payload), ["t2t", "assembly_review"]
+        )
         self.assertEqual(payload["t2t"]["mode"], "manual_review")
         self.assertNotIn("telomere_motif", payload["t2t"])
         self.assertNotIn("thresholds", payload["t2t"])
@@ -1733,6 +1780,7 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
                 recommended,
                 ["assembly_review", "t2t", "assembly_review"],
             )
+
     def test_recommended_stages_empty_for_missing_manifest(self):
         recommended = _recommended_stages_from_manifest("/nonexistent/manifest.yaml")
         self.assertEqual(recommended, [])

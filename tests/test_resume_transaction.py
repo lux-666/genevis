@@ -34,6 +34,10 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         "step_id": "step-002-assembly_review",
         "stage": "assembly_review",
         "allow_local_execution": True,
+        "review_target": {
+            "resource_type": "assembly",
+            "producer_step_id": "step-001-assembly",
+        },
     },
     {
         "step_id": "step-003-hic_scaffolding",
@@ -176,9 +180,7 @@ class ResumeTransactionTests(unittest.TestCase):
             self.assertEqual(started[0]["source"], "test")
             self.assertEqual(started[0]["checkpointer"], "sqlite")
             self.assertEqual(started[0]["decision"]["stage"], "assembly_review")
-            self.assertEqual(
-                started[0]["workflow_step_id"], "step-002-assembly_review"
-            )
+            self.assertEqual(started[0]["workflow_step_id"], "step-002-assembly_review")
             self.assertEqual(
                 completed[0]["workflow_step_id"], "step-002-assembly_review"
             )

@@ -54,9 +54,7 @@ class TuiWorkflowTests(unittest.TestCase):
             manifest_ref="test.yaml",
         )
 
-        result = _apply_llm_plan_draft(
-            plan, {"selected_stage_occurrences": []}
-        )
+        result = _apply_llm_plan_draft(plan, {"selected_stage_occurrences": []})
 
         self.assertEqual(result.selected_stage_occurrences, [])
 
@@ -564,7 +562,8 @@ class TuiWorkflowTests(unittest.TestCase):
                 manifest_draft=materialize_manifest_draft(parent),
                 run_config_draft={
                     "requested_stages": [
-                        {"stage": "assembly", "allow_local_execution": False}
+                        {"stage": "assembly", "allow_local_execution": False},
+                        {"stage": "assembly_review", "allow_local_execution": False},
                     ]
                 },
             )

@@ -63,6 +63,16 @@ def _review_occurrence_state(
                 "step_id": f"step-001-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
+                **(
+                    {
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-000-inventory",
+                        }
+                    }
+                    if stage == "assembly_review"
+                    else {}
+                ),
             },
         ],
         "workflow_step_index": 1,
@@ -190,9 +200,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["accept", "pass"],
             "candidate_ids": ["flye"],
-            "candidate_primary_output_refs": {
-                "flye": _primary_output_ref("flye")
-            },
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         inputs = iter(["1", ""])
         with patch("builtins.input", side_effect=lambda _: next(inputs)):
@@ -208,9 +216,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
             "stage": "assembly_review",
             "decisions_allowed": ["accept", "stop_human_review"],
             "candidate_ids": ["flye"],
-            "candidate_primary_output_refs": {
-                "flye": _primary_output_ref("flye")
-            },
+            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
         }
         inputs = iter(["1", ""])
         out = io.StringIO()
@@ -808,9 +814,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                 "stage": "assembly_review",
                 "decisions_allowed": ["accept", "stop_human_review"],
                 "candidate_ids": ["flye"],
-                "candidate_primary_output_refs": {
-                    "flye": _primary_output_ref("flye")
-                },
+                "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
                 "report_refs": {"report": "/tmp/report.json"},
                 "candidate_comparison_context": {"flye_n50": 10000},
             },
@@ -827,9 +831,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                 "stage": "assembly_review",
                 "decisions_allowed": ["accept", "stop_human_review"],
                 "candidate_ids": ["flye"],
-                "candidate_primary_output_refs": {
-                    "flye": _primary_output_ref("flye")
-                },
+                "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
             },
             "workflow_steps": [
                 {
@@ -846,11 +848,24 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": True,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-001-t2t",
+                    },
                 },
                 {
                     "step_id": "step-003-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-004-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": True,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-003-t2t",
+                    },
                 },
             ],
             "workflow_step_index": 2,
@@ -1017,9 +1032,7 @@ class DecisionBriefTests(unittest.TestCase):
                 "stage": "assembly_review",
                 "decisions_allowed": ["accept", "stop_human_review"],
                 "candidate_ids": ["flye"],
-                "candidate_primary_output_refs": {
-                    "flye": _primary_output_ref("flye")
-                },
+                "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
                 "report_refs": {"quast": "/tmp/quast_report.json"},
                 "candidate_comparison_context": {
                     "flye_n50": 50000,

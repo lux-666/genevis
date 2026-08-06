@@ -137,7 +137,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as tmpdir,
             ):
                 session_id = "s1"
-                producer_step_id = f"step-002-{producer_stage}"
+                producer_step_id = f"step-001-{producer_stage}"
                 data_dir = v2_run_dir(tmpdir, session_id)
                 state = initial_state(
                     session_id=session_id,
@@ -150,24 +150,23 @@ class AssemblyReviewStageTests(unittest.TestCase):
                             "allow_local_execution": False,
                         },
                         {
-                            "step_id": "step-001-assembly",
-                            "stage": "assembly",
-                            "allow_local_execution": True,
-                        },
-                        {
                             "step_id": producer_step_id,
                             "stage": producer_stage,
                             "allow_local_execution": True,
                         },
                         {
-                            "step_id": "step-003-assembly_review",
+                            "step_id": "step-002-assembly_review",
                             "stage": "assembly_review",
                             "allow_local_execution": True,
+                            "review_target": {
+                                "resource_type": "assembly",
+                                "producer_step_id": producer_step_id,
+                            },
                         },
                     ],
                 )
-                state["workflow_step_index"] = 3
-                state["entered_workflow_step_index"] = 3
+                state["workflow_step_index"] = 2
+                state["entered_workflow_step_index"] = 2
                 state["current_stage"] = "assembly_review"
                 state["stage_outputs"] = {"assembly_review": {}}
 
@@ -240,9 +239,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                             mode="json"
                         ),
                         "primary_output_ref": (
-                            derived_candidate.primary_output_ref.model_dump(
-                                mode="json"
-                            )
+                            derived_candidate.primary_output_ref.model_dump(mode="json")
                         ),
                         "input_candidate_bundle_ref": source_candidate.ref.model_dump(
                             mode="json"
@@ -274,6 +271,35 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     derived_candidate.primary_output_path,
                 )
                 self.assertNotIn(producer_stage, state["stage_outputs"])
+
+    def test_rejects_current_assembly_from_another_producer_occurrence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            state = self._build_state(data_dir=tmpdir)
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="s1:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            self._set_candidate_refs(state, [str(candidate_ref)])
+            current = state["resource_refs"]["assembly"]
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=list(current["paths"]),
+                source_stage="inventory",
+                workflow_step_id="step-000-inventory",
+                metadata=dict(current["metadata"]),
+            ).to_dict()
+
+            update = resolve_candidates(state)
+
+            review = update["stage_outputs"]["assembly_review"]
+            self.assertEqual(review["status"], "failed")
+            self.assertIn("producer step does not match", review["reason"])
+            self.assertIn("step-001-assembly", review["reason"])
+            self.assertEqual(review["candidate_count"], 0)
 
     def test_metric_graphs_resume_ran_checkpoint_at_collect(self):
         for module_name, build_graph, ran_status in [
@@ -376,6 +402,10 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": True,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-001-assembly",
+                    },
                 },
                 {
                     "step_id": "step-003-hic_scaffolding",

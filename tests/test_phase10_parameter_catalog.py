@@ -196,6 +196,10 @@ def _v2_state(tmpdir: str, *, session_id: str = "s1") -> dict:
                 "step_id": "step-004-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": True,
+                "review_target": {
+                    "resource_type": "assembly",
+                    "producer_step_id": "step-003-assembly",
+                },
             },
         ],
     )
@@ -1771,9 +1775,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             status="planned",
             input_type=assembly["input_type"],
             input_member_ids=dict(assembly["assembly_input_member_ids"]),
-            input_member_platforms=dict(
-                assembly["assembly_input_member_platforms"]
-            ),
+            input_member_platforms=dict(assembly["assembly_input_member_platforms"]),
             parameter_attempt_id=0,
             expected_outputs=["primary_assembly"],
         )
@@ -1800,9 +1802,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 f"{short_name}.planned.json",
             ),
         )
-        assembly["planned_candidate_bundle_ref"] = published.ref.model_dump(
-            mode="json"
-        )
+        assembly["planned_candidate_bundle_ref"] = published.ref.model_dump(mode="json")
 
     def _parameter_attempt(
         self, state: dict, *, method_name: str, recommended_params=None
@@ -1853,9 +1853,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             "assembly_input_member_platforms": {
                 "primary": ["pacbio_hifi" if method == "hifiasm" else "ont"]
             },
-            "assembly_input_artifact_refs": {
-                "primary": [reads_artifact_ref]
-            },
+            "assembly_input_artifact_refs": {"primary": [reads_artifact_ref]},
         }
         if attempt_payload is not None:
             assembly["parameter_attempts"] = [attempt_payload]
@@ -1910,9 +1908,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             },
             "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
             "assembly_input_member_platforms": {"primary": ["ont"]},
-            "assembly_input_artifact_refs": {
-                "primary": [reads_artifact_ref]
-            },
+            "assembly_input_artifact_refs": {"primary": [reads_artifact_ref]},
             "resolved_genome_size": {
                 "value_bp": 2_000_000,
                 "source": "provided",

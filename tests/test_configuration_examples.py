@@ -100,6 +100,7 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                 ("t2t", False),
                 ("assembly_review", True),
                 ("t2t", True),
+                ("assembly_review", True),
             ],
         )
 

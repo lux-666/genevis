@@ -51,7 +51,7 @@ def test_resolution_precedence_is_central_then_registry(tmp_path) -> None:
                         "asset_type": "raw_long_reads",
                         "path": "/registry/raw.fastq.gz",
                     }
-                ]
+                ],
             }
         ),
         encoding="utf-8",
@@ -103,7 +103,7 @@ def test_registry_fallback_honors_asset_type_priority_and_multiple(tmp_path) -> 
                         "asset_type": "clean_long_reads",
                         "path": "/clean/two.fastq.gz",
                     },
-                ]
+                ],
             }
         ),
         encoding="utf-8",
@@ -199,6 +199,15 @@ def test_update_resource_ref_returns_validated_replacement_without_mutation() ->
                 "stage": "assembly",
                 "allow_local_execution": False,
             },
+            {
+                "step_id": "step-002-assembly_review",
+                "stage": "assembly_review",
+                "allow_local_execution": False,
+                "review_target": {
+                    "resource_type": "assembly",
+                    "producer_step_id": "step-001-assembly",
+                },
+            },
         ],
     )
     state["current_stage"] = "assembly"
@@ -235,10 +244,13 @@ def test_resource_table_rejects_invalid_and_oversized_entries() -> None:
             paths=["/assembly.fasta"],
             workflow_step_id="step-001-assembly",
         )
-    assert ResourceRef(
-        resource_type="long_reads",
-        paths=["/reads.fastq.gz"],
-    ).source_stage is None
+    assert (
+        ResourceRef(
+            resource_type="long_reads",
+            paths=["/reads.fastq.gz"],
+        ).source_stage
+        is None
+    )
     state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
     state["resource_refs"] = {
         "assembly": {
@@ -290,3 +302,43 @@ def test_resource_table_rejects_invalid_and_oversized_entries() -> None:
                 ).to_dict()
             }
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["resource_type", "source_stage", "workflow_step_id"],
+)
+@pytest.mark.parametrize("invalid_value", [1, True, [], object()])
+def test_resource_ref_from_dict_rejects_non_string_provenance_before_coercion(
+    field: str, invalid_value: object
+) -> None:
+    data = ResourceRef(
+        resource_type="assembly",
+        paths=["/assembly.fasta"],
+        source_stage="assembly",
+        workflow_step_id="step-001-assembly",
+    ).to_dict()
+    data[field] = invalid_value
+
+    with pytest.raises(TypeError, match=rf"ResourceRef.{field} must be a string"):
+        ResourceRef.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("source_stage", "workflow_step_id"),
+    [(None, None), ("inventory", "step-000-inventory")],
+)
+def test_resource_ref_from_dict_preserves_valid_string_or_none_provenance(
+    source_stage: str | None, workflow_step_id: str | None
+) -> None:
+    data = {
+        "resource_type": "assembly",
+        "paths": ["/assembly.fasta"],
+        "source_stage": source_stage,
+        "workflow_step_id": workflow_step_id,
+        "metadata": {"candidate_id": "candidate-1"},
+    }
+
+    resource = ResourceRef.from_dict(data)
+
+    assert resource.to_dict() == data

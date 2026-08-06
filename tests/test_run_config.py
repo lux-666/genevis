@@ -17,8 +17,7 @@ def _stage_requests(
     local: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
     return [
-        {"stage": stage, "allow_local_execution": stage in local}
-        for stage in stages
+        {"stage": stage, "allow_local_execution": stage in local} for stage in stages
     ]
 
 
@@ -39,12 +38,48 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("requested_stages", str(ctx.exception))
 
+    def test_mandatory_assembly_reviews_are_sequence_validated(self):
+        invalid_sequences = (
+            ("assembly",),
+            ("assembly", "assembly", "assembly_review"),
+            ("assembly", "t2t", "assembly_review"),
+            ("assembly", "gapcloser", "assembly_review"),
+            ("t2t",),
+            ("t2t", "t2t", "assembly_review"),
+            ("t2t", "base_polish", "assembly_review"),
+            ("assembly", "assembly_review", "t2t"),
+        )
+
+        for stages in invalid_sequences:
+            with self.subTest(stages=stages), self.assertRaises(ValidationError):
+                RunConfig.model_validate({"requested_stages": _stage_requests(*stages)})
+
+    def test_standalone_review_and_t2t_then_review_are_valid(self):
+        for stages in (("assembly_review",), ("t2t", "assembly_review")):
+            with self.subTest(stages=stages):
+                config = RunConfig.model_validate(
+                    {"requested_stages": _stage_requests(*stages)}
+                )
+                self.assertEqual(config.requested_stage_names(), list(stages))
+
+    def test_terminal_placeholders_are_allowed_after_review_boundary_closes(self):
+        for stages in (
+            ("assembly", "assembly_review", "gapcloser"),
+            ("t2t", "assembly_review", "base_polish"),
+        ):
+            with self.subTest(stages=stages):
+                config = RunConfig.model_validate(
+                    {"requested_stages": _stage_requests(*stages)}
+                )
+                self.assertEqual(config.requested_stage_names(), list(stages))
+
     def test_duplicate_stage_requests_preserve_order_and_local_consent(self):
         config = RunConfig.model_validate(
             {
                 "requested_stages": [
                     {"stage": "read_qc", "allow_local_execution": False},
                     {"stage": "t2t", "allow_local_execution": False},
+                    {"stage": "assembly_review", "allow_local_execution": False},
                     {"stage": "read_qc", "allow_local_execution": True},
                 ]
             }
@@ -52,11 +87,11 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             config.requested_stage_names(),
-            ["read_qc", "t2t", "read_qc"],
+            ["read_qc", "t2t", "assembly_review", "read_qc"],
         )
         self.assertEqual(
             [request.allow_local_execution for request in config.requested_stages],
-            [False, False, True],
+            [False, False, False, True],
         )
 
     def test_allow_local_execution_must_be_a_bool(self):
@@ -91,7 +126,9 @@ class RunConfigSchemaTests(unittest.TestCase):
         config = RunConfig.model_validate(
             {
                 "requested_stages": _stage_requests(
-                    "read_qc", "assembly", "assembly_review",
+                    "read_qc",
+                    "assembly",
+                    "assembly_review",
                     local=("read_qc", "assembly", "assembly_review"),
                 ),
                 "assembly": {
@@ -117,7 +154,9 @@ class RunConfigSchemaTests(unittest.TestCase):
     def test_valid_config_with_nextdenovo_parameters(self):
         config = RunConfig.model_validate(
             {
-                "requested_stages": _local_stage_requests("assembly"),
+                "requested_stages": _local_stage_requests(
+                    "assembly", "assembly_review"
+                ),
                 "assembly": {
                     "assembly_method": "nextdenovo",
                     "nextdenovo_parameters": {
@@ -151,14 +190,16 @@ class RunConfigSchemaTests(unittest.TestCase):
                             "requested_stages": [],
                             "assembly": {
                                 parameter_key: parameters,
-                            }
+                            },
                         }
                     )
 
     def test_valid_config_with_hifiasm_parameters(self):
         config = RunConfig.model_validate(
             {
-                "requested_stages": _local_stage_requests("assembly"),
+                "requested_stages": _local_stage_requests(
+                    "assembly", "assembly_review"
+                ),
                 "assembly": {
                     "assembly_method": "hifiasm",
                     "hifiasm_parameters": {
@@ -176,7 +217,9 @@ class RunConfigSchemaTests(unittest.TestCase):
     def test_valid_config_with_hifiasm_ont_parameters(self):
         config = RunConfig.model_validate(
             {
-                "requested_stages": _local_stage_requests("assembly"),
+                "requested_stages": _local_stage_requests(
+                    "assembly", "assembly_review"
+                ),
                 "assembly": {
                     "assembly_method": "hifiasm_ont",
                     "hifiasm_ont_parameters": {
@@ -201,7 +244,9 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         for method, parameter_key in cases:
             payload = {
-                "requested_stages": _local_stage_requests("assembly"),
+                "requested_stages": _local_stage_requests(
+                    "assembly", "assembly_review"
+                ),
                 "assembly": {
                     "assembly_method": method,
                     parameter_key: {},
@@ -264,7 +309,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "hic_reads_ref": "hic.fofn",
                     "target_level": "near_t2t",
                     "assembly_route": "hifi",
-                }
+                },
             }
         )
 
@@ -281,7 +326,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "assembly": {
                     "assembly_route": "hifi",
                     "flye_parameters": {"threads": 4},
-                }
+                },
             }
         )
 
@@ -304,7 +349,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                                 "assembly_route": route,
                                 "assembly_method": method,
                                 parameters_key: {"threads": 4},
-                            }
+                            },
                         }
                     )
 
@@ -321,7 +366,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                         "assembly_route": "cyclone",
                         "assembly_method": "hifiasm",
                         "hifiasm_parameters": {"threads": 4},
-                    }
+                    },
                 }
             )
 
@@ -334,7 +379,9 @@ class RunConfigSchemaTests(unittest.TestCase):
     def test_local_assembly_accepts_shared_parameters_with_flye_threads_only(self):
         config = RunConfig.model_validate(
             {
-                "requested_stages": _local_stage_requests("assembly"),
+                "requested_stages": _local_stage_requests(
+                    "assembly", "assembly_review"
+                ),
                 "shared_parameters": {
                     "platform": "ont",
                     "read_type": "ont_raw",
@@ -437,7 +484,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                             "approved": True,
                             "thresholds": {},
                         }
-                    }
+                    },
                 }
             )
 
@@ -454,7 +501,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                             "approved": True,
                             "thresholds": {"min_len": 1000},
                         }
-                    }
+                    },
                 }
             )
 
@@ -486,7 +533,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "shared_parameters": {
                         "read_type": "nano-raw",
                         "estimated_genome_size": 2_000_000,
-                    }
+                    },
                 }
             )
 
@@ -526,7 +573,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                             "threads": 4,
                         },
                         "canu_parameters": {},
-                    }
+                    },
                 }
             )
 
@@ -542,7 +589,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                             "threads": 4,
                             "min_overlap": 1000,
                         }
-                    }
+                    },
                 }
             )
 
@@ -584,7 +631,9 @@ class RunConfigSchemaTests(unittest.TestCase):
     def test_flye_method_block_contains_only_executor_threads(self):
         config = RunConfig.model_validate(
             {
-                "requested_stages": _local_stage_requests("assembly"),
+                "requested_stages": _local_stage_requests(
+                    "assembly", "assembly_review"
+                ),
                 "assembly": {
                     "flye_parameters": {
                         "threads": 4,
@@ -669,7 +718,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                         "assembly": {"max_blocked_seconds": -1},
                         "hic_scaffolding": {"max_blocked_seconds": 0},
                     },
-                }
+                },
             }
         )
 
@@ -708,7 +757,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "requested_stages": [],
                     "review_policy": {
                         "stages": {"removed_stage": {"max_blocked_seconds": 1}},
-                    }
+                    },
                 }
             )
 
@@ -787,7 +836,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                             "approved": True,
                             "thresholds": {"min_len": 1000},
                         }
-                    }
+                    },
                 }
             )
 
@@ -803,7 +852,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                         "approved": False,
                         "thresholds": {"min_len": 1000},
                     }
-                }
+                },
             }
         )
 
@@ -842,7 +891,10 @@ class RunConfigSchemaTests(unittest.TestCase):
 
     def test_t2t_run_config_does_not_materialize_catalog_owned_mode(self):
         config = RunConfig.model_validate(
-            {"requested_stages": _local_stage_requests("t2t"), "t2t": {}}
+            {
+                "requested_stages": _local_stage_requests("t2t", "assembly_review"),
+                "t2t": {},
+            }
         )
 
         self.assertIsNotNone(config.t2t)
@@ -866,7 +918,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                         "requested_stages": [],
                         "hic_scaffolding": {
                             "autohic_parameters": {name: value},
-                        }
+                        },
                     }
                 )
 
@@ -889,7 +941,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "hic_scaffolding": {
                         "method": "autohic",
                         "methods": ["autohic"],
-                    }
+                    },
                 }
             )
 
@@ -902,7 +954,9 @@ class RunConfigLoaderTests(unittest.TestCase):
                 json.dumps(
                     {
                         "requested_stages": _stage_requests(
-                            "read_qc", "assembly", "assembly_review",
+                            "read_qc",
+                            "assembly",
+                            "assembly_review",
                             local=("read_qc", "assembly", "assembly_review"),
                         ),
                         "assembly": {
@@ -956,9 +1010,7 @@ class RunConfigLoaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run_config.json"
             path.write_text(
-                json.dumps(
-                    {"requested_stages": _local_stage_requests("assembly")}
-                ),
+                json.dumps({"requested_stages": _local_stage_requests("assembly")}),
                 encoding="utf-8",
             )
             with self.assertRaises(ValueError) as ctx:

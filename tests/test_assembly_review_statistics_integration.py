@@ -38,8 +38,7 @@ def _candidate(candidate_id: str, method_name: str = "flye") -> dict:
             "schema_version": 2,
             "artifact_id": f"primary:{candidate_id}",
             "path_ref": (
-                "artifacts/steps/step-001-assembly/assembly/"
-                f"{candidate_id}/draft.fa"
+                f"artifacts/steps/step-001-assembly/assembly/{candidate_id}/draft.fa"
             ),
             "sha256": "1" * 64,
             "size_bytes": 0,
@@ -74,6 +73,10 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-001-assembly",
+                    },
                 },
             ],
         )

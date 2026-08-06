@@ -2,39 +2,39 @@
 
 ## Status
 
-Approved by the user on 2026-08-06. This specification makes Assembly Review
-consume an exact producer occurrence, enforces the mandatory review boundaries
-for Assembly and T2T, completes the natural Inventory-only planner path, and
-closes two strictness/documentation gaps.
+Approved by the user and implemented on 2026-08-06. This specification makes
+Assembly Review consume an exact producer occurrence, enforces the mandatory
+review boundaries for Assembly and T2T, completes the natural Inventory-only
+planner path, and closes two strictness/documentation gaps.
 
 ## Problem
 
-The frozen workflow preserves repeated stage occurrences, but an
-`assembly_review` occurrence currently resolves only the central `assembly`
-resource that happens to be current at runtime. The frozen step does not name
-the producer occurrence that it must review. Consequently, sequence validity
-and review correctness are inferred from mutable current state rather than
+Before this change, the frozen workflow preserved repeated stage occurrences,
+but an `assembly_review` occurrence resolved only the central `assembly`
+resource that happened to be current at runtime. The frozen step did not name
+the producer occurrence that it had to review. Consequently, sequence validity
+and review correctness were inferred from mutable current state rather than
 proved by the frozen plan.
 
-This has four concrete effects:
+That had four concrete effects:
 
-- a file-authored RunConfig can request `assembly` or `t2t` without a later
+- a file-authored RunConfig could request `assembly` or `t2t` without a later
   `assembly_review`;
-- repeated Review occurrences cannot prove which exact producer occurrence
+- repeated Review occurrences could not prove which exact producer occurrence
   supplied their subject;
-- a Review may silently consume a different current assembly if the handoff
+- a Review could silently consume a different current assembly if the handoff
   drifts before it starts;
-- Review reuse is easily described incorrectly as "the first Review reviews
+- Review reuse was easily described incorrectly as "the first Review reviews
   Assembly and the second reviews T2T", even though occurrence order, not
   ordinal position, must define the dependency.
 
-Three adjacent conformance gaps are also in scope:
+Three adjacent conformance gaps were also in scope:
 
-- when intent and manifest-based recommendations are both empty, the planner
-  still recommends the first two available stages instead of Inventory only;
-- `ResourceRef.from_dict()` coerces non-string provenance fields before the
-  strict constructor sees them;
-- the resource-handoff documentation incorrectly treats Inventory-wrapped
+- when intent and manifest-based recommendations were both empty, the planner
+  still recommended the first two available stages instead of Inventory only;
+- `ResourceRef.from_dict()` coerced non-string provenance fields before the
+  strict constructor saw them;
+- the resource-handoff documentation incorrectly treated Inventory-wrapped
   registered assemblies as ordinary provenance-free external resources.
 
 ## Goals
@@ -56,11 +56,10 @@ Three adjacent conformance gaps are also in scope:
 
 - No runtime insertion, deletion, or reordering of workflow occurrences.
 - No ordinal mapping such as "Review #1 -> Assembly" or "Review #2 -> T2T".
-- No occurrence-local QUAST/BUSCO configuration in this change.
+- No occurrence-local QUAST/BUSCO configuration: immutable method configuration
+  remains stage-scoped, while runtime attempts, artifacts, reviews, resources,
+  and Ledger facts remain occurrence-scoped.
 - No general DAG planner or arbitrary resource-expression language.
-- No change to runtime-orchestration or repeated-occurrence documentation that
-  depends on the broader occurrence-local configuration question; the finding
-  grouped as documentation item 6 remains deferred.
 - No conditional skipping of post-T2T Review when T2T keeps the prior bytes.
 
 ## Considered Approaches
@@ -176,11 +175,16 @@ The validator enforces two business boundaries:
 
 1. An `assembly` occurrence opens a required pre-finishing review boundary.
    Assembly Dedup and other assembly refinements may update the subject of that
-   boundary, but a matching `assembly_review` must close it before T2T begins or
-   the workflow ends.
+   boundary, but a matching `assembly_review` must close it before another
+   Assembly or T2T occurrence begins or the workflow ends.
 2. Every `t2t` occurrence opens a new required post-T2T review boundary. A
    matching `assembly_review` bound to that T2T handoff must close it before
-   another T2T occurrence or workflow termination.
+   another Assembly or T2T occurrence or workflow termination.
+
+An open mandatory boundary also cannot cross the current deterministic terminal
+placeholders, `gapcloser` or `base_polish`: either occurrence would stop the run
+before the required Review could be reached. The validator rejects that plan
+shape instead of accepting an unreachable later Review.
 
 This preserves the normal template:
 
@@ -197,11 +201,13 @@ assembly -> t2t -> assembly_review
 t2t
 t2t -> t2t -> assembly_review
 assembly -> assembly_review -> t2t
+t2t -> base_polish -> assembly_review
 ```
 
-The last sequence is invalid only because the T2T boundary remains open at
-termination. The validator reports the exact producer step and missing Review
-boundary. It never inserts the missing occurrence.
+The last sequence is rejected before the terminal placeholder because that
+placeholder would make the required Review unreachable. The validator reports
+the exact producer step and missing Review boundary. It never inserts the
+missing occurrence.
 
 A standalone `assembly_review` remains schema-valid and binds to Inventory.
 A standalone `t2t -> assembly_review` also remains valid for a registered
@@ -236,22 +242,21 @@ delivery", not "new bytes created by that occurrence". Therefore a T2T
 occurrence that keeps its input assembly still owns the selected final handoff
 for review purposes.
 
-`commit_t2t()` must republish the central ResourceRef with
+`commit_t2t()` republishes the central ResourceRef with
 `source_stage="t2t"` and the active T2T `workflow_step_id` while preserving the
-verified candidate bundle when no patch is adopted. The current
-`current_assembly_matches_output` early-return path does not perform that
-handoff when output and input are the same assembly; it must be changed to
-distinguish an already occurrence-bound idempotent replay from an unchanged
-assembly still attributed to an earlier producer. The former may return
+verified candidate bundle when no patch is adopted. The
+`current_assembly_matches_output` path distinguishes an already
+occurrence-bound idempotent replay from an unchanged assembly still attributed
+to an earlier producer. The former may return
 unchanged after verification. The latter republishes the existing verified
 candidate metadata under the active T2T occurrence before advancing. The
 post-T2T Review then runs normally against the same candidate content with the
 new occurrence-level delivery provenance.
 
-Every other producer in the centralized set must follow the same delivery
+Every other producer in the centralized set follows the same delivery
 rule: successful completion leaves the central assembly ResourceRef attributed
 to that occurrence, even when the selected bytes are unchanged. In particular,
-the Hi-C `keep_prior_assembly` completion path is brought into line with T2T by
+the Hi-C `keep_prior_assembly` completion path was brought into line with T2T by
 republishing the verified prior candidate as an unchanged Hi-C delivery
 handoff. Stop and retry paths do not commit a handoff. Focused tests prevent a
 frozen target from pointing at a producer that cannot satisfy this runtime
@@ -337,6 +342,7 @@ Focused tests must prove:
 - `assembly -> t2t -> assembly_review` is rejected because Assembly lacked its
   pre-T2T Review;
 - every T2T occurrence requires its own later Review;
+- a mandatory Review cannot be placed after a deterministic terminal placeholder;
 - the recommended two-Review T2T template validates;
 - `assembly_review` alone binds to `step-000-inventory`;
 - repeated same-stage producers produce distinct Review target step IDs;
@@ -371,5 +377,6 @@ expected assertions.
 5. ResourceRef deserialization is strictly typed before conversion.
 6. External assembly provenance documentation matches the Inventory candidate
    implementation.
-7. Documentation finding 6 remains untouched pending the separate
-   occurrence-local configuration decision.
+7. Architecture documentation distinguishes stage-scoped immutable
+   configuration from occurrence-scoped runtime records without implying
+   occurrence-local method configuration.

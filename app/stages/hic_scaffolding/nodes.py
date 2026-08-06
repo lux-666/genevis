@@ -430,9 +430,7 @@ def apply_hic_scaffolding_resume_decision(
                 state,
                 resource_spec=assembly_resource_spec(),
             )
-            source_candidate_ref = current_assembly.metadata.get(
-                "candidate_bundle_ref"
-            )
+            source_candidate_ref = current_assembly.metadata.get("candidate_bundle_ref")
             if source_candidate_ref is None:
                 raise AssemblyCandidateBundleError(
                     "accepted AutoHiC scaffolding requires the current "
@@ -568,6 +566,54 @@ def apply_hic_scaffolding_resume_decision(
         "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
     }
     if request.decision == "keep_prior_assembly":
+        try:
+            current_assembly = resolve_stage_resource(
+                state,
+                resource_spec=assembly_resource_spec(),
+            )
+            source_candidate_ref = current_assembly.metadata.get("candidate_bundle_ref")
+            if source_candidate_ref is None:
+                raise AssemblyCandidateBundleError(
+                    "kept AutoHiC assembly requires the current candidate_bundle_ref"
+                )
+            source_candidate = load_executed_candidate_bundle(
+                absolute_data_dir(state), state["session_id"], source_candidate_ref
+            )
+            if (
+                current_assembly.path is None
+                or Path(current_assembly.path).resolve(strict=False)
+                != Path(str(pre_hic_assembly_ref)).resolve(strict=False)
+                or source_candidate.primary_output_path.resolve(strict=False)
+                != Path(str(pre_hic_assembly_ref)).resolve(strict=False)
+            ):
+                raise AssemblyCandidateBundleError(
+                    "current candidate primary output does not match the "
+                    "kept pre-Hi-C assembly"
+                )
+        except (
+            AssemblyCandidateBundleError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ResumeValidationError(
+                f"AutoHiC kept candidate provenance is invalid: {exc}"
+            ) from exc
+        update["resource_refs"] = update_resource_ref(
+            state,
+            "assembly",
+            [str(pre_hic_assembly_ref)],
+            "hic_scaffolding",
+            {
+                **dict(current_assembly.metadata),
+                "decision": request.decision,
+                "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
+                "candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
+                "primary_output_ref": (
+                    source_candidate.primary_output_ref.model_dump(mode="json")
+                ),
+            },
+        )
         return update
 
     if adoption_resource_metadata is None:

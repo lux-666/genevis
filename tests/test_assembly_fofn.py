@@ -73,6 +73,15 @@ class AssemblyFofnResolutionTests(unittest.TestCase):
                             "stage": "assembly",
                             "allow_local_execution": False,
                         },
+                        {
+                            "step_id": "step-002-assembly_review",
+                            "stage": "assembly_review",
+                            "allow_local_execution": False,
+                            "review_target": {
+                                "resource_type": "assembly",
+                                "producer_step_id": "step-001-assembly",
+                            },
+                        },
                     ],
                     "workflow_step_index": 1,
                     "entered_workflow_step_index": 1,

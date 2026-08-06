@@ -99,6 +99,10 @@ class ReviewResumeTests(unittest.TestCase):
                         "step_id": "step-001-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-000-inventory",
+                        },
                     },
                     {
                         "step_id": "step-002-hic_scaffolding",
@@ -109,6 +113,10 @@ class ReviewResumeTests(unittest.TestCase):
                         "step_id": "step-003-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-002-hic_scaffolding",
+                        },
                     },
                 ],
                 "workflow_step_index": 3,
@@ -1603,6 +1611,34 @@ def _record_review_decision(
     )
 
 
+def _frozen_workflow_steps(stages: list[str]) -> list[dict]:
+    latest_assembly_handoff = "step-000-inventory"
+    steps = []
+    for index, item in enumerate(stages):
+        step_id = f"step-{index:03d}-{item}"
+        step = {
+            "step_id": step_id,
+            "stage": item,
+            "allow_local_execution": False,
+        }
+        if item == "assembly_review":
+            step["review_target"] = {
+                "resource_type": "assembly",
+                "producer_step_id": latest_assembly_handoff,
+            }
+        steps.append(step)
+        if item in {
+            "inventory",
+            "assembly",
+            "assembly_dedup",
+            "assembly_review",
+            "hic_scaffolding",
+            "t2t",
+        }:
+            latest_assembly_handoff = step_id
+    return steps
+
+
 def _frozen_workflow(stage: str, next_stage: str) -> dict:
     stages = ["inventory"]
     if stage == "assembly_review":
@@ -1616,14 +1652,7 @@ def _frozen_workflow(stage: str, next_stage: str) -> dict:
     step_index = stages.index(stage)
     return {
         "current_stage": stage,
-        "workflow_steps": [
-            {
-                "step_id": f"step-{index:03d}-{item}",
-                "stage": item,
-                "allow_local_execution": False,
-            }
-            for index, item in enumerate(stages)
-        ],
+        "workflow_steps": _frozen_workflow_steps(stages),
         "workflow_step_index": step_index,
         "entered_workflow_step_index": step_index,
         "stage_plan_ref": "control/run_config.json",

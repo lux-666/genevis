@@ -48,7 +48,17 @@ def _request(
                 "step_id": f"step-001-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
-            }
+                **(
+                    {
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-000-inventory",
+                        }
+                    }
+                    if stage == "assembly_review"
+                    else {}
+                ),
+            },
         ],
         "workflow_step_index": 1,
     }
@@ -82,7 +92,17 @@ def _review_state(paths: SessionPaths, stage: str, **updates: object) -> dict:
                 "step_id": f"step-001-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
-            }
+                **(
+                    {
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-000-inventory",
+                        }
+                    }
+                    if stage == "assembly_review"
+                    else {}
+                ),
+            },
         ],
         "workflow_step_index": 1,
         "supervision_state": "blocked_human",

@@ -991,7 +991,7 @@ def _suggested_stages(plan: AskPlanState, available: list[str]) -> list[str]:
     recommended = _recommended_stages_from_manifest(plan.manifest_ref)
     if recommended:
         return [s for s in recommended if s in available]
-    return available[:2] if available else []
+    return []
 
 
 def _intent_requested_stages(plan: AskPlanState) -> list[str]:
@@ -1049,10 +1049,7 @@ def _needs_method_selection(plan: AskPlanState) -> bool:
             ):
                 return True
         return False
-    return any(
-        stage in _STAGES_NEEDING_METHOD_SELECTION
-        for stage in locally_enabled
-    )
+    return any(stage in _STAGES_NEEDING_METHOD_SELECTION for stage in locally_enabled)
 
 
 def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
@@ -1465,8 +1462,7 @@ def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
         return False
     every_assembly_has_prior_survey = all(
         any(
-            earlier.stage == "genome_survey"
-            and earlier.allow_local_execution
+            earlier.stage == "genome_survey" and earlier.allow_local_execution
             for earlier in occurrences[:assembly_index]
         )
         for assembly_index in local_assembly_indexes

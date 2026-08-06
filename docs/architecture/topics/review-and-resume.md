@@ -35,12 +35,13 @@ artifacts live below `artifacts/steps/<workflow_step_id>/<stage>/reviews/`.
 Resume rejects a request whose occurrence does not match the active frozen
 workflow step.
 
-Gate definitions centralize allowed decisions, prompt construction, timing,
-and resume application. The external resume DTO is one strict
-`ResumeReviewRequest` with a string decision field; parameter approval,
-assembly adoption, Hi-C adoption, and T2T adoption remain
-different gate-scoped decision vocabularies because each registered gate and
-stage applier validates its own allowed values and bindings.
+The review registry centralizes gate declarations, allowed decisions,
+occurrence validation, dispatch, and timing metadata. The external resume DTO
+is one strict `ResumeReviewRequest` with a string decision field. Stage
+appliers and interactive code still own payload semantics, prompt branches, and
+the state/resource effects of a decision; parameter approval, assembly
+adoption, Hi-C adoption, and T2T adoption therefore remain different
+gate-scoped vocabularies and effects.
 
 ## Foreground review policy
 

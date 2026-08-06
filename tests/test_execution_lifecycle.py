@@ -80,7 +80,32 @@ def _state(tmpdir: str, *, stage: str = "assembly_review") -> dict:
                 "step_id": f"step-001-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
+                **(
+                    {
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-000-inventory",
+                        }
+                    }
+                    if stage == "assembly_review"
+                    else {}
+                ),
             },
+            *(
+                [
+                    {
+                        "step_id": "step-002-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-001-assembly",
+                        },
+                    }
+                ]
+                if stage == "assembly"
+                else []
+            ),
         ],
     )
     state["current_stage"] = stage
@@ -99,9 +124,7 @@ def _attempt(
     parameter_attempt_id: int | None = None,
     script_body: str = "#!/bin/sh\nexit 1\n",
 ) -> FrozenAttemptSpec:
-    workflow_step_id = state["workflow_steps"][state["workflow_step_index"]][
-        "step_id"
-    ]
+    workflow_step_id = state["workflow_steps"][state["workflow_step_index"]]["step_id"]
     work_dir = SessionPaths.from_run_dir(state["data_dir"]).workflow_step_work_path(
         workflow_step_id,
         stage,
@@ -135,9 +158,7 @@ def _attempt(
 def _bound_attempt_id(state: dict, attempt_id: str) -> str:
     session_prefix = f"{state['session_id']}:"
     local_attempt_id = attempt_id.removeprefix(session_prefix)
-    workflow_step_id = state["workflow_steps"][state["workflow_step_index"]][
-        "step_id"
-    ]
+    workflow_step_id = state["workflow_steps"][state["workflow_step_index"]]["step_id"]
     return f"{session_prefix}{workflow_step_id}:{local_attempt_id}"
 
 
@@ -1346,6 +1367,10 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-001-assembly_review",
+                    },
                 }
             )
             state["workflow_step_index"] = 2

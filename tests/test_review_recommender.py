@@ -51,6 +51,10 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         "step_id": "step-002-assembly_review",
         "stage": "assembly_review",
         "allow_local_execution": True,
+        "review_target": {
+            "resource_type": "assembly",
+            "producer_step_id": "step-001-assembly",
+        },
     },
     {
         "step_id": "step-003-hic_scaffolding",

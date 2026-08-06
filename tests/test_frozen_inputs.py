@@ -38,10 +38,22 @@ def _stage_requests(
     *stages: str,
     local: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
-    return [
-        {"stage": stage, "allow_local_execution": stage in local}
-        for stage in stages
-    ]
+    requests: list[dict[str, object]] = []
+    review_open = False
+    for stage in stages:
+        if stage in {"assembly", "t2t"} and review_open:
+            requests.append(
+                {"stage": "assembly_review", "allow_local_execution": False}
+            )
+            review_open = False
+        requests.append({"stage": stage, "allow_local_execution": stage in local})
+        if stage in {"assembly", "t2t"}:
+            review_open = True
+        elif stage == "assembly_review":
+            review_open = False
+    if review_open:
+        requests.append({"stage": "assembly_review", "allow_local_execution": False})
+    return requests
 
 
 def _local_stage_requests(*stages: str) -> list[dict[str, object]]:
@@ -239,10 +251,8 @@ class FrozenInputTests(unittest.TestCase):
                     {
                         "requested_stages": [],
                         "t2t": {
-                            "read_inputs": [
-                                {"path": "reads.fastq", "platform": "ont"}
-                            ]
-                        }
+                            "read_inputs": [{"path": "reads.fastq", "platform": "ont"}]
+                        },
                     }
                 )
                 + "\n",
@@ -320,10 +330,8 @@ class FrozenInputTests(unittest.TestCase):
                     {
                         "requested_stages": [],
                         "t2t": {
-                            "read_inputs": [
-                                {"path": "reads.fastq", "platform": "ont"}
-                            ]
-                        }
+                            "read_inputs": [{"path": "reads.fastq", "platform": "ont"}]
+                        },
                     }
                 )
                 + "\n",
@@ -671,7 +679,13 @@ class FrozenInputTests(unittest.TestCase):
             )
             self.assertEqual(
                 bundle.run_config.requested_stage_names(),
-                ["assembly", "read_qc", "assembly"],
+                [
+                    "assembly",
+                    "read_qc",
+                    "assembly_review",
+                    "assembly",
+                    "assembly_review",
+                ],
             )
             self.assertEqual(
                 set(snapshot.stage_environments),
@@ -872,9 +886,7 @@ class FrozenInputTests(unittest.TestCase):
                     manifest_draft=manifest,
                     run_config_draft=run_config,
                     config_path=envs,
-                    selected_methods={
-                        "assembly": ["assembly_review.eval.quast"]
-                    },
+                    selected_methods={"assembly": ["assembly_review.eval.quast"]},
                 )
 
     def test_freeze_normalizes_explicit_paired_hic_paths(self) -> None:

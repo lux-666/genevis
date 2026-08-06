@@ -40,14 +40,37 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
 
     @staticmethod
     def _workflow_steps(*requested_stages: str) -> list[dict[str, object]]:
-        return [
+        stages = ["inventory", *requested_stages]
+        if (
+            any(stage in {"assembly", "t2t"} for stage in requested_stages)
+            and stages[-1] != "assembly_review"
+        ):
+            stages.append("assembly_review")
+        steps = [
             {
                 "step_id": f"step-{index:03d}-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
             }
-            for index, stage in enumerate(("inventory", *requested_stages))
+            for index, stage in enumerate(stages)
         ]
+        producer_step_id = steps[0]["step_id"]
+        for step in steps:
+            if step["stage"] == "assembly_review":
+                step["review_target"] = {
+                    "resource_type": "assembly",
+                    "producer_step_id": producer_step_id,
+                }
+            if step["stage"] in {
+                "inventory",
+                "assembly",
+                "assembly_dedup",
+                "assembly_review",
+                "hic_scaffolding",
+                "t2t",
+            }:
+                producer_step_id = step["step_id"]
+        return steps
 
     def _state(self, paths: SessionPaths, *requested_stages: str) -> dict[str, object]:
         return initial_state(

@@ -111,12 +111,23 @@ class MultiplatformLongReadTests(unittest.TestCase):
                         "stage": "assembly",
                         "allow_local_execution": True,
                     },
+                    {
+                        "step_id": "step-002-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-001-assembly",
+                        },
+                    },
                 ],
             )
             state["entered_workflow_step_index"] = 0
 
             registered = build_inventory_stage(
-                verified_inputs=validate_frozen_inputs(SessionPaths.from_run_dir(run_dir))
+                verified_inputs=validate_frozen_inputs(
+                    SessionPaths.from_run_dir(run_dir)
+                )
             ).invoke(state)
             registry = json.loads(
                 resolve_artifact_ref(
@@ -189,7 +200,10 @@ class MultiplatformLongReadTests(unittest.TestCase):
     def test_t2t_run_config_accepts_each_supported_long_read_platform(self):
         config = RunConfig.model_validate(
             {
-                "requested_stages": [{"stage": "t2t", "allow_local_execution": True}],
+                "requested_stages": [
+                    {"stage": "t2t", "allow_local_execution": True},
+                    {"stage": "assembly_review", "allow_local_execution": False},
+                ],
                 "t2t": {
                     "read_inputs": [
                         {"path": "/reads/cyclone.fastq", "platform": "cycloneseq"},
@@ -210,7 +224,8 @@ class MultiplatformLongReadTests(unittest.TestCase):
             RunConfig.model_validate(
                 {
                     "requested_stages": [
-                        {"stage": "t2t", "allow_local_execution": True}
+                        {"stage": "t2t", "allow_local_execution": True},
+                        {"stage": "assembly_review", "allow_local_execution": False},
                     ],
                     "t2t": {
                         "read_inputs": [

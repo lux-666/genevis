@@ -36,6 +36,14 @@ The frozen occurrence sequence decides which stage subgraphs are reached.  It
 does not prove that their biological inputs exist: every reached stage resolves
 and validates its own logical resources before it plans or runs a method.
 
+Before that sequence is frozen, validation requires `assembly_review` to close
+each Assembly or T2T boundary before the next Assembly, T2T, manual-only
+boundary, or termination. It rejects invalid plans instead of inserting Review.
+When an assembly-refining handoff occurs before closure, Review binds that
+handoff as its subject. Every `assembly_review` occurrence therefore carries an
+exact `review_target` with `resource_type: "assembly"` and an earlier
+`producer_step_id`.
+
 Unregistered future tools are not stage candidates. Adding one requires its
 descriptor, executable adapter, routing, run-config contract, and tests in the
 same change.
@@ -179,8 +187,12 @@ the stage validates the assembly and the candidate/evidence required by its
 current operation; it must not bypass the resource contract with a bare
 `fasta_path`. The same contract is reusable after Assembly, Dedup, a changed
 accepted Hi-C assembly, a changed accepted T2T patch, or a previous Review
-action. A repeated occurrence starts with its own frozen stage seed and remains
-separate by step-scoped artifacts, attempts, review records, and Ledger facts.
+action. Before it loads candidates, it verifies that the central assembly
+`ResourceRef.source_stage` and `.workflow_step_id` match its frozen
+`review_target`; a stage name alone cannot satisfy the handoff. A repeated
+occurrence starts with a fresh copy of the same immutable stage-scoped seed,
+not occurrence-specific method configuration, and remains separate by
+step-scoped artifacts, attempts, review records, and Ledger facts.
 
 Registered methods:
 
@@ -203,7 +215,8 @@ Purpose: produce and review a chromosome-scale AutoHiC assembly.
 Logical inputs and output:
 
 - requires `assembly` and, when entered, `hic_reads`;
-- updates `assembly` only after the adoption decision.
+- republishes the central `assembly` `ResourceRef` after an adoption decision;
+  its bytes and candidate relation change only when a scaffold is adopted.
 
 Registered method:
 
@@ -223,7 +236,8 @@ An accepted scaffolding adoption verifies the current assembly candidate and
 the adopted primary artifact, then publishes a derived executed candidate in
 the active Hi-C occurrence before replacing the central resource. The immutable
 adoption-decision artifact identifies that derived candidate. Retaining the
-prior assembly publishes no candidate and leaves the current resource unchanged.
+prior assembly keeps the prior bytes and candidate relation, but republishes the
+central `assembly` `ResourceRef` under the active Hi-C occurrence.
 
 Freeze-time readiness validation covers inputs, local tools, models, and the
 declared output locations; it does not preflight files that AutoHiC has not yet
@@ -268,7 +282,8 @@ Logical inputs and output:
 - requires the current adopted `assembly` and `long_reads`;
 - consumes the complete ordered, platform-preserving long-read set, including
   ONT, PacBio HiFi, CLR, and CycloneSEQ inputs;
-- updates `assembly` only when a materialized result is selected.
+- republishes the central `assembly` `ResourceRef` after review; its bytes and
+  candidate relation change only when a materialized patch is selected.
 
 T2T consumes the central assembly as it exists when that frozen occurrence is
 reached. It never consumes `hic_reads` directly. A configured
@@ -305,7 +320,9 @@ When an adopted patch changes the assembly, T2T verifies the current candidate
 and exact patched primary artifact, then publishes a derived executed candidate
 bound to the immutable adoption-decision artifact before replacing the central
 resource. It retains the predecessor candidate and primary output as lineage.
-Keeping the prior assembly leaves that candidate relation untouched.
+Keeping the prior assembly keeps its bytes and candidate relation, but
+republishes the central `assembly` `ResourceRef` under the active T2T
+occurrence.
 
 ## 10. Base Polish Placeholder
 

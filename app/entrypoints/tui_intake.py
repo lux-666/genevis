@@ -216,10 +216,10 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
         requested_stages = list(stages_through("hic_scaffolding"))
         target_assembly_level = "chromosome"
     elif any(token in lower for token in ("scaffold", "挂载")):
-        requested_stages = list(stages_through("assembly"))
+        requested_stages = list(recommended_workflow_template("assembly"))
         target_assembly_level = "scaffold"
     elif any(token in lower for token in ("assembly", "assemble", "组装")):
-        requested_stages = list(stages_through("assembly"))
+        requested_stages = list(recommended_workflow_template("assembly"))
         target_assembly_level = "contig"
     else:
         requested_stages = []
@@ -298,15 +298,22 @@ def parse_workflow_intent(
         return fallback
     # A recognized deterministic scope is a hard ceiling.  The model may make
     # that scope more literal (including a custom order or repeated stages),
-    # but it may not expand it.  When the local recognizer found no stages, use
-    # the model's exact sequence without sorting or deduplication.
+    # but it may not expand it or drop a mandatory Assembly/T2T Review boundary.
+    # When the local recognizer found no stages, accept the model's exact
+    # sequence only when it satisfies the same boundary invariant.
     fallback_scope = set(fallback.requested_stages)
     parsed_sequence = list(parsed.requested_stages)
     if parsed_sequence and (
-        not fallback.requested_stages
-        or set(parsed_sequence).issubset(fallback_scope)
+        not fallback.requested_stages or set(parsed_sequence).issubset(fallback_scope)
     ):
-        requested_stages = parsed_sequence
+        from app.workflow import analyze_review_sequence
+
+        try:
+            analyze_review_sequence(parsed_sequence)
+        except ValueError:
+            requested_stages = list(fallback.requested_stages)
+        else:
+            requested_stages = parsed_sequence
     else:
         requested_stages = list(fallback.requested_stages)
     deterministic_scope_recognized = bool(fallback.requested_stages)

@@ -81,11 +81,7 @@ def _frozen_run_with_read_qc(tmp: str) -> SessionPaths:
     run_config_draft = Path(tmp) / "run_config.json"
     run_config_draft.write_text(
         json.dumps(
-            {
-                "requested_stages": [
-                    {"stage": "read_qc", "allow_local_execution": False}
-                ]
-            }
+            {"requested_stages": [{"stage": "read_qc", "allow_local_execution": False}]}
         ),
         encoding="utf-8",
     )
@@ -187,6 +183,15 @@ def _workflow_state(paths: SessionPaths, *, workflow_step_index: int) -> dict:
         }
         for index, stage in enumerate(("inventory", *_DEFAULT_REQUESTED_STAGES))
     ]
+    producer_step_id = steps[0]["step_id"]
+    for step in steps:
+        if step["stage"] == "assembly_review":
+            step["review_target"] = {
+                "resource_type": "assembly",
+                "producer_step_id": producer_step_id,
+            }
+        if step["stage"] in {"inventory", "assembly", "assembly_review"}:
+            producer_step_id = step["step_id"]
     state = initial_state(
         session_id=paths.session_id,
         input_manifest_ref=paths.to_ref(paths.manifest_path),
@@ -253,6 +258,7 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 [step["step_id"] for step in steps],
                 ["step-002-a", "step-010-z"],
             )
+
     def test_inspect_route_trace_keeps_only_latest_sixteen_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)

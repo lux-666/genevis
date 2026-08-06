@@ -122,6 +122,15 @@ def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
                 "stage": "assembly",
                 "allow_local_execution": True,
             },
+            {
+                "step_id": "step-004-assembly_review",
+                "stage": "assembly_review",
+                "allow_local_execution": False,
+                "review_target": {
+                    "resource_type": "assembly",
+                    "producer_step_id": "step-003-assembly",
+                },
+            },
         ],
     )
     state["shared_parameters"] = {
@@ -370,14 +379,23 @@ def test_parameter_chains_reject_an_earlier_same_stage_occurrence(
         "workflow_steps": [
             *state["workflow_steps"],
             {
-                "step_id": "step-004-assembly",
+                "step_id": "step-005-assembly",
                 "stage": "assembly",
                 "allow_local_execution": True,
             },
+            {
+                "step_id": "step-006-assembly_review",
+                "stage": "assembly_review",
+                "allow_local_execution": False,
+                "review_target": {
+                    "resource_type": "assembly",
+                    "producer_step_id": "step-005-assembly",
+                },
+            },
         ],
         "current_stage": "assembly",
-        "workflow_step_index": 4,
-        "entered_workflow_step_index": 4,
+        "workflow_step_index": 5,
+        "entered_workflow_step_index": 5,
     }
 
     with pytest.raises(

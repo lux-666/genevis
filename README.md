@@ -41,8 +41,9 @@ inventory
 This is the unique stage registry/display order, not an automatic planning
 template or runtime successor table. It includes the manual-only `gapcloser`
 and `base_polish` placeholders. Runtime order comes only from the literal
-frozen `requested_stages` occurrence list. The actual automatic T2T template
-omits those placeholders and explicitly repeats `assembly_review` after `t2t`:
+frozen `requested_stages` occurrence list. The automatic Assembly template
+appends `assembly_review`; the T2T template omits the placeholders and repeats
+that same Review component after `t2t`:
 
 ```text
 read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
@@ -51,6 +52,11 @@ read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
 
 The parent graph is composable but statically registered in `app/graph/builder.py`;
 it does not dynamically discover stage plugins or insert successor stages.
+Before freeze, sequence validation rejects a plan that leaves an Assembly or T2T
+boundary without its required `assembly_review`; it never inserts one. A later
+assembly-refining occurrence may become the exact handoff that Review closes.
+The owner contracts are [runtime orchestration](docs/architecture/topics/runtime-orchestration.md)
+and [stage contracts](docs/architecture/reference/stage-contracts.md).
 
 `gapcloser` 和 `base_polish` 当前只是父图中已注册的 manual-only
 placeholder：自动规划不会加入它们；显式请求会以
@@ -70,8 +76,8 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 - **Opt-in local execution**：只有显式批准的 occurrence 才会真正运行本地工具；同一 stage 的重复 occurrence 可分别授权或拒绝。未批准或未满足条件时输出计划、blocked state 或 review gate。
 - **Shared execution boundary**：通过 `EnvResolver`、`env_dispatch`、`LocalRunner` 统一解析 conda 环境、做 preflight、冻结命令并收集产物。
 - **Durable resume**：基于 sqlite checkpointer、ledger 和 decision file，支持跨进程恢复 `assembly_review`、`hic_scaffolding` 等人工 gate。
-- **Human-in-the-loop review**：review registry 统一声明 gate、允许的决策、resume applier 和 prompt bundle，避免每个阶段各写一套暂停/恢复逻辑。
-- **Reusable assembly review**：每个已采纳的 Assembly、Hi-C 或 T2T assembly revision 都有当前 executed candidate handoff；后续 `assembly_review` occurrence 复用同一合同。
+- **Human-in-the-loop review**：review registry 统一声明 gate、允许的决策、occurrence 校验、dispatch 与 timing metadata；stage code 仍拥有 payload 语义、prompt 分支和 resume effects。
+- **Reusable assembly review**：每个 Review occurrence 都冻结一个精确的 assembly producer target，并验证 central `ResourceRef` provenance 后才加载 candidate；后续 Review 复用同一合同。
 - **Operator observability**：`inspect` 和 session run trace 从 durable records
   还原状态、下一步动作和关键 artifact；blocked/failed operator report 是运行边界
   写下的 live compact projection，当前重建限制见 architecture conformance。
@@ -141,8 +147,9 @@ gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interact
 `<data-dir>/runs/<session_id>/`。命令在写出任何运行输入之前校验并规范化两个文件，
 要求 run config 显式提供 `requested_stages` JSON 对象列表；每项形如
 `{"stage": "assembly_review", "allow_local_execution": true}`，其中 stage
-定义一个有序 occurrence，布尔值只授权该 occurrence 启动本地进程。列表允许重复
-stage 和任意顺序；冻结时会在首位隐式加入 `step-000-inventory`，其余 `step_id`
+定义一个有序 occurrence，布尔值只授权该 occurrence 启动本地进程。列表保留字面
+顺序、允许重复且无需遵循 registry order，但必须通过 RunConfig 序列校验；
+冻结时会在首位隐式加入 `step-000-inventory`，其余 `step_id`
 由列表位置生成。`requested_stages` 不得为 `null`，但 `[]` 是有效的 inventory-only
 计划。随后命令冻结 occurrence 序列及保守的依赖闭包，并以 SQLite 执行已冻结的
 会话。冻结发布顺序为
@@ -216,12 +223,6 @@ TUI 的实际流程是：
 物种及 telomere motif。CLR、CycloneSEQ、short reads 和已有 assembly 尚未接入
 这段追问流程。规划 LLM 失败或返回非法 draft 时，本次规划中止并保留草稿供
 `/resume` 重试，不使用确定性 stage plan 回退。
-
-上方展示的自动 T2T template 是由
-`recommended_workflow_template("t2t")` 给出的 occurrence recommendation；它不会修改
-文件提供的 RunConfig。冻结的 run config 可以重排或重复 stage。`gapcloser` 与
-`base_polish` 只存在于 registry/display order，自动计划会省略它们，直到对应方法、
-资源交接和执行合同真正实现。
 
 TUI 最终会把选择落到 run config：
 

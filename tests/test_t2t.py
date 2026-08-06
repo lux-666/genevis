@@ -28,6 +28,7 @@ from app.stages.t2t.nodes import (
     _materialize_t2t_patches,
     _t2t_adoption_decision_ref,
     build_t2t_candidates,
+    commit_t2t,
     scan_read_telomeres,
 )
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
@@ -64,7 +65,8 @@ class T2TDescriptorTests(unittest.TestCase):
         config = RunConfig.model_validate(
             {
                 "requested_stages": [
-                    {"stage": "t2t", "allow_local_execution": True}
+                    {"stage": "t2t", "allow_local_execution": True},
+                    {"stage": "assembly_review", "allow_local_execution": False},
                 ],
                 "t2t": {},
             }
@@ -78,7 +80,11 @@ class T2TDescriptorTests(unittest.TestCase):
             RunConfig.model_validate(
                 {
                     "requested_stages": [
-                        {"stage": "t2t", "allow_local_execution": True}
+                        {"stage": "t2t", "allow_local_execution": True},
+                        {
+                            "stage": "assembly_review",
+                            "allow_local_execution": False,
+                        },
                     ],
                     "t2t": {"telomere_motif": "TTAGGG"},
                 }
@@ -89,7 +95,11 @@ class T2TDescriptorTests(unittest.TestCase):
             RunConfig.model_validate(
                 {
                     "requested_stages": [
-                        {"stage": "t2t", "allow_local_execution": True}
+                        {"stage": "t2t", "allow_local_execution": True},
+                        {
+                            "stage": "assembly_review",
+                            "allow_local_execution": False,
+                        },
                     ],
                     "t2t": {"thresholds": {"min_mapq": 30}},
                 }
@@ -252,7 +262,16 @@ class T2TStageTests(unittest.TestCase):
                     "allow_local_execution": True,
                 },
                 {
-                    "step_id": "step-002-base_polish",
+                    "step_id": "step-002-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-001-t2t",
+                    },
+                },
+                {
+                    "step_id": "step-003-base_polish",
                     "stage": "base_polish",
                     "allow_local_execution": True,
                 },
@@ -295,9 +314,7 @@ class T2TStageTests(unittest.TestCase):
             source_stage="inventory",
             workflow_step_id="step-000-inventory",
             metadata={
-                "candidate_bundle_ref": source_candidate.ref.model_dump(
-                    mode="json"
-                ),
+                "candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
                 "primary_output_ref": source_candidate.primary_output_ref.model_dump(
                     mode="json"
                 ),
@@ -375,7 +392,7 @@ class T2TStageTests(unittest.TestCase):
         )
         return assembly, reads
 
-    def test_auto_patch_preserves_input_and_hands_patched_assembly_to_base_polish(self):
+    def test_auto_patch_preserves_input_and_hands_patched_assembly_to_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             original = assembly.read_text(encoding="utf-8")
@@ -431,14 +448,12 @@ class T2TStageTests(unittest.TestCase):
                     gate_id="t2t_review",
                     decision="accept_selected_candidates",
                     candidate_ids=selected_candidate_ids,
-                    review_request_id=blocked["active_interrupt"][
-                        "review_request_id"
-                    ],
+                    review_request_id=blocked["active_interrupt"]["review_request_id"],
                     review_request_hash=blocked["active_interrupt"]["request_hash"],
                 ),
             )
 
-            self.assertEqual(result["current_stage"], "base_polish")
+            self.assertEqual(result["current_stage"], "assembly_review")
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed")
             self.assertEqual(t2t["output_assembly_ref"], str(patched))
@@ -453,7 +468,7 @@ class T2TStageTests(unittest.TestCase):
             expected_assembly = state["resource_refs"]["assembly"]["paths"][0]
             result = self._invoke_with_parameter_approval(state)
 
-            self.assertEqual(result["current_stage"], "base_polish")
+            self.assertEqual(result["current_stage"], "assembly_review")
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "skipped")
             self.assertEqual(t2t["output_assembly_ref"], expected_assembly)
@@ -552,9 +567,7 @@ class T2TStageTests(unittest.TestCase):
                     gate_id="t2t_review",
                     decision="accept_selected_candidates",
                     candidate_ids=selected_candidate_ids,
-                    review_request_id=blocked["active_interrupt"][
-                        "review_request_id"
-                    ],
+                    review_request_id=blocked["active_interrupt"]["review_request_id"],
                     review_request_hash=blocked["active_interrupt"]["request_hash"],
                 ),
             )
@@ -641,6 +654,15 @@ class T2TStageTests(unittest.TestCase):
                         "step_id": "step-001-t2t",
                         "stage": "t2t",
                         "allow_local_execution": True,
+                    },
+                    {
+                        "step_id": "step-002-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-001-t2t",
+                        },
                     },
                 ],
             )
@@ -842,7 +864,7 @@ class T2TStageTests(unittest.TestCase):
                 recommended_parameters={"min_supporting_reads": 2},
             )
 
-            self.assertEqual(result["current_stage"], "base_polish")
+            self.assertEqual(result["current_stage"], "assembly_review")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(
                 result["stage_outputs"]["t2t"]["status"], "completed_with_warnings"
@@ -873,7 +895,7 @@ class T2TStageTests(unittest.TestCase):
             )
             resumed = resume_review_state(blocked, request)
 
-            self.assertEqual(resumed["current_stage"], "base_polish")
+            self.assertEqual(resumed["current_stage"], "assembly_review")
             self.assertEqual(resumed["supervision_state"], "running_stage")
             self.assertIsNone(resumed["active_interrupt"])
             t2t = resumed["stage_outputs"]["t2t"]
@@ -919,7 +941,7 @@ class T2TStageTests(unittest.TestCase):
 
             resumed = resume_review_state(blocked, request)
 
-            self.assertEqual(resumed["current_stage"], "base_polish")
+            self.assertEqual(resumed["current_stage"], "assembly_review")
             t2t = resumed["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed_with_warnings")
             self.assertEqual(t2t["output_assembly_ref"], expected_assembly)
@@ -927,17 +949,73 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(t2t["selected_candidate_ids"], [])
             self.assertEqual(t2t["selected_patch_count"], 0)
             self.assertEqual(
-                resumed.get("resource_refs", blocked["resource_refs"])["assembly"][
-                    "paths"
-                ],
+                resumed["resource_refs"]["assembly"]["paths"],
                 [expected_assembly],
             )
-            self.assertNotIn("resource_refs", resumed)
+            self.assertEqual(
+                resumed["resource_refs"]["assembly"]["source_stage"],
+                "t2t",
+            )
+            self.assertEqual(
+                resumed["resource_refs"]["assembly"]["workflow_step_id"],
+                "step-001-t2t",
+            )
             resumed_candidate_count = sum(
                 record["artifact_type"] == "draft_assembly.candidate"
                 for record in read_artifact_records(blocked["data_dir"], "s1")
             )
             self.assertEqual(resumed_candidate_count, source_candidate_count)
+
+    def test_no_patch_handoff_is_consumed_by_bound_post_t2t_review(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            input_assembly = state["resource_refs"]["assembly"]["paths"][0]
+            state["workflow_steps"] = [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-002-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-001-t2t",
+                    },
+                },
+            ]
+            state["stage_outputs"]["t2t"] = {
+                "status": "completed_with_warnings",
+                "input_assembly_ref": input_assembly,
+                "output_assembly_ref": input_assembly,
+            }
+
+            committed = {**state, **commit_t2t(state)}
+
+            self.assertEqual(committed["current_stage"], "assembly_review")
+            self.assertEqual(
+                committed["resource_refs"]["assembly"]["workflow_step_id"],
+                "step-001-t2t",
+            )
+            from app.stages.assembly_review.nodes import resolve_candidates
+
+            reviewed = resolve_candidates(committed)
+            self.assertEqual(
+                reviewed["stage_outputs"]["assembly_review"]["status"],
+                "resolved",
+            )
+            self.assertEqual(
+                reviewed["stage_outputs"]["assembly_review"]["candidate_count"],
+                1,
+            )
 
     def test_adopted_patch_rejects_non_decision_artifact_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -968,9 +1046,7 @@ class T2TStageTests(unittest.TestCase):
             tampered_out = {
                 **resumed["stage_outputs"]["t2t"],
                 "review_decision_artifact_ref": {
-                    **resumed["stage_outputs"]["t2t"][
-                        "review_decision_artifact_ref"
-                    ],
+                    **resumed["stage_outputs"]["t2t"]["review_decision_artifact_ref"],
                     "artifact_type": "t2t.not_a_decision",
                 },
             }
@@ -996,9 +1072,7 @@ class T2TStageTests(unittest.TestCase):
             }
             blocked = self._invoke_with_parameter_approval(state)
             candidates = Path(
-                blocked["stage_outputs"]["t2t"][
-                    "telomere_extension_candidates_ref"
-                ]
+                blocked["stage_outputs"]["t2t"]["telomere_extension_candidates_ref"]
             )
             candidates.write_text(
                 candidates.read_text(encoding="utf-8") + "\n",
@@ -1027,9 +1101,7 @@ class T2TStageTests(unittest.TestCase):
                     stage="t2t",
                     gate_id="t2t_review",
                     decision="continue_without_patch",
-                    review_request_id=blocked["active_interrupt"][
-                        "review_request_id"
-                    ],
+                    review_request_id=blocked["active_interrupt"]["review_request_id"],
                     review_request_hash=blocked["active_interrupt"]["request_hash"],
                 ),
             )
@@ -1082,9 +1154,7 @@ class T2TStageTests(unittest.TestCase):
                         if decision == "accept_selected_candidates"
                         else []
                     ),
-                    review_request_id=blocked["active_interrupt"][
-                        "review_request_id"
-                    ],
+                    review_request_id=blocked["active_interrupt"]["review_request_id"],
                     review_request_hash=blocked["active_interrupt"]["request_hash"],
                 )
                 artifacts_before = read_artifact_records(blocked["data_dir"], "s1")
@@ -1141,9 +1211,7 @@ class T2TStageTests(unittest.TestCase):
                         review_request_id=blocked["active_interrupt"][
                             "review_request_id"
                         ],
-                        review_request_hash=blocked["active_interrupt"][
-                            "request_hash"
-                        ],
+                        review_request_hash=blocked["active_interrupt"]["request_hash"],
                         decided_by="llm_provisional",
                         rationale_artifact_ref="llm:t2t-adoption",
                     ),
@@ -1203,7 +1271,7 @@ class T2TStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approval(state)
 
-            self.assertEqual(result["current_stage"], "base_polish")
+            self.assertEqual(result["current_stage"], "assembly_review")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(
                 result["stage_outputs"]["t2t"]["status"], "completed_with_warnings"
@@ -1375,9 +1443,7 @@ class T2TStageTests(unittest.TestCase):
                 set(t2t["telomeric_reads_fasta_refs"]),
                 {"map-ont"},
             )
-            self.assertTrue(
-                Path(t2t["telomeric_reads_fasta_refs"]["map-ont"]).exists()
-            )
+            self.assertTrue(Path(t2t["telomeric_reads_fasta_refs"]["map-ont"]).exists())
 
     def test_all_clean_read_files_are_scanned_before_raw_and_ids_are_namespaced(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1606,6 +1672,15 @@ class T2TStageTests(unittest.TestCase):
                         "stage": "t2t",
                         "allow_local_execution": True,
                     },
+                    {
+                        "step_id": "step-002-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-001-t2t",
+                        },
+                    },
                 ],
             )
             state["workflow_step_index"] = 1
@@ -1719,6 +1794,15 @@ class T2TStageTests(unittest.TestCase):
                         "step_id": "step-001-t2t",
                         "stage": "t2t",
                         "allow_local_execution": True,
+                    },
+                    {
+                        "step_id": "step-002-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                        "review_target": {
+                            "resource_type": "assembly",
+                            "producer_step_id": "step-001-t2t",
+                        },
                     },
                 ],
             )

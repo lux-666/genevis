@@ -12,7 +12,11 @@ from app.control.workflow_plan import (
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.run_config import RunConfig
-from app.schemas.state import freeze_workflow_steps, initial_state
+from app.schemas.state import (
+    freeze_workflow_steps,
+    initial_state,
+    validate_workflow_steps,
+)
 from app.storage.paths import SessionPaths
 
 
@@ -41,6 +45,7 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
                 {"stage": "t2t", "allow_local_execution": False},
                 {"stage": "assembly_review", "allow_local_execution": False},
                 {"stage": "t2t", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": False},
             ]
         }
     )
@@ -50,13 +55,23 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
         "t2t",
         "assembly_review",
         "t2t",
+        "assembly_review",
     ]
     assert [step["step_id"] for step in steps] == [
         "step-000-inventory",
         "step-001-t2t",
         "step-002-assembly_review",
         "step-003-t2t",
+        "step-004-assembly_review",
     ]
+    assert steps[2]["review_target"] == {
+        "resource_type": "assembly",
+        "producer_step_id": "step-001-t2t",
+    }
+    assert steps[4]["review_target"] == {
+        "resource_type": "assembly",
+        "producer_step_id": "step-003-t2t",
+    }
 
     state = initial_state(
         session_id="s1",
@@ -118,6 +133,10 @@ def test_frozen_workflow_plan_rejects_runtime_append_or_reorder() -> None:
                         "allow_local_execution": False,
                     },
                     {"stage": "t2t", "allow_local_execution": False},
+                    {
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                    },
                 ]
             }
         )
@@ -132,6 +151,10 @@ def test_frozen_workflow_plan_rejects_runtime_append_or_reorder() -> None:
                         "allow_local_execution": False,
                     },
                     {"stage": "t2t", "allow_local_execution": False},
+                    {
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                    },
                 ]
             }
         )
@@ -145,11 +168,104 @@ def test_frozen_workflow_plan_rejects_runtime_append_or_reorder() -> None:
         freeze_workflow_steps(original, appended)
 
 
+def test_review_target_binds_the_nearest_assembly_handoff_occurrence() -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": False},
+                {"stage": "assembly_dedup", "allow_local_execution": False},
+                {"stage": "assembly_review", "allow_local_execution": False},
+                {"stage": "hic_scaffolding", "allow_local_execution": False},
+                {"stage": "t2t", "allow_local_execution": False},
+                {"stage": "assembly_review", "allow_local_execution": False},
+            ]
+        }
+    )
+
+    steps = workflow_steps_from_run_config(config)
+
+    assert steps[3]["review_target"] == {
+        "resource_type": "assembly",
+        "producer_step_id": "step-002-assembly_dedup",
+    }
+    assert steps[6]["review_target"] == {
+        "resource_type": "assembly",
+        "producer_step_id": "step-005-t2t",
+    }
+
+
+def test_workflow_step_validation_rejects_bad_review_targets() -> None:
+    steps = workflow_steps_from_run_config(
+        RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {"stage": "t2t", "allow_local_execution": False},
+                    {"stage": "assembly_review", "allow_local_execution": False},
+                ]
+            }
+        )
+    )
+
+    missing = [dict(step) for step in steps]
+    missing[2].pop("review_target")
+    with pytest.raises(ValueError, match="review_target is required"):
+        validate_workflow_steps(missing)
+
+    forbidden = [dict(step) for step in steps]
+    forbidden[1]["review_target"] = {
+        "resource_type": "assembly",
+        "producer_step_id": "step-000-inventory",
+    }
+    with pytest.raises(ValueError, match="allowed only"):
+        validate_workflow_steps(forbidden)
+
+    forged = [dict(step) for step in steps]
+    forged[2]["review_target"] = {
+        "resource_type": "assembly",
+        "producer_step_id": "step-000-inventory",
+    }
+    with pytest.raises(ValueError, match="must be 'step-001-t2t'"):
+        validate_workflow_steps(forged)
+
+
+def test_workflow_step_validation_rejects_terminal_placeholder_before_review() -> None:
+    steps = [
+        {
+            "step_id": "step-000-inventory",
+            "stage": "inventory",
+            "allow_local_execution": False,
+        },
+        {
+            "step_id": "step-001-t2t",
+            "stage": "t2t",
+            "allow_local_execution": False,
+        },
+        {
+            "step_id": "step-002-base_polish",
+            "stage": "base_polish",
+            "allow_local_execution": False,
+        },
+        {
+            "step_id": "step-003-assembly_review",
+            "stage": "assembly_review",
+            "allow_local_execution": False,
+            "review_target": {
+                "resource_type": "assembly",
+                "producer_step_id": "step-001-t2t",
+            },
+        },
+    ]
+
+    with pytest.raises(ValueError, match="before base_polish"):
+        validate_workflow_steps(steps)
+
+
 def test_prebound_attempt_still_receives_canonical_occurrence_namespace() -> None:
     config = RunConfig.model_validate(
         {
             "requested_stages": [
                 {"stage": "t2t", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": False},
             ]
         }
     )
@@ -177,6 +293,7 @@ def test_prebound_attempt_rejects_another_occurrence_namespace() -> None:
         {
             "requested_stages": [
                 {"stage": "t2t", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": False},
             ]
         }
     )

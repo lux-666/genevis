@@ -136,11 +136,21 @@ config; the boolean authorizes local process execution only for that occurrence.
 `requested_stages: null` is rejected, while `[]` is valid. Inventory registers
 an `assembly_fasta_registered` input as the central assembly resource;
 `assembly_review` is the recommended review-only entry, but the executor does
-not reject, reorder, or fill the frozen occurrence sequence by registry order.
+not reorder the occurrence sequence by registry order. Pre-freeze validation
+does reject an unclosed mandatory Assembly/T2T Review boundary and never fills
+or repairs the sequence; see
+[Runtime orchestration](../architecture/topics/runtime-orchestration.md).
 Use `--non-interactive` for automation: a human gate persists `blocked_human`
 and prints `inspect`, `review`, and `resume` continuation commands. The TUI is
 an optional conversational intake/planning alternative that uses the same
 frozen executor.
+
+## Active Sessions During Code Upgrades
+
+The current pre-release runtime has no checkpoint migration. Finish active
+sessions before replacing a server checkout, or preserve the old checkout and
+its environment until their SQLite checkpoints have been resumed or
+terminalized. Do not assume upgraded code can read an older checkpoint.
 
 ## Verification
 

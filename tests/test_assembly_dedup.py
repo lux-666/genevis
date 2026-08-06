@@ -52,6 +52,10 @@ class AssemblyDedupStageTests(unittest.TestCase):
                     "step_id": "step-003-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-002-assembly_dedup",
+                    },
                 },
             ],
         )

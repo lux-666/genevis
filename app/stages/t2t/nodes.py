@@ -61,6 +61,7 @@ from app.schemas.artifacts import (
     T2TReviewDecisionArtifact,
 )
 from app.schemas.execution import InputDependency
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import (
     ActiveInterrupt,
     StateUpdate,
@@ -1045,26 +1046,54 @@ def commit_t2t(state: TopLevelState) -> StateUpdate:
             == _canonical_path(str(input_assembly_ref))
         )
         if current_assembly_matches_output:
-            if adopted_patch:
-                try:
-                    _verify_t2t_adopted_candidate(
-                        state,
-                        current_assembly_metadata=current_assembly.metadata,
-                        assembly_path=str(assembly_ref),
-                    )
-                except (
-                    AssemblyCandidateBundleError,
-                    OSError,
-                    TypeError,
-                    ValueError,
-                ) as exc:
-                    reason = f"t2t adopted candidate provenance is invalid: {exc}"
-                    return {
-                        **_fail(state, reason),
-                        "current_stage": "t2t",
-                        "supervision_state": "failed_terminal",
-                        "last_error": reason,
-                    }
+            try:
+                current_candidate = _verify_t2t_adopted_candidate(
+                    state,
+                    current_assembly_metadata=current_assembly.metadata,
+                    assembly_path=str(assembly_ref),
+                )
+                raw_assembly_ref = (state.get("resource_refs") or {}).get("assembly")
+                if raw_assembly_ref is None:
+                    raise ValueError("the central assembly ResourceRef is missing")
+                persisted_assembly_ref = (
+                    ResourceRef.from_dict(raw_assembly_ref)
+                    if isinstance(raw_assembly_ref, dict)
+                    else raw_assembly_ref
+                )
+            except (
+                AssemblyCandidateBundleError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                reason = f"t2t output candidate provenance is invalid: {exc}"
+                return {
+                    **_fail(state, reason),
+                    "current_stage": "t2t",
+                    "supervision_state": "failed_terminal",
+                    "last_error": reason,
+                }
+            active_step_id = current_workflow_step_id(state, expected_stage="t2t")
+            if (
+                persisted_assembly_ref.source_stage == "t2t"
+                and persisted_assembly_ref.workflow_step_id == active_step_id
+            ):
+                return update
+            handoff_metadata = {
+                **dict(persisted_assembly_ref.metadata),
+                "patched": adopted_patch,
+                "candidate_bundle_ref": current_candidate.ref.model_dump(mode="json"),
+                "primary_output_ref": (
+                    current_candidate.primary_output_ref.model_dump(mode="json")
+                ),
+            }
+            update["resource_refs"] = update_resource_ref(
+                state,
+                "assembly",
+                [str(assembly_ref)],
+                "t2t",
+                handoff_metadata,
+            )
             return update
         if not current_assembly_matches_input:
             reason = (
@@ -1500,12 +1529,14 @@ def apply_t2t_review_decision(
             **stage_update,
             "last_error": "t2t stopped by human review decision",
         }
-    reviewed_state = validate_top_level_state({
-        **state,
-        **dict(stage_update),
-        "active_interrupt": None,
-        "supervision_state": "running_stage",
-    })
+    reviewed_state = validate_top_level_state(
+        {
+            **state,
+            **dict(stage_update),
+            "active_interrupt": None,
+            "supervision_state": "running_stage",
+        }
+    )
     reviewed_out = read_t2t_stage_output(reviewed_state)
     try:
         final_evidence_update = _finalize_t2t_evidence(reviewed_state, reviewed_out)
@@ -1513,10 +1544,12 @@ def apply_t2t_review_decision(
         raise ResumeValidationError(
             f"t2t final evidence could not be persisted: {exc}"
         ) from exc
-    finalized_state = validate_top_level_state({
-        **reviewed_state,
-        **dict(final_evidence_update),
-    })
+    finalized_state = validate_top_level_state(
+        {
+            **reviewed_state,
+            **dict(final_evidence_update),
+        }
+    )
     commit_update = commit_t2t(finalized_state)
     return {
         **final_evidence_update,
@@ -1536,7 +1569,7 @@ def _verify_t2t_adopted_candidate(
     candidate_ref = current_assembly_metadata.get("candidate_bundle_ref")
     if candidate_ref is None:
         raise AssemblyCandidateBundleError(
-            "adopted t2t patch requires the current candidate_bundle_ref"
+            "t2t assembly handoff requires the current candidate_bundle_ref"
         )
     source_candidate = load_executed_candidate_bundle(
         absolute_data_dir(state), state["session_id"], candidate_ref
@@ -1545,7 +1578,7 @@ def _verify_t2t_adopted_candidate(
         assembly_path
     ):
         raise AssemblyCandidateBundleError(
-            "current candidate primary output does not match the t2t input assembly"
+            "current candidate primary output does not match the t2t assembly"
         )
     return source_candidate
 
@@ -2435,9 +2468,7 @@ def _publish_t2t_finishing_evidence(
     """Publish one immutable pre-review or final report/bundle pair."""
 
     stem_suffix = ".pre_review" if evidence_phase == "pre_review" else ""
-    report_source = (
-        Path(out["work_dir"]) / f"t2t_finishing_report{stem_suffix}.md"
-    )
+    report_source = Path(out["work_dir"]) / f"t2t_finishing_report{stem_suffix}.md"
     report_source.write_text(
         _report_markdown(
             out,
@@ -2472,9 +2503,7 @@ def _publish_t2t_finishing_evidence(
         }
     )
     artifacts = list(artifacts_by_path.values())
-    bundle_source = (
-        Path(out["work_dir"]) / f"t2t_finishing_bundle{stem_suffix}.json"
-    )
+    bundle_source = Path(out["work_dir"]) / f"t2t_finishing_bundle{stem_suffix}.json"
     bundle = T2TFinishingBundle(
         session_id=state["session_id"],
         evidence_phase=evidence_phase,
@@ -2538,8 +2567,7 @@ def _finalize_t2t_evidence(
     ]
     status: T2TStatus = (
         "completed_with_warnings"
-        if any(row["status"] == "missing_signal" for row in summary)
-        or out.get("notes")
+        if any(row["status"] == "missing_signal" for row in summary) or out.get("notes")
         else "completed"
     )
     summary_source = Path(out["work_dir"]) / "telomere_status_summary.final.tsv"

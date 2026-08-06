@@ -21,7 +21,12 @@ from uuid import uuid4
 import yaml
 
 from app.control.lifecycle import ResumeValidationError
-from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    current_workflow_step,
+    current_workflow_step_id,
+    workflow_step_by_id,
+)
 from app.reference.ncbi_metazoa import (
     build_related_species_evidence_pack as _build_related_species_evidence_pack,
 )
@@ -53,6 +58,7 @@ from app.schemas.artifacts import (
     ReviewDecisionArtifact,
 )
 from app.schemas.plan import AssemblyReviewPlan
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import (
     ActiveInterrupt,
     StateUpdate,
@@ -123,6 +129,18 @@ def enter_assembly_review(state: TopLevelState) -> StateUpdate:
 def resolve_candidates(state: TopLevelState) -> StateUpdate:
     """Resolve current assembly candidates from the central resource table."""
     candidates: list[AssemblyCandidateCursor] = []
+    try:
+        _validate_review_target_handoff(state)
+    except (TypeError, ValueError) as exc:
+        return update_assembly_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": f"assembly review producer binding is invalid: {exc}",
+                "candidate_count": 0,
+                "candidates": [],
+            },
+        )
     assembly = resolve_stage_resource(
         state,
         resource_spec=ASSEMBLY_CANDIDATES_SPEC,
@@ -234,6 +252,42 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
         payload["reason"] = "no_assembly_candidates_found"
 
     return update_assembly_review_output(state, payload)
+
+
+def _validate_review_target_handoff(state: TopLevelState) -> None:
+    """Require the current assembly to come from this Review's frozen producer."""
+
+    step = current_workflow_step(state)
+    if step is None or step["stage"] != "assembly_review":
+        raise ValueError("the active workflow step is not assembly_review")
+    target = step.get("review_target")
+    if not isinstance(target, dict):
+        raise ValueError("assembly_review has no frozen review_target")
+    producer_step_id = target.get("producer_step_id")
+    if not isinstance(producer_step_id, str) or not producer_step_id:
+        raise ValueError("assembly_review review_target has no producer_step_id")
+    producer_step = workflow_step_by_id(state, producer_step_id)
+
+    raw_assembly_ref = (state.get("resource_refs") or {}).get("assembly")
+    if raw_assembly_ref is None:
+        return
+    assembly_ref = (
+        ResourceRef.from_dict(raw_assembly_ref)
+        if isinstance(raw_assembly_ref, dict)
+        else raw_assembly_ref
+    )
+    if assembly_ref.workflow_step_id != producer_step_id:
+        raise ValueError(
+            "current assembly producer step does not match frozen review_target: "
+            f"expected {producer_step_id!r}, got "
+            f"{assembly_ref.workflow_step_id!r}"
+        )
+    if assembly_ref.source_stage != producer_step["stage"]:
+        raise ValueError(
+            "current assembly producer stage does not match frozen review_target: "
+            f"expected {producer_step['stage']!r}, got "
+            f"{assembly_ref.source_stage!r}"
+        )
 
 
 def plan_review_metrics(state: TopLevelState) -> StateUpdate:
@@ -1391,9 +1445,7 @@ def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
         stage="assembly_review",
         workflow_step_id=workflow_step_id,
         subject_id=comparison_ref,
-        idempotency_key=(
-            f"candidate-comparison:{workflow_step_id}:{comparison_ref}"
-        ),
+        idempotency_key=(f"candidate-comparison:{workflow_step_id}:{comparison_ref}"),
     )
 
     return update_assembly_review_output(

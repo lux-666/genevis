@@ -13,6 +13,7 @@ from app.schemas.state import (
     validate_stage_outputs,
     validate_workflow_steps,
 )
+from app.workflow import analyze_review_sequence
 
 if TYPE_CHECKING:
     from app.schemas.descriptors import FrozenAttemptSpec
@@ -30,6 +31,7 @@ def workflow_steps_from_requests(
 ) -> list[WorkflowStep]:
     """Project RunConfig requests into the immutable runtime plan."""
 
+    review_bindings = analyze_review_sequence([request.stage for request in requests])
     steps: list[WorkflowStep] = [
         {
             "step_id": workflow_step_id(0, "inventory"),
@@ -46,6 +48,12 @@ def workflow_steps_from_requests(
                 "allow_local_execution": bool(request.allow_local_execution),
             }
         )
+        if stage == "assembly_review":
+            producer = steps[review_bindings[index]]
+            steps[-1]["review_target"] = {
+                "resource_type": "assembly",
+                "producer_step_id": producer["step_id"],
+            }
     return validate_workflow_steps(steps)
 
 
@@ -159,9 +167,7 @@ def advance_workflow_step(
     return {
         "workflow_step_index": next_index,
         "current_stage": next_stage,
-        "supervision_state": (
-            "completed" if next_stage == "done" else "running_stage"
-        ),
+        "supervision_state": ("completed" if next_stage == "done" else "running_stage"),
     }
 
 

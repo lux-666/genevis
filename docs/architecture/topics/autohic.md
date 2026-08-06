@@ -115,7 +115,8 @@ review candidate or gate, and does not retry or roll back the publication.
 
 Accepting the candidate verifies the published FASTA and replaces
 `resource_refs["assembly"]` with the Hi-C-produced assembly plus provenance.
-Keeping the prior assembly leaves the current resource unchanged. Requesting a
+Keeping the prior assembly preserves its bytes and candidate relation but
+republishes the central resource under the active Hi-C occurrence. Requesting a
 parameter retry seals the current attempt and returns to recommendation with
 immutable execution and review evidence.
 

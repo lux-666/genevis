@@ -136,6 +136,10 @@ def replace_stage_outputs(
 def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
     """Validate the immutable occurrence list used by runtime routing."""
 
+    # app.workflow imports DomainStage from this module, so defer this import
+    # until validation rather than creating an import-time schema cycle.
+    from app.workflow import ASSEMBLY_HANDOFF_PRODUCER_STAGES, analyze_review_sequence
+
     if not isinstance(value, list) or not value:
         raise TypeError("workflow_steps must be a non-empty list")
     if len(value) > MAX_WORKFLOW_STEPS:
@@ -167,21 +171,91 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
             )
         expected_id = f"step-{index:03d}-{stage}"
         if raw_step.get("step_id") != expected_id:
+            raise ValueError(f"workflow_steps[{index}].step_id must be {expected_id!r}")
+        has_review_target = "review_target" in raw_step
+        if stage != "assembly_review" and has_review_target:
             raise ValueError(
-                f"workflow_steps[{index}].step_id must be {expected_id!r}"
+                f"workflow_steps[{index}].review_target is allowed only for "
+                "assembly_review"
             )
-        steps.append(
-            {
-                "step_id": expected_id,
-                "stage": cast(DomainStage, stage),
-                "allow_local_execution": allow_local,
+
+        step: WorkflowStep = {
+            "step_id": expected_id,
+            "stage": cast(DomainStage, stage),
+            "allow_local_execution": allow_local,
+        }
+        if stage == "assembly_review":
+            if not has_review_target:
+                raise ValueError(
+                    f"workflow_steps[{index}].review_target is required for "
+                    "assembly_review"
+                )
+            raw_target = raw_step.get("review_target")
+            if not isinstance(raw_target, Mapping):
+                raise TypeError(
+                    f"workflow_steps[{index}].review_target must be a JSON object"
+                )
+            target_unknown = set(raw_target).difference(ReviewTarget.__annotations__)
+            target_missing = set(ReviewTarget.__required_keys__).difference(raw_target)
+            if target_unknown:
+                raise ValueError(
+                    f"workflow_steps[{index}].review_target contains unsupported "
+                    "fields: " + ", ".join(sorted(target_unknown))
+                )
+            if target_missing:
+                raise ValueError(
+                    f"workflow_steps[{index}].review_target is missing required "
+                    "fields: " + ", ".join(sorted(target_missing))
+                )
+            if raw_target.get("resource_type") != "assembly":
+                raise ValueError(
+                    f"workflow_steps[{index}].review_target.resource_type must be "
+                    "'assembly'"
+                )
+            producer_step_id = raw_target.get("producer_step_id")
+            if not isinstance(producer_step_id, str):
+                raise TypeError(
+                    f"workflow_steps[{index}].review_target.producer_step_id "
+                    "must be a string"
+                )
+            step["review_target"] = {
+                "resource_type": "assembly",
+                "producer_step_id": producer_step_id,
             }
-        )
+        steps.append(step)
 
     if steps[0]["stage"] != "inventory":
         raise ValueError("workflow_steps must begin with inventory")
     if any(step["stage"] == "inventory" for step in steps[1:]):
         raise ValueError("inventory may appear only as the first workflow step")
+
+    review_bindings = analyze_review_sequence([step["stage"] for step in steps[1:]])
+    for review_index, producer_index in review_bindings.items():
+        review_step = steps[review_index]
+        target = review_step["review_target"]
+        producer_step_id = target["producer_step_id"]
+        matching_indexes = [
+            index
+            for index, step in enumerate(steps[:review_index])
+            if step["step_id"] == producer_step_id
+        ]
+        if not matching_indexes:
+            raise ValueError(
+                f"workflow_steps[{review_index}].review_target.producer_step_id "
+                "must reference an earlier workflow step"
+            )
+        referenced_step = steps[matching_indexes[0]]
+        if referenced_step["stage"] not in ASSEMBLY_HANDOFF_PRODUCER_STAGES:
+            raise ValueError(
+                f"workflow_steps[{review_index}].review_target.producer_step_id "
+                "must reference an assembly handoff producer"
+            )
+        expected_producer_step_id = steps[producer_index]["step_id"]
+        if producer_step_id != expected_producer_step_id:
+            raise ValueError(
+                f"workflow_steps[{review_index}].review_target.producer_step_id "
+                f"must be {expected_producer_step_id!r}"
+            )
     return steps
 
 
@@ -406,16 +480,13 @@ def _validate_active_interrupt(value: object) -> None:
     missing = set(ActiveInterrupt.__required_keys__).difference(value)
     if missing:
         raise ValueError(
-            "active_interrupt is missing required fields: "
-            + ", ".join(sorted(missing))
+            "active_interrupt is missing required fields: " + ", ".join(sorted(missing))
         )
     if value.get("stage") not in DOMAIN_STAGES:
         raise ValueError("active_interrupt.stage must be a known domain stage")
     workflow_step_id = value.get("workflow_step_id")
     if not isinstance(workflow_step_id, str) or not workflow_step_id.strip():
-        raise ValueError(
-            "active_interrupt.workflow_step_id must be a non-empty string"
-        )
+        raise ValueError("active_interrupt.workflow_step_id must be a non-empty string")
     request_ref = value.get("request_ref")
     if request_ref is not None:
         from app.schemas.artifacts import ArtifactRef
@@ -485,12 +556,20 @@ class ActiveInterrupt(TypedDict, total=False):
     recommendation_hash: NotRequired[str]
 
 
+class ReviewTarget(TypedDict):
+    """Exact assembly handoff occurrence consumed by one Review step."""
+
+    resource_type: Literal["assembly"]
+    producer_step_id: str
+
+
 class WorkflowStep(TypedDict):
     """One immutable occurrence in the frozen linear workflow plan."""
 
     step_id: str
     stage: DomainStage
     allow_local_execution: bool
+    review_target: NotRequired[ReviewTarget]
 
 
 class TopLevelState(TypedDict, total=False):
@@ -508,9 +587,7 @@ class TopLevelState(TypedDict, total=False):
     # Workflow position.  The frozen RunConfig is authoritative; these fields
     # are its immutable, checkpoint-sized routing projection.
     current_stage: Required[DomainStage]
-    workflow_steps: Required[
-        Annotated[list[WorkflowStep], freeze_workflow_steps]
-    ]
+    workflow_steps: Required[Annotated[list[WorkflowStep], freeze_workflow_steps]]
     workflow_step_index: Required[int]
     entered_workflow_step_index: Required[int]
 

@@ -128,7 +128,8 @@ def test_preflight_rejects_flye_when_no_stage_can_produce_genome_size():
     config = RunConfig.model_validate(
         {
             "requested_stages": [
-                {"stage": "assembly", "allow_local_execution": True}
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": False},
             ],
             "assembly": {
                 "assembly_method": "flye",
@@ -148,6 +149,7 @@ def test_preflight_allows_flye_to_wait_for_an_earlier_executable_survey():
             "requested_stages": [
                 {"stage": "genome_survey", "allow_local_execution": True},
                 {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": False},
             ],
             "genome_survey": {
                 "survey_parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4}
@@ -167,7 +169,8 @@ def test_preflight_allows_manifest_genome_size_without_survey():
     config = RunConfig.model_validate(
         {
             "requested_stages": [
-                {"stage": "assembly", "allow_local_execution": True}
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": False},
             ],
             "assembly": {
                 "assembly_method": "flye",

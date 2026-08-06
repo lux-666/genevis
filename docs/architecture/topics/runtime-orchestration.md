@@ -28,13 +28,21 @@ overrides. `data-dir` is the layout root and the run lives at
 `<data-dir>/runs/<session_id>/`. The handler validates and canonicalizes both
 source documents and requires an explicit `requested_stages` JSON list. Each
 item is `{ "stage": "<stage>", "allow_local_execution": <boolean> }`.
-The list is an ordered occurrence sequence: it accepts arbitrary registered
-stage order and repeated stage names. `allow_local_execution` authorizes only
-that occurrence's process execution. `requested_stages` must not be `null`;
+The list is an ordered occurrence sequence: it preserves operator order, may
+depart from registry order, and permits repeated stage names, subject to the
+sequence validation below. `allow_local_execution` authorizes only that
+occurrence's process execution. `requested_stages` must not be `null`;
 `[]` is the valid empty biological-stage plan. The handler freezes that exact
 sequence plus its conservative dependency closure.
 It publishes `input_manifest.yaml`, `run_config.json`, and
 `dependency_manifest.json` before publishing `frozen_inputs.json` last.
+
+RunConfig validation calls `analyze_review_sequence` before freeze. It rejects a
+plan that leaves an Assembly or T2T boundary without the required
+`assembly_review` closure; it never inserts, reorders, or otherwise repairs a
+Review occurrence. The closure is required before the next Assembly, T2T,
+manual-only boundary, or termination. An assembly-refining occurrence reached
+while that boundary remains open can become the exact handoff Review closes.
 
 `gene-agent tui` is an optional conversational intake/planning boundary that
 uses the same frozen publication and executor. Other public subcommands are
@@ -89,10 +97,17 @@ sequence is the sole runtime routing authority. The controller advances one
 position at a time, stops on a human block or terminal failure, and never
 appends, reorders, deduplicates, or fills in stages.
 
+Each frozen `assembly_review` step also contains
+`review_target: {resource_type: "assembly", producer_step_id: "..."}`. The
+producer ID is the exact earlier occurrence selected by the sequence analysis,
+not merely a stage name. Before candidate loading, Assembly Review verifies the
+central assembly `ResourceRef.source_stage` and `.workflow_step_id` against that
+target.
+
 `app.workflow.STAGE_ORDER` is a registration/default-planning/display aid. It
 is not runtime order or a successor table. `recommended_workflow_template` is
-a separate planning helper and may include repeated occurrences (the T2T
-template appends `assembly_review` after `t2t`). Neither helper rewrites a
+a separate planning helper: the Assembly template appends `assembly_review`,
+and the T2T template repeats it after `t2t`. Neither helper rewrites a
 literal RunConfig. The controller does not inspect FASTQ contents, choose an
 assembler, build a command, or interpret biological metrics.
 
@@ -123,6 +138,11 @@ planner/TUI draft state; it is never executable semantics and public
 `workflow_steps` is the frozen runtime projection of the operator plan. Resume
 restores and applies only the decision bound to the interrupted occurrence; it
 does not rewrite the remaining sequence or edit the frozen run config.
+
+`stage_seeds` are immutable stage-scoped RunConfig projections. Every repeated
+occurrence starts from a fresh copy of the same stage seed; there is no
+occurrence-specific method-configuration seed and no reuse of a prior
+occurrence's completed cursor.
 
 When the manifest declares `assembly_fasta_registered`, Inventory registers it
 as the central assembly resource. `assembly_review` is the recommended first

@@ -54,9 +54,12 @@ Current constraints:
 - `paths` contains at least one non-empty string;
 - `source_stage is None` if and only if `workflow_step_id is None`;
 - a present `source_stage` and `workflow_step_id` are each non-empty strings;
-- manifest/external resources leave both provenance fields absent, while a
-  stage-produced resource records its canonical producing stage and exact
-  workflow occurrence;
+- ordinary manifest/external resources leave both provenance fields absent,
+  while a stage-produced resource records its canonical producing stage and
+  exact workflow occurrence. A registered assembly is deliberately upgraded by
+  Inventory into an executed candidate, so its central `assembly` handoff has
+  `source_stage="inventory"` and
+  `workflow_step_id="step-000-inventory"`;
 - the complete table is JSON-only and at most 128 KiB;
 - reducers validate and replace the complete table;
 - stage nodes return a delta and do not mutate input state;
@@ -126,7 +129,8 @@ a second cross-stage file table.
 
 ## Current assembly candidate lineage
 
-Every central, stage-produced `assembly` resource carries a current executed
+Every central `assembly` resource that represents an executed candidate,
+including an Inventory-wrapped registered assembly, carries a current executed
 candidate bundle and its exact primary-output ref. When Assembly Dedup, an
 accepted Hi-C adoption, an accepted T2T patch, or an Assembly Review corrective
 action changes the assembly path, it publishes a new executed candidate in that
@@ -139,7 +143,9 @@ and `t2t.patched_assembly`. The wrapper itself remains
 `draft_assembly.candidate`; no derived FASTA is copied under a draft-only type.
 Assembly Review consumes the same current candidate contract after each of
 those producers and has no Hi-C- or T2T-specific fallback path. An unchanged
-Hi-C/T2T decision preserves the current resource and candidate relation.
+Hi-C/T2T decision preserves the current paths and candidate relation while
+republishing the central ResourceRef under the active producer occurrence, so
+a later Review can verify the exact delivery handoff.
 
 ## Sequencing-member identity
 
