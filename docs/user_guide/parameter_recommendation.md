@@ -76,7 +76,7 @@ metadata are kept out of model input.
 For recommendation `N`, inspect:
 
 ```text
-artifacts/<stage>/parameter_recommendations/<N>/
+artifacts/steps/<workflow_step_id>/<stage>/parameter_recommendations/<N>/
 ├── input_snapshot.json
 ├── basis_snapshot.json        # initial basis; a retry may reuse its ref
 ├── model_request.json

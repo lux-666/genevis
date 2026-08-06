@@ -1,4 +1,4 @@
-"""Focused contracts for the non-annotation execution refactor."""
+"""Focused contracts for the shared execution refactor."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             )
             source_config = source_dir / "run_config.json"
             source_config.write_text(
-                json.dumps({"requested_stages": [], "local_exec": []}),
+                json.dumps({"requested_stages": []}),
                 encoding="utf-8",
             )
             paths = SessionPaths(root / "data", "s1")
@@ -60,7 +60,6 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 paths,
                 manifest_draft=source_manifest,
                 run_config_draft=source_config,
-                selected_stages=[],
                 selected_methods={},
             )
 
@@ -110,7 +109,6 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 json.dumps(
                     {
                         "requested_stages": [],
-                        "local_exec": [],
                         "assembly": {"hifi_reads_ref": "reads/hifi.fofn"},
                         "assembly_review": {
                             "busco": {
@@ -144,7 +142,6 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 paths,
                 manifest_draft=source_manifest,
                 run_config_draft=source_config,
-                selected_stages=[],
                 selected_methods={},
             )
 
@@ -293,7 +290,13 @@ class ExecutionRefactorContractTests(unittest.TestCase):
     def test_wrong_artifact_type_fails_with_data_layout_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
-            artifact_path = run_dir / "artifacts" / "assembly" / "draft.fasta"
+            paths = SessionPaths.from_run_dir(run_dir)
+            artifact_path = paths.workflow_step_artifact_path(
+                "step-001-assembly",
+                "assembly",
+                "outputs",
+                "draft.fasta",
+            )
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             artifact_path.write_text(">contig\nACGT\n", encoding="utf-8")
             artifact = ArtifactMeta.from_file(

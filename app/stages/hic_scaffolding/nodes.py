@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
+from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -36,7 +38,6 @@ from app.stages.resource_resolution import resolve_stage_resource, update_resour
 from app.stages.resource_specs import assembly_resource_spec
 from app.storage.artifacts import artifact_ref_for_path
 from app.storage.ledger import Ledger
-from app.workflow import next_stage_name
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
@@ -281,7 +282,7 @@ def apply_hic_scaffolding_resume_decision(
     else:
         final_assembly = str(pre_hic_assembly_ref)
 
-    active_interrupt = (
+    active_interrupt: Mapping[str, Any] = (
         state.get("active_interrupt") or hic_out.get("active_interrupt") or {}
     )
     review_request_id = request.review_request_id or active_interrupt.get(
@@ -297,6 +298,7 @@ def apply_hic_scaffolding_resume_decision(
     try:
         review_request_ref = ArtifactRef.model_validate(
             active_interrupt.get("request_ref")
+            or hic_out.get("review_request_artifact_ref")
         )
         review_request_record = load_review_request(
             absolute_data_dir(state),
@@ -312,6 +314,11 @@ def apply_hic_scaffolding_resume_decision(
         or review_request_record.get("review_request_id") != str(review_request_id)
         or review_request_record.get("stage") != "hic_scaffolding"
         or review_request_record.get("gate_id") != "hic_scaffolding"
+        or review_request_record.get("workflow_step_id")
+        != (
+            active_interrupt.get("workflow_step_id")
+            or current_workflow_step_id(state, expected_stage="hic_scaffolding")
+        )
     ):
         raise ResumeValidationError("AutoHiC adoption review request binding mismatch")
 
@@ -484,8 +491,7 @@ def apply_hic_scaffolding_resume_decision(
             "last_error": "hic_scaffolding stopped by human review decision",
         }
     update: StateUpdate = {
-        "current_stage": next_stage_name("hic_scaffolding"),
-        "supervision_state": "running_stage",
+        **advance_workflow_step(state, "hic_scaffolding"),
         "active_interrupt": None,
         **stage_update,
         "route_trace": append_route_trace(state, "hic_scaffolding_stage"),

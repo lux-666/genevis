@@ -58,7 +58,25 @@ class AssemblyFofnResolutionTests(unittest.TestCase):
             run_dir = root / "data" / "runs" / "session"
 
             materialized, paths, error = _fofn(
-                {"data_dir": str(run_dir)},
+                {
+                    "session_id": "session",
+                    "data_dir": str(run_dir),
+                    "current_stage": "assembly",
+                    "workflow_steps": [
+                        {
+                            "step_id": "step-000-inventory",
+                            "stage": "inventory",
+                            "allow_local_execution": False,
+                        },
+                        {
+                            "step_id": "step-001-assembly",
+                            "stage": "assembly",
+                            "allow_local_execution": False,
+                        },
+                    ],
+                    "workflow_step_index": 1,
+                    "entered_workflow_step_index": 1,
+                },
                 source_fofn,
                 "long_reads.fofn",
                 attempt_id=1,

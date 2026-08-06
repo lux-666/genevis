@@ -31,7 +31,7 @@ from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 def _ref(name: str) -> ArtifactRef:
     return ArtifactRef(
         artifact_id=f"artifact:{name}",
-        path_ref=f"artifacts/test/{name}.json",
+        path_ref=f"artifacts/steps/step-001-test/test/{name}.json",
         sha256=sha256(name.encode("utf-8")).hexdigest(),
         size_bytes=1,
         artifact_type="test.artifact",
@@ -247,7 +247,9 @@ def test_resolver_rejects_supplied_l0_binding_not_declared_by_catalog() -> None:
             catalog,
             l0_executor_values={
                 "assembly_method_read_type": "hifi",
-                "assembly_output_prefix": "work/hifiasm/out",
+                "assembly_output_prefix": (
+                    "work/steps/step-001-assembly/assembly/hifiasm/out"
+                ),
                 "assembly_input_reads": ["reads.fastq.gz"],
             },
             snapshot=_assembly_snapshot("assembly.candidate.hifiasm"),
@@ -294,7 +296,7 @@ def test_resolver_validates_selected_l1_value() -> None:
             {
                 "assembly_method_read_type": "nano-hq",
                 "assembly_input_reads": ["reads.fastq.gz"],
-                "assembly_output_dir": "work/flye",
+                "assembly_output_dir": "work/steps/step-001-assembly/assembly/flye",
                 "assembly_threads": 8,
             },
             {"asm_coverage": 201},

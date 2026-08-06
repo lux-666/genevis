@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.control.workflow_plan import bind_attempt_to_current_workflow_step
 from app.execution.attempt_owners import (
     AttemptOwner,
     DirectAttemptOwner,
@@ -156,8 +157,11 @@ def freeze_method_attempts(
 
     if not attempts:
         return _failure_update(state, lifecycle, "no frozen attempts were prepared")
+    bound_attempts = [
+        bind_attempt_to_current_workflow_step(state, attempt) for attempt in attempts
+    ]
     seen_ids: set[str] = set()
-    for attempt in attempts:
+    for attempt in bound_attempts:
         if (
             attempt.stage != lifecycle.stage
             or attempt.method_name != lifecycle.method_name
@@ -180,11 +184,13 @@ def freeze_method_attempts(
 
     output = stage_output(state, lifecycle.stage)
     try:
-        frozen_refs = [persist_frozen_attempt(state, attempt) for attempt in attempts]
+        frozen_refs = [
+            persist_frozen_attempt(state, attempt) for attempt in bound_attempts
+        ]
         owner_updates = lifecycle.owner.record_frozen_attempts(
             output,
             lifecycle,
-            attempts,
+            bound_attempts,
             frozen_refs,
             owner_metadata=owner_metadata,
         )

@@ -20,6 +20,7 @@ from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import (
     ReviewGateDeclaration,
     get_review_gate,
+    planned_review_gates,
     register_review_gate,
     review_prompt_bundle,
 )
@@ -75,6 +76,28 @@ class ReviewGateRegistryTests(unittest.TestCase):
         )
         self.assertEqual(gate.template_preferred_decision, "accept")
 
+    def test_planned_review_gates_preserves_repeated_stage_occurrences(self):
+        planned = planned_review_gates(
+            ["inventory", "assembly", "assembly_review", "assembly"]
+        )
+
+        self.assertEqual(
+            [gate.stage for gate in planned],
+            [
+                "inventory",
+                "inventory",
+                "assembly",
+                "assembly",
+                "assembly_review",
+                "assembly",
+                "assembly",
+            ],
+        )
+        self.assertEqual(
+            [gate.gate_id for gate in planned[2:4]],
+            [gate.gate_id for gate in planned[5:]],
+        )
+
     def test_registered_gate_dispatches_resume_applier(self):
         state = _blocked_unit_state()
         interrupt = state["active_interrupt"]
@@ -116,14 +139,12 @@ class ReviewGateRegistryTests(unittest.TestCase):
         self.assertEqual(update["stage_outputs"]["inventory"]["decision"], "defer")
 
     def test_unknown_gate_is_rejected_by_registry_not_schema(self):
-        state = _blocked_unit_state(
-            stage="unregistered_gate", decisions_allowed=["accept"]
-        )
+        state = _blocked_unit_state(stage="genome_survey", decisions_allowed=["accept"])
         interrupt = state["active_interrupt"]
         assert interrupt is not None
         request = ResumeReviewRequest(
             session_id="s1",
-            stage="unregistered_gate",
+            stage="genome_survey",
             review_request_id=interrupt["review_request_id"],
             review_request_hash=interrupt["request_hash"],
             decision="accept",
@@ -136,15 +157,15 @@ class ReviewGateRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(
-                stage="unit_review_gate",
+                stage="inventory",
                 gate_id="unit_review_gate",
                 reason="unit review",
                 candidates=[{"candidate_id": "candidate-a"}],
                 decisions_allowed=["accept", "stop_human_review"],
             )
             persisted = persist_review_request(
-                {"session_id": "s1", "data_dir": str(run_dir)},
-                stage="unit_review_gate",
+                _review_state(run_dir, stage="inventory"),
+                stage="inventory",
                 gate_id="unit_review_gate",
                 reason="unit review",
                 payload=request,
@@ -156,7 +177,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 session_id="s1",
             )
 
-            self.assertEqual(record["stage"], "unit_review_gate")
+            self.assertEqual(record["stage"], "inventory")
             self.assertEqual(record["gate_id"], "unit_review_gate")
             self.assertEqual(record["reason"], "unit review")
             self.assertFalse({"stage", "gate_id", "reason"} & set(record["payload"]))
@@ -164,9 +185,9 @@ class ReviewGateRegistryTests(unittest.TestCase):
     def test_review_request_rejects_conflicting_envelope_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "s1")
-            state = {"session_id": "s1", "data_dir": str(run_dir)}
+            state = _review_state(run_dir, stage="inventory")
             baseline = {
-                "stage": "unit_review_gate",
+                "stage": "inventory",
                 "gate_id": "unit_review_gate",
                 "reason": "unit review",
                 "decisions_allowed": ["accept"],
@@ -186,7 +207,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     ):
                         persist_review_request(
                             state,
-                            stage="unit_review_gate",
+                            stage="inventory",
                             gate_id="unit_review_gate",
                             reason="unit review",
                             payload=payload,
@@ -199,7 +220,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 ):
                     persist_review_request(
                         state,
-                        stage="unit_review_gate",
+                        stage="inventory",
                         gate_id="unit_review_gate",
                         reason="unit review",
                         payload={**baseline, "gate_id": None},
@@ -265,12 +286,9 @@ class ReviewGateRegistryTests(unittest.TestCase):
             for stage, gate_id in production_gates:
                 with self.subTest(stage=stage, gate_id=gate_id):
                     gate = get_review_gate(stage, gate_id)
-                    state = {
-                        "session_id": "s1",
-                        "data_dir": str(run_dir),
-                        "stage_outputs": {
-                            stage: {"review_policy": {"max_blocked_seconds": 17}}
-                        },
+                    state = _review_state(run_dir, stage=stage)
+                    state["stage_outputs"] = {
+                        stage: {"review_policy": {"max_blocked_seconds": 17}}
                     }
                     persisted = persist_review_request(
                         state,
@@ -310,9 +328,6 @@ class ReviewGateRegistryTests(unittest.TestCase):
             "decision_requirements": {
                 "review_request_id": "request-1",
                 "request_hash": "a" * 64,
-                "review_request_artifact_ref": (
-                    "artifacts/reviews/request-1/request.json"
-                ),
                 "max_blocked_seconds": 0,
             },
         }
@@ -333,6 +348,10 @@ class ReviewGateRegistryTests(unittest.TestCase):
                         **base["decision_requirements"],
                         "stage": stage,
                         "gate_id": gate_id,
+                        "review_request_artifact_ref": (
+                            f"artifacts/steps/step-001-{stage}/{stage}/reviews/"
+                            "request-1/request.json"
+                        ),
                         "decisions_allowed": list(gate.decisions_allowed),
                     },
                 }
@@ -356,10 +375,14 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 "review_request_id": "request-1",
                 "request_hash": "a" * 64,
                 "review_request_artifact_ref": (
-                    "artifacts/reviews/request-1/request.json"
+                    "artifacts/steps/step-001-assembly/assembly/reviews/"
+                    "request-1/request.json"
                 ),
                 "request_ref": {
-                    "path_ref": "artifacts/reviews/request-1/request.json",
+                    "path_ref": (
+                        "artifacts/steps/step-001-assembly/assembly/reviews/"
+                        "request-1/request.json"
+                    ),
                     "sha256": "a" * 64,
                 },
                 "max_blocked_seconds": 0,
@@ -391,10 +414,14 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 "review_request_id": "request-1",
                 "request_hash": "a" * 64,
                 "review_request_artifact_ref": (
-                    "artifacts/reviews/request-1/request.json"
+                    "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
+                    "request-1/request.json"
                 ),
                 "request_ref": {
-                    "path_ref": "artifacts/reviews/request-1/request.json",
+                    "path_ref": (
+                        "artifacts/steps/step-002-assembly_review/assembly_review/"
+                        "reviews/request-1/request.json"
+                    ),
                     "sha256": "a" * 64,
                 },
                 "max_blocked_seconds": 0,
@@ -410,7 +437,10 @@ class ReviewGateRegistryTests(unittest.TestCase):
             review_request_id="request-1",
             review_request_hash="a" * 64,
             decided_by="llm_provisional",
-            rationale_artifact_ref="artifacts/reviews/request-1/recommendation.json",
+            rationale_artifact_ref=(
+                "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
+                "request-1/recommendation.json"
+            ),
         )
 
         with patch(
@@ -429,7 +459,10 @@ class ReviewGateRegistryTests(unittest.TestCase):
             stage="assembly_review",
             review_request_id="request-1",
             request_ref={
-                "path_ref": "artifacts/reviews/request-1/request.json",
+                "path_ref": (
+                    "artifacts/steps/step-002-assembly_review/assembly_review/"
+                    "reviews/request-1/request.json"
+                ),
                 "sha256": "a" * 64,
             },
             request_hash="a" * 64,
@@ -439,7 +472,10 @@ class ReviewGateRegistryTests(unittest.TestCase):
         self.assertEqual(request.candidate_id, "candidate-a")
         self.assertEqual(
             request.rationale_artifact_ref,
-            "artifacts/reviews/request-1/recommendation.json",
+            (
+                "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
+                "request-1/recommendation.json"
+            ),
         )
         self.assertEqual(request.metadata["source"], "foreground_countdown")
 
@@ -496,28 +532,13 @@ def _blocked_unit_state(
     allowed = decisions_allowed or ["accept", "stop_human_review"]
     gate_id = "unit_review_gate" if stage == "inventory" else stage
     run_dir = v2_run_dir(tempfile.mkdtemp(), "s1")
-    state = {
-        "session_id": "s1",
-        "thread_id": "s1",
-        "data_dir": str(run_dir),
-        "control_state": "running",
-        "supervision_state": "blocked_human",
-        "current_stage": stage,
-        "requested_stages": None,
-        "input_manifest_ref": "control/manifest.yaml",
-        "asset_registry_ref": None,
-        "stage_plan_ref": None,
-        "active_interrupt": None,
-        "last_error": None,
-        "review_notes": [],
-        "route_trace": [],
-        "stage_outputs": {
-            stage: {
-                "status": "blocked_human",
-                "candidates": [{"candidate_id": "candidate-a"}],
-            }
-        },
-        "skip_reasons": {},
+    state = _review_state(run_dir, stage=stage)
+    state["supervision_state"] = "blocked_human"
+    state["stage_outputs"] = {
+        stage: {
+            "status": "blocked_human",
+            "candidates": [{"candidate_id": "candidate-a"}],
+        }
     }
     payload = ReviewPayload(
         stage=stage,
@@ -544,10 +565,7 @@ def _blocked_unit_state(
 def _blocked_unit_session(tmp: str) -> tuple[str, str]:
     session_id = "s1"
     data_dir = v2_run_dir(Path(tmp) / "data", session_id)
-    state = {
-        "session_id": session_id,
-        "data_dir": str(data_dir),
-    }
+    state = _review_state(data_dir, stage="inventory")
     payload = ReviewPayload(
         stage="inventory",
         gate_id="unit_review_gate",
@@ -575,6 +593,42 @@ def _blocked_unit_session(tmp: str) -> tuple[str, str]:
         review_request_id=persisted.review_request_id,
     )
     return session_id, str(data_dir)
+
+
+def _review_state(run_dir: Path, *, stage: str) -> dict:
+    """Minimal frozen occurrence state for review persistence tests."""
+
+    stages = ["inventory"] if stage == "inventory" else ["inventory", stage]
+    step_index = stages.index(stage)
+    return {
+        "session_id": "s1",
+        "thread_id": "s1",
+        "data_dir": str(run_dir),
+        "control_state": "running",
+        "supervision_state": "running_stage",
+        "current_stage": stage,
+        "workflow_steps": [
+            {
+                "step_id": f"step-{index:03d}-{item}",
+                "stage": item,
+                "allow_local_execution": False,
+            }
+            for index, item in enumerate(stages)
+        ],
+        "workflow_step_index": step_index,
+        "entered_workflow_step_index": step_index,
+        "input_manifest_ref": "control/manifest.yaml",
+        "asset_registry_ref": None,
+        "stage_plan_ref": "control/run_config.json",
+        "stage_seeds": {},
+        "active_interrupt": None,
+        "last_error": None,
+        "review_notes": [],
+        "route_trace": [],
+        "stage_outputs": {},
+        "resource_refs": {},
+        "skip_reasons": {},
+    }
 
 
 if __name__ == "__main__":

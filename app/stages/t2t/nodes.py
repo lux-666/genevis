@@ -22,6 +22,7 @@ from typing_extensions import TypedDict
 
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
+from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
@@ -38,7 +39,12 @@ from app.execution.lifecycle import (
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import current_parameter_attempt
 from app.review.base import ResumeReviewRequest, ReviewPayload
-from app.review.persistence import persist_review_decision, persist_review_request
+from app.review.persistence import (
+    ReviewPersistenceError,
+    load_review_request,
+    persist_review_decision,
+    persist_review_request,
+)
 from app.schemas.artifacts import (
     T2T_ASSEMBLY_TELOMERE_SCAN,
     T2T_EXTENSION_CANDIDATES,
@@ -49,12 +55,18 @@ from app.schemas.artifacts import (
     T2T_READS_TELOMERE_SCAN,
     T2T_STATUS_SUMMARY,
     T2T_TELOMERIC_READS,
+    ArtifactRef,
     ArtifactRefJson,
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
 )
 from app.schemas.execution import InputDependency
-from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
+from app.schemas.state import (
+    ActiveInterrupt,
+    StateUpdate,
+    TopLevelState,
+    validate_top_level_state,
+)
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
@@ -86,7 +98,6 @@ from app.storage.artifacts import (
 from app.storage.asset_registry import load_asset_registry
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError
-from app.workflow import next_stage_name
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
@@ -111,7 +122,10 @@ class _T2TConfig(TypedDict):
 def _top_level_interrupt(value: T2TInterruptJson) -> ActiveInterrupt:
     """Convert the validated stage interrupt to the shared top-level cursor."""
 
-    interrupt: ActiveInterrupt = {"stage": "t2t"}
+    interrupt: ActiveInterrupt = {
+        "stage": "t2t",
+        "workflow_step_id": value["workflow_step_id"],
+    }
     if "gate_id" in value:
         interrupt["gate_id"] = value["gate_id"]
     if "reason" in value:
@@ -970,7 +984,7 @@ def gate_t2t_review(state: TopLevelState) -> StateUpdate:
 
 
 def commit_t2t(state: TopLevelState) -> StateUpdate:
-    """Advance to annotation with the patched or original assembly reference."""
+    """Advance with the patched or original assembly reference."""
     out = _output(state)
     input_assembly_ref = out.get("input_assembly_ref")
     if out.get("parameter_attempts"):
@@ -988,8 +1002,7 @@ def commit_t2t(state: TopLevelState) -> StateUpdate:
             }
     assembly_ref = out.get("output_assembly_ref") or input_assembly_ref
     update: StateUpdate = {
-        "current_stage": next_stage_name("t2t"),
-        "supervision_state": "running_stage",
+        **advance_workflow_step(state, "t2t"),
         "route_trace": append_route_trace(state, "t2t_stage"),
     }
     if assembly_ref:
@@ -1358,19 +1371,9 @@ def apply_t2t_review_decision(
         notes=list(request.notes),
         metadata=request.metadata,
     )
-    active_interrupt: ActiveInterrupt = state.get("active_interrupt") or {
-        "stage": "t2t"
-    }
-    review_request_id = request.review_request_id or active_interrupt.get(
-        "review_request_id"
+    review_request_id, review_request_hash, review_request_ref = _t2t_review_binding(
+        state, request, out
     )
-    review_request_hash = request.review_request_hash or active_interrupt.get(
-        "request_hash"
-    )
-    if not review_request_id or not review_request_hash:
-        raise ResumeValidationError(
-            "t2t review decision is missing review request binding"
-        )
     decision_ref = persist_review_decision(
         data_dir,
         session_id=session_id,
@@ -1379,6 +1382,7 @@ def apply_t2t_review_decision(
         gate_id="t2t_review",
         decision=decision_payload,
         request_hash=review_request_hash,
+        request_ref=review_request_ref,
         method_name=T2T_CONTRACT_METHOD,
         artifact_type="t2t.review_decision",
     )
@@ -1424,12 +1428,12 @@ def apply_t2t_review_decision(
             **stage_update,
             "last_error": "t2t stopped by human review decision",
         }
-    reviewed_state: TopLevelState = {
+    reviewed_state = validate_top_level_state({
         **state,
-        **stage_update,
+        **dict(stage_update),
         "active_interrupt": None,
         "supervision_state": "running_stage",
-    }
+    })
     reviewed_out = read_t2t_stage_output(reviewed_state)
     try:
         final_evidence_update = _finalize_t2t_evidence(reviewed_state, reviewed_out)
@@ -1437,16 +1441,58 @@ def apply_t2t_review_decision(
         raise ResumeValidationError(
             f"t2t final evidence could not be persisted: {exc}"
         ) from exc
-    finalized_state: TopLevelState = {
+    finalized_state = validate_top_level_state({
         **reviewed_state,
-        **final_evidence_update,
-    }
+        **dict(final_evidence_update),
+    })
     commit_update = commit_t2t(finalized_state)
     return {
         **final_evidence_update,
         **commit_update,
         "active_interrupt": None,
     }
+
+
+def _t2t_review_binding(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    output: T2TStageCursor,
+) -> tuple[str, str, ArtifactRef]:
+    """Load and verify the frozen request that authorizes a T2T decision."""
+
+    active_interrupt: Mapping[str, Any] = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get(
+        "review_request_id"
+    )
+    review_request_hash = request.review_request_hash or active_interrupt.get(
+        "request_hash"
+    )
+    request_ref_value = active_interrupt.get("request_ref") or output.get(
+        "review_request_artifact_ref"
+    )
+    if not review_request_id or not review_request_hash or request_ref_value is None:
+        raise ResumeValidationError(
+            "t2t review decision is missing review request binding"
+        )
+    try:
+        request_ref = ArtifactRef.model_validate(request_ref_value)
+        request_record = load_review_request(
+            absolute_data_dir(state), request_ref, session_id=state["session_id"]
+        )
+    except (ReviewPersistenceError, ValueError, TypeError) as exc:
+        raise ResumeValidationError("t2t review request is missing or changed") from exc
+    workflow_step_id = active_interrupt.get(
+        "workflow_step_id"
+    ) or current_workflow_step_id(state, expected_stage="t2t")
+    if (
+        request_ref.sha256 != str(review_request_hash)
+        or request_record.get("review_request_id") != str(review_request_id)
+        or request_record.get("stage") != "t2t"
+        or request_record.get("gate_id") != "t2t_review"
+        or request_record.get("workflow_step_id") != workflow_step_id
+    ):
+        raise ResumeValidationError("t2t review request binding mismatch")
+    return str(review_request_id), str(review_request_hash), request_ref
 
 
 def _config(out: T2TStageCursor) -> _T2TConfig:
@@ -2481,6 +2527,7 @@ def _block_for_t2t_review(
         candidates=candidates,
         review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=False,
+        review_request_id=persisted_request.review_request_id,
     )
     stage_update = update_t2t_stage_output(
         state,

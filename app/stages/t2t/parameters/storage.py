@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from app.storage.parameter_evidence import ParameterPersistenceError, ParameterStageStorage
+from app.storage.parameter_evidence import (
+    ParameterPersistenceError,
+    ParameterStageStorage,
+)
 
 _storage = ParameterStageStorage(stage="t2t")
 write_artifact = _storage.write_artifact

@@ -90,11 +90,17 @@ def resolve_hic_pairs(
     raw_ref = (state.get("resource_refs") or {}).get("hic_reads")
     if not isinstance(raw_ref, Mapping):
         return []
-    paths = [str(path) for path in raw_ref.get("paths") or []]
+    raw_paths = raw_ref.get("paths")
+    if not isinstance(raw_paths, list):
+        raise ValueError("hic_reads resource paths must be an array")
+    paths = [str(path) for path in raw_paths]
     metadata = raw_ref.get("metadata")
     if not isinstance(metadata, Mapping):
         raise ValueError("hic_reads resource metadata must be an object")
-    asset_ids = [str(value) for value in metadata.get("asset_ids") or []]
+    raw_asset_ids = metadata.get("asset_ids")
+    if not isinstance(raw_asset_ids, list):
+        raise ValueError("hic_reads resource asset_ids must be an array")
+    asset_ids = [str(value) for value in raw_asset_ids]
     if len(asset_ids) != len(paths):
         raise ValueError("hic_reads paths and ordered asset IDs differ in cardinality")
     records = records_by_ordered_ids(state, asset_ids, expected_paths=paths)
@@ -175,9 +181,7 @@ def _members_from_read_set(
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"read-set manifest is unreadable: {path}: {exc}") from exc
     manifest = ReadSetManifest.model_validate(payload)
-    current_registry_ref = ArtifactRef.model_validate(
-        state.get("asset_registry_ref")
-    )
+    current_registry_ref = ArtifactRef.model_validate(state.get("asset_registry_ref"))
     if manifest.source_registry_ref != current_registry_ref:
         raise ValueError(
             "read-set manifest source_registry_ref does not match the current "
@@ -204,8 +208,7 @@ def _members_from_read_set(
         for member in manifest.members
     ]
     canonical_expected = [
-        str(Path(value).expanduser().resolve(strict=False))
-        for value in expected_paths
+        str(Path(value).expanduser().resolve(strict=False)) for value in expected_paths
     ]
     if actual_paths != canonical_expected:
         raise ValueError("read-set members do not match ResourceRef paths")
@@ -233,10 +236,7 @@ def _apply_registered_override(
         str(Path(member.path).expanduser().resolve(strict=False)): member
         for member in members
     }
-    by_source_asset_id = {
-        member.source_asset_id: member
-        for member in members
-    }
+    by_source_asset_id = {member.source_asset_id: member for member in members}
     registry_by_path = {
         str(Path(record.path).expanduser().resolve(strict=False)): record
         for record in load_asset_registry(state).assets

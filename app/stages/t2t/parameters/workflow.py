@@ -790,6 +790,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                 "response_parse_ref": parse_ref.model_dump(mode="json"),
                 "recommendation_ref": recommendation_ref.model_dump(mode="json"),
                 "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                "auto_decidable": False,
             },
             method_name=_APPROVAL_METHOD,
             artifact_type="t2t.parameter_approval.request",
@@ -816,7 +817,6 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
         review_request_artifact_ref=persisted.request_ref.path_ref,
         review_request_id=persisted.review_request_id,
         auto_decidable=False,
-        pending_human_confirmation=True,
     )
     return update_t2t_stage_output(
         state,
@@ -934,11 +934,14 @@ def apply_t2t_parameter_approval_decision(
         raise ResumeValidationError(
             "T2T parameter recommendation has no parameters mapping"
         )
+    request_id = interrupt.get("review_request_id")
+    if not isinstance(request_id, str) or not request_id:
+        raise ResumeValidationError("T2T parameter approval request ID is missing")
 
     decision_ref = persist_parameter_approval_decision(
         state,
         stage="t2t",
-        request_id=interrupt.get("review_request_id"),
+        request_id=request_id,
         request_ref=request_ref,
         request=request,
         manifest_ref=manifest_ref,

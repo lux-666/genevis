@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from app.control.errors import ResumeValidationError
+from app.control.workflow_plan import current_workflow_step_id
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -82,11 +83,17 @@ def load_verified_interrupt_request(
     request_id = str(interrupt.get("review_request_id") or "")
     if record.get("review_request_id") != request_id:
         raise ResumeValidationError(
-            "review request artifact ID does not match active_interrupt.review_request_id"
+            "review request artifact ID does not match "
+            "active_interrupt.review_request_id"
         )
     if record.get("stage") != interrupt.get("stage"):
         raise ResumeValidationError(
             "review request artifact stage does not match active_interrupt.stage"
+        )
+    if record.get("workflow_step_id") != interrupt.get("workflow_step_id"):
+        raise ResumeValidationError(
+            "review request artifact workflow_step_id does not match "
+            "active_interrupt.workflow_step_id"
         )
     if record.get("gate_id") != interrupt.get("gate_id"):
         raise ResumeValidationError(
@@ -160,9 +167,7 @@ def validate_parameter_approval_bindings(
         )
     request_hash = interrupt.get("request_hash")
     if request.review_request_hash != request_hash:
-        raise ResumeValidationError(
-            "parameter approval decision request hash is stale"
-        )
+        raise ResumeValidationError("parameter approval decision request hash is stale")
     missing = [k for k in PARAMETER_APPROVAL_BINDINGS if k not in request.metadata]
     if missing:
         raise ResumeValidationError(
@@ -170,9 +175,7 @@ def validate_parameter_approval_bindings(
         )
     for key in PARAMETER_APPROVAL_BINDINGS:
         if request.metadata.get(key) != interrupt.get(key):
-            raise ResumeValidationError(
-                f"stale parameter approval binding: {key}"
-            )
+            raise ResumeValidationError(f"stale parameter approval binding: {key}")
 
 
 def validate_parameter_recommendation_manifest(
@@ -216,6 +219,17 @@ def persist_parameter_approval_decision(
     """
 
     try:
+        workflow_step_id = current_workflow_step_id(state, expected_stage=stage)
+        request_record = load_review_request(
+            absolute_data_dir(state), request_ref, session_id=state["session_id"]
+        )
+        if (
+            request_record.get("stage") != stage
+            or request_record.get("workflow_step_id") != workflow_step_id
+        ):
+            raise ReviewPersistenceError(
+                "parameter approval request targets another workflow step"
+            )
         decision_ref = persist_review_decision(
             absolute_data_dir(state),
             session_id=state["session_id"],
@@ -230,8 +244,7 @@ def persist_parameter_approval_decision(
                 "decided_by": request.decided_by,
                 "notes": list(request.notes),
                 "bindings": {
-                    key: request.metadata[key]
-                    for key in PARAMETER_APPROVAL_BINDINGS
+                    key: request.metadata[key] for key in PARAMETER_APPROVAL_BINDINGS
                 },
                 "request_hash": request_ref.sha256,
                 "validated_recommendation_manifest_ref": manifest_ref.model_dump(

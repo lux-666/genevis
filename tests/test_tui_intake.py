@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.entrypoints.ask_planner import _build_assembly_execution_config
+from app.entrypoints.tui import _planner_state_from_tui_draft
 from app.entrypoints.tui_intake import (
     TuiDraftConflictError,
     apply_asset_answer,
@@ -22,10 +24,9 @@ from app.entrypoints.tui_intake import (
     parse_workflow_intent,
     save_tui_session_draft,
 )
-from app.entrypoints.ask_planner import _build_assembly_execution_config
-from app.entrypoints.tui import _planner_state_from_tui_draft
+from app.schemas.ask_plan import PlanStageOccurrence
 from app.schemas.manifest import InputAssetSpec, PairedReadSpec
-from app.schemas.tui_intake import HifiReadsFact, HiCPairedReadsFact, HiCReadPair
+from app.schemas.tui_intake import HiCPairedReadsFact, HiCReadPair, HifiReadsFact
 
 
 class TuiIntakeTests(unittest.TestCase):
@@ -70,9 +71,7 @@ class TuiIntakeTests(unittest.TestCase):
         self.assertEqual(next_intake_clarification(draft).role, "hifi_reads")
 
     def test_hifiasm_ont_goal_is_a_distinct_ont_primary_method(self):
-        intent = deterministic_workflow_intent(
-            "用 hifiasm-ont --ont 做 assembly"
-        )
+        intent = deterministic_workflow_intent("用 hifiasm-ont --ont 做 assembly")
 
         self.assertEqual(intent.requested_assembly_method, "hifiasm_ont")
         self.assertFalse(intent.use_ultralong_ont)
@@ -198,7 +197,7 @@ class TuiIntakeTests(unittest.TestCase):
                 ],
             )
 
-    def test_llm_cannot_weaken_deterministic_t2t_intent(self):
+    def test_llm_cannot_expand_deterministic_t2t_intent(self):
         request = "sample CHM13 做 T2T 组装"
 
         intent = parse_workflow_intent(
@@ -216,8 +215,32 @@ class TuiIntakeTests(unittest.TestCase):
         self.assertEqual(intent.sample_id, "CHM13")
         self.assertIsNone(intent.target_species)
         self.assertEqual(intent.target_assembly_level, "chromosome")
-        self.assertIn("hic_scaffolding", intent.requested_stages)
-        self.assertIn("t2t", intent.requested_stages)
+        self.assertEqual(intent.requested_stages, ["assembly"])
+
+    def test_llm_intent_cannot_expand_explicit_stage_scope(self):
+        intent = parse_workflow_intent(
+            "assembly",
+            llm_parser=lambda _request: {
+                "goal_text": "ignored",
+                "requested_stages": ["assembly", "t2t"],
+            },
+        )
+
+        self.assertEqual(
+            intent.requested_stages,
+            deterministic_workflow_intent("assembly").requested_stages,
+        )
+
+    def test_llm_preserves_custom_order_and_repeated_stages_without_scope(self):
+        intent = parse_workflow_intent(
+            "custom workflow",
+            llm_parser=lambda _request: {
+                "goal_text": "ignored",
+                "requested_stages": ["t2t", "assembly", "t2t"],
+            },
+        )
+
+        self.assertEqual(intent.requested_stages, ["t2t", "assembly", "t2t"])
 
     def test_path_extraction_keeps_invalid_path_for_local_validation(self):
         spans = extract_path_spans("ONT: /tmp/missing.fastq.gz, /tmp/a-directory")
@@ -600,8 +623,14 @@ class TuiIntakeTests(unittest.TestCase):
             ).draft
             parent = parent.model_copy(
                 update={
-                    "selected_stages": ["assembly", "hic_scaffolding"],
-                    "resolved_execution_order": ["assembly", "hic_scaffolding"],
+                    "selected_stage_occurrences": [
+                        PlanStageOccurrence(
+                            stage="assembly", allow_local_execution=True
+                        ),
+                        PlanStageOccurrence(
+                            stage="hic_scaffolding", allow_local_execution=True
+                        ),
+                    ],
                     "selected_methods": {
                         "assembly": "assembly.candidate.flye",
                     },
@@ -618,7 +647,7 @@ class TuiIntakeTests(unittest.TestCase):
             self.assertEqual(parent.model_dump(mode="json"), parent_snapshot)
             self.assertEqual(child.parent_session_id, "parent")
             self.assertEqual(child.lifecycle, "intake")
-            self.assertIsNone(child.selected_stages)
+            self.assertIsNone(child.selected_stage_names)
             self.assertEqual(child.intake.ont_reads.paths, [str(ont.resolve())])
             self.assertEqual(child.intake.hic_reads.pairs[0].r1, str(r1.resolve()))
 
@@ -629,6 +658,37 @@ class TuiIntakeTests(unittest.TestCase):
             )
             self.assertIsNone(stale_child.intake.hic_reads)
             self.assertTrue(stale_child.intake.unresolved_candidates)
+
+    def test_planner_state_keeps_occurrence_local_execution_consent(self):
+        draft = create_tui_session_draft(
+            session_id="s1",
+            data_dir="data",
+            request_text="custom workflow",
+        ).model_copy(
+            update={
+                "selected_stage_occurrences": [
+                    PlanStageOccurrence(stage="t2t", allow_local_execution=False),
+                    PlanStageOccurrence(
+                        stage="assembly_review", allow_local_execution=True
+                    ),
+                    PlanStageOccurrence(stage="t2t", allow_local_execution=True),
+                ]
+            }
+        )
+
+        plan = _planner_state_from_tui_draft(draft)
+
+        self.assertEqual(
+            [
+                occurrence.model_dump(mode="json")
+                for occurrence in plan.selected_stage_occurrences
+            ],
+            [
+                {"stage": "t2t", "allow_local_execution": False},
+                {"stage": "assembly_review", "allow_local_execution": True},
+                {"stage": "t2t", "allow_local_execution": True},
+            ],
+        )
 
     def test_rerun_hic_reuse_is_all_or_nothing_and_retains_every_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -730,7 +790,10 @@ class TuiIntakeTests(unittest.TestCase):
             with self.assertRaises(TuiDraftConflictError):
                 save_tui_session_draft(stale)
 
-            self.assertEqual(load_tui_session_draft(data_dir, "s1").lifecycle, "planning")
+            self.assertEqual(
+                load_tui_session_draft(data_dir, "s1").lifecycle,
+                "planning",
+            )
             self.assertEqual(winner.revision, 2)
 
     def test_manifest_pairs_are_explicit_and_paths_must_match(self):

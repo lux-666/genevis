@@ -16,7 +16,13 @@ from app.domains.assembly.selection import (
     SHARED_TO_METHOD_READ_TYPE,
     validate_assembly_selection,
 )
+from app.integrity import sha256_file
 from app.review.base import ResumeReviewRequest
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_DRAFT_ASSEMBLY,
+    ArtifactMeta,
+)
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state
@@ -28,8 +34,11 @@ from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
 from app.stages.assembly.nodes import infer_input_profile
-from app.schemas.artifacts import ArtifactMeta
 from app.storage.artifacts import publish_artifact_record, resolve_artifact_ref
+from app.storage.assembly_candidates import (
+    load_executed_candidate_bundle,
+    load_planned_candidate_bundle,
+)
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -74,6 +83,26 @@ def _assembly_selection(
     }
 
 
+def _assets_with_ready_byte_evidence(assets: list[dict]) -> list[dict]:
+    """Add immutable byte evidence for fixture assets that exist on disk."""
+
+    ready_assets = []
+    for asset in assets:
+        path = Path(asset["path"])
+        if not path.is_file():
+            ready_assets.append(asset)
+            continue
+        ready_assets.append(
+            {
+                **asset,
+                "checksum": sha256_file(path),
+                "checksum_status": "ready",
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    return ready_assets
+
+
 def _set_long_reads(state: dict, *paths: Path, platform: str = "cycloneseq") -> None:
     asset_ids = [f"fixture-long-read-{index}" for index, _path in enumerate(paths)]
     registry_content = json.dumps(
@@ -87,6 +116,9 @@ def _set_long_reads(state: dict, *paths: Path, platform: str = "cycloneseq") -> 
                     "path": str(path.resolve(strict=False)),
                     "platform": platform,
                     "format": "fastq",
+                    "checksum": sha256_file(path),
+                    "checksum_status": "ready",
+                    "size_bytes": path.stat().st_size,
                     "metadata": {
                         "manifest_entry_ordinal": 0,
                         "path_ordinal": index,
@@ -97,7 +129,11 @@ def _set_long_reads(state: dict, *paths: Path, platform: str = "cycloneseq") -> 
         }
     )
     _session_paths = SessionPaths.from_run_dir(state["data_dir"])
-    source = _session_paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+    source = _session_paths.workflow_step_work_path(
+        "step-000-inventory",
+        "inventory",
+        f"asset_registry_{os.urandom(4).hex()}.json",
+    )
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(registry_content, encoding="utf-8")
     artifact = ArtifactMeta.from_file(
@@ -106,13 +142,16 @@ def _set_long_reads(state: dict, *paths: Path, platform: str = "cycloneseq") -> 
         method_name="inventory.register_assets",
         artifact_type="asset_registry",
     )
-    published = publish_artifact_record(state["data_dir"], state["session_id"], artifact)
+    published = publish_artifact_record(
+        state["data_dir"], state["session_id"], artifact
+    )
     state["asset_registry_ref"] = published.ref.model_dump(mode="json")
     state["resource_refs"]["long_reads"] = ResourceRef(
         resource_type="long_reads",
         paths=[str(path) for path in paths],
         source_stage="read_qc",
         metadata={
+            "asset_registry_ref": state["asset_registry_ref"],
             "asset_ids": asset_ids,
             "platforms": [platform],
             "formats": ["fastq"],
@@ -286,7 +325,13 @@ class AssemblyStageTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "assets": _assets_with_ready_byte_evidence(assets),
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
         return path
@@ -295,7 +340,9 @@ class AssemblyStageTests(unittest.TestCase):
         self, data_dir: str, session_id: str, registry_path: str | Path
     ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path("inventory", "asset_registry.json")
+        source = paths.workflow_step_work_path(
+            "step-000-inventory", "inventory", "asset_registry.json"
+        )
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(
             Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
@@ -315,7 +362,26 @@ class AssemblyStageTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-002-assembly_dedup",
+                    "stage": "assembly_dedup",
+                    "allow_local_execution": True,
+                },
+            ],
         )
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         state["current_stage"] = "assembly"
         state["asset_registry_ref"] = (
             self._publish_registry_ref(str(run_dir), "s1", registry_ref)
@@ -516,23 +582,30 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["status"], "planned")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
             self.assertNotIn("fallback_method", assembly)
-            candidate = _ref_json(
-                result,
+            candidate = load_planned_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
                 assembly["planned_candidate_bundle_ref"],
+                expected_method_name="assembly.candidate.flye",
+                expected_parameter_attempt_id=0,
             )
-            self.assertEqual(candidate["status"], "planned")
+            bundle = candidate.bundle
+            self.assertEqual(bundle.status, "planned")
             self.assertEqual(
-                candidate["input_ref"],
-                str(reads.resolve(strict=False)),
+                [
+                    str(Path(path).resolve(strict=False))
+                    for path in result["resource_refs"]["long_reads"]["paths"]
+                ],
+                [str(reads.resolve(strict=False))],
             )
-            self.assertEqual(candidate["genome_size_prior"], 2_000_000)
-            self.assertEqual(candidate["artifact_type"], "draft_assembly.candidate")
-            self.assertNotIn("logs", candidate)
-            self.assertTrue(
-                candidate["expected_outputs"]["draft_assembly_fasta"].endswith(
-                    ".fasta"
-                )
+            self.assertEqual(
+                bundle.input_member_ids["primary"], ["fixture-long-read-0"]
             )
+            self.assertEqual(bundle.genome_size_prior, 2_000_000)
+            self.assertEqual(bundle.artifact_type, ASSEMBLY_CANDIDATE_BUNDLE)
+            self.assertEqual(bundle.expected_outputs, ["primary_assembly"])
+            self.assertIsNone(bundle.primary_output)
+            self.assertFalse(bundle.log_refs)
 
     def test_missing_genome_size_rejects_methods_that_require_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -748,19 +821,20 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "planned")
             self.assertNotIn("draft_assembly_ref", assembly)
-            candidate = json.loads(
-                _ref_path(
-                    result,
-                    assembly["planned_candidate_bundle_ref"],
-                ).read_text(encoding="utf-8")
+            candidate = load_planned_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
+                assembly["planned_candidate_bundle_ref"],
+                expected_method_name="assembly.candidate.flye",
+                expected_parameter_attempt_id=0,
             )
-            self.assertEqual(candidate["status"], "planned")
-            self.assertFalse(candidate["metadata"]["execution_enabled"])
-            self.assertNotIn("execution_mode", candidate["metadata"])
-            self.assertEqual(
-                candidate["metadata"]["draft_assembly_ref_status"],
-                "planned_path_not_materialized",
-            )
+            bundle = candidate.bundle
+            self.assertEqual(bundle.status, "planned")
+            self.assertEqual(bundle.expected_outputs, ["primary_assembly"])
+            self.assertIsNone(bundle.plan_ref)
+            self.assertIsNone(bundle.primary_output)
+            self.assertFalse(bundle.native_outputs)
+            self.assertFalse(bundle.log_refs)
 
     def test_local_flye_rejects_invalid_threads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -872,21 +946,27 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
 
-            candidate = json.loads(
-                _ref_path(
-                    result,
-                    assembly["executed_candidate_bundle_ref"],
-                ).read_text(encoding="utf-8")
+            verified = load_executed_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
+                assembly["executed_candidate_bundle_ref"],
+                expected_method_name="assembly.candidate.flye",
+                expected_parameter_attempt_id=0,
             )
-            self.assertEqual(candidate["status"], "executed")
-            self.assertTrue(
-                Path(candidate["expected_outputs"]["draft_assembly_fasta"]).exists()
-            )
-            self.assertTrue(candidate["metadata"]["execution_enabled"])
-            self.assertNotIn("execution_mode", candidate["metadata"])
+            candidate = verified.bundle
+            self.assertEqual(candidate.status, "executed")
+            self.assertEqual(candidate.artifact_type, ASSEMBLY_CANDIDATE_BUNDLE)
+            self.assertEqual(candidate.expected_outputs, ["primary_assembly"])
+            self.assertIsNotNone(candidate.primary_output)
             self.assertEqual(
-                candidate["metadata"]["draft_assembly_ref_status"], "materialized"
+                candidate.primary_output.artifact_type,
+                ASSEMBLY_DRAFT_ASSEMBLY,
             )
+            self.assertEqual(
+                verified.primary_output_path,
+                Path(assembly["draft_assembly_ref"]),
+            )
+            self.assertEqual(set(candidate.log_refs), {"stdout", "stderr"})
             self.assertNotIn("candidate_artifact_refs", assembly)
 
             artifact_events = [
@@ -1132,15 +1212,17 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertNotIn("hifiasm_frozen_attempt", assembly)
             self.assertNotIn("hifiasm_execution_result", assembly)
 
-            candidate = json.loads(
-                _ref_path(
-                    result,
-                    assembly["executed_candidate_bundle_ref"],
-                ).read_text(encoding="utf-8")
+            verified = load_executed_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
+                assembly["executed_candidate_bundle_ref"],
+                expected_method_name="assembly.candidate.hifiasm",
+                expected_parameter_attempt_id=0,
             )
-            self.assertEqual(candidate["status"], "executed")
+            candidate = verified.bundle
+            self.assertEqual(candidate.status, "executed")
             self.assertEqual(
-                candidate["plan_ref"],
+                candidate.plan_ref.model_dump(mode="json"),
                 assembly["planned_candidate_bundle_ref"],
             )
             frozen_attempt = _ref_json(
@@ -1148,23 +1230,29 @@ class AssemblyStageTests(unittest.TestCase):
                 assembly["parameter_attempts"][0]["frozen_attempt_ref"],
             )
             self.assertEqual(
-                frozen_attempt["attempt"]["metadata"][
-                    "planned_candidate_bundle_ref"
-                ],
+                frozen_attempt["attempt"]["metadata"]["planned_candidate_bundle_ref"],
                 assembly["planned_candidate_bundle_ref"],
             )
             self.assertEqual(
-                _ref_path(result, candidate["primary_output"]),
+                verified.primary_output_path,
                 draft,
             )
             primary_graph = next(
                 output
-                for output in candidate["native_outputs"]
-                if output["native_role"] == "hifiasm.primary_graph_bp"
+                for output in candidate.native_outputs
+                if output.native_role == "hifiasm.primary_graph_bp"
             )
-            self.assertEqual(primary_graph["artifact_class"], "assembly_graph")
-            self.assertTrue(_ref_path(result, primary_graph["artifact_ref"]).is_file())
-            self.assertTrue(candidate["metadata"]["execution_enabled"])
+            self.assertEqual(primary_graph.artifact_class, "assembly_graph")
+            self.assertTrue(
+                _ref_path(
+                    result, primary_graph.artifact_ref.model_dump(mode="json")
+                ).is_file()
+            )
+            self.assertEqual(candidate.artifact_type, ASSEMBLY_CANDIDATE_BUNDLE)
+            self.assertEqual(
+                candidate.primary_output.artifact_type,
+                ASSEMBLY_DRAFT_ASSEMBLY,
+            )
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
             self.assertEqual(
                 assembly["parameter_attempts"][0]["method_id"],
@@ -1399,22 +1487,32 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
 
-            candidate = json.loads(
-                _ref_path(
-                    result,
-                    assembly["executed_candidate_bundle_ref"],
-                ).read_text(encoding="utf-8")
+            verified = load_executed_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
+                assembly["executed_candidate_bundle_ref"],
+                expected_method_name="assembly.candidate.nextdenovo",
+                expected_parameter_attempt_id=0,
             )
-            self.assertEqual(candidate["status"], "executed")
-            self.assertTrue(candidate["metadata"]["execution_enabled"])
-            self.assertTrue(candidate["metadata"]["method_graph_requested"])
+            candidate = verified.bundle
+            self.assertEqual(candidate.status, "executed")
+            self.assertEqual(candidate.method_name, "assembly.candidate.nextdenovo")
+            self.assertEqual(candidate.expected_outputs, ["primary_assembly"])
             self.assertEqual(
-                candidate["metadata"]["draft_assembly_ref_status"], "materialized"
+                verified.primary_output_path,
+                Path(assembly["draft_assembly_ref"]),
             )
-            run_cfg = _native_output_path(
+            self.assertEqual(
+                candidate.primary_output.artifact_type,
+                ASSEMBLY_DRAFT_ASSEMBLY,
+            )
+            run_cfg = _ref_path(
                 result,
-                candidate,
-                "nextdenovo.run_config",
+                next(
+                    output.artifact_ref.model_dump(mode="json")
+                    for output in candidate.native_outputs
+                    if output.native_role == "nextdenovo.run_config"
+                ),
             )
             self.assertTrue(run_cfg.exists())
             run_cfg_text = run_cfg.read_text(encoding="utf-8")
@@ -1423,9 +1521,9 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("read_cutoff = 1000", run_cfg_text)
             self.assertEqual(
                 next(
-                    output["artifact_class"]
-                    for output in candidate["native_outputs"]
-                    if output["native_role"] == "nextdenovo.run_config"
+                    output.artifact_class
+                    for output in candidate.native_outputs
+                    if output.native_role == "nextdenovo.run_config"
                 ),
                 "config",
             )
@@ -1523,7 +1621,13 @@ class Phase4FlyeParameterTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "assets": _assets_with_ready_byte_evidence(assets),
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
         return path
@@ -1532,7 +1636,9 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         self, data_dir: str, session_id: str, registry_path: str | Path
     ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path("inventory", "asset_registry.json")
+        source = paths.workflow_step_work_path(
+            "step-000-inventory", "inventory", "asset_registry.json"
+        )
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(
             Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
@@ -1552,7 +1658,26 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-002-assembly_dedup",
+                    "stage": "assembly_dedup",
+                    "allow_local_execution": True,
+                },
+            ],
         )
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         state["current_stage"] = "assembly"
         state["asset_registry_ref"] = self._publish_registry_ref(
             str(run_dir), "s1", registry_ref
@@ -1604,9 +1729,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                     "asset_type": "clean_long_reads",
                     "path": str(clean_reads),
                     "platform": (
-                        "pacbio_hifi"
-                        if shared_read_type == "pacbio_hifi"
-                        else "ont"
+                        "pacbio_hifi" if shared_read_type == "pacbio_hifi" else "ont"
                     ),
                 }
             ],
@@ -1694,14 +1817,18 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--pacbio-hifi", script_text)
             self.assertIn("--genome-size 2000000", script_text)
-            candidate = json.loads(
-                _ref_path(
-                    result,
-                    assembly["executed_candidate_bundle_ref"],
-                ).read_text(encoding="utf-8")
+            candidate = load_executed_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
+                assembly["executed_candidate_bundle_ref"],
+                expected_method_name="assembly.candidate.flye",
+                expected_parameter_attempt_id=0,
             )
-            self.assertEqual(candidate["metadata"]["read_profile"], "pacbio-hifi")
-            self.assertEqual(candidate["metadata"]["estimated_genome_size"], 2_000_000)
+            self.assertEqual(
+                candidate.bundle.input_member_platforms["primary"],
+                ["pacbio_hifi"],
+            )
+            self.assertEqual(candidate.bundle.genome_size_prior, 2_000_000)
 
     def test_obsolete_method_read_type_cannot_override_approved_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1742,22 +1869,20 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertIn("--nano-hq", script_text)
             self.assertIn("--genome-size 2000000", script_text)
             self.assertIn("--threads 1", script_text)
-            # pre-commit stage state still holds the rich metadata until commit
-            # strips it; the executed Flye candidate bundle carries execution
-            # provenance.
-            candidate = json.loads(
-                _ref_path(
-                    result,
-                    assembly["executed_candidate_bundle_ref"],
-                ).read_text(encoding="utf-8")
+            candidate = load_executed_candidate_bundle(
+                result["data_dir"],
+                result["session_id"],
+                assembly["executed_candidate_bundle_ref"],
+                expected_method_name="assembly.candidate.flye",
+                expected_parameter_attempt_id=0,
             )
-            self.assertTrue(candidate["metadata"]["execution_enabled"])
-            self.assertNotIn("execution_mode", candidate["metadata"])
-            # The executed bundle metadata must reflect the validated
-            # parameters, not an unrelated default read profile.
-            self.assertEqual(candidate["metadata"]["read_profile"], "nano-hq")
-            self.assertEqual(candidate["metadata"]["estimated_genome_size"], 2_000_000)
-            self.assertEqual(candidate["metadata"]["threads"], 1)
+            self.assertEqual(candidate.bundle.method_name, "assembly.candidate.flye")
+            self.assertEqual(candidate.bundle.genome_size_prior, 2_000_000)
+            self.assertEqual(candidate.bundle.expected_outputs, ["primary_assembly"])
+            self.assertEqual(
+                candidate.primary_output_path,
+                Path(assembly["draft_assembly_ref"]),
+            )
 
     def test_flye_command_keeps_reads_after_read_type_and_excludes_l1_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -31,10 +31,11 @@
 
 ## Stage boundary
 
-The parent graph decides whether `hic_scaffolding` is in the requested stage
-set. If it is absent, the parent bypasses the stage. If it is present, the
-compiled stage runs AutoHiC directly. There is no one-item method-selection
-gate, stage-local skip branch, or no-op AutoHiC result.
+`hic_scaffolding` has a runtime occurrence only when it is present in the frozen
+ordered plan; absence creates neither a node visit nor a bypass/skip event. When
+that occurrence becomes active, the compiled stage runs AutoHiC directly. There
+is no one-item method-selection gate, stage-local skip branch, or no-op AutoHiC
+result.
 
 The stable method ID `hic_scaffolding.candidate.autohic` identifies the
 descriptor, catalog, recommendation, attempt, artifacts, and ledger events. It

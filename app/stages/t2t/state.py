@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import ConfigDict, TypeAdapter, with_config
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import NotRequired, Required, TypedDict
 
 from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.parameter_cursors import (
@@ -57,6 +57,7 @@ class T2TInterruptJson(TypedDict, total=False):
     """Persisted pointer to a T2T human-review request."""
 
     stage: Literal["t2t"]
+    workflow_step_id: Required[str]
     gate_id: str | None
     reason: str
     blocked_at: str

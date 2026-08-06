@@ -13,13 +13,14 @@ from app.storage.artifacts import register_artifact_records
 from app.storage.audit import (
     audit_run_storage,
     build_cleanup_manifest,
-    verify_checkpoint_free_artifact_retention,
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
 
 class StorageAuditTests(unittest.TestCase):
+    WORKFLOW_STEP_ID = "step-001-assembly"
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.data_root = Path(self.temporary.name) / "data"
@@ -37,7 +38,9 @@ class StorageAuditTests(unittest.TestCase):
         artifact_type: str,
         metadata: dict | None = None,
     ) -> ArtifactRef:
-        path = self.paths.artifact_path("assembly", filename)
+        path = self.paths.workflow_step_artifact_path(
+            self.WORKFLOW_STEP_ID, "assembly", filename
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
         artifact = ArtifactMeta.from_file(
@@ -109,7 +112,9 @@ class StorageAuditTests(unittest.TestCase):
             {"orphan": True},
             artifact_type="assembly.parameter.model_response",
         )
-        unindexed = self.paths.artifact_path("assembly", "unindexed.json")
+        unindexed = self.paths.workflow_step_artifact_path(
+            self.WORKFLOW_STEP_ID, "assembly", "unindexed.json"
+        )
         unindexed.write_text('{"unindexed": true}\n', encoding="utf-8")
 
         self.paths.run_config_path.write_text(
@@ -121,7 +126,9 @@ class StorageAuditTests(unittest.TestCase):
         duplicate_bytes = b"same derived bytes\n"
         report = self.paths.report_path("session_summary.md")
         report.write_bytes(duplicate_bytes)
-        work = self.paths.work_path("assembly", "scratch.txt")
+        work = self.paths.workflow_step_work_path(
+            self.WORKFLOW_STEP_ID, "assembly", "scratch.txt"
+        )
         work.parent.mkdir(parents=True, exist_ok=True)
         work.write_bytes(duplicate_bytes)
 
@@ -229,7 +236,7 @@ class StorageAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(DataLayoutError, "integrity mismatch"):
             audit_run_storage(self.paths.run_dir)
 
-    def test_legacy_ledger_asset_path_ref_is_ignored_by_retention_scan(self) -> None:
+    def test_removed_ledger_asset_path_ref_format_fails_closed(self) -> None:
         ledger = Ledger(self.paths.run_dir)
         ledger.create_session(self.paths.session_id, "control/manifest.yaml")
         ledger.record_session_terminal(
@@ -244,20 +251,8 @@ class StorageAuditTests(unittest.TestCase):
             ],
         )
 
-        audit = audit_run_storage(self.paths.run_dir)
-        retention = verify_checkpoint_free_artifact_retention(
-            self.paths.run_dir,
-            {
-                "stage_outputs": {
-                    "read_qc": {
-                        "input_asset_ref": "art_session:raw_long_reads:reads.fastq"
-                    }
-                }
-            },
-        )
-
-        self.assertEqual(audit["artifact_index"]["record_count"], 0)
-        self.assertEqual(retention["missing_artifact_ids"], [])
+        with self.assertRaisesRegex(DataLayoutError, "dangling artifact reference"):
+            audit_run_storage(self.paths.run_dir)
 
     def test_ledger_replaces_transient_artifact_id_with_indexed_ref(self) -> None:
         indexed_ref = self._register_json(
@@ -280,6 +275,7 @@ class StorageAuditTests(unittest.TestCase):
             "attempt_succeeded",
             {"artifacts": [transient.model_dump(mode="json")]},
             stage="assembly",
+            workflow_step_id=self.WORKFLOW_STEP_ID,
             subject_id="attempt-001",
         )
 
@@ -342,7 +338,9 @@ class StorageAuditTests(unittest.TestCase):
     def test_symlink_inside_run_fails_closed(self) -> None:
         outside = Path(self.temporary.name) / "outside.txt"
         outside.write_text("outside", encoding="utf-8")
-        link = self.paths.work_path("assembly", "escape")
+        link = self.paths.workflow_step_work_path(
+            self.WORKFLOW_STEP_ID, "assembly", "escape"
+        )
         link.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.symlink(outside, link)

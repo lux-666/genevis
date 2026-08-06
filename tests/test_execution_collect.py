@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.control.workflow_plan import bind_attempt_to_current_workflow_step
 from app.execution.collect import (
     COLLECT_REASON_MAX_CHARS,
     collect_with_failure_boundary,
@@ -21,8 +22,33 @@ from app.execution.method_runner import build_frozen_attempt
 from app.schemas.execution import ExecutionResult
 from app.schemas.state import initial_state
 from app.storage.ledger import Ledger, LedgerConflictError, LedgerFormatError
-from app.storage.paths import DataLayoutError
+from app.storage.paths import DataLayoutError, SessionPaths
 from tests.data_v2 import v2_run_dir
+
+
+def _state(run_dir: Path, session_id: str, *, status: str) -> dict:
+    state = initial_state(
+        session_id=session_id,
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(run_dir),
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-001-genome_survey",
+                "stage": "genome_survey",
+                "allow_local_execution": False,
+            },
+        ],
+    )
+    state["current_stage"] = "genome_survey"
+    state["workflow_step_index"] = 1
+    state["entered_workflow_step_index"] = 1
+    state["stage_outputs"] = {"genome_survey": {"status": status}}
+    return state
 
 
 class CollectFailureBoundaryTests(unittest.TestCase):
@@ -39,14 +65,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     session_id = f"s{index}"
                     run_dir = v2_run_dir(tmpdir, session_id)
-                    state = initial_state(
-                        session_id=session_id,
-                        input_manifest_ref="control/manifest.yaml",
-                        data_dir=str(run_dir),
-                    )
-                    state["stage_outputs"] = {
-                        "genome_survey": {"status": "jellyfish_ran"}
-                    }
+                    state = _state(run_dir, session_id, status="jellyfish_ran")
 
                     def fail_collect(_state, *, raised=error):
                         raise raised
@@ -84,12 +103,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(run_dir),
-            )
-            state["stage_outputs"] = {"genome_survey": {"status": "jellyfish_ran"}}
+            state = _state(run_dir, "s1", status="jellyfish_ran")
 
             def broken_collect(_state):
                 raise ValueError("collect callback contract bug")
@@ -112,11 +126,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
     def test_failure_records_attempt_and_stage_events_when_evidence_is_valid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(run_dir),
-            )
+            state = _state(run_dir, "s1", status="jellyfish_ran")
             lifecycle = MethodExecutionLifecycle(
                 stage="genome_survey",
                 name="Jellyfish",
@@ -124,7 +134,9 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 frozen_status="jellyfish_frozen",
                 ran_status="jellyfish_ran",
             )
-            working_dir = Path(run_dir) / "work" / "genome_survey" / "jellyfish"
+            working_dir = SessionPaths.from_run_dir(run_dir).workflow_step_work_path(
+                "step-001-genome_survey", "genome_survey", "jellyfish"
+            )
             working_dir.mkdir(parents=True)
             script_path = working_dir / "run.sh"
             script_path.write_text("exit 0\n", encoding="utf-8")
@@ -139,6 +151,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 env=None,
                 env_spec=None,
             )
+            attempt = bind_attempt_to_current_workflow_step(state, attempt)
             state["stage_outputs"] = freeze_method_attempts(
                 state, lifecycle, [attempt]
             )["stage_outputs"]
@@ -164,12 +177,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
     def test_shared_graph_applies_collect_failure_boundary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(run_dir),
-            )
-            state["stage_outputs"] = {"genome_survey": {"status": "planned"}}
+            state = _state(run_dir, "s1", status="planned")
             lifecycle = MethodExecutionLifecycle(
                 stage="genome_survey",
                 name="Jellyfish",
@@ -179,7 +187,11 @@ class CollectFailureBoundaryTests(unittest.TestCase):
             )
 
             def freeze(current):
-                working_dir = Path(run_dir) / "work" / "genome_survey" / "graph"
+                working_dir = SessionPaths.from_run_dir(
+                    run_dir
+                ).workflow_step_work_path(
+                    "step-001-genome_survey", "genome_survey", "graph"
+                )
                 working_dir.mkdir(parents=True, exist_ok=True)
                 script_path = working_dir / "run.sh"
                 script_path.write_text("exit 0\n", encoding="utf-8")
@@ -194,6 +206,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                     env=None,
                     env_spec=None,
                 )
+                attempt = bind_attempt_to_current_workflow_step(current, attempt)
                 return freeze_method_attempts(current, lifecycle, [attempt])
 
             def broken_collect(_state):
@@ -214,11 +227,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
     def test_existing_attempt_failure_does_not_suppress_stage_failure_event(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(run_dir),
-            )
+            state = _state(run_dir, "s1", status="jellyfish_ran")
             lifecycle = MethodExecutionLifecycle(
                 stage="genome_survey",
                 name="Jellyfish",
@@ -227,7 +236,9 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 ran_status="jellyfish_ran",
                 process_failure="collect",
             )
-            working_dir = Path(run_dir) / "work" / "genome_survey" / "failed"
+            working_dir = SessionPaths.from_run_dir(run_dir).workflow_step_work_path(
+                "step-001-genome_survey", "genome_survey", "failed"
+            )
             working_dir.mkdir(parents=True)
             script_path = working_dir / "run.sh"
             script_path.write_text("exit 1\n", encoding="utf-8")
@@ -242,6 +253,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 env=None,
                 env_spec=None,
             )
+            attempt = bind_attempt_to_current_workflow_step(state, attempt)
             state["stage_outputs"] = freeze_method_attempts(
                 state, lifecycle, [attempt]
             )["stage_outputs"]
@@ -288,12 +300,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
     def test_ledger_conflict_at_collect_boundary_is_bounded(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(run_dir),
-            )
-            state["stage_outputs"] = {"genome_survey": {"status": "jellyfish_ran"}}
+            state = _state(run_dir, "s1", status="jellyfish_ran")
             lifecycle = MethodExecutionLifecycle(
                 stage="genome_survey",
                 name="Jellyfish",
@@ -330,11 +337,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
         # already recorded success.
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(run_dir),
-            )
+            state = _state(run_dir, "s1", status="jellyfish_ran")
             lifecycle = MethodExecutionLifecycle(
                 stage="genome_survey",
                 name="Jellyfish",
@@ -342,7 +345,9 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 frozen_status="jellyfish_frozen",
                 ran_status="jellyfish_ran",
             )
-            working_dir = Path(run_dir) / "work" / "genome_survey" / "jellyfish"
+            working_dir = SessionPaths.from_run_dir(run_dir).workflow_step_work_path(
+                "step-001-genome_survey", "genome_survey", "jellyfish"
+            )
             working_dir.mkdir(parents=True)
             script_path = working_dir / "run.sh"
             script_path.write_text("exit 0\n", encoding="utf-8")
@@ -357,6 +362,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 env=None,
                 env_spec=None,
             )
+            attempt = bind_attempt_to_current_workflow_step(state, attempt)
             state["stage_outputs"] = freeze_method_attempts(
                 state, lifecycle, [attempt]
             )["stage_outputs"]

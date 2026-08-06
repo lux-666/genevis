@@ -43,8 +43,7 @@ For installation and server execution, read
 | `architecture/reference/` | Exact architecture, stage, descriptor, governance, and conformance contracts |
 | `deployment/` | Current host setup and Mac/server workflow |
 | `user_guide/` | Current operator-facing feature guides |
-| `examples/` | Schema-valid manifest and run-config templates |
-| `archive/` | Original biological source material retained for reference |
+| `examples/` | Schema-valid manifest and run-config templates, including literal-order repeated-stage occurrences |
 
 ## Status and update rule
 
@@ -62,7 +61,7 @@ code or behavior change
   -> README/router only when navigation relationships change
 ```
 
-The implementation-map step is required when a graph node, canonical stage,
+The implementation-map step is required when a graph node, registered stage,
 registered method, execution adapter, collection boundary, parameter flow,
 human gate, resource commit, verification classification, or cited conformance
 status changes. Do not add phase reports, historical progress logs, completion

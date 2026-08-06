@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 
 def run_tui(data_dir: str, *, resume_session: str | None = None) -> int:
@@ -159,13 +159,13 @@ def _resume_status(data_dir: str, session_id: str) -> str:
         except (OSError, ValueError):
             return "invalid draft"
     if not has_frozen_input_contract(paths):
-        return f"draft/{draft.lifecycle}" if draft is not None else "legacy"
+        return f"draft/{draft.lifecycle}" if draft is not None else "incomplete"
     try:
         validate_frozen_inputs(paths)
     except (FrozenInputError, OSError, ValueError):
         return "invalid frozen inputs"
     if draft is None:
-        return "frozen legacy"
+        return "frozen structured run"
     return _durable_supervision_state(draft)
 
 
@@ -260,10 +260,13 @@ def _collect_sample_assets(draft: Any) -> Any | None:
             print("未收到路径或明确的\u201c没有 Hi-C\u201d，请重新输入。\n")
             continue
 
+        focused_role = clarification.role
+        if focused_role not in {"hifi_reads", "ont_reads", "hic_reads"}:
+            raise RuntimeError("asset collection clarification requires an asset role")
         result = apply_asset_answer(
             draft,
             answer=answer,
-            focused_role=clarification.role,
+            focused_role=focused_role,
             llm_parser=_parse_assets_with_configured_llm,
         )
         if _would_replace_confirmed_asset(result) and _confirm(
@@ -272,7 +275,7 @@ def _collect_sample_assets(draft: Any) -> Any | None:
             result = apply_asset_answer(
                 draft,
                 answer=answer,
-                focused_role=clarification.role,
+                focused_role=focused_role,
                 llm_parser=_parse_assets_with_configured_llm,
                 replace_confirmed=True,
             )
@@ -303,7 +306,7 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
     try:
         plan = _planner_state_from_tui_draft(draft)
         if draft.lifecycle == "planning":
-            if plan.selected_stages is None:
+            if plan.selected_stage_names is None:
                 print("\n正在根据目标和已确认的样本事实生成 Plan Draft...\n")
                 try:
                     plan = _generate_plan_draft_with_configured_llm(plan)
@@ -316,9 +319,7 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
                     )
                     print("请通过 /resume 重试该草稿。", file=sys.stderr)
                     return None
-                draft = _copy_planner_fields_to_draft(
-                    draft, plan, lifecycle="planning"
-                )
+                draft = _copy_planner_fields_to_draft(draft, plan, lifecycle="planning")
                 save_tui_session_draft(draft)
 
             reviewed = _review_plan_draft(plan)
@@ -380,7 +381,7 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
 
     has_hifi = draft.intake.hifi_reads is not None
     has_ont = draft.intake.ont_reads is not None
-    platform = "pacbio_hifi" if has_hifi and not has_ont else "ont"
+    platform: str | None = "pacbio_hifi" if has_hifi and not has_ont else "ont"
     if has_hifi and has_ont:
         platform = None
 
@@ -392,6 +393,16 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         if draft.method_parameters is not None
         else {}
     )
+    selected_methods = draft.selected_methods
+    if selected_methods is None and draft.intent.requested_assembly_method:
+        method_id = f"assembly.candidate.{draft.intent.requested_assembly_method}"
+        selected_methods = {"assembly": method_id}
+        if draft.intent.requested_assembly_method == "hifiasm":
+            method_parameters[method_id] = {
+                **method_parameters.get(method_id, {}),
+                "use_ultralong_ont": draft.intent.use_ultralong_ont,
+                "use_hic_phasing": draft.intent.use_hic_phasing,
+            }
 
     entry_request: dict[str, Any] = {
         "command": "run",
@@ -399,6 +410,7 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         "data_dir": draft.data_dir,
         "platform": platform,
         "target_species": draft.intent.target_species,
+        "requested_stages": list(draft.intent.requested_stages),
         "source_paths": [],
         "intent_parse_source": "llm_plan_draft",
         "intake_goal": {
@@ -416,9 +428,8 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         manifest_ref=str(
             SessionPaths(draft.data_dir, draft.session_id).manifest_draft_path
         ),
-        selected_stages=draft.selected_stages,
-        resolved_execution_order=draft.resolved_execution_order,
-        selected_methods=draft.selected_methods,
+        selected_stage_occurrences=draft.selected_stage_occurrences,
+        selected_methods=selected_methods,
         shared_parameters=draft.shared_parameters,
         method_parameters=method_parameters or None,
         stage_parameters=draft.stage_parameters,
@@ -432,15 +443,18 @@ def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
     context = _plan_draft_context(plan)
     system = (
         "You create one editable Gene Agent Plan Draft. Return exactly one JSON "
-        "object with selected_stages, selected_methods, and optional "
+        "object with selected_stage_occurrences, selected_methods, and optional "
         "shared_parameters, method_parameters, and stage_parameters. Use only "
         "the stages, method IDs, and planning-time parameter names supplied in "
-        "the context. selected_stages must contain the complete ordered workflow "
+        "the context. selected_stage_occurrences must contain the complete ordered "
+        "workflow, with each object containing stage and allow_local_execution. "
         "needed for every stated goal: combine multiple goals instead of stopping "
-        "at the first one. A T2T goal normally includes read_qc, genome_survey, "
+        "at the first one. Preserve the literal order and duplicate occurrences "
+        "given in requested_stage_scope. When requested_stage_scope is non-empty, "
+        "it is a hard ceiling: do not add any other stage. A T2T goal normally "
+        "includes read_qc, genome_survey, "
         "assembly, assembly_dedup, assembly_review, hic_scaffolding, and t2t. "
-        "When annotation is also requested, append repeat_annotation, "
-        "gene_annotation, and function_annotation as applicable. Choose methods "
+        "Choose methods "
         "that match the confirmed input platforms. Include a method choice for "
         "every selected stage that has selectable methods. For read_qc include "
         "seqkit stats plus exactly one length-filter choice; for genome_survey "
@@ -450,7 +464,9 @@ def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
         "decisions. Do not fill runtime-derived catalog L2 parameters; omit them "
         "so the existing UI can show them as deferred. Hi-C presence alone must "
         "not enable hifiasm Hi-C phasing, and ONT presence alone must not enable "
-        "hifiasm ultra-long input. Do not return confirmation or execution fields."
+        "hifiasm ultra-long input. Choose allow_local_execution independently for "
+        "every occurrence; it is explicit operator authorization, not a method "
+        "selection consequence. Do not return confirmation fields."
     )
     payload = _invoke_json_model(
         system,
@@ -464,12 +480,17 @@ def _plan_draft_context(plan: Any) -> dict[str, Any]:
     from app.entrypoints.ask_planner import _all_selectable_stages, _load_manifest
     from app.entrypoints.planner_catalog import load_planner_method_catalog
 
-    available_stages = _all_selectable_stages()
+    requested_scope = [
+        str(stage)
+        for stage in (plan.entry_request or {}).get("requested_stages", [])
+        if str(stage) in _all_selectable_stages()
+    ]
+    available_stages = requested_scope or _all_selectable_stages()
     catalog = load_planner_method_catalog()
     registry = load_descriptor_registry()
     executor_parameters = _executor_planning_parameters_by_method()
     methods_by_stage: dict[str, list[dict[str, Any]]] = {}
-    for stage in available_stages:
+    for stage in dict.fromkeys(available_stages):
         methods: list[dict[str, Any]] = []
         for item in catalog.methods_for_stage(stage):
             method_name = str(item["method_name"])
@@ -510,6 +531,7 @@ def _plan_draft_context(plan: Any) -> dict[str, Any]:
             else {}
         ),
         "available_stages_in_order": available_stages,
+        "requested_stage_scope": requested_scope,
         "methods_by_stage": methods_by_stage,
     }
 
@@ -525,7 +547,7 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
     from app.schemas.shared_parameters import SharedParameters
 
     allowed_top_level = {
-        "selected_stages",
+        "selected_stage_occurrences",
         "selected_methods",
         "shared_parameters",
         "method_parameters",
@@ -535,30 +557,45 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
     if unknown:
         raise ValueError(f"Plan Draft contains unknown fields: {sorted(unknown)}")
 
-    raw_stages = payload.get("selected_stages")
-    if not isinstance(raw_stages, list) or not raw_stages:
-        raise ValueError("Plan Draft selected_stages must be a non-empty list")
-    stages = [str(stage).strip() for stage in raw_stages]
-    if any(not stage for stage in stages) or len(stages) != len(set(stages)):
-        raise ValueError("Plan Draft selected_stages must be unique non-empty names")
+    raw_occurrences = payload.get("selected_stage_occurrences")
+    if not isinstance(raw_occurrences, list) or not raw_occurrences:
+        raise ValueError(
+            "Plan Draft selected_stage_occurrences must be a non-empty list"
+        )
+    from app.schemas.ask_plan import PlanStageOccurrence
+
+    occurrences = [
+        PlanStageOccurrence.model_validate(occurrence)
+        for occurrence in raw_occurrences
+    ]
+    stages = [occurrence.stage for occurrence in occurrences]
     invalid_stages = set(stages).difference(_all_selectable_stages())
     if invalid_stages:
         raise ValueError(
             f"Plan Draft contains unknown stages: {sorted(invalid_stages)}"
         )
+    requested_scope = [
+        str(stage)
+        for stage in (plan.entry_request or {}).get("requested_stages", [])
+    ]
+    if requested_scope and stages != requested_scope:
+        raise ValueError(
+            "Plan Draft selected_stage_occurrences must preserve the explicit intent "
+            "sequence, including order and repeated occurrences"
+        )
 
     candidate = merge_clarification_response(
         plan,
-        AskClarificationResponse(kind="stage_selection", selected_stages=stages),
+        AskClarificationResponse(
+            kind="stage_selection", selected_stage_occurrences=occurrences
+        ),
     )
 
     raw_methods = payload.get("selected_methods") or {}
     if not isinstance(raw_methods, Mapping):
         raise ValueError("Plan Draft selected_methods must be an object")
     methods = {str(stage): value for stage, value in raw_methods.items()}
-    extra_method_stages = set(methods).difference(
-        candidate.resolved_execution_order or []
-    )
+    extra_method_stages = set(methods).difference(candidate.selected_stage_names or [])
     if extra_method_stages:
         raise ValueError(
             "Plan Draft selects methods for unselected stages: "
@@ -566,8 +603,12 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
         )
     missing_method_stages = {
         stage
-        for stage in candidate.resolved_execution_order or []
+        for stage in candidate.selected_stage_names or []
         if stage in _STAGES_NEEDING_METHOD_SELECTION and stage not in methods
+        and any(
+            occurrence.stage == stage and occurrence.allow_local_execution
+            for occurrence in candidate.selected_stage_occurrences or []
+        )
     }
     if missing_method_stages:
         raise ValueError(
@@ -632,6 +673,7 @@ def _validate_llm_plan_parameters(
     stage_parameters: Mapping[str, Mapping[str, Any]],
 ) -> None:
     from app.entrypoints.planner_catalog import load_planner_method_catalog
+
     selected_methods = {
         method
         for value in (plan.selected_methods or {}).values()
@@ -657,12 +699,10 @@ def _validate_llm_plan_parameters(
                 f"{sorted(unknown)}"
             )
 
-    selected_stages = set(plan.resolved_execution_order or [])
-    allowed_stage_parameters = {
-        "function_annotation": {"database_provenance"},
-    }
+    selected_stage_names = set(plan.selected_stage_names or [])
+    allowed_stage_parameters: dict[str, set[str]] = {}
     for stage, values in stage_parameters.items():
-        if stage not in selected_stages:
+        if stage not in selected_stage_names:
             raise ValueError(
                 f"Plan Draft supplies parameters for unselected stage {stage!r}"
             )
@@ -709,8 +749,7 @@ def _shared_parameters_from_intake(draft: Any) -> Any:
 def _discard_generated_plan_fields(draft: Any) -> Any:
     return draft.model_copy(
         update={
-            "selected_stages": None,
-            "resolved_execution_order": None,
+            "selected_stage_occurrences": None,
             "selected_methods": None,
             "shared_parameters": _shared_parameters_from_intake(draft),
             "method_parameters": None,
@@ -723,8 +762,7 @@ def _discard_generated_plan_fields(draft: Any) -> Any:
 def _copy_planner_fields_to_draft(draft: Any, plan: Any, *, lifecycle: str) -> Any:
     return draft.model_copy(
         update={
-            "selected_stages": plan.selected_stages,
-            "resolved_execution_order": plan.resolved_execution_order,
+            "selected_stage_occurrences": plan.selected_stage_occurrences,
             "selected_methods": plan.selected_methods,
             "shared_parameters": plan.shared_parameters,
             "method_parameters": plan.method_parameters,
@@ -752,7 +790,6 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
             manifest_draft=materialize_manifest_draft(draft),
             run_config_draft=build_run_config_payload(plan),
             parent_session_id=draft.parent_session_id,
-            selected_stages=plan.resolved_execution_order or [],
             selected_methods=plan.selected_methods or {},
         )
     except DependencySnapshotError as exc:
@@ -832,10 +869,10 @@ def _resume_tui_session(data_dir: str, session_id: str) -> int:
 
     if not has_frozen_input_contract(paths):
         print(f"继续草稿 {session_id}（当前阶段：{draft.lifecycle}）。\n")
-        draft = _review_resumed_draft(draft)
-        if draft is None:
+        resumed_draft = _review_resumed_draft(draft)
+        if resumed_draft is None:
             return 0
-        return _continue_tui_draft(draft)
+        return _continue_tui_draft(resumed_draft)
 
     try:
         validate_frozen_inputs(paths)
@@ -960,7 +997,11 @@ def _replace_draft_goal(draft: Any) -> Any:
     return _reset_draft_planning(updated)
 
 
-def _replace_draft_asset(draft: Any, *, role: str) -> Any:
+def _replace_draft_asset(
+    draft: Any,
+    *,
+    role: Literal["hifi_reads", "ont_reads", "hic_reads"],
+) -> Any:
     from app.entrypoints.tui_intake import apply_asset_answer
 
     if role == "hifi_reads":
@@ -992,8 +1033,7 @@ def _reset_draft_planning(draft: Any) -> Any:
     lifecycle = "intake" if next_intake_clarification(draft) is not None else "planning"
     return draft.model_copy(
         update={
-            "selected_stages": None,
-            "resolved_execution_order": None,
+            "selected_stage_occurrences": None,
             "selected_methods": None,
             "shared_parameters": _shared_parameters_from_intake(draft),
             "method_parameters": None,

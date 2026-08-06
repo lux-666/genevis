@@ -13,6 +13,7 @@ from collections.abc import Callable
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
+from app.control.workflow_plan import current_workflow_step_id
 from app.execution.attempt_owners import MethodExecution
 from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
@@ -137,12 +138,17 @@ def _record_collect_failure(
 
     reason_digest = sha256(reason.encode("utf-8")).hexdigest()[:16]
     try:
+        workflow_step_id = current_workflow_step_id(
+            state,
+            expected_stage=lifecycle.stage,
+        )
         ledger.record_stage_failed(
             state["session_id"],
             lifecycle.stage,
+            workflow_step_id=workflow_step_id,
             error=reason,
             idempotency_key=(
-                f"collect:{state['session_id']}:{lifecycle.stage}:"
+                f"collect:{state['session_id']}:{workflow_step_id}:"
                 f"{lifecycle.method_name}:failed:{reason_digest}"
             ),
         )

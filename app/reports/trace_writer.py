@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from app.control.lifecycle import inspect_session
+from app.control.workflow_plan import workflow_steps_from_run_config
 from app.reports._projection import atomic_write_text, source_watermark
 from app.reports.review_report import _pending_review_requests
 from app.review.records import counts_by_origin
+from app.schemas.run_config import RunConfig
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-from app.workflow import STAGE_ORDER
 
 # Stable stage-status vocabulary. Keep this small and durable; the trace
 # JSON and any downstream tooling depend on these exact strings.
@@ -36,15 +37,8 @@ SESSION_SUMMARY_MARKDOWN_FILENAME = "session_summary.md"
 
 # Artifact types that are workflow plumbing, not operator-facing evidence.
 _NOISE_ARTIFACT_TYPES = frozenset({"command.stdout", "command.stderr"})
-_ANNOTATION_INTAKE_ARTIFACT_TYPE = "annotation.intake_plan"
 # Artifact-type prefixes the operator should open first, in priority order.
-_OPEN_FIRST_PREFIXES = (
-    "annotation.",
-    "function_annotation.",
-    "assembly_review.",
-    "repeat_annotation.",
-    "gene_annotation.",
-)
+_OPEN_FIRST_PREFIXES = ("assembly_review.",)
 
 
 def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]:
@@ -61,7 +55,7 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
     decisions = [
         event for event in events if event.get("event_type") == "review_decision"
     ]
-    stages = _build_stage_records(events, artifacts, summary)
+    stages = _build_stage_records(paths, events, artifacts, summary)
     gaps = _build_gaps(session, events, decisions)
     route = _route_records(events)
     observed_path = [
@@ -75,7 +69,7 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
         ]
 
     trace: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "report_type": "session_summary",
         "session_id": session_id,
         "session_found": session is not None,
@@ -106,36 +100,41 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
 
 
 def _build_stage_records(
+    paths: SessionPaths,
     events: list[dict[str, Any]],
     artifacts: list[dict[str, Any]],
     summary: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    methods_by_stage = _methods_by_stage(events)
-    artifacts_by_stage = _artifact_refs_by_stage(artifacts)
-    candidate_methods_by_stage = _candidate_methods_by_stage(artifacts)
-    review_by_stage = _review_events_by_stage(events)
-    lifecycle_by_stage = _stage_lifecycle_by_stage(events)
-    blocked_stage = _blocked_stage(summary)
-    failed_stage = _failed_stage(events, summary)
+    steps = _workflow_steps_for_trace(paths, events, artifacts)
+    methods_by_step = _methods_by_workflow_step(events)
+    artifacts_by_step = _artifact_refs_by_workflow_step(artifacts)
+    candidate_methods_by_step = _candidate_methods_by_workflow_step(artifacts)
+    review_by_step = _review_events_by_workflow_step(events)
+    lifecycle_by_step = _stage_lifecycle_by_workflow_step(events)
+    blocked_step_id = _blocked_workflow_step_id(summary, events)
+    failed_step_id = _failed_workflow_step_id(events, summary)
 
     records: list[dict[str, Any]] = []
-    for stage in STAGE_ORDER:
-        methods = methods_by_stage.get(stage, [])
-        stage_artifacts = artifacts_by_stage.get(stage, [])
-        review = review_by_stage.get(stage)
-        candidate_methods = candidate_methods_by_stage.get(stage, [])
-        lifecycle = lifecycle_by_stage.get(stage)
+    for step in steps:
+        step_id = step["step_id"]
+        stage = step["stage"]
+        methods = methods_by_step.get(step_id, [])
+        stage_artifacts = artifacts_by_step.get(step_id, [])
+        review = review_by_step.get(step_id)
+        candidate_methods = candidate_methods_by_step.get(step_id, [])
+        lifecycle = lifecycle_by_step.get(step_id)
         status = _stage_status(
-            stage,
+            step_id,
             methods=methods,
             stage_artifacts=stage_artifacts,
             candidate_methods=candidate_methods,
             review=review,
-            blocked_stage=blocked_stage,
-            failed_stage=failed_stage,
+            blocked_step_id=blocked_step_id,
+            failed_step_id=failed_step_id,
             lifecycle=lifecycle,
         )
         record: dict[str, Any] = {
+            "workflow_step_id": step_id,
             "stage": stage,
             "status": status,
             "methods": methods,
@@ -152,7 +151,51 @@ def _build_stage_records(
     return records
 
 
-def _methods_by_stage(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _workflow_steps_for_trace(
+    paths: SessionPaths,
+    events: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Load the frozen plan, falling back to occurrence-bearing durable facts.
+
+    The frozen RunConfig is authoritative whenever it is available.  The
+    fallback keeps trace inspection useful for partially migrated or damaged
+    sessions without inventing a stage order from a global registry.
+    """
+
+    if paths.run_config_path.is_file():
+        try:
+            run_config = RunConfig.model_validate_json(
+                paths.run_config_path.read_text(encoding="utf-8")
+            )
+            return [dict(step) for step in workflow_steps_from_run_config(run_config)]
+        except (OSError, ValueError, TypeError):
+            pass
+
+    steps: dict[str, dict[str, Any]] = {}
+    for record in [*events, *artifacts]:
+        step_id = record.get("workflow_step_id")
+        stage = record.get("stage")
+        if not isinstance(step_id, str) or not step_id:
+            continue
+        if not isinstance(stage, str) or not stage:
+            continue
+        existing = steps.get(step_id)
+        if existing is None:
+            steps[step_id] = {
+                "step_id": step_id,
+                "stage": stage,
+                "allow_local_execution": False,
+            }
+        elif existing["stage"] != stage:
+            # A conflicting durable occurrence cannot be safely projected.
+            continue
+    return list(steps.values())
+
+
+def _methods_by_workflow_step(
+    events: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     attempts: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for event in events:
@@ -167,6 +210,7 @@ def _methods_by_stage(events: list[dict[str, Any]]) -> dict[str, list[dict[str, 
         if record is None:
             record = {
                 "attempt_id": attempt_id,
+                "workflow_step_id": event.get("workflow_step_id"),
                 "stage": event.get("stage"),
                 "method_name": event.get("method_name"),
                 "outcome": "started",
@@ -187,62 +231,53 @@ def _methods_by_stage(events: list[dict[str, Any]]) -> dict[str, list[dict[str, 
             record["finished_at"] = event.get("timestamp")
             record["error"] = _first_error_line(event.get("error"))
             record["return_code"] = event.get("return_code")
-    by_stage: dict[str, list[dict[str, Any]]] = {}
+    by_step: dict[str, list[dict[str, Any]]] = {}
     for attempt_id in order:
         record = attempts[attempt_id]
-        by_stage.setdefault(str(record["stage"]), []).append(record)
-    return by_stage
+        step_id = record.get("workflow_step_id")
+        if isinstance(step_id, str) and step_id:
+            by_step.setdefault(step_id, []).append(record)
+    return by_step
 
 
-def _artifact_refs_by_stage(
+def _artifact_refs_by_workflow_step(
     artifacts: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    by_stage: dict[str, list[dict[str, Any]]] = {}
+    by_step: dict[str, list[dict[str, Any]]] = {}
     for artifact in artifacts:
         artifact_type = str(artifact.get("artifact_type", ""))
         if artifact_type in _NOISE_ARTIFACT_TYPES:
             continue
-        stage = str(artifact.get("stage", ""))
-        by_stage.setdefault(stage, []).append(
+        step_id = artifact.get("workflow_step_id")
+        if not isinstance(step_id, str) or not step_id:
+            continue
+        by_step.setdefault(step_id, []).append(
             {
                 "artifact_type": artifact_type,
                 "method_name": artifact.get("method_id") or artifact.get("method_name"),
                 "path_ref": artifact.get("path_ref") or artifact.get("file_path"),
             }
         )
-    return by_stage
+    return by_step
 
 
 def _stage_artifacts_for_trace(
     stage_artifacts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    selected = list(stage_artifacts[:5])
-    if any(
-        artifact.get("artifact_type") == _ANNOTATION_INTAKE_ARTIFACT_TYPE
-        for artifact in selected
-    ):
-        return selected
-    intake = next(
-        (
-            artifact
-            for artifact in reversed(stage_artifacts)
-            if artifact.get("artifact_type") == _ANNOTATION_INTAKE_ARTIFACT_TYPE
-        ),
-        None,
-    )
-    if intake is not None:
-        selected.append(intake)
-    return selected
+    return list(stage_artifacts[:5])
 
 
-def _candidate_methods_by_stage(
+def _candidate_methods_by_workflow_step(
     artifacts: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    by_stage: dict[str, list[dict[str, Any]]] = {}
+    by_step: dict[str, list[dict[str, Any]]] = {}
     for artifact in artifacts:
         if artifact.get("artifact_type") != "draft_assembly.candidate":
             continue
-        by_stage.setdefault(str(artifact.get("stage", "")), []).append(
+        step_id = artifact.get("workflow_step_id")
+        if not isinstance(step_id, str) or not step_id:
+            continue
+        by_step.setdefault(step_id, []).append(
             {
                 "method_name": artifact.get("method_id") or artifact.get("method_name"),
                 "candidate_id": artifact.get("candidate_id"),
@@ -251,10 +286,12 @@ def _candidate_methods_by_stage(
                 ),
             }
         )
-    return by_stage
+    return by_step
 
 
-def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _review_events_by_workflow_step(
+    events: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     requests: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for event in events:
@@ -266,7 +303,13 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
             event.get("review_request_id") or event.get("subject_id") or ""
         )
         if event_type == "review_requested":
-            entry = requests.setdefault(request_id, {"stage": stage})
+            entry = requests.setdefault(
+                request_id,
+                {
+                    "stage": stage,
+                    "workflow_step_id": event.get("workflow_step_id"),
+                },
+            )
             if request_id not in order:
                 order.append(request_id)
             entry["review_request_id"] = request_id
@@ -277,7 +320,12 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
             )
         elif event_type == "review_decision":
             entry = requests.setdefault(
-                request_id, {"stage": stage, "review_request_id": request_id}
+                request_id,
+                {
+                    "stage": stage,
+                    "workflow_step_id": event.get("workflow_step_id"),
+                    "review_request_id": request_id,
+                },
             )
             if request_id not in order:
                 order.append(request_id)
@@ -288,17 +336,19 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
             entry["method_name"] = event.get("method_name")
             entry["rationale_artifact_ref"] = event.get("rationale_artifact_ref")
             entry["decision_artifact_ref"] = event.get("artifact_ref")
-    by_stage: dict[str, dict[str, Any]] = {}
+    by_step: dict[str, dict[str, Any]] = {}
     for request_id in order:
         entry = requests[request_id]
-        by_stage[str(entry["stage"])] = entry
-    return by_stage
+        step_id = entry.get("workflow_step_id")
+        if isinstance(step_id, str) and step_id:
+            by_step[step_id] = entry
+    return by_step
 
 
-def _stage_lifecycle_by_stage(
+def _stage_lifecycle_by_workflow_step(
     events: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    by_stage: dict[str, dict[str, Any]] = {}
+    by_step: dict[str, dict[str, Any]] = {}
     for event in events:
         if event.get("event_type") not in {
             "stage_entered",
@@ -306,10 +356,10 @@ def _stage_lifecycle_by_stage(
             "stage_completed",
         }:
             continue
-        stage = str(event.get("stage") or "")
-        if not stage:
+        step_id = event.get("workflow_step_id")
+        if not isinstance(step_id, str) or not step_id:
             continue
-        entry = by_stage.setdefault(stage, {})
+        entry = by_step.setdefault(step_id, {})
         if event["event_type"] == "stage_entered":
             entry["entered_at"] = event.get("timestamp")
         elif event["event_type"] == "stage_skipped":
@@ -317,23 +367,23 @@ def _stage_lifecycle_by_stage(
             entry["skip_reason"] = event.get("reason")
         else:
             entry["completed_at"] = event.get("timestamp")
-    return by_stage
+    return by_step
 
 
 def _stage_status(
-    stage: str,
+    workflow_step_id: str,
     *,
     methods: list[dict[str, Any]],
     stage_artifacts: list[dict[str, Any]],
     candidate_methods: list[dict[str, Any]],
     review: dict[str, Any] | None,
-    blocked_stage: str | None,
-    failed_stage: str | None,
+    blocked_step_id: str | None,
+    failed_step_id: str | None,
     lifecycle: dict[str, Any] | None,
 ) -> str:
-    if stage == failed_stage:
+    if workflow_step_id == failed_step_id:
         return STAGE_STATUS_FAILED
-    if stage == blocked_stage:
+    if workflow_step_id == blocked_step_id:
         return STAGE_STATUS_BLOCKED_HUMAN
     if any(method["outcome"] == "succeeded" for method in methods):
         return STAGE_STATUS_EXECUTED
@@ -385,6 +435,7 @@ def _decision_record(decision: dict[str, Any]) -> dict[str, Any]:
     return {
         "review_request_id": decision.get("review_request_id")
         or decision.get("subject_id"),
+        "workflow_step_id": decision.get("workflow_step_id"),
         "stage": decision.get("stage"),
         "gate_id": decision.get("gate_id"),
         "decision": decision.get("decision"),
@@ -425,6 +476,7 @@ def _failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if event.get("event_type") == "attempt_failed":
             failures.append(
                 {
+                    "workflow_step_id": event.get("workflow_step_id"),
                     "stage": event.get("stage"),
                     "method_name": event.get("method_name"),
                     "return_code": event.get("return_code"),
@@ -435,6 +487,7 @@ def _failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif event.get("event_type") == "env_preflight_blocked":
             failures.append(
                 {
+                    "workflow_step_id": event.get("workflow_step_id"),
                     "stage": event.get("stage"),
                     "method_name": event.get("method_name"),
                     "env_target": event.get("env_target"),
@@ -452,6 +505,9 @@ def _blocked_summary(summary: dict[str, Any]) -> dict[str, Any] | None:
     requirements = summary.get("decision_requirements") or {}
     next_action = summary.get("next_action") or {}
     return {
+        "workflow_step_id": (summary.get("active_interrupt") or {}).get(
+            "workflow_step_id"
+        ),
         "stage": requirements.get("stage") or next_action.get("stage"),
         "decisions_allowed": requirements.get("decisions_allowed") or [],
         "pending_human_action": next_action.get("summary"),
@@ -463,7 +519,26 @@ def _blocked_summary(summary: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _blocked_workflow_step_id(
+    summary: dict[str, Any], events: list[dict[str, Any]]
+) -> str | None:
+    if summary.get("supervision_state") != "blocked_human":
+        return None
+    active_interrupt = summary.get("active_interrupt") or {}
+    step_id = active_interrupt.get("workflow_step_id")
+    if isinstance(step_id, str) and step_id:
+        return step_id
+    for event in reversed(events):
+        if event.get("event_type") == "review_requested":
+            step_id = event.get("workflow_step_id")
+            if isinstance(step_id, str) and step_id:
+                return step_id
+    return None
+
+
 def _blocked_stage(summary: dict[str, Any]) -> str | None:
+    """Return the display stage for the pending-human-action summary."""
+
     if summary.get("supervision_state") != "blocked_human":
         return None
     requirements = summary.get("decision_requirements") or {}
@@ -473,17 +548,16 @@ def _blocked_stage(summary: dict[str, Any]) -> str | None:
     return str(next_action["stage"]) if next_action.get("stage") else None
 
 
-def _failed_stage(events: list[dict[str, Any]], summary: dict[str, Any]) -> str | None:
+def _failed_workflow_step_id(
+    events: list[dict[str, Any]], summary: dict[str, Any]
+) -> str | None:
     if summary.get("supervision_state") != "failed_terminal":
         return None
-    if summary.get("current_stage"):
-        return str(summary["current_stage"])
-    next_action = summary.get("next_action") or {}
-    if next_action.get("stage"):
-        return str(next_action["stage"])
     for event in reversed(events):
-        if event.get("event_type") == "attempt_failed":
-            return str(event.get("stage"))
+        if event.get("event_type") in {"stage_failed", "attempt_failed"}:
+            step_id = event.get("workflow_step_id")
+            if isinstance(step_id, str) and step_id:
+                return step_id
     return None
 
 
@@ -570,6 +644,7 @@ def _route_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "sequence": event.get("sequence"),
             "event_type": event.get("event_type"),
             "stage": event.get("stage"),
+            "workflow_step_id": event.get("workflow_step_id"),
             "timestamp": event.get("timestamp"),
         }
         if event.get("reason"):
@@ -628,7 +703,10 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
     lines.append("## Stages")
     lines.append("")
     for stage in trace.get("stages", []):
-        lines.append(f"### {stage['stage']} — {stage['status']}")
+        lines.append(
+            f"### {stage['workflow_step_id']} / {stage['stage']} — "
+            f"{stage['status']}"
+        )
         timing = stage.get("timing") or {}
         if timing:
             span = " ".join(f"{key}={value}" for key, value in timing.items())

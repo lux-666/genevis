@@ -23,8 +23,9 @@ from app.entrypoints.review_interactive import (
     run_interactive_review,
 )
 from app.review.base import ResumeReviewRequest
-from app.schemas.artifacts import ArtifactRef
 from app.review.persistence import persist_review_request
+from app.schemas.artifacts import ArtifactRef
+from app.schemas.state import initial_state
 from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
 
@@ -32,18 +33,46 @@ from tests.data_v2 import v2_run_dir
 def _primary_output_ref(candidate_id: str) -> dict:
     return ArtifactRef(
         artifact_id=f"artifact-{candidate_id}",
-        path_ref=f"artifacts/assembly/{candidate_id}.fasta",
+        path_ref=(
+            "artifacts/steps/step-001-assembly_review/assembly_review/"
+            f"{candidate_id}.fasta"
+        ),
         sha256="a" * 64,
         size_bytes=10,
         artifact_type="assembly.draft_assembly",
     ).model_dump(mode="json")
 
 
+def _review_occurrence_state(
+    session_id: str, data_dir: str, stage: str
+) -> dict[str, object]:
+    """Build the minimum state needed to persist one non-inventory review gate."""
+
+    return {
+        "session_id": session_id,
+        "data_dir": data_dir,
+        "current_stage": stage,
+        "workflow_steps": [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": f"step-001-{stage}",
+                "stage": stage,
+                "allow_local_execution": False,
+            },
+        ],
+        "workflow_step_index": 1,
+    }
+
+
 def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
     """Create a blocked assembly-review session and return its ID and data dir."""
     session_id = "review-test-1"
     data_dir = v2_run_dir(Path(tmp) / "data", session_id)
-    draft_ref = "work/assembly/flye/draft.fasta"
+    draft_ref = "work/steps/step-001-assembly_review/assembly_review/flye/draft.fasta"
     draft_path = data_dir / draft_ref
     draft_path.parent.mkdir(parents=True, exist_ok=True)
     draft_path.write_text(">ctg1\nACGT\n", encoding="utf-8")
@@ -64,7 +93,7 @@ def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
         "report_refs": {},
         "candidate_comparison_context": {},
     }
-    state = {"session_id": session_id, "data_dir": str(data_dir)}
+    state = _review_occurrence_state(session_id, str(data_dir), "assembly_review")
     persisted = persist_review_request(
         state,
         stage="assembly_review",
@@ -103,7 +132,7 @@ def _hic_blocked_session(tmp: str) -> tuple[str, str]:
         ],
         "notes": ["Hi-C reads available"],
     }
-    state = {"session_id": session_id, "data_dir": str(data_dir)}
+    state = _review_occurrence_state(session_id, str(data_dir), "hic_scaffolding")
     persisted = persist_review_request(
         state,
         stage="hic_scaffolding",
@@ -173,7 +202,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertEqual(result["candidate_id"], "flye")
         self.assertNotIn("final_assembly_ref", result)
 
-    def test_decision_prompt_describes_hic_t2t_downstream(self):
+    def test_decision_prompt_defers_to_frozen_workflow_sequence(self):
         requirements = {
             "stage": "assembly_review",
             "decisions_allowed": ["accept", "stop_human_review"],
@@ -192,12 +221,8 @@ class PromptAssemblyReviewTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         rendered = out.getvalue()
-        self.assertIn("requested downstream finishing", rendered)
-        self.assertIn(
-            "next: assembly_review -> hic_scaffolding -> gapcloser -> t2t "
-            "-> base_polish",
-            rendered,
-        )
+        self.assertIn("remaining frozen workflow steps", rendered)
+        self.assertNotIn("Hi-C scaffolding", rendered)
 
     def test_accept_multiple_candidates_prompts_choice(self):
         requirements = {
@@ -309,25 +334,6 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertIn(
             "purge_dups log shows 5% removed", result["metadata"]["evidence_notes"]
         )
-
-    def test_legacy_rerun_requirements_fail_closed_without_prompting(self):
-        requirements = {
-            "stage": "assembly_review",
-            "decisions_allowed": ["rerun", "accept"],
-            "candidate_ids": ["flye"],
-            "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
-        }
-        stderr = io.StringIO()
-        with patch("builtins.input") as mock_input, patch("sys.stderr", stderr):
-            result = prompt_assembly_review_decision(requirements)
-
-        self.assertIsNone(result)
-        mock_input.assert_not_called()
-        self.assertIn(
-            "legacy assembly_review rerun requirements are unsupported",
-            stderr.getvalue(),
-        )
-        self.assertIn("v3 recommendation and approval workflow", stderr.getvalue())
 
     def test_purge_missing_evidence_returns_none(self):
         requirements = {
@@ -510,83 +516,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 code = run_interactive_review(session_id, data_dir)
             self.assertEqual(code, 1)
 
-    def test_annotation_intake_cancel_does_not_resume_or_write_decision(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            session_id = "review-cancel-intake"
-            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
-            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            db_path.write_text("", encoding="utf-8")
-            state = {
-                "session_id": session_id,
-                "data_dir": str(data_dir),
-                "control_state": "running",
-                "supervision_state": "blocked_human",
-                "current_stage": "assembly_review",
-                "requested_stages": ["read_qc", "assembly", "assembly_review"],
-                "input_manifest_ref": "control/manifest.yaml",
-                "active_interrupt": {
-                    "stage": "assembly_review",
-                    "gate_id": "assembly_review",
-                },
-                "review_notes": [],
-                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
-                "route_trace": [],
-                "skip_reasons": {},
-            }
-            graph = type(
-                "FakeGraph",
-                (),
-                {
-                    "get_state": lambda self, config: type(
-                        "Snapshot", (), {"values": state}
-                    )(),
-                    "update_state": lambda self, config, update: None,
-                    "invoke": lambda self, state_arg, config: {
-                        "supervision_state": "completed"
-                    },
-                },
-            )()
-            request = ResumeReviewRequest(
-                session_id=session_id,
-                stage="assembly_review",
-                gate_id="assembly_review",
-                decision="accept",
-                candidate_id="flye",
-            )
-            raw_decision = request.model_dump(mode="json")
-
-            with (
-                patch(
-                    "app.entrypoints.review_interactive.collect_gate_decision",
-                    return_value=(request, raw_decision),
-                ),
-                patch("app.graph.builder.build_graph", return_value=graph),
-                patch(
-                    "app.review.annotation_intake.collect_annotation_intake_selection",
-                    side_effect=RuntimeError("annotation intake cancelled"),
-                ) as intake_prompt,
-                patch("app.control.resume_transaction.validate_resume_review_state"),
-                patch(
-                    "app.control.resume_transaction.resume_review_state"
-                ) as resume_mock,
-            ):
-                code = run_interactive_review(session_id, str(data_dir))
-
-            self.assertEqual(code, 1)
-            intake_prompt.assert_called_once()
-            resume_mock.assert_not_called()
-            decision_dir = data_dir / "artifacts" / "reviews"
-            self.assertFalse(
-                list(decision_dir.glob("*/decision.json"))
-                if decision_dir.exists()
-                else []
-            )
-            events = Ledger(data_dir).read_events(session_id)
-            self.assertFalse(
-                any(event["event_type"] == "review_decision" for event in events)
-            )
-
     def test_update_state_failure_does_not_invoke_graph(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_id = "review-update-failure"
@@ -644,10 +573,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
                     return_value=(request, raw_decision),
                 ),
                 patch("app.graph.builder.build_graph", return_value=graph),
-                patch(
-                    "app.review.annotation_intake.collect_annotation_intake_selection",
-                    return_value=None,
-                ),
                 patch("app.control.resume_transaction.validate_resume_review_state"),
                 patch(
                     "app.control.resume_transaction.resume_review_state",
@@ -662,88 +587,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 any(event["event_type"] == "resume_failed" for event in events)
             )
 
-    def test_annotation_intake_value_error_is_reported_without_crash(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            session_id = "review-intake-value-error"
-            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
-            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            db_path.write_text("", encoding="utf-8")
-            Ledger(data_dir).create_session(session_id, "control/manifest.yaml")
-            state = {
-                "session_id": session_id,
-                "data_dir": str(data_dir),
-                "control_state": "running",
-                "supervision_state": "blocked_human",
-                "current_stage": "assembly_review",
-                "input_manifest_ref": "control/manifest.yaml",
-                "active_interrupt": {
-                    "stage": "assembly_review",
-                    "gate_id": "assembly_review",
-                },
-                "review_notes": [],
-                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
-                "route_trace": [],
-                "skip_reasons": {},
-            }
-            graph = type(
-                "FakeGraph",
-                (),
-                {
-                    "get_state": lambda self, config: type(
-                        "Snapshot", (), {"values": state}
-                    )(),
-                    "update_state": lambda self, config, update: (_ for _ in ()).throw(
-                        AssertionError("should not update")
-                    ),
-                    "invoke": lambda self, state_arg, config: (_ for _ in ()).throw(
-                        AssertionError("should not invoke")
-                    ),
-                },
-            )()
-            request = ResumeReviewRequest(
-                session_id=session_id,
-                stage="assembly_review",
-                decision="accept",
-                candidate_id="flye",
-            )
-            raw_decision = request.model_dump(mode="json")
-            intake_selection = type(
-                "IntakeSelection",
-                (),
-                {"recommended_plan": object(), "final_plan": object()},
-            )()
-            with (
-                patch(
-                    "app.entrypoints.review_interactive.collect_gate_decision",
-                    return_value=(request, raw_decision),
-                ),
-                patch("app.graph.builder.build_graph", return_value=graph),
-                patch(
-                    "app.review.annotation_intake.collect_annotation_intake_selection",
-                    return_value=intake_selection,
-                ),
-                patch(
-                    "app.control.resume_transaction.persist_annotation_intake_plan",
-                    side_effect=ValueError("missing provenance"),
-                ),
-                patch("app.control.resume_transaction.validate_resume_review_state"),
-                patch(
-                    "app.control.resume_transaction.resume_review_state",
-                    return_value={"supervision_state": "running_stage"},
-                ),
-            ):
-                code = run_interactive_review(session_id, str(data_dir))
-
-            self.assertEqual(code, 1)
-            events = Ledger(data_dir).read_events(session_id)
-            failed = [
-                event for event in events if event["event_type"] == "resume_failed"
-            ]
-            self.assertEqual(len(failed), 1)
-            self.assertEqual(failed[0]["phase"], "annotation_intake")
-            self.assertIn("ValueError: missing provenance", failed[0]["error"])
-
     def test_dry_run_writes_decision_without_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_id, data_dir = _assembly_blocked_session(tmp)
@@ -751,8 +594,8 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with patch("builtins.input", side_effect=lambda _: next(inputs)):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            decision_dir = Path(data_dir) / "work" / "reviews"
-            decisions = list(decision_dir.glob("*/decision.preview.json"))
+            decision_dir = Path(data_dir) / "work" / "steps"
+            decisions = list(decision_dir.glob("*/*/reviews/*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)
             decision = json.loads(decisions[0].read_text(encoding="utf-8"))
             self.assertEqual(decision["decision"], "accept")
@@ -766,8 +609,8 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with patch("builtins.input", side_effect=lambda _: next(inputs)):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            decision_dir = Path(data_dir) / "work" / "reviews"
-            decisions = list(decision_dir.glob("*/decision.preview.json"))
+            decision_dir = Path(data_dir) / "work" / "steps"
+            decisions = list(decision_dir.glob("*/*/reviews/*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)
             decision = json.loads(decisions[0].read_text(encoding="utf-8"))
             self.assertEqual(decision["decision"], "keep_prior_assembly")
@@ -790,24 +633,24 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 "messages": ["raw_long_reads: platform unknown"],
                 "decisions_allowed": ["continue", "stop_human_review"],
             }
-            state = {
-                "session_id": session_id,
-                "data_dir": str(data_dir),
-                "control_state": "running",
-                "supervision_state": "blocked_human",
-                "current_stage": "inventory",
-                "input_manifest_ref": "control/manifest.yaml",
-                "stage_outputs": {
-                    "inventory": {
-                        "status": "validated",
-                        "valid": True,
-                        "warnings": ["raw_long_reads: platform unknown"],
-                    }
-                },
-                "review_notes": [],
-                "route_trace": [],
-                "skip_reasons": {},
-            }
+            state = initial_state(
+                session_id=session_id,
+                data_dir=str(data_dir),
+                input_manifest_ref="control/manifest.yaml",
+            )
+            state.update(
+                {
+                    "control_state": "running",
+                    "supervision_state": "blocked_human",
+                    "stage_outputs": {
+                        "inventory": {
+                            "status": "validated",
+                            "valid": True,
+                            "warnings": ["raw_long_reads: platform unknown"],
+                        }
+                    },
+                }
+            )
             persisted = persist_review_request(
                 state,
                 stage="inventory",
@@ -865,7 +708,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
         }
         render_blocked_summary(summary)
 
-    def test_renders_assembly_review_downstream_flow(self):
+    def test_renders_assembly_review_following_frozen_occurrences(self):
         summary = {
             "session_id": "s1",
             "supervision_state": "blocked_human",
@@ -877,6 +720,29 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                     "flye": _primary_output_ref("flye")
                 },
             },
+            "workflow_steps": [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-002-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-003-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": True,
+                },
+            ],
+            "workflow_step_index": 2,
             "latest_review_request_artifact": None,
             "next_action": {},
         }
@@ -887,11 +753,10 @@ class RenderBlockedSummaryTests(unittest.TestCase):
         rendered = out.getvalue()
         self.assertIn("after_accepting_assembly", rendered)
         self.assertIn(
-            "assembly_review -> hic_scaffolding -> gapcloser -> t2t "
-            "-> base_polish",
+            "next: step-003-t2t (t2t)",
             rendered,
         )
-        self.assertIn("canonical order shown above", rendered)
+        self.assertIn("runtime does not append or reorder them", rendered)
 
     def test_renders_hic_scaffolding_without_error(self):
         summary = {

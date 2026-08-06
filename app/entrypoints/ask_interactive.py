@@ -1,11 +1,10 @@
-"""Interactive planning helpers shared by the TUI and review intake."""
+"""Interactive planning helpers shared by the TUI."""
 
 from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from pydantic import ValidationError
 
@@ -16,7 +15,6 @@ from app.domains.assembly.selection import (
 )
 from app.entrypoints.ask_planner import (
     _STAGES_NEEDING_METHOD_SELECTION,
-    FUNCTION_DATABASE_PROVENANCE_FIELD,
     READ_QC_FILTER_METHODS,
     READ_QC_FILTER_SKIP,
     READ_QC_STATS_METHOD,
@@ -29,12 +27,13 @@ from app.entrypoints.ask_planner import (
     merge_clarification_response,
     next_clarification,
 )
-from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.ask_plan import (
     AskClarificationRequest,
     AskClarificationResponse,
     AskPlanState,
+    PlanStageOccurrence,
 )
+from app.schemas.run_config import RequestableStage
 from app.schemas.shared_parameters import (
     SharedParameters,
 )
@@ -81,7 +80,6 @@ _PARAM_HINTS: dict[str, str] = {
     "genome_survey.kmer_count.jellyfish.kmer_size": "k-mer length, typically 21",
     "genome_survey.kmer_count.jellyfish.hash_size": "hash table size, e.g. 1G",
     "genome_survey.kmer_count.jellyfish.threads": "CPU threads for jellyfish",
-    "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
     "t2t.alignment.minimap2.mode": "auto_patch / manual_review / propose_only",
 }
@@ -105,9 +103,6 @@ _STAGE_DESCRIPTIONS: dict[str, str] = {
     "assembly_dedup": "haplotig and overlap removal with purge_dups",
     "assembly_review": "QUAST/BUSCO quality evaluation",
     "hic_scaffolding": "Hi-C based chromosome scaffolding",
-    "repeat_annotation": "repeat element identification and masking",
-    "gene_annotation": "gene structure prediction",
-    "function_annotation": "protein function annotation",
 }
 
 
@@ -138,8 +133,8 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
             plan = _edit_draft_stages(plan)
             continue
         if action.startswith("stage:"):
-            _, stage = action.split(":", 1)
-            plan = _edit_draft_stage(plan, stage)
+            _, raw_index = action.split(":", 1)
+            plan = _edit_draft_stage(plan, int(raw_index))
             continue
         if action.startswith("method:"):
             _, stage = action.split(":", 1)
@@ -187,7 +182,7 @@ def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
     print("  - You can edit a stage here first, then return to this plan.")
 
     attention_items = _draft_attention_items(plan, summary)
-    order = summary.get("resolved_execution_order") or []
+    order = summary.get("selected_stage_names") or []
     if order:
         print("\nStages:")
         for idx, stage in enumerate(order, start=1):
@@ -255,9 +250,18 @@ def _render_draft_stage_summary(
     attention: list[str],
     *,
     nested: bool = False,
+    occurrence_index: int | None = None,
 ) -> None:
     print(f"\n{idx}. {stage}")
-    print(f"   status: {_draft_stage_status(stage, plan, summary)}")
+    occurrence_index = idx - 1 if occurrence_index is None else occurrence_index
+    occurrence = (plan.selected_stage_occurrences or [])[occurrence_index]
+    print(
+        "   local execution: "
+        + ("authorized" if occurrence.allow_local_execution else "not authorized")
+    )
+    print(
+        f"   status: {_draft_stage_status(stage, plan, summary, occurrence_index)}"
+    )
     method_lines = _draft_stage_method_lines(stage, plan, summary)
     if method_lines:
         print("   methods:")
@@ -297,18 +301,24 @@ def _render_draft_stage_summary(
         for item in attention:
             print(f"     - {item}")
     if nested and stage in _FIXED_METHOD_STAGES:
-        print("   edit: p parameters / b back")
+        print("   edit: l local execution / p parameters / b back")
     elif nested:
-        print("   edit: m method / p parameters / b back")
+        print("   edit: l local execution / m method / p parameters / b back")
     elif stage in _FIXED_METHOD_STAGES:
         print(f"   edit: {idx} / {idx}p parameters")
     else:
         print(f"   edit: {idx} / {idx}m method / {idx}p parameters")
 
 
-def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> str:
-    roles = summary.get("stage_roles") or {}
-    role = roles.get(stage)
+def _draft_stage_status(
+    stage: str,
+    plan: AskPlanState,
+    summary: dict[str, Any],
+    occurrence_index: int,
+) -> str:
+    occurrence = (plan.selected_stage_occurrences or [])[occurrence_index]
+    if not occurrence.allow_local_execution:
+        return "included without local execution"
     selected = _selected_methods_for_stage(plan, stage)
     if stage in _FIXED_METHOD_STAGES:
         return "will run fixed AutoHiC pipeline"
@@ -316,8 +326,6 @@ def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any])
         return "method needed before locking"
     if selected:
         return "will run locally"
-    if role == "dependency":
-        return "included as a dependency"
     return "included"
 
 
@@ -465,19 +473,25 @@ def _draft_blocking_items(
     plan: AskPlanState, summary: dict[str, Any]
 ) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
-    for stage in plan.resolved_execution_order or []:
+    for occurrence in plan.selected_stage_occurrences or []:
+        if not occurrence.allow_local_execution:
+            continue
+        occurrence_stage = occurrence.stage
         if (
-            stage in _STAGES_NEEDING_METHOD_SELECTION
-            and not _selected_methods_for_stage(plan, stage)
+            occurrence_stage in _STAGES_NEEDING_METHOD_SELECTION
+            and not _selected_methods_for_stage(plan, occurrence_stage)
         ):
-            items.append((stage, "method is missing"))
+            items.append((occurrence_stage, "method is missing"))
     for field in summary.get("missing_parameter_fields") or []:
-        stage = _stage_for_field(str(field), plan)
-        items.append((stage, f"{_field_label(str(field))} is missing"))
+        field_stage = _stage_for_field(str(field), plan)
+        items.append((field_stage, f"{_field_label(str(field))} is missing"))
     if summary.get("run_config_preview_error"):
-        stage = (plan.resolved_execution_order or ["plan"])[0]
+        preview_stage = (plan.selected_stage_names or ["plan"])[0]
         items.append(
-            (stage, f"run config is not ready: {summary['run_config_preview_error']}")
+            (
+                preview_stage,
+                f"run config is not ready: {summary['run_config_preview_error']}",
+            )
         )
     items.extend(_next_clarification_blocking_items(plan, summary))
     return list(dict.fromkeys(items))
@@ -506,12 +520,12 @@ def _render_draft_blockers(blocking_items: list[tuple[str, str]]) -> None:
 
 
 def _prompt_draft_action(plan: AskPlanState) -> str:
-    stages = list(plan.resolved_execution_order or [])
+    stages = list(plan.selected_stage_names or [])
     if _HAS_QUESTIONARY:
         choices = [
             questionary.Choice("continue", value="continue"),
             *[
-                questionary.Choice(f"edit {idx}. {stage}", value=f"stage:{stage}")
+                questionary.Choice(f"edit {idx}. {stage}", value=f"stage:{idx - 1}")
                 for idx, stage in enumerate(stages, 1)
             ],
             questionary.Choice("edit stage list", value="stages"),
@@ -538,14 +552,16 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
     if raw.isdigit():
         idx = int(raw) - 1
         if 0 <= idx < len(stages):
-            return f"stage:{stages[idx]}"
+            return f"stage:{idx}"
     return raw
 
 
-def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
+def _edit_draft_stage(plan: AskPlanState, occurrence_index: int) -> AskPlanState:
     current = plan
     invalid_attempts = 0
     while True:
+        occurrence = (current.selected_stage_occurrences or [])[occurrence_index]
+        stage = occurrence.stage
         summary = build_run_plan_summary(current)
         print()
         print("-" * 64)
@@ -553,8 +569,17 @@ def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
         print("-" * 64)
         attention_items = _draft_attention_items(current, summary)
         attention = _draft_stage_attention(stage, current, summary, attention_items)
-        _render_draft_stage_summary(1, stage, current, summary, attention, nested=True)
+        _render_draft_stage_summary(
+            occurrence_index + 1,
+            stage,
+            current,
+            summary,
+            attention,
+            nested=True,
+            occurrence_index=occurrence_index,
+        )
         print("\nActions:")
+        print("  l      change local execution authorization")
         if stage not in _FIXED_METHOD_STAGES:
             print("  m      change method")
         print("  p      edit parameters")
@@ -562,6 +587,9 @@ def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
         raw = input(f"{stage}> ").strip().lower()
         if raw in ("", "b", "back"):
             return current
+        if raw in ("l", "local", "local-execution"):
+            current = _edit_occurrence_local_execution(current, occurrence_index)
+            continue
         if raw in ("m", "method", "methods"):
             if stage in _FIXED_METHOD_STAGES:
                 print(
@@ -577,7 +605,7 @@ def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
             current = _edit_stage_parameters(current, stage)
             continue
         invalid_attempts += 1
-        allowed = "p or b" if stage in _FIXED_METHOD_STAGES else "m, p, or b"
+        allowed = "l, p, or b" if stage in _FIXED_METHOD_STAGES else "l, m, p, or b"
         print(f"Unknown action. Use {allowed}.")
         if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
             print("Too many invalid actions; returning to the plan.")
@@ -594,17 +622,52 @@ def _edit_draft_stages(plan: AskPlanState) -> AskPlanState:
         question="Which workflow stages should run?",
         choices={
             "available_stages": _all_selectable_stages(),
-            "suggested_stages": plan.selected_stages or [],
+            "suggested_stage_occurrences": [
+                occurrence.model_dump(mode="json")
+                for occurrence in plan.selected_stage_occurrences or []
+            ],
         },
-        required_fields=["selected_stages"],
+        required_fields=["selected_stage_occurrences"],
         response_schema={
             "kind": "stage_selection",
-            "selected_stages": plan.selected_stages or [],
+            "selected_stage_occurrences": [
+                occurrence.model_dump(mode="json")
+                for occurrence in plan.selected_stage_occurrences or []
+            ],
         },
         next_action={},
     )
     response = _prompt_stage_selection(req)
     return _refresh_draft_defaults(merge_clarification_response(plan, response))
+
+
+def _edit_occurrence_local_execution(
+    plan: AskPlanState, occurrence_index: int
+) -> AskPlanState:
+    occurrences = list(plan.selected_stage_occurrences or [])
+    occurrence = occurrences[occurrence_index]
+    prompt = (
+        "Allow local execution for occurrence "
+        f"{occurrence_index + 1} ({occurrence.stage})?"
+    )
+    if _HAS_QUESTIONARY:
+        allowed = bool(
+            _safe_ask(
+                questionary.confirm(
+                    prompt, default=occurrence.allow_local_execution
+                )
+            )
+        )
+    else:
+        default = "Y/n" if occurrence.allow_local_execution else "y/N"
+        raw = input(f"{prompt} [{default}] ").strip().lower()
+        allowed = occurrence.allow_local_execution if not raw else raw in {"y", "yes"}
+    occurrences[occurrence_index] = occurrence.model_copy(
+        update={"allow_local_execution": allowed}
+    )
+    return plan.model_copy(
+        update={"selected_stage_occurrences": occurrences, "confirmed": False}
+    )
 
 
 def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
@@ -743,7 +806,7 @@ def _selected_methods_for_stage(plan: AskPlanState, stage: str) -> list[str]:
 
 
 def _shared_parameter_stage(plan: AskPlanState) -> str | None:
-    order = list(plan.resolved_execution_order or [])
+    order = list(plan.selected_stage_names or [])
     for preferred in ("assembly", "genome_survey", "read_qc"):
         if preferred in order:
             return preferred
@@ -758,8 +821,6 @@ def _stage_for_field(field: str, plan: AskPlanState) -> str:
     """
     if field.startswith("shared_parameters."):
         return _shared_parameter_stage(plan) or "plan"
-    if field == FUNCTION_DATABASE_PROVENANCE_FIELD:
-        return "function_annotation"
     for stage, methods in (plan.selected_methods or {}).items():
         method_list = methods if isinstance(methods, list) else [methods]
         for method in method_list:
@@ -770,7 +831,7 @@ def _stage_for_field(field: str, plan: AskPlanState) -> str:
 
 
 def _stage_for_warning(warning: str, plan: AskPlanState) -> str:
-    for stage in plan.resolved_execution_order or []:
+    for stage in plan.selected_stage_names or []:
         if warning.startswith(f"{stage}:") or f"{stage}." in warning:
             return stage
     return _shared_parameter_stage(plan) or "plan"
@@ -779,8 +840,6 @@ def _stage_for_warning(warning: str, plan: AskPlanState) -> str:
 def _field_label(field: str) -> str:
     if field.startswith("shared_parameters."):
         return field.rsplit(".", 1)[-1]
-    if field == FUNCTION_DATABASE_PROVENANCE_FIELD:
-        return "database_provenance"
     return field.rsplit(".", 1)[-1]
 
 
@@ -810,12 +869,12 @@ def _render_plan_summary(
         print(f"Intent parser: {parse_label}")
     _render_summary_inputs(summary)
 
-    roles = summary.get("stage_roles", {})
-    order = summary.get("resolved_execution_order", [])
+    roles = summary.get("stage_roles", [])
+    order = summary.get("selected_stage_names", [])
     if order:
         print("\nStages:")
-        for stage in order:
-            role = roles.get(stage, "")
+        for index, stage in enumerate(order):
+            role = roles[index] if index < len(roles) else ""
             label = _ROLE_LABELS.get(role, role)
             print(f"  [{label:>9}] {stage}")
 
@@ -1013,7 +1072,7 @@ def _render_preview_parameters(
 
 def _ordered_summary_methods(summary: dict[str, Any]) -> list[str]:
     methods = summary.get("selected_methods", {}) or {}
-    order = summary.get("resolved_execution_order", []) or list(methods)
+    order = summary.get("selected_stage_names", []) or list(methods)
     ordered: list[str] = []
     for stage in order:
         value = methods.get(stage)
@@ -1198,50 +1257,55 @@ def _explicit_shared_params(draft: AskPlanState) -> set[str]:
 
 def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationResponse:
     available = req.choices.get("available_stages", [])
-    suggested = req.choices.get("suggested_stages", [])
-
-    if _HAS_QUESTIONARY:
-        print("\n--- Step 1: Stage Selection ---")
-        print(
-            "  Recommended stages are pre-checked based on your request/input data.\n"
-        )
-        choices = [
-            questionary.Choice(
-                f"{stage} — {_STAGE_DESCRIPTIONS.get(stage, '')}",
-                value=stage,
-                checked=(stage in suggested),
-            )
-            for stage in available
-        ]
-        selected = _safe_ask(
-            questionary.checkbox(
-                "Select stages:",
-                choices=choices,
-                instruction="(Space toggle, Enter confirm)",
-            )
-        )
-        if not selected:
-            selected = suggested
-        return AskClarificationResponse(
-            kind="stage_selection", selected_stages=selected
-        )
-
-    # Plain-text fallback
+    suggested = req.choices.get("suggested_stage_occurrences", [])
+    suggested_names = [str(item["stage"]) for item in suggested]
     print("\n--- Step 1: Stage Selection ---")
-    print("  * = recommended based on your request/input data\n")
+    print("  Enter the complete ordered sequence; repeated stages are allowed.\n")
     print("Available stages:")
     for i, stage in enumerate(available, 1):
-        marker = "*" if stage in suggested else " "
         desc = _STAGE_DESCRIPTIONS.get(stage, "")
         desc_str = f"  {desc}" if desc else ""
-        print(f"  {marker} {i}. {stage}{desc_str}")
-    if suggested:
-        print(f"\n  Recommended: {', '.join(suggested)}")
-    print("\n  Enter numbers or names, e.g. 1,3 or read_qc,assembly")
+        print(f"  {i}. {stage}{desc_str}")
+    if suggested_names:
+        print(f"\n  Recommended: {', '.join(suggested_names)}")
+    print("\n  Enter numbers or names, e.g. 1,3,1 or t2t,assembly_review,t2t")
     print("  Press Enter to accept recommended.")
-    raw = input("> ").strip()
-    stages = _parse_selection(raw, available) if raw else suggested
-    return AskClarificationResponse(kind="stage_selection", selected_stages=stages)
+    if _HAS_QUESTIONARY:
+        raw = str(
+            _safe_ask(
+                questionary.text(
+                    "Ordered stage sequence:", default=",".join(suggested_names)
+                )
+            )
+        ).strip()
+    else:
+        raw = input("> ").strip()
+    stages = _parse_selection(raw, available) if raw else suggested_names
+    occurrences: list[PlanStageOccurrence] = []
+    for index, stage in enumerate(stages):
+        suggested_allowed = (
+            bool(suggested[index].get("allow_local_execution", True))
+            if index < len(suggested) and suggested[index].get("stage") == stage
+            else True
+        )
+        prompt = f"Allow local execution for occurrence {index + 1} ({stage})?"
+        if _HAS_QUESTIONARY:
+            allowed = bool(
+                _safe_ask(questionary.confirm(prompt, default=suggested_allowed))
+            )
+        else:
+            default = "Y/n" if suggested_allowed else "y/N"
+            answer = input(f"{prompt} [{default}] ").strip().lower()
+            allowed = suggested_allowed if not answer else answer in {"y", "yes"}
+        occurrences.append(
+            PlanStageOccurrence(
+                stage=cast(RequestableStage, stage),
+                allow_local_execution=allowed,
+            )
+        )
+    return AskClarificationResponse(
+        kind="stage_selection", selected_stage_occurrences=occurrences
+    )
 
 
 def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationResponse:
@@ -1426,11 +1490,6 @@ def _prompt_parameter_values(
             value = _prompt_shared_parameter(label, param_name, default)
             shared_params[param_name] = value
             shared_params = _derive_shared_parameter_defaults(shared_params)
-        elif field == "function_annotation.database_provenance":
-            value = _prompt_function_database_provenance(plan)
-            stage_params.setdefault("function_annotation", {})[
-                "database_provenance"
-            ] = value
         else:
             value = _prompt_text_value(label, default, required=True)
             if param_name == "estimated_genome_size" and isinstance(value, str):
@@ -1450,72 +1509,6 @@ def _prompt_parameter_values(
         method_parameters=params or None,
         stage_parameters=stage_params or None,
     )
-
-
-def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, Any]]:
-    """Prompt for function annotation database provenance interactively.
-
-    Asks simple per-method questions (database path, name, version) and
-    auto-fills the rest (method_name, snapshot_date, descriptor_version).
-    input_proteins_ref is left unset: function_annotation adopts the resolved
-    proteins_fasta_ref at runtime, which the planner cannot know for
-    manifest-provided proteins.  Users never see or construct JSON.
-    """
-    from datetime import date
-
-    methods = (plan.selected_methods or {}).get("function_annotation")
-    method_list = methods if isinstance(methods, list) else [methods] if methods else []
-
-    _METHOD_LABELS = {
-        "function_annotation.candidate.diamond": "DIAMOND",
-    }
-
-    records: list[dict[str, Any]] = []
-    for method in method_list:
-        label = _METHOD_LABELS.get(method, method.rsplit(".", 1)[-1])
-        print(f"\n  -- {label} database provenance --")
-
-        # Database source path (the only thing the user must provide)
-        db_path = None
-        invalid_attempts = 0
-        while not db_path:
-            raw = _prompt_text_value(f"{label} database path", None, required=True)
-            candidate = Path(str(raw).strip()).expanduser()
-            if candidate.exists():
-                db_path = str(candidate)
-                break
-            invalid_attempts += 1
-            print(f"    Database path does not exist for {label}: {candidate}")
-            if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
-                raise _UserAbort()
-
-        # Database name (optional, defaults to label)
-        db_name = _prompt_text_value(f"{label} database name", label)
-        if db_name is None:
-            db_name = label
-
-        # Database version (optional, defaults to "current")
-        db_version = _prompt_text_value(f"{label} database version", "current")
-        if db_version is None:
-            db_version = "current"
-
-        record = {
-            "method_name": method,
-            "database_name": str(db_name),
-            "database_version": str(db_version),
-            "snapshot_date": date.today().isoformat(),
-            "database_source_ref": db_path,
-            "descriptor_version": f"{method.rsplit('.', 1)[-1]}.yaml",
-        }
-        records.append(
-            FunctionDatabaseProvenance.model_validate(record).model_dump(mode="json")
-        )
-
-    if not records:
-        return records
-
-    print(f"\n  database_provenance: {len(records)} record(s) configured.")
-    return records
 
 
 def _prompt_text_value(label: str, default: Any, *, required: bool = False) -> Any:

@@ -6,6 +6,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.control.workflow_plan import current_workflow_step, workflow_step_by_id
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
     CheckpointerBackend,
@@ -20,29 +21,15 @@ from app.stages.assembly_review.builder import (
     build_stage as build_assembly_review_stage,
 )
 from app.stages.base_polish.builder import build_stage as build_base_polish_stage
-from app.stages.function_annotation.builder import (
-    build_stage as build_function_annotation_stage,
-)
 from app.stages.gapcloser.builder import build_stage as build_gapcloser_stage
-from app.stages.gene_annotation.builder import (
-    build_stage as build_gene_annotation_stage,
-)
 from app.stages.genome_survey.builder import build_stage as build_genome_survey_stage
 from app.stages.hic_scaffolding.builder import (
     build_stage as build_hic_scaffolding_stage,
 )
 from app.stages.inventory.builder import build_stage as build_inventory_stage
 from app.stages.read_qc.builder import build_stage as build_read_qc_stage
-from app.stages.repeat_annotation.builder import (
-    build_stage as build_repeat_annotation_stage,
-)
 from app.stages.t2t.builder import build_stage as build_t2t_stage
-from app.workflow import (
-    STAGE_ORDER,
-    TERMINAL_STAGE,
-    next_requested_stage,
-    unrequested_stages_from_current,
-)
+from app.workflow import TERMINAL_STAGE
 
 
 def build_graph(
@@ -85,48 +72,64 @@ def build_graph(
             from app.storage.ledger import Ledger
 
             ledger = Ledger(runtime_data_dir)
-            for skipped_stage, reason in (state.get("skip_reasons") or {}).items():
-                if skipped_stage in STAGE_ORDER:
-                    ledger.record_stage_skipped(
+            for skipped_step_id, reason in (state.get("skip_reasons") or {}).items():
+                try:
+                    skipped_step = workflow_step_by_id(state, skipped_step_id)
+                except ValueError:
+                    continue
+                ledger.record_stage_skipped(
+                    session_id,
+                    skipped_step["stage"],
+                    workflow_step_id=skipped_step_id,
+                    reason=str(reason),
+                    idempotency_key=f"stage-skipped:{skipped_step_id}",
+                )
+            # Settle only the occurrence adjacent to the compact workflow
+            # cursor. Replaying the whole route trace would bind an earlier
+            # same-stage occurrence to the current occurrence's cursor refs and
+            # can turn an idempotent resume into a LedgerConflictError.
+            steps = state.get("workflow_steps") or []
+            entered_index = state.get("entered_workflow_step_index")
+            workflow_index = state.get("workflow_step_index")
+            if (
+                type(entered_index) is int
+                and 0 <= entered_index < len(steps)
+                and type(workflow_index) is int
+            ):
+                settled_step = steps[entered_index]
+                settled_step_id = settled_step["step_id"]
+                settled_stage = settled_step["stage"]
+                settled_cursor = (state.get("stage_outputs") or {}).get(
+                    settled_stage, {}
+                )
+                settled_refs = ledger.references_from(
+                    settled_cursor,
+                    role_prefix=f"stage.{settled_stage}",
+                )
+                if (
+                    supervision == "failed_terminal"
+                    and workflow_index == entered_index
+                ):
+                    ledger.record_stage_failed(
                         session_id,
-                        skipped_stage,
-                        reason=str(reason),
-                        idempotency_key=f"stage-skipped:{skipped_stage}",
+                        settled_stage,
+                        workflow_step_id=settled_step_id,
+                        error=state.get("last_error"),
+                        refs=settled_refs,
+                        idempotency_key=f"stage-failed:{settled_step_id}",
                     )
-            for trace_item in state.get("route_trace") or []:
-                if isinstance(trace_item, str) and trace_item.endswith("_stage"):
-                    completed_stage = trace_item[: -len("_stage")]
-                    if completed_stage in STAGE_ORDER:
-                        completed_cursor = (state.get("stage_outputs") or {}).get(
-                            completed_stage, {}
+                elif workflow_index == entered_index + 1:
+                    completion_marker = (
+                        f"{settled_step_id}:{settled_stage}_stage"
+                    )
+                    if completion_marker in (state.get("route_trace") or []):
+                        ledger.record_stage_completed(
+                            session_id,
+                            settled_stage,
+                            workflow_step_id=settled_step_id,
+                            refs=settled_refs,
+                            idempotency_key=f"stage-completed:{settled_step_id}",
                         )
-                        completed_refs = ledger.references_from(
-                            completed_cursor,
-                            role_prefix=f"stage.{completed_stage}",
-                        )
-                        if (
-                            supervision == "blocked_human"
-                            and completed_stage == state.get("current_stage")
-                        ):
-                            continue
-                        if (
-                            supervision == "failed_terminal"
-                            and completed_stage == state.get("current_stage")
-                        ):
-                            ledger.record_stage_failed(
-                                session_id,
-                                completed_stage,
-                                error=state.get("last_error"),
-                                refs=completed_refs,
-                                idempotency_key=f"stage-failed:{completed_stage}",
-                            )
-                        else:
-                            ledger.record_stage_completed(
-                                session_id,
-                                completed_stage,
-                                refs=completed_refs,
-                                idempotency_key=f"stage-completed:{completed_stage}",
-                            )
 
             if supervision not in {
                 "failed_terminal",
@@ -134,36 +137,14 @@ def build_graph(
                 "blocked_human",
             }:
                 current = state.get("current_stage", "inventory")
-                requested = state.get("requested_stages")
-                if (
-                    requested is not None
-                    and current not in {"inventory", TERMINAL_STAGE}
-                    and current not in requested
-                ):
-                    next_requested = next_requested_stage(current, requested)
-                    for unrequested_stage in unrequested_stages_from_current(
-                        current,
-                        requested,
-                    ):
-                        ledger.record_stage_skipped(
-                            session_id,
-                            unrequested_stage,
-                            reason="not_requested",
-                            idempotency_key=f"stage-skipped:{unrequested_stage}",
-                        )
-                    if next_requested != TERMINAL_STAGE:
-                        ledger.record_stage_entered(
-                            session_id,
-                            next_requested,
-                            route_node="route_controller",
-                            idempotency_key=f"stage-entered:{next_requested}",
-                        )
-                elif current in STAGE_ORDER:
+                step = current_workflow_step(state)
+                if step is not None:
                     ledger.record_stage_entered(
                         session_id,
                         current,
+                        workflow_step_id=step["step_id"],
                         route_node="route_controller",
-                        idempotency_key=f"stage-entered:{current}",
+                        idempotency_key=f"stage-entered:{step['step_id']}",
                     )
 
             terminal_refs = ledger.references_from(
@@ -212,9 +193,6 @@ def build_graph(
     graph.add_node("gapcloser_stage", build_gapcloser_stage())
     graph.add_node("t2t_stage", build_t2t_stage())
     graph.add_node("base_polish_stage", build_base_polish_stage())
-    graph.add_node("repeat_annotation_stage", build_repeat_annotation_stage())
-    graph.add_node("gene_annotation_stage", build_gene_annotation_stage())
-    graph.add_node("function_annotation_stage", build_function_annotation_stage())
 
     graph.add_edge(START, "route_controller")
     graph.add_conditional_edges(
@@ -231,9 +209,6 @@ def build_graph(
             "gapcloser_stage": "gapcloser_stage",
             "t2t_stage": "t2t_stage",
             "base_polish_stage": "base_polish_stage",
-            "repeat_annotation_stage": "repeat_annotation_stage",
-            "gene_annotation_stage": "gene_annotation_stage",
-            "function_annotation_stage": "function_annotation_stage",
             "end": END,
         },
     )
@@ -249,9 +224,6 @@ def build_graph(
         "gapcloser_stage",
         "t2t_stage",
         "base_polish_stage",
-        "repeat_annotation_stage",
-        "gene_annotation_stage",
-        "function_annotation_stage",
     ]:
         graph.add_edge(node_name, "route_controller")
 

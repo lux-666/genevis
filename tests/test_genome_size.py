@@ -127,8 +127,9 @@ def _manifest(*, genome_size_estimate=None):
 def test_preflight_rejects_flye_when_no_stage_can_produce_genome_size():
     config = RunConfig.model_validate(
         {
-            "local_exec": ["assembly"],
-            "requested_stages": ["assembly"],
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True}
+            ],
             "assembly": {
                 "assembly_method": "flye",
                 "assembly_route": "ont",
@@ -144,8 +145,10 @@ def test_preflight_rejects_flye_when_no_stage_can_produce_genome_size():
 def test_preflight_allows_flye_to_wait_for_an_earlier_executable_survey():
     config = RunConfig.model_validate(
         {
-            "local_exec": ["genome_survey", "assembly"],
-            "requested_stages": ["genome_survey", "assembly"],
+            "requested_stages": [
+                {"stage": "genome_survey", "allow_local_execution": True},
+                {"stage": "assembly", "allow_local_execution": True},
+            ],
             "genome_survey": {
                 "survey_parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4}
             },
@@ -163,8 +166,9 @@ def test_preflight_allows_flye_to_wait_for_an_earlier_executable_survey():
 def test_preflight_allows_manifest_genome_size_without_survey():
     config = RunConfig.model_validate(
         {
-            "local_exec": ["assembly"],
-            "requested_stages": ["assembly"],
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True}
+            ],
             "assembly": {
                 "assembly_method": "flye",
                 "assembly_route": "ont",
@@ -226,7 +230,7 @@ def test_manifest_only_genome_size_reaches_assembly_l1_freeze(
         )
         source_config = root / "run_config.json"
         source_config.write_text(
-            '{"requested_stages": [], "local_exec": []}\n',
+            '{"requested_stages": []}\n',
             encoding="utf-8",
         )
         paths = SessionPaths(root / "data", "s1")
@@ -234,7 +238,6 @@ def test_manifest_only_genome_size_reaches_assembly_l1_freeze(
             paths,
             manifest_draft=source_manifest,
             run_config_draft=source_config,
-            selected_stages=[],
             selected_methods={},
         )
         state = initial_state(

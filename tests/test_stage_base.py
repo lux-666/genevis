@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from typing import cast
 
 from app.schemas.limits import ROUTE_TRACE_LIMIT
-from app.schemas.state import TopLevelState
+from app.schemas.state import TopLevelState, initial_state
 from app.stages.base import append_route_trace, session_paths
 from app.storage.paths import DataLayoutError
 from tests.data_v2 import v2_run_dir
@@ -17,13 +17,21 @@ from tests.data_v2 import v2_run_dir
 class RouteTraceTests(unittest.TestCase):
     def test_append_route_trace_retains_only_latest_sixteen_items(self):
         original = [f"old-{index}" for index in range(20)]
-        state = cast(TopLevelState, {"route_trace": original})
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref="control/manifest.yaml",
+        )
+        state["route_trace"] = original
 
         trace = append_route_trace(state, "new-a", "new-b")
 
         self.assertEqual(
             trace,
-            [*original[6:], "new-a", "new-b"],
+            [
+                *original[6:],
+                "step-000-inventory:new-a",
+                "step-000-inventory:new-b",
+            ],
         )
         self.assertEqual(len(trace), ROUTE_TRACE_LIMIT)
         self.assertEqual(state["route_trace"], original)

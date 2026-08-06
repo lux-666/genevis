@@ -13,6 +13,8 @@ from pathlib import Path
 
 from app.control.lifecycle import inspect_session
 from app.graph.builder import build_graph
+from app.integrity import sha256_file
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.read_qc.builder import build_stage
@@ -21,12 +23,36 @@ from app.stages.read_qc.method_application.seqkit_length_filter import (
     build_seqkit_length_filter_graph,
 )
 from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
-from app.schemas.artifacts import ArtifactMeta
 from app.storage.artifacts import publish_artifact_record
 from app.storage.audit import audit_run_storage
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
+
+
+def _read_qc_workflow_steps(*, include_genome_survey: bool = True) -> list[dict]:
+    steps = [
+        {
+            "step_id": "step-000-inventory",
+            "stage": "inventory",
+            "allow_local_execution": False,
+        },
+        {
+            "step_id": "step-001-read_qc",
+            "stage": "read_qc",
+            "allow_local_execution": True,
+        },
+    ]
+    if include_genome_survey:
+        steps.append(
+            {
+                "step_id": "step-002-genome_survey",
+                "stage": "genome_survey",
+                "allow_local_execution": False,
+            }
+        )
+    return steps
 
 
 def _write_phase4_smoke_fixture(root: Path) -> tuple[Path, Path]:
@@ -109,18 +135,39 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertNotIn("app.stages.read_qc.routing", source)
 
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
+        normalized_assets = []
+        for asset in assets:
+            normalized = dict(asset)
+            source = Path(str(normalized["path"]))
+            if source.is_file():
+                normalized.setdefault("size_bytes", source.stat().st_size)
+                normalized.setdefault("checksum", sha256_file(source))
+                normalized.setdefault("checksum_status", "ready")
+            normalized_assets.append(normalized)
         path = Path(tmpdir) / "registry.json"
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            json.dumps({"session_id": "s1", "assets": normalized_assets}, indent=2),
             encoding="utf-8",
         )
         return path
 
-    def _publish_registry_ref(self, data_dir: str, session_id: str, registry_path: str | Path) -> dict:
+    def _publish_registry_ref(
+        self,
+        data_dir: str,
+        session_id: str,
+        registry_path: str | Path,
+    ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source = paths.workflow_step_work_path(
+            "step-000-inventory",
+            "inventory",
+            f"asset_registry_{os.urandom(4).hex()}.json",
+        )
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8")
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
         artifact = ArtifactMeta.from_file(
             source, stage="inventory",
             method_name="inventory.register_assets", artifact_type="asset_registry"
@@ -133,8 +180,11 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=_read_qc_workflow_steps(),
         )
         state["current_stage"] = "read_qc"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
             if registry_ref is not None else None
@@ -214,8 +264,11 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 session_id="s1",
                 input_manifest_ref="control/manifest.yaml",
                 data_dir=str(v2_run_dir(data_dir, "s1")),
+                workflow_steps=_read_qc_workflow_steps(include_genome_survey=False),
             )
             state["current_stage"] = "read_qc"
+            state["workflow_step_index"] = 1
+            state["entered_workflow_step_index"] = 1
             state["asset_registry_ref"] = self._publish_registry_ref(
                 state["data_dir"], "s1", str(registry)
             )
@@ -453,12 +506,11 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 result["resource_refs"]["long_reads"]["paths"],
                 [str(fq1), str(fq2)],
             )
-            stats_script = (
-                Path(result["data_dir"])
-                / "work"
-                / "read_qc"
-                / "seqkit_stats"
-                / "run_seqkit_stats.sh"
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            stats_script = paths.workflow_step_work_path(
+                "step-001-read_qc",
+                "read_qc",
+                "seqkit_stats/run_seqkit_stats.sh",
             )
             stats_script_text = stats_script.read_text(encoding="utf-8")
             self.assertIn(str(fq1), stats_script_text)
@@ -521,12 +573,11 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 [str(filtered_ref)],
             )
 
-            filter_script = (
-                Path(result["data_dir"])
-                / "work"
-                / "read_qc"
-                / "length_filter"
-                / "run_length_filter.sh"
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            filter_script = paths.workflow_step_work_path(
+                "step-001-read_qc",
+                "read_qc",
+                "length_filter/run_length_filter.sh",
             )
             filter_script_text = filter_script.read_text(encoding="utf-8")
             self.assertIn("seqkit seq -m 1000", filter_script_text)
@@ -775,7 +826,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("seqkit", result["last_error"])
-            stats_dir = Path(result["data_dir"]) / "artifacts" / "read_qc"
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            stats_dir = paths.workflow_step_artifacts_dir(
+                "step-001-read_qc", "read_qc"
+            )
             self.assertFalse((stats_dir / "seqkit_stats.tsv").exists())
             ledger_events = [
                 json.loads(line)
@@ -792,18 +846,39 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
     """Phase 4 task2 coverage: env resolver wiring and structured blocked states."""
 
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
+        normalized_assets = []
+        for asset in assets:
+            normalized = dict(asset)
+            source = Path(str(normalized["path"]))
+            if source.is_file():
+                normalized.setdefault("size_bytes", source.stat().st_size)
+                normalized.setdefault("checksum", sha256_file(source))
+                normalized.setdefault("checksum_status", "ready")
+            normalized_assets.append(normalized)
         path = Path(tmpdir) / "registry.json"
         path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            json.dumps({"session_id": "s1", "assets": normalized_assets}, indent=2),
             encoding="utf-8",
         )
         return path
 
-    def _publish_registry_ref(self, data_dir: str, session_id: str, registry_path: str | Path) -> dict:
+    def _publish_registry_ref(
+        self,
+        data_dir: str,
+        session_id: str,
+        registry_path: str | Path,
+    ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        source = paths.workflow_step_work_path(
+            "step-000-inventory",
+            "inventory",
+            f"asset_registry_{os.urandom(4).hex()}.json",
+        )
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8")
+        source.write_text(
+            Path(str(registry_path)).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
         artifact = ArtifactMeta.from_file(
             source, stage="inventory",
             method_name="inventory.register_assets", artifact_type="asset_registry"
@@ -816,13 +891,51 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=_read_qc_workflow_steps(),
         )
         state["current_stage"] = "read_qc"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
             if registry_ref is not None else None
         )
         return state
+
+    def _freeze_read_qc_dependencies(self, state: dict, fq: Path) -> None:
+        """Commit the minimum dependency contract required by env preflight."""
+
+        config_path = fq.parent / "envs.yaml"
+        config_path.write_text(
+            "default:\n"
+            "  fallback_env: read-qc-test\n"
+            "stages:\n"
+            "  read_qc:\n"
+            "    conda_env: read-qc-test\n"
+            "    required_tools: [seqkit]\n"
+            "packages: {}\n",
+            encoding="utf-8",
+        )
+        freeze_session_inputs(
+            SessionPaths.from_run_dir(state["data_dir"]),
+            manifest_draft={
+                "session_id": state["session_id"],
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(fq)],
+                        "platform": "cycloneseq",
+                        "format": "fastq",
+                    }
+                ],
+            },
+            run_config_draft={
+                "requested_stages": [
+                    {"stage": "read_qc", "allow_local_execution": True}
+                ]
+            },
+            config_path=config_path,
+        )
 
     def test_missing_fastq_path_blocks_with_blocked_input_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -862,8 +975,9 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
-            # Empty PATH removes conda binary, which forces env_resolver.preflight
-            # to report blocked_env. Note: no env override is supplied on
+            self._freeze_read_qc_dependencies(state, fq)
+            # Empty PATH removes conda binary, which forces frozen env preflight
+            # to report blocked_env. No PATH override is supplied on
             # stage_outputs.read_qc.env, so the resolver path is taken.
             state["stage_outputs"] = {"read_qc": {"execution_mode": "local"}}
             old_path = os.environ.get("PATH", "")
@@ -928,6 +1042,7 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             )
             conda_stub.chmod(0o755)
             state = self._state(tmpdir, str(registry))
+            self._freeze_read_qc_dependencies(state, fq)
             state["stage_outputs"] = {"read_qc": {"execution_mode": "local"}}
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = f"{conda_stub_dir}{os.pathsep}{old_path}"
@@ -967,7 +1082,7 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             tmp = Path(tmpdir)
             fq = tmp / "BGI_CycloneSEQ_sample.fastq.gz"
             fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            self._write_registry(
+            registry = self._write_registry(
                 tmpdir,
                 assets=[
                     {
@@ -984,9 +1099,17 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             os.chdir(tmp)
             try:
                 run_dir = v2_run_dir(tmp / "out", "s1")
+                registry_ref = self._publish_registry_ref(
+                    str(run_dir), "s1", str(registry)
+                )
                 state = {
                     "session_id": "s1",
                     "data_dir": "out/runs/s1",
+                    "current_stage": "read_qc",
+                    "workflow_steps": _read_qc_workflow_steps(),
+                    "workflow_step_index": 1,
+                    "entered_workflow_step_index": 1,
+                    "asset_registry_ref": registry_ref,
                     "stage_outputs": {
                         "read_qc": {
                             "status": "planned",
@@ -995,6 +1118,9 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                             "input_asset_ref": (
                                 "s1:raw_long_reads:BGI_CycloneSEQ_sample.fastq.gz"
                             ),
+                            "input_asset_refs": [
+                                "s1:raw_long_reads:BGI_CycloneSEQ_sample.fastq.gz"
+                            ],
                             "substeps": {
                                 "long_read_stats": {
                                     "name": "long_read_stats",
@@ -1011,17 +1137,21 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                     },
                 }
                 freeze_seqkit_attempt(state)
-                script_path = run_dir / "work/read_qc/seqkit_stats/run_seqkit_stats.sh"
+                work_dir = SessionPaths.from_run_dir(run_dir).workflow_step_work_dir(
+                    "step-001-read_qc", "read_qc"
+                )
+                script_path = work_dir / "seqkit_stats/run_seqkit_stats.sh"
                 self.assertTrue(script_path.exists())
                 script_text = script_path.read_text(encoding="utf-8")
                 expected_work_output = (
-                    run_dir / "work/read_qc/seqkit_stats/seqkit_stats.tsv"
+                    work_dir / "seqkit_stats/seqkit_stats.tsv"
                 )
                 self.assertIn(str(expected_work_output), script_text)
                 # And the script must NOT carry the bare relative form
                 # that would resolve from the runner's cwd.
                 self.assertNotIn(
-                    " > out/runs/s1/work/read_qc/seqkit_stats/seqkit_stats.tsv",
+                    " > out/runs/s1/work/steps/step-001-read_qc/read_qc/"
+                    "seqkit_stats/seqkit_stats.tsv",
                     script_text,
                 )
             finally:
@@ -1074,16 +1204,15 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
-                        "local_exec": ["read_qc"],
-                        "requested_stages": ["read_qc"],
+                        "requested_stages": [
+                            {"stage": "read_qc", "allow_local_execution": True}
+                        ],
                     }
                 ),
                 encoding="utf-8",
             )
             argv = [
                 "run",
-                "--session-id",
-                session_id,
                 "--manifest",
                 str(manifest),
                 "--data-dir",
@@ -1094,8 +1223,8 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             rc = run_main(argv)
             self.assertEqual(rc, 0)
 
-            artifact_dir = (
-                SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc"
+            artifact_dir = SessionPaths(tmpdir, session_id).workflow_step_artifacts_dir(
+                "step-001-read_qc", "read_qc"
             )
             stats = artifact_dir / "outputs" / "seqkit_stats" / "seqkit_stats.tsv"
             summary = artifact_dir / "outputs" / "seqkit_stats" / "read_qc_summary.json"

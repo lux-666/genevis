@@ -46,9 +46,6 @@ class ProjectScaffoldTests(unittest.TestCase):
                 "gapcloser",
                 "t2t",
                 "base_polish",
-                "repeat_annotation",
-                "gene_annotation",
-                "function_annotation",
             ],
         )
 

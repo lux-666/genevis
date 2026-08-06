@@ -45,7 +45,7 @@ from app.storage.paths import SessionPaths, ensure_run_layout
 
 FROZEN_INPUTS_SCHEMA_VERSION = 1
 INPUT_MANIFEST_SCHEMA_VERSION = 1
-RUN_CONFIG_SCHEMA_VERSION = 1
+RUN_CONFIG_SCHEMA_VERSION = 2
 
 _FILE_KEYS = ("input_manifest", "run_config", "dependency_manifest")
 _FILE_NAMES = {
@@ -56,7 +56,7 @@ _FILE_NAMES = {
 _FILE_SCHEMA_VERSIONS = {
     "input_manifest": INPUT_MANIFEST_SCHEMA_VERSION,
     "run_config": RUN_CONFIG_SCHEMA_VERSION,
-    "dependency_manifest": 1,
+    "dependency_manifest": 2,
 }
 
 
@@ -184,15 +184,12 @@ class PreparedSessionInputs:
     """Validated canonical inputs ready for a later create-only freeze.
 
     Preparation deliberately has no ``SessionPaths`` argument and never
-    creates directories or control files.  The original run-config field set
-    is retained for the public-entrypoint presence rules, which are stricter
-    than generic freeze validation and therefore belong to that caller.
+    creates directories or control files.
     """
 
     manifest: InputManifest
     run_config: RunConfig
     declarations: CanonicalInputDeclarations
-    explicit_run_config_fields: frozenset[str]
 
 
 def canonicalize_input_declarations(
@@ -520,9 +517,7 @@ def prepare_session_inputs(
 
     try:
         manifest = _load_manifest_draft(manifest_draft)
-        run_config, explicit_fields = _load_run_config_draft_with_fields(
-            run_config_draft
-        )
+        run_config = _load_run_config_draft(run_config_draft)
         declarations = canonicalize_input_declarations(manifest, run_config)
         if not declarations.manifest_report["valid"]:
             raise FrozenInputValidationError(
@@ -547,7 +542,6 @@ def prepare_session_inputs(
         manifest=manifest,
         run_config=run_config,
         declarations=declarations,
-        explicit_run_config_fields=explicit_fields,
     )
 
 
@@ -559,7 +553,6 @@ def freeze_session_inputs(
     prepared_inputs: PreparedSessionInputs | None = None,
     config_path: str | Path | None = None,
     parent_session_id: str | None = None,
-    selected_stages: Sequence[str] | None = None,
     selected_methods: Mapping[str, str | Sequence[str]] | None = None,
     preflight_runner: Any | None = None,
     probe_environments: bool | None = None,
@@ -606,7 +599,6 @@ def freeze_session_inputs(
     run_config = prepared.run_config
     dependency_stages, dependency_methods = _dependency_scope(
         run_config,
-        selected_stages=selected_stages,
         selected_methods=selected_methods,
     )
     ensure_run_layout(paths)
@@ -625,7 +617,6 @@ def freeze_session_inputs(
                     manifest_bytes=manifest_bytes,
                     run_config_bytes=run_config_bytes,
                     parent_session_id=parent_session_id,
-                    selected_stages=dependency_stages,
                     selected_methods=dependency_methods,
                 )
                 return bundle
@@ -739,12 +730,11 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
 
 
 def has_frozen_input_contract(paths: SessionPaths) -> bool:
-    """Whether any new-format frozen-control file is present.
+    """Whether any transaction-owned frozen-control file is present.
 
-    ``run_config.json`` alone is intentionally not a signal: legacy session
-    layouts wrote that name before this transaction existed.  A new executor
-    sees any of the unique new-format files and must validate the full marker
-    rather than fall back to live machine configuration.
+    ``run_config.json`` alone is not a commit signal. If any unique transaction
+    file exists, the executor validates the complete marker and fails closed on
+    an interrupted or tampered freeze.
     """
 
     return any(
@@ -839,42 +829,15 @@ def frozen_execution_progress(
 def _dependency_scope(
     run_config: RunConfig,
     *,
-    selected_stages: Sequence[str] | None,
     selected_methods: Mapping[str, str | Sequence[str]] | None,
 ) -> tuple[list[str], list[str]]:
-    requested: list[str] | None = (
-        None
-        if run_config.requested_stages is None
-        else [str(stage) for stage in run_config.requested_stages]
+    # The frozen RunConfig is the sole workflow-plan authority.  Environment
+    # resolution needs only the distinct stage types represented by that plan,
+    # so repeated occurrences are intentionally deduplicated here and nowhere
+    # in runtime routing.
+    stages = list(
+        dict.fromkeys(str(stage) for stage in run_config.requested_stage_names())
     )
-    stages: list[str] = (
-        [str(stage).strip() for stage in selected_stages]
-        if selected_stages is not None
-        else (
-            list(requested)
-            if requested is not None
-            else [str(stage) for stage in run_config.local_exec]
-        )
-    )
-    if any(not stage for stage in stages):
-        raise FrozenInputValidationError(
-            "selected dependency stages must not contain empty names"
-        )
-    if len(stages) != len(set(stages)):
-        raise FrozenInputValidationError(
-            "selected dependency stages must not contain duplicates"
-        )
-    if requested is not None and stages != requested:
-        raise FrozenInputValidationError(
-            "selected dependency stages differ from run-config requested_stages"
-        )
-    missing_local = sorted(set(run_config.local_exec).difference(stages))
-    if missing_local:
-        raise FrozenInputValidationError(
-            "selected dependency stages omit local_exec stages: "
-            + ", ".join(missing_local)
-        )
-
     methods: list[str] = []
     for stage, selected in (selected_methods or {}).items():
         normalized_stage = str(stage).strip()
@@ -968,29 +931,19 @@ def _load_manifest_draft(
     return manifest
 
 
-def _load_run_config_draft_with_fields(
+def _load_run_config_draft(
     source: str | Path | RunConfig | Mapping[str, Any],
-) -> tuple[RunConfig, frozenset[str]]:
-    """Load canonical config plus the fields explicitly supplied by its author."""
+) -> RunConfig:
+    """Load and canonicalize the strict frozen RunConfig draft."""
 
-    model_fields = (
-        frozenset(source.model_fields_set) if isinstance(source, RunConfig) else None
-    )
     payload, source_dir = _load_json_draft(source, label="run-config draft")
     try:
-        file_validated = RunConfig.model_validate(payload)
+        RunConfig.model_validate(payload)
         normalized = canonicalize_run_config_paths(
             payload,
             source_dir=source_dir,
         )
-        return (
-            RunConfig.model_validate(normalized),
-            (
-                model_fields
-                if model_fields is not None
-                else frozenset(file_validated.model_fields_set)
-            ),
-        )
+        return RunConfig.model_validate(normalized)
     except (ValidationError, ValueError) as exc:
         raise FrozenInputValidationError(
             f"run-config draft failed validation: {exc}"
@@ -1014,7 +967,7 @@ def _validate_assembly_input_contract(
     from app.schemas.run_config import infer_assembly_method
 
     method = infer_assembly_method(assembly)
-    local_assembly = "assembly" in run_config.local_exec
+    local_assembly = run_config.any_occurrence_allows_local_execution("assembly")
     shared_parameters = run_config.shared_parameters
     read_type = resolve_read_type(
         ("assembly.assembly_route", assembly.assembly_route),
@@ -1302,7 +1255,6 @@ def _verify_idempotent_request(
     manifest_bytes: bytes,
     run_config_bytes: bytes,
     parent_session_id: str | None,
-    selected_stages: Sequence[str],
     selected_methods: Sequence[str],
 ) -> None:
     if bundle.marker.parent_session_id != parent_session_id:
@@ -1325,10 +1277,6 @@ def _verify_idempotent_request(
         bundle.paths.dependency_manifest_path,
         expected_sha256=bundle.file_sha256("dependency_manifest"),
     )
-    if snapshot.selected_stages != list(selected_stages):
-        raise FrozenInputConflictError(
-            "frozen session selected stages differ from this freeze request"
-        )
     if snapshot.selected_methods != sorted(selected_methods):
         raise FrozenInputConflictError(
             "frozen session selected methods differ from this freeze request"

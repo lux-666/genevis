@@ -450,6 +450,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
                 "response_parse_ref": response_parse_ref.model_dump(mode="json"),
                 "recommendation_ref": recommendation_ref.model_dump(mode="json"),
                 "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                "auto_decidable": False,
             },
             method_name=_APPROVAL_METHOD,
             artifact_type="hic_scaffolding.parameter_approval.request",
@@ -481,7 +482,6 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
         review_request_artifact_ref=persisted_request.request_ref.path_ref,
         review_request_id=persisted_request.review_request_id,
         auto_decidable=False,
-        pending_human_confirmation=True,
     )
     return _update_hic_output(
         state,
@@ -578,11 +578,14 @@ def apply_autohic_parameter_approval_decision(
             != ArtifactRef.model_validate(predecessor.get("attempt_manifest_ref"))
         ):
             raise ResumeValidationError("AutoHiC parameter retry predecessor changed")
+    request_id = interrupt.get("review_request_id")
+    if not isinstance(request_id, str) or not request_id:
+        raise ResumeValidationError("AutoHiC parameter approval request ID is missing")
 
     decision_ref = persist_parameter_approval_decision(
         state,
         stage="hic_scaffolding",
-        request_id=interrupt.get("review_request_id"),
+        request_id=request_id,
         request_ref=request_ref,
         request=request,
         manifest_ref=manifest_ref,

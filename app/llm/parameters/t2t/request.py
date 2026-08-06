@@ -7,7 +7,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.llm.parameters.base import (
-    PARAMETER_RECOMMENDATION_CONTRACT,
+    PARAMETER_RECOMMENDATION_CONTRACT as _PARAMETER_RECOMMENDATION_CONTRACT,
+)
+from app.llm.parameters.base import (
     build_adjustable_parameters,
 )
 from app.schemas.parameter_catalog import MethodParameterCatalog
@@ -18,6 +20,16 @@ from app.schemas.parameter_recommendation import (
 )
 
 T2T_METHOD: Literal["t2t.alignment.minimap2"] = "t2t.alignment.minimap2"
+PARAMETER_RECOMMENDATION_CONTRACT: Literal["parameter_recommendation_v1"] = (
+    _PARAMETER_RECOMMENDATION_CONTRACT
+)
+
+__all__ = [
+    "T2T_METHOD",
+    "PARAMETER_RECOMMENDATION_CONTRACT",
+    "T2TParameterRequest",
+    "build_t2t_parameter_request",
+]
 
 
 class T2TParameterRequest(BaseModel):

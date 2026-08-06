@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    model_validator,
+)
 
+from app.schemas.run_config import RequestableStage
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.warnings import PlanWarning as PlanWarning
 
@@ -15,6 +22,15 @@ AskClarificationKind = Literal[
     "parameter_values",
     "confirm",
 ]
+
+
+class PlanStageOccurrence(BaseModel):
+    """One mutable pre-freeze workflow occurrence and its local-exec consent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: RequestableStage
+    allow_local_execution: StrictBool
 
 
 class AskPlanState(BaseModel):
@@ -30,18 +46,27 @@ class AskPlanState(BaseModel):
     )
     entry_request: dict[str, Any]
     manifest_ref: str
-    selected_stages: list[str] | None = None
-    resolved_execution_order: list[str] | None = None
+    # This is the one mutable pre-freeze workflow sequence. Its literal order,
+    # duplicate occurrences, and each occurrence's local-execution consent are
+    # projected unchanged into RunConfig.requested_stages at confirmation.
+    selected_stage_occurrences: list[PlanStageOccurrence] | None = None
     selected_methods: dict[str, str | list[str]] | None = None
     # Three parameter scopes, threaded consistently through response -> merge ->
     # request -> run_config -> checkpoint: shared_parameters are pipeline-wide
     # (platform, genome size); method_parameters key off a method id (e.g. Flye
-    # threads); stage_parameters are stage-scoped and not owned by one method
-    # (e.g. function_annotation.database_provenance).
+    # threads); stage_parameters are stage-scoped and not owned by one method.
     shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
     stage_parameters: dict[str, dict[str, Any]] | None = None
     confirmed: bool = False
+
+    @property
+    def selected_stage_names(self) -> list[str] | None:
+        """Derived stage-name projection for display and stage-scoped settings."""
+
+        if self.selected_stage_occurrences is None:
+            return None
+        return [occurrence.stage for occurrence in self.selected_stage_occurrences]
 
 
 class AskClarificationRequest(BaseModel):
@@ -68,7 +93,7 @@ class AskClarificationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: AskClarificationKind
-    selected_stages: list[str] | None = None
+    selected_stage_occurrences: list[PlanStageOccurrence] | None = None
     selected_methods: dict[str, str | list[str]] | None = None
     shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
@@ -77,8 +102,10 @@ class AskClarificationResponse(BaseModel):
 
     @model_validator(mode="after")
     def _require_kind_payload(self) -> "AskClarificationResponse":
-        if self.kind == "stage_selection" and not self.selected_stages:
-            raise ValueError("stage_selection response requires selected_stages")
+        if self.kind == "stage_selection" and not self.selected_stage_occurrences:
+            raise ValueError(
+                "stage_selection response requires selected_stage_occurrences"
+            )
         if self.kind == "method_selection" and not self.selected_methods:
             raise ValueError("method_selection response requires selected_methods")
         if self.kind == "parameter_values" and not (

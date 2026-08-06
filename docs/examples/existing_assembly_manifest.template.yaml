@@ -1,0 +1,18 @@
+# Existing-assembly manifest template for a review-only run.
+#
+# Copy this file and assembly_review_run_config.template.json to a server-local
+# directory, then replace the placeholders. The paired run config deliberately
+# requests only assembly_review. Other literal occurrence sequences remain
+# valid when every reached stage can satisfy its own input contract.
+session_id: existing-assembly-review-YYYYMMDD-a
+sample_id: existing_assembly_sample
+target_assembly_level: contig
+assets:
+  - asset_type: assembly_fasta_registered
+    paths:
+      - /ABS/PATH/TO/existing_assembly.fasta
+    format: fasta
+    compression: none
+    metadata:
+      source: <assembler-or-accession>
+      note: replace with the one assembly FASTA to review

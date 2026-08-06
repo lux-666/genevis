@@ -7,7 +7,7 @@ from typing import Literal, TypeAlias, cast
 
 from pydantic import ConfigDict, TypeAdapter, with_config
 from pydantic import JsonValue as PydanticJsonValue
-from typing_extensions import TypedDict
+from typing_extensions import Required, TypedDict
 
 from app.domains.assembly.selection import (
     AssemblySelectionSource,
@@ -92,6 +92,7 @@ class AssemblyActiveInterruptCursor(TypedDict, total=False):
     """Assembly's compact copy of an unresolved review request pointer."""
 
     stage: Literal["assembly"]
+    workflow_step_id: Required[str]
     gate_id: str | None
     reason: str
     blocked_at: str

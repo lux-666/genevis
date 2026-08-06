@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import RESOURCE_REFS_MAX_BYTES
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state, validate_resource_refs
@@ -11,7 +12,6 @@ from app.stages.resource_resolution import (
     resolve_stage_resource,
     update_resource_ref,
 )
-from app.schemas.artifacts import ArtifactMeta
 from app.storage.artifacts import publish_artifact_record
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
@@ -19,7 +19,9 @@ from tests.data_v2 import v2_run_dir
 
 def _publish_registry_ref(data_dir: str, session_id: str, registry_path: Path) -> dict:
     paths = SessionPaths.from_run_dir(data_dir)
-    source = paths.work_path("inventory", "asset_registry.json")
+    source = paths.workflow_step_work_path(
+        "step-000-inventory", "inventory", "asset_registry.json"
+    )
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(registry_path.read_text(encoding="utf-8"), encoding="utf-8")
     artifact = ArtifactMeta.from_file(
@@ -32,7 +34,7 @@ def _publish_registry_ref(data_dir: str, session_id: str, registry_path: Path) -
     return published.ref.model_dump(mode="json")
 
 
-def test_resolution_precedence_is_override_then_central_then_registry(tmp_path) -> None:
+def test_resolution_precedence_is_central_then_registry(tmp_path) -> None:
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(
         json.dumps(
@@ -52,7 +54,8 @@ def test_resolution_precedence_is_override_then_central_then_registry(tmp_path) 
     )
     state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
     state["data_dir"] = str(v2_run_dir(tmp_path, "s1"))
-    state["asset_registry_ref"] = _publish_registry_ref(state["data_dir"], "s1", registry_path)
+    registry_ref = _publish_registry_ref(state["data_dir"], "s1", registry_path)
+    state["asset_registry_ref"] = registry_ref
     state["resource_refs"]["long_reads"] = ResourceRef(
         resource_type="long_reads",
         paths=["/central/clean.fastq.gz"],
@@ -66,15 +69,10 @@ def test_resolution_precedence_is_override_then_central_then_registry(tmp_path) 
     )
 
     central = resolve_stage_resource(state, resource_spec=spec)
-    override = resolve_stage_resource(
-        state, resource_spec=spec, override="/override/reads.fastq.gz"
-    )
 
     assert central.paths == ["/central/clean.fastq.gz"]
     assert central.source == "read_qc"
     assert central.metadata == {"quality": "filtered"}
-    assert override.paths == ["/override/reads.fastq.gz"]
-    assert override.source_type == "override"
 
 
 def test_registry_fallback_honors_asset_type_priority_and_multiple(tmp_path) -> None:
@@ -107,7 +105,8 @@ def test_registry_fallback_honors_asset_type_priority_and_multiple(tmp_path) -> 
     )
     state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
     state["data_dir"] = str(v2_run_dir(tmp_path, "s1"))
-    state["asset_registry_ref"] = _publish_registry_ref(state["data_dir"], "s1", registry_path)
+    registry_ref = _publish_registry_ref(state["data_dir"], "s1", registry_path)
+    state["asset_registry_ref"] = registry_ref
 
     resolved = resolve_stage_resource(
         state,
@@ -154,13 +153,14 @@ def test_inventory_resource_ref_honors_asset_type_priority(tmp_path) -> None:
         encoding="utf-8",
     )
     state["data_dir"] = str(v2_run_dir(tmp_path, "s1"))
-    state["asset_registry_ref"] = _publish_registry_ref(state["data_dir"], "s1", registry_path)
+    registry_ref = _publish_registry_ref(state["data_dir"], "s1", registry_path)
+    state["asset_registry_ref"] = registry_ref
     state["resource_refs"]["long_reads"] = ResourceRef(
         resource_type="long_reads",
         paths=[str(raw_path), str(clean_path)],
         source_stage=None,
         metadata={
-            "asset_registry_ref": str(registry_path),
+            "asset_registry_ref": registry_ref,
             "asset_ids": ["raw-1", "clean-1"],
             "member_count": 2,
         },
@@ -180,7 +180,25 @@ def test_inventory_resource_ref_honors_asset_type_priority(tmp_path) -> None:
 
 
 def test_update_resource_ref_returns_validated_replacement_without_mutation() -> None:
-    state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    state = initial_state(
+        session_id="s1",
+        input_manifest_ref="manifest.yaml",
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-001-assembly",
+                "stage": "assembly",
+                "allow_local_execution": False,
+            },
+        ],
+    )
+    state["current_stage"] = "assembly"
+    state["workflow_step_index"] = 1
+    state["entered_workflow_step_index"] = 1
     original = dict(state["resource_refs"])
 
     replacement = update_resource_ref(
@@ -194,6 +212,7 @@ def test_update_resource_ref_returns_validated_replacement_without_mutation() ->
     assert state["resource_refs"] == original
     assert replacement["assembly"]["paths"] == ["/work/a.fasta"]
     assert replacement["assembly"]["source_stage"] == "assembly"
+    assert replacement["assembly"]["workflow_step_id"] == "step-001-assembly"
 
 
 def test_resource_table_rejects_invalid_and_oversized_entries() -> None:

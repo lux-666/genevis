@@ -22,8 +22,11 @@ from unittest.mock import patch
 from app.execution.evidence import load_frozen_attempt
 from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_DRAFT_ASSEMBLY,
     ASSEMBLY_REVIEW_PACKET,
     ArtifactMeta,
+    AssemblyCandidateBundle,
     ReviewDecisionArtifact,
 )
 from app.schemas.descriptors import DescriptorRegistry
@@ -150,7 +153,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
         self, data_dir: str, session_id: str, registry_path: str | Path
     ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path("inventory", "asset_registry.json")
+        source = paths.workflow_step_work_path(
+            "step-000-inventory", "inventory", "asset_registry.json"
+        )
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(
             Path(str(registry_path)).read_text(encoding="utf-8"), encoding="utf-8"
@@ -195,26 +200,85 @@ class AssemblyReviewStageTests(unittest.TestCase):
             session_id=session_id,
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(data_root, session_id)),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-002-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-003-hic_scaffolding",
+                    "stage": "hic_scaffolding",
+                    "allow_local_execution": True,
+                },
+            ],
         )
+        state["workflow_step_index"] = 2
+        state["entered_workflow_step_index"] = 2
+        state["current_stage"] = "assembly_review"
         state["stage_outputs"] = stage_outputs
         if candidate_bundles:
-            candidate_paths = [
-                str(
-                    (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta")
-                    or f"/planned/{bundle.get('candidate_id', index)}.fasta"
+            candidate_refs = [
+                self._write_candidate_bundle(
+                    str(data_root),
+                    candidate_id=str(bundle.get("candidate_id", f"candidate-{index}")),
+                    method_name=str(
+                        bundle.get("method_name", "assembly.candidate.flye")
+                    ),
+                    draft_assembly_fasta=(bundle.get("expected_outputs") or {}).get(
+                        "draft_assembly_fasta"
+                    ),
                 )
                 for index, bundle in enumerate(candidate_bundles)
             ]
-            state["resource_refs"]["assembly"] = ResourceRef(
-                resource_type="assembly",
-                paths=candidate_paths,
-                source_stage="assembly",
-                metadata={"candidate_bundles": candidate_bundles},
-            ).to_dict()
+            self._set_candidate_refs(state, [str(ref) for ref in candidate_refs])
         if registry_ref:
             state["asset_registry_ref"] = self._publish_registry_ref(
                 state["data_dir"], session_id, registry_ref
             )
+        else:
+            empty_registry = SessionPaths.from_run_dir(
+                state["data_dir"]
+            ).workflow_step_work_path(
+                "step-000-inventory", "inventory", "empty_asset_registry.json"
+            )
+            empty_registry.parent.mkdir(parents=True, exist_ok=True)
+            empty_registry.write_text(
+                json.dumps({"session_id": session_id, "assets": []}),
+                encoding="utf-8",
+            )
+            state["asset_registry_ref"] = publish_artifact_record(
+                state["data_dir"],
+                session_id,
+                ArtifactMeta.from_file(
+                    empty_registry,
+                    stage="inventory",
+                    method_name="inventory.register_assets",
+                    artifact_type="asset_registry",
+                ),
+            ).ref.model_dump(mode="json")
+        if entry_mode == "existing_assembly" and registry_ref:
+            assets = json.loads(Path(registry_ref).read_text(encoding="utf-8")).get(
+                "assets", []
+            )
+            if assets:
+                bundle = self._write_candidate_bundle(
+                    str(data_root),
+                    candidate_id="existing_assembly",
+                    method_name="inventory.registered_assembly",
+                    draft_assembly_fasta=str(assets[0]["path"]),
+                )
+                self._set_candidate_refs(state, [str(bundle)])
         return state
 
     def _write_candidate_bundle(
@@ -250,24 +314,115 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
     @staticmethod
     def _set_candidate_refs(state: dict, candidate_refs: list[str]) -> None:
-        paths: list[str] = []
+        """Publish legacy fixture candidates through the executed-bundle contract."""
+        data_dir = state["data_dir"]
+        session_id = state["session_id"]
+        paths = SessionPaths.from_run_dir(data_dir)
+        published_candidates = []
         for candidate_ref in candidate_refs:
             payload = json.loads(Path(candidate_ref).read_text(encoding="utf-8"))
             draft = (payload.get("expected_outputs") or {}).get("draft_assembly_fasta")
-            if draft:
-                paths.append(str(draft))
+            if not draft:
+                raise ValueError("fixture candidate is missing draft_assembly_fasta")
+            draft_path = Path(str(draft))
+            draft_path.parent.mkdir(parents=True, exist_ok=True)
+            if not draft_path.exists():
+                draft_path.write_text(">fixture\nACGT\n", encoding="utf-8")
+            candidate_id = str(payload["candidate_id"])
+            method_name = str(payload["method_name"])
+            planned = AssemblyCandidateBundle(
+                session_id=session_id,
+                candidate_id=candidate_id,
+                method_name=method_name,
+                status="planned",
+                input_type="long_reads.fofn",
+                input_member_ids={"primary": ["fixture-long-reads"]},
+                input_member_platforms={"primary": ["ont"]},
+                parameter_attempt_id=0,
+                expected_outputs=["primary_assembly"],
+            )
+            planned_source = paths.workflow_step_work_path(
+                "step-001-assembly",
+                "assembly",
+                "fixture_candidates",
+                f"{candidate_id}.planned.json",
+            )
+            planned_source.parent.mkdir(parents=True, exist_ok=True)
+            planned_source.write_text(planned.model_dump_json(), encoding="utf-8")
+            planned_ref = publish_artifact_record(
+                data_dir,
+                session_id,
+                ArtifactMeta.from_file(
+                    planned_source,
+                    stage="assembly",
+                    method_name=method_name,
+                    artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+                ),
+            ).ref
+            primary_source = paths.workflow_step_work_path(
+                "step-001-assembly",
+                "assembly",
+                "fixture_candidates",
+                f"{candidate_id}.fasta",
+            )
+            primary_source.write_bytes(draft_path.read_bytes())
+            primary_ref = publish_artifact_record(
+                data_dir,
+                session_id,
+                ArtifactMeta.from_file(
+                    primary_source,
+                    stage="assembly",
+                    method_name=method_name,
+                    artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+                ),
+            ).ref
+            executed = planned.model_copy(
+                update={
+                    "status": "executed",
+                    "plan_ref": planned_ref,
+                    "primary_output": primary_ref,
+                }
+            )
+            executed_source = paths.workflow_step_work_path(
+                "step-001-assembly",
+                "assembly",
+                "fixture_candidates",
+                f"{candidate_id}.executed.json",
+            )
+            executed_source.write_text(executed.model_dump_json(), encoding="utf-8")
+            executed_ref = publish_artifact_record(
+                data_dir,
+                session_id,
+                ArtifactMeta.from_file(
+                    executed_source,
+                    stage="assembly",
+                    method_name=method_name,
+                    artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+                ),
+            ).ref
+            published_candidates.append((executed_ref, primary_ref))
+
+        if not published_candidates:
+            return
+        current_ref, current_primary = published_candidates[0]
+        metadata = {
+            "candidate_bundle_ref": current_ref.model_dump(mode="json"),
+            "primary_output_ref": current_primary.model_dump(mode="json"),
+            "rejected_candidates": dict(
+                (state.get("stage_outputs") or {})
+                .get("assembly", {})
+                .get("rejected_candidates", {})
+            ),
+        }
+        if len(published_candidates) > 1:
+            raw_ref, raw_primary = published_candidates[1]
+            metadata["raw_candidate_bundle_ref"] = raw_ref.model_dump(mode="json")
+            metadata["raw_primary_output_ref"] = raw_primary.model_dump(mode="json")
         state["resource_refs"]["assembly"] = ResourceRef(
             resource_type="assembly",
-            paths=paths,
+            paths=[str(paths.resolve_ref(current_primary.path_ref))],
             source_stage="assembly",
-            metadata={
-                "candidate_bundle_refs": list(candidate_refs),
-                "rejected_candidates": dict(
-                    (state.get("stage_outputs") or {})
-                    .get("assembly", {})
-                    .get("rejected_candidates", {})
-                ),
-            },
+            metadata=metadata,
         ).to_dict()
 
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
@@ -377,6 +532,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
             request_payload = _request_payload(result)
             self.assertIn("accept", request_payload["decisions_allowed"])
+            # Eligibility remains a review fact for the assembly LLM resolver;
+            # it is not a removed strict/auto policy outcome.
+            self.assertIn("auto_decidable", request_payload)
             self.assertNotIn("rerun", request_payload["decisions_allowed"])
             self.assertIn("stop_human_review", request_payload["decisions_allowed"])
             self.assertNotIn("pass", request_payload["decisions_allowed"])
@@ -386,9 +544,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 ar_out["candidates"][0]["candidate_id"], "existing_assembly"
             )
             self.assertEqual(
-                ar_out["candidates"][0]["final_assembly_ref"], str(assembly_fasta)
+                ar_out["candidates"][0]["primary_output_ref"]["artifact_type"],
+                ASSEMBLY_DRAFT_ASSEMBLY,
             )
-            self.assertFalse(ar_out["auto_decidable"])
             request_ref = SessionPaths.from_run_dir(result["data_dir"]).resolve_ref(
                 result["active_interrupt"]["request_ref"]["path_ref"]
             )
@@ -399,7 +557,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 request_record["payload"]["candidates"][0]["candidate_id"],
                 "existing_assembly",
             )
-            self.assertFalse(request_record["payload"]["auto_decidable"])
 
     def test_review_decision_artifact_allows_post_review_actions(self):
         for decision in ["pass", "polish"]:
@@ -413,7 +570,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
         graph = build_stage()
         result = graph.invoke(state)
         self.assertEqual(result["supervision_state"], "failed_terminal")
-        self.assertIn("no_assembly_candidates_found", result.get("last_error", ""))
+        self.assertIn("no executed candidate bundle ref", result.get("last_error", ""))
 
     def test_single_assembly_candidate_blocks_human(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -442,10 +599,13 @@ class AssemblyReviewStageTests(unittest.TestCase):
             # current_stage stays at assembly_review while blocked
             self.assertEqual(result["current_stage"], "assembly_review")
             ar_out = result["stage_outputs"]["assembly_review"]
-            self.assertEqual(ar_out["candidates"][0]["bundle_ref"], str(candidate_ref))
             self.assertEqual(
-                ar_out["candidates"][0]["final_assembly_ref"],
-                str(Path(tmpdir) / "flye_01.fasta"),
+                ar_out["candidates"][0]["bundle_ref"]["artifact_type"],
+                ASSEMBLY_CANDIDATE_BUNDLE,
+            )
+            self.assertEqual(
+                ar_out["candidates"][0]["primary_output_ref"]["artifact_type"],
+                ASSEMBLY_DRAFT_ASSEMBLY,
             )
             self.assertTrue(Path(ar_out["eval_bundle_ref"]).exists())
 
@@ -573,7 +733,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 len(
                     list(
                         (
-                            Path(result["data_dir"]) / "artifacts" / "assembly_review"
+                            SessionPaths.from_run_dir(
+                                result["data_dir"]
+                            ).workflow_step_artifacts_dir(
+                                "step-002-assembly_review", "assembly_review"
+                            )
                         ).glob("assembly_eval_bundle.planned.*.json")
                     )
                 ),
@@ -755,7 +919,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             self.assertEqual(request_busco["status"], "available")
             self.assertEqual(request_busco["candidate_id"], "flye_01")
-            self.assertTrue(request_payload["auto_decidable"])
             report_data = json.loads(
                 Path(ar_out["assembly_review_packet_ref"]).read_text(encoding="utf-8")
             )
@@ -822,9 +985,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             self.assertEqual(busco_signal["status"], "missing")
             self.assertIn("busco_lineage_not_supplied", busco_signal["notes"])
-            self.assertFalse(ar_out["auto_decidable"])
-            request_payload = _request_payload(result)
-            self.assertFalse(request_payload["auto_decidable"])
 
     def test_local_busco_failure_marks_signal_failed_and_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -878,46 +1038,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("command.stdout", artifact_types)
             self.assertIn("command.stderr", artifact_types)
-
-    def test_auto_decidable_requires_quast_and_busco(self):
-        from app.stages.assembly_review.nodes import _assembly_review_auto_decidable
-
-        quast_only = {
-            "candidates": [{"candidate_id": "flye_01"}],
-            "signals": [
-                {
-                    "signal_name": "quast",
-                    "candidate_id": "flye_01",
-                    "status": "available",
-                    "metric_refs": ["/q.tsv"],
-                },
-                {
-                    "signal_name": "busco",
-                    "candidate_id": "flye_01",
-                    "status": "missing",
-                    "metric_refs": [],
-                },
-            ],
-        }
-        quast_busco = {
-            "candidates": [{"candidate_id": "flye_01"}],
-            "signals": [
-                {
-                    "signal_name": "quast",
-                    "candidate_id": "flye_01",
-                    "status": "available",
-                    "metric_refs": ["/q.tsv"],
-                },
-                {
-                    "signal_name": "busco",
-                    "candidate_id": "flye_01",
-                    "status": "available",
-                    "metric_refs": ["/b.json"],
-                },
-            ],
-        }
-        self.assertFalse(_assembly_review_auto_decidable(quast_only))
-        self.assertTrue(_assembly_review_auto_decidable(quast_busco))
 
     def test_local_quast_failure_marks_signal_failed_and_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -999,6 +1119,12 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "selected_candidate_refs": [str(candidate_ref)],
             }
             self._set_candidate_refs(state, [str(candidate_ref)])
+            primary_path = SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(
+                state["resource_refs"]["assembly"]["metadata"]["primary_output_ref"][
+                    "path_ref"
+                ]
+            )
+            primary_path.unlink()
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -1006,20 +1132,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            quast_signal = next(
-                signal
-                for signal in result["stage_outputs"]["assembly_review"]["signals"]
-                if signal["signal_name"] == "quast"
-            )
-            self.assertEqual(quast_signal["status"], "missing")
-            events_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
-            event_types = [
-                json.loads(line)["event_type"]
-                for line in events_path.read_text().splitlines()
-            ]
-            self.assertIn("review_requested", event_types)
-            self.assertNotIn("attempt_started", event_types)
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("candidate handoff is invalid", result["last_error"])
 
     def test_multiple_candidates_block_human(self):
         state = self._build_state(
@@ -1199,7 +1313,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 _request_payload(result)["candidates"][0]["candidate_id"],
                 "existing_assembly",
             )
-            self.assertFalse(requested_events[0]["summary"]["auto_decidable"])
             self.assertEqual(decision_events, [])
 
     def test_human_gate_writes_review_requested_ledger(self):
@@ -1226,7 +1339,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
             ]
             self.assertEqual(len(request_events), 1)
             self.assertEqual(request_events[0]["stage"], "assembly_review")
-            self.assertFalse(request_events[0]["summary"]["auto_decidable"])
             self.assertTrue(
                 any(
                     ref.get("role") == "review_request_artifact_ref"
@@ -1238,89 +1350,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 request_record["review_request_id"],
                 result["active_interrupt"]["review_request_id"],
             )
-
-    def test_pending_contamination_signal_does_not_disable_auto_decidable(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            candidate_ref = self._write_candidate_bundle(
-                tmpdir,
-                candidate_id="flye_01",
-                method_name="assembly.candidate.flye",
-            )
-            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
-            state["stage_outputs"]["assembly"] = {
-                "status": "planned",
-                "selected_candidate_refs": [str(candidate_ref)],
-            }
-            self._set_candidate_refs(state, [str(candidate_ref)])
-            state["stage_outputs"]["assembly_review"] = {
-                "review_policy": {"mode": "auto"}
-            }
-            ar_out = {
-                "candidates": [{"candidate_id": "flye_01"}],
-                "signals": [
-                    {
-                        "signal_name": "quast",
-                        "candidate_id": "flye_01",
-                        "status": "available",
-                        "metric_refs": ["/tmp/quast/report.tsv"],
-                    },
-                    {
-                        "signal_name": "busco",
-                        "candidate_id": "flye_01",
-                        "status": "available",
-                        "metric_refs": ["/tmp/busco/summary.json"],
-                    },
-                    {
-                        "signal_name": "contamination_check",
-                        "candidate_id": "flye_01",
-                        "status": "pending",
-                        "metric_refs": [],
-                    },
-                ],
-            }
-            from app.stages.assembly_review.nodes import _assembly_review_auto_decidable
-
-            self.assertTrue(_assembly_review_auto_decidable(ar_out))
-
-    def test_auto_decidable_false_when_no_available_eval_signal(self):
-        from app.stages.assembly_review.nodes import _assembly_review_auto_decidable
-
-        ar_out_pending = {
-            "candidates": [{"candidate_id": "flye_01"}],
-            "signals": [
-                {
-                    "signal_name": "quast",
-                    "candidate_id": "flye_01",
-                    "status": "pending",
-                    "metric_refs": [],
-                },
-            ],
-        }
-        ar_out_no_metrics = {
-            "candidates": [{"candidate_id": "flye_01"}],
-            "signals": [
-                {
-                    "signal_name": "quast",
-                    "candidate_id": "flye_01",
-                    "status": "available",
-                    "metric_refs": [],
-                },
-            ],
-        }
-        ar_out_no_candidates = {
-            "candidates": [],
-            "signals": [
-                {
-                    "signal_name": "quast",
-                    "candidate_id": "flye_01",
-                    "status": "available",
-                    "metric_refs": ["/x.tsv"],
-                },
-            ],
-        }
-        self.assertFalse(_assembly_review_auto_decidable(ar_out_pending))
-        self.assertFalse(_assembly_review_auto_decidable(ar_out_no_metrics))
-        self.assertFalse(_assembly_review_auto_decidable(ar_out_no_candidates))
 
     def test_assembly_stage_executed_candidate_ref_points_to_real_fasta(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1348,8 +1377,15 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(
                 candidate["candidate_id"], "test-session:assembly.candidate.flye"
             )
-            self.assertEqual(candidate["final_assembly_ref"], str(draft))
-            self.assertTrue(Path(candidate["final_assembly_ref"]).exists())
+            self.assertEqual(
+                candidate["primary_output_ref"]["artifact_type"],
+                ASSEMBLY_DRAFT_ASSEMBLY,
+            )
+            self.assertTrue(
+                SessionPaths.from_run_dir(result["data_dir"])
+                .resolve_ref(candidate["primary_output_ref"]["path_ref"])
+                .exists()
+            )
 
     def test_consumes_assembly_stage_selected_candidate_refs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1431,19 +1467,18 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     "selected_candidate_refs": [str(candidate_ref)],
                 }
                 self._set_candidate_refs(state, [str(candidate_ref)])
+                from app.stages.assembly_review.nodes import (
+                    plan_review_metrics,
+                    resolve_candidates,
+                )
+
+                state.update(resolve_candidates(state))
+                state.update(plan_review_metrics(state))
                 state["stage_outputs"]["assembly_review"] = {
+                    **state["stage_outputs"]["assembly_review"],
                     "execution_mode": "local",
                     "env": {"PATH": "/nonexistent"},
                     "quast_parameters": {"threads": 1},
-                    "review_plan": {"status": "evaluating"},
-                    "candidates": [
-                        {
-                            "candidate_id": "s1:assembly.candidate.flye",
-                            "method_name": "assembly.candidate.flye",
-                            "status": "planned",
-                            "final_assembly_ref": str(draft),
-                        }
-                    ],
                 }
                 with (
                     patch(
@@ -1474,9 +1509,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 )
                 script_text = script_path.read_text(encoding="utf-8")
                 expected_out_dir = (
-                    run_dir
-                    / "work"
-                    / "assembly_review"
+                    SessionPaths.from_run_dir(run_dir).workflow_step_work_dir(
+                        "step-002-assembly_review", "assembly_review"
+                    )
                     / "quast"
                     / "s1_assembly.candidate.flye"
                     / "quast_out"
@@ -1539,7 +1574,7 @@ class AssemblyReviewSchemaTests(unittest.TestCase):
 
 
 class AssemblyReviewCutoverTests(unittest.TestCase):
-    """Regression coverage for the removed direct Flye rerun path."""
+    """Regression coverage for the current Assembly Review boundary."""
 
     def _build_blocked_state(
         self,
@@ -1549,115 +1584,47 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
         persist_request: bool = True,
     ) -> dict:
         """Build a Flye-candidate state blocked at the assembly-review gate."""
-        from app.stages.assembly_review.nodes import human_review_gate
-
+        stage_tests = AssemblyReviewStageTests()
         session_id = "test-rerun-session"
         assembly_fasta = Path(tmpdir) / "draft.fasta"
-        assembly_fasta.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
-        reads = Path(tmpdir) / "reads.fastq"
-        reads.write_text("@r1\nACGT\n+\nIIII\n", encoding="utf-8")
-        fofn = Path(tmpdir) / "long_reads.fofn"
-        fofn.write_text(str(reads) + "\n", encoding="utf-8")
-
-        candidate_id = f"{session_id}:assembly.candidate.flye"
-        bundle_path = Path(tmpdir) / "flye_candidate.json"
-        bundle_path.write_text(
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "candidate_id": candidate_id,
-                    "method_name": "assembly.candidate.flye",
-                    "status": "executed",
-                    "artifact_type": "draft_assembly.candidate",
-                    "input_ref": str(fofn),
-                    "input_type": "long_reads.fofn",
-                    "expected_outputs": {"draft_assembly_fasta": str(assembly_fasta)},
-                    "logs": {},
-                    "metadata": {
-                        "execution_enabled": True,
-                        "read_profile": "nano-raw",
-                        "estimated_genome_size": 100000000,
-                        "threads": 4,
-                    },
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        assembly_fasta.write_text(">ctg1\\nACGTACGT\\n", encoding="utf-8")
+        candidate_refs = [
+            stage_tests._write_candidate_bundle(
+                tmpdir,
+                candidate_id=f"{session_id}:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(assembly_fasta),
+            )
+        ]
+        for index in range(extra_candidate_count):
+            candidate_refs.append(
+                stage_tests._write_candidate_bundle(
+                    tmpdir,
+                    candidate_id=(
+                        f"{session_id}:assembly.candidate.flye:alternative_{index + 1}"
+                    ),
+                    method_name="assembly.candidate.flye",
+                    draft_assembly_fasta=str(assembly_fasta),
+                )
+            )
+        state = stage_tests._build_state(
+            session_id=session_id, entry_mode="raw_inputs", data_dir=tmpdir
+        )
+        state["stage_outputs"]["assembly"] = {"status": "completed"}
+        stage_tests._set_candidate_refs(state, [str(ref) for ref in candidate_refs])
+        from app.stages.assembly_review.nodes import (
+            evaluate_review_rules,
+            human_review_gate,
+            plan_review_metrics,
+            resolve_candidates,
         )
 
-        selected_refs = [str(bundle_path)]
-        for i in range(extra_candidate_count):
-            alternative_bundle = (
-                Path(tmpdir) / f"flye_alternative_{i + 1}_candidate.json"
-            )
-            alternative_bundle.write_text(
-                json.dumps(
-                    {
-                        "session_id": session_id,
-                        "candidate_id": (
-                            f"{session_id}:assembly.candidate.flye:alternative_{i + 1}"
-                        ),
-                        "method_name": "assembly.candidate.flye",
-                        "status": "executed",
-                        "artifact_type": "draft_assembly.candidate",
-                        "input_ref": str(fofn),
-                        "input_type": "long_reads.fofn",
-                        "expected_outputs": {
-                            "draft_assembly_fasta": str(assembly_fasta)
-                        },
-                        "logs": {},
-                        "metadata": {"alternative_index": i + 1},
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            selected_refs.append(str(alternative_bundle))
-
-        state = initial_state(
-            session_id=session_id,
-            input_manifest_ref="control/manifest.yaml",
-            data_dir=str(v2_run_dir(tmpdir, session_id)),
-        )
-        state["stage_outputs"] = {
-            "assembly": {
-                "status": "completed",
-                "input_ref": str(fofn),
-                "input_type": "long_reads.fofn",
-                "selected_candidate_refs": selected_refs,
-                "flye_parameters": {
-                    "read_type": "nano-raw",
-                    "estimated_genome_size": 100000000,
-                    "threads": 4,
-                },
-            },
-            "assembly_review": {
-                "status": "blocked_human",
-                "execution_mode": "local",
-                "env": {},
-                "quast_parameters": {"threads": 1},
-                "busco_parameters": {},
-                "candidates": [
-                    {
-                        "candidate_id": candidate_id,
-                        "method_name": "assembly.candidate.flye",
-                        "source": "assembly_stage",
-                        "bundle_ref": str(bundle_path),
-                        "final_assembly_ref": str(assembly_fasta),
-                    }
-                ],
-            },
-        }
-        state["resource_refs"]["assembly"] = ResourceRef(
-            resource_type="assembly",
-            paths=[str(assembly_fasta)],
-            source_stage="assembly",
-            metadata={"candidate_bundle_refs": selected_refs},
-        ).to_dict()
+        state.update(resolve_candidates(state))
+        state.update(plan_review_metrics(state))
+        state.update(evaluate_review_rules(state))
         if not persist_request:
             return state
-        blocked = human_review_gate(state)
-        return {**state, **blocked}
+        return {**state, **human_review_gate(state)}
 
     @staticmethod
     def _review_binding(state: dict) -> dict:
@@ -1667,7 +1634,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
             "review_request_hash": state["active_interrupt"]["request_hash"],
         }
 
-    def test_legacy_rerun_request_fails_closed_even_with_complete_metadata(self):
+    def test_unsupported_review_decision_fails_closed(self):
         from app.control.lifecycle import ResumeValidationError
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (
@@ -1679,60 +1646,18 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
             request = ResumeReviewRequest(
                 session_id=state["session_id"],
                 stage="assembly_review",
-                decision="rerun",
+                decision="invalid",
                 candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0][
                     "candidate_id"
                 ],
-                metadata={
-                    "rerun_parameters": {
-                        "read_type": "nano-raw",
-                        "estimated_genome_size": 200000000,
-                        "threads": 2,
-                    }
-                },
                 **self._review_binding(state),
             )
 
             with self.assertRaisesRegex(
                 ResumeValidationError,
-                "unsupported assembly_review decision: rerun",
+                "unsupported assembly_review decision: invalid",
             ):
                 apply_assembly_review_resume_decision(state, request)
-
-    def test_stage_has_no_direct_flye_rerun_node(self):
-        node_names = set(build_stage().get_graph().nodes)
-        self.assertNotIn("flye_rerun", node_names)
-
-    def test_legacy_flye_rerun_state_fails_closed(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._build_blocked_state(tmpdir, persist_request=False)
-            state["stage_outputs"]["assembly"]["status"] = "flye_rerun_planned"
-            result = build_stage().invoke(state)
-
-        self.assertEqual(result["supervision_state"], "failed_terminal")
-        self.assertIn(
-            "unsupported legacy Flye rerun lifecycle state or rerun_request",
-            result["last_error"],
-        )
-        self.assertIn("v3 Assembly parameter retry workflow", result["last_error"])
-
-    def test_legacy_rerun_request_field_fails_closed_without_legacy_status(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._build_blocked_state(tmpdir, persist_request=False)
-            state["stage_outputs"]["assembly"]["rerun_request"] = {
-                "parameters": {
-                    "read_type": "nano-raw",
-                    "estimated_genome_size": 200000000,
-                    "threads": 2,
-                }
-            }
-            result = build_stage().invoke(state)
-
-        self.assertEqual(result["supervision_state"], "failed_terminal")
-        self.assertIn(
-            "unsupported legacy Flye rerun lifecycle state or rerun_request",
-            result["last_error"],
-        )
 
     def test_candidate_comparison_replay_reuses_existing_artifact(self):
         """Reuse comparison output when candidates and signals are unchanged."""
@@ -1742,18 +1667,8 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._build_blocked_state(tmpdir, extra_candidate_count=1)
-            candidates = []
-            for ref in state["stage_outputs"]["assembly"]["selected_candidate_refs"]:
-                bundle = json.loads(Path(ref).read_text(encoding="utf-8"))
-                bundle["bundle_ref"] = ref
-                bundle["source"] = "assembly_stage"
-                bundle["final_assembly_ref"] = bundle["expected_outputs"][
-                    "draft_assembly_fasta"
-                ]
-                candidates.append(bundle)
             state["stage_outputs"]["assembly_review"] = {
                 **state["stage_outputs"]["assembly_review"],
-                "candidates": candidates,
                 "signals": [],
             }
 

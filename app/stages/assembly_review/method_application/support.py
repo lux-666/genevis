@@ -74,7 +74,7 @@ def verified_review_candidate(
     verified = load_executed_candidate_bundle(
         absolute_data_dir(state),
         state["session_id"],
-        candidate["bundle_ref"],
+        ArtifactRef.model_validate(candidate["bundle_ref"]),
         expected_method_name=candidate["method_name"],
         expected_candidate_id=candidate["candidate_id"],
     )

@@ -34,6 +34,8 @@ from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.execution import load_t2t_frozen_execution_inputs
 from app.stages.t2t.parameters.storage import (
     read_artifact as read_t2t_parameter_artifact,
+)
+from app.stages.t2t.parameters.storage import (
     write_artifact as write_t2t_parameter_artifact,
 )
 from app.stages.t2t.parameters.workflow import (
@@ -60,11 +62,28 @@ class T2TMotifResolutionTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": True,
+                },
+            ],
         )
+        state["current_stage"] = "t2t"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         read_inputs: list[dict[str, object]] = []
         read_refs: list[dict] = []
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        assembly_source = paths.work_path("inventory", "assembly.fa")
+        assembly_source = paths.workflow_step_work_path(
+            "step-000-inventory", "inventory", "assembly.fa"
+        )
         assembly_source.parent.mkdir(parents=True, exist_ok=True)
         assembly_source.write_text(">contig-1\nTTAGGGTTAGGG\n", encoding="utf-8")
         assembly_artifact = ArtifactMeta.from_file(
@@ -77,7 +96,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
             state["data_dir"], state["session_id"], assembly_artifact
         )
         for index in range(read_count):
-            source = paths.work_path("inventory", f"ont_{index:04d}.fastq")
+            source = paths.workflow_step_work_path(
+                "step-000-inventory", "inventory", f"ont_{index:04d}.fastq"
+            )
             source.parent.mkdir(parents=True, exist_ok=True)
             source.write_text(
                 f"@read-{index}\nTTAGGGTTAGGG\n+\nIIIIIIIIIIII\n",
@@ -111,7 +132,11 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "long_read_refs": [str(item["path"]) for item in read_inputs],
                 "long_read_inputs": read_inputs,
                 "input_assembly_ref": str(published_assembly.path),
-                "work_dir": str(paths.work_path("t2t", "t2t_finishing")),
+                "work_dir": str(
+                    paths.workflow_step_work_path(
+                        "step-001-t2t", "t2t", "t2t_finishing"
+                    )
+                ),
                 "execution_enabled": True,
             }
         }
@@ -581,7 +606,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 }
                 for item in long_read_inputs
             ]
-            registry_source = paths.work_path("inventory", "asset_registry.json")
+            registry_source = paths.workflow_step_work_path(
+                "step-000-inventory", "inventory", "asset_registry.json"
+            )
             registry_source.parent.mkdir(parents=True, exist_ok=True)
             registry_source.write_text(
                 json.dumps(
@@ -1049,8 +1076,8 @@ class T2TMotifResolutionTests(unittest.TestCase):
             ]
             ready_output["execution_enabled"] = False
             ready_output["work_dir"] = str(
-                SessionPaths.from_run_dir(ready["data_dir"]).work_path(
-                    "t2t", "frozen-input-test"
+                SessionPaths.from_run_dir(ready["data_dir"]).workflow_step_work_path(
+                    "step-001-t2t", "t2t", "frozen-input-test"
                 )
             )
             Path(ready_output["work_dir"]).mkdir(parents=True, exist_ok=True)

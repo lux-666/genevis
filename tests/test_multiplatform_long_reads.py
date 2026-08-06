@@ -88,7 +88,20 @@ class MultiplatformLongReadTests(unittest.TestCase):
                 session_id=session_id,
                 input_manifest_ref="control/manifest.yaml",
                 data_dir=str(run_dir),
+                workflow_steps=[
+                    {
+                        "step_id": "step-000-inventory",
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-001-assembly",
+                        "stage": "assembly",
+                        "allow_local_execution": True,
+                    },
+                ],
             )
+            state["entered_workflow_step_index"] = 0
 
             registered = build_inventory_stage().invoke(state)
             registry = json.loads(
@@ -105,7 +118,9 @@ class MultiplatformLongReadTests(unittest.TestCase):
             ]
 
             self.assertEqual(len(registered_long_reads), 4)
-            self.assertEqual(len({record["asset_id"] for record in registry["assets"]}), 8)
+            self.assertEqual(
+                len({record["asset_id"] for record in registry["assets"]}), 8
+            )
             self.assertEqual(
                 [record["platform"] for record in registered_long_reads],
                 ["pacbio_hifi", "pacbio_hifi", "ont", "ont"],
@@ -115,7 +130,7 @@ class MultiplatformLongReadTests(unittest.TestCase):
                 registered["resource_refs"]["long_reads"]["metadata"],
             )
 
-            registered["current_stage"] = "assembly"
+            registered["entered_workflow_step_index"] = 1
             registered["stage_outputs"]["assembly"] = {
                 "assembly_route": "hifi",
                 "assembly_selection": {
@@ -150,14 +165,17 @@ class MultiplatformLongReadTests(unittest.TestCase):
                 [str(path.resolve()) for path in hic_r2],
             )
             self.assertEqual(
-                {role: len(ids) for role, ids in assembly["assembly_input_member_ids"].items()},
+                {
+                    role: len(ids)
+                    for role, ids in assembly["assembly_input_member_ids"].items()
+                },
                 {"primary": 2, "ultralong": 2, "hic_r1": 2, "hic_r2": 2},
             )
 
     def test_t2t_run_config_accepts_each_supported_long_read_platform(self):
         config = RunConfig.model_validate(
             {
-                "local_exec": ["t2t"],
+                "requested_stages": [{"stage": "t2t", "allow_local_execution": True}],
                 "t2t": {
                     "read_inputs": [
                         {"path": "/reads/cyclone.fastq", "platform": "cycloneseq"},
@@ -177,7 +195,9 @@ class MultiplatformLongReadTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RunConfig.model_validate(
                 {
-                    "local_exec": ["t2t"],
+                    "requested_stages": [
+                        {"stage": "t2t", "allow_local_execution": True}
+                    ],
                     "t2t": {
                         "read_inputs": [
                             {

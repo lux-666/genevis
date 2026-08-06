@@ -28,10 +28,13 @@ from app.entrypoints.tui_intake import (
     save_tui_session_draft,
 )
 from app.integrity import sha256_file
-from app.schemas.ask_plan import AskPlanState
+from app.schemas.ask_plan import AskPlanState, PlanStageOccurrence
 from app.schemas.shared_parameters import SharedParameters
-from app.storage.frozen_inputs import freeze_session_inputs
-from app.storage.frozen_inputs import FrozenExecutionActiveError, frozen_execution_lock
+from app.storage.frozen_inputs import (
+    FrozenExecutionActiveError,
+    freeze_session_inputs,
+    frozen_execution_lock,
+)
 from app.storage.paths import SessionPaths
 
 
@@ -420,17 +423,16 @@ class TuiWorkflowTests(unittest.TestCase):
                 request_text="assembly",
                 entry_request={"requested_stages": ["read_qc"]},
                 manifest_ref=str(SessionPaths(data_dir, "s1").manifest_draft_path),
-                selected_stages=["read_qc"],
-                resolved_execution_order=["read_qc"],
+                selected_stage_occurrences=[
+                    PlanStageOccurrence(stage="read_qc", allow_local_execution=True)
+                ],
                 selected_methods={
                     "read_qc": [
                         "read_qc.long_read_stats.seqkit_stats",
                         "read_qc.length_filter.skip",
                     ]
                 },
-                shared_parameters=SharedParameters(
-                    platform="ont", read_type="ont_raw"
-                ),
+                shared_parameters=SharedParameters(platform="ont", read_type="ont_raw"),
                 confirmed=True,
             )
 
@@ -485,8 +487,7 @@ class TuiWorkflowTests(unittest.TestCase):
                 data_dir=str(data_dir),
                 entry_request={},
                 manifest_ref=str(SessionPaths(data_dir, "s1").manifest_draft_path),
-                selected_stages=[],
-                resolved_execution_order=[],
+                selected_stage_occurrences=[],
                 selected_methods={},
                 confirmed=True,
             )
@@ -534,7 +535,11 @@ class TuiWorkflowTests(unittest.TestCase):
             freeze_session_inputs(
                 SessionPaths(data_dir, parent.session_id),
                 manifest_draft=materialize_manifest_draft(parent),
-                run_config_draft={},
+                run_config_draft={
+                    "requested_stages": [
+                        {"stage": "assembly", "allow_local_execution": False}
+                    ]
+                },
             )
         return parent
 

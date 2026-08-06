@@ -14,23 +14,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.entrypoints.review_interactive import run_interactive_review
 from app.entrypoints.run import (
     _build_assembly_selection,
     _execute_verified_frozen_session,
-    _interactive_gate_loop,
     _load_dotenv_without_override,
     _parse_args,
     _resolve_checkpointer_backend,
-    _run,
     _run_inspect,
     _run_resume,
     _run_storage_audit,
     generate_session_id,
 )
 from app.entrypoints.tui import _tui_main, run_tui
-from app.execution.env_resolver import PreflightResult
-from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.base import ReviewPayload
 from app.review.persistence import (
     PersistedReviewRequest,
     load_review_request,
@@ -38,6 +34,7 @@ from app.review.persistence import (
 )
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.run_config import AssemblyRunConfig, RunConfig
+from app.schemas.state import initial_state
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
@@ -84,7 +81,10 @@ def _artifact_ref_json(
 ) -> dict:
     return ArtifactRef(
         artifact_id=f"artifact-{candidate_id}{suffix}",
-        path_ref=f"artifacts/assembly/{candidate_id}{suffix}",
+        path_ref=(
+            "artifacts/steps/step-001-assembly_review/assembly_review/"
+            f"{candidate_id}{suffix}"
+        ),
         sha256="a" * 64,
         size_bytes=10,
         artifact_type=artifact_type,
@@ -108,10 +108,12 @@ def _write_assembly_review_request(
             }
         ],
         decisions_allowed=["accept", "stop_human_review"],
-        auto_decidable=False,
         report_refs={
             "assembly_review_report": "reports/assembly_review.md",
-            "review_packet": "artifacts/assembly_review/assembly_review_packet.json",
+            "review_packet": (
+                "artifacts/steps/step-001-assembly_review/assembly_review/"
+                "assembly_review_packet.json"
+            ),
         },
         candidate_comparison_context={
             "candidate_ids": ["flye"],
@@ -122,6 +124,20 @@ def _write_assembly_review_request(
         "session_id": session_id,
         "data_dir": str(run_dir),
         "input_manifest_ref": paths.to_ref(paths.manifest_path),
+        "current_stage": "assembly_review",
+        "workflow_steps": [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-001-assembly_review",
+                "stage": "assembly_review",
+                "allow_local_execution": False,
+            }
+        ],
+        "workflow_step_index": 1,
     }
     persisted = persist_review_request(
         state,
@@ -169,118 +185,6 @@ def _load_assembly_review_request(
         }
     )
     return run_dir, ref, load_review_request(run_dir, ref, session_id=session_id)
-
-
-def _add_gene_method_bins(bin_dir: Path) -> Path:
-    """Add fake augustus + gffread binaries so a gene candidate can materialize."""
-    augustus = bin_dir / "augustus"
-    augustus.write_text(
-        "#!/bin/sh\n"
-        "printf '##gff-version 3\\n"
-        "ctg1\\tAUGUSTUS\\tgene\\t1\\t6\\t.\\t+\\t.\\tID=g1\\n'\n",
-        encoding="utf-8",
-    )
-    augustus.chmod(0o755)
-    gffread = bin_dir / "gffread"
-    gffread.write_text(
-        "#!/bin/sh\n"
-        'prot=""; cds=""\n'
-        "while [ $# -gt 0 ]; do\n"
-        '  case "$1" in\n'
-        '    -y) prot="$2"; shift 2;;\n'
-        '    -x) cds="$2"; shift 2;;\n'
-        "    -g) shift 2;;\n"
-        "    *) shift;;\n"
-        "  esac\n"
-        "done\n"
-        '[ -n "$prot" ] && printf \'>g1\\nMKT\\n\' > "$prot"\n'
-        '[ -n "$cds" ] && printf \'>g1\\nATGAAAACC\\n\' > "$cds"\n',
-        encoding="utf-8",
-    )
-    gffread.chmod(0o755)
-    return bin_dir
-
-
-def _assert_existing_assembly_blocks_at_review(
-    test: unittest.TestCase,
-    *,
-    code: int,
-    stdout: str,
-    stderr: str,
-    data_dir: Path,
-    session_id: str,
-) -> None:
-    test.assertEqual(code, 0)
-    test.assertEqual(stderr, "")
-    test.assertIn("current_stage: assembly_review", stdout)
-    test.assertIn("supervision_state: blocked_human", stdout)
-    test.assertIn("checkpoint_persistence: sqlite", stdout)
-    test.assertIn(
-        "resume_note: workflow is safely blocked; continue with one command below",
-        stdout,
-    )
-    test.assertIn("inspect_command: gene-agent inspect", stdout)
-    test.assertIn("review_command: gene-agent review", stdout)
-    test.assertIn("resume_command: gene-agent resume", stdout)
-    run_dir, _request_ref, request_record = _load_assembly_review_request(
-        data_dir, session_id
-    )
-    blocked_report = run_dir / "reports" / "current_status.json"
-    test.assertTrue(blocked_report.exists())
-
-    test.assertEqual(request_record["stage"], "assembly_review")
-    request = request_record["payload"]
-    test.assertIn(":registered_assembly:", request["candidates"][0]["candidate_id"])
-    test.assertIsInstance(request["candidates"][0]["primary_output_ref"], dict)
-    test.assertFalse(request["auto_decidable"])
-
-    report = json.loads(blocked_report.read_text(encoding="utf-8"))
-    test.assertEqual(report["current_stage"], "assembly_review")
-    test.assertEqual(report["supervision_state"], "blocked_human")
-    test.assertEqual(report["next_action"]["kind"], "review_decision_required")
-
-    artifact_types = _artifact_types(data_dir, session_id)
-    test.assertIn("assembly_review.request", artifact_types)
-    test.assertIn("assembly_review.review_packet", artifact_types)
-    test.assertNotIn("operator_report.blocked_human", artifact_types)
-    test.assertTrue((run_dir / "reports" / "assembly_review.md").exists())
-
-    events_path = run_dir / "ledger" / "events.jsonl"
-    events = [
-        json.loads(line)
-        for line in events_path.read_text(encoding="utf-8").splitlines()
-    ]
-    test.assertTrue(any(event["event_type"] == "review_requested" for event in events))
-    test.assertFalse(any(event["event_type"] == "review_decision" for event in events))
-
-
-def _write_accept_existing_assembly_decision(
-    data_dir: Path, session_id: str, path: Path
-) -> Path:
-    run_dir, request_ref, request_record = _load_assembly_review_request(
-        data_dir, session_id
-    )
-    request = request_record["payload"]
-    candidate = request["candidates"][0]
-    decision_path = run_dir / "control" / path.name
-    decision_path.write_text(
-        json.dumps(
-            {
-                "session_id": session_id,
-                "stage": request_record["stage"],
-                "gate_id": request_record["gate_id"],
-                "review_request_id": request_record["review_request_id"],
-                "review_request_hash": request_ref.sha256,
-                "decision": "accept",
-                "candidate_id": candidate["candidate_id"],
-                "rejected_candidates": [],
-                "notes": ["accepted existing assembly for downstream E2E"],
-                "decided_by": "human",
-            }
-        ),
-        encoding="utf-8",
-    )
-    return decision_path
 
 
 class EntrypointTests(unittest.TestCase):
@@ -383,7 +287,9 @@ class EntrypointTests(unittest.TestCase):
             ensure_run_layout(paths)
             report = paths.report_path("session_summary.json")
             report.write_text("{}\n", encoding="utf-8")
-            work = paths.work_path("assembly", "resume-required.txt")
+            work = paths.workflow_step_work_path(
+                "step-001-assembly", "assembly", "resume-required.txt"
+            )
             work.parent.mkdir(parents=True, exist_ok=True)
             work.write_text("keep\n", encoding="utf-8")
             args = _parse_args(
@@ -533,7 +439,6 @@ class EntrypointTests(unittest.TestCase):
                 reason="needs_review",
                 review_request_artifact_ref=persisted.request_ref,
                 review_request_id=persisted.review_request_id,
-                auto_decidable=False,
             )
             code, stdout, stderr = _capture_cli(
                 _run_inspect,
@@ -560,7 +465,6 @@ class EntrypointTests(unittest.TestCase):
                 reason="needs_review",
                 review_request_artifact_ref=persisted.request_ref,
                 review_request_id=persisted.review_request_id,
-                auto_decidable=False,
             )
             template_path = Path(tmp) / "decision.json"
             code, stdout, stderr = _capture_cli(
@@ -613,7 +517,6 @@ class EntrypointTests(unittest.TestCase):
                 reason="needs_review",
                 review_request_artifact_ref=persisted.request_ref,
                 review_request_id=persisted.review_request_id,
-                auto_decidable=False,
             )
             code, stdout, stderr = _capture_cli(
                 _run_inspect,
@@ -710,7 +613,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
             )
 
             def fake_initial_state(**kwargs):
-                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+                return dict(kwargs, stage_outputs={})
 
             with (
                 patch("app.entrypoints.run.Ledger"),
@@ -739,18 +642,10 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
         run_config = RunConfig.model_validate(
             {
                 "requested_stages": [
-                    "read_qc",
-                    "genome_survey",
-                    "assembly",
-                    "assembly_review",
-                    "repeat_annotation",
-                    "gene_annotation",
-                ],
-                "local_exec": [
-                    "read_qc",
-                    "assembly",
-                    "assembly_review",
-                    "repeat_annotation",
+                    {"stage": "read_qc", "allow_local_execution": True},
+                    {"stage": "genome_survey", "allow_local_execution": False},
+                    {"stage": "assembly", "allow_local_execution": True},
+                    {"stage": "assembly_review", "allow_local_execution": True},
                 ],
                 "shared_parameters": {"read_type": "ont_raw"},
                 "read_qc": {
@@ -772,12 +667,6 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     "quast": {"threads": 2},
                     "related_species_reference_dir": "/ref/ncbi_metazoa",
                 },
-                "gene_annotation": {
-                    "lineage_or_species_hints": {
-                        "busco_lineage": "/db/busco/actinopterygii_odb10",
-                        "augustus_species_model": "zebrafish",
-                    }
-                },
             }
         )
 
@@ -786,47 +675,37 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         self.assertEqual(state["shared_parameters"], {"read_type": "ont_raw"})
-        stage_outputs = state["stage_outputs"]
+        stage_seeds = state["stage_seeds"]
         for stage in (
             "read_qc",
             "assembly",
             "assembly_review",
-            "repeat_annotation",
         ):
-            self.assertEqual(stage_outputs[stage]["execution_mode"], "local")
+            self.assertNotIn("execution_mode", stage_seeds[stage])
         self.assertEqual(
-            stage_outputs["read_qc"]["length_filter_request"]["method"],
+            stage_seeds["read_qc"]["length_filter_request"]["method"],
             "read_qc.length_filter.seqkit_seq",
         )
         self.assertEqual(
-            stage_outputs["genome_survey"]["survey_parameters"]["kmer_size"],
+            stage_seeds["genome_survey"]["survey_parameters"]["kmer_size"],
             21,
         )
-        self.assertEqual(stage_outputs["assembly"]["flye_parameters"], {"threads": 4})
+        self.assertEqual(stage_seeds["assembly"]["flye_parameters"], {"threads": 4})
         self.assertEqual(
-            stage_outputs["assembly"]["assembly_selection"]["primary_method"],
+            stage_seeds["assembly"]["assembly_selection"]["primary_method"],
             "assembly.candidate.flye",
         )
         self.assertEqual(
-            stage_outputs["assembly_review"]["quast_parameters"],
+            stage_seeds["assembly_review"]["quast_parameters"],
             {"threads": 2},
-        )
-        self.assertEqual(
-            stage_outputs["repeat_annotation"]["primary_method"],
-            "repeat_annotation.masking.repeatmasker",
-        )
-        self.assertEqual(
-            stage_outputs["gene_annotation"]["lineage_or_species_hints"][
-                "augustus_species_model"
-            ],
-            "zebrafish",
         )
 
     def test_frozen_executor_seeds_hifiasm_ont_selection(self):
         run_config = RunConfig.model_validate(
             {
-                "requested_stages": ["assembly"],
-                "local_exec": ["assembly"],
+                "requested_stages": [
+                    {"stage": "assembly", "allow_local_execution": True}
+                ],
                 "shared_parameters": {"platform": "ont"},
                 "assembly": {
                     "assembly_method": "hifiasm_ont",
@@ -839,7 +718,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
-        assembly = state["stage_outputs"]["assembly"]
+        assembly = state["stage_seeds"]["assembly"]
         self.assertEqual(
             assembly["assembly_selection"]["primary_method"],
             "assembly.candidate.hifiasm_ont",
@@ -850,8 +729,9 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
     def test_frozen_executor_rejects_explicit_method_without_read_type(self):
         run_config = RunConfig.model_validate(
             {
-                "requested_stages": ["assembly"],
-                "local_exec": ["assembly"],
+                "requested_stages": [
+                    {"stage": "assembly", "allow_local_execution": True}
+                ],
                 "assembly": {
                     "assembly_method": "hifiasm_ont",
                     "hifiasm_ont_parameters": {"threads": 4},
@@ -881,846 +761,6 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
             stderr,
         )
         build_graph.assert_not_called()
-
-
-class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
-    def _fake_repeatmasker_bin(self, root: Path, *, fail: bool = False) -> Path:
-        bin_dir = root / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        script = bin_dir / "RepeatMasker"
-        script.write_text(
-            "#!/usr/bin/env python3\n"
-            "import pathlib\n"
-            "import sys\n"
-            "if " + repr(fail) + ":\n"
-            "    print('fake RepeatMasker failed', file=sys.stderr)\n"
-            "    sys.exit(9)\n"
-            "assembly = pathlib.Path(sys.argv[-1])\n"
-            "assembly.with_name(assembly.name + '.masked').write_text("
-            "'>ctg1\\nacgtacgt\\n', encoding='utf-8')\n"
-            "assembly.with_name(assembly.name + '.out.gff').write_text("
-            "'##gff-version 3\\n"
-            "ctg1\\tRepeatMasker\\trepeat_region\\t1\\t8\\t.\\t+\\t.\\t"
-            "ID=repeat1\\n', encoding='utf-8')\n"
-            "print('fake RepeatMasker ok')\n",
-            encoding="utf-8",
-        )
-        script.chmod(0o755)
-        return bin_dir
-
-    def _write_existing_assembly_inputs(
-        self, root: Path, *, session_id: str = "phase5-e2e"
-    ) -> tuple[Path, Path, Path]:
-        assembly = root / "existing_assembly.fa"
-        library = root / "trusted_repeats.fa"
-        assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
-        library.write_text(">repeat1\nACAC\n", encoding="utf-8")
-        manifest = root / "manifest.yaml"
-        manifest.write_text(
-            "\n".join(
-                [
-                    f"session_id: {session_id}",
-                    "sample_id: test-sample",
-                    "assets:",
-                    "  - asset_type: assembly_fasta_registered",
-                    f"    paths: [{assembly}]",
-                    "  - asset_type: repeat_library",
-                    f"    paths: [{library}]",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        run_config = root / "run_config.json"
-        run_config.write_text(
-            json.dumps(
-                {
-                    "local_exec": ["repeat_annotation"],
-                    "requested_stages": [
-                        "assembly_review",
-                        "repeat_annotation",
-                        "gene_annotation",
-                        "function_annotation",
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return manifest, run_config, root / "out"
-
-    def _run_args(
-        self,
-        *,
-        session_id: str,
-        manifest: Path,
-        run_config: Path,
-        data_dir: Path,
-    ) -> argparse.Namespace:
-        self.assertIn(
-            f"session_id: {session_id}",
-            manifest.read_text(encoding="utf-8"),
-        )
-        return argparse.Namespace(
-            manifest=str(manifest),
-            run_config=str(run_config),
-            data_dir=str(data_dir),
-            non_interactive=True,
-        )
-
-    def test_existing_assembly_repeatmasker_backbone_blocks_at_assembly_review_gate(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase5-e2e"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
-                root, session_id=session_id
-            )
-            bin_dir = self._fake_repeatmasker_bin(root)
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            with (
-                patch.dict(
-                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-                ),
-                patch(
-                    "app.stages.repeat_annotation.nodes.resolve_method_env",
-                    return_value=(None, [], None),
-                ),
-            ):
-                code, stdout, stderr = _capture_cli(_run, args)
-
-            _assert_existing_assembly_blocks_at_review(
-                self,
-                code=code,
-                stdout=stdout,
-                stderr=stderr,
-                data_dir=data_dir,
-                session_id=session_id,
-            )
-
-            run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = (
-                run_dir
-                / "artifacts"
-                / "repeat_annotation"
-                / "repeat_annotation_bundle.json"
-            )
-            gene_bundle = (
-                run_dir
-                / "artifacts"
-                / "gene_annotation"
-                / "gene_annotation_bundle.json"
-            )
-            function_bundle = (
-                run_dir
-                / "artifacts"
-                / "function_annotation"
-                / "function_annotation_bundle.json"
-            )
-            self.assertFalse(repeat_bundle.exists())
-            self.assertFalse(gene_bundle.exists())
-            self.assertFalse(function_bundle.exists())
-
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertNotIn("repeat_annotation.softmasked_genome", artifact_types)
-            self.assertNotIn("repeat_annotation.gff3", artifact_types)
-            self.assertNotIn("gene_annotation.bundle", artifact_types)
-            self.assertNotIn("operator_report.failed_terminal", artifact_types)
-
-    def test_repeatmasker_backbone_resumes_to_function_provenance_gate(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase5-e2e-resume"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
-                root, session_id=session_id
-            )
-            bin_dir = self._fake_repeatmasker_bin(root)
-            _add_gene_method_bins(bin_dir)
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            with (
-                patch.dict(
-                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-                ),
-                patch(
-                    "app.stages.repeat_annotation.nodes.resolve_method_env",
-                    return_value=(None, [], None),
-                ),
-                patch(
-                    "app.stages.gene_annotation.nodes.resolve_method_env",
-                    return_value=(None, [], None),
-                ),
-                patch(
-                    "app.stages.gene_annotation.nodes._lineage_or_species_hints",
-                    return_value={"augustus_species_model": "test_species"},
-                ),
-            ):
-                code, stdout, stderr = _capture_cli(_run, args)
-
-                _assert_existing_assembly_blocks_at_review(
-                    self,
-                    code=code,
-                    stdout=stdout,
-                    stderr=stderr,
-                    data_dir=data_dir,
-                    session_id=session_id,
-                )
-
-                decision = _write_accept_existing_assembly_decision(
-                    data_dir, session_id, root / "decision.json"
-                )
-                resume_code, resume_stdout, resume_stderr = _capture_cli(
-                    _run_resume,
-                    argparse.Namespace(
-                        session_id=session_id,
-                        decision_file=str(decision),
-                        data_dir=str(data_dir),
-                        checkpointer="sqlite",
-                        max_blocked_seconds=None,
-                    ),
-                )
-
-            self.assertEqual(resume_code, 1)
-            self.assertIn("current_stage: function_annotation", resume_stdout)
-            self.assertIn("supervision_state: failed_terminal", resume_stdout)
-            self.assertIn("database_provenance", resume_stderr)
-
-            run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = (
-                run_dir
-                / "artifacts"
-                / "repeat_annotation"
-                / "repeat_annotation_bundle.json"
-            )
-            gene_bundle = (
-                run_dir
-                / "artifacts"
-                / "gene_annotation"
-                / "gene_annotation_bundle.json"
-            )
-            function_bundle = (
-                run_dir
-                / "artifacts"
-                / "function_annotation"
-                / "function_annotation_bundle.json"
-            )
-            self.assertTrue(repeat_bundle.exists())
-            self.assertTrue(gene_bundle.exists())
-            self.assertFalse(function_bundle.exists())
-
-            repeat = json.loads(repeat_bundle.read_text(encoding="utf-8"))
-            gene = json.loads(gene_bundle.read_text(encoding="utf-8"))
-            self.assertEqual(repeat["status"], "executed")
-            self.assertEqual(gene["genome_input_ref"], repeat["softmasked_genome_ref"])
-
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
-            self.assertIn("repeat_annotation.gff3", artifact_types)
-            self.assertIn("gene_annotation.bundle", artifact_types)
-            self.assertNotIn("operator_report.failed_terminal", artifact_types)
-            self.assertTrue((run_dir / "reports" / "current_status.json").exists())
-
-    def test_existing_assembly_interactive_review_reports_missing_function_provenance(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase6-intake-sqlite-smoke"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
-                root, session_id=session_id
-            )
-            bin_dir = self._fake_repeatmasker_bin(root)
-            _add_gene_method_bins(bin_dir)
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            with (
-                patch.dict(
-                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-                ),
-                patch(
-                    "app.stages.repeat_annotation.nodes.resolve_method_env",
-                    return_value=(None, [], None),
-                ),
-                patch(
-                    "app.stages.gene_annotation.nodes.resolve_method_env",
-                    return_value=(None, [], None),
-                ),
-                patch(
-                    "app.stages.gene_annotation.nodes._lineage_or_species_hints",
-                    return_value={"augustus_species_model": "test_species"},
-                ),
-            ):
-                code, stdout, stderr = _capture_cli(_run, args)
-                _assert_existing_assembly_blocks_at_review(
-                    self,
-                    code=code,
-                    stdout=stdout,
-                    stderr=stderr,
-                    data_dir=data_dir,
-                    session_id=session_id,
-                )
-
-                inputs = iter(["accept", "", "y"])
-                with (
-                    patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                    patch(
-                        "builtins.input",
-                        side_effect=lambda _: next(inputs),
-                    ),
-                ):
-                    review_code, review_stdout, review_stderr = _capture_cli(
-                        run_interactive_review,
-                        session_id,
-                        str(data_dir),
-                    )
-
-            self.assertEqual(review_code, 1)
-            self.assertNotIn("annotation_intake_plan:", review_stdout)
-            self.assertIn("resume annotation_intake failed", review_stderr)
-            self.assertIn("database_provenance", review_stderr)
-
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertNotIn("annotation.intake_plan", artifact_types)
-
-            events = Ledger(SessionPaths(data_dir, session_id).run_dir).read_events(
-                session_id
-            )
-            failed = [
-                event for event in events if event["event_type"] == "resume_failed"
-            ]
-            self.assertEqual(len(failed), 1)
-            self.assertEqual(failed[0]["phase"], "annotation_intake")
-            self.assertFalse(
-                any(
-                    event["event_type"] == "annotation_intake_planned"
-                    for event in events
-                )
-            )
-
-    def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase5-preflight-block"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
-                root, session_id=session_id
-            )
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            with patch(
-                "app.execution.env_dispatch.preflight",
-                return_value=PreflightResult(
-                    status="missing_tool",
-                    env_target="env_geno_exec",
-                    missing_tools=["RepeatMasker"],
-                    detail="missing tools in env_geno_exec: RepeatMasker",
-                ),
-            ) as preflight:
-                code, stdout, stderr = _capture_cli(_run, args)
-
-            _assert_existing_assembly_blocks_at_review(
-                self,
-                code=code,
-                stdout=stdout,
-                stderr=stderr,
-                data_dir=data_dir,
-                session_id=session_id,
-            )
-            preflight.assert_not_called()
-
-            run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_work = run_dir / "work" / "repeat_annotation" / "repeatmasker"
-            gene_bundle = (
-                run_dir
-                / "artifacts"
-                / "gene_annotation"
-                / "gene_annotation_bundle.json"
-            )
-            self.assertFalse(repeat_work.exists())
-            self.assertFalse(gene_bundle.exists())
-            events_path = run_dir / "ledger" / "events.jsonl"
-            events = [
-                json.loads(line)
-                for line in events_path.read_text(encoding="utf-8").splitlines()
-            ]
-            blocks = [
-                event
-                for event in events
-                if event["event_type"] == "env_preflight_blocked"
-            ]
-            self.assertEqual(blocks, [])
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertNotIn("operator_report.failed_terminal", artifact_types)
-
-    def test_repeatmasker_failure_stops_before_gene_annotation_bundle(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase5-repeatmasker-fails"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
-                root, session_id=session_id
-            )
-            bin_dir = self._fake_repeatmasker_bin(root, fail=True)
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            with (
-                patch.dict(
-                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-                ),
-                patch(
-                    "app.stages.repeat_annotation.nodes.resolve_method_env",
-                    return_value=(None, [], None),
-                ),
-            ):
-                code, stdout, stderr = _capture_cli(_run, args)
-
-            _assert_existing_assembly_blocks_at_review(
-                self,
-                code=code,
-                stdout=stdout,
-                stderr=stderr,
-                data_dir=data_dir,
-                session_id=session_id,
-            )
-            run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = (
-                run_dir
-                / "artifacts"
-                / "repeat_annotation"
-                / "repeat_annotation_bundle.json"
-            )
-            gene_bundle = (
-                run_dir
-                / "artifacts"
-                / "gene_annotation"
-                / "gene_annotation_bundle.json"
-            )
-            self.assertFalse(repeat_bundle.exists())
-            self.assertFalse(gene_bundle.exists())
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertNotIn("command.stderr", artifact_types)
-
-
-class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
-    def _write_provided_annotation_inputs(
-        self,
-        root: Path,
-        *,
-        session_id: str = "phase5-provided-ann-e2e",
-        include_provenance: bool = False,
-    ) -> tuple[Path, Path, Path]:
-        assembly = root / "existing_assembly.fa"
-        gene_models = root / "gene_models.gff3"
-        proteins = root / "predicted_proteins.fasta"
-        transcripts = root / "transcripts.fa"
-        database_fasta = root / "uniprot.fasta"
-        assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
-        gene_models.write_text(
-            "##gff-version 3\nctg1\tprediction\tgene\t1\t8\t.\t+\t.\tID=gene1\n",
-            encoding="utf-8",
-        )
-        proteins.write_text(">prot1\nMACGT\n", encoding="utf-8")
-        transcripts.write_text(">tx1\nACGTACGT\n", encoding="utf-8")
-        database_fasta.write_text(">sp|P12345\nMACGT\n", encoding="utf-8")
-        manifest = root / "manifest.yaml"
-        manifest.write_text(
-            "\n".join(
-                [
-                    f"session_id: {session_id}",
-                    "sample_id: test-sample",
-                    "assets:",
-                    "  - asset_type: assembly_fasta_registered",
-                    f"    paths: [{assembly}]",
-                    "  - asset_type: gene_models",
-                    f"    paths: [{gene_models}]",
-                    "  - asset_type: predicted_proteins",
-                    f"    paths: [{proteins}]",
-                    "  - asset_type: transcripts_fasta",
-                    f"    paths: [{transcripts}]",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        run_config = root / "run_config.json"
-        run_config_payload = {
-            "local_exec": [],
-            "requested_stages": [
-                "assembly_review",
-                "repeat_annotation",
-                "gene_annotation",
-                "function_annotation",
-            ],
-        }
-        if include_provenance:
-            run_config_payload["function_annotation"] = {
-                "database_provenance": [
-                    {
-                        "method_name": "function_annotation.candidate.diamond",
-                        "database_name": "UniProt",
-                        "database_version": "2026_02",
-                        "snapshot_date": "2026-05-25",
-                        "database_source_ref": str(database_fasta),
-                        "descriptor_version": "diamond.yaml",
-                        "input_proteins_ref": str(proteins),
-                    }
-                ]
-            }
-        run_config.write_text(json.dumps(run_config_payload), encoding="utf-8")
-        return manifest, run_config, root / "out"
-
-    def _run_args(
-        self,
-        *,
-        session_id: str,
-        manifest: Path,
-        run_config: Path,
-        data_dir: Path,
-    ) -> argparse.Namespace:
-        self.assertIn(
-            f"session_id: {session_id}",
-            manifest.read_text(encoding="utf-8"),
-        )
-        return argparse.Namespace(
-            manifest=str(manifest),
-            run_config=str(run_config),
-            data_dir=str(data_dir),
-            non_interactive=True,
-        )
-
-    def test_existing_assembly_provided_annotation_blocks_at_assembly_review_gate(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase5-provided-ann-e2e"
-            manifest, run_config, data_dir = self._write_provided_annotation_inputs(
-                root, session_id=session_id
-            )
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            code, stdout, stderr = _capture_cli(_run, args)
-
-            _assert_existing_assembly_blocks_at_review(
-                self,
-                code=code,
-                stdout=stdout,
-                stderr=stderr,
-                data_dir=data_dir,
-                session_id=session_id,
-            )
-
-            run_dir = SessionPaths(data_dir, session_id).run_dir
-            gene_bundle_path = (
-                run_dir
-                / "artifacts"
-                / "gene_annotation"
-                / "gene_annotation_bundle.json"
-            )
-            function_bundle_path = (
-                run_dir
-                / "artifacts"
-                / "function_annotation"
-                / "function_annotation_bundle.json"
-            )
-            self.assertFalse(gene_bundle_path.exists())
-            self.assertFalse(function_bundle_path.exists())
-
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertNotIn("gene_annotation.provided_gene_models", artifact_types)
-            self.assertNotIn(
-                "gene_annotation.provided_predicted_proteins", artifact_types
-            )
-            self.assertNotIn(
-                "gene_annotation.provided_transcripts_fasta", artifact_types
-            )
-            self.assertNotIn("gene_annotation.bundle", artifact_types)
-            self.assertNotIn("operator_report.failed_terminal", artifact_types)
-
-    def test_provided_annotation_still_blocks_at_assembly_review_gate(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase5-function-provenance-e2e"
-            manifest, run_config, data_dir = self._write_provided_annotation_inputs(
-                root,
-                session_id=session_id,
-                include_provenance=True,
-            )
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            code, stdout, stderr = _capture_cli(_run, args)
-
-            _assert_existing_assembly_blocks_at_review(
-                self,
-                code=code,
-                stdout=stdout,
-                stderr=stderr,
-                data_dir=data_dir,
-                session_id=session_id,
-            )
-
-            run_dir = SessionPaths(data_dir, session_id).run_dir
-            function_bundle_path = (
-                run_dir
-                / "artifacts"
-                / "function_annotation"
-                / "function_annotation_bundle.json"
-            )
-            final_report_path = run_dir / "reports" / "session_summary.json"
-            self.assertFalse(function_bundle_path.exists())
-            self.assertFalse(final_report_path.exists())
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertNotIn("function_annotation.plan", artifact_types)
-            self.assertNotIn("function_annotation.bundle", artifact_types)
-            self.assertNotIn("final_report.review_decisions", artifact_types)
-
-            events_path = (
-                SessionPaths(data_dir, session_id).run_dir / "ledger" / "events.jsonl"
-            )
-            artifact_events = [
-                json.loads(line)["artifact"]["artifact_type"]
-                for line in events_path.read_text(encoding="utf-8").splitlines()
-                if json.loads(line)["event_type"] == "artifact_registered"
-            ]
-            self.assertNotIn("function_annotation.plan", artifact_events)
-            self.assertNotIn("function_annotation.bundle", artifact_events)
-            self.assertNotIn("final_report.review_decisions", artifact_events)
-
-    def test_provided_annotation_with_provenance_resumes_and_completes(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_id = "phase5-function-provenance-resume"
-            manifest, run_config, data_dir = self._write_provided_annotation_inputs(
-                root,
-                session_id=session_id,
-                include_provenance=True,
-            )
-            args = self._run_args(
-                session_id=session_id,
-                manifest=manifest,
-                run_config=run_config,
-                data_dir=data_dir,
-            )
-
-            code, stdout, stderr = _capture_cli(_run, args)
-            _assert_existing_assembly_blocks_at_review(
-                self,
-                code=code,
-                stdout=stdout,
-                stderr=stderr,
-                data_dir=data_dir,
-                session_id=session_id,
-            )
-
-            decision = _write_accept_existing_assembly_decision(
-                data_dir, session_id, root / "decision.json"
-            )
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            fake_diamond = fake_bin / "diamond"
-            fake_diamond.write_text(
-                "#!/bin/sh\n"
-                "out=''\n"
-                "while [ $# -gt 0 ]; do\n"
-                '  if [ "$1" = \'--out\' ]; then out="$2"; shift 2; continue; fi\n'
-                "  shift\n"
-                "done\n"
-                'if [ -n "$out" ]; then\n'
-                "  printf 'prot1\\tsp|P12345\\t100.0\\t5\\t0\\t0\\t"
-                '1\\t5\\t1\\t5\\t0.0\\t10\\n\' > "$out"\n'
-                "fi\n",
-                encoding="utf-8",
-            )
-            fake_diamond.chmod(0o755)
-            fake_path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
-            with (
-                patch(
-                    "app.stages.function_annotation.nodes.resolve_method_env",
-                    return_value=(None, [], None),
-                ),
-                patch.dict(os.environ, {"PATH": fake_path}),
-            ):
-                resume_code, resume_stdout, resume_stderr = _capture_cli(
-                    _run_resume,
-                    argparse.Namespace(
-                        session_id=session_id,
-                        decision_file=str(decision),
-                        data_dir=str(data_dir),
-                        checkpointer="sqlite",
-                        max_blocked_seconds=None,
-                    ),
-                )
-
-            self.assertEqual(resume_code, 0, resume_stderr)
-            self.assertIn("current_stage: done", resume_stdout)
-            self.assertIn("supervision_state: completed", resume_stdout)
-
-            proteins_file = root / "predicted_proteins.fasta"
-            run_dir = SessionPaths(data_dir, session_id).run_dir
-            function_bundle_path = (
-                run_dir
-                / "artifacts"
-                / "function_annotation"
-                / "function_annotation_bundle.json"
-            )
-            final_report_path = run_dir / "reports" / "session_summary.json"
-            self.assertTrue(function_bundle_path.exists())
-            self.assertTrue(final_report_path.exists())
-
-            bundle = json.loads(function_bundle_path.read_text(encoding="utf-8"))
-            canonical_proteins = str(proteins_file.resolve())
-            self.assertEqual(bundle["proteins_fasta_ref"], canonical_proteins)
-            self.assertEqual(
-                bundle["database_provenance"][0]["input_proteins_ref"],
-                canonical_proteins,
-            )
-            self.assertEqual(
-                bundle["database_provenance"][0]["database_source_ref"],
-                str(root / "uniprot.fasta"),
-            )
-
-            artifact_types = _artifact_types(data_dir, session_id)
-            self.assertIn("function_annotation.plan", artifact_types)
-            self.assertIn("function_annotation.bundle", artifact_types)
-            self.assertNotIn("final_report.review_decisions", artifact_types)
-
-
-class InteractiveGateLoopTests(unittest.TestCase):
-    def test_annotation_intake_cancel_does_not_resume_or_write_decision(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            data_root = Path(tmp) / "data"
-            session_id = "s1"
-            run_dir, persisted = _write_assembly_review_request(data_root, session_id)
-            paths = SessionPaths.from_run_dir(run_dir)
-            Ledger(run_dir).create_session(session_id, paths.manifest_path)
-            state = {
-                "session_id": session_id,
-                "data_dir": str(run_dir),
-                "control_state": "running",
-                "supervision_state": "blocked_human",
-                "current_stage": "assembly_review",
-                "requested_stages": ["read_qc", "assembly", "assembly_review"],
-                "input_manifest_ref": paths.to_ref(paths.manifest_path),
-                "active_interrupt": persisted.compact_interrupt(
-                    stage="assembly_review",
-                    gate_id="assembly_review",
-                    reason="needs_review",
-                ),
-                "stage_outputs": {
-                    "assembly_review": {
-                        "status": "blocked_human",
-                        "candidates": [
-                            {
-                                "candidate_id": "flye",
-                                "method_name": "assembly.candidate.flye",
-                                "source": "assembly",
-                                "status": "executed",
-                                "bundle_ref": _artifact_ref_json(
-                                    "flye",
-                                    artifact_type="draft_assembly.candidate",
-                                    suffix=".json",
-                                ),
-                                "primary_output_ref": _artifact_ref_json("flye"),
-                            }
-                        ],
-                        "review_request_artifact_ref": persisted.request_ref.model_dump(
-                            mode="json"
-                        ),
-                    }
-                },
-                "review_notes": [],
-                "route_trace": [],
-                "skip_reasons": {},
-            }
-            graph = _FakeResumeGraph(
-                state, result={"supervision_state": "blocked_human"}
-            )
-            request = ResumeReviewRequest(
-                session_id=session_id,
-                stage="assembly_review",
-                gate_id="assembly_review",
-                review_request_id=persisted.review_request_id,
-                review_request_hash=persisted.request_hash,
-                decision="accept",
-                candidate_id="flye",
-            )
-            raw_decision = request.model_dump(mode="json")
-
-            with (
-                patch(
-                    "app.entrypoints.review_interactive.collect_gate_decision",
-                    return_value=(request, raw_decision),
-                ),
-                patch(
-                    "app.review.annotation_intake.collect_annotation_intake_selection",
-                    side_effect=RuntimeError("annotation intake cancelled"),
-                ) as intake_prompt,
-                patch(
-                    "app.control.resume_transaction.resume_review_state"
-                ) as resume_mock,
-            ):
-                result = _interactive_gate_loop(
-                    graph,
-                    {"configurable": {"thread_id": session_id}},
-                    {"supervision_state": "blocked_human"},
-                    session_id,
-                    str(run_dir),
-                )
-
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            intake_prompt.assert_called_once()
-            resume_mock.assert_not_called()
-            self.assertEqual(graph.updated, [])
-            decision_path = (
-                run_dir
-                / "artifacts"
-                / "reviews"
-                / persisted.review_request_id
-                / "decision.json"
-            )
-            self.assertFalse(decision_path.exists())
-            events = Ledger(run_dir).read_events(session_id)
-            self.assertFalse(
-                any(event["event_type"] == "review_decision" for event in events)
-            )
 
 
 class ResumeCLITests(unittest.TestCase):
@@ -1755,6 +795,20 @@ class ResumeCLITests(unittest.TestCase):
         # Default is None at the parser level; backend resolution falls
         # through to GENE_AGENT_CHECKPOINTER, then DEFAULT_CHECKPOINTER_BACKEND.
         self.assertIsNone(args.checkpointer)
+
+    def test_resume_rejects_removed_max_blocked_seconds_override(self):
+        with self.assertRaises(SystemExit):
+            _parse_args(
+                [
+                    "resume",
+                    "--session-id",
+                    "s1",
+                    "--decision-file",
+                    "decision.json",
+                    "--max-blocked-seconds",
+                    "60",
+                ]
+            )
 
     def test_resume_rejects_memory_backend(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1855,23 +909,39 @@ class ResumeCLITests(unittest.TestCase):
                 review_request_id=persisted.review_request_id,
                 review_request_hash=persisted.request_hash,
             )
-            state = {
-                "session_id": session_id,
-                "data_dir": str(run_dir),
-                "control_state": "running",
-                "supervision_state": "blocked_human",
-                "current_stage": "assembly_review",
-                "input_manifest_ref": paths.to_ref(paths.manifest_path),
-                "active_interrupt": persisted.compact_interrupt(
-                    stage="assembly_review",
-                    gate_id="assembly_review",
-                    reason="needs_review",
-                ),
-                "review_notes": [],
-                "route_trace": [],
-                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
-                "skip_reasons": {},
-            }
+            state = initial_state(
+                session_id=session_id,
+                input_manifest_ref=paths.to_ref(paths.manifest_path),
+                data_dir=str(run_dir),
+                workflow_steps=[
+                    {
+                        "step_id": "step-000-inventory",
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-001-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                    },
+                ],
+            )
+            state.update(
+                {
+                    "supervision_state": "blocked_human",
+                    "current_stage": "assembly_review",
+                    "workflow_step_index": 1,
+                    "entered_workflow_step_index": 1,
+                    "active_interrupt": persisted.compact_interrupt(
+                        stage="assembly_review",
+                        gate_id="assembly_review",
+                        reason="needs_review",
+                    ),
+                    "stage_outputs": {
+                        "assembly_review": {"status": "blocked_human"}
+                    },
+                }
+            )
             graph = _FakeResumeGraph(state)
 
             with (
@@ -1883,10 +953,6 @@ class ResumeCLITests(unittest.TestCase):
                         "supervision_state": "completed",
                     },
                 ),
-                patch(
-                    "app.control.resume_transaction.maybe_collect_annotation_intake",
-                    return_value=None,
-                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_resume,
@@ -1895,7 +961,6 @@ class ResumeCLITests(unittest.TestCase):
                         decision_file=str(decision),
                         data_dir=str(data_root),
                         checkpointer="sqlite",
-                        max_blocked_seconds=None,
                     ),
                 )
 
@@ -1906,100 +971,6 @@ class ResumeCLITests(unittest.TestCase):
                 event for event in events if event["event_type"] == "resume_started"
             ]
             self.assertEqual(started[0]["data_dir"], str(run_dir))
-
-    def test_resume_decision_file_records_recommended_intake_without_prompting(self):
-        # A continue-downstream (assembly_review accept) decision-file resume is
-        # non-interactive but must still record the RECOMMENDED annotation intake
-        # plan that the gene_annotation chain requires at entry. It must not call
-        # the interactive prompt.
-        from app.storage.artifacts import read_artifact_records
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            data_root = root / "data"
-            session_id = "s1"
-            run_dir, persisted = _write_assembly_review_request(data_root, session_id)
-            paths = SessionPaths.from_run_dir(run_dir)
-            paths.checkpoint_db_path.write_text("", encoding="utf-8")
-
-            manifest_ref = paths.manifest_path
-            manifest_ref.write_text(
-                json.dumps(
-                    {
-                        "session_id": session_id,
-                        "assets": [
-                            {
-                                "asset_type": "raw_long_reads",
-                                "paths": [str(root / "reads.fastq")],
-                                "platform": "ont",
-                                "format": "fastq",
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            Ledger(run_dir).create_session(session_id, manifest_ref)
-            decision = self._write_decision(
-                paths.control_dir / "decision.json",
-                gate_id="assembly_review",
-                review_request_id=persisted.review_request_id,
-                review_request_hash=persisted.request_hash,
-            )
-            state = {
-                "session_id": session_id,
-                "data_dir": str(run_dir),
-                "control_state": "running",
-                "input_manifest_ref": paths.to_ref(manifest_ref),
-                "supervision_state": "blocked_human",
-                "current_stage": "assembly_review",
-                "requested_stages": ["read_qc", "assembly", "assembly_review"],
-                "active_interrupt": persisted.compact_interrupt(
-                    stage="assembly_review",
-                    gate_id="assembly_review",
-                    reason="needs_review",
-                ),
-                "review_notes": [],
-                "route_trace": [],
-                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
-                "skip_reasons": {},
-            }
-            graph = _FakeResumeGraph(state)
-
-            with (
-                patch("app.entrypoints.run.build_graph", return_value=graph),
-                patch(
-                    "app.control.resume_transaction.resume_review_state",
-                    return_value={
-                        "current_stage": "done",
-                        "supervision_state": "completed",
-                    },
-                ),
-                patch(
-                    "app.review.annotation_intake.prompt_annotation_intake_plan"
-                ) as intake_prompt,
-            ):
-                code, _stdout, stderr = _capture_cli(
-                    _run_resume,
-                    argparse.Namespace(
-                        session_id=session_id,
-                        decision_file=str(decision),
-                        data_dir=str(data_root),
-                        checkpointer="sqlite",
-                        max_blocked_seconds=None,
-                    ),
-                )
-
-            self.assertEqual(code, 0)
-            self.assertEqual(stderr, "")
-            intake_prompt.assert_not_called()
-            artifact_types = [
-                record["artifact_type"]
-                for record in read_artifact_records(run_dir, session_id)
-            ]
-            self.assertIn("annotation.intake_plan", artifact_types)
-            self.assertEqual(len(graph.updated), 1)
-
 
 class CheckpointerBackendResolutionTests(unittest.TestCase):
     def test_explicit_arg_wins_over_env_var(self):

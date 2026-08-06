@@ -123,7 +123,14 @@ def publish_execution_logs(
     paths = SessionPaths.from_run_dir(data_dir)
     paths.require_session_id(attempt.session_id)
     ensure_run_layout(paths)
-    logs_dir = paths.artifact_path(attempt.stage, "logs")
+    workflow_step_id = (attempt.metadata or {}).get("workflow_step_id")
+    if not isinstance(workflow_step_id, str) or not workflow_step_id:
+        raise ValueError("execution attempt has no workflow_step_id")
+    logs_dir = paths.workflow_step_artifact_path(
+        workflow_step_id,
+        attempt.stage,
+        "logs",
+    )
     safe_attempt_id = "".join(
         char if char.isalnum() or char in {"-", "_"} else "_"
         for char in attempt.attempt_id

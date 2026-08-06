@@ -40,7 +40,10 @@ from tests.test_parameter_persistence_v2 import (
 def _ref(name: str, artifact_type: str) -> ArtifactRef:
     return ArtifactRef(
         artifact_id=f"art_{name[0] * 32}",
-        path_ref=f"artifacts/assembly/parameter_recommendations/{name}.json",
+        path_ref=(
+            "artifacts/steps/step-003-assembly/assembly/"
+            f"parameter_recommendations/{name}.json"
+        ),
         sha256=name[0] * 64,
         size_bytes=1,
         artifact_type=artifact_type,
@@ -145,7 +148,7 @@ class ParameterApprovalGateV3Tests(unittest.TestCase):
                 state,
                 _attempt(
                     1,
-                    task="retry_after_review_failure",
+                    task="retry_after_execution_failure",
                     previous_attempt_id=0,
                     previous_attempt_seal_hash=initial["seal_hash"],
                 ),
@@ -155,7 +158,7 @@ class ParameterApprovalGateV3Tests(unittest.TestCase):
                 state,
                 {
                     "parameter_attempts": chain,
-                    "retry_counts": {"execution": 0, "review": 1},
+                    "retry_counts": {"execution": 1},
                 },
                 status="assembly_succeeded",
                 reason="completed",
@@ -164,7 +167,7 @@ class ParameterApprovalGateV3Tests(unittest.TestCase):
             self.assertEqual(
                 [entry["attempt_id"] for entry in timeline["entries"]], [0, 1]
             )
-            self.assertEqual(timeline["terminal"]["review_retries_used"], 1)
+            self.assertEqual(timeline["terminal"]["execution_retries_used"], 1)
             serialized = json.dumps(timeline, separators=(",", ":"))
             for forbidden in (
                 "catalog_snapshot",

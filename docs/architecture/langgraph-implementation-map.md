@@ -4,7 +4,7 @@
 > explicitly.
 > **Read when:** determining which graph nodes, method routes, parameter flows,
 > and review boundaries actually exist before changing or extending a stage.
-> **Comes from:** the canonical stage order, compiled graph builders, descriptor
+> **Comes from:** frozen workflow occurrences, compiled graph builders, descriptor
 > registry, method adapters, focused tests, and architecture conformance review.
 > **Feeds into:** implementation planning, code review, method onboarding, and
 > updates to the exact architecture contracts.
@@ -43,30 +43,31 @@ contract at all.
 ## Parent graph
 
 The parent graph is a controller loop, not an unconditional linear pipeline.
-The numeric prefixes below show canonical precedence only. On each visit the
-controller selects the earliest applicable requested stage; unrequested stages
-are skipped and recorded.
+At freeze, the ordered RunConfig occurrences become immutable `workflow_steps`:
+implicit inventory is `step-000-inventory`, and every requested occurrence gets
+a position-derived `step_id`. On each visit, the controller selects the active
+frozen occurrence and advances exactly one position after completion. A stage
+that is absent from that sequence is not skipped at runtime. Repeated stage
+names remain distinct occurrences. `STAGE_ORDER` supports registration, default
+recommendations, and display; it does not determine runtime order.
 
 ```mermaid
 flowchart TB
     start([START]) --> controller["route_controller"]
     controller --> boundary{"terminal boundary?"}
     boundary -->|"completed / failed_terminal / blocked_human"| finish([END])
-    boundary -->|"continue"| selector{"next requested stage in STAGE_ORDER"}
+    boundary -->|"continue"| selector{"active frozen workflow step"}
 
-    selector --> inventory["00 inventory_stage"]
-    selector --> readqc["01 read_qc_stage"]
-    selector --> survey["02 genome_survey_stage"]
-    selector --> assembly["03 assembly_stage"]
-    selector --> dedup["04 assembly_dedup_stage"]
-    selector --> review["05 assembly_review_stage"]
-    selector --> hic["06 hic_scaffolding_stage"]
-    selector --> gapcloser["07 gapcloser_stage"]
-    selector --> t2t["08 t2t_stage"]
-    selector --> basepolish["09 base_polish_stage"]
-    selector --> repeat["10 repeat_annotation_stage"]
-    selector --> gene["11 gene_annotation_stage"]
-    selector --> function["12 function_annotation_stage"]
+    selector --> inventory["inventory_stage"]
+    selector --> readqc["read_qc_stage"]
+    selector --> survey["genome_survey_stage"]
+    selector --> assembly["assembly_stage"]
+    selector --> dedup["assembly_dedup_stage"]
+    selector --> review["assembly_review_stage"]
+    selector --> hic["hic_scaffolding_stage"]
+    selector --> gapcloser["gapcloser_stage"]
+    selector --> t2t["t2t_stage"]
+    selector --> basepolish["base_polish_stage"]
 
     inventory --> controller
     readqc --> controller
@@ -78,9 +79,6 @@ flowchart TB
     gapcloser --> controller
     t2t --> controller
     basepolish --> controller
-    repeat --> controller
-    gene --> controller
-    function --> controller
 ```
 
 There are no direct parent edges from one biological stage to the next. Every
@@ -91,8 +89,8 @@ events and writes blocked or failed operator reports.
 | Parent unit | Wiring | Implementation | Verification | Debt | Evidence |
 |---|---|---|---|---|---|
 | `route_controller` and `route_from_current_stage` | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py` |
-| Requested-stage skipping and canonical precedence | `wired` | `implemented-no-process` | `tested` | `none` | `app/workflow.py`; `tests/test_graph_routing.py`, `tests/test_ask_plan.py` |
-| Manual-only GapCloser/Base Polish placeholder boundary | `wired` | `placeholder` | `tested` | `known-gap` | Strict cursors, explicit-request failure, and legacy unscoped skip only; `app/stages/gapcloser/`, `app/stages/base_polish/`; `tests/test_placeholder_stages.py` |
+| Frozen workflow-occurrence routing | `wired` | `implemented-no-process` | `tested` | `none` | `app/control/workflow_plan.py`, `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py` |
+| Manual-only GapCloser/Base Polish placeholder boundary | `wired` | `placeholder` | `tested` | `known-gap` | A reached frozen occurrence fails closed with a strict cursor; `app/stages/gapcloser/`, `app/stages/base_polish/`; `tests/test_placeholder_stages.py` |
 | SQLite/memory checkpoint selection and durable resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`, `app/control/lifecycle.py`; `tests/test_checkpointer.py`, `tests/test_durable_resume.py` |
 | Foreground review countdown policy | `wired` | `implemented-no-process` | `tested` | `none` | Frozen `RunConfig.review_policy` defaults to 300 seconds and allows only registry-backed stage overrides. `-1` waits; `0` and positive expiry trigger only a gate's existing eligible resolver. Assembly Review keeps its bound LLM recommendation path, route selection keeps its recommendation timeout applier, and gates without a resolver remain human. Countdown applies only in the original foreground run with real stdin/stdout TTYs; re-executing an already-blocked checkpoint and later review/resume remain manual with no daemon, inferred deadline, strict/auto mode, or public timeout override. `app/schemas/run_config.py`, `app/entrypoints/run.py`, `app/control/lifecycle.py`; `tests/test_run_config.py`, `tests/test_run_command.py`, `tests/test_foreground_review_countdown.py` |
 | Terminal reporting and checkpoint compaction | `wired` | `partial` | `tested` | `contract-drift` | `app/graph/checkpoint_compaction.py`, `app/reports/`; live-state report and replay gaps in [conformance](reference/conformance.md) |
@@ -105,12 +103,12 @@ the exact behavioral contract.
 
 | Boundary | Current implementation | Code and test evidence | Contract owner |
 |---|---|---|---|
-| Public structured-run preflight and whole-run freeze | `gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interactive]` canonicalizes and validates source files, requires explicit JSON arrays for `requested_stages` and `local_exec`, rejects `requested_stages: null`, freezes the requested scope and dependency snapshot, then dispatches the frozen session through SQLite. TUI confirmation uses the same freeze/executor. | `app/entrypoints/run.py`, `app/storage/frozen_inputs.py`; `tests/test_run_command.py`, `tests/test_frozen_inputs.py`, `tests/test_configuration_examples.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
+| Public structured-run preflight and whole-run freeze | `gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interactive]` canonicalizes and validates source files, requires an explicit ordered `requested_stages` list of `{stage, allow_local_execution}` objects, rejects `requested_stages: null`, freezes that literal occurrence sequence and dependency snapshot, then projects it into immutable `workflow_steps` for SQLite execution. Inventory registers an `assembly_fasta_registered` asset as a resource; public preflight does not reject, reorder, or rewrite occurrences by registry order. Each reached stage validates its own inputs. TUI confirmation uses the same freeze/executor. | `app/entrypoints/run.py`, `app/storage/frozen_inputs.py`, `app/control/workflow_plan.py`; `tests/test_run_command.py`, `tests/test_frozen_inputs.py`, `tests/test_configuration_examples.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
 | Stage resource resolution | Stage adapters query canonical `ResourceSpec` objects through `resource_resolution.py`. There is no separate repository planning-preflight API or duplicate stage-requirement table. Method/environment preflight occurs at frozen-attempt construction. | `app/stages/resource_specs.py`, `app/stages/resource_resolution.py`; `tests/test_project_scaffold.py`, stage-focused tests | [Resource handoff](reference/resource-handoff.md) |
 | Genome Survey logical inputs | The stage boundary exposes only `short_reads` and `long_reads`, prefers the short-read family, and leaves clean/raw lifecycle priority to each resource spec. No-read execution is permitted only when an explicit genome size supports the documented skip path. | `app/stages/genome_survey/nodes.py`, `app/stages/genome_survey/state.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` | [Stage contracts](reference/stage-contracts.md) |
 | Executable artifact dependencies | Genome Survey k-mer products cross the Jellyfish/GenomeScope2 boundary as indexed `ArtifactRefJson` values. The consumer has no path-string upgrade branch. | `app/stages/genome_survey/method_application/jellyfish.py`, `genomescope2.py`; `tests/test_genome_survey.py` | [Data contract](reference/data-contract.md) |
-| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The committed registry loads as 18 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](reference/descriptors.md) |
-| Registered execution classes | The registry is partitioned into 17 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](reference/descriptors.md) |
+| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The committed registry loads as 14 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](reference/descriptors.md) |
+| Registered execution classes | The registry is partitioned into 13 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](reference/descriptors.md) |
 | AutoHiC output collection | After process success and before the first new publication, collection requires all four frozen products or matching attempt-local indexed recovery records. Missing products fail collection; a later publication failure may leave an indexed orphan without success semantic events. | `app/stages/hic_scaffolding/method_application/support.py`; `tests/test_hic_scaffolding.py` | [AutoHiC](topics/autohic.md), [Stage contracts](reference/stage-contracts.md) |
 
 ## Stage node inventory
@@ -141,8 +139,8 @@ the method inventory rather than being hidden inside one stage-level color.
 | Assembly `flye`, `nextdenovo`, `hifiasm`, `hifiasm_ont` nested method nodes | `wired` | `executable` | `tested` | method-specific below | `app/stages/assembly/method_application/`; `tests/test_assembly.py` |
 | Assembly `execution_retry_gate`, `commit`, `fail`, `block` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly/parameters/workflow.py`, `app/stages/assembly/routing.py`; `tests/test_phase11_parameter_approval.py`, `tests/test_review_resume.py` |
 | Dedup `enter -> plan -> purge_dups -> commit/fail` | `wired` | `executable` | `tested` | `none` | `app/stages/assembly_dedup/`; `tests/test_assembly_dedup.py` |
-| Assembly Review candidate resolution and `quast -> busco` metrics | `wired` | `executable` | `tested` | `none` | `app/stages/assembly_review/`; `tests/test_assembly_review.py` |
-| Assembly Review rule, parameter-quality, related-species, comparison nodes | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly_review/nodes.py`; `tests/test_related_species_evidence.py`, `tests/test_related_species_statistics.py`, `tests/test_assembly_review_statistics_integration.py` |
+| Assembly Review reusable subgraph, candidate resolution, and `quast -> busco` metrics | `wired` | `executable` | `tested` | `none` | callers supply an executed `AssemblyCandidateBundle` plus the central `assembly` `ResourceRef`; no bare `fasta_path` bypass. `app/stages/assembly_review/`; `tests/test_assembly_review.py` |
+| Assembly Review rule, review-owned parameter-quality, related-species, comparison nodes | `wired` | `implemented-no-process` | `tested` | `none` | Parameter-quality diagnosis remains in the active `assembly_review` occurrence; it records no Assembly retry cursor or parameter evidence and continues to related-species/human review. `app/stages/assembly_review/nodes.py`; `tests/test_phase10_parameter_catalog.py`, `tests/test_related_species_evidence.py`, `tests/test_related_species_statistics.py`, `tests/test_assembly_review_statistics_integration.py` |
 | Assembly Review `human_gate` and adoption/resume transaction | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly_review/builder.py`, `app/control/resume_transaction.py`; `tests/test_review_resume.py` |
 | Hi-C `resolve_hic_inputs` and requirement boundary | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/`; `tests/test_hic_scaffolding.py` |
 | Hi-C `recommend_autohic_parameters` and approval/retry gates | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`; `tests/test_hic_scaffolding.py`, `tests/test_parameter_resolution_validation.py` |
@@ -155,22 +153,9 @@ the method inventory rather than being hidden inside one stage-level color.
 | T2T patch, validation, report, adoption gate, commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | `apply_patches`, `validate_patched`, `report`, `gate_review`; `tests/test_t2t.py`, `tests/test_review_resume.py` |
 | Base Polish parent placeholder | `wired` | `placeholder` | `tested` | `known-gap` | Manual-only route position and strict fail-closed cursor; no method, artifact, or resource handoff; `app/stages/base_polish/`; `tests/test_placeholder_stages.py` |
 
-### Annotation stages
-
-| Stage node or capability group | Wiring | Implementation | Verification | Debt | Evidence |
-|---|---|---|---|---|---|
-| Repeat input/strategy/library planning | `wired` | `partial` | `tested` | `known-gap` | Operator-registered repeat libraries are supported; de-novo library discovery is not; `app/stages/repeat_annotation/`; `tests/test_repeat_annotation.py` |
-| RepeatMasker method, mask review, and commit/fail | `wired` | `executable` | `tested` | `none` | `app/stages/repeat_annotation/nodes.py`; `tests/test_repeat_annotation.py` |
-| Gene input resolution, evidence profile, method planning | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/gene_annotation/builder.py`; `tests/test_gene_annotation.py` |
-| Gene `miniprot` and `augustus` registered method nodes | `wired` | `executable` | `tested` | `none` | `app/stages/gene_annotation/nodes.py`; `tests/test_gene_annotation_miniprot.py`, `tests/test_gene_annotation.py` |
-| Gene internal `materialize`/gffread, `evm`, and BUSCO helper nodes | `wired` | `executable`, not operator-selectable registered methods | `tested` | `none` | `app/stages/gene_annotation/nodes.py`; `tests/test_gene_annotation_merge.py`, `tests/test_gene_annotation.py` |
-| Gene planning, candidate, merge, and final-set review gates | `wired` | `implemented-no-process` | `tested` | `none` | Four `block_*` nodes in `app/stages/gene_annotation/builder.py`; `tests/test_gene_annotation.py`, `tests/test_review_resume.py` |
-| Function input/provenance/method planning | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/function_annotation/`; `tests/test_function_annotation.py` |
-| Function `diamond` method and commit/fail | `wired` | `executable` | `tested` | `none` | `app/stages/function_annotation/nodes.py`; `tests/test_function_annotation_diamond.py` |
-
 ## Registered method inventory
 
-`descriptors/registry.yaml` currently contains 18 registered methods. Seventeen
+`descriptors/registry.yaml` currently contains 14 registered methods. Thirteen
 declare `execution_kind: local`; the executable invariant binds each ID to an
 imported lifecycle, nested method graph, and outer stage node. The sole
 `planner_only` method is an intentional no-process choice whose real
@@ -194,13 +179,8 @@ registry and every nested YAML model boundary.
 | `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py` | requires operator-provided offline lineage provenance |
 | `hic_scaffolding.candidate.autohic` | registered with catalog | `executable` | implemented | `tests/test_hic_scaffolding.py` | all four review products are mandatory at collection |
 | `t2t.alignment.minimap2` | registered with catalog | `executable` | implemented | `tests/test_t2t.py` | none |
-| `repeat_annotation.masking.repeatmasker` | registered | `executable` | implemented | `tests/test_repeat_annotation.py` | requires an operator-registered repeat library |
-| `gene_annotation.candidate.augustus` | registered | `executable` | implemented | `tests/test_gene_annotation.py` | none |
-| `gene_annotation.candidate.miniprot` | registered | `executable` | implemented | `tests/test_gene_annotation_miniprot.py` | none |
-| `function_annotation.candidate.diamond` | registered | `executable` | implemented | `tests/test_function_annotation_diamond.py` | requires explicit database provenance |
-
 `tests/test_registry_executable_invariant.py` derives local IDs from imported
-`MethodExecutionLifecycle` bindings, proves those bindings cover exactly the 17
+`MethodExecutionLifecycle` bindings, proves those bindings cover exactly the 13
 registered local methods, and verifies each shared freeze/run/collect and outer
 stage route. It derives the planner-only set from the production planner catalog
 and exercises `read_qc.length_filter.skip` through raw-read commit while proving
@@ -222,7 +202,6 @@ freeze binding, retry, and biological knowledge coverage are separate facts.
 | T2T/minimap2 thresholds | implemented | implemented after motif resolution | mandatory | implemented | initial recommendation only | no T2T parameter-retry route |
 | GapCloser / Base Polish | no registered method | not implemented | not applicable | no executable attempt | not applicable | parent-only placeholders fail closed when explicitly requested |
 | Read QC, Survey, Dedup, Review | method/run configuration | not implemented as formal recommenders | not applicable | normal run-config freeze | not applicable | do not label these as stale recommenders |
-| Repeat/Gene/Function annotation | method/run configuration | not implemented as formal recommenders | stage review only where defined | normal run-config freeze | stage-specific | parameter recommendation is a future product decision, not an existing placeholder |
 | Inventory | not required | not required | input ambiguity review only | not applicable | not applicable | no recommender should be inferred |
 
 The formal schema-3 recommendation chain for Assembly, AutoHiC, and T2T is
@@ -241,7 +220,6 @@ truthfully; it does not mean the biological capability runs.
 | Gap closing after chromosome scaffolding | `wired` | `placeholder` | `tested` | `known-gap` | `gapcloser` has a parent subgraph, strict not-implemented cursor, and skip/failure evidence; it has no method descriptor, executable adapter, artifact contract, or resource handoff |
 | Automated base polishing | `wired` | `placeholder` | `tested` | `known-gap` | `base_polish` has the same parent-only boundary; Assembly Review can still adopt an operator-produced polished FASTA, but no NextPolish, Racon, Medaka, Pilon, or other polishing executor is registered |
 | Final integrated post-polish QA | `unwired` | `absent` | `untested` | `known-gap` | QUAST/BUSCO Assembly Review and later stage-local evidence exist, but there is no terminal comprehensive QA stage after polishing |
-| De-novo repeat-library discovery | `unwired` | `absent` | `untested` | `known-gap` | RepeatMasker execution exists only with an operator-registered repeat library |
 | TUI midstage entry from clean reads or an existing assembly | `unwired` in the public TUI | `placeholder` as accepted design | `partially-tested` | `known-gap` | See [TUI midstage entry](topics/tui-midstage-entry.md) |
 
 This is why `assembly_review` should not be renamed to “final QA,” and why the

@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from types import ModuleType
 from unittest.mock import patch
 
+from app.control.workflow_plan import workflow_step_id
 from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SKIP,
     READ_QC_STATS_METHOD,
@@ -16,7 +17,7 @@ from app.entrypoints.ask_planner import (
     build_run_config_payload,
 )
 from app.execution.lifecycle import MethodExecutionLifecycle
-from app.schemas.ask_plan import AskPlanState
+from app.schemas.ask_plan import AskPlanState, PlanStageOccurrence
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import initial_state
 from app.stages.assembly import builder as assembly_builder
@@ -30,10 +31,6 @@ from app.stages.assembly_dedup import builder as assembly_dedup_builder
 from app.stages.assembly_dedup import nodes as assembly_dedup_nodes
 from app.stages.assembly_review import builder as assembly_review_builder
 from app.stages.assembly_review.method_application import busco, quast
-from app.stages.function_annotation import builder as function_annotation_builder
-from app.stages.function_annotation import nodes as function_annotation_nodes
-from app.stages.gene_annotation import builder as gene_annotation_builder
-from app.stages.gene_annotation import nodes as gene_annotation_nodes
 from app.stages.genome_survey import builder as genome_survey_builder
 from app.stages.genome_survey.method_application import genomescope2, jellyfish
 from app.stages.hic_scaffolding import builder as hic_scaffolding_builder
@@ -42,8 +39,6 @@ from app.stages.read_qc import builder as read_qc_builder
 from app.stages.read_qc.constants import LENGTH_FILTER_SKIP
 from app.stages.read_qc.method_application import seqkit_length_filter, seqkit_stats
 from app.stages.read_qc.nodes import commit_read_qc, plan_length_filter
-from app.stages.repeat_annotation import builder as repeat_annotation_builder
-from app.stages.repeat_annotation import nodes as repeat_annotation_nodes
 from app.stages.t2t import builder as t2t_builder
 from app.stages.t2t import nodes as t2t_nodes
 from app.storage.ledger import Ledger
@@ -125,27 +120,6 @@ LOCAL_BINDINGS = (
         "genomescope2",
     ),
     LocalBinding(
-        gene_annotation_nodes,
-        gene_annotation_nodes.AUGUSTUS_LIFECYCLE,
-        gene_annotation_nodes.build_augustus_graph,
-        gene_annotation_builder.build_stage,
-        "augustus",
-    ),
-    LocalBinding(
-        gene_annotation_nodes,
-        gene_annotation_nodes.MINIPROT_LIFECYCLE,
-        gene_annotation_nodes.build_miniprot_graph,
-        gene_annotation_builder.build_stage,
-        "miniprot",
-    ),
-    LocalBinding(
-        function_annotation_nodes,
-        function_annotation_nodes.DIAMOND_LIFECYCLE,
-        function_annotation_nodes.build_diamond_graph,
-        function_annotation_builder.build_stage,
-        "diamond",
-    ),
-    LocalBinding(
         autohic,
         autohic.LIFECYCLE,
         autohic.build_autohic_graph,
@@ -172,13 +146,6 @@ LOCAL_BINDINGS = (
         seqkit_length_filter.build_seqkit_length_filter_graph,
         read_qc_builder.build_stage,
         "seqkit_length_filter",
-    ),
-    LocalBinding(
-        repeat_annotation_nodes,
-        repeat_annotation_nodes.REPEATMASKER_LIFECYCLE,
-        repeat_annotation_nodes.build_repeatmasker_graph,
-        repeat_annotation_builder.build_stage,
-        "repeatmasker",
     ),
 )
 
@@ -272,8 +239,9 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
             data_dir="data",
             entry_request={"command": "run", "manifest": "inputs/manifest.yaml"},
             manifest_ref="inputs/manifest.yaml",
-            selected_stages=["read_qc"],
-            resolved_execution_order=["read_qc"],
+            selected_stage_occurrences=[
+                PlanStageOccurrence(stage="read_qc", allow_local_execution=True)
+            ],
             selected_methods={"read_qc": [READ_QC_STATS_METHOD, canonical_method]},
             confirmed=True,
         )
@@ -284,7 +252,22 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
         state = initial_state(
             session_id="planner-only-invariant",
             input_manifest_ref="inputs/manifest.yaml",
+            workflow_steps=[
+                {
+                    "step_id": workflow_step_id(0, "inventory"),
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": workflow_step_id(1, "read_qc"),
+                    "stage": "read_qc",
+                    "allow_local_execution": True,
+                },
+            ],
         )
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
+        state["current_stage"] = "read_qc"
         state["stage_outputs"] = {
             "read_qc": {
                 "status": "length_filter_pending",
@@ -342,6 +325,7 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
                 working_dir=data_dir.resolve(),
                 expected_outputs=[],
                 input_dependencies=[],
+                metadata={"workflow_step_id": workflow_step_id(1, "read_qc")},
             )
             ledger.record_attempt_started(session_id, stats_attempt)
             ledger.record_attempt_succeeded(session_id, stats_attempt)
@@ -350,7 +334,22 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
                 session_id=session_id,
                 input_manifest_ref="inputs/manifest.yaml",
                 data_dir=str(data_dir),
+                workflow_steps=[
+                    {
+                        "step_id": workflow_step_id(0, "inventory"),
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": workflow_step_id(1, "read_qc"),
+                        "stage": "read_qc",
+                        "allow_local_execution": True,
+                    },
+                ],
             )
+            state["workflow_step_index"] = 1
+            state["entered_workflow_step_index"] = 1
+            state["current_stage"] = "read_qc"
             state["stage_outputs"] = {
                 "read_qc": {
                     "status": "length_filter_pending",

@@ -1,4 +1,4 @@
-"""Failure-state contracts for non-annotation stage routers."""
+"""Failure-state contracts for retained stage routers."""
 
 from __future__ import annotations
 

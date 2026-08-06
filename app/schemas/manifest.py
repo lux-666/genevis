@@ -18,7 +18,7 @@ from app.schemas.assets import AssetType
 Platform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi", "illumina", "unknown"]
 Layout = Literal["single", "paired", "unknown"]
 Format = Literal[
-    "fastq", "fasta", "bam", "cram", "hic", "assembly", "gff3", "gff", "gtf", "unknown"
+    "fastq", "fasta", "bam", "cram", "hic", "assembly", "unknown"
 ]
 Compression = Literal["gzip", "bzip2", "xz", "none", "unknown"]
 
@@ -33,12 +33,7 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "hic_alignment_bam",
     "hic_merged_nodups",
     "assembly_fasta_registered",
-    "repeat_library",
     "reference_proteins",
-    "gene_models",
-    "predicted_proteins",
-    "transcripts_fasta",
-    "function_database",
 }
 
 
@@ -209,12 +204,6 @@ def _detect_format(path: Path) -> Format:
         or name.endswith(".faa.gz")
     ):
         return "fasta"
-    if name.endswith(".gff3") or name.endswith(".gff3.gz"):
-        return "gff3"
-    if name.endswith(".gff") or name.endswith(".gff.gz"):
-        return "gff"
-    if name.endswith(".gtf") or name.endswith(".gtf.gz"):
-        return "gtf"
     if name.endswith(".bam"):
         return "bam"
     if name.endswith(".cram"):
@@ -329,18 +318,6 @@ def validate_manifest(
     if not manifest.assets:
         errors.append("manifest must declare at least one asset")
 
-    _adoption_types = {"gene_models", "predicted_proteins", "transcripts_fasta"}
-    seen_adoption: dict[str, int] = {}
-    for spec in manifest.assets:
-        if spec.asset_type in _adoption_types:
-            seen_adoption[spec.asset_type] = seen_adoption.get(spec.asset_type, 0) + 1
-    for atype, count in seen_adoption.items():
-        if count > 1:
-            errors.append(
-                f"{atype}: adoption assets must appear exactly once, got {count} "
-                "entries"
-            )
-
     entry_inferences: list[AssetEntryInference] = []
     for entry_ordinal, spec in enumerate(manifest.assets):
         entry = _infer_asset_properties(
@@ -361,33 +338,6 @@ def validate_manifest(
         if unknown_formats:
             warnings.append(
                 f"{spec.asset_type}: could not infer format from {unknown_formats}"
-            )
-
-        inferred_formats = {fact.format for fact in entry.path_facts}
-        if spec.asset_type == "gene_models" and len(inferred_formats) > 1:
-            errors.append(f"{spec.asset_type}: paths have conflicting formats")
-        inferred_format = next(iter(inferred_formats), "unknown")
-        if spec.asset_type == "gene_models" and inferred_format not in {
-            "gff3",
-            "gff",
-            "gtf",
-        }:
-            errors.append(
-                f"{spec.asset_type}: expected GFF/GFF3/GTF, got {inferred_format}"
-            )
-        if (
-            spec.asset_type in {"predicted_proteins", "transcripts_fasta"}
-            and inferred_format != "fasta"
-        ):
-            errors.append(f"{spec.asset_type}: expected FASTA, got {inferred_format}")
-        if (
-            spec.asset_type
-            in {"gene_models", "predicted_proteins", "transcripts_fasta"}
-            and len(spec.paths) > 1
-        ):
-            errors.append(
-                f"{spec.asset_type}: adoption assets must have exactly one path, "
-                f"got {len(spec.paths)}"
             )
 
         if (

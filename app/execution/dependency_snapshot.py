@@ -29,7 +29,7 @@ from app.execution.env_resolver import (
 from app.integrity import sha256_file
 from app.storage.paths import SessionPaths
 
-DEPENDENCY_MANIFEST_SCHEMA_VERSION = 1
+DEPENDENCY_MANIFEST_SCHEMA_VERSION = 2
 
 
 class DependencySnapshotError(ValueError):
@@ -60,7 +60,6 @@ class DependencySnapshot(BaseModel):
     schema_version: int = DEPENDENCY_MANIFEST_SCHEMA_VERSION
     captured_at: str
     config: DependencyConfigIdentity
-    selected_stages: list[str] = Field(default_factory=list)
     selected_methods: list[str] = Field(default_factory=list)
     default_environment: EnvSpec
     stage_environments: dict[str, EnvSpec] = Field(default_factory=dict)
@@ -167,7 +166,7 @@ def capture_dependency_snapshot(
         method_names = _snapshot_method_names(
             raw.get("methods"),
             requested=selected_method_scope,
-            selected_stages=selected_stage_scope,
+            stage_scope=selected_stage_scope,
         )
         default_environment = resolver.resolve(stage="__frozen_default__")
         stage_environments = {
@@ -216,7 +215,6 @@ def capture_dependency_snapshot(
         config=DependencyConfigIdentity(
             source_path=str(source), sha256=sha256_file(source)
         ),
-        selected_stages=selected_stage_scope or [],
         selected_methods=selected_method_scope or [],
         default_environment=default_environment,
         stage_environments=stage_environments,
@@ -315,7 +313,7 @@ def _snapshot_method_names(
     raw_value: object,
     *,
     requested: Iterable[str] | None,
-    selected_stages: list[str] | None,
+    stage_scope: list[str] | None,
 ) -> list[str]:
     if requested is None:
         return _snapshot_names(raw_value, None)
@@ -328,13 +326,13 @@ def _snapshot_method_names(
 
     requested_names = {str(value) for value in requested}
     closure = available.intersection(requested_names)
-    if selected_stages:
+    if stage_scope:
         from app.configuration import load_descriptor_registry
 
         registry = load_descriptor_registry()
         planner_methods = {
             method
-            for stage in selected_stages
+            for stage in stage_scope
             for method in (registry.by_stage.get(stage) or [])
         }
         explicitly_scoped_stages = {
@@ -343,7 +341,7 @@ def _snapshot_method_names(
         closure.update(
             method
             for method in available
-            if method.split(".", 1)[0] in selected_stages
+            if method.split(".", 1)[0] in stage_scope
             and (
                 method.split(".", 1)[0] not in explicitly_scoped_stages
                 or method not in planner_methods

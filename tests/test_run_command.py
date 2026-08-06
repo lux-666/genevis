@@ -35,15 +35,15 @@ def _prepared_inputs(
     *,
     session_id: str = "manifest-session",
     requested_stages: list[str] | None = None,
-    explicit_fields: frozenset[str] = frozenset({"requested_stages", "local_exec"}),
 ):
     return SimpleNamespace(
         manifest=SimpleNamespace(session_id=session_id),
         run_config=RunConfig(
-            requested_stages=requested_stages,
-            local_exec=[],
+            requested_stages=[
+                {"stage": stage, "allow_local_execution": False}
+                for stage in (requested_stages or [])
+            ],
         ),
-        explicit_run_config_fields=explicit_fields,
     )
 
 
@@ -178,7 +178,6 @@ class RunHandlerTests(unittest.TestCase):
             freeze.call_args.kwargs,
             {
                 "prepared_inputs": prepared,
-                "selected_stages": ["assembly"],
                 "selected_methods": {},
             },
         )
@@ -241,63 +240,6 @@ class RunHandlerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(execute.call_args.kwargs["interactive_gate"])
 
-    def test_empty_requested_stage_scope_is_frozen_as_empty(self):
-        prepared = _prepared_inputs(requested_stages=[])
-        with tempfile.TemporaryDirectory() as tmp:
-            args = argparse.Namespace(
-                manifest="manifest.yaml",
-                run_config="run.json",
-                data_dir=tmp,
-                non_interactive=False,
-            )
-            with (
-                patch(
-                    "app.storage.frozen_inputs.prepare_session_inputs",
-                    return_value=prepared,
-                ),
-                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
-                patch("app.entrypoints.run.execute_frozen_session", return_value=0),
-            ):
-                code = run_entry._run(args)
-
-        self.assertEqual(code, 0)
-        self.assertEqual(freeze.call_args.kwargs["selected_stages"], [])
-        self.assertIsNotNone(freeze.call_args.kwargs["selected_stages"])
-
-    def test_missing_explicit_fields_fail_before_freeze_or_execute(self):
-        for explicit_fields, missing in (
-            (frozenset({"local_exec"}), "requested_stages"),
-            (frozenset({"requested_stages"}), "local_exec"),
-            (frozenset(), "local_exec, requested_stages"),
-        ):
-            with self.subTest(explicit_fields=explicit_fields):
-                prepared = _prepared_inputs(
-                    requested_stages=[],
-                    explicit_fields=explicit_fields,
-                )
-                args = argparse.Namespace(
-                    manifest="manifest.yaml",
-                    run_config="run.json",
-                    data_dir="data",
-                    non_interactive=False,
-                )
-                with (
-                    patch(
-                        "app.storage.frozen_inputs.prepare_session_inputs",
-                        return_value=prepared,
-                    ),
-                    patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
-                    patch("app.entrypoints.run.execute_frozen_session") as execute,
-                ):
-                    code, stdout, stderr = _capture_call(run_entry._run, args)
-
-                self.assertEqual(code, 1)
-                self.assertEqual(stdout, "")
-                self.assertIn("error:", stderr)
-                self.assertIn(missing, stderr)
-                freeze.assert_not_called()
-                execute.assert_not_called()
-
     def test_null_requested_stages_fails_before_freeze_or_execute(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -316,7 +258,6 @@ class RunHandlerTests(unittest.TestCase):
                 json.dumps(
                     {
                         "requested_stages": None,
-                        "local_exec": [],
                     }
                 ),
                 encoding="utf-8",
@@ -337,13 +278,43 @@ class RunHandlerTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
-        self.assertIn(
-            "requested_stages must be a JSON array, not null",
-            stderr,
-        )
+        self.assertIn("requested_stages", stderr)
+        self.assertIn("valid list", stderr)
         self.assertFalse(data_dir.exists())
         freeze.assert_not_called()
         execute.assert_not_called()
+
+    def test_registered_assembly_does_not_restrict_the_requested_plan(self):
+        for stage in ("read_qc", "genome_survey", "assembly", "assembly_dedup"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                prepared = _prepared_inputs(requested_stages=[stage])
+                prepared.manifest.assets = [
+                    SimpleNamespace(asset_type="assembly_fasta_registered")
+                ]
+                args = argparse.Namespace(
+                    manifest="manifest.yaml",
+                    run_config="run.json",
+                    data_dir=tmp,
+                    non_interactive=False,
+                )
+                with (
+                    patch(
+                        "app.storage.frozen_inputs.prepare_session_inputs",
+                        return_value=prepared,
+                    ),
+                    patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                    patch(
+                        "app.entrypoints.run.execute_frozen_session", return_value=0
+                    ) as execute,
+                ):
+                    code, stdout, stderr = _capture_call(run_entry._run, args)
+
+                self.assertEqual(code, 0)
+                self.assertEqual(stdout, "")
+                self.assertEqual(stderr, "")
+                freeze.assert_called_once()
+                self.assertNotIn("selected_stages", freeze.call_args.kwargs)
+                execute.assert_called_once()
 
     def test_preflight_failures_are_normalized(self):
         args = argparse.Namespace(
@@ -423,6 +394,55 @@ class RunHandlerTests(unittest.TestCase):
 
 
 class PublicRunSQLiteIntegrationTests(unittest.TestCase):
+    def test_registered_assembly_with_supporting_asset_starts_at_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "public-run-existing-with-support"
+            assembly = root / "existing_assembly.fa"
+            proteins = root / "reference_proteins.fa"
+            assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            proteins.write_text(">p1\nMKT\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: {session_id}\n"
+                "assets:\n"
+                "  - asset_type: assembly_fasta_registered\n"
+                f"    paths: [{assembly}]\n"
+                "  - asset_type: reference_proteins\n"
+                f"    paths: [{proteins}]\n",
+                encoding="utf-8",
+            )
+            run_config = root / "run.json"
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [
+                            {"stage": "assembly_review", "allow_local_execution": False}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = _capture_call(
+                run_entry.main,
+                [
+                    "run",
+                    "--manifest",
+                    str(manifest),
+                    "--run-config",
+                    str(run_config),
+                    "--data-dir",
+                    str(root / "data"),
+                    "--non-interactive",
+                ],
+            )
+
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(stderr, "")
+            self.assertIn("current_stage: assembly_review", stdout)
+            self.assertIn("supervision_state: blocked_human", stdout)
+
     def test_noninteractive_run_persists_and_reopens_blocked_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -448,8 +468,9 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
-                        "requested_stages": ["assembly_review"],
-                        "local_exec": [],
+                        "requested_stages": [
+                            {"stage": "assembly_review", "allow_local_execution": False}
+                        ],
                     }
                 ),
                 encoding="utf-8",
@@ -587,20 +608,25 @@ class FrozenExecutionBoundaryTests(unittest.TestCase):
 
 
 class FrozenHelperTests(unittest.TestCase):
-    def test_frozen_run_injects_effective_wait_into_every_registered_review_stage(self):
-        from app.review.gates import registered_review_stages
-
+    def test_frozen_run_initializes_occurrence_aware_workflow_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "frozen-session")
             bundle = SimpleNamespace(
                 paths=paths,
                 run_config=RunConfig.model_validate(
                     {
-                        "requested_stages": [],
+                        "requested_stages": [
+                            {"stage": "t2t", "allow_local_execution": False},
+                            {
+                                "stage": "assembly_review",
+                                "allow_local_execution": False,
+                            },
+                            {"stage": "t2t", "allow_local_execution": True},
+                        ],
+                        "t2t": {"mode": "manual_review"},
                         "review_policy": {
                             "max_blocked_seconds": 300,
                             "stages": {
-                                "hic_scaffolding": {"max_blocked_seconds": -1},
                                 "t2t": {"max_blocked_seconds": 0},
                             },
                         },
@@ -615,10 +641,6 @@ class FrozenHelperTests(unittest.TestCase):
             }
             with (
                 patch("app.entrypoints.run.Ledger"),
-                patch(
-                    "app.entrypoints.run.initial_state",
-                    return_value={"stage_outputs": {}},
-                ),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch("app.entrypoints.run.finalize_terminal_state", return_value=None),
             ):
@@ -633,25 +655,53 @@ class FrozenHelperTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         invoked_state = graph.invoke.call_args.args[0]
-        stage_outputs = invoked_state["stage_outputs"]
-        self.assertEqual(set(stage_outputs), set(registered_review_stages()))
-        for stage in registered_review_stages():
-            expected = 300
-            if stage == "hic_scaffolding":
-                expected = -1
-            elif stage == "t2t":
-                expected = 0
-            self.assertEqual(
-                stage_outputs[stage]["review_policy"]["max_blocked_seconds"],
-                expected,
-            )
+        self.assertEqual(
+            invoked_state["workflow_steps"],
+            [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-002-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-003-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": True,
+                },
+            ],
+        )
+        self.assertEqual(invoked_state["stage_plan_ref"], "control/run_config.json")
+        self.assertEqual(
+            invoked_state["stage_seeds"],
+            {
+                "assembly_review": {
+                    "review_policy": {"max_blocked_seconds": 300},
+                },
+                "t2t": {
+                    "mode": "manual_review",
+                    "read_inputs": [],
+                    "review_policy": {"max_blocked_seconds": 0},
+                },
+            },
+        )
+        self.assertEqual(invoked_state["stage_outputs"], {})
 
     def test_noninteractive_block_uses_frozen_authority_and_prints_guidance(self):
         with tempfile.TemporaryDirectory(prefix="gene agent ") as tmp:
             paths = SessionPaths(tmp, "frozen-session")
             bundle = SimpleNamespace(
                 paths=paths,
-                run_config=RunConfig(requested_stages=[], local_exec=[]),
+                run_config=RunConfig(requested_stages=[]),
             )
             graph = Mock()
             graph.invoke.return_value = {
@@ -690,7 +740,15 @@ class FrozenHelperTests(unittest.TestCase):
             session_id="frozen-session",
             input_manifest_ref="control/input_manifest.yaml",
             data_dir=str(paths.run_dir),
-            requested_stages=[],
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                }
+            ],
+            stage_plan_ref="control/run_config.json",
+            stage_seeds={},
         )
         ledger.assert_called_once_with(str(paths.run_dir))
         ledger.return_value.create_session.assert_called_once_with(
@@ -714,12 +772,12 @@ class FrozenHelperTests(unittest.TestCase):
             f"run_config_ref: {paths.run_config_path.resolve(strict=False)}", stdout
         )
 
-    def test_none_requested_stage_scope_remains_none(self):
+    def test_empty_requested_stages_produces_inventory_only_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "frozen-session")
             bundle = SimpleNamespace(
                 paths=paths,
-                run_config=RunConfig(requested_stages=None, local_exec=[]),
+                run_config=RunConfig(requested_stages=[]),
             )
             graph = Mock()
             graph.invoke.return_value = {
@@ -746,14 +804,24 @@ class FrozenHelperTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
-        self.assertIsNone(initial.call_args.kwargs["requested_stages"])
+        self.assertEqual(
+            initial.call_args.kwargs["workflow_steps"],
+            [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                }
+            ],
+        )
+        self.assertEqual(initial.call_args.kwargs["stage_seeds"], {})
 
     def test_interactive_resume_validation_failure_returns_one(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "frozen-session")
             bundle = SimpleNamespace(
                 paths=paths,
-                run_config=RunConfig(requested_stages=[], local_exec=[]),
+                run_config=RunConfig(requested_stages=[]),
             )
             graph = Mock()
             graph.invoke.return_value = {
@@ -849,7 +917,11 @@ class FrozenHelperTests(unittest.TestCase):
             paths = SessionPaths(tmp, "frozen-session")
             bundle = SimpleNamespace(
                 paths=paths,
-                run_config=RunConfig(requested_stages=["assembly"], local_exec=[]),
+                run_config=RunConfig(
+                    requested_stages=[
+                        {"stage": "assembly", "allow_local_execution": False}
+                    ]
+                ),
             )
             graph = Mock()
             graph.invoke.side_effect = RuntimeError("stage exploded")

@@ -21,7 +21,6 @@ handoff clarity.
 
 The coordinator owns these responsibilities:
 
-- Keep `docs/archive/deep-research-report.md` as the biological design source.
 - Keep `CLAUDE.md` as the engineering behavior source.
 - Keep architecture documents current before large implementation work.
 - Split large work into testable slices with explicit exit criteria.
@@ -54,8 +53,8 @@ rationale, and coordination procedure into one linear ranking:
   silently amend an accepted design; a mismatch is recorded as conformance
   debt.
 - `CLAUDE.md` and this document govern engineering/coordination procedure.
-- `docs/archive/deep-research-report.md` supplies biological rationale, not
-  runtime storage or software-state facts.
+- Git history retains superseded biological rationale; it is not a runtime
+  storage or software-state fact.
 - Git history retains superseded implementation and design records; the working
   tree keeps current contracts, accepted planned nodes, explicit conformance
   debt, and operational documentation.
@@ -99,6 +98,7 @@ green and enforced, record that difference in
 
 - session and thread IDs
 - current stage
+- immutable `workflow_steps` plus the active occurrence index
 - input manifest reference
 - asset registry reference
 - stage plan reference
@@ -115,6 +115,7 @@ Anything large or replay-sensitive belongs outside checkpointed state.
 Ledger stores business execution facts:
 
 - attempt ID
+- workflow-step ID
 - method name
 - immutable frozen-attempt ref when it is needed to prove the transition
 - status
@@ -135,6 +136,7 @@ run-owned artifacts. Between them they record:
 - file sizes
 - artifact type
 - stage and method provenance
+- workflow-step provenance, including step-scoped artifact paths
 - compact metadata
 
 The graph state should point to the asset registry and indexed artifact outputs

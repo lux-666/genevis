@@ -26,6 +26,7 @@ from app.schemas.shared_parameters import (
 )
 from app.schemas.tui_intake import (
     AssetAnswerCandidate,
+    AssetCandidateRole,
     AssetCollectionState,
     AssetPathSpan,
     DegradationDecision,
@@ -41,6 +42,14 @@ from app.schemas.tui_intake import (
     WorkflowIntent,
 )
 from app.storage.paths import SessionPaths, ensure_run_layout
+
+PathAssetRole = Literal["hifi_reads", "ont_reads", "hic_r1", "hic_r2"]
+_PATH_ASSET_ROLES: tuple[PathAssetRole, ...] = (
+    "hifi_reads",
+    "ont_reads",
+    "hic_r1",
+    "hic_r2",
+)
 
 _FASTQ_SUFFIXES = (".fastq.gz", ".fq.gz", ".fastq", ".fq")
 _FASTA_SUFFIXES = (".fasta.gz", ".fa.gz", ".fna.gz", ".fasta", ".fa", ".fna")
@@ -125,7 +134,7 @@ class BatchT2TParseResult:
     """Biological facts parsed from one batch T2T response."""
 
     species: str | None
-    motif_raw: str | None        # validated DNA motif string, or None
+    motif_raw: str | None  # validated DNA motif string, or None
     motif_explicit_unknown: bool  # True if user said unknown/不知道/none
     assembly_only_switch: bool
     issues: list[str]
@@ -201,27 +210,30 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
     requested_stages: list[str]
     target_assembly_level: Literal["contig", "scaffold", "chromosome"]
     if any(token in lower for token in ("t2t", "telomere-to-telomere", "端粒到端粒")):
-        requested_stages = stages_through("t2t")
+        requested_stages = list(stages_through("t2t"))
         target_assembly_level = "chromosome"
     elif any(token in lower for token in ("hi-c", "hic", "染色体级", "chromosome")):
-        requested_stages = stages_through("hic_scaffolding")
+        requested_stages = list(stages_through("hic_scaffolding"))
         target_assembly_level = "chromosome"
     elif any(token in lower for token in ("scaffold", "挂载")):
-        requested_stages = stages_through("assembly")
+        requested_stages = list(stages_through("assembly"))
         target_assembly_level = "scaffold"
     elif any(token in lower for token in ("assembly", "assemble", "组装")):
-        requested_stages = stages_through("assembly")
+        requested_stages = list(stages_through("assembly"))
         target_assembly_level = "contig"
     else:
         requested_stages = []
         target_assembly_level = "contig"
 
-    requested_assembly_method: Literal[
-        "flye",
-        "nextdenovo",
-        "hifiasm",
-        "hifiasm_ont",
-    ] | None = None
+    requested_assembly_method: (
+        Literal[
+            "flye",
+            "nextdenovo",
+            "hifiasm",
+            "hifiasm_ont",
+        ]
+        | None
+    ) = None
     if "hifiasm" in lower:
         ont_mode = bool(
             re.search(
@@ -284,28 +296,42 @@ def parse_workflow_intent(
         parsed = _coerce_workflow_intent(llm_parser(request_text))
     except Exception:
         return fallback
-    # Keep the raw request authoritative and use deterministic recognition only
-    # to fill missing intake hints. It must never overwrite a model-supplied
-    # stage hint or become the later Plan Draft.
-    target_assembly_level = (
-        parsed.target_assembly_level
-        if "target_assembly_level" in parsed.model_fields_set
-        else fallback.target_assembly_level
-    )
+    # A recognized deterministic scope is a hard ceiling.  The model may make
+    # that scope more literal (including a custom order or repeated stages),
+    # but it may not expand it.  When the local recognizer found no stages, use
+    # the model's exact sequence without sorting or deduplication.
+    fallback_scope = set(fallback.requested_stages)
+    parsed_sequence = list(parsed.requested_stages)
+    if parsed_sequence and (
+        not fallback.requested_stages
+        or set(parsed_sequence).issubset(fallback_scope)
+    ):
+        requested_stages = parsed_sequence
+    else:
+        requested_stages = list(fallback.requested_stages)
+    deterministic_scope_recognized = bool(fallback.requested_stages)
     return WorkflowIntent(
         goal_text=fallback.goal_text,
         sample_id=parsed.sample_id if parsed.sample_id else fallback.sample_id,
-        target_species=parsed.target_species or fallback.target_species,
-        target_assembly_level=target_assembly_level,
-        requested_stages=parsed.requested_stages or fallback.requested_stages,
+        target_species=fallback.target_species,
+        target_assembly_level=(
+            fallback.target_assembly_level
+            if deterministic_scope_recognized
+            else parsed.target_assembly_level
+        ),
+        requested_stages=requested_stages,
         requested_assembly_method=(
-            parsed.requested_assembly_method or fallback.requested_assembly_method
+            fallback.requested_assembly_method or parsed.requested_assembly_method
         ),
         use_ultralong_ont=(
-            fallback.use_ultralong_ont or parsed.use_ultralong_ont
+            fallback.use_ultralong_ont
+            if deterministic_scope_recognized
+            else parsed.use_ultralong_ont
         ),
         use_hic_phasing=(
-            fallback.use_hic_phasing or parsed.use_hic_phasing
+            fallback.use_hic_phasing
+            if deterministic_scope_recognized
+            else parsed.use_hic_phasing
         ),
     )
 
@@ -318,9 +344,7 @@ def required_roles_for_intent(intent: WorkflowIntent) -> list[IntakeRole]:
         intent.target_assembly_level == "chromosome"
     )
     method = intent.requested_assembly_method
-    roles: list[IntakeRole] = (
-        ["hifi_reads"] if method == "hifiasm" else ["ont_reads"]
-    )
+    roles: list[IntakeRole] = ["hifi_reads"] if method == "hifiasm" else ["ont_reads"]
     if method == "hifiasm" and intent.use_ultralong_ont:
         roles.append("ont_reads")
     if method == "hifiasm_ont":
@@ -477,7 +501,7 @@ def parse_batch_t2t_answer(answer: str) -> BatchT2TParseResult:
     species: str | None = None
     species_match = _BATCH_SPECIES_RE.search(answer)
     if species_match:
-        raw_species = species_match.group("species").strip().strip("\"'""''")
+        raw_species = species_match.group("species").strip().strip("\"'''")
         if raw_species:
             species = raw_species
 
@@ -571,9 +595,7 @@ def apply_batch_t2t_facts(
                 "target_assembly_level": "contig",
             }
         )
-        new_requirements = [
-            r for r in working.intake.requirements if r != "hic_reads"
-        ]
+        new_requirements = [r for r in working.intake.requirements if r != "hic_reads"]
         new_intake = working.intake.model_copy(
             update={"requirements": new_requirements}
         )
@@ -645,9 +667,7 @@ def apply_batch_t2t_facts(
 
     # --- 4 & 5. Motif + motif_choice_complete ---
     has_invalid_motif_only = bool(batch.issues) and batch.motif_raw is None
-    batch_has_accepted_content = bool(
-        accepted_roles or batch.species is not None
-    )
+    batch_has_accepted_content = bool(accepted_roles or batch.species is not None)
 
     if batch.motif_raw is not None:
         existing_motif = working.intent.telomere_motif
@@ -738,13 +758,13 @@ def parse_asset_answer_deterministically(
 
     spans = extract_path_spans(answer)
     masked = _mask_path_spans(answer, spans)
-    grouped: dict[str, list[AssetPathSpan]] = {
+    grouped: dict[PathAssetRole, list[AssetPathSpan]] = {
         "hifi_reads": [],
         "ont_reads": [],
         "hic_r1": [],
         "hic_r2": [],
     }
-    explicit_roles: dict[str, bool] = {
+    explicit_roles: dict[PathAssetRole, bool] = {
         "hifi_reads": False,
         "ont_reads": False,
         "hic_r1": False,
@@ -765,7 +785,7 @@ def parse_asset_answer_deterministically(
         explicit_roles[role] = explicit_roles[role] or explicit
 
     candidates: list[AssetAnswerCandidate] = []
-    for role in ("hifi_reads", "ont_reads", "hic_r1", "hic_r2"):
+    for role in _PATH_ASSET_ROLES:
         role_spans = grouped[role]
         if not role_spans:
             continue
@@ -1424,9 +1444,9 @@ def _safe_llm_candidates(
 def _merge_candidates(
     base: Sequence[AssetAnswerCandidate], additions: Sequence[AssetAnswerCandidate]
 ) -> list[AssetAnswerCandidate]:
-    grouped: dict[str, list[str]] = {}
-    explicit: dict[str, bool] = {}
-    spans: dict[str, list[AssetPathSpan]] = {}
+    grouped: dict[AssetCandidateRole, list[str]] = {}
+    explicit: dict[AssetCandidateRole, bool] = {}
+    spans: dict[AssetCandidateRole, list[AssetPathSpan]] = {}
     for candidate in [*base, *additions]:
         role = candidate.role
         if role == "no_hic":
@@ -1474,9 +1494,7 @@ def _role_for_path_span(
     clause_start, clause_end = _clause_bounds(masked_answer, span.start)
     clause = masked_answer[clause_start:clause_end]
     clause_has_hic = bool(_HIC_LABEL_RE.search(clause))
-    has_hic = clause_has_hic or bool(
-        _HIC_LABEL_RE.search(masked_answer)
-    )
+    has_hic = clause_has_hic or bool(_HIC_LABEL_RE.search(masked_answer))
     explicit_role = _nearest_explicit_role_before(
         clause,
         offset=clause_start,
@@ -1518,13 +1536,16 @@ def _nearest_explicit_role_before(
     *,
     offset: int,
     path_start: int,
-) -> Literal[
-    "hifi_reads",
-    "ont_reads",
-    "hic_r1",
-    "hic_r2",
-    "hic_unpaired",
-] | None:
+) -> (
+    Literal[
+        "hifi_reads",
+        "ont_reads",
+        "hic_r1",
+        "hic_r2",
+        "hic_unpaired",
+    ]
+    | None
+):
     """Return the closest role label before the path in the same clause.
 
     Looking only backwards prevents a later ``R1`` label from stealing an
@@ -1690,9 +1711,7 @@ def _merge_hic_candidates(
     unresolved.extend(
         UnresolvedAssetCandidate(
             candidate=candidate,
-            reason=(
-                "Hi-C R1/R2 lane counts do not match"
-            ),
+            reason=("Hi-C R1/R2 lane counts do not match"),
         )
         for candidate, _paths in [*validated_r1, *validated_r2]
     )

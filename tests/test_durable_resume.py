@@ -28,7 +28,14 @@ from app.graph.builder import build_graph
 from app.graph.checkpointer import checkpoint_db_path
 from app.review.base import ReviewPayload
 from app.review.persistence import PersistedReviewRequest, persist_review_request
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_DRAFT_ASSEMBLY,
+    ArtifactMeta,
+    AssemblyCandidateBundle,
+)
 from app.schemas.state import initial_state
+from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
@@ -40,13 +47,93 @@ def _build_blocked_state(
     session_id: str = "s1",
 ) -> tuple[dict, PersistedReviewRequest, Path]:
     paths = SessionPaths.from_run_dir(run_dir)
-    draft_path = paths.work_dir / "draft.fasta"
+    assembly_step_id = "step-001-assembly"
+    review_step_id = "step-002-assembly_review"
+    draft_path = paths.workflow_step_work_path(
+        assembly_step_id, "assembly", "draft.fasta"
+    )
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
     draft_path.write_text(">c\nACGT\n", encoding="utf-8")
+    candidate_id = "flye"
+    method_name = "assembly.candidate.flye"
+    candidate_dir = (
+        paths.workflow_step_artifacts_dir(assembly_step_id, "assembly")
+        / candidate_id
+    )
+    primary = publish_artifact_record(
+        run_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            draft_path,
+            stage="assembly",
+            method_name=method_name,
+            artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+        ),
+        destination=candidate_dir / "draft.fasta",
+    )
+    planned = AssemblyCandidateBundle(
+        session_id=session_id,
+        candidate_id=candidate_id,
+        method_name=method_name,
+        status="planned",
+        input_type="raw_long_reads",
+        input_member_ids={"primary": ["flye:reads"]},
+        input_member_platforms={"primary": ["ont"]},
+        parameter_attempt_id=0,
+        expected_outputs=["primary_assembly"],
+    )
+    planned_path = paths.workflow_step_work_path(
+        assembly_step_id, "assembly", candidate_id, "candidate.planned.json"
+    )
+    planned_path.parent.mkdir(parents=True, exist_ok=True)
+    planned_path.write_text(
+        json.dumps(planned.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+    published_plan = publish_artifact_record(
+        run_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            planned_path,
+            stage="assembly",
+            method_name=method_name,
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+        destination=candidate_dir / "candidate.planned.json",
+    )
+    executed = planned.model_copy(
+        update={
+            "status": "executed",
+            "plan_ref": published_plan.ref,
+            "primary_output": primary.ref,
+        }
+    )
+    executed_path = paths.workflow_step_work_path(
+        assembly_step_id, "assembly", candidate_id, "candidate.executed.json"
+    )
+    executed_path.write_text(
+        json.dumps(executed.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+    published_executed = publish_artifact_record(
+        run_dir,
+        session_id,
+        ArtifactMeta.from_file(
+            executed_path,
+            stage="assembly",
+            method_name=method_name,
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+        destination=candidate_dir / "candidate.executed.json",
+    )
     candidates = [
         {
-            "candidate_id": "flye",
-            "method_name": "assembly.candidate.flye",
-            "final_assembly_ref": str(draft_path),
+            "candidate_id": candidate_id,
+            "method_name": method_name,
+            "source": "test_fixture",
+            "status": "executed",
+            "bundle_ref": published_executed.ref.model_dump(mode="json"),
+            "primary_output_ref": primary.ref.model_dump(mode="json"),
         }
     ]
     reason = "assembly_review_human_decision_required"
@@ -61,6 +148,30 @@ def _build_blocked_state(
         session_id=session_id,
         input_manifest_ref=paths.to_ref(paths.manifest_path),
         data_dir=str(run_dir),
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": assembly_step_id,
+                "stage": "assembly",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": review_step_id,
+                "stage": "assembly_review",
+                "allow_local_execution": False,
+            },
+        ],
+    )
+    state.update(
+        {
+            "current_stage": "assembly_review",
+            "workflow_step_index": 2,
+            "entered_workflow_step_index": 2,
+        }
     )
     persisted = persist_review_request(
         state,
@@ -153,7 +264,6 @@ class DurableResumeTests(unittest.TestCase):
                         "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "flye",
-                        "final_assembly_ref": str(draft_path),
                         "notes": ["operator accepted in test"],
                     }
                 ),
@@ -171,7 +281,7 @@ class DurableResumeTests(unittest.TestCase):
             )
 
             # The graph may exit non-zero if a downstream stage (e.g.
-            # function_annotation) hits its own gate; what matters here is
+            # base_polish) hits its own gate; what matters here is
             # that the resume itself happened — assembly_review accepted,
             # the workflow advanced, and a review_decision ledger event
             # was written before whatever downstream gate may have
@@ -205,9 +315,9 @@ class DurableResumeTests(unittest.TestCase):
                 e for e in ledger_events if e["event_type"] == "review_decision"
             ]
             self.assertTrue(decision_events, "expected review_decision ledger event")
-            # The accepted assembly_review decision advances downstream into the
-            # annotation chain, which records its own gate decisions; assert on
-            # the assembly_review decision specifically rather than the last one.
+            # The accepted assembly_review decision advances into downstream
+            # finishing gates; assert on the assembly_review decision specifically
+            # rather than the last one.
             assembly_decisions = [
                 e for e in decision_events if e["stage"] == "assembly_review"
             ]
@@ -296,7 +406,6 @@ class DurableResumeTests(unittest.TestCase):
                         "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "unknown_candidate",
-                        "final_assembly_ref": "missing.fasta",
                     }
                 ),
                 encoding="utf-8",
@@ -361,7 +470,6 @@ class DurableResumeTests(unittest.TestCase):
                         "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "flye",
-                        "final_assembly_ref": str(draft_path),
                     }
                 ),
                 encoding="utf-8",
@@ -402,7 +510,6 @@ class DurableResumeTests(unittest.TestCase):
                         "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "flye",
-                        "final_assembly_ref": str(draft_path),
                     }
                 ),
                 encoding="utf-8",

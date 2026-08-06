@@ -8,61 +8,209 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.integrity import sha256_file
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_DRAFT_ASSEMBLY,
+    ArtifactMeta,
+    AssemblyCandidateBundle,
+)
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.state import initial_state
 from app.stages.assembly_dedup.builder import build_stage as build_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_review_stage
+from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
 class AssemblyDedupStageTests(unittest.TestCase):
-    def _candidate_bundle(
-        self, tmpdir: str, *, candidate_id: str, draft_ref: str
-    ) -> Path:
-        path = Path(tmpdir) / f"{candidate_id.replace(':', '_')}.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "session_id": "s1",
-                    "candidate_id": candidate_id,
-                    "method_name": "assembly.candidate.flye",
-                    "status": "planned",
-                    "artifact_type": "draft_assembly.candidate",
-                    "input_ref": "reads.fofn",
-                    "input_type": "long_reads.fofn",
-                    "parameter_attempt_id": 0,
-                    "expected_outputs": {"draft_assembly_fasta": draft_ref},
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        return path
-
     def _state(self, tmpdir: str):
         run_dir = v2_run_dir(tmpdir, "s1")
         state = initial_state(
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-002-assembly_dedup",
+                    "stage": "assembly_dedup",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-003-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                },
+            ],
         )
         state["current_stage"] = "assembly_dedup"
+        state["workflow_step_index"] = 2
+        state["entered_workflow_step_index"] = 2
+        self._publish_asset_registry(state, assets=[])
         return state
+
+    @staticmethod
+    def _publish_asset_registry(state: dict, *, assets: list[dict]) -> None:
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        source = paths.workflow_step_work_path(
+            "step-000-inventory",
+            "inventory",
+            f"asset_registry_{len(assets)}.json",
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "session_id": state["session_id"],
+                    "assets": assets,
+                }
+            ),
+            encoding="utf-8",
+        )
+        state["asset_registry_ref"] = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            ArtifactMeta.from_file(
+                source,
+                stage="inventory",
+                method_name="inventory.register_assets",
+                artifact_type="asset_registry",
+            ),
+        ).ref.model_dump(mode="json")
+
+    @staticmethod
+    def _publish_candidate(
+        state: dict,
+        *,
+        candidate_id: str,
+        method_name: str,
+        draft: Path,
+        member_id: str,
+        platform: str = "ont",
+    ) -> tuple[dict, dict]:
+        """Publish one typed, indexed executed candidate and its primary output."""
+
+        data_dir = state["data_dir"]
+        session_id = state["session_id"]
+        paths = SessionPaths.from_run_dir(data_dir)
+        safe_candidate_id = candidate_id.replace(":", "_")
+        work_dir = paths.workflow_step_work_path(
+            "step-001-assembly", "assembly", "fixture_candidates", safe_candidate_id
+        )
+        artifact_dir = paths.workflow_step_artifact_path(
+            "step-001-assembly", "assembly", "fixture_candidates", safe_candidate_id
+        )
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        primary_source = work_dir / "draft.fasta"
+        primary_source.write_bytes(draft.read_bytes())
+        primary = publish_artifact_record(
+            data_dir,
+            session_id,
+            ArtifactMeta.from_file(
+                primary_source,
+                stage="assembly",
+                method_name=method_name,
+                artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+            ),
+            destination=artifact_dir / "draft.fasta",
+        )
+
+        planned = AssemblyCandidateBundle(
+            session_id=session_id,
+            candidate_id=candidate_id,
+            method_name=method_name,
+            status="planned",
+            input_type="clean_long_reads",
+            input_member_ids={"primary": [member_id]},
+            input_member_platforms={"primary": [platform]},
+            parameter_attempt_id=0,
+            expected_outputs=["primary_assembly"],
+        )
+        planned_source = work_dir / "candidate.planned.json"
+        planned_source.write_text(planned.model_dump_json(), encoding="utf-8")
+        planned_ref = publish_artifact_record(
+            data_dir,
+            session_id,
+            ArtifactMeta.from_file(
+                planned_source,
+                stage="assembly",
+                method_name=method_name,
+                artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+            ),
+            destination=artifact_dir / "candidate.planned.json",
+        ).ref
+
+        executed = planned.model_copy(
+            update={
+                "status": "executed",
+                "plan_ref": planned_ref,
+                "primary_output": primary.ref,
+            }
+        )
+        executed_source = work_dir / "candidate.executed.json"
+        executed_source.write_text(executed.model_dump_json(), encoding="utf-8")
+        executed_ref = publish_artifact_record(
+            data_dir,
+            session_id,
+            ArtifactMeta.from_file(
+                executed_source,
+                stage="assembly",
+                method_name=method_name,
+                artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+            ),
+            destination=artifact_dir / "candidate.executed.json",
+        ).ref
+        return (
+            executed_ref.model_dump(mode="json"),
+            primary.ref.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _set_assembly_resource(
+        state: dict,
+        *,
+        primary_path: Path,
+        candidate_bundle_ref: dict,
+        primary_output_ref: dict,
+        source_stage: str,
+        raw_candidate_bundle_ref: dict | None = None,
+        raw_primary_output_ref: dict | None = None,
+    ) -> None:
+        metadata = {
+            "candidate_bundle_ref": candidate_bundle_ref,
+            "primary_output_ref": primary_output_ref,
+        }
+        if raw_candidate_bundle_ref is not None:
+            metadata["raw_candidate_bundle_ref"] = raw_candidate_bundle_ref
+        if raw_primary_output_ref is not None:
+            metadata["raw_primary_output_ref"] = raw_primary_output_ref
+        state["resource_refs"]["assembly"] = ResourceRef(
+            resource_type="assembly",
+            paths=[str(primary_path)],
+            source_stage=source_stage,
+            metadata=metadata,
+        ).to_dict()
 
     def test_passes_through_when_candidate_is_not_materialized(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            candidate_ref = self._candidate_bundle(
-                tmpdir,
-                candidate_id="s1:assembly.candidate.flye",
-                draft_ref=str(Path(tmpdir) / "candidate_only.fasta"),
-            )
             state = self._state(tmpdir)
             state["stage_outputs"] = {
-                "assembly": {
-                    "status": "planned",
-                    "selected_candidate_refs": [str(candidate_ref)],
-                }
+                "assembly": {"status": "planned"},
+                "assembly_dedup": {"execution_mode": "local"},
             }
 
             result = build_dedup_stage().invoke(state)
@@ -71,11 +219,12 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_review")
             self.assertEqual(dedup["status"], "completed")
             self.assertEqual(dedup["skip_reason"], "no_materialized_draft_assembly")
-            self.assertNotIn("selected_candidate_refs", dedup)
+            self.assertIsNone(dedup["purged_candidate_bundle_ref"])
 
     def test_passes_through_when_assembly_output_is_absent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
+            state["stage_outputs"] = {"assembly_dedup": {"execution_mode": "local"}}
 
             result = build_dedup_stage().invoke(state)
 
@@ -92,41 +241,44 @@ class AssemblyDedupStageTests(unittest.TestCase):
             draft.write_text(">contig1\nACGT\n", encoding="utf-8")
             purged = Path(tmpdir) / "purged.fasta"
             purged.write_text(">contig1\nACGT\n", encoding="utf-8")
-            candidate_ref = self._candidate_bundle(
-                tmpdir,
-                candidate_id="s1:assembly.candidate.flye",
-                draft_ref=str(draft),
-            )
             state = self._state(tmpdir)
+            member_id = "s1:clean_long_reads:reads.fastq"
+            raw_bundle_ref, raw_primary_ref = self._publish_candidate(
+                state,
+                candidate_id="s1:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft=draft,
+                member_id=member_id,
+            )
+            purged_bundle_ref, purged_primary_ref = self._publish_candidate(
+                state,
+                candidate_id="s1:assembly.candidate.flye:assembly_dedup.purge_dups",
+                method_name="assembly_dedup.purge_dups",
+                draft=purged,
+                member_id=member_id,
+            )
+            purged_path = SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(
+                purged_primary_ref["path_ref"]
+            )
             state["current_stage"] = "assembly_review"
-            state["stage_outputs"] = {
-                "assembly": {
-                    "status": "draft_ready",
-                    "selected_candidate_refs": [str(candidate_ref)],
-                },
-                "assembly_dedup": {
-                    "status": "completed",
-                    "candidate_ref": str(candidate_ref),
-                    "candidate_id": "s1:assembly.candidate.flye",
-                    "method_name": "assembly_dedup.purge_dups",
-                    "input_assembly_ref": str(draft),
-                    "purged_assembly_ref": str(purged),
-                },
-            }
-            state["resource_refs"]["assembly"] = ResourceRef(
-                resource_type="assembly",
-                paths=[str(purged)],
+            state["workflow_step_index"] = 3
+            state["entered_workflow_step_index"] = 3
+            self._set_assembly_resource(
+                state,
+                primary_path=purged_path,
+                candidate_bundle_ref=purged_bundle_ref,
+                primary_output_ref=purged_primary_ref,
                 source_stage="assembly_dedup",
-                metadata={"candidate_bundle_refs": []},
-            ).to_dict()
+                raw_candidate_bundle_ref=raw_bundle_ref,
+                raw_primary_output_ref=raw_primary_ref,
+            )
 
             result = build_review_stage().invoke(state)
 
             candidates = result["stage_outputs"]["assembly_review"]["candidates"]
-            self.assertEqual(
-                [candidate["source"] for candidate in candidates], ["assembly_dedup"]
-            )
-            self.assertEqual(candidates[0]["final_assembly_ref"], str(purged))
+            self.assertEqual(candidates[0]["source"], "assembly_dedup")
+            self.assertEqual(candidates[0]["primary_output_ref"], purged_primary_ref)
+            self.assertEqual(candidates[1]["source"], "assembly_dedup:raw")
 
     def test_default_auto_purge_dups_writes_purged_candidate_without_overwriting_raw(
         self,
@@ -134,13 +286,52 @@ class AssemblyDedupStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"
             draft.write_text(">contig1\nACGT\n", encoding="utf-8")
-            candidate_ref = self._candidate_bundle(
-                tmpdir,
-                candidate_id="s1:assembly.candidate.flye",
-                draft_ref=str(draft),
-            )
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n####\n", encoding="utf-8")
+            member_id = "s1:clean_long_reads:reads.fastq"
+            state = self._state(tmpdir)
+            self._publish_asset_registry(
+                state,
+                assets=[
+                    {
+                        "asset_id": member_id,
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                        "platform": "ont",
+                        "format": "fastq",
+                        "checksum": sha256_file(reads),
+                        "checksum_status": "ready",
+                        "size_bytes": reads.stat().st_size,
+                    }
+                ],
+            )
+            raw_bundle_ref, raw_primary_ref = self._publish_candidate(
+                state,
+                candidate_id="s1:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft=draft,
+                member_id=member_id,
+            )
+            raw_path = SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(
+                raw_primary_ref["path_ref"]
+            )
+            self._set_assembly_resource(
+                state,
+                primary_path=raw_path,
+                candidate_bundle_ref=raw_bundle_ref,
+                primary_output_ref=raw_primary_ref,
+                source_stage="assembly",
+            )
+            state["resource_refs"]["long_reads"] = ResourceRef(
+                resource_type="long_reads",
+                paths=[str(reads)],
+                source_stage="read_qc",
+                metadata={
+                    "asset_registry_ref": state["asset_registry_ref"],
+                    "asset_ids": [member_id],
+                },
+            ).to_dict()
+
             bin_dir = Path(tmpdir) / "bin"
             bin_dir.mkdir()
             minimap2 = bin_dir / "minimap2"
@@ -201,30 +392,13 @@ class AssemblyDedupStageTests(unittest.TestCase):
             )
             get_seqs.chmod(0o755)
 
-            state = self._state(tmpdir)
             state["stage_outputs"] = {
-                "assembly": {
-                    "status": "draft_ready",
-                    "selected_candidate_refs": [str(candidate_ref)],
-                    "input_ref": str(reads),
-                    "primary_long_read_platform": "ont",
-                },
+                "assembly": {"status": "completed"},
                 "assembly_dedup": {
+                    "execution_mode": "local",
                     "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
                 },
             }
-            state["resource_refs"]["assembly"] = ResourceRef(
-                resource_type="assembly",
-                paths=[str(draft)],
-                source_stage="assembly",
-                metadata={"candidate_bundle_refs": [str(candidate_ref)]},
-            ).to_dict()
-            state["resource_refs"]["long_reads"] = ResourceRef(
-                resource_type="long_reads",
-                paths=[str(reads)],
-                source_stage="read_qc",
-                metadata={"platforms": ["ont"]},
-            ).to_dict()
 
             result = build_dedup_stage().invoke(state)
 
@@ -240,12 +414,14 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 draft.read_text(encoding="utf-8"),
             )
             self.assertEqual(draft.read_text(encoding="utf-8"), ">contig1\nACGT\n")
-            self.assertTrue(Path(dedup["purged_candidate_ref"]).exists())
+            self.assertIsNotNone(dedup["purged_candidate_bundle_ref"])
             run_dir = Path(state["data_dir"])
             self.assertTrue(
                 (
                     run_dir
                     / "artifacts"
+                    / "steps"
+                    / "step-002-assembly_dedup"
                     / "assembly_dedup"
                     / "reads_to_raw_assembly.paf.gz"
                 ).is_file()
@@ -254,6 +430,8 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 (
                     run_dir
                     / "artifacts"
+                    / "steps"
+                    / "step-002-assembly_dedup"
                     / "assembly_dedup"
                     / "raw_assembly.split.fasta"
                 ).is_file()

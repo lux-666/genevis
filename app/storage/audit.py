@@ -690,7 +690,6 @@ def _collect_references(
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="python")
     if isinstance(value, Mapping):
-        legacy_asset_value_ref = _is_legacy_asset_value_ref(value)
         if "artifact_id" in value and "path_ref" in value:
             found.update(
                 _resolve_declared_reference(
@@ -705,8 +704,6 @@ def _collect_references(
         for key, nested in value.items():
             key_text = str(key)
             if _is_asset_ref_key(key_text):
-                continue
-            if legacy_asset_value_ref and key_text == "path_ref":
                 continue
             if key_text.endswith("_ref") or key_text.endswith("_refs"):
                 found.update(
@@ -835,18 +832,6 @@ def _resolve_declared_reference(
 
 def _is_asset_ref_key(key: str) -> bool:
     return key.endswith("_asset_ref") or key.endswith("_asset_refs")
-
-
-def _is_legacy_asset_value_ref(value: Mapping[str, Any]) -> bool:
-    role = value.get("role")
-    if not isinstance(role, str) or not isinstance(value.get("path_ref"), str):
-        return False
-    if any(
-        key in value for key in ("artifact_id", "sha256", "size_bytes", "artifact_type")
-    ):
-        return False
-    role_parts = [part for part in role.split(".") if part and not part.isdigit()]
-    return bool(role_parts and _is_asset_ref_key(role_parts[-1]))
 
 
 def _artifact_ref_details(value: Mapping[str, Any], *, context: str) -> str:

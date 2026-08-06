@@ -7,24 +7,29 @@ registry artifact and ledger events.  It does not run bioinformatics tools.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 import yaml
 from typing_extensions import TypedDict
 
+from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.integrity import sha256_file
-from app.review.persistence import persist_review_decision
-from app.schemas.artifacts import ArtifactMeta, ArtifactRefJson
+from app.review.persistence import (
+    ReviewPersistenceError,
+    load_review_request,
+    persist_review_decision,
+)
+from app.schemas.artifacts import ArtifactMeta, ArtifactRef, ArtifactRefJson
 from app.schemas.assets import AssetRecord, AssetRegistryDocument
 from app.schemas.manifest import AssetEntryInference, InputManifest
 from app.schemas.resource_ref import ResourceRef
-from app.schemas.run_config import RunConfig, load_run_config
+from app.schemas.run_config import RunConfig, RunConfigSharedParameters, load_run_config
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.state import (
-    DomainStage,
     ResourceRefs,
     StateUpdate,
     TopLevelState,
@@ -90,10 +95,7 @@ def _build_asset_records(
         raise ValueError(
             "manifest inference entry count does not match manifest asset count"
         )
-    reads_by_path = {
-        declaration.path: declaration
-        for declaration in read_declarations
-    }
+    reads_by_path = {declaration.path: declaration for declaration in read_declarations}
     records: list[AssetRecord] = []
     seen_asset_ids: dict[str, str] = {}
     for entry_ordinal, spec in enumerate(manifest.assets):
@@ -103,9 +105,7 @@ def _build_asset_records(
             or entry.asset_type != spec.asset_type
             or len(entry.path_facts) != len(spec.paths)
         ):
-            raise ValueError(
-                f"manifest inference mismatch at assets[{entry_ordinal}]"
-            )
+            raise ValueError(f"manifest inference mismatch at assets[{entry_ordinal}]")
         pair_roles = {
             str(Path(path).expanduser().resolve(strict=False)): (pair_index, mate)
             for pair_index, pair in enumerate(spec.paired_reads)
@@ -113,10 +113,7 @@ def _build_asset_records(
         }
         for path_ordinal, declared_path in enumerate(spec.paths):
             fact = entry.path_facts[path_ordinal]
-            if (
-                fact.path_ordinal != path_ordinal
-                or fact.declared_path != declared_path
-            ):
+            if fact.path_ordinal != path_ordinal or fact.declared_path != declared_path:
                 raise ValueError(
                     f"manifest inference path mismatch at "
                     f"assets[{entry_ordinal}].paths[{path_ordinal}]"
@@ -128,20 +125,17 @@ def _build_asset_records(
             declaration = reads_by_path.get(str(path))
             if spec.asset_type in {"raw_long_reads", "clean_long_reads"}:
                 if declaration is None:
-                    raise ValueError(
-                        f"missing canonical read declaration for {path}"
-                    )
+                    raise ValueError(f"missing canonical read declaration for {path}")
                 if (
                     declaration.manifest_entry_ordinal != entry_ordinal
                     or declaration.path_ordinal != path_ordinal
                 ):
-                    raise ValueError(
-                        f"read declaration ordinal mismatch for {path}"
-                    )
+                    raise ValueError(f"read declaration ordinal mismatch for {path}")
             metadata: dict[str, Any] = {
                 **spec.metadata,
                 "layout": (
-                    declaration.layout if declaration is not None
+                    declaration.layout
+                    if declaration is not None
                     else entry.inferred_layout
                 ),
                 "compression": (
@@ -171,9 +165,7 @@ def _build_asset_records(
                         else fact.platform
                     ),
                     format=(
-                        declaration.format
-                        if declaration is not None
-                        else fact.format
+                        declaration.format if declaration is not None else fact.format
                     ),
                     checksum=sha256_file(path),
                     checksum_status="ready",
@@ -230,9 +222,7 @@ def _build_asset_records(
                     declaration=declaration,
                     fallback_declared_path=declaration.path,
                     fallback_field="run_config",
-                    platform_resolution_source=(
-                        declaration.platform_resolution_source
-                    ),
+                    platform_resolution_source=(declaration.platform_resolution_source),
                     manifest_ref=None,
                     run_config_ref=run_config_ref,
                 ),
@@ -252,8 +242,7 @@ def _claim_asset_id(
         if previous_path == canonical_path:
             raise ValueError(f"duplicate asset record for {canonical_path}")
         raise ValueError(
-            f"generated asset ID collision between {previous_path} and "
-            f"{canonical_path}"
+            f"generated asset ID collision between {previous_path} and {canonical_path}"
         )
     seen_asset_ids[asset_id] = canonical_path
 
@@ -291,12 +280,8 @@ def _asset_provenance(
     }
     if manifest_ref is not None:
         provenance["manifest_ref"] = manifest_ref
-    if (
-        run_config_ref is not None
-        and any(
-            source["declaration_source"] == "run_config"
-            for source in sources
-        )
+    if run_config_ref is not None and any(
+        source["declaration_source"] == "run_config" for source in sources
     ):
         provenance["run_config_ref"] = run_config_ref
     return provenance
@@ -312,15 +297,7 @@ def _asset_id(session_id: str, path: Path) -> str:
 def _entry_mode(manifest: InputManifest) -> str:
     """Return the entry mode implied by manifest assets."""
     asset_types = {asset.asset_type for asset in manifest.assets}
-    supporting = {
-        "repeat_library",
-        "gene_models",
-        "predicted_proteins",
-        "transcripts_fasta",
-        "function_database",
-    }
-    non_supporting = asset_types - supporting
-    if non_supporting == {"assembly_fasta_registered"}:
+    if "assembly_fasta_registered" in asset_types:
         return "existing_assembly"
     return "raw_inputs"
 
@@ -348,8 +325,7 @@ def _recover_registry_if_unchanged(
         for record in existing_doc.assets
     ]
     new_payload = [
-        record.model_dump(mode="json", exclude={"verified_at"})
-        for record in records
+        record.model_dump(mode="json", exclude={"verified_at"}) for record in records
     ]
     if existing_payload != new_payload:
         return None
@@ -368,10 +344,16 @@ def _write_registry(
     *,
     data_dir: Path,
     session_id: str,
+    workflow_step_id: str,
 ) -> PublishedArtifact:
     """Publish the asset registry through the shared immutable boundary."""
     paths = SessionPaths.from_run_dir(data_dir)
-    destination = paths.stage_artifacts_dir("asset_registry") / "registry.json"
+    destination = paths.workflow_step_artifact_path(
+        workflow_step_id,
+        "inventory",
+        "asset_registry",
+        "registry.json",
+    )
     # If the destination already exists, reuse it when the underlying asset
     # checksums have not changed.  This makes the node idempotent: a replayed
     # run with identical inputs returns the same PublishedArtifact without
@@ -382,7 +364,11 @@ def _write_registry(
         )
         if recovered is not None:
             return recovered
-    source = paths.work_path("inventory", "registry.json")
+    source = paths.workflow_step_work_path(
+        workflow_step_id,
+        "inventory",
+        "registry.json",
+    )
     source.parent.mkdir(parents=True, exist_ok=True)
     payload = AssetRegistryDocument(
         session_id=session_id,
@@ -497,8 +483,7 @@ def _canonical_shared_parameters(
         runtime_value = shared.get(key)
         if runtime_value is not None and runtime_value != configured_value:
             raise ValueError(
-                f"runtime shared_parameters.{key} conflicts with frozen "
-                "run-config"
+                f"runtime shared_parameters.{key} conflicts with frozen run-config"
             )
         shared[key] = configured_value
 
@@ -543,10 +528,17 @@ def register_assets(state: TopLevelState) -> StateUpdate:
         read_declarations=declarations.read_declarations,
     )
     data_dir = Path(state.get("data_dir", "data"))
-    published_registry = _write_registry(
-        records, data_dir=data_dir, session_id=manifest.session_id
+    workflow_step_id = current_workflow_step_id(
+        state,
+        expected_stage="inventory",
     )
-    registry_ref = published_registry.ref.model_dump(mode="json")
+    published_registry = _write_registry(
+        records,
+        data_dir=data_dir,
+        session_id=manifest.session_id,
+        workflow_step_id=workflow_step_id,
+    )
+    registry_ref = cast(ArtifactRefJson, published_registry.ref.model_dump(mode="json"))
 
     ledger = Ledger(data_dir)
     ledger.create_session(manifest.session_id, state["input_manifest_ref"])
@@ -555,6 +547,7 @@ def register_assets(state: TopLevelState) -> StateUpdate:
         [r.model_dump(mode="json") for r in records],
         registry_ref=registry_ref,
         ambiguous=any("ambiguous" in w for w in report["warnings"]),
+        workflow_step_id=workflow_step_id,
     )
 
     # Populate resource_refs from registered assets
@@ -563,9 +556,7 @@ def register_assets(state: TopLevelState) -> StateUpdate:
         asset_registry_ref=registry_ref,
     )
     registered_assemblies = [
-        record
-        for record in records
-        if record.asset_type == "assembly_fasta_registered"
+        record for record in records if record.asset_type == "assembly_fasta_registered"
     ]
     if len(registered_assemblies) > 1:
         raise ValueError(
@@ -578,12 +569,11 @@ def register_assets(state: TopLevelState) -> StateUpdate:
             or registered_assembly.checksum is None
             or registered_assembly.size_bytes is None
         ):
-            raise ValueError(
-                "registered assembly lacks immutable byte evidence"
-            )
+            raise ValueError("registered assembly lacks immutable byte evidence")
         bound_candidate = publish_registered_assembly_candidate(
             data_dir,
             manifest.session_id,
+            workflow_step_id=workflow_step_id,
             asset_id=registered_assembly.asset_id,
             source_path=registered_assembly.path,
             expected_sha256=registered_assembly.checksum,
@@ -598,13 +588,12 @@ def register_assets(state: TopLevelState) -> StateUpdate:
             resource_type="assembly",
             paths=[str(bound_candidate.primary_output_path)],
             source_stage="inventory_registered_assembly",
+            workflow_step_id=workflow_step_id,
             metadata={
                 **source_metadata,
                 "source_asset_ids": source_asset_ids,
                 "source_asset_registry_ref": source_registry_ref,
-                "candidate_bundle_ref": bound_candidate.ref.model_dump(
-                    mode="json"
-                ),
+                "candidate_bundle_ref": bound_candidate.ref.model_dump(mode="json"),
                 "primary_output_ref": (
                     bound_candidate.primary_output_ref.model_dump(mode="json")
                 ),
@@ -615,9 +604,7 @@ def register_assets(state: TopLevelState) -> StateUpdate:
             "registered_assembly_candidate_bound",
             {
                 "asset_id": registered_assembly.asset_id,
-                "candidate_bundle_ref": bound_candidate.ref.model_dump(
-                    mode="json"
-                ),
+                "candidate_bundle_ref": bound_candidate.ref.model_dump(mode="json"),
                 "primary_output_ref": (
                     bound_candidate.primary_output_ref.model_dump(mode="json")
                 ),
@@ -631,7 +618,7 @@ def register_assets(state: TopLevelState) -> StateUpdate:
             "registered_assets": [r.asset_id for r in records],
         },
     )
-    update["asset_registry_ref"] = registry_ref
+    update["asset_registry_ref"] = dict(registry_ref)
     update["resource_refs"] = resource_refs
     return update
 
@@ -656,46 +643,33 @@ def _load_inventory_run_config(
         shared = None
     else:
         raise ValueError("shared_parameters must be a mapping")
-    return RunConfig(shared_parameters=shared), None
+    return (
+        RunConfig(
+            requested_stages=[],
+            shared_parameters=(
+                RunConfigSharedParameters.model_validate(shared)
+                if shared is not None
+                else None
+            ),
+        ),
+        None,
+    )
 
 
 def commit_inventory(state: TopLevelState) -> StateUpdate:
-    """Advance to the next stage based on routing decision."""
-    from app.workflow import next_stage_name
-
+    """Complete inventory and advance one frozen workflow occurrence."""
     trace = append_route_trace(state, "inventory_stage")
-    inventory_out = read_inventory_stage_output(state)
-    next_stage: DomainStage
-    if inventory_out.get("entry_mode") == "existing_assembly":
-        next_stage = "assembly_review"
-    else:
-        next_stage = next_stage_name("inventory")
-    update: StateUpdate = {
-        "current_stage": next_stage,
-        "supervision_state": "completed" if next_stage == "done" else "running_stage",
+    return {
+        **advance_workflow_step(state, "inventory"),
         "route_trace": trace,
     }
-    if inventory_out.get("entry_mode") == "existing_assembly":
-        update["skip_reasons"] = {
-            **(state.get("skip_reasons") or {}),
-            "read_qc": "existing_assembly_input",
-            "genome_survey": "existing_assembly_input",
-            "assembly": "existing_assembly_input",
-        }
-    return update
 
 
 def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> StateUpdate:
     """Apply a human inventory review decision."""
-    active_interrupt = state.get("active_interrupt")
-    review_request_id = getattr(request, "review_request_id", None) or (
-        active_interrupt.get("review_request_id") if active_interrupt else None
+    review_request_id, review_request_hash, review_request_ref = (
+        _inventory_review_binding(state, request)
     )
-    review_request_hash = getattr(request, "review_request_hash", None) or (
-        active_interrupt.get("request_hash") if active_interrupt else None
-    )
-    if not review_request_id or not review_request_hash:
-        raise ValueError("inventory review decision is missing review request binding")
     decision_ref = persist_review_decision(
         state["data_dir"],
         session_id=state["session_id"],
@@ -704,6 +678,7 @@ def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> State
         gate_id="inventory_review",
         decision=request,
         request_hash=review_request_hash,
+        request_ref=review_request_ref,
         method_name="inventory.contract",
         artifact_type="inventory.review_decision",
     )
@@ -751,6 +726,45 @@ def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> State
     result["stage_outputs"] = decision_update["stage_outputs"]
     result["active_interrupt"] = None
     return result
+
+
+def _inventory_review_binding(
+    state: TopLevelState, request: Any
+) -> tuple[str, str, ArtifactRef]:
+    """Return the verified, immutable request binding for inventory decisions."""
+
+    active_interrupt: Mapping[str, Any] = state.get("active_interrupt") or {}
+    inventory_out = read_inventory_stage_output(state)
+    review_request_id = getattr(
+        request, "review_request_id", None
+    ) or active_interrupt.get("review_request_id")
+    review_request_hash = getattr(
+        request, "review_request_hash", None
+    ) or active_interrupt.get("request_hash")
+    request_ref_value = active_interrupt.get("request_ref") or inventory_out.get(
+        "review_request_artifact_ref"
+    )
+    if not review_request_id or not review_request_hash or request_ref_value is None:
+        raise ValueError("inventory review decision is missing review request binding")
+    try:
+        request_ref = ArtifactRef.model_validate(request_ref_value)
+        request_record = load_review_request(
+            state["data_dir"], request_ref, session_id=state["session_id"]
+        )
+    except (ReviewPersistenceError, ValueError, TypeError) as exc:
+        raise ValueError("inventory review request is missing or changed") from exc
+    workflow_step_id = active_interrupt.get(
+        "workflow_step_id"
+    ) or current_workflow_step_id(state, expected_stage="inventory")
+    if (
+        request_ref.sha256 != str(review_request_hash)
+        or request_record.get("review_request_id") != str(review_request_id)
+        or request_record.get("stage") != "inventory"
+        or request_record.get("gate_id") != "inventory_review"
+        or request_record.get("workflow_step_id") != workflow_step_id
+    ):
+        raise ValueError("inventory review request binding mismatch")
+    return str(review_request_id), str(review_request_hash), request_ref
 
 
 class _ResourceMetadataAccumulator(TypedDict):
@@ -802,10 +816,6 @@ def _populate_resource_refs_from_assets(
             resource_type = "hic_reads"
         elif record.asset_type == "assembly_fasta_registered":
             resource_type = "assembly"
-        elif record.asset_type == "predicted_proteins":
-            resource_type = "predicted_proteins"
-        elif record.asset_type == "repeat_library":
-            resource_type = "repeat_library"
         elif record.asset_type == "reference_proteins":
             resource_type = "reference_proteins"
 
@@ -857,10 +867,7 @@ def _populate_resource_refs_from_assets(
                 resource_refs[resource_type]["metadata"]["asset_types"].append(
                     record.asset_type
                 )
-            if (
-                resource_type == "hic_reads"
-                and record.metadata.get("mate") == "R1"
-            ):
+            if resource_type == "hic_reads" and record.metadata.get("mate") == "R1":
                 resource_refs[resource_type]["metadata"]["pair_count"] += 1
 
     return {
@@ -868,6 +875,7 @@ def _populate_resource_refs_from_assets(
             resource_type=resource_type,
             paths=list(payload["paths"]),
             source_stage=None,
+            workflow_step_id=None,
             metadata=dict(payload["metadata"]),
         ).to_dict()
         for resource_type, payload in resource_refs.items()

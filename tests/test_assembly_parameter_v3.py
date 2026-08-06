@@ -28,6 +28,7 @@ from app.schemas.parameter_recommendation import (
     RecommendationInputSnapshotV3,
     RecommendationRetryContext,
 )
+from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import (
     parameter_sources_payload,
     render_assembly_cli,
@@ -48,6 +49,35 @@ from app.stages.assembly.parameters.context import (
     build_assembly_recommendation_context,
 )
 from app.storage.parameter_evidence import ParameterEvidenceError
+
+
+def _assembly_state(run_dir: Path, output: dict) -> dict:
+    state = initial_state(
+        session_id="s1",
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(run_dir),
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-001-assembly",
+                "stage": "assembly",
+                "allow_local_execution": False,
+            },
+        ],
+    )
+    state.update(
+        {
+            "current_stage": "assembly",
+            "workflow_step_index": 1,
+            "entered_workflow_step_index": 1,
+            "stage_outputs": {"assembly": output},
+        }
+    )
+    return state
 
 
 def _snapshot(
@@ -609,12 +639,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 )
                 output[parameter_key]["threads"] = 99
                 output["env"] = {"PATH": "/mutable/not-frozen"}
-                state = {
-                    "session_id": "s1",
-                    "data_dir": str(run_dir),
-                    "input_manifest_ref": "control/manifest.yaml",
-                    "stage_outputs": {"assembly": output},
-                }
+                state = _assembly_state(run_dir, output)
                 bundle = SimpleNamespace(
                     attempt=SimpleNamespace(attempt_id=0),
                     chain=SimpleNamespace(
@@ -637,6 +662,13 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                             adapter,
                             "resolve_assembly_read_paths",
                             return_value=[Path("/reads/long.fastq.gz")],
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            adapter,
+                            "build_read_input_dependencies",
+                            return_value=[],
                         )
                     )
                     env_resolver = stack.enter_context(
@@ -754,12 +786,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                     contract.model_dump(mode="json")
                 )
                 output[parameter_key]["threads"] = 99
-                state = {
-                    "session_id": "s1",
-                    "data_dir": str(run_dir),
-                    "input_manifest_ref": "control/manifest.yaml",
-                    "stage_outputs": {"assembly": output},
-                }
+                state = _assembly_state(run_dir, output)
                 bundle = SimpleNamespace(
                     attempt=SimpleNamespace(attempt_id=0),
                     chain=SimpleNamespace(
@@ -782,6 +809,13 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                             adapter,
                             "resolve_assembly_read_paths",
                             return_value=[Path("/reads/long.fastq.gz")],
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            adapter,
+                            "build_read_input_dependencies",
+                            return_value=[],
                         )
                     )
                     stack.enter_context(

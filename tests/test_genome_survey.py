@@ -7,10 +7,13 @@ import json
 import os
 import tempfile
 import unittest
+from functools import partial
 from pathlib import Path
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import load_frozen_attempt
 from app.integrity import sha256_file
 from app.schemas.artifacts import (
@@ -41,6 +44,26 @@ from app.storage.artifacts import (
 )
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
+
+
+def _genome_survey_workflow_steps() -> list[dict]:
+    return [
+        {
+            "step_id": "step-000-inventory",
+            "stage": "inventory",
+            "allow_local_execution": False,
+        },
+        {
+            "step_id": "step-001-genome_survey",
+            "stage": "genome_survey",
+            "allow_local_execution": True,
+        },
+        {
+            "step_id": "step-002-assembly",
+            "stage": "assembly",
+            "allow_local_execution": False,
+        },
+    ]
 
 
 def _ready_assets(assets: list[dict]) -> list[dict]:
@@ -130,8 +153,10 @@ class GenomeSurveyStageTests(unittest.TestCase):
         self, data_dir: str, session_id: str, registry_path: str | Path
     ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path(
-            "inventory", f"asset_registry_{os.urandom(4).hex()}.json"
+        source = paths.workflow_step_work_path(
+            "step-000-inventory",
+            "inventory",
+            f"asset_registry_{os.urandom(4).hex()}.json",
         )
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(
@@ -151,8 +176,11 @@ class GenomeSurveyStageTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=_genome_survey_workflow_steps(),
         )
         state["current_stage"] = "genome_survey"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
             if registry_ref is not None
@@ -168,7 +196,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
         source_asset_id: str,
     ):
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        read_source = paths.work_path("read_qc", source.name)
+        read_source = paths.workflow_step_work_path(
+            "step-001-read_qc", "read_qc", source.name
+        )
         read_source.parent.mkdir(parents=True, exist_ok=True)
         read_source.write_bytes(source.read_bytes())
         published_read = publish_artifact_record(
@@ -195,7 +225,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 )
             ],
         )
-        manifest_source = paths.work_path("read_qc", "read_set_manifest.json")
+        manifest_source = paths.workflow_step_work_path(
+            "step-001-read_qc", "read_qc", "read_set_manifest.json"
+        )
         manifest_source.write_text(
             json.dumps(manifest.model_dump(mode="json"), indent=2), encoding="utf-8"
         )
@@ -267,10 +299,15 @@ class GenomeSurveyStageTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=_genome_survey_workflow_steps(),
         )
         state["current_stage"] = "genome_survey"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        work_dir = paths.work_path("genome_survey", "indexed_jellyfish")
+        work_dir = paths.workflow_step_work_path(
+            "step-001-genome_survey", "genome_survey", "indexed_jellyfish"
+        )
         work_dir.mkdir(parents=True, exist_ok=True)
         sources = [
             (work_dir / "jellyfish_kmers.jf", GENOME_SURVEY_KMER_DB, "fake-jf\n"),
@@ -714,7 +751,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["estimates"]["genome_size"], 2_000_000)
             self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
             self.assertTrue(
-                (Path(result["data_dir"]) / "work" / "genome_survey").exists()
+                SessionPaths.from_run_dir(result["data_dir"])
+                .workflow_step_work_dir("step-001-genome_survey", "genome_survey")
+                .exists()
             )
 
     def test_parse_genomescope2_summary_table(self):
@@ -873,24 +912,21 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["survey_input_family"], "long_reads")
             self.assertEqual(survey["survey_input_refs"], [source_asset_id])
             # Jellyfish must have been pointed at filtered path, not raw gz.
-            script = (
-                Path(result["data_dir"])
-                / "work"
-                / "genome_survey"
-                / "jellyfish"
-                / "run_jellyfish.sh"
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            script = paths.workflow_step_work_path(
+                "step-001-genome_survey",
+                "genome_survey",
+                "jellyfish/run_jellyfish.sh",
             )
             self.assertTrue(script.exists(), "expected jellyfish script under work/")
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(published_read.path), script_text)
             self.assertNotIn(str(raw_reads), script_text)
             [attempt_path] = (
-                Path(result["data_dir"])
-                / "artifacts"
-                / "genome_survey"
+                SessionPaths.from_run_dir(result["data_dir"])
+                .workflow_step_artifacts_dir("step-001-genome_survey", "genome_survey")
                 / "attempts"
-                / "jellyfish"
-            ).glob("attempt.*.json")
+            ).glob("genome_survey_jellyfish/attempt.*.json")
             jellyfish_attempt = load_frozen_attempt(
                 result,
                 artifact_ref_for_path(
@@ -1027,12 +1063,11 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "long_reads")
-            script = (
-                Path(result["data_dir"])
-                / "work"
-                / "genome_survey"
-                / "jellyfish"
-                / "run_jellyfish.sh"
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            script = paths.workflow_step_work_path(
+                "step-001-genome_survey",
+                "genome_survey",
+                "jellyfish/run_jellyfish.sh",
             )
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(published_read.path), script_text)
@@ -1083,12 +1118,11 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "short_reads")
-            script = (
-                Path(result["data_dir"])
-                / "work"
-                / "genome_survey"
-                / "jellyfish"
-                / "run_jellyfish.sh"
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            script = paths.workflow_step_work_path(
+                "step-001-genome_survey",
+                "genome_survey",
+                "jellyfish/run_jellyfish.sh",
             )
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(short_reads), script_text)
@@ -1311,8 +1345,10 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
         self, data_dir: str, session_id: str, registry_path: str | Path
     ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path(
-            "inventory", f"asset_registry_{os.urandom(4).hex()}.json"
+        source = paths.workflow_step_work_path(
+            "step-000-inventory",
+            "inventory",
+            f"asset_registry_{os.urandom(4).hex()}.json",
         )
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(
@@ -1332,8 +1368,11 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=_genome_survey_workflow_steps(),
         )
         state["current_stage"] = "genome_survey"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         state["asset_registry_ref"] = self._publish_registry_ref(
             state["data_dir"], "s1", registry_ref
         )
@@ -1354,13 +1393,32 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             ],
         )
 
+    def _write_env_config(self, tmpdir: str) -> Path:
+        envs_path = Path(tmpdir) / "envs.yaml"
+        envs_path.write_text(
+            "default:\n"
+            "  conda_bin: conda\n"
+            "  fallback_env: genome-survey-test\n"
+            "methods:\n"
+            "  genome_survey.kmer_count.jellyfish:\n"
+            "    conda_env: genome-survey-test\n"
+            "    required_tools:\n"
+            "      - jellyfish\n"
+            "  genome_survey.model.genomescope2:\n"
+            "    conda_env: genome-survey-test\n"
+            "    required_tools:\n"
+            "      - genomescope2\n",
+            encoding="utf-8",
+        )
+        return envs_path
+
     def test_missing_conda_env_blocks_jellyfish_with_blocked_env_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._short_read_registry(tmpdir)
+            envs_path = self._write_env_config(tmpdir)
             state = self._state(tmpdir, str(registry))
-            # No env.PATH override → env_dispatch resolves and preflights via
-            # config/envs.yaml. Empty PATH removes conda so preflight reports
-            # blocked_env before any jellyfish/genomescope2 command runs.
+            # Inject the explicit pre-freeze config seam. Empty PATH removes conda,
+            # so preflight reports blocked_env before either method command runs.
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
@@ -1373,7 +1431,12 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = ""
             try:
-                result = build_stage().invoke(state)
+                with patch(
+                    "app.stages.genome_survey.method_application.jellyfish."
+                    "resolve_method_env",
+                    partial(resolve_method_env, config_path=envs_path),
+                ):
+                    result = build_stage().invoke(state)
             finally:
                 os.environ["PATH"] = old_path
 
@@ -1398,6 +1461,7 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
     def test_missing_jellyfish_in_env_blocks_with_missing_tool_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._short_read_registry(tmpdir)
+            envs_path = self._write_env_config(tmpdir)
             # Stub conda that reports env ok but every tool probe fails, so
             # the first method (jellyfish) blocks before any binary runs.
             conda_stub_dir = Path(tmpdir) / "conda-stub-bin"
@@ -1435,7 +1499,12 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = f"{conda_stub_dir}{os.pathsep}{old_path}"
             try:
-                result = build_stage().invoke(state)
+                with patch(
+                    "app.stages.genome_survey.method_application.jellyfish."
+                    "resolve_method_env",
+                    partial(resolve_method_env, config_path=envs_path),
+                ):
+                    result = build_stage().invoke(state)
             finally:
                 os.environ["PATH"] = old_path
 
@@ -1451,6 +1520,7 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
         self,
     ):
         with tempfile.TemporaryDirectory() as tmpdir:
+            envs_path = self._write_env_config(tmpdir)
             short_reads = Path(tmpdir) / "short.fq"
             short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             registry = self._write_registry(
@@ -1537,7 +1607,22 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
                 f"{conda_stub_dir}{os.pathsep}{jelly_stub_dir}{os.pathsep}{old_path}"
             )
             try:
-                result = build_stage().invoke(state)
+                injected_resolver = partial(
+                    resolve_method_env, config_path=envs_path
+                )
+                with (
+                    patch(
+                        "app.stages.genome_survey.method_application.jellyfish."
+                        "resolve_method_env",
+                        injected_resolver,
+                    ),
+                    patch(
+                        "app.stages.genome_survey.method_application.genomescope2."
+                        "resolve_method_env",
+                        injected_resolver,
+                    ),
+                ):
+                    result = build_stage().invoke(state)
             finally:
                 os.environ["PATH"] = old_path
 

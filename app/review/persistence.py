@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, cast
 from uuid import uuid4
 
+from app.control.workflow_plan import current_workflow_step_id
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.run_config import DEFAULT_REVIEW_MAX_BLOCKED_SECONDS
@@ -32,6 +33,7 @@ class PersistedReviewRequest:
     """Canonical identity and ref returned after publishing a request."""
 
     review_request_id: str
+    workflow_step_id: str
     request_ref: ArtifactRef
 
     @property
@@ -51,6 +53,7 @@ class PersistedReviewRequest:
 
         interrupt: dict[str, Any] = {
             "stage": stage,
+            "workflow_step_id": self.workflow_step_id,
             "gate_id": gate_id,
             "reason": reason,
             "review_request_id": self.review_request_id,
@@ -86,13 +89,14 @@ def persist_review_request(
     artifact_type: str | None = None,
     bindings: Mapping[str, Any] | None = None,
 ) -> PersistedReviewRequest:
-    """Publish one content-addressed review request below ``artifacts/reviews``.
+    """Publish one content-addressed review request for one workflow occurrence.
 
     The ID is stable for the same stage, gate, bindings, and portable payload,
     so a replay reuses the same immutable file and artifact-index row.
     """
 
     paths = _paths_for_state(state)
+    workflow_step_id = current_workflow_step_id(state, expected_stage=stage)
     request_body = _review_request_body(
         _dump_payload(payload),
         stage=stage,
@@ -111,6 +115,7 @@ def persist_review_request(
     portable_bindings = _portable_value(paths, dict(bindings or {}))
     identity_payload = {
         "schema_version": 2,
+        "workflow_step_id": workflow_step_id,
         "stage": stage,
         "gate_id": gate_id,
         "reason": reason,
@@ -123,7 +128,9 @@ def persist_review_request(
         **identity_payload,
         "review_request_id": review_request_id,
     }
-    destination = paths.artifact_path("reviews", review_request_id, "request.json")
+    destination = paths.workflow_step_artifact_path(
+        workflow_step_id, stage, "reviews", review_request_id, "request.json"
+    )
     ref = _publish_json(
         paths,
         session_id=state["session_id"],
@@ -132,9 +139,16 @@ def persist_review_request(
         stage=stage,
         method_name=method_name or f"{stage}.review.{gate_id}",
         artifact_type=artifact_type or f"{stage}.review_request",
-        metadata={"review_request_id": review_request_id},
+        metadata={
+            "review_request_id": review_request_id,
+            "workflow_step_id": workflow_step_id,
+        },
     )
-    return PersistedReviewRequest(review_request_id=review_request_id, request_ref=ref)
+    return PersistedReviewRequest(
+        review_request_id=review_request_id,
+        workflow_step_id=workflow_step_id,
+        request_ref=ref,
+    )
 
 
 def persist_review_recommendation(
@@ -174,6 +188,7 @@ def persist_review_recommendation(
         raise ReviewPersistenceError(
             "review recommendation stage does not match the canonical request"
         )
+    workflow_step_id = _review_workflow_step_id(request_record)
 
     recommendation_body = dict(payload)
     reserved = {
@@ -191,12 +206,15 @@ def persist_review_recommendation(
         )
     record = {
         "schema_version": 2,
+        "workflow_step_id": workflow_step_id,
         "review_request_id": review_request_id,
         "request_ref": ref.model_dump(mode="json"),
         "request_hash": request_hash,
         **_portable_value(paths, recommendation_body),
     }
-    destination = paths.artifact_path(
+    destination = paths.workflow_step_artifact_path(
+        workflow_step_id,
+        stage,
         "reviews",
         review_request_id,
         "recommendation.json",
@@ -211,6 +229,7 @@ def persist_review_recommendation(
         artifact_type=f"{stage}.review_recommendation",
         metadata={
             "review_request_id": review_request_id,
+            "workflow_step_id": workflow_step_id,
             "decided_by": "llm_provisional",
         },
     )
@@ -235,13 +254,20 @@ def persist_review_decision(
     paths.require_session_id(session_id)
     _safe_component(review_request_id, "review_request_id")
     validated_request_ref = _validate_optional_ref(request_ref)
-    if validated_request_ref is not None:
-        _verify_ref(paths, validated_request_ref)
-        if request_hash is not None and request_hash != validated_request_ref.sha256:
-            raise ReviewPersistenceError(
-                "request_hash does not match request_ref.sha256"
-            )
-        request_hash = validated_request_ref.sha256
+    if validated_request_ref is None:
+        raise ReviewPersistenceError("decision requires the bound review request ref")
+    _verify_ref(paths, validated_request_ref)
+    if request_hash is not None and request_hash != validated_request_ref.sha256:
+        raise ReviewPersistenceError("request_hash does not match request_ref.sha256")
+    request_hash = validated_request_ref.sha256
+    request_record = load_review_request(
+        paths.run_dir, validated_request_ref, session_id=session_id
+    )
+    if request_record.get("review_request_id") != review_request_id:
+        raise ReviewPersistenceError("decision request ID does not match request ref")
+    if request_record.get("stage") != stage or request_record.get("gate_id") != gate_id:
+        raise ReviewPersistenceError("decision does not match the bound review request")
+    workflow_step_id = _review_workflow_step_id(request_record)
     if (
         request_hash is None
         or len(request_hash) != 64
@@ -252,6 +278,7 @@ def persist_review_decision(
         )
     record = {
         "schema_version": 2,
+        "workflow_step_id": workflow_step_id,
         "review_request_id": review_request_id,
         "stage": stage,
         "gate_id": gate_id,
@@ -263,7 +290,9 @@ def persist_review_decision(
         ),
         "decision": _portable_value(paths, _dump_payload(decision)),
     }
-    destination = paths.artifact_path("reviews", review_request_id, "decision.json")
+    destination = paths.workflow_step_artifact_path(
+        workflow_step_id, stage, "reviews", review_request_id, "decision.json"
+    )
     return _publish_json(
         paths,
         session_id=session_id,
@@ -272,7 +301,10 @@ def persist_review_decision(
         stage=stage,
         method_name=method_name or f"{stage}.review.{gate_id}",
         artifact_type=artifact_type or f"{stage}.review_decision",
-        metadata={"review_request_id": review_request_id},
+        metadata={
+            "review_request_id": review_request_id,
+            "workflow_step_id": workflow_step_id,
+        },
     )
 
 
@@ -322,7 +354,12 @@ def _publish_json(
     artifact_type: str,
     metadata: dict[str, Any],
 ) -> ArtifactRef:
-    temporary = paths.work_path(
+    workflow_step_id = metadata.get("workflow_step_id")
+    if not isinstance(workflow_step_id, str) or not workflow_step_id:
+        raise ReviewPersistenceError("review persistence requires workflow_step_id")
+    temporary = paths.workflow_step_work_path(
+        workflow_step_id,
+        stage,
         "reviews",
         "persistence",
         f".{destination.name}.{uuid4().hex}.tmp",
@@ -460,6 +497,7 @@ def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) ->
     if record.get("schema_version") != 2:
         raise ReviewPersistenceError(f"invalid review request record: {path_ref}")
     stage = record.get("stage")
+    workflow_step_id = record.get("workflow_step_id")
     gate_id = record.get("gate_id")
     reason = record.get("reason")
     bindings = record.get("bindings")
@@ -467,6 +505,8 @@ def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) ->
     request_id = record.get("review_request_id")
     if (
         not isinstance(stage, str)
+        or not isinstance(workflow_step_id, str)
+        or not workflow_step_id
         or not isinstance(gate_id, str)
         or not isinstance(reason, str)
     ):
@@ -481,6 +521,7 @@ def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) ->
         )
     identity_payload = {
         "schema_version": 2,
+        "workflow_step_id": workflow_step_id,
         "stage": stage,
         "gate_id": gate_id,
         "reason": reason,
@@ -523,4 +564,11 @@ def _safe_component(value: str, label: str) -> str:
     path = Path(value)
     if not value or path.is_absolute() or len(path.parts) != 1 or value in {".", ".."}:
         raise ReviewPersistenceError(f"{label} must be one safe path component")
+    return value
+
+
+def _review_workflow_step_id(record: Mapping[str, Any]) -> str:
+    value = record.get("workflow_step_id")
+    if not isinstance(value, str) or not value:
+        raise ReviewPersistenceError("review request has no workflow_step_id")
     return value

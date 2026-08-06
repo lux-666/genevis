@@ -11,6 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.ask_plan import PlanStageOccurrence
 from app.schemas.shared_parameters import SharedParameters
 
 IntakeRole = Literal["hifi_reads", "ont_reads", "hic_reads"]
@@ -70,14 +71,13 @@ class WorkflowIntent(BaseModel):
 
     @field_validator("requested_stages")
     @classmethod
-    def _deduplicate_stages(cls, value: list[str]) -> list[str]:
+    def _normalize_requested_stages(cls, value: list[str]) -> list[str]:
         result: list[str] = []
         for stage in value:
             normalized = str(stage).strip()
             if not normalized:
                 raise ValueError("requested_stages must not contain blank values")
-            if normalized not in result:
-                result.append(normalized)
+            result.append(normalized)
         return result
 
 
@@ -269,8 +269,10 @@ class TuiSessionDraft(BaseModel):
     request_text: str = Field(min_length=1)
     intent: WorkflowIntent
     intake: AssetCollectionState
-    selected_stages: list[str] | None = None
-    resolved_execution_order: list[str] | None = None
+    # The sole mutable pre-freeze execution sequence. Its literal order,
+    # duplicate occurrences, and local-execution consent are retained until it
+    # is frozen as RunConfig.
+    selected_stage_occurrences: list[PlanStageOccurrence] | None = None
     selected_methods: dict[str, str | list[str]] | None = None
     shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, object]] | None = None
@@ -278,6 +280,14 @@ class TuiSessionDraft(BaseModel):
     degradation_decision: DegradationDecision | None = None
     lifecycle: TuiLifecycle = "intake"
     revision: int = Field(default=1, ge=1)
+
+    @property
+    def selected_stage_names(self) -> list[str] | None:
+        """Derived stage-name projection for display and stage-scoped settings."""
+
+        if self.selected_stage_occurrences is None:
+            return None
+        return [occurrence.stage for occurrence in self.selected_stage_occurrences]
 
     @field_validator("session_id", "parent_session_id", "request_text")
     @classmethod

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from app.schemas.artifacts import (
     HIC_PARAMETER_FROZEN_PARAMETERS,
     ParameterAttempt,
 )
+from app.schemas.execution import InputDependency
 from app.schemas.parameter_recommendation import ResolvedParameterSources
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
@@ -326,6 +328,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             raise ValueError(
                 "resolved assembly no longer matches pre_hic_assembly_ref"
             )
+        assembly_dependencies: Sequence[InputDependency]
         if assembly_resolution.asset_records:
             assembly_dependencies = asset_input_dependencies(
                 state,
@@ -357,7 +360,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             config_ref,
             published_config_path,
         )
-        input_dependencies = [
+        input_dependencies: list[InputDependency] = [
             *assembly_dependencies,
             *read_dependencies,
             config_dependency,

@@ -25,6 +25,7 @@ from langchain_core.runnables import RunnableConfig
 
 from app.config import default_data_root
 from app.control.lifecycle import finalize_terminal_state
+from app.control.workflow_plan import workflow_steps_from_run_config
 from app.domains.assembly.selection import (
     AssemblySelection,
     default_primary_method,
@@ -38,10 +39,11 @@ from app.graph.checkpointer import (
 from app.review.gates import registered_review_stages
 from app.schemas.run_config import (
     AssemblyRunConfig,
+    RunConfig,
     infer_assembly_method,
 )
 from app.schemas.shared_parameters import SharedParameters
-from app.schemas.state import DomainStage, initial_state
+from app.schemas.state import StageOutputs, initial_state, validate_stage_outputs
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
 
@@ -128,6 +130,125 @@ def _build_assembly_selection(
         rationale="run_config provided assembly_route read-type hint",
         metadata={"assembly_route": assembly.assembly_route},
     )
+
+
+def _stage_seeds_from_run_config(
+    run_config: RunConfig,
+    *,
+    shared_parameters: SharedParameters | dict[str, Any] | None,
+) -> StageOutputs:
+    """Project shared stage configuration without occurrence-local consent.
+
+    ``allow_local_execution`` belongs to one workflow occurrence and is applied
+    only when that occurrence is entered.  Keeping it out of these immutable
+    per-stage seeds prevents one locally authorized occurrence from granting
+    process execution to another occurrence of the same stage.
+    """
+
+    requested = set(run_config.requested_stage_names())
+    seeds: StageOutputs = {}
+
+    if (
+        "read_qc" in requested
+        and run_config.read_qc
+        and run_config.read_qc.length_filter
+    ):
+        seeds["read_qc"] = {
+            "length_filter_request": run_config.read_qc.length_filter.model_dump(
+                mode="json"
+            )
+        }
+
+    if (
+        "genome_survey" in requested
+        and run_config.genome_survey
+        and run_config.genome_survey.survey_parameters
+    ):
+        seeds["genome_survey"] = {
+            "survey_parameters": run_config.genome_survey.survey_parameters.model_dump(
+                exclude_none=True
+            )
+        }
+
+    if "assembly" in requested and run_config.assembly:
+        assembly_seed: dict[str, Any] = {}
+        selection = _build_assembly_selection(
+            assembly=run_config.assembly,
+            shared_parameters=shared_parameters,
+            shared_platform=(
+                run_config.shared_parameters.platform
+                if run_config.shared_parameters
+                else None
+            ),
+        )
+        if selection:
+            assembly_seed["assembly_selection"] = selection.model_dump(mode="json")
+        for method in _ASSEMBLY_PARAMETER_ATTRS:
+            if getattr(run_config.assembly, _ASSEMBLY_PARAMETER_ATTRS[method]):
+                assembly_seed[f"{method}_parameters"] = _assembly_parameter_dump(
+                    run_config.assembly,
+                    method,
+                )
+        for key in (
+            "hifi_reads_ref",
+            "hic_reads_ref",
+            "target_level",
+            "assembly_route",
+        ):
+            value = getattr(run_config.assembly, key)
+            if value is not None:
+                assembly_seed[key] = value
+        if assembly_seed:
+            seeds["assembly"] = assembly_seed
+
+    if "assembly_review" in requested and run_config.assembly_review:
+        review_seed: dict[str, Any] = {}
+        if run_config.assembly_review.quast:
+            review_seed["quast_parameters"] = (
+                run_config.assembly_review.quast.model_dump()
+            )
+        if run_config.assembly_review.busco:
+            review_seed["busco_parameters"] = (
+                run_config.assembly_review.busco.model_dump()
+            )
+        if run_config.assembly_review.related_species_reference_dir:
+            review_seed["related_species_reference_dir"] = (
+                run_config.assembly_review.related_species_reference_dir
+            )
+        seeds["assembly_review"] = review_seed
+
+    if "hic_scaffolding" in requested and run_config.hic_scaffolding:
+        hic_seed: dict[str, Any] = {}
+        if run_config.hic_scaffolding.autohic_parameters:
+            hic_seed["autohic_parameters"] = (
+                run_config.hic_scaffolding.autohic_parameters.model_dump(
+                    exclude_none=True
+                )
+            )
+        hic_seed["parameter_retry_policy"] = {
+            "retry_on_execution_failure": (
+                run_config.hic_scaffolding.retry_on_execution_failure
+            ),
+            "max_execution_retries": run_config.hic_scaffolding.max_execution_retries,
+            "max_review_retries": run_config.hic_scaffolding.max_review_retries,
+        }
+        seeds["hic_scaffolding"] = hic_seed
+
+    if "t2t" in requested and run_config.t2t:
+        seeds["t2t"] = run_config.t2t.model_dump(mode="json", exclude_none=True)
+
+    for review_stage in registered_review_stages():
+        if review_stage not in requested:
+            continue
+        stage_seed = dict(seeds.get(review_stage) or {})
+        stage_seed["review_policy"] = {
+            "max_blocked_seconds": (
+                run_config.review_policy.effective_max_blocked_seconds(review_stage)
+            )
+        }
+        seeds[review_stage] = stage_seed
+
+    return validate_stage_outputs(seeds)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -287,9 +408,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
-        help=(
-            "Auxiliary machine configuration initialization and validation"
-        ),
+        help=("Auxiliary machine configuration initialization and validation"),
     )
     bootstrap_mode = bootstrap_parser.add_mutually_exclusive_group()
     bootstrap_mode.add_argument(
@@ -363,28 +482,12 @@ def _run(args: argparse.Namespace) -> int:
             manifest_draft=args.manifest,
             run_config_draft=args.run_config,
         )
-        required_fields = {"requested_stages", "local_exec"}
-        missing_fields = sorted(
-            required_fields.difference(prepared.explicit_run_config_fields)
-        )
-        if missing_fields:
-            raise FrozenInputValidationError(
-                "run config must explicitly provide top-level field(s): "
-                + ", ".join(missing_fields)
-            )
-
-        requested_stages = prepared.run_config.requested_stages
-        if requested_stages is None:
-            raise FrozenInputValidationError(
-                "run config field requested_stages must be a JSON array, not null"
-            )
 
         data_dir = _resolve_data_dir(args.data_dir)
         paths = SessionPaths(data_dir, prepared.manifest.session_id)
         freeze_session_inputs(
             paths,
             prepared_inputs=prepared,
-            selected_stages=list(requested_stages),
             selected_methods={},
         )
     except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
@@ -484,160 +587,30 @@ def _execute_verified_frozen_session(
     manifest_ref = paths.to_ref(paths.input_manifest_path)
     Ledger(run_dir).create_session(session_id, manifest_ref)
 
-    requested_stages = (
-        list(run_config.requested_stages)
-        if run_config.requested_stages is not None
+    workflow_steps = workflow_steps_from_run_config(run_config)
+    shared_parameters = (
+        run_config.shared_parameters.model_dump(exclude_none=True)
+        if run_config.shared_parameters
         else None
     )
+    try:
+        stage_seeds = _stage_seeds_from_run_config(
+            run_config,
+            shared_parameters=shared_parameters,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     state = initial_state(
         session_id=session_id,
         input_manifest_ref=manifest_ref,
         data_dir=run_dir,
-        requested_stages=(
-            [cast(DomainStage, stage) for stage in requested_stages]
-            if requested_stages is not None
-            else None
-        ),
+        workflow_steps=workflow_steps,
+        stage_plan_ref=paths.to_ref(paths.run_config_path),
+        stage_seeds=stage_seeds,
     )
-
-    local_stages = list(run_config.local_exec)
-    stage_outputs = dict(state.get("stage_outputs") or {})
-    if local_stages:
-        for stage_name in local_stages:
-            existing = dict(stage_outputs.get(stage_name) or {})
-            existing["execution_mode"] = "local"
-            stage_outputs[stage_name] = existing
-    if run_config.shared_parameters:
-        state["shared_parameters"] = run_config.shared_parameters.model_dump(
-            exclude_none=True
-        )
-    if run_config.read_qc and run_config.read_qc.length_filter:
-        read_qc_out = dict(stage_outputs.get("read_qc") or {})
-        read_qc_out["length_filter_request"] = (
-            run_config.read_qc.length_filter.model_dump(mode="json")
-        )
-        stage_outputs["read_qc"] = read_qc_out
-    if run_config.genome_survey and run_config.genome_survey.survey_parameters:
-        survey_out = dict(stage_outputs.get("genome_survey") or {})
-        survey_out["survey_parameters"] = (
-            run_config.genome_survey.survey_parameters.model_dump(exclude_none=True)
-        )
-        stage_outputs["genome_survey"] = survey_out
-    if "repeat_annotation" in local_stages:
-        repeat_out = dict(stage_outputs.get("repeat_annotation") or {})
-        repeat_out.setdefault(
-            "primary_method", "repeat_annotation.masking.repeatmasker"
-        )
-        stage_outputs["repeat_annotation"] = repeat_out
-    if run_config.assembly:
-        assembly_out = dict(stage_outputs.get("assembly") or {})
-        try:
-            selection = _build_assembly_selection(
-                assembly=run_config.assembly,
-                shared_parameters=state.get("shared_parameters"),
-                shared_platform=(
-                    run_config.shared_parameters.platform
-                    if run_config.shared_parameters
-                    else None
-                ),
-            )
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        if selection:
-            assembly_out["assembly_selection"] = selection.model_dump(mode="json")
-        if run_config.assembly.flye_parameters:
-            assembly_out["flye_parameters"] = _assembly_parameter_dump(
-                run_config.assembly, "flye"
-            )
-        if run_config.assembly.nextdenovo_parameters:
-            assembly_out["nextdenovo_parameters"] = _assembly_parameter_dump(
-                run_config.assembly, "nextdenovo"
-            )
-        if run_config.assembly.hifiasm_parameters:
-            assembly_out["hifiasm_parameters"] = _assembly_parameter_dump(
-                run_config.assembly, "hifiasm"
-            )
-        if run_config.assembly.hifiasm_ont_parameters:
-            assembly_out["hifiasm_ont_parameters"] = _assembly_parameter_dump(
-                run_config.assembly, "hifiasm_ont"
-            )
-        for key in [
-            "hifi_reads_ref",
-            "hic_reads_ref",
-            "target_level",
-            "assembly_route",
-        ]:
-            value = getattr(run_config.assembly, key)
-            if value is not None:
-                assembly_out[key] = value
-        if assembly_out:
-            stage_outputs["assembly"] = assembly_out
-    if run_config.assembly_review:
-        review_out = dict(stage_outputs.get("assembly_review") or {})
-        if run_config.assembly_review.quast:
-            review_out["quast_parameters"] = (
-                run_config.assembly_review.quast.model_dump()
-            )
-        if run_config.assembly_review.busco:
-            review_out["busco_parameters"] = (
-                run_config.assembly_review.busco.model_dump()
-            )
-        review_out["max_reruns"] = run_config.assembly_review.max_reruns
-        if run_config.assembly_review.related_species_reference_dir:
-            review_out["related_species_reference_dir"] = (
-                run_config.assembly_review.related_species_reference_dir
-            )
-        stage_outputs["assembly_review"] = review_out
-    if run_config.hic_scaffolding:
-        hic_out = dict(stage_outputs.get("hic_scaffolding") or {})
-        if run_config.hic_scaffolding.autohic_parameters:
-            hic_out["autohic_parameters"] = (
-                run_config.hic_scaffolding.autohic_parameters.model_dump(
-                    exclude_none=True
-                )
-            )
-        hic_out["parameter_retry_policy"] = {
-            "retry_on_execution_failure": (
-                run_config.hic_scaffolding.retry_on_execution_failure
-            ),
-            "max_execution_retries": run_config.hic_scaffolding.max_execution_retries,
-            "max_review_retries": run_config.hic_scaffolding.max_review_retries,
-        }
-        stage_outputs["hic_scaffolding"] = hic_out
-    if run_config.t2t:
-        t2t_out = dict(stage_outputs.get("t2t") or {})
-        t2t_out.update(run_config.t2t.model_dump(mode="json", exclude_none=True))
-        stage_outputs["t2t"] = t2t_out
-    for review_stage in registered_review_stages():
-        stage_out = dict(stage_outputs.get(review_stage) or {})
-        stage_out["review_policy"] = {
-            "max_blocked_seconds": (
-                run_config.review_policy.effective_max_blocked_seconds(review_stage)
-            )
-        }
-        stage_outputs[review_stage] = stage_out
-    if (
-        run_config.gene_annotation
-        and run_config.gene_annotation.lineage_or_species_hints
-    ):
-        gene_out = dict(stage_outputs.get("gene_annotation") or {})
-        gene_out["lineage_or_species_hints"] = dict(
-            run_config.gene_annotation.lineage_or_species_hints
-        )
-        stage_outputs["gene_annotation"] = gene_out
-    if (
-        run_config.function_annotation
-        and run_config.function_annotation.database_provenance
-    ):
-        fn_out = dict(stage_outputs.get("function_annotation") or {})
-        fn_out["database_provenance"] = [
-            p.model_dump(mode="json")
-            for p in run_config.function_annotation.database_provenance
-        ]
-        stage_outputs["function_annotation"] = fn_out
-    if stage_outputs != (state.get("stage_outputs") or {}):
-        state["stage_outputs"] = stage_outputs
+    if shared_parameters:
+        state["shared_parameters"] = shared_parameters
 
     graph = build_graph(backend=backend, data_dir=run_dir)
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
@@ -864,7 +837,6 @@ def _interactive_gate_loop(
         render_decision_brief,
         wait_for_gate_claim,
     )
-    from app.review.annotation_intake import collect_annotation_intake_selection
 
     waiter = claim_waiter or wait_for_gate_claim
 
@@ -1015,7 +987,6 @@ def _interactive_gate_loop(
                 request=request,
                 source=source,
                 checkpointer="sqlite",
-                annotation_intake_collector=collect_annotation_intake_selection,
                 blocked_timeout_seconds=blocked_timeout_seconds,
                 event_context=event_context,
             )
@@ -1029,10 +1000,6 @@ def _interactive_gate_loop(
         result = transaction.state
         if transaction.decision_artifact_path is not None:
             print(f"decision_artifact: {transaction.decision_artifact_path}")
-        if transaction.annotation_intake_artifact_ref is not None:
-            print(
-                f"annotation_intake_plan: {transaction.annotation_intake_artifact_ref}"
-            )
         print(
             f"\nresumed → stage={result.get('current_stage')} "
             f"state={result.get('supervision_state')}"
@@ -1366,7 +1333,6 @@ def _run_resume(args: argparse.Namespace) -> int:
             request=decision,
             source="cli",
             checkpointer=backend,
-            collect_default_annotation_intake=True,
             event_context=event_context,
         )
     except ResumeTransactionError as exc:
@@ -1377,8 +1343,6 @@ def _run_resume(args: argparse.Namespace) -> int:
         return 1
 
     result = transaction.state
-    if transaction.annotation_intake_artifact_ref is not None:
-        print(f"annotation_intake_plan: {transaction.annotation_intake_artifact_ref}")
     current_stage = result.get("current_stage", "unknown")
     supervision = result.get("supervision_state", "unknown")
     route_trace = result.get("route_trace", [])
@@ -1510,8 +1474,7 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                     )
                 elif change.previous_value is None:
                     print(
-                        f"  - {change.file}: {change.field} "
-                        f"= {change.display_value()}"
+                        f"  - {change.file}: {change.field} = {change.display_value()}"
                     )
                 else:
                     print(
@@ -1535,8 +1498,7 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                         effective_apply = True
                         break
                     print(
-                        "Type nothing and press Enter to apply, or interrupt "
-                        "to cancel."
+                        "Type nothing and press Enter to apply, or interrupt to cancel."
                     )
             elif not apply_requested:
                 print("\nRun with --apply to write these project configuration changes")
@@ -1602,16 +1564,16 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                     if juicer_tools_spec:
                         print("    - Link juicer_tools.jar into scripts/common/")
 
-    if not update_requested and not effective_apply and any(
-        pkg.conform_on_bootstrap for pkg in resolver.packages.values()
+    if (
+        not update_requested
+        and not effective_apply
+        and any(pkg.conform_on_bootstrap for pkg in resolver.packages.values())
     ):
         print("\n💡 Run with --apply to execute conformance actions")
 
     # Step 4: Strictly verify and preflight all packages after conformance.
     post_conformance_issues = verify_envs_yaml(config_path)
-    issues = [
-        issue for issue in post_conformance_issues if issue not in initial_issues
-    ]
+    issues = [issue for issue in post_conformance_issues if issue not in initial_issues]
     if issues:
         print("\n❌ Configuration issues found after conformance:")
         for issue in issues:
@@ -1619,8 +1581,10 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
 
     print("\nPackage preflight:")
     preflight_results = preflight_all(resolver)
-    all_ok = not initial_issues and not issues and all(
-        result.status == "ok" for result in conformance_results
+    all_ok = (
+        not initial_issues
+        and not issues
+        and all(result.status == "ok" for result in conformance_results)
     )
     for package_name, preflight_result in preflight_results:
         if preflight_result.status == "ok":
@@ -1657,10 +1621,7 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                 f"[{method_result.env_target}]: tools available ({required})"
             )
             if method_result.package_tools:
-                print(
-                    "      package refs: "
-                    + ", ".join(method_result.package_tools)
-                )
+                print("      package refs: " + ", ".join(method_result.package_tools))
             continue
 
         if method_result.status == "blocked_env":

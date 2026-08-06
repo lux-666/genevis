@@ -41,7 +41,7 @@ kernel.
 
 | Scale | Owner | Responsibility |
 |---|---|---|
-| Parent graph | `app/graph/` and `app/workflow.py` | Select the next requested biological stage and enforce terminal boundaries |
+| Parent graph | `app/graph/` and `app/workflow.py` | Dispatch the active frozen occurrence, advance its cursor, and enforce terminal boundaries |
 | Stage subgraph | `app/stages/<stage>/` | Resolve inputs, choose/prepare methods, collect outputs, review, and commit logical resources where applicable |
 | Method lifecycle | `app/execution/` plus a stage adapter | Persist one exact attempt, run at most one pending process per transition, publish evidence, and return to stage collection |
 
@@ -54,7 +54,7 @@ as a parameterized AutoHiC attempt.
 | Module | Owns |
 |---|---|
 | `app/entrypoints/` | Public structured `run` CLI, optional mutable TUI/planning UI, shared whole-run freeze handoff, and inspect/review/resume surfaces |
-| `app/workflow.py` and `app/graph/` | Canonical stage order, parent routing, checkpointer construction, and parent lifecycle event boundary |
+| `app/workflow.py` and `app/graph/` | Stage registration/default planning, frozen-occurrence routing, checkpointer construction, and parent lifecycle event boundary |
 | `app/domains/` | Stage-neutral biological rules and shared typed input interpretation without workflow side effects |
 | `app/stages/` | Compiled biological subgraphs, method routing, command preparation, collection, review, and resource commit |
 | `app/llm/` | Strict model-facing DTO rendering, invocation, and response-shape parsing; not approval, routing, or persistence ownership |
@@ -80,22 +80,25 @@ when deciding where a new fact belongs.
 
 ## Current product boundary
 
-The fixed stage order covers inventory, read QC, genome survey, assembly,
+The stage registry contains inventory, read QC, genome survey, assembly,
 assembly deduplication, assembly review, Hi-C scaffolding, GapCloser, T2T
-finishing, Base Polish, repeat annotation, gene annotation, and function
-annotation. The requested stage set may select a subset of that order.
-GapCloser and Base Polish are wired manual-only placeholders, not executable
-biological capabilities; automatic recommendations omit them and explicit
-requests fail closed.
+finishing, and Base Polish. A run's requested-stage list is instead a literal,
+ordered sequence of occurrences: stages may be repeated and need not follow
+registry order. Freeze adds one implicit inventory occurrence as
+`step-000-inventory`, then assigns every requested occurrence a position-based
+`step_id`. The frozen `workflow_steps` sequence—not registry order—is runtime
+authority. GapCloser and Base Polish remain manual-only placeholders; an
+occurrence of either fails closed.
 
 Real/operator new runs enter through `gene-agent run --manifest PATH --run-config
 PATH --data-dir PATH [--non-interactive]`. The manifest solely owns
 `session_id`; `data-dir` is the layout root, so outputs live under
 `<data-dir>/runs/<session_id>/`. The command preflights both documents, freezes
-them with the exact requested stage set and dependency closure, and executes
-with SQLite. Its run config must explicitly contain JSON arrays for
-`requested_stages` and `local_exec`; `requested_stages: null` is rejected while
-`[]` is a valid empty biological-stage plan. `gene-agent tui` remains an
+them with the exact requested occurrence sequence and dependency closure, and executes
+with SQLite. Its run config must explicitly contain a `requested_stages` JSON
+list of `{stage, allow_local_execution}` objects; the boolean is local-process
+authorization for that particular occurrence. `requested_stages: null` is
+rejected while `[]` is a valid empty biological-stage plan. `gene-agent tui` remains an
 optional conversational intake and planning path into that same freeze/executor.
 Other public commands inspect,
 audit, review, resume, or bootstrap. Production method execution is a local

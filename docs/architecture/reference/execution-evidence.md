@@ -35,7 +35,7 @@ or inspect files. It is never serialized directly into durable state.
 
 ```json
 {
-  "attempt_id": "session:stage:attempt-000",
+  "attempt_id": "session:<workflow_step_id>:attempt-000",
   "success": true,
   "return_code": 0,
   "status": "ok",
@@ -45,7 +45,7 @@ or inspect files. It is never serialized directly into durable state.
     "schema_version": 2,
     "artifact_id": "...",
     "artifact_type": "command.stdout",
-    "path_ref": "artifacts/stage/logs/attempt-000.invocation.stdout.log",
+    "path_ref": "artifacts/steps/<workflow_step_id>/<stage>/attempts/attempt-000/invocation.stdout.log",
     "sha256": "...",
     "size_bytes": 0
   },
@@ -53,7 +53,7 @@ or inspect files. It is never serialized directly into durable state.
     "schema_version": 2,
     "artifact_id": "...",
     "artifact_type": "command.stderr",
-    "path_ref": "artifacts/stage/logs/attempt-000.invocation.stderr.log",
+    "path_ref": "artifacts/steps/<workflow_step_id>/<stage>/attempts/attempt-000/invocation.stderr.log",
     "sha256": "...",
     "size_bytes": 0
   }
@@ -80,9 +80,9 @@ authoritative process output.
 - For model-recommended parameterized execution after human approval, current
   and historical execution-record refs live only on the corresponding
   `ParameterAttempt`; the stage cursor selects an attempt by ID and does not
-  duplicate a method-specific execution cursor. Ordinary methods, ordered
-  batches, and operator-directed Assembly reruns bind their frozen and execution
-  refs through the shared typed `execution_attempts` cursor. Small immutable
+  duplicate a method-specific execution cursor. Ordinary methods and ordered
+  batches bind their frozen and execution refs through the shared typed
+  `execution_attempts` cursor. Small immutable
   projections such as success, return code, or a bounded error may be used for
   routing and display; the execution record remains authoritative.
 - Collect resolves refs only when it needs log bytes. It registers biological
@@ -106,9 +106,7 @@ For model-recommended Assembly, AutoHiC, and T2T execution, the same
 `ParameterAttempt` owns both this `frozen_attempt_ref` and the later
 `execution_ref`. Sealing an attempt binds both refs into its immutable manifest,
 so advancing the current attempt during a retry cannot erase which runner input
-produced an earlier result. This ownership rule does not include an
-operator-directed Assembly review rerun, which uses the direct-attempt owner
-defined by [`execution-lifecycle.md`](execution-lifecycle.md).
+produced an earlier result.
 
 ## Compatibility Boundary
 

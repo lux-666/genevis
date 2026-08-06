@@ -124,7 +124,7 @@ code or behavior change
 ```
 
 Synchronize the implementation map in the same change when a graph node,
-canonical stage, registered method, execution adapter, collection boundary,
+registered stage, registered method, execution adapter, collection boundary,
 parameter flow, human gate, resource commit, verification classification, or
 cited conformance status changes.
 

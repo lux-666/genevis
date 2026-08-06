@@ -12,7 +12,7 @@
 #   fallback_env: env_geno_exec
 #   fallback_prefix: /opt/conda/envs/env_geno_exec
 #
-# Most bioinformatics tools (seqkit, flye, quast.py, RepeatMasker, ...)
+# Most bioinformatics tools (seqkit, flye, quast.py, ...)
 # are expected to live in a single shared conda env `env_geno_exec`. The
 # `gene_agent` env is reserved for the orchestrator itself and is not a
 # candidate host for tool binaries.
@@ -85,8 +85,6 @@ stages:
     conda_env: env_geno_exec
   t2t:
     conda_env: env_geno_exec
-  repeat_annotation:
-    conda_env: env_geno_exec
 
 methods:
   read_qc.long_read_stats.seqkit_stats:
@@ -155,31 +153,3 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - minimap2
-  repeat_annotation.masking.repeatmasker:
-    conda_env: env_geno_exec
-    required_tools:
-      - RepeatMasker
-  gene_annotation.candidate.miniprot:
-    conda_env: env_geno_exec
-    required_tools:
-      - miniprot
-  gene_annotation.candidate.augustus:
-    conda_env: env_geno_exec
-    required_tools:
-      - augustus
-  gene_annotation.materialize.gffread:
-    conda_env: env_geno_exec
-    required_tools:
-      - gffread
-  function_annotation.candidate.diamond:
-    conda_env: env_geno_exec
-    required_tools:
-      - diamond
-  gene_annotation.merge.evm:
-    conda_env: env_geno_exec
-    required_tools:
-      - EVidenceModeler
-  gene_annotation.busco:
-    conda_env: env_geno_exec
-    required_tools:
-      - busco

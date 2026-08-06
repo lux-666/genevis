@@ -1,0 +1,28 @@
+{
+  "requested_stages": [
+    {"stage": "t2t", "allow_local_execution": false},
+    {"stage": "assembly_review", "allow_local_execution": true},
+    {"stage": "t2t", "allow_local_execution": true}
+  ],
+  "review_policy": {
+    "max_blocked_seconds": 300,
+    "stages": {
+      "assembly_review": {
+        "max_blocked_seconds": -1
+      }
+    }
+  },
+  "assembly_review": {
+    "quast": {
+      "threads": 16
+    },
+    "busco": {
+      "lineage_path": "/absolute/path/to/busco_downloads/lineages/embryophyta_odb10",
+      "lineage_name": "embryophyta_odb10",
+      "lineage_version": "odb10",
+      "lineage_source": "operator_offline_cache",
+      "mode": "genome",
+      "threads": 16
+    }
+  }
+}

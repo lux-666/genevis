@@ -42,8 +42,7 @@ from app.stages.assembly.state import (
     update_assembly_stage_output,
     validated_assembly_stage_payload,
 )
-from app.stages.base import absolute_data_dir
-from app.storage.paths import SessionPaths
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.storage.publish import publish_file, shell_publish_file
 
 LIFECYCLE = MethodExecutionLifecycle(
@@ -122,11 +121,13 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
     )
     if error:
         return fail_update(state, error)
-    paths = SessionPaths.from_run_dir(data_dir)
     attempt_scope = f"{parameter_attempt_id:03d}"
-    working_dir = paths.work_path("assembly", "attempts", attempt_scope, "nextdenovo")
+    working_dir = stage_work_dir(
+        state, "assembly", "attempts", attempt_scope, "nextdenovo"
+    )
     nextdenovo_work_dir = working_dir / "nextdenovo_work"
-    artifact_dir = paths.artifact_path(
+    artifact_dir = stage_artifacts_dir(
+        state,
         "assembly", "attempts", attempt_scope, "outputs", "nextdenovo"
     )
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -241,7 +242,8 @@ def collect_nextdenovo_artifacts(state: TopLevelState) -> StateUpdate:
         method_id=NEXTDENOVO_METHOD,
         label="NextDenovo",
     ).attempt_id
-    durable_run_cfg = SessionPaths.from_run_dir(absolute_data_dir(state)).artifact_path(
+    durable_run_cfg = stage_artifacts_dir(
+        state,
         "assembly",
         "attempts",
         f"{attempt_id:03d}",
@@ -290,8 +292,8 @@ def _fofn(
     except AssemblyInputError as exc:
         return None, [], f"NextDenovo local execution {exc}"
 
-    session_paths = SessionPaths.from_run_dir(absolute_data_dir(state))
-    fofn = session_paths.work_path(
+    fofn = stage_work_dir(
+        state,
         "assembly", "attempts", f"{attempt_id:03d}", "nextdenovo", "input.fofn"
     )
     fofn.parent.mkdir(parents=True, exist_ok=True)

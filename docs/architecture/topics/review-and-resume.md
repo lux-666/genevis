@@ -11,8 +11,8 @@
 > [execution lifecycle](../reference/execution-lifecycle.md), and
 > [stage contracts](../reference/stage-contracts.md).  
 > **Code evidence:** `app/review/gates.py`, `app/review/persistence.py`,
-> `app/review/approval.py`, `app/control/resume_transaction.py`,
-> `app/control/lifecycle.py`, and `app/review/annotation_intake.py`.
+> `app/review/approval.py`, `app/control/resume_transaction.py`, and
+> `app/control/lifecycle.py`.
 
 ## Durable gate model
 
@@ -20,7 +20,7 @@ A human gate has three different records:
 
 1. the stage publishes an immutable review-request artifact;
 2. the checkpoint stores only a bounded interrupt cursor with request ref,
-   request hash, stage, gate, and attempt bindings;
+   request hash, `workflow_step_id`, stage, gate, and attempt bindings;
 3. the operator decision is published once beneath that request identity and
    binds the request hash.
 
@@ -28,10 +28,17 @@ The prompt shown to a person is a projection of the request, not the recovery
 authority. A checkpoint must not embed the full request or decision body, and a
 Ledger event must not replace either artifact.
 
+Stage names are not review identities: a frozen plan can contain the same stage
+more than once. Every review request, decision, Ledger event, and review path
+is bound to the active occurrence's `workflow_step_id`; request and decision
+artifacts live below `artifacts/steps/<workflow_step_id>/<stage>/reviews/`.
+Resume rejects a request whose occurrence does not match the active frozen
+workflow step.
+
 Gate definitions centralize allowed decisions, prompt construction, timing,
 and resume application. The external resume DTO is one strict
 `ResumeReviewRequest` with a string decision field; parameter approval,
-assembly adoption, Hi-C adoption, T2T adoption, and annotation intake remain
+assembly adoption, Hi-C adoption, and T2T adoption remain
 different gate-scoped decision vocabularies because each registered gate and
 stage applier validates its own allowed values and bindings.
 
@@ -69,8 +76,8 @@ public resume timeout override are not part of the interface.
 ## Resume validation
 
 Before state changes, resume reloads the current checkpoint and verifies the
-session, stage, gate, request ID and hash, decision vocabulary, manifest
-identity, and any recommendation/attempt bindings. Missing, stale,
+session, workflow-step identity, stage, gate, request ID and hash, decision
+vocabulary, manifest identity, and any recommendation/attempt bindings. Missing, stale,
 cross-session, conflicting, or already-consumed input fails closed. Republishing
 the identical immutable bytes is idempotent, but it does not authorize applying
 an already-consumed gate a second time.
@@ -107,14 +114,8 @@ earlier steps.
 ## Decision effects
 
 A decision may approve parameters, accept or reject a biological candidate,
-keep a prior resource, authorize a bounded retry, stop, or continue into
-annotation intake. It must not silently create an unregistered method or bypass
-the frozen-attempt boundary.
-
-Assembly Review is a deliberate plan-mutation boundary. When the operator
-continues downstream, annotation intake can persist a typed plan and update the
-remaining `requested_stages`. That is an auditable post-freeze decision, not a
-claim that the original run config was edited.
+keep a prior resource, authorize a bounded retry, or stop. It must not silently
+create an unregistered method or bypass the frozen-attempt boundary.
 
 Terminal completion or failure may trigger report generation and checkpoint
 compaction. Immutable review requests, decisions, execution evidence, and

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -16,7 +17,12 @@ from pydantic import ValidationError
 
 from app.control.lifecycle import resume_review_state
 from app.domains.parameter_recommendation.facts import build_canonical_facts
-from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.execution.evidence import (
+    load_execution_evidence,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
+from app.execution.method_runner import build_frozen_attempt
 from app.integrity import sha256_file
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import persist_review_decision, persist_review_request
@@ -65,7 +71,6 @@ from app.stages.assembly.method_application.support import (
     ASSEMBLY_EXECUTION_CONTRACT_KEY,
     build_assembly_execution_contract,
 )
-from app.stages.assembly.nodes import commit_assembly_plan, plan_candidate_attempts
 from app.stages.assembly.parameters.catalog import (
     lint_parameter_catalogs,
     load_parameter_catalog,
@@ -82,14 +87,16 @@ from app.stages.assembly.parameters.storage import (
 )
 from app.stages.assembly.parameters.workflow import (
     execution_retry_gate,
-    hydrate_parameter_attempt,
-    parameter_quality_gate,
     recommend_assembly_parameters,
 )
 from app.stages.assembly.routing import route_after_method_subgraph
 from app.stages.assembly_review.builder import (
     build_stage as build_assembly_review_stage,
 )
+from app.stages.assembly_review.nodes import (
+    parameter_quality_gate as assembly_review_parameter_quality_gate,
+)
+from app.stages.assembly_review.routing import route_after_parameter_quality_gate
 from app.storage.artifacts import (
     publish_artifact_record,
     read_artifact_records,
@@ -160,11 +167,46 @@ def _project_hifiasm_min_version() -> tuple[int, int, int]:
 
 def _v2_state(tmpdir: str, *, session_id: str = "s1") -> dict:
     run_dir = v2_run_dir(tmpdir, session_id)
-    return initial_state(
+    state = initial_state(
         session_id=session_id,
         input_manifest_ref="control/manifest.yaml",
         data_dir=str(run_dir),
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-001-read_qc",
+                "stage": "read_qc",
+                "allow_local_execution": True,
+            },
+            {
+                "step_id": "step-002-genome_survey",
+                "stage": "genome_survey",
+                "allow_local_execution": True,
+            },
+            {
+                "step_id": "step-003-assembly",
+                "stage": "assembly",
+                "allow_local_execution": True,
+            },
+            {
+                "step_id": "step-004-assembly_review",
+                "stage": "assembly_review",
+                "allow_local_execution": True,
+            },
+        ],
     )
+    _activate_step(state, 3)
+    return state
+
+
+def _activate_step(state: dict, index: int) -> None:
+    state["workflow_step_index"] = index
+    state["entered_workflow_step_index"] = index
+    state["current_stage"] = state["workflow_steps"][index]["stage"]
 
 
 def _ref_path(state: dict, ref: dict | str) -> Path:
@@ -177,7 +219,10 @@ def _frozen_attempt_ref(attempt_id: int) -> ArtifactRef:
     marker = f"{attempt_id:x}"[-1]
     return ArtifactRef(
         artifact_id=f"art_{marker * 32}",
-        path_ref=f"artifacts/assembly/attempts/{attempt_id:03d}/frozen_attempt.json",
+        path_ref=(
+            "artifacts/steps/step-003-assembly/assembly/"
+            f"attempts/{attempt_id:03d}/frozen_attempt.json"
+        ),
         sha256=marker * 64,
         size_bytes=1,
         artifact_type="assembly.frozen_attempt",
@@ -375,17 +420,34 @@ def _persist_parameter_attempt(
         artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     )
     frozen_attempt_ref = (
-        _frozen_attempt_ref(attempt_id) if status != "recommended" else None
+        _frozen_attempt_ref(attempt_id)
+        if status != "recommended" and execution_result is None
+        else None
     )
     execution_ref = None
     if execution_result is not None:
-        if frozen_attempt_ref is None:
-            raise AssertionError(
-                "execution_result fixture requires a frozen parameter attempt"
-            )
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        log_dir = paths.work_path("assembly", "parameter_test_logs")
+        log_dir = paths.workflow_step_work_path(
+            "step-003-assembly", "assembly", "parameter_test_logs"
+        )
         log_dir.mkdir(parents=True, exist_ok=True)
+        script_path = log_dir / f"attempt_{attempt_id}.sh"
+        script_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        frozen_attempt = build_frozen_attempt(
+            attempt_id=(
+                f"{state['session_id']}:step-003-assembly:parameter-{attempt_id}"
+            ),
+            session_id=state["session_id"],
+            stage="assembly",
+            method_name=method_id,
+            script_path=script_path,
+            working_dir=log_dir,
+            expected_outputs=[],
+            env=None,
+            env_spec=None,
+            metadata={"workflow_step_id": "step-003-assembly"},
+        )
+        frozen_attempt_ref = persist_frozen_attempt(state, frozen_attempt)
         stdout_source = log_dir / f"attempt_{attempt_id}.stdout.log"
         stderr_source = log_dir / f"attempt_{attempt_id}.stderr.log"
         stdout_source.write_text("", encoding="utf-8")
@@ -400,8 +462,11 @@ def _persist_parameter_attempt(
                 artifact_type="command.stdout",
                 metadata={"attempt_id": attempt_id},
             ),
-            destination=paths.artifact_path(
-                "assembly", "logs", f"parameter_attempt_{attempt_id}.stdout.log"
+            destination=paths.workflow_step_artifact_path(
+                "step-003-assembly",
+                "assembly",
+                "logs",
+                f"parameter_attempt_{attempt_id}.stdout.log",
             ),
         )
         stderr_published = publish_artifact_record(
@@ -414,12 +479,15 @@ def _persist_parameter_attempt(
                 artifact_type="command.stderr",
                 metadata={"attempt_id": attempt_id},
             ),
-            destination=paths.artifact_path(
-                "assembly", "logs", f"parameter_attempt_{attempt_id}.stderr.log"
+            destination=paths.workflow_step_artifact_path(
+                "step-003-assembly",
+                "assembly",
+                "logs",
+                f"parameter_attempt_{attempt_id}.stderr.log",
             ),
         )
         runtime_result = ExecutionResult(
-            attempt_id=f"{state['session_id']}:assembly:parameter-{attempt_id}",
+            attempt_id=frozen_attempt.attempt_id,
             success=bool(execution_result.get("success", False)),
             return_code=int(execution_result.get("return_code", 1)),
             stdout_path=stdout_published.path,
@@ -929,7 +997,10 @@ class CanonicalFactsAndContextTests(unittest.TestCase):
     def test_manifest_rejects_legacy_input_profile_ref(self):
         ref = ArtifactRef(
             artifact_id=f"art_{'a' * 32}",
-            path_ref="artifacts/assembly/parameter_recommendations/000/a.json",
+            path_ref=(
+                "artifacts/steps/step-003-assembly/assembly/"
+                "parameter_recommendations/000/a.json"
+            ),
             sha256="a" * 64,
             size_bytes=1,
             artifact_type="assembly.parameter.test",
@@ -1190,7 +1261,9 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
     def _state(self, tmpdir: str):
         state = _v2_state(tmpdir)
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        reads = paths.work_path("inventory", "fixture_reads", "reads.fastq")
+        reads = paths.workflow_step_work_path(
+            "step-000-inventory", "inventory", "fixture_reads", "reads.fastq"
+        )
         reads.parent.mkdir(parents=True, exist_ok=True)
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         published_reads = publish_artifact_record(
@@ -1202,8 +1275,8 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 method_name="inventory.test_fixture",
                 artifact_type="input.long_reads",
             ),
-            destination=paths.artifact_path(
-                "inventory", "long_reads", "reads.fastq"
+            destination=paths.workflow_step_artifact_path(
+                "step-000-inventory", "inventory", "long_reads", "reads.fastq"
             ),
         )
         state["shared_parameters"] = {
@@ -1218,6 +1291,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             "estimates": {"genome_size": 1_000_000_000, "heterozygosity": 0.01},
             "estimate_sources": {"genome_size": "survey"},
         }
+        _activate_step(state, 1)
         read_qc_ref = publish_parameter_json(
             state,
             stage="read_qc",
@@ -1228,6 +1302,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             artifact_type="read_qc.summary",
             method_name="read_qc.test_fixture",
         )
+        _activate_step(state, 2)
         genome_survey_ref = publish_parameter_json(
             state,
             stage="genome_survey",
@@ -1238,6 +1313,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             artifact_type="genome_survey.result",
             method_name="genome_survey.test_fixture",
         )
+        _activate_step(state, 3)
         state["stage_outputs"] = {
             "read_qc": {
                 "summary": read_qc_summary,
@@ -1485,50 +1561,6 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
         self.assertNotIn("path_ref", serialized)
         self.assertNotIn("parameter_attempt_0.stderr.log", serialized)
 
-    def test_review_retry_prompt_excludes_execution_stderr_tail(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._state(tmpdir)
-            attempt = _persist_parameter_attempt(
-                state,
-                method_id="assembly.candidate.hifiasm_ont",
-                recommended_params={"purge_level": 1},
-                status="executed",
-                execution_result={
-                    "success": True,
-                    "return_code": 0,
-                    "status": "ok",
-                },
-                execution_stderr="review retry must not receive this log",
-            )
-            state["stage_outputs"]["assembly"].update(
-                {
-                    "status": "draft_ready",
-                    "current_parameter_attempt_id": 0,
-                    "parameter_attempts": [attempt],
-                }
-            )
-            state["stage_outputs"]["assembly_review"] = {
-                "metrics": {
-                    "assembly_size_ratio": 1.35,
-                    "busco_complete": 0.94,
-                    "busco_duplicate": 0.21,
-                }
-            }
-            retry_gate = parameter_quality_gate(state)
-            state["stage_outputs"] = retry_gate["stage_outputs"]
-            retry_model = _FakeModel(_complete_hifiasm_ont_response(purge_level=2))
-
-            with patch(
-                "app.llm.parameters.assembly.recommender.build_chat_model",
-                return_value=retry_model,
-            ):
-                recommend_assembly_parameters(state)
-
-            serialized = retry_model.messages[1]["content"]
-
-        self.assertNotIn("review retry must not receive this log", serialized)
-        self.assertNotIn("stderr_tail", serialized)
-
     def test_execution_retry_gate_does_not_apply_hifiasm_classifier_to_other_methods(
         self,
     ):
@@ -1618,7 +1650,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertEqual(route_after_method_subgraph(state), "fail")
             self.assertEqual(execution_retry_gate(state), {})
 
-    def test_review_quality_gate_classifies_under_purged_retry(self):
+    def test_review_quality_diagnosis_preserves_frozen_assembly_occurrence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _v2_state(tmpdir)
             attempt = _persist_parameter_attempt(
@@ -1640,153 +1672,57 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     }
                 },
             }
+            _activate_step(state, 4)
+            before_assembly = json.loads(json.dumps(state["stage_outputs"]["assembly"]))
+            before_index = state["workflow_step_index"]
+            before_entered_index = state["entered_workflow_step_index"]
 
-            result = parameter_quality_gate(state)
+            result = {**state, **assembly_review_parameter_quality_gate(state)}
 
             assembly = result["stage_outputs"]["assembly"]
+            review = result["stage_outputs"]["assembly_review"]
+            self.assertEqual(assembly, before_assembly)
+            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["workflow_step_index"], before_index)
             self.assertEqual(
-                assembly["status"], "retry_parameters_after_review_failure"
+                result["entered_workflow_step_index"], before_entered_index
             )
-            self.assertEqual(assembly["quality_gate"]["failure_mode"], "under_purged")
-            self.assertEqual(assembly["current_parameter_attempt_id"], 0)
-            self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
-            review_ref = assembly["parameter_attempts"][0]["review_ref"]
-            self.assertIn("attempts/000/review.json", review_ref["path_ref"])
-            review_path = _ref_path(state, review_ref)
-            self.assertTrue(review_path.exists())
-            self.assertEqual(review_ref["sha256"], sha256_file(review_path))
-            review = read_json_artifact(state, review_ref)
-            self.assertEqual(review["diagnosis"]["failure_mode"], "under_purged")
-            self.assertNotIn("review_failure", assembly["parameter_attempts"][0])
+            self.assertEqual(
+                review["parameter_quality_gate"]["failure_mode"], "under_purged"
+            )
+            self.assertTrue(review["parameter_quality_checked"])
+            self.assertIsNone(assembly["parameter_attempts"][0]["review_ref"])
+            self.assertEqual(
+                route_after_parameter_quality_gate(result),
+                "related_species_sanity_check",
+            )
+            self.assertNotIn("replan", build_assembly_review_stage().get_graph().nodes)
 
-    def test_review_retry_recommendation_can_adjust_ont_l2_parameters(self):
+    def test_review_quality_diagnosis_rejects_non_finite_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._state(tmpdir)
-            state["stage_outputs"]["assembly"].update(
-                {
-                    "env": {"ASSEMBLY_TEST": "1"},
-                    "hifiasm_ont_parameters": {"threads": 7},
-                    "flye_parameters": {"threads": 99},
-                }
-            )
-            initial_payload = _complete_hifiasm_ont_response(
-                purge_level=1, read_length_cutoff=3000, score_cutoff=10
-            )
-            retry_payload = _complete_hifiasm_ont_response(
-                purge_level=2, read_length_cutoff=5000, score_cutoff=12
-            )
-
-            with patch(
-                "app.llm.parameters.assembly.recommender.build_chat_model",
-                return_value=_FakeModel(initial_payload),
-            ):
-                first = recommend_assembly_parameters(state)
-            state = self._approve(state, first)
-            state["stage_outputs"]["assembly"][ASSEMBLY_EXECUTION_CONTRACT_KEY] = (
-                build_assembly_execution_contract(
-                    state["stage_outputs"]["assembly"],
-                    method_id="assembly.candidate.hifiasm_ont",
-                ).model_dump(mode="json")
-            )
-            state["stage_outputs"]["assembly"]["status"] = "draft_ready"
-            initial_attempt = state["stage_outputs"]["assembly"]["parameter_attempts"][
-                0
-            ]
-            state["stage_outputs"]["assembly"]["parameter_attempts"][0] = (
-                _attach_frozen_parameter_sources(
-                    state,
-                    initial_attempt,
-                    status="executed",
-                )
-            )
-            committed = commit_assembly_plan(state)
-            state = {**state, **committed}
-            committed_assembly = state["stage_outputs"]["assembly"]
-            state["stage_outputs"]["assembly_review"] = {
-                "metrics": {
-                    "busco_complete": 0.94,
-                    "busco_duplicate": 0.21,
-                    "assembly_size_ratio": 1.35,
-                }
-            }
-
-            gate = parameter_quality_gate(state)
-            state["stage_outputs"] = gate["stage_outputs"]
-            self.assertEqual(
-                state["stage_outputs"]["assembly"]["status"],
-                "retry_parameters_after_review_failure",
-            )
-            self.assertEqual(
-                state["stage_outputs"]["assembly"]["current_parameter_attempt_id"], 0
-            )
-            self.assertEqual(
-                state["stage_outputs"]["assembly"]["proposed_parameter_attempt_id"], 1
-            )
-
-            with patch(
-                "app.llm.parameters.assembly.recommender.build_chat_model",
-                return_value=_FakeModel(retry_payload),
-            ):
-                retry = recommend_assembly_parameters(state)
-            state = self._approve(state, retry)
-            assembly = state["stage_outputs"]["assembly"]
-            planned = plan_candidate_attempts(state)
-            planned_assembly = planned["stage_outputs"]["assembly"]
-            attempts = {
-                item["attempt_id"]: item for item in assembly["parameter_attempts"]
-            }
-            initial_evidence = hydrate_parameter_attempt(state, attempts[0])
-            retry_bundle = load_approved_parameter_chain_v3(
+            state = _v2_state(tmpdir)
+            attempt = _persist_parameter_attempt(
                 state,
-                attempt=attempts[1],
-                expected_stage="assembly",
-                expected_method_id="assembly.candidate.hifiasm_ont",
+                method_id="assembly.candidate.hifiasm_ont",
+                status="executed",
             )
-            resolved = resolve_assembly_parameters(
-                catalog=retry_bundle.chain.catalog,
-                snapshot=retry_bundle.chain.input_snapshot,
-                approved_l2=retry_bundle.approved_l2,
-                l0_executor_values={
-                    "assembly_output_prefix": "asm",
-                    "assembly_threads": 1,
-                    "assembly_input_reads": ["reads.fastq"],
+            state["stage_outputs"] = {
+                "assembly": {
+                    "status": "draft_ready",
+                    "current_parameter_attempt_id": 0,
+                    "parameter_attempts": [attempt],
                 },
-            )
-            argv = render_assembly_cli(retry_bundle.chain.catalog, resolved)
+                "assembly_review": {
+                    "metrics": {
+                        "busco_complete": math.nan,
+                        "busco_duplicate": math.inf,
+                    }
+                },
+            }
+            _activate_step(state, 4)
 
-        self.assertEqual(assembly["status"], "parameters_approved")
-        self.assertEqual(committed_assembly["execution_mode"], "local")
-        self.assertNotIn("env", committed_assembly)
-        self.assertNotIn("hifiasm_ont_parameters", committed_assembly)
-        self.assertEqual(
-            committed_assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY]["threads"],
-            {"value": 7, "source": "run_config"},
-        )
-        self.assertNotIn("flye_parameters", committed_assembly)
-        self.assertEqual(planned_assembly["status"], "hifiasm_ont_execution_planned")
-        self.assertEqual(
-            planned_assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY],
-            committed_assembly[ASSEMBLY_EXECUTION_CONTRACT_KEY],
-        )
-        self.assertEqual(attempts[1]["previous_attempt_id"], 0)
-        self.assertEqual(initial_evidence.review.failure_mode, "under_purged")
-        retry_context = retry_bundle.chain.input_snapshot.stage_context.retry
-        self.assertIsNotNone(retry_context)
-        self.assertEqual(
-            retry_context.attempt_history[0].review.failure_mode,
-            "under_purged",
-        )
-        self.assertEqual(
-            initial_evidence.recommended_parameters,
-            {"purge_level": 1, "read_length_cutoff": 3000, "score_cutoff": 10},
-        )
-        self.assertEqual(
-            retry_bundle.approved_l2,
-            {"purge_level": 2, "read_length_cutoff": 5000, "score_cutoff": 12},
-        )
-        self.assertEqual(argv[argv.index("-l") + 1], "2")
-        self.assertEqual(argv[argv.index("--rl-cut") + 1], "5000")
-        self.assertEqual(argv[argv.index("--sc-cut") + 1], "12")
+            with self.assertRaisesRegex(ValueError, "non-finite float"):
+                assembly_review_parameter_quality_gate(state)
 
     def test_assembly_review_graph_contains_parameter_quality_gate(self):
         graph = build_assembly_review_stage().get_graph()
@@ -1806,8 +1742,8 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 method_name="inventory.test_fixture",
                 artifact_type="input.long_reads",
             ),
-            destination=paths.artifact_path(
-                "inventory", "long_reads", reads.name
+            destination=paths.workflow_step_artifact_path(
+                "step-000-inventory", "inventory", "long_reads", reads.name
             ),
         )
         return str(published.path), published.ref.model_dump(mode="json")
@@ -1821,7 +1757,8 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
     ) -> None:
         paths = SessionPaths.from_run_dir(state["data_dir"])
         short_name = method_name.rsplit(".", 1)[-1]
-        source = paths.work_path(
+        source = paths.workflow_step_work_path(
+            "step-003-assembly",
             "assembly",
             "fixture_candidate_planning",
             f"{short_name}.planned.json",
@@ -1854,7 +1791,8 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             state["data_dir"],
             state["session_id"],
             artifact,
-            destination=paths.artifact_path(
+            destination=paths.workflow_step_artifact_path(
+                "step-003-assembly",
                 "assembly",
                 "attempts",
                 "000",
@@ -1884,8 +1822,8 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         attempt_payload: dict | None = None,
     ):
         state = _v2_state(tmpdir)
-        reads = SessionPaths.from_run_dir(state["data_dir"]).work_path(
-            "inventory", "fixture_reads", "reads.fastq"
+        reads = SessionPaths.from_run_dir(state["data_dir"]).workflow_step_work_path(
+            "step-000-inventory", "inventory", "fixture_reads", "reads.fastq"
         )
         reads.parent.mkdir(parents=True, exist_ok=True)
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -1949,8 +1887,8 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         attempt_payload: dict | None = None,
     ):
         state = _v2_state(tmpdir)
-        reads = SessionPaths.from_run_dir(state["data_dir"]).work_path(
-            "inventory", "fixture_reads", "reads.fastq"
+        reads = SessionPaths.from_run_dir(state["data_dir"]).workflow_step_work_path(
+            "step-000-inventory", "inventory", "fixture_reads", "reads.fastq"
         )
         reads.parent.mkdir(parents=True, exist_ok=True)
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -2035,8 +1973,10 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 recommended_params={"purge_level": 1},
             )
             state["stage_outputs"]["assembly"]["current_parameter_attempt_id"] = "0"
-            work_dir = SessionPaths.from_run_dir(state["data_dir"]).work_path(
-                "assembly", "attempts", "000", "hifiasm"
+            work_dir = SessionPaths.from_run_dir(
+                state["data_dir"]
+            ).workflow_step_work_path(
+                "step-003-assembly", "assembly", "attempts", "000", "hifiasm"
             )
 
             with patch(

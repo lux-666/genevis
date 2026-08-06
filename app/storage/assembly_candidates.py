@@ -185,6 +185,7 @@ def publish_registered_assembly_candidate(
     data_dir: Path | str,
     session_id: str,
     *,
+    workflow_step_id: str,
     asset_id: str,
     source_path: Path | str,
     expected_sha256: str,
@@ -217,12 +218,14 @@ def publish_registered_assembly_candidate(
     paths = SessionPaths.from_run_dir(data_dir)
     method_name = "inventory.registered_assembly"
     candidate_id = f"{session_id}:registered_assembly:{asset_id}"
-    candidate_dir = paths.artifact_path(
+    candidate_dir = paths.workflow_step_artifact_path(
+        workflow_step_id,
         "inventory",
         "registered_assembly",
         safe_asset_id,
     )
-    work_dir = paths.work_path(
+    work_dir = paths.workflow_step_work_path(
+        workflow_step_id,
         "inventory",
         "registered_assembly",
         safe_asset_id,
@@ -356,6 +359,7 @@ def publish_derived_assembly_candidate(
     data_dir: Path | str,
     session_id: str,
     *,
+    workflow_step_id: str,
     source_candidate: (
         VerifiedExecutedCandidate | ArtifactRef | dict[str, Any]
     ),
@@ -457,12 +461,14 @@ def publish_derived_assembly_candidate(
         character if character.isalnum() or character in {"-", "_"} else "_"
         for character in method_name
     ).strip("_")
-    candidate_dir = paths.artifact_path(
+    candidate_dir = paths.workflow_step_artifact_path(
+        workflow_step_id,
         stage,
         "derived_candidates",
         f"{safe_method[:64]}-{identity_digest[:16]}",
     )
-    work_dir = paths.work_path(
+    work_dir = paths.workflow_step_work_path(
+        workflow_step_id,
         stage,
         "derived_candidates",
         identity_digest[:16],

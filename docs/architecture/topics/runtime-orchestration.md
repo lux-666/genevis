@@ -26,10 +26,13 @@ All three paths are required. The manifest solely owns `session_id`; the CLI
 does not expose session, checkpointer, local-execution, launch, or ask
 overrides. `data-dir` is the layout root and the run lives at
 `<data-dir>/runs/<session_id>/`. The handler validates and canonicalizes both
-source documents and requires explicit JSON arrays for `requested_stages` and
-`local_exec`. `requested_stages` must not be `null`; `[]` is the valid empty
-biological-stage plan. The handler then freezes that exact stage set plus its
-conservative dependency closure.
+source documents and requires an explicit `requested_stages` JSON list. Each
+item is `{ "stage": "<stage>", "allow_local_execution": <boolean> }`.
+The list is an ordered occurrence sequence: it accepts arbitrary registered
+stage order and repeated stage names. `allow_local_execution` authorizes only
+that occurrence's process execution. `requested_stages` must not be `null`;
+`[]` is the valid empty biological-stage plan. The handler freezes that exact
+sequence plus its conservative dependency closure.
 It publishes `input_manifest.yaml`, `run_config.json`, and
 `dependency_manifest.json` before publishing `frozen_inputs.json` last.
 
@@ -73,40 +76,50 @@ START -> route_controller -> selected stage subgraph
                             -> route_controller -> ... -> END
 ```
 
-`app.workflow.STAGE_ORDER` is the single canonical order. The controller uses
-`current_stage`, `requested_stages`, and supervision state to select the next
-node, skip unrequested stages, or stop on a human block or terminal failure.
-It does not inspect FASTQ contents, choose an assembler, build a command, or
-interpret biological metrics.
+Before graph entry, the frozen RunConfig is projected into `workflow_steps`.
+Inventory is always the implicit first occurrence (`step-000-inventory`) and
+each requested item becomes the next position-derived ID, for example
+`step-001-t2t`, `step-002-assembly_review`, and `step-003-t2t`. This immutable
+sequence is the sole runtime routing authority. The controller advances one
+position at a time, stops on a human block or terminal failure, and never
+appends, reorders, deduplicates, or fills in stages.
+
+`app.workflow.STAGE_ORDER` is a registration/default-planning/display aid. It
+is not runtime order. The controller does not inspect FASTQ contents, choose
+an assembler, build a command, or interpret biological metrics.
 
 The controller wrapper is thin but not pure. It records stage-entered,
-stage-skipped, stage-completed, stage-failed, and session-terminal Ledger
-events, and writes an operator report at blocked or failed boundaries. Any
-architecture description claiming that the parent graph has no side effects
-is incorrect.
+stage-completed, stage-failed, and session-terminal Ledger events, and writes
+an operator report at blocked or failed boundaries. A stage-local skip, when a
+stage contract explicitly creates one, remains distinct from the parent: the
+parent never synthesizes skip events for absent occurrences. Any architecture
+description claiming that the parent graph has no side effects is incorrect.
 
 ## Stage boundary
 
 Each domain node in the parent is a compiled stage subgraph. Stages may resolve
 logical resources, plan registered methods, enter the shared method lifecycle,
 publish biological artifacts, open review gates, and commit a new resource.
-Those are available boundaries, not a mandatory identical sequence for all 13
+Those are available boundaries, not a mandatory identical sequence for all ten
 stages.
 
-The parent currently contains 13 domain stages. `gapcloser` and `base_polish`
-are manual-only placeholders: automatic prefix expansion and manifest-derived
-recommendations omit them, ordinary explicit stage sets skip them when absent,
-and an explicit request terminates with `blocked_not_implemented`. Internal/TUI
-legacy state may still carry `requested_stages = null`; that compatibility
-traversal records `stage_skipped:not_implemented` and advances without a success
-cursor or completion trace. Public `gene-agent run` rejects JSON `null` before
-freeze or execution.
+The parent registers ten domain stages. `gapcloser` and `base_polish` are
+manual-only placeholders: automatic recommendations omit them, while a frozen
+occurrence of either terminates with `blocked_not_implemented`. An absent stage
+has no runtime occurrence and is not skipped. `None` is only an unfinished
+planner/TUI draft state; it is never executable semantics and public
+`gene-agent run` rejects JSON `null` before freeze.
 
-`requested_stages` is frozen as the initial operator plan, but it is not an
-eternally immutable checkpoint field. After Assembly Review, the approved
-annotation-intake transaction may rewrite the remaining requested stage set.
-The change is persisted and auditable rather than treated as an edit to the
-original frozen run config.
+`workflow_steps` is the frozen runtime projection of the operator plan. Resume
+restores and applies only the decision bound to the interrupted occurrence; it
+does not rewrite the remaining sequence or edit the frozen run config.
+
+When the manifest declares `assembly_fasta_registered`, Inventory registers it
+as the central assembly resource. `assembly_review` is the recommended first
+analytical occurrence, but public `gene-agent run` does not reject, reorder, or
+otherwise rewrite the frozen occurrence sequence according to `STAGE_ORDER`.
+Every occurrence that is reached validates the resources its stage contract
+requires; omitted stages have neither an occurrence nor a synthetic skip.
 
 ## Stop and terminal behavior
 

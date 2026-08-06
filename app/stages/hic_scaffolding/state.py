@@ -13,7 +13,7 @@ from pydantic import (
 from pydantic import (
     JsonValue as PydanticJsonValue,
 )
-from typing_extensions import TypedDict
+from typing_extensions import Required, TypedDict
 
 from app.schemas.artifacts import (
     ArtifactRefJson,
@@ -37,6 +37,7 @@ class HiCInterruptJson(TypedDict, total=False):
     """Compact pointer to an unresolved Hi-C review request."""
 
     stage: Literal["hic_scaffolding"]
+    workflow_step_id: Required[str]
     gate_id: str | None
     reason: str
     blocked_at: str

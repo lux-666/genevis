@@ -28,19 +28,47 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
         graph = StateGraph(TopLevelState)
         graph.add_node(
             "finish",
-            lambda _state: {
+            lambda state: {
                 "current_stage": "done",
+                "workflow_step_index": len(state["workflow_steps"]),
+                "entered_workflow_step_index": len(state["workflow_steps"]) - 1,
                 "supervision_state": "completed",
             },
         )
         graph.set_entry_point("finish")
         return graph.compile(checkpointer=saver), saver
 
+    @staticmethod
+    def _workflow_steps(*requested_stages: str) -> list[dict[str, object]]:
+        return [
+            {
+                "step_id": f"step-{index:03d}-{stage}",
+                "stage": stage,
+                "allow_local_execution": False,
+            }
+            for index, stage in enumerate(("inventory", *requested_stages))
+        ]
+
+    def _state(self, paths: SessionPaths, *requested_stages: str) -> dict[str, object]:
+        return initial_state(
+            session_id=paths.session_id,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(paths.run_dir),
+            workflow_steps=self._workflow_steps(*requested_stages),
+            stage_plan_ref="control/run_config.json",
+        )
+
+    @staticmethod
+    def _step_id(index: int, stage: str) -> str:
+        return f"step-{index:03d}-{stage}"
+
     def test_compacts_verified_terminal_sqlite_history_to_one_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "s1")
             ensure_run_layout(paths)
-            artifact_path = paths.artifact_path("assembly", "result.json")
+            artifact_path = paths.workflow_step_artifact_path(
+                self._step_id(1, "assembly"), "assembly", "result.json"
+            )
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             artifact_path.write_text('{"ok": true}\n', encoding="utf-8")
             [artifact_ref] = register_artifact_records(
@@ -65,11 +93,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             )
             graph, saver = self._terminal_graph(paths)
             config = {"configurable": {"thread_id": paths.session_id}}
-            state = initial_state(
-                session_id=paths.session_id,
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(paths.run_dir),
-            )
+            state = self._state(paths, "assembly")
             state["stage_outputs"] = {
                 "assembly": {"result_ref": artifact_ref.model_dump(mode="json")}
             }
@@ -103,6 +127,43 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             )
             saver.conn.close()
 
+    def test_compaction_round_trips_frozen_occurrence_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "s1")
+            ensure_run_layout(paths)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session(paths.session_id, "control/manifest.yaml")
+            ledger.record_session_terminal(
+                paths.session_id,
+                outcome="completed",
+                stage="done",
+            )
+            graph, saver = self._terminal_graph(paths)
+            config = {"configurable": {"thread_id": paths.session_id}}
+            state = self._state(paths, "read_qc", "read_qc")
+            state["stage_seeds"] = {"read_qc": {"frozen_setting": "keep"}}
+
+            terminal_state = graph.invoke(state, config=config)
+
+            self.assertTrue(compact_terminal_checkpoint(saver, config, terminal_state))
+            restored = dict(graph.get_state(config).values)
+
+            self.assertEqual(
+                restored["workflow_steps"],
+                state["workflow_steps"],
+            )
+            self.assertEqual(
+                restored["workflow_step_index"],
+                len(state["workflow_steps"]),
+            )
+            self.assertEqual(
+                restored["entered_workflow_step_index"],
+                len(state["workflow_steps"]) - 1,
+            )
+            self.assertEqual(restored["stage_plan_ref"], "control/run_config.json")
+            self.assertEqual(restored["stage_seeds"], state["stage_seeds"])
+            saver.conn.close()
+
     def test_refuses_active_or_blocked_state_without_deleting_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "s1")
@@ -111,11 +172,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             ledger.create_session(paths.session_id, "control/manifest.yaml")
             graph, saver = self._terminal_graph(paths)
             config = {"configurable": {"thread_id": paths.session_id}}
-            state = initial_state(
-                session_id=paths.session_id,
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(paths.run_dir),
-            )
+            state = self._state(paths, "assembly")
             graph.invoke(state, config=config)
             before = len(list(saver.list(config)))
             blocked = {**state, "supervision_state": "blocked_human"}
@@ -130,7 +187,9 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "s1")
             ensure_run_layout(paths)
-            artifact_path = paths.artifact_path("assembly", "orphan.json")
+            artifact_path = paths.workflow_step_artifact_path(
+                self._step_id(1, "assembly"), "assembly", "orphan.json"
+            )
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             artifact_path.write_text('{"orphan": true}\n', encoding="utf-8")
             [artifact_ref] = register_artifact_records(
@@ -154,11 +213,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             )
             graph, saver = self._terminal_graph(paths)
             config = {"configurable": {"thread_id": paths.session_id}}
-            state = initial_state(
-                session_id=paths.session_id,
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(paths.run_dir),
-            )
+            state = self._state(paths, "assembly")
             state["stage_outputs"] = {
                 "assembly": {"orphan_ref": artifact_ref.model_dump(mode="json")}
             }
@@ -181,11 +236,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             )
             graph, saver = self._terminal_graph(paths)
             config = {"configurable": {"thread_id": paths.session_id}}
-            state = initial_state(
-                session_id=paths.session_id,
-                input_manifest_ref="control/manifest.yaml",
-                data_dir=str(paths.run_dir),
-            )
+            state = self._state(paths, "assembly")
             result = graph.invoke(state, config=config)
             before = len(list(saver.list(config)))
 
@@ -209,6 +260,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             artifact_specs = (
                 (
                     "inventory.asset_registry",
+                    "step-000-inventory",
                     "inventory",
                     "inventory",
                     "registry.json",
@@ -216,6 +268,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 ),
                 (
                     "assembly.failure",
+                    "step-002-assembly",
                     "assembly",
                     "assembler",
                     "failure.json",
@@ -223,6 +276,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 ),
                 (
                     "assembly_review.request",
+                    "step-003-assembly_review",
                     "assembly_review",
                     "review",
                     "request.json",
@@ -230,6 +284,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 ),
                 (
                     "assembly_review.decision",
+                    "step-003-assembly_review",
                     "assembly_review",
                     "review",
                     "decision.json",
@@ -237,16 +292,23 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 ),
             )
             metas = []
-            for artifact_type, stage, method, name, body in artifact_specs:
-                path = paths.artifact_path(stage, name)
+            for artifact_type, step_id, stage, method, name, body in artifact_specs:
+                path = paths.workflow_step_artifact_path(step_id, stage, name)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(body, encoding="utf-8")
+                metadata = {"workflow_step_id": step_id}
+                if artifact_type in {
+                    "assembly_review.request",
+                    "assembly_review.decision",
+                }:
+                    metadata["review_request_id"] = "review_001"
                 metas.append(
                     ArtifactMeta.from_file(
                         path,
                         stage=stage,
                         method_name=method,
                         artifact_type=artifact_type,
+                        metadata=metadata,
                     )
                 )
             refs = {
@@ -267,24 +329,28 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             ledger.record_stage_entered(
                 paths.session_id,
                 "inventory",
+                workflow_step_id="step-000-inventory",
                 route_node="inventory_stage",
                 idempotency_key="stage-entered:inventory",
             )
             ledger.record_stage_completed(
                 paths.session_id,
                 "inventory",
+                workflow_step_id="step-000-inventory",
                 refs=[inventory_ref],
                 idempotency_key="stage-completed:inventory",
             )
             ledger.record_stage_entered(
                 paths.session_id,
                 "genome_survey",
+                workflow_step_id="step-001-genome_survey",
                 route_node="genome_survey_stage",
                 idempotency_key="stage-entered:genome_survey",
             )
             ledger.record_stage_skipped(
                 paths.session_id,
                 "genome_survey",
+                workflow_step_id="step-001-genome_survey",
                 reason="not_requested",
                 idempotency_key="stage-skipped:genome_survey",
             )
@@ -306,10 +372,13 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             ledger.record_stage_entered(
                 paths.session_id,
                 "assembly",
+                workflow_step_id="step-002-assembly",
                 route_node="assembly_stage",
                 idempotency_key="stage-entered:assembly",
             )
-            script_path = paths.work_path("assembly", "run.sh")
+            script_path = paths.workflow_step_work_path(
+                "step-002-assembly", "assembly", "run.sh"
+            )
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
             attempt = FrozenAttemptSpec(
@@ -319,9 +388,16 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 method_name="assembly.candidate.test",
                 script_path=script_path,
                 script_sha256=sha256_file(script_path),
-                working_dir=paths.stage_work_dir("assembly"),
-                expected_outputs=[paths.work_path("assembly", "draft.fasta")],
+                working_dir=paths.workflow_step_work_dir(
+                    "step-002-assembly", "assembly"
+                ),
+                expected_outputs=[
+                    paths.workflow_step_work_path(
+                        "step-002-assembly", "assembly", "draft.fasta"
+                    )
+                ],
                 input_dependencies=[],
+                metadata={"workflow_step_id": "step-002-assembly"},
             )
             ledger.record_attempt_failed(
                 paths.session_id,
@@ -333,6 +409,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             ledger.record_stage_failed(
                 paths.session_id,
                 "assembly",
+                workflow_step_id="step-002-assembly",
                 error="assembler failed",
                 refs=[failure_ref],
                 idempotency_key="stage-failed:assembly",
@@ -372,11 +449,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
 
             graph, saver = self._terminal_graph(paths)
             config = {"configurable": {"thread_id": paths.session_id}}
-            state = initial_state(
-                session_id=paths.session_id,
-                input_manifest_ref=paths.to_ref(paths.manifest_path),
-                data_dir=str(paths.run_dir),
-            )
+            state = self._state(paths, "genome_survey", "assembly", "assembly_review")
             state["stage_outputs"] = {
                 "inventory": {
                     "registry_ref": inventory_ref.model_dump(mode="json"),
@@ -394,6 +467,8 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 config,
                 {
                     "current_stage": "assembly",
+                    "workflow_step_index": 2,
+                    "entered_workflow_step_index": 2,
                     "supervision_state": "failed_terminal",
                     "last_error": "assembler failed",
                     "active_interrupt": None,

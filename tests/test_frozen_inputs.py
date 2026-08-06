@@ -28,7 +28,21 @@ from app.storage.frozen_inputs import (
     prepare_session_inputs,
     validate_frozen_inputs,
 )
-from app.storage.paths import SessionPaths, ensure_run_layout
+from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
+
+
+def _stage_requests(
+    *stages: str,
+    local: tuple[str, ...] = (),
+) -> list[dict[str, object]]:
+    return [
+        {"stage": stage, "allow_local_execution": stage in local}
+        for stage in stages
+    ]
+
+
+def _local_stage_requests(*stages: str) -> list[dict[str, object]]:
+    return _stage_requests(*stages, local=stages)
 
 
 class _FrozenExecutionGraph:
@@ -45,6 +59,24 @@ class _FrozenExecutionGraph:
 
 
 class FrozenInputTests(unittest.TestCase):
+    def test_method_env_rejects_unfrozen_implicit_active_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(Path(tmp), "s1")
+            ensure_run_layout(paths)
+
+            with self.assertRaisesRegex(
+                DataLayoutError,
+                "requires a frozen dependency contract",
+            ):
+                resolve_method_env(
+                    {},
+                    stage="assembly",
+                    method_name="assembly.candidate.flye",
+                    session_id="s1",
+                    data_dir=paths.run_dir,
+                    input_manifest_ref="control/input_manifest.yaml",
+                )
+
     def _fixture(self, root: Path) -> tuple[SessionPaths, Path, Path, Path]:
         root.mkdir(parents=True, exist_ok=True)
         reads = root / "reads.fastq"
@@ -60,7 +92,7 @@ class FrozenInputTests(unittest.TestCase):
             encoding="utf-8",
         )
         run_config = root / "run_config_draft.json"
-        run_config.write_text("{}\n", encoding="utf-8")
+        run_config.write_text('{"requested_stages": []}\n', encoding="utf-8")
         envs = root / "envs.yaml"
         envs.write_text(
             "default:\n  fallback_env: original-env\n"
@@ -77,7 +109,7 @@ class FrozenInputTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
-                        "requested_stages": ["read_qc"],
+                        "requested_stages": _stage_requests("read_qc"),
                         "shared_parameters": {"platform": "ont"},
                     }
                 )
@@ -96,8 +128,8 @@ class FrozenInputTests(unittest.TestCase):
                 [str((root / "reads.fastq").resolve())],
             )
             self.assertEqual(
-                prepared.explicit_run_config_fields,
-                frozenset({"requested_stages", "shared_parameters"}),
+                prepared.run_config.model_fields_set,
+                {"requested_stages", "shared_parameters"},
             )
             self.assertFalse(paths.data_root.exists())
             self.assertFalse(paths.run_dir.exists())
@@ -109,6 +141,7 @@ class FrozenInputTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
+                        "requested_stages": [],
                         "t2t": {
                             "read_inputs": [
                                 {"path": "reads.fastq", "platform": "ont"}
@@ -171,7 +204,7 @@ class FrozenInputTests(unittest.TestCase):
                 run_config_draft=run_config,
             )
             prepared.manifest.session_id = "other-session"
-            prepared.run_config.local_exec.append("not-a-stage")  # type: ignore[arg-type]
+            prepared.run_config.requested_stages.append("not-a-stage")  # type: ignore[arg-type]
 
             with self.assertRaisesRegex(
                 FrozenInputValidationError,
@@ -189,6 +222,7 @@ class FrozenInputTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
+                        "requested_stages": [],
                         "t2t": {
                             "read_inputs": [
                                 {"path": "reads.fastq", "platform": "ont"}
@@ -253,7 +287,7 @@ class FrozenInputTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
-                        "local_exec": ["assembly"],
+                        "requested_stages": _local_stage_requests("assembly"),
                         "assembly": {
                             "assembly_method": "flye",
                             "flye_parameters": {},
@@ -281,7 +315,7 @@ class FrozenInputTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
-                        "local_exec": ["assembly"],
+                        "requested_stages": _local_stage_requests("assembly"),
                         "assembly": {
                             "assembly_method": "hifiasm_ont",
                             "hifiasm_ont_parameters": {"threads": 4},
@@ -318,7 +352,7 @@ class FrozenInputTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
-                        "local_exec": ["assembly"],
+                        "requested_stages": _local_stage_requests("assembly"),
                         "assembly": {"flye_parameters": {}},
                     }
                 )
@@ -358,7 +392,7 @@ class FrozenInputTests(unittest.TestCase):
                 run_config.write_text(
                     json.dumps(
                         {
-                            "local_exec": ["assembly"],
+                            "requested_stages": _local_stage_requests("assembly"),
                             "shared_parameters": {"read_type": "ont_raw"},
                             "assembly": {f"{method}_parameters": {}},
                         }
@@ -398,7 +432,7 @@ class FrozenInputTests(unittest.TestCase):
                 run_config.write_text(
                     json.dumps(
                         {
-                            "local_exec": ["assembly"],
+                            "requested_stages": _local_stage_requests("assembly"),
                             "shared_parameters": {"read_type": "ont_raw"},
                             "assembly": {f"{method}_parameters": {}},
                         }
@@ -448,7 +482,7 @@ class FrozenInputTests(unittest.TestCase):
                 run_config.write_text(
                     json.dumps(
                         {
-                            "local_exec": ["assembly"],
+                            "requested_stages": _local_stage_requests("assembly"),
                             "shared_parameters": {"read_type": read_type},
                             "assembly": {"flye_parameters": {}},
                         }
@@ -482,7 +516,7 @@ class FrozenInputTests(unittest.TestCase):
             run_config.write_text(
                 json.dumps(
                     {
-                        "local_exec": ["assembly"],
+                        "requested_stages": _local_stage_requests("assembly"),
                         "shared_parameters": {"read_type": "ont_raw"},
                         "assembly": {"hifiasm_parameters": {}},
                     }
@@ -505,44 +539,50 @@ class FrozenInputTests(unittest.TestCase):
             self.assertFalse(paths.data_root.exists())
             self.assertFalse(paths.run_dir.exists())
 
-    def test_selected_stages_keep_order_and_must_include_local_exec(self) -> None:
+    def test_run_config_occurrences_are_the_only_dependency_stage_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": _stage_requests(
+                            "assembly", "read_qc", "assembly"
+                        )
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            envs.write_text(
+                "default:\n  fallback_env: original-env\n"
+                "stages:\n"
+                "  assembly:\n    conda_env: original-assembly\n"
+                "  read_qc:\n    conda_env: original-read-qc\n"
+                "packages: {}\n",
+                encoding="utf-8",
+            )
             bundle = freeze_session_inputs(
                 paths,
                 manifest_draft=manifest,
                 run_config_draft=run_config,
                 config_path=envs,
-                selected_stages=["assembly", "read_qc"],
                 selected_methods={},
             )
             snapshot = load_dependency_snapshot(
                 paths.dependency_manifest_path,
                 expected_sha256=bundle.marker.files["dependency_manifest"].sha256,
             )
-            self.assertEqual(snapshot.selected_stages, ["assembly", "read_qc"])
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            paths, manifest, run_config, envs = self._fixture(root)
-            run_config.write_text(
-                json.dumps({"local_exec": ["read_qc"]}) + "\n",
-                encoding="utf-8",
+            self.assertEqual(
+                bundle.run_config.requested_stage_names(),
+                ["assembly", "read_qc", "assembly"],
+            )
+            self.assertEqual(
+                set(snapshot.stage_environments),
+                {"assembly", "read_qc"},
             )
 
-            with self.assertRaisesRegex(FrozenInputValidationError, "local_exec"):
-                freeze_session_inputs(
-                    paths,
-                    manifest_draft=manifest,
-                    run_config_draft=run_config,
-                    config_path=envs,
-                    selected_stages=["assembly"],
-                )
-
-            self.assertFalse(paths.data_root.exists())
-
-    def test_raw_explicit_empty_scope_does_not_fall_back_to_local_exec(self) -> None:
+    def test_legacy_local_exec_is_rejected_during_freeze(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
@@ -568,29 +608,27 @@ class FrozenInputTests(unittest.TestCase):
             self.assertFalse(paths.data_root.exists())
             self.assertFalse(paths.run_dir.exists())
 
-    def test_explicit_empty_scope_rejects_nonempty_selected_stages(self) -> None:
+    def test_empty_scope_freezes_no_stage_environment_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
             run_config.write_text(
-                json.dumps({"requested_stages": [], "local_exec": []}) + "\n",
+                json.dumps({"requested_stages": []}) + "\n",
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(
-                FrozenInputValidationError,
-                "differ from run-config requested_stages",
-            ):
-                freeze_session_inputs(
-                    paths,
-                    manifest_draft=manifest,
-                    run_config_draft=run_config,
-                    config_path=envs,
-                    selected_stages=["read_qc"],
-                )
-
-            self.assertFalse(paths.data_root.exists())
-            self.assertFalse(paths.run_dir.exists())
+            bundle = freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+            )
+            snapshot = load_dependency_snapshot(
+                paths.dependency_manifest_path,
+                expected_sha256=bundle.marker.files["dependency_manifest"].sha256,
+            )
+            self.assertEqual(snapshot.stage_environments, {})
+            self.assertTrue(paths.run_dir.exists())
 
     def test_freeze_is_create_only_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -696,6 +734,10 @@ class FrozenInputTests(unittest.TestCase):
     def test_different_dependency_selection_cannot_reuse_frozen_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
+            run_config.write_text(
+                json.dumps({"requested_stages": _stage_requests("assembly")}),
+                encoding="utf-8",
+            )
             envs.write_text(
                 envs.read_text(encoding="utf-8")
                 + "methods:\n"
@@ -708,7 +750,6 @@ class FrozenInputTests(unittest.TestCase):
                 manifest_draft=manifest,
                 run_config_draft=run_config,
                 config_path=envs,
-                selected_stages=["assembly"],
                 selected_methods={"assembly": ["assembly.candidate.flye"]},
             )
 
@@ -718,13 +759,16 @@ class FrozenInputTests(unittest.TestCase):
                     manifest_draft=manifest,
                     run_config_draft=run_config,
                     config_path=envs,
-                    selected_stages=["assembly"],
                     selected_methods={"assembly": ["assembly.candidate.hifiasm"]},
                 )
 
     def test_selected_method_must_belong_to_its_declared_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
+            run_config.write_text(
+                json.dumps({"requested_stages": _stage_requests("assembly")}),
+                encoding="utf-8",
+            )
 
             with self.assertRaises(FrozenInputValidationError):
                 freeze_session_inputs(
@@ -732,9 +776,8 @@ class FrozenInputTests(unittest.TestCase):
                     manifest_draft=manifest,
                     run_config_draft=run_config,
                     config_path=envs,
-                    selected_stages=["assembly"],
                     selected_methods={
-                        "assembly": ["gene_annotation.candidate.miniprot"]
+                        "assembly": ["assembly_review.eval.quast"]
                     },
                 )
 
@@ -781,12 +824,15 @@ class FrozenInputTests(unittest.TestCase):
     def test_dependency_resolver_uses_snapshot_after_live_config_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
+            run_config.write_text(
+                json.dumps({"requested_stages": _stage_requests("assembly")}),
+                encoding="utf-8",
+            )
             freeze_session_inputs(
                 paths,
                 manifest_draft=manifest,
                 run_config_draft=run_config,
                 config_path=envs,
-                selected_stages=["assembly"],
                 selected_methods={},
             )
             envs.write_text(
@@ -823,7 +869,10 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
             run_config.write_text(
-                json.dumps({"local_exec": ["read_qc"]}) + "\n",
+                json.dumps(
+                    {"requested_stages": _stage_requests("read_qc", local=("read_qc",))}
+                )
+                + "\n",
                 encoding="utf-8",
             )
             freeze_session_inputs(
@@ -870,10 +919,16 @@ class FrozenInputTests(unittest.TestCase):
                 "control/input_manifest.yaml",
             )
             self.assertEqual(captured["data_dir"], str(paths.run_dir))
-            invoked_state = graph.invocations[0][0]
             self.assertEqual(
-                invoked_state["stage_outputs"]["read_qc"]["execution_mode"],
-                "local",
+                [
+                    (step["stage"], step["allow_local_execution"])
+                    for step in captured["workflow_steps"]
+                ],
+                [("inventory", False), ("read_qc", True)],
+            )
+            self.assertNotIn(
+                "execution_mode",
+                captured["stage_seeds"].get("read_qc", {}),
             )
 
     def test_execution_lock_refuses_duplicate_executor(self) -> None:
@@ -989,8 +1044,7 @@ class FrozenInputTests(unittest.TestCase):
                 "stages:\n"
                 "  assembly: {conda_env: assembly-env}\n"
                 "  assembly_dedup: {conda_env: dedup-env}\n"
-                "  gene_annotation: {conda_env: gene-env}\n"
-                "  repeat_annotation: {conda_env: unrelated-env}\n"
+                "  assembly_review: {conda_env: review-env}\n"
                 "methods:\n"
                 "  assembly.candidate.flye:\n"
                 "    conda_env: flye-env\n"
@@ -1000,20 +1054,9 @@ class FrozenInputTests(unittest.TestCase):
                 "    package_tools: [unrelated]\n"
                 "  assembly_dedup.purge_dups:\n"
                 "    conda_env: dedup-method-env\n"
-                "  gene_annotation.candidate.miniprot:\n"
-                "    conda_env: miniprot-env\n"
-                "  gene_annotation.materialize.gffread:\n"
-                "    conda_env: gffread-env\n"
+                "  assembly_review.eval.quast:\n"
+                "    conda_env: quast-env\n"
                 "    package_tools: [internal]\n"
-                "  gene_annotation.merge.evm:\n"
-                "    conda_env: evm-env\n"
-                "    package_tools: [internal]\n"
-                "  gene_annotation.busco:\n"
-                "    conda_env: gene-busco-env\n"
-                "    package_tools: [internal]\n"
-                "  repeat_annotation.masking.repeatmasker:\n"
-                "    conda_env: repeat-env\n"
-                "    package_tools: [unrelated]\n"
                 "packages:\n"
                 "  selected:\n"
                 f"    install_root: {selected_root}\n"
@@ -1029,35 +1072,28 @@ class FrozenInputTests(unittest.TestCase):
 
             snapshot = capture_dependency_snapshot(
                 config_path=envs,
-                stages=["assembly", "assembly_dedup", "gene_annotation"],
+                stages=["assembly", "assembly_dedup", "assembly_review"],
                 methods=[
                     "assembly.candidate.flye",
-                    "gene_annotation.candidate.miniprot",
+                    "assembly_review.eval.quast",
                 ],
             )
 
             self.assertEqual(
                 set(snapshot.stage_environments),
-                {"assembly", "assembly_dedup", "gene_annotation"},
+                {"assembly", "assembly_dedup", "assembly_review"},
             )
             self.assertEqual(
                 set(snapshot.method_environments),
                 {
                     "assembly.candidate.flye",
                     "assembly_dedup.purge_dups",
-                    "gene_annotation.candidate.miniprot",
-                    "gene_annotation.materialize.gffread",
-                    "gene_annotation.merge.evm",
-                    "gene_annotation.busco",
+                    "assembly_review.eval.quast",
                 },
             )
             self.assertEqual(
-                snapshot.selected_stages,
-                ["assembly", "assembly_dedup", "gene_annotation"],
-            )
-            self.assertEqual(
                 snapshot.selected_methods,
-                ["assembly.candidate.flye", "gene_annotation.candidate.miniprot"],
+                ["assembly.candidate.flye", "assembly_review.eval.quast"],
             )
             self.assertEqual(set(snapshot.packages), {"selected", "internal"})
 

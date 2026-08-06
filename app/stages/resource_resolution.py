@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.control.workflow_plan import current_workflow_step_id
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.assets import AssetRecord
 from app.schemas.resource_ref import ResourceRef
@@ -311,6 +312,10 @@ def update_resource_ref(
         resource_type=resource_type,
         paths=list(dict.fromkeys(str(path) for path in paths if str(path).strip())),
         source_stage=source_stage,
+        workflow_step_id=current_workflow_step_id(
+            state,
+            expected_stage=source_stage,
+        ),
         metadata=metadata or {},
     )
     refs = dict(state.get("resource_refs") or {})

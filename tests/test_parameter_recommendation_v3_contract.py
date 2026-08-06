@@ -23,7 +23,7 @@ from app.schemas.parameter_recommendation import (
 def _ref(name: str, artifact_type: str = "test.artifact") -> ArtifactRef:
     return ArtifactRef(
         artifact_id=f"artifact:{name}",
-        path_ref=f"artifacts/test/{name}.json",
+        path_ref=f"artifacts/steps/step-001-test/test/{name}.json",
         sha256=sha256(name.encode("utf-8")).hexdigest(),
         size_bytes=1,
         artifact_type=artifact_type,

@@ -33,7 +33,6 @@ def route_after_enter(
     """Route retry states directly back into parameter recommendation."""
     if assembly_stage_output(state).get("status") in {
         "retry_parameters_after_execution_failure",
-        "retry_parameters_after_review_failure",
     }:
         return "recommend"
     if assembly_stage_output(state).get("status") == "parameters_approved":

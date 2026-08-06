@@ -21,7 +21,6 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
-from app.stages.repeat_annotation.nodes import resolve_repeat_inputs
 from app.stages.t2t.builder import build_stage
 from app.stages.t2t.nodes import (
     _CANDIDATE_FIELDS,
@@ -56,7 +55,14 @@ class T2TDescriptorTests(unittest.TestCase):
         self.assertEqual(catalog.method_id, method.method_name)
 
     def test_run_config_leaves_catalog_owned_mode_unset(self):
-        config = RunConfig.model_validate({"local_exec": ["t2t"], "t2t": {}})
+        config = RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {"stage": "t2t", "allow_local_execution": True}
+                ],
+                "t2t": {},
+            }
+        )
         self.assertIsNone(config.t2t.mode)
         self.assertFalse(hasattr(config.t2t, "thresholds"))
         self.assertFalse(hasattr(config.t2t, "telomere_motif"))
@@ -65,7 +71,9 @@ class T2TDescriptorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RunConfig.model_validate(
                 {
-                    "local_exec": ["t2t"],
+                    "requested_stages": [
+                        {"stage": "t2t", "allow_local_execution": True}
+                    ],
                     "t2t": {"telomere_motif": "TTAGGG"},
                 }
             )
@@ -74,7 +82,9 @@ class T2TDescriptorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RunConfig.model_validate(
                 {
-                    "local_exec": ["t2t"],
+                    "requested_stages": [
+                        {"stage": "t2t", "allow_local_execution": True}
+                    ],
                     "t2t": {"thresholds": {"min_mapq": 30}},
                 }
             )
@@ -85,7 +95,9 @@ class T2TStageTests(unittest.TestCase):
         self, state: dict, source_path: Path, *, label: str = "assembly"
     ) -> Path:
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        staged = paths.work_path("inventory", f"{label}{source_path.suffix}")
+        staged = paths.workflow_step_work_path(
+            "step-000-inventory", "inventory", f"{label}{source_path.suffix}"
+        )
         staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_bytes(source_path.read_bytes())
         artifact = ArtifactMeta.from_file(
@@ -106,7 +118,9 @@ class T2TStageTests(unittest.TestCase):
         label: str,
     ) -> Path:
         paths = SessionPaths.from_run_dir(state["data_dir"])
-        staged = paths.work_path("inventory", f"{label}{source_path.suffix}")
+        staged = paths.workflow_step_work_path(
+            "step-000-inventory", "inventory", f"{label}{source_path.suffix}"
+        )
         staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_bytes(source_path.read_bytes())
         artifact = ArtifactMeta.from_file(
@@ -138,8 +152,10 @@ class T2TStageTests(unittest.TestCase):
                 }
             )
         registry["assets"] = ready_assets
-        source = paths.work_path(
-            "inventory", f"asset_registry_{os.urandom(4).hex()}.json"
+        source = paths.workflow_step_work_path(
+            "step-000-inventory",
+            "inventory",
+            f"asset_registry_{os.urandom(4).hex()}.json",
         )
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(json.dumps(registry), encoding="utf-8")
@@ -218,7 +234,26 @@ class T2TStageTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-002-base_polish",
+                    "stage": "base_polish",
+                    "allow_local_execution": True,
+                },
+            ],
         )
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         state["current_stage"] = "t2t"
         published_assembly = self._publish_assembly_input(state, assembly)
         assets = []
@@ -315,7 +350,7 @@ class T2TStageTests(unittest.TestCase):
         )
         return assembly, reads
 
-    def test_auto_patch_preserves_input_and_hands_patched_assembly_to_annotation(self):
+    def test_auto_patch_preserves_input_and_hands_patched_assembly_to_base_polish(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             original = assembly.read_text(encoding="utf-8")
@@ -378,27 +413,22 @@ class T2TStageTests(unittest.TestCase):
                 ),
             )
 
-            self.assertEqual(result["current_stage"], "repeat_annotation")
+            self.assertEqual(result["current_stage"], "base_polish")
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed")
             self.assertEqual(t2t["output_assembly_ref"], str(patched))
             self.assertEqual(
                 result["resource_refs"]["assembly"]["paths"], [str(patched)]
             )
-            downstream = resolve_repeat_inputs(result)
-            self.assertEqual(
-                downstream["stage_outputs"]["repeat_annotation"]["input_assembly_ref"],
-                str(patched),
-            )
 
-    def test_execution_is_plan_only_without_local_exec(self):
+    def test_execution_is_plan_only_without_local_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly, reads)
             expected_assembly = state["resource_refs"]["assembly"]["paths"][0]
             result = self._invoke_with_parameter_approval(state)
 
-            self.assertEqual(result["current_stage"], "repeat_annotation")
+            self.assertEqual(result["current_stage"], "base_polish")
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "skipped")
             self.assertEqual(t2t["output_assembly_ref"], expected_assembly)
@@ -550,7 +580,22 @@ class T2TStageTests(unittest.TestCase):
                 session_id="s1",
                 input_manifest_ref="control/manifest.yaml",
                 data_dir=str(v2_run_dir(tmpdir, "s1")),
+                workflow_steps=[
+                    {
+                        "step_id": "step-000-inventory",
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-001-t2t",
+                        "stage": "t2t",
+                        "allow_local_execution": True,
+                    },
+                ],
             )
+            state["workflow_step_index"] = 1
+            state["entered_workflow_step_index"] = 1
+            state["current_stage"] = "t2t"
             state["stage_outputs"] = {
                 "t2t": {
                     "status": "candidates_built",
@@ -746,7 +791,7 @@ class T2TStageTests(unittest.TestCase):
                 recommended_parameters={"min_supporting_reads": 2},
             )
 
-            self.assertEqual(result["current_stage"], "repeat_annotation")
+            self.assertEqual(result["current_stage"], "base_polish")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(
                 result["stage_outputs"]["t2t"]["status"], "completed_with_warnings"
@@ -778,7 +823,7 @@ class T2TStageTests(unittest.TestCase):
 
             resumed = resume_review_state(blocked, request)
 
-            self.assertEqual(resumed["current_stage"], "repeat_annotation")
+            self.assertEqual(resumed["current_stage"], "base_polish")
             self.assertEqual(resumed["supervision_state"], "running_stage")
             self.assertIsNone(resumed["active_interrupt"])
             t2t = resumed["stage_outputs"]["t2t"]
@@ -820,7 +865,7 @@ class T2TStageTests(unittest.TestCase):
 
             resumed = resume_review_state(blocked, request)
 
-            self.assertEqual(resumed["current_stage"], "repeat_annotation")
+            self.assertEqual(resumed["current_stage"], "base_polish")
             t2t = resumed["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed_with_warnings")
             self.assertEqual(t2t["output_assembly_ref"], expected_assembly)
@@ -1055,7 +1100,7 @@ class T2TStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approval(state)
 
-            self.assertEqual(result["current_stage"], "repeat_annotation")
+            self.assertEqual(result["current_stage"], "base_polish")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(
                 result["stage_outputs"]["t2t"]["status"], "completed_with_warnings"
@@ -1176,7 +1221,9 @@ class T2TStageTests(unittest.TestCase):
                 "platform": registered_read.platform,
             }
             paths = SessionPaths.from_run_dir(state["data_dir"])
-            work_dir = paths.work_path("t2t", "t2t_finishing")
+            work_dir = paths.workflow_step_work_path(
+                "step-001-t2t", "t2t", "t2t_finishing"
+            )
             work_dir.mkdir(parents=True)
             state["stage_outputs"]["t2t"] = {
                 "status": "reads_prepared",
@@ -1329,7 +1376,7 @@ class T2TStageTests(unittest.TestCase):
                 "telomere_extension_candidates_ref",
             ):
                 self.assertTrue(Path(t2t[key]).is_file())
-                self.assertIn("/artifacts/t2t/", t2t[key])
+                self.assertIn("/artifacts/steps/step-001-t2t/t2t/", t2t[key])
 
     def test_malformed_nonempty_read_input_fails_before_parameter_recommendation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1445,9 +1492,24 @@ class T2TStageTests(unittest.TestCase):
                 session_id="s1",
                 input_manifest_ref="control/manifest.yaml",
                 data_dir=str(v2_run_dir(tmpdir, "s1")),
+                workflow_steps=[
+                    {
+                        "step_id": "step-000-inventory",
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-001-t2t",
+                        "stage": "t2t",
+                        "allow_local_execution": True,
+                    },
+                ],
             )
-            work = SessionPaths.from_run_dir(state["data_dir"]).work_path(
-                "t2t", "t2t_finishing"
+            state["workflow_step_index"] = 1
+            state["entered_workflow_step_index"] = 1
+            state["current_stage"] = "t2t"
+            work = SessionPaths.from_run_dir(state["data_dir"]).workflow_step_work_path(
+                "step-001-t2t", "t2t", "t2t_finishing"
             )
             work.mkdir(parents=True)
             candidates = work / "candidates.tsv"
@@ -1544,10 +1606,25 @@ class T2TStageTests(unittest.TestCase):
                 session_id="s2",
                 input_manifest_ref="control/manifest.yaml",
                 data_dir=str(v2_run_dir(other_tmp.name, "s2")),
+                workflow_steps=[
+                    {
+                        "step_id": "step-000-inventory",
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-001-t2t",
+                        "stage": "t2t",
+                        "allow_local_execution": True,
+                    },
+                ],
             )
+            conflict_state["workflow_step_index"] = 1
+            conflict_state["entered_workflow_step_index"] = 1
+            conflict_state["current_stage"] = "t2t"
             conflict_work = SessionPaths.from_run_dir(
                 conflict_state["data_dir"]
-            ).work_path("t2t", "t2t_finishing")
+            ).workflow_step_work_path("step-001-t2t", "t2t", "t2t_finishing")
             conflict_work.mkdir(parents=True)
             conflict_candidates = conflict_work / "candidates.tsv"
             candidates.replace(conflict_candidates)

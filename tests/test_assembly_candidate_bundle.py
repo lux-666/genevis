@@ -16,7 +16,7 @@ from app.schemas.artifacts import (
 def _ref(name: str, artifact_type: str) -> ArtifactRef:
     return ArtifactRef(
         artifact_id=f"artifact-{name}",
-        path_ref=f"artifacts/assembly/{name}",
+        path_ref=f"artifacts/steps/step-001-assembly/assembly/{name}",
         sha256="a" * 64,
         size_bytes=1,
         artifact_type=artifact_type,

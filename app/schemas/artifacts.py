@@ -108,13 +108,6 @@ T2T_STATUS_SUMMARY = "t2t.status_summary"
 T2T_FINISHING_REPORT = "t2t.finishing_report"
 T2T_PATCHED_ASSEMBLY = "t2t.patched_assembly"
 T2T_PATCH_RECORDS = "t2t.patch_records"
-REPEAT_ANNOTATION_PLAN = "repeat_annotation.plan"
-REPEAT_ANNOTATION_BUNDLE = "repeat_annotation.bundle"
-REPEAT_ANNOTATION_GFF3 = "repeat_annotation.gff3"
-REPEAT_SOFTMASKED_GENOME = "repeat_annotation.softmasked_genome"
-REPEAT_HARDMASKED_GENOME = "repeat_annotation.hardmasked_genome"
-
-
 class ArtifactMeta(BaseModel):
     """Metadata stored in state/ledger instead of large file contents."""
 
@@ -371,7 +364,7 @@ class AssemblyCandidateBundle(BaseModel):
     candidate_id: str = Field(min_length=1)
     method_name: str = Field(min_length=1)
     status: Literal["planned", "executed"]
-    artifact_type: Literal[ASSEMBLY_CANDIDATE_BUNDLE] = ASSEMBLY_CANDIDATE_BUNDLE
+    artifact_type: Literal["draft_assembly.candidate"] = "draft_assembly.candidate"
     input_type: str = Field(min_length=1)
     input_member_ids: dict[str, list[str]]
     input_member_platforms: dict[str, list[str]]
@@ -573,7 +566,7 @@ class T2TReviewDecisionArtifact(BaseModel):
 
 
 class T2TFinishingBundle(BaseModel):
-    """Compact provenance for a T2T finishing run and its annotation handoff."""
+    """Compact provenance for a T2T finishing run."""
 
     session_id: str
     evidence_phase: Literal["pre_review", "final"]
@@ -586,213 +579,6 @@ class T2TFinishingBundle(BaseModel):
     resolved_telomere_motif_source: str | None = None
     patched_assembly_ref: str | None = None
     artifact_refs: dict[str, str] = Field(default_factory=dict)
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class RepeatAnnotationPlan(BaseModel):
-    """Planned repeat annotation contract without running repeat tools."""
-
-    session_id: str
-    status: Literal["planned"]
-    strategy: Literal["provided", "de_novo"]
-    repeat_library_source: Literal["provided", "de_novo"]
-    input_assembly_ref: str
-    provided_repeat_library_ref: str | None = None
-    library_candidate_methods: list[str] = Field(default_factory=list)
-    helper_methods: list[str] = Field(default_factory=list)
-    masking_method: str
-    expected_outputs: dict[str, str] = Field(default_factory=dict)
-    confidence: Literal["high", "low"] = "high"
-    low_confidence_reasons: list[str] = Field(default_factory=list)
-    method_selection_required: bool = False
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class RepeatAnnotationBundle(BaseModel):
-    """Repeat annotation bundle consumed by downstream gene annotation."""
-
-    session_id: str
-    status: Literal["planned", "executed"]
-    strategy: Literal["provided", "de_novo"]
-    repeat_library_source: Literal["provided", "de_novo"]
-    input_assembly_ref: str
-    repeat_library_ref: str
-    repeat_annotation_gff3_ref: str | None = None
-    softmasked_genome_ref: str | None = None
-    hardmasked_genome_ref: str | None = None
-    confidence: Literal["high", "low"] = "high"
-    low_confidence_reasons: list[str] = Field(default_factory=list)
-    candidate_methods: list[str] = Field(default_factory=list)
-    plan_artifact_ref: str | None = None
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class GeneAnnotationPlan(BaseModel):
-    """Planned gene annotation contract without running annotation tools."""
-
-    session_id: str
-    status: Literal["planned"]
-    genome_input_ref: str
-    genome_input_source: Literal["softmasked_genome", "assembly"]
-    unmasked_fallback_reason: str | None = None
-    repeat_annotation_ref: str | None = None
-    rnaseq_read_refs: list[str] = Field(default_factory=list)
-    long_rna_read_refs: list[str] = Field(default_factory=list)
-    protein_evidence_refs: list[str] = Field(default_factory=list)
-    lineage_or_species_hints: dict[str, Any] = Field(default_factory=dict)
-    evidence_profile: Literal[
-        "no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence"
-    ]
-    candidate_methods: list[str] = Field(default_factory=list)
-    helper_methods: list[str] = Field(default_factory=list)
-    expected_outputs: dict[str, str] = Field(default_factory=dict)
-    review_required: bool = False
-    review_triggers: list[str] = Field(default_factory=list)
-    method_selection_required: bool = True
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class GeneAnnotationBundle(BaseModel):
-    """Gene annotation bundle consumed by downstream function annotation."""
-
-    session_id: str
-    status: Literal["planned", "adopted_existing_annotation"]
-    genome_input_ref: str
-    genome_input_source: Literal["softmasked_genome", "assembly"]
-    genes_gff3_ref: str
-    transcripts_fasta_ref: str | None = None
-    predicted_proteins_ref: str
-    evidence_report_ref: str | None = None
-    repeat_annotation_ref: str | None = None
-    evidence_profile: Literal[
-        "no_evidence",
-        "rnaseq",
-        "long_rna",
-        "protein",
-        "mixed_evidence",
-        "provided_annotation",
-    ]
-    candidate_methods: list[str] = Field(default_factory=list)
-    helper_methods: list[str] = Field(default_factory=list)
-    review_required: bool = False
-    review_triggers: list[str] = Field(default_factory=list)
-    plan_artifact_ref: str | None = None
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class CandidateBundle(BaseModel):
-    """Standardized gene-annotation candidate: a structural GFF plus a real,
-    on-disk proteins FASTA. A candidate is valid only when annotation_gff_ref
-    and proteins_fasta_ref point at files that actually exist; methods without
-    native protein output materialize proteins.fa from the GFF + genome before
-    the bundle is recorded.
-    """
-
-    method_name: str
-    category: str
-    annotation_gff_ref: str
-    proteins_fasta_ref: str
-    cds_fasta_ref: str | None = None
-    metrics_ref: str | None = None
-    provenance_ref: str | None = None
-    evm_evidence_class: str = "ABINITIO_PREDICTION"
-    evm_source_type: str = ""
-    status: Literal["materialized", "materialization_failed"] = "materialized"
-
-
-FunctionAnnotationProvenanceMethod = Literal["function_annotation.candidate.diamond"]
-
-
-class FunctionDatabaseProvenance(BaseModel):
-    """Database provenance required for planned function annotation."""
-
-    method_name: FunctionAnnotationProvenanceMethod
-    database_name: str
-    database_version: str
-    snapshot_date: str
-    database_source_ref: str
-    # Optional: when omitted, function_annotation adopts the resolved
-    # proteins_fasta_ref at runtime. The planner cannot know the runtime
-    # path for manifest-provided proteins, so it leaves this unset.
-    input_proteins_ref: str | None = None
-    command: str | None = None
-    descriptor_version: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator(
-        "method_name",
-        "database_name",
-        "database_version",
-        "snapshot_date",
-        "database_source_ref",
-    )
-    @classmethod
-    def _required_text_must_not_be_empty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("must be non-empty")
-        return value
-
-    @model_validator(mode="after")
-    def _require_command_or_descriptor_version(self) -> FunctionDatabaseProvenance:
-        if not (self.command and self.command.strip()) and not (
-            self.descriptor_version and self.descriptor_version.strip()
-        ):
-            raise ValueError(
-                "function database provenance requires command or descriptor_version"
-            )
-        return self
-
-
-class FunctionMethodResult(BaseModel):
-    """Materialized result from one function annotation method."""
-
-    method_name: str
-    status: Literal["materialized", "skipped", "failed"] = "materialized"
-    result_refs: dict[str, str] = Field(default_factory=dict)
-    database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class FunctionAnnotationPlan(BaseModel):
-    """Planned function annotation contract without running tools."""
-
-    session_id: str
-    status: Literal["planned"]
-    proteins_fasta_ref: str
-    genes_gff3_ref: str | None = None
-    transcripts_fasta_ref: str | None = None
-    candidate_methods: list[str] = Field(default_factory=list)
-    expected_outputs: dict[str, str] = Field(default_factory=dict)
-    database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
-    method_selection_required: bool = True
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class FunctionAnnotationBundle(BaseModel):
-    """Function annotation bundle for final workflow outputs."""
-
-    session_id: str
-    status: Literal["planned"]
-    proteins_fasta_ref: str
-    genes_gff3_ref: str | None = None
-    transcripts_fasta_ref: str | None = None
-    diamond_hits_ref: str | None = None
-    gene_function_tsv_ref: str | None = None
-    go_annotation_table_ref: str | None = None
-    kegg_annotation_table_ref: str | None = None
-    pfam_interpro_table_ref: str | None = None
-    annotated_gene_models_gff3_ref: str | None = None
-    method_results: list[FunctionMethodResult] = Field(default_factory=list)
-    candidate_methods: list[str] = Field(default_factory=list)
-    database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
-    plan_artifact_ref: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

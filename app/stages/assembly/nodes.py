@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from app.configuration import load_descriptor_registry
 from app.control.errors import ResumeValidationError
+from app.control.workflow_plan import advance_workflow_step
 from app.domains.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
@@ -56,6 +57,8 @@ from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
     ASSEMBLY_ROUTE_DECISION,
     ArtifactMeta,
+    ArtifactRef,
+    ArtifactRefJson,
     AssemblyCandidateBundle,
     AssemblyInputProfile,
     AssemblyRouteDecision,
@@ -107,7 +110,6 @@ from app.storage.artifacts import (
 )
 from app.storage.assembly_candidates import load_executed_candidate_bundle
 from app.storage.ledger import Ledger
-from app.workflow import next_stage_name
 
 ROUTE_DECISION_MAP: dict[str, SelectedAssemblyRoute] = {
     "select_cyclone": "cyclone",
@@ -159,9 +161,7 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
     configured_route = assembly_out.get("assembly_route") or "auto"
     existing_selection = _selection_from_output(assembly_out)
     single_platform_read_type = (
-        PLATFORM_TO_SHARED_READ_TYPE.get(platforms[0])
-        if len(platforms) == 1
-        else None
+        PLATFORM_TO_SHARED_READ_TYPE.get(platforms[0]) if len(platforms) == 1 else None
     )
     hinted_read_type = resolve_read_type(
         (
@@ -251,13 +251,9 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
     primary_platforms = list(
         dict.fromkeys(member.platform for member in primary_members)
     )
-    primary_platform = (
-        primary_platforms[0] if len(primary_platforms) == 1 else None
-    )
+    primary_platform = primary_platforms[0] if len(primary_platforms) == 1 else None
     input_source = str(
-        (state.get("resource_refs") or {})
-        .get("long_reads", {})
-        .get("source_stage")
+        (state.get("resource_refs") or {}).get("long_reads", {}).get("source_stage")
         or "asset_registry"
     )
 
@@ -306,14 +302,10 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
                     else []
                 ),
                 "hic_r1": (
-                    [pair.r1.member_id for pair in hic_pairs]
-                    if use_hic_phasing
-                    else []
+                    [pair.r1.member_id for pair in hic_pairs] if use_hic_phasing else []
                 ),
                 "hic_r2": (
-                    [pair.r2.member_id for pair in hic_pairs]
-                    if use_hic_phasing
-                    else []
+                    [pair.r2.member_id for pair in hic_pairs] if use_hic_phasing else []
                 ),
             },
             "assembly_input_member_platforms": {
@@ -324,20 +316,19 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
                     else []
                 ),
                 "hic_r1": (
-                    [pair.r1.platform for pair in hic_pairs]
-                    if use_hic_phasing
-                    else []
+                    [pair.r1.platform for pair in hic_pairs] if use_hic_phasing else []
                 ),
                 "hic_r2": (
-                    [pair.r2.platform for pair in hic_pairs]
-                    if use_hic_phasing
-                    else []
+                    [pair.r2.platform for pair in hic_pairs] if use_hic_phasing else []
                 ),
             },
             "assembly_input_artifact_refs": {
                 "primary": [
                     (
-                        member.read_artifact_ref.model_dump(mode="json")
+                        cast(
+                            ArtifactRefJson,
+                            member.read_artifact_ref.model_dump(mode="json"),
+                        )
                         if member.read_artifact_ref
                         else None
                     )
@@ -346,7 +337,10 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
                 "ultralong": (
                     [
                         (
-                            member.read_artifact_ref.model_dump(mode="json")
+                            cast(
+                                ArtifactRefJson,
+                                member.read_artifact_ref.model_dump(mode="json"),
+                            )
                             if member.read_artifact_ref
                             else None
                         )
@@ -358,7 +352,10 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
                 "hic_r1": (
                     [
                         (
-                            pair.r1.read_artifact_ref.model_dump(mode="json")
+                            cast(
+                                ArtifactRefJson,
+                                pair.r1.read_artifact_ref.model_dump(mode="json"),
+                            )
                             if pair.r1.read_artifact_ref
                             else None
                         )
@@ -370,7 +367,10 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
                 "hic_r2": (
                     [
                         (
-                            pair.r2.read_artifact_ref.model_dump(mode="json")
+                            cast(
+                                ArtifactRefJson,
+                                pair.r2.read_artifact_ref.model_dump(mode="json"),
+                            )
                             if pair.r2.read_artifact_ref
                             else None
                         )
@@ -571,7 +571,11 @@ def apply_route_decision(
     if request.stage != "assembly":
         raise ResumeValidationError("assembly selection resume requires stage assembly")
     if request.decision == "stop_human_review":
-        review_request_id, review_request_hash = _route_review_binding(state, request)
+        (
+            review_request_id,
+            review_request_hash,
+            review_request_ref,
+        ) = _route_review_binding(state, request)
         decision_ref = persist_review_decision(
             state["data_dir"],
             session_id=state["session_id"],
@@ -580,6 +584,7 @@ def apply_route_decision(
             gate_id="route_selection",
             decision=request,
             request_hash=review_request_hash,
+            request_ref=review_request_ref,
             method_name="assembly.route_selector",
             artifact_type=ASSEMBLY_ROUTE_DECISION,
         )
@@ -648,7 +653,9 @@ def apply_route_decision(
             "read_type_source": read_type_source,
         },
     )
-    review_request_id, review_request_hash = _route_review_binding(state, request)
+    review_request_id, review_request_hash, review_request_ref = _route_review_binding(
+        state, request
+    )
     decision_ref = persist_review_decision(
         state["data_dir"],
         session_id=state["session_id"],
@@ -657,6 +664,7 @@ def apply_route_decision(
         gate_id="route_selection",
         decision=decision,
         request_hash=review_request_hash,
+        request_ref=review_request_ref,
         method_name="assembly.route_selector",
         artifact_type=ASSEMBLY_ROUTE_DECISION,
     )
@@ -697,7 +705,7 @@ def apply_route_decision(
 def _route_review_binding(
     state: TopLevelState,
     request: ResumeReviewRequest,
-) -> tuple[str, str]:
+) -> tuple[str, str, ArtifactRef]:
     active_interrupt: Mapping[str, object] = state.get("active_interrupt") or {}
     review_request_id = request.review_request_id or active_interrupt.get(
         "review_request_id"
@@ -705,11 +713,30 @@ def _route_review_binding(
     review_request_hash = request.review_request_hash or active_interrupt.get(
         "request_hash"
     )
-    if not review_request_id or not review_request_hash:
+    request_ref_value = active_interrupt.get("request_ref")
+    if not review_request_id or not review_request_hash or request_ref_value is None:
         raise ResumeValidationError(
             "assembly route decision is missing review request binding"
         )
-    return str(review_request_id), str(review_request_hash)
+    try:
+        request_ref = ArtifactRef.model_validate(request_ref_value)
+        request_record = load_review_request(
+            state["data_dir"], request_ref, session_id=state["session_id"]
+        )
+    except (ReviewPersistenceError, ValueError, TypeError) as exc:
+        raise ResumeValidationError(
+            "assembly route review request is missing or changed"
+        ) from exc
+    if (
+        request_ref.sha256 != str(review_request_hash)
+        or request_record.get("review_request_id") != str(review_request_id)
+        or request_record.get("stage") != "assembly"
+        or request_record.get("gate_id") != "route_selection"
+        or request_record.get("workflow_step_id")
+        != active_interrupt.get("workflow_step_id")
+    ):
+        raise ResumeValidationError("assembly route review request binding mismatch")
+    return str(review_request_id), str(review_request_hash), request_ref
 
 
 def apply_selection_timeout(
@@ -964,9 +991,7 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
             method_name=method_name,
             status="planned",
             input_type=assembly_out["input_type"],
-            input_member_ids=dict(
-                assembly_out.get("assembly_input_member_ids") or {}
-            ),
+            input_member_ids=dict(assembly_out.get("assembly_input_member_ids") or {}),
             input_member_platforms=dict(
                 assembly_out.get("assembly_input_member_platforms") or {}
             ),
@@ -1029,7 +1054,9 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
         status = "planned"
     plan_update: AssemblyStageCursor = {
         "status": status,
-        "planned_candidate_bundle_ref": planned_candidate_bundle_ref,
+        "planned_candidate_bundle_ref": cast(
+            ArtifactRefJson, planned_candidate_bundle_ref
+        ),
         "substeps": {
             **dict(assembly_out.get("substeps") or {}),
             "flye_assembly": {
@@ -1121,8 +1148,7 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
     outputs["assembly"] = committed
     trace = append_route_trace(state, "assembly_stage")
     update: StateUpdate = {
-        "current_stage": next_stage_name("assembly"),
-        "supervision_state": "running_stage",
+        **advance_workflow_step(state, "assembly"),
         "route_trace": trace,
         "stage_outputs": outputs,
     }
@@ -1132,19 +1158,15 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
             verified = load_executed_candidate_bundle(
                 absolute_data_dir(state),
                 state["session_id"],
-                executed_bundle_ref,
+                ArtifactRef.model_validate(executed_bundle_ref),
                 expected_method_name=assembly_out.get("primary_method"),
             )
         except (OSError, TypeError, ValueError) as exc:
-            return _fail_update(
-                state, f"assembly candidate bundle is invalid: {exc}"
-            )
+            return _fail_update(state, f"assembly candidate bundle is invalid: {exc}")
         checkpoint_primary = assembly_out.get("draft_assembly_ref")
-        if (
-            checkpoint_primary
-            and Path(checkpoint_primary).resolve(strict=False)
-            != verified.primary_output_path.resolve(strict=False)
-        ):
+        if checkpoint_primary and Path(checkpoint_primary).resolve(
+            strict=False
+        ) != verified.primary_output_path.resolve(strict=False):
             return _fail_update(
                 state,
                 "assembly draft path does not match executed candidate primary output",

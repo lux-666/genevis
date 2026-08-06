@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.configuration import load_descriptor_registry
+from app.control.workflow_plan import advance_workflow_step
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     append_route_trace,
@@ -26,7 +27,6 @@ from app.stages.read_qc.state import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import LONG_READS_SPEC
-from app.workflow import next_stage_name
 
 
 def _read_qc_output(state: TopLevelState) -> ReadQCStageCursor:
@@ -89,7 +89,10 @@ def enter_read_qc(state: TopLevelState) -> StateUpdate:
 
 def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
     """Resolve the current logical long-read set."""
-    resolution = resolve_stage_resource(state, resource_spec=LONG_READS_SPEC)
+    try:
+        resolution = resolve_stage_resource(state, resource_spec=LONG_READS_SPEC)
+    except ValueError as exc:
+        return _fail_update(state, f"raw_long_reads resolution failed: {exc}")
     if not resolution.found:
         return _fail_update(state, "raw_long_reads/long_reads resource not found")
     paths = [Path(path) for path in resolution.paths]
@@ -280,8 +283,7 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
         },
     )
     update: StateUpdate = {
-        "current_stage": next_stage_name("read_qc"),
-        "supervision_state": "running_stage",
+        **advance_workflow_step(state, "read_qc"),
         "route_trace": append_route_trace(state, "read_qc_stage"),
         "stage_outputs": cursor_update["stage_outputs"],
     }

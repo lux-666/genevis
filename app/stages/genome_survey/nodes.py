@@ -11,6 +11,7 @@ from typing import cast
 from typing_extensions import TypedDict
 
 from app.configuration import load_descriptor_registry
+from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.domains.genome_size import resolve_explicit_genome_size
 from app.schemas.artifacts import (
     ArtifactMeta,
@@ -39,7 +40,6 @@ from app.stages.resource_resolution import ResourceResolution, resolve_stage_res
 from app.stages.resource_specs import LONG_READS_SPEC, SHORT_READS_SPEC
 from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
-from app.workflow import next_stage_name
 
 FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
@@ -537,9 +537,10 @@ def write_survey_skip(state: TopLevelState) -> StateUpdate:
         },
     )
     skip_reason = result.skip_reason or "no_usable_survey_reads"
+    step_id = current_workflow_step_id(state, expected_stage="genome_survey")
     update["skip_reasons"] = {
         **(state.get("skip_reasons") or {}),
-        "genome_survey": skip_reason,
+        step_id: skip_reason,
     }
     return update
 
@@ -557,8 +558,7 @@ def commit_genome_survey(state: TopLevelState) -> StateUpdate:
     outputs["genome_survey"] = committed_cursor
     trace = append_route_trace(state, "genome_survey_stage")
     return {
-        "current_stage": next_stage_name("genome_survey"),
-        "supervision_state": "running_stage",
+        **advance_workflow_step(state, "genome_survey"),
         "route_trace": trace,
         "stage_outputs": validate_stage_outputs(outputs),
     }

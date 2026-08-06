@@ -5,9 +5,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import dataclass
-from pathlib import Path
 from unittest.mock import patch
 
+from app.control.workflow_plan import bind_attempt_to_current_workflow_step
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.evidence import execution_log_paths
 from app.execution.fake_runner import FakeRunner
@@ -53,10 +53,11 @@ from app.storage.parameter_evidence import (
     load_parameter_recommendation_chain_v3,
     publish_parameter_json,
 )
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 DIRECT_LIFECYCLE = MethodExecutionLifecycle(
-    stage="function_annotation",
+    stage="assembly_review",
     name="contract method",
     method_name="contract.method",
     frozen_status="contract_frozen",
@@ -64,12 +65,27 @@ DIRECT_LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def _state(tmpdir: str, *, stage: str = "function_annotation") -> dict:
+def _state(tmpdir: str, *, stage: str = "assembly_review") -> dict:
     state = initial_state(
         session_id="s1",
         input_manifest_ref="control/manifest.yaml",
         data_dir=str(v2_run_dir(tmpdir, "s1")),
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": f"step-001-{stage}",
+                "stage": stage,
+                "allow_local_execution": False,
+            },
+        ],
     )
+    state["current_stage"] = stage
+    state["workflow_step_index"] = 1
+    state["entered_workflow_step_index"] = 1
     state["stage_outputs"] = {stage: {"status": "planned"}}
     return state
 
@@ -78,17 +94,24 @@ def _attempt(
     state: dict,
     *,
     attempt_id: str = "s1:contract:0",
-    stage: str = "function_annotation",
+    stage: str = "assembly_review",
     method_name: str = "contract.method",
     parameter_attempt_id: int | None = None,
     script_body: str = "#!/bin/sh\nexit 1\n",
 ) -> FrozenAttemptSpec:
-    work_dir = Path(state["data_dir"]) / "work" / stage / attempt_id.replace(":", "_")
+    workflow_step_id = state["workflow_steps"][state["workflow_step_index"]][
+        "step_id"
+    ]
+    work_dir = SessionPaths.from_run_dir(state["data_dir"]).workflow_step_work_path(
+        workflow_step_id,
+        stage,
+        attempt_id.replace(":", "_"),
+    )
     work_dir.mkdir(parents=True, exist_ok=True)
     script = work_dir / "run.sh"
     script.write_text(script_body, encoding="utf-8")
     script.chmod(0o755)
-    return build_frozen_attempt(
+    attempt = build_frozen_attempt(
         attempt_id=attempt_id,
         session_id=state["session_id"],
         stage=stage,
@@ -98,12 +121,24 @@ def _attempt(
         expected_outputs=[work_dir / "output.txt"],
         env=None,
         env_spec=None,
-        metadata=(
-            {"parameter_attempt_id": parameter_attempt_id}
-            if parameter_attempt_id is not None
-            else None
-        ),
+        metadata={
+            **(
+                {"parameter_attempt_id": parameter_attempt_id}
+                if parameter_attempt_id is not None
+                else {}
+            ),
+        },
     )
+    return bind_attempt_to_current_workflow_step(state, attempt)
+
+
+def _bound_attempt_id(state: dict, attempt_id: str) -> str:
+    session_prefix = f"{state['session_id']}:"
+    local_attempt_id = attempt_id.removeprefix(session_prefix)
+    workflow_step_id = state["workflow_steps"][state["workflow_step_index"]][
+        "step_id"
+    ]
+    return f"{session_prefix}{workflow_step_id}:{local_attempt_id}"
 
 
 def _merge(state: dict, update: dict) -> dict:
@@ -209,7 +244,7 @@ class _LargeStderrRunner:
 def _ref(name: str, artifact_type: str) -> ArtifactRef:
     return ArtifactRef(
         artifact_id=f"art_{name * 32}",
-        path_ref=f"artifacts/assembly/{name}.json",
+        path_ref=f"artifacts/steps/step-001-assembly/assembly/{name}.json",
         sha256=name * 64,
         size_bytes=1,
         artifact_type=artifact_type,
@@ -527,7 +562,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
 
             result = graph.invoke(state)
 
-            output = result["stage_outputs"]["function_annotation"]
+            output = result["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "collected")
             self.assertEqual(len(runner.executed_commands), 1)
             self.assertEqual(output["execution_attempts"][0]["status"], "executed")
@@ -559,7 +594,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             result = graph.invoke(ran)
 
             self.assertEqual(
-                result["stage_outputs"]["function_annotation"]["status"],
+                result["stage_outputs"]["assembly_review"]["status"],
                 "collected",
             )
             self.assertEqual(replay_runner.executed_commands, [])
@@ -568,7 +603,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _state(tmpdir)
             frozen = _merge(state, _freeze_contract(state))
-            frozen_ref = frozen["stage_outputs"]["function_annotation"][
+            frozen_ref = frozen["stage_outputs"]["assembly_review"][
                 "execution_attempts"
             ][0]["frozen_attempt_ref"]
             runner = FakeRunner()
@@ -585,7 +620,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
 
             result = graph.invoke(frozen)
 
-            output = result["stage_outputs"]["function_annotation"]
+            output = result["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "collected")
             self.assertEqual(len(runner.executed_commands), 1)
             self.assertEqual(
@@ -604,10 +639,8 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 DIRECT_LIFECYCLE,
                 runner=first_runner,
             )
-            discarded_output = discarded["stage_outputs"]["function_annotation"]
-            execution_ref = discarded_output["execution_attempts"][0][
-                "execution_ref"
-            ]
+            discarded_output = discarded["stage_outputs"]["assembly_review"]
+            execution_ref = discarded_output["execution_attempts"][0]["execution_ref"]
             replay_runner = _OutcomeRunner(set())
 
             recovered = run_method_attempts(
@@ -616,8 +649,11 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 runner=replay_runner,
             )
 
-            output = recovered["stage_outputs"]["function_annotation"]
-            self.assertEqual(first_runner.attempt_ids, ["s1:contract:0"])
+            output = recovered["stage_outputs"]["assembly_review"]
+            self.assertEqual(
+                first_runner.attempt_ids,
+                [_bound_attempt_id(state, "s1:contract:0")],
+            )
             self.assertEqual(replay_runner.attempt_ids, [])
             self.assertEqual(output["status"], DIRECT_LIFECYCLE.ran_status)
             self.assertEqual(output["execution_attempts"][0]["status"], "executed")
@@ -655,7 +691,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 runner=replay_runner,
             )
 
-            output = update["stage_outputs"]["function_annotation"]
+            output = update["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
             self.assertIn("does not bind the frozen attempt", output["reason"])
             self.assertEqual(replay_runner.attempt_ids, [])
@@ -682,7 +718,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 runner=runner,
             )
 
-            output = update["stage_outputs"]["function_annotation"]
+            output = update["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
             self.assertIn("script changed after freeze", output["reason"])
             self.assertEqual(runner.attempt_ids, [])
@@ -691,13 +727,13 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _state(tmpdir)
             frozen = _merge(state, _freeze_contract(state))
-            frozen["stage_outputs"]["function_annotation"]["execution_attempts"][0][
+            frozen["stage_outputs"]["assembly_review"]["execution_attempts"][0][
                 "method_id"
             ] = "contract.other"
 
             update = run_method_attempts(frozen, DIRECT_LIFECYCLE)
 
-            output = update["stage_outputs"]["function_annotation"]
+            output = update["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
             self.assertIn("wrong method identity", output["reason"])
 
@@ -713,7 +749,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                     runner=FakeRunner(),
                 ),
             )
-            ran["stage_outputs"]["function_annotation"]["status"] = (
+            ran["stage_outputs"]["assembly_review"]["status"] = (
                 DIRECT_LIFECYCLE.frozen_status
             )
             replay_runner = FakeRunner()
@@ -724,7 +760,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 runner=replay_runner,
             )
 
-            output = update["stage_outputs"]["function_annotation"]
+            output = update["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], DIRECT_LIFECYCLE.ran_status)
             self.assertEqual(output["execution_attempts"][0]["status"], "executed")
             self.assertEqual(replay_runner.executed_commands, [])
@@ -733,7 +769,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _state(tmpdir)
             lifecycle = MethodExecutionLifecycle(
-                stage="function_annotation",
+                stage="assembly_review",
                 name="contract batch",
                 method_name="contract.method",
                 frozen_status="batch_frozen",
@@ -748,15 +784,18 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 state,
                 freeze_method_attempts(state, lifecycle, attempts),
             )
-            runner = _OutcomeRunner({"s1:contract:0"})
+            runner = _OutcomeRunner({_bound_attempt_id(state, "s1:contract:0")})
 
             after_first = _merge(
                 frozen,
                 run_method_attempts(frozen, lifecycle, runner=runner),
             )
-            first_output = after_first["stage_outputs"]["function_annotation"]
+            first_output = after_first["stage_outputs"]["assembly_review"]
             self.assertEqual(first_output["status"], "batch_frozen")
-            self.assertEqual(runner.attempt_ids, ["s1:contract:0"])
+            self.assertEqual(
+                runner.attempt_ids,
+                [_bound_attempt_id(state, "s1:contract:0")],
+            )
             self.assertEqual(
                 [cursor["status"] for cursor in first_output["execution_attempts"]],
                 ["execution_failed", "frozen"],
@@ -767,9 +806,15 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 run_method_attempts(after_first, lifecycle, runner=runner),
             )
 
-            output = ran["stage_outputs"]["function_annotation"]
+            output = ran["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "batch_ran")
-            self.assertEqual(runner.attempt_ids, ["s1:contract:0", "s1:contract:1"])
+            self.assertEqual(
+                runner.attempt_ids,
+                [
+                    _bound_attempt_id(state, "s1:contract:0"),
+                    _bound_attempt_id(state, "s1:contract:1"),
+                ],
+            )
             self.assertEqual(
                 [cursor["status"] for cursor in output["execution_attempts"]],
                 ["execution_failed", "executed"],
@@ -795,11 +840,14 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
 
             result = graph.invoke(state)
 
-            output = result["stage_outputs"]["function_annotation"]
+            output = result["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
             self.assertIn("runner binary missing", output["reason"])
             self.assertLessEqual(len(output["reason"]), 2048)
-            self.assertEqual(runner.attempt_ids, ["s1:contract:0"])
+            self.assertEqual(
+                runner.attempt_ids,
+                [_bound_attempt_id(state, "s1:contract:0")],
+            )
             [execution] = load_method_executions(result, DIRECT_LIFECYCLE)
             self.assertFalse(execution.evidence.success)
             self.assertIn("runner binary missing", execution.evidence.error)
@@ -862,7 +910,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             )
             failed = _merge(frozen, update)
 
-            output = failed["stage_outputs"]["function_annotation"]
+            output = failed["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
             self.assertLessEqual(len(output["reason"]), 2048)
             [execution] = load_method_executions(failed, DIRECT_LIFECYCLE)
@@ -874,7 +922,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _state(tmpdir)
             lifecycle = MethodExecutionLifecycle(
-                stage="function_annotation",
+                stage="assembly_review",
                 name="contract batch",
                 method_name="contract.method",
                 frozen_status="batch_frozen",
@@ -896,10 +944,13 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
 
             update = run_method_attempts(frozen, lifecycle, runner=runner)
 
-            output = update["stage_outputs"]["function_annotation"]
+            output = update["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
             self.assertIn("attempt_id mismatch", output["reason"])
-            self.assertEqual(runner.attempt_ids, ["s1:contract:0"])
+            self.assertEqual(
+                runner.attempt_ids,
+                [_bound_attempt_id(state, "s1:contract:0")],
+            )
             self.assertEqual(
                 [cursor["status"] for cursor in output["execution_attempts"]],
                 ["frozen", "frozen"],
@@ -923,7 +974,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _state(tmpdir)
             lifecycle = MethodExecutionLifecycle(
-                stage="function_annotation",
+                stage="assembly_review",
                 name="contract batch",
                 method_name="contract.method",
                 frozen_status="batch_frozen",
@@ -945,9 +996,12 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
 
             update = run_method_attempts(frozen, lifecycle, runner=runner)
 
-            output = update["stage_outputs"]["function_annotation"]
+            output = update["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
-            self.assertEqual(runner.attempt_ids, ["s1:contract:0"])
+            self.assertEqual(
+                runner.attempt_ids,
+                [_bound_attempt_id(state, "s1:contract:0")],
+            )
             self.assertEqual(
                 [cursor["status"] for cursor in output["execution_attempts"]],
                 ["execution_failed", "frozen"],
@@ -960,7 +1014,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                 DIRECT_LIFECYCLE,
                 _freeze_contract,
                 _collect_contract,
-                runner=_OutcomeRunner({"s1:contract:0"}),
+                runner=_OutcomeRunner({_bound_attempt_id(state, "s1:contract:0")}),
             )
 
             with patch(
@@ -969,7 +1023,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             ):
                 result = graph.invoke(state)
 
-            output = result["stage_outputs"]["function_annotation"]
+            output = result["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
             self.assertEqual(
                 output["execution_attempts"][0]["status"],
@@ -981,7 +1035,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _state(tmpdir)
             lifecycle = MethodExecutionLifecycle(
-                stage="function_annotation",
+                stage="assembly_review",
                 name="contract batch",
                 method_name="contract.method",
                 frozen_status="batch_frozen",
@@ -1010,9 +1064,15 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             ):
                 update = run_method_attempts(after_first, lifecycle, runner=runner)
 
-            output = update["stage_outputs"]["function_annotation"]
+            output = update["stage_outputs"]["assembly_review"]
             self.assertEqual(output["status"], "failed")
-            self.assertEqual(runner.attempt_ids, ["s1:contract:0", "s1:contract:1"])
+            self.assertEqual(
+                runner.attempt_ids,
+                [
+                    _bound_attempt_id(state, "s1:contract:0"),
+                    _bound_attempt_id(state, "s1:contract:1"),
+                ],
+            )
             self.assertEqual(
                 [cursor["status"] for cursor in output["execution_attempts"]],
                 ["executed", "frozen"],

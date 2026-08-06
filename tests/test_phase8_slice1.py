@@ -15,6 +15,7 @@ from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
+    ArtifactMeta,
     AssemblyInputProfile,
     AssemblyQCSummary,
     AssemblyReviewTaskItem,
@@ -22,6 +23,7 @@ from app.schemas.artifacts import (
     AssemblyRouteDecision,
     AssemblyT2TReadiness,
 )
+from app.schemas.run_config import DEFAULT_REVIEW_MAX_BLOCKED_SECONDS
 from app.schemas.state import initial_state
 from app.stages.assembly.nodes import (
     apply_route_decision,
@@ -30,7 +32,6 @@ from app.stages.assembly.nodes import (
     resolve_extended_inputs,
     select_route,
 )
-from app.schemas.artifacts import ArtifactMeta
 from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
@@ -50,7 +51,7 @@ class Phase8SchemaTests(unittest.TestCase):
         decision = AssemblyRouteDecision(
             session_id="s1",
             selected_route="hifi",
-            decided_by="llm_auto",
+            decided_by="auto_rule",
             rationale="HiFi reads available",
         )
         qc = AssemblyQCSummary(
@@ -172,17 +173,37 @@ class InputProfilerTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": True,
+                },
+            ],
         )
         state["current_stage"] = "assembly"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 1
         _paths = SessionPaths.from_run_dir(str(run_dir))
-        _source = _paths.work_path("inventory", f"asset_registry_{os.urandom(4).hex()}.json")
+        _source = _paths.workflow_step_work_path(
+            "step-000-inventory",
+            "inventory",
+            f"asset_registry_{os.urandom(4).hex()}.json",
+        )
         _source.parent.mkdir(parents=True, exist_ok=True)
         _source.write_text(
             json.dumps({"session_id": "s1", "assets": assets or []}), encoding="utf-8"
         )
         _artifact = ArtifactMeta.from_file(
-            _source, stage="inventory",
-            method_name="inventory.register_assets", artifact_type="asset_registry"
+            _source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
         )
         state["asset_registry_ref"] = publish_artifact_record(
             str(run_dir), "s1", _artifact
@@ -199,7 +220,7 @@ class InputProfilerTests(unittest.TestCase):
         self,
         recommended_route: str = "hifi",
         *,
-        review_policy: dict | None = None,
+        max_blocked_seconds: int | None = None,
     ) -> dict:
         selections = {
             "hifi": ("pacbio_hifi", "assembly.candidate.hifiasm"),
@@ -224,8 +245,10 @@ class InputProfilerTests(unittest.TestCase):
             },
             "recommended_assembly_selection": selection,
         }
-        if review_policy is not None:
-            assembly["review_policy"] = review_policy
+        if max_blocked_seconds is not None:
+            assembly["review_policy"] = {
+                "max_blocked_seconds": max_blocked_seconds,
+            }
         return assembly
 
     def _request(self, state: dict, decision: str, **kwargs) -> ResumeReviewRequest:
@@ -532,7 +555,7 @@ class InputProfilerTests(unittest.TestCase):
             self.assertNotIn("route_selector_prompt", assembly)
             self.assertNotIn("route_selector_source", assembly)
 
-    def test_select_route_defaults_to_strict_and_blocks_high_confidence(self):
+    def test_select_route_blocks_recommendation_for_foreground_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             blocked = self._blocked_route_state(
@@ -546,26 +569,30 @@ class InputProfilerTests(unittest.TestCase):
             self.assertNotIn("route_decision", assembly)
             self.assertEqual(blocked["active_interrupt"]["gate_id"], "route_selection")
             self.assertEqual(payload["recommended_route"], "cyclone")
-            self.assertEqual(payload["review_policy"]["mode"], "strict")
+            self.assertEqual(
+                payload["max_blocked_seconds"], DEFAULT_REVIEW_MAX_BLOCKED_SECONDS
+            )
+            self.assertNotIn("review_policy", payload)
+            self.assertNotIn("review_policy_outcome", payload)
             self.assertNotIn("recommended_route", blocked["active_interrupt"])
             self.assertNotIn("review_policy", blocked["active_interrupt"])
 
-    def test_select_route_auto_policy_can_adopt_high_confidence(self):
-        """All LLM recommendations now require human gate (confidence removed)."""
+    def test_select_route_persists_configured_foreground_countdown(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             blocked = self._blocked_route_state(
                 state,
-                self._route_assembly("cyclone", review_policy={"mode": "auto"}),
+                self._route_assembly("cyclone", max_blocked_seconds=180),
             )
             assembly = blocked["stage_outputs"]["assembly"]
             payload = self._request_payload(blocked)
 
-            # After confidence removal, all LLM recommendations block for human gate
             self.assertEqual(assembly["status"], "blocked_human")
             self.assertNotIn("route_decision", assembly)
             self.assertEqual(blocked["active_interrupt"]["gate_id"], "route_selection")
-            self.assertEqual(payload["review_policy"]["mode"], "auto")
+            self.assertEqual(payload["max_blocked_seconds"], 180)
+            self.assertNotIn("review_policy", payload)
+            self.assertNotIn("review_policy_outcome", payload)
 
     def test_select_route_insufficient_data_blocks_without_decision(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -667,42 +694,39 @@ class InputProfilerTests(unittest.TestCase):
                         self.assertEqual(assembly["assembly_selection"][key], expected)
                     self.assertNotIn("method_decision", assembly)
 
-    def test_route_selection_includes_review_policy_outcome(self):
-        """P1 fix: route selection should call evaluate() and include policy outcome"""
+    def test_route_selection_request_contains_countdown_not_policy_outcome(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             blocked = self._blocked_route_state(
                 state,
                 self._route_assembly(
-                    review_policy={"mode": "strict", "max_blocked_seconds": 180},
+                    max_blocked_seconds=180,
                 ),
             )
             assembly = blocked["stage_outputs"]["assembly"]
             payload = self._request_payload(blocked)
 
             self.assertEqual(assembly["status"], "blocked_human")
-            outcome = payload["review_policy_outcome"]
-            self.assertEqual(outcome["action"], "BLOCK_WITH_TIMEOUT")
-            self.assertEqual(outcome["max_blocked_seconds"], 180)
-            self.assertEqual(payload["review_policy"]["max_blocked_seconds"], 180)
+            self.assertEqual(payload["max_blocked_seconds"], 180)
+            self.assertNotIn("review_policy", payload)
+            self.assertNotIn("review_policy_outcome", payload)
             self.assertIn("blocked_at", blocked["active_interrupt"])
             self.assertNotIn("review_policy_outcome", blocked["active_interrupt"])
 
-    def test_route_selection_no_timeout_blocks_indefinitely(self):
-        """P1 fix: strict mode without timeout should block indefinitely"""
+    def test_route_selection_indefinite_countdown_is_persisted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             blocked = self._blocked_route_state(
                 state,
-                self._route_assembly(review_policy={"mode": "strict"}),
+                self._route_assembly(max_blocked_seconds=-1),
             )
             assembly = blocked["stage_outputs"]["assembly"]
             payload = self._request_payload(blocked)
 
             self.assertEqual(assembly["status"], "blocked_human")
-            outcome = payload["review_policy_outcome"]
-            self.assertEqual(outcome["action"], "BLOCK_INDEFINITE")
-            self.assertIsNone(outcome["max_blocked_seconds"])
+            self.assertEqual(payload["max_blocked_seconds"], -1)
+            self.assertNotIn("review_policy", payload)
+            self.assertNotIn("review_policy_outcome", payload)
 
     def test_explicit_route_maps_to_assembly_selection(self):
         """An explicit run-config route writes the canonical assembly selection."""

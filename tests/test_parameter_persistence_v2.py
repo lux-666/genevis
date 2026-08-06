@@ -27,12 +27,15 @@ from app.stages.assembly.nodes import plan_candidate_attempts
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
+)
+from app.stages.assembly.parameters.storage import (
     recover_artifact as recover_recommendation_json_artifact,
 )
 from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
 from app.storage.artifacts import read_artifact_records
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
+    load_approved_parameter_chain_v3,
     load_parameter_recommendation_chain_v3,
     publish_parameter_file,
     publish_parameter_json,
@@ -65,6 +68,8 @@ class _FailingModel:
         request_path = (
             self.run_dir
             / "artifacts"
+            / "steps"
+            / "step-003-assembly"
             / "assembly"
             / "parameter_recommendations"
             / "000"
@@ -96,6 +101,28 @@ def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
         session_id="s1",
         input_manifest_ref="control/manifest.yaml",
         data_dir=str(paths.run_dir),
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-001-read_qc",
+                "stage": "read_qc",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-002-genome_survey",
+                "stage": "genome_survey",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-003-assembly",
+                "stage": "assembly",
+                "allow_local_execution": True,
+            },
+        ],
     )
     state["shared_parameters"] = {
         "organism": "Example species",
@@ -106,6 +133,9 @@ def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
         "estimates": {"genome_size": genome_size, "heterozygosity": 0.01},
         "estimate_sources": {"genome_size": "survey"},
     }
+    state["current_stage"] = "read_qc"
+    state["workflow_step_index"] = 1
+    state["entered_workflow_step_index"] = 1
     read_qc_ref = publish_parameter_json(
         state,
         stage="read_qc",
@@ -116,6 +146,9 @@ def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
         artifact_type="read_qc.summary",
         method_name="read_qc.test_fixture",
     )
+    state["current_stage"] = "genome_survey"
+    state["workflow_step_index"] = 2
+    state["entered_workflow_step_index"] = 2
     genome_survey_ref = publish_parameter_json(
         state,
         stage="genome_survey",
@@ -126,6 +159,9 @@ def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
         artifact_type="genome_survey.result",
         method_name="genome_survey.test_fixture",
     )
+    state["current_stage"] = "assembly"
+    state["workflow_step_index"] = 3
+    state["entered_workflow_step_index"] = 3
     state["stage_outputs"] = {
         "read_qc": {
             "summary": read_qc_summary,
@@ -308,6 +344,94 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
     )
 
 
+def test_parameter_chains_reject_an_earlier_same_stage_occurrence(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        return_value=_Model(_response(purge_level=1)),
+    ):
+        update = recommend_assembly_parameters(state)
+    blocked = _blocked_state(state, update)
+    approval_update = resume_review_state(
+        blocked,
+        _decision_request(blocked, "approve_parameters"),
+    )
+    first_cursor = ParameterRecommendationCursor.model_validate(
+        update["stage_outputs"]["assembly"]["current_parameter_recommendation"]
+    )
+    first_attempt = ParameterAttempt.model_validate(
+        approval_update["stage_outputs"]["assembly"]["parameter_attempts"][0]
+    )
+
+    second_occurrence = {
+        **state,
+        "workflow_steps": [
+            *state["workflow_steps"],
+            {
+                "step_id": "step-004-assembly",
+                "stage": "assembly",
+                "allow_local_execution": True,
+            },
+        ],
+        "current_stage": "assembly",
+        "workflow_step_index": 4,
+        "entered_workflow_step_index": 4,
+    }
+
+    with pytest.raises(
+        ParameterEvidenceError,
+        match="recommendation manifest targets another workflow occurrence",
+    ):
+        load_parameter_recommendation_chain_v3(
+            second_occurrence,
+            manifest_ref=first_cursor.manifest_ref,
+            expected_stage="assembly",
+            expected_method_id="assembly.candidate.hifiasm_ont",
+        )
+    with pytest.raises(
+        ParameterEvidenceError,
+        match="recommendation manifest targets another workflow occurrence",
+    ):
+        load_approved_parameter_chain_v3(
+            second_occurrence,
+            attempt=first_attempt,
+            expected_stage="assembly",
+            expected_method_id="assembly.candidate.hifiasm_ont",
+        )
+
+
+def test_parameter_publication_rejects_a_source_from_another_occurrence(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    paths = SessionPaths.from_run_dir(state["data_dir"])
+    source = paths.workflow_step_work_path(
+        "step-001-read_qc",
+        "read_qc",
+        "parameter_persistence",
+        "stale.json",
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text('{"schema_version": 2}\n', encoding="utf-8")
+
+    with pytest.raises(
+        ParameterEvidenceError,
+        match="parameter evidence source targets another workflow occurrence",
+    ):
+        publish_parameter_file(
+            state,
+            stage="assembly",
+            scope="recommendation",
+            identifier=0,
+            filename="stale.json",
+            source=source,
+            artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+            method_name="assembly.parameter_test",
+        )
+
+
 def test_freeze_uses_approved_snapshot_after_mutable_genome_state_changes(
     tmp_path: Path,
 ) -> None:
@@ -318,9 +442,9 @@ def test_freeze_uses_approved_snapshot_after_mutable_genome_state_changes(
     assembly.update(
         {
             "input_ref": str(reads.resolve()),
-            "selected_methods": ["assembly.candidate.hifiasm_ont"],
             "hifiasm_ont_parameters": {"threads": 4},
             "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
+            "assembly_input_member_platforms": {"primary": ["ont"]},
         }
     )
 
@@ -349,9 +473,15 @@ def test_freeze_uses_approved_snapshot_after_mutable_genome_state_changes(
         **plan_update,
         "stage_outputs": plan_update["stage_outputs"],
     }
-    with patch(
-        "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
-        return_value=(None, [], None),
+    with (
+        patch(
+            "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+            return_value=(None, [], None),
+        ),
+        patch(
+            "app.stages.assembly.method_application.hifiasm_ont.build_read_input_dependencies",
+            return_value=[],
+        ),
     ):
         freeze_update = freeze_hifiasm_ont_attempt(planned_state)
     frozen_state = {
@@ -431,7 +561,12 @@ def test_stale_checkpoint_reuses_persisted_model_response(tmp_path: Path) -> Non
 def test_recovery_repairs_file_published_before_index_append(tmp_path: Path) -> None:
     state = _state(tmp_path)
     paths = SessionPaths.from_run_dir(state["data_dir"])
-    source = paths.work_path("assembly", "parameter_persistence", "response.tmp")
+    source = paths.workflow_step_work_path(
+        "step-003-assembly",
+        "assembly",
+        "parameter_persistence",
+        "response.tmp",
+    )
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(
         json.dumps(
@@ -445,7 +580,8 @@ def test_recovery_repairs_file_published_before_index_append(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
-    destination = paths.artifact_path(
+    destination = paths.workflow_step_artifact_path(
+        "step-003-assembly",
         "assembly",
         "parameter_recommendations",
         "000",
@@ -500,7 +636,8 @@ def test_parameter_read_requires_exact_index_membership(tmp_path: Path) -> None:
         )
 
     paths = SessionPaths.from_run_dir(state["data_dir"])
-    unindexed_path = paths.artifact_path(
+    unindexed_path = paths.workflow_step_artifact_path(
+        "step-003-assembly",
         "assembly",
         "parameter_recommendations",
         "000",
@@ -552,7 +689,11 @@ def test_parameter_file_publication_is_idempotent_and_conflicts_fail_closed(
     tmp_path: Path,
 ) -> None:
     state = _state(tmp_path)
-    source = Path(state["data_dir"]) / "work" / "assembly" / "command.sh"
+    source = SessionPaths.from_run_dir(state["data_dir"]).workflow_step_work_path(
+        "step-003-assembly",
+        "assembly",
+        "command.sh",
+    )
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"set -e\necho exact\n")
 

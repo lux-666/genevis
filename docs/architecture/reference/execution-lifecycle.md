@@ -134,7 +134,7 @@ execution evidence, or create stage-local lifecycle factories.
 Before any process starts, the shared run node validates the owner cursor and
 loads the next frozen attempt through its verified ref. Stage, method, session,
 and attempt identities must match. The working directory must resolve below the
-current run's `work/<stage>/` tree; the declared absolute script path must be
+current run's `work/steps/<workflow_step_id>/<stage>/` tree; the declared absolute script path must be
 lexically below that working directory and resolve somewhere inside the run;
 every expected output must resolve inside the run. The retained script must
 exist and match its frozen SHA-256. The Runner executes that exact declared path

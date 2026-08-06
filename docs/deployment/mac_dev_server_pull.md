@@ -72,8 +72,9 @@ gene-agent run \
 
 The manifest owns `session_id`, and output is placed at
 `data/server_run/out/runs/<session_id>/`. The command validates/canonicalizes
-both files. The run config must explicitly contain JSON arrays for
-`requested_stages` and `local_exec`; `requested_stages: null` is rejected, while
+both files. The run config must explicitly contain one `requested_stages` list
+of `{stage, allow_local_execution}` objects; the boolean authorizes local
+process execution for that occurrence. `requested_stages: null` is rejected, while
 `[]` is valid. The command freezes that exact stage scope and dependency
 snapshot before SQLite execution. Add `--non-interactive` for automation; a
 human gate persists

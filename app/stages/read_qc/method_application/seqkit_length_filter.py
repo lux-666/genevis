@@ -22,6 +22,7 @@ from app.schemas.artifacts import (
     READ_QC_LONG_READ_SUMMARY,
     READ_QC_READ_SET_MANIFEST,
     ArtifactMeta,
+    ArtifactRef,
 )
 from app.schemas.assets import ReadSetManifest, ReadSetMember
 from app.schemas.state import StateUpdate, TopLevelState
@@ -200,7 +201,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         )
     read_set = ReadSetManifest(
         session_id=attempt.session_id,
-        source_registry_ref=registry_ref,
+        source_registry_ref=ArtifactRef.model_validate(registry_ref),
         members=[
             ReadSetMember(
                 output_ref=published.ref,
@@ -218,10 +219,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         "member_count": len(paths),
         "dependency_refs": [
             registry_ref,
-            *[
-                published.ref.model_dump(mode="json")
-                for published in published_reads
-            ],
+            *[published.ref.model_dump(mode="json") for published in published_reads],
         ],
     }
     read_set_source = (

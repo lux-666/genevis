@@ -14,7 +14,7 @@ from app.control.lifecycle import (
 )
 from app.reports.review_report import write_final_review_report, write_operator_report
 from app.review.base import ResumeReviewRequest, ReviewPayload
-from app.review.persistence import persist_review_request
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
 
@@ -37,13 +37,26 @@ def _request(
     state = {
         "session_id": paths.session_id,
         "data_dir": str(paths.run_dir),
+        "current_stage": stage,
+        "workflow_steps": [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": f"step-001-{stage}",
+                "stage": stage,
+                "allow_local_execution": False,
+            }
+        ],
+        "workflow_step_index": 1,
     }
     payload = ReviewPayload(
         stage=stage,
         gate_id=gate_id,
         reason="needs_review",
         decisions_allowed=decisions_allowed,
-        auto_decidable=False,
     )
     return persist_review_request(
         state,
@@ -52,6 +65,30 @@ def _request(
         reason="needs_review",
         payload=payload,
     )
+
+
+def _review_state(paths: SessionPaths, stage: str, **updates: object) -> dict:
+    return {
+        "session_id": paths.session_id,
+        "data_dir": str(paths.run_dir),
+        "current_stage": stage,
+        "workflow_steps": [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": f"step-001-{stage}",
+                "stage": stage,
+                "allow_local_execution": False,
+            }
+        ],
+        "workflow_step_index": 1,
+        "supervision_state": "blocked_human",
+        "stage_outputs": {},
+        **updates,
+    }
 
 
 class ReviewReportTests(unittest.TestCase):
@@ -72,14 +109,7 @@ class ReviewReportTests(unittest.TestCase):
             self.assertNotIn("decisions_allowed", interrupt)
 
             summary = inspect_state(
-                {
-                    "session_id": "s1",
-                    "data_dir": str(paths.run_dir),
-                    "current_stage": "assembly_review",
-                    "supervision_state": "blocked_human",
-                    "active_interrupt": interrupt,
-                    "stage_outputs": {},
-                }
+                _review_state(paths, "assembly_review", active_interrupt=interrupt)
             )
 
             self.assertEqual(
@@ -100,18 +130,15 @@ class ReviewReportTests(unittest.TestCase):
                 gate_id="assembly_review",
                 decisions_allowed=["accept"],
             )
-            state = {
-                "session_id": "s1",
-                "data_dir": str(paths.run_dir),
-                "current_stage": "assembly_review",
-                "supervision_state": "blocked_human",
-                "active_interrupt": persisted.compact_interrupt(
+            state = _review_state(
+                paths,
+                "assembly_review",
+                active_interrupt=persisted.compact_interrupt(
                     stage="assembly_review",
                     gate_id="assembly_review",
                     reason="needs_review",
                 ),
-                "stage_outputs": {},
-            }
+            )
             wrong_hash = ResumeReviewRequest(
                 session_id="s1",
                 stage="assembly_review",
@@ -148,9 +175,12 @@ class ReviewReportTests(unittest.TestCase):
                 gate_id="hic_scaffolding",
                 decisions_allowed=["select_method", "skip"],
             )
-            rationale = paths.artifact_path("reviews", "assembly_001", "rationale.json")
-            rationale.parent.mkdir(parents=True, exist_ok=True)
-            rationale.write_text("{}", encoding="utf-8")
+            assembly_request = _request(
+                paths,
+                stage="assembly_review",
+                gate_id="assembly_review",
+                decisions_allowed=["accept"],
+            )
             ledger.record_review_requested(
                 "s1",
                 "hic_scaffolding",
@@ -158,14 +188,31 @@ class ReviewReportTests(unittest.TestCase):
                 review_request_artifact_ref=persisted.request_ref,
                 review_request_id=persisted.review_request_id,
             )
+            ledger.record_review_requested(
+                "s1",
+                "assembly_review",
+                reason="assembly_review_human_decision_required",
+                review_request_artifact_ref=assembly_request.request_ref,
+                review_request_id=assembly_request.review_request_id,
+            )
+            decision_ref = persist_review_decision(
+                paths.run_dir,
+                session_id="s1",
+                review_request_id=assembly_request.review_request_id,
+                stage="assembly_review",
+                gate_id="assembly_review",
+                decision={"candidate_id": "flye"},
+                request_hash=assembly_request.request_hash,
+                request_ref=assembly_request.request_ref,
+            )
             ledger.record_review_decision(
                 "s1",
                 "assembly_review",
                 decision="accept",
                 candidate_id="flye",
                 decided_by="llm_provisional",
-                rationale_artifact_ref=str(rationale),
-                review_request_id="assembly_001",
+                artifact_ref=decision_ref,
+                review_request_id=assembly_request.review_request_id,
             )
 
             before_events = len(ledger.read_event_rows("s1"))
@@ -183,7 +230,8 @@ class ReviewReportTests(unittest.TestCase):
             )
             self.assertEqual(report["decisions_by_origin"]["llm_provisional"], 1)
             self.assertEqual(
-                report["decisions"][0]["review_request_id"], "assembly_001"
+                report["decisions"][0]["review_request_id"],
+                assembly_request.review_request_id,
             )
             self.assertEqual(len(ledger.read_event_rows("s1")), before_events)
             self.assertEqual(paths.artifact_index_path.read_bytes(), before_index)
@@ -195,20 +243,26 @@ class ReviewReportTests(unittest.TestCase):
             ledger.record_session_terminal(
                 "s1",
                 outcome="failed",
-                stage="function_annotation",
-                error="missing database_provenance for function_annotation",
+                stage="base_polish",
+                error=(
+                    "base_polish is registered in the parent graph but has no "
+                    "implemented method"
+                ),
             )
             before_events = len(ledger.read_event_rows("s1"))
             report_ref = write_operator_report(
                 paths.run_dir,
                 "s1",
                 {
-                    "current_stage": "function_annotation",
+                    "current_stage": "base_polish",
                     "supervision_state": "failed_terminal",
-                    "last_error": "missing database_provenance for function_annotation",
+                    "last_error": (
+                        "base_polish is registered in the parent graph but has no "
+                        "implemented method"
+                    ),
                     "route_trace": [
-                        "gene_annotation_stage",
-                        "function_annotation_stage",
+                        "t2t_stage",
+                        "base_polish_stage",
                     ],
                 },
             )
@@ -216,13 +270,10 @@ class ReviewReportTests(unittest.TestCase):
             report = json.loads(Path(report_ref).read_text(encoding="utf-8"))
             self.assertEqual(Path(report_ref), paths.report_path("current_status.json"))
             self.assertEqual(report["report_type"], "current_status")
-            self.assertEqual(report["next_action"]["kind"], "provenance_required")
+            self.assertEqual(report["next_action"]["kind"], "failed_terminal")
             self.assertEqual(
                 report["route_trace_tail"],
-                ["gene_annotation_stage", "function_annotation_stage"],
-            )
-            self.assertIn(
-                "database_source_ref", report["next_action"]["required_fields"]
+                ["t2t_stage", "base_polish_stage"],
             )
             self.assertEqual(len(ledger.read_event_rows("s1")), before_events)
             self.assertFalse(paths.artifact_index_path.exists())
@@ -240,8 +291,7 @@ class ReviewReportTests(unittest.TestCase):
                 paths.run_dir,
                 "s1",
                 {
-                    "current_stage": "assembly_review",
-                    "supervision_state": "blocked_human",
+                    **_review_state(paths, "assembly_review"),
                     "checkpoint_persistence": "sqlite",
                     "active_interrupt": persisted.compact_interrupt(
                         stage="assembly_review",

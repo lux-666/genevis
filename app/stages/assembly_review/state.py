@@ -131,7 +131,6 @@ class AssemblyReviewCursor(TypedDict, total=False):
     busco_parameters: BuscoParametersCursor
 
     parameter_quality_gate: dict[str, CursorJsonValue] | None
-    parameter_retries_exhausted: bool
     parameter_quality_checked: bool
 
     related_species_reference_dir: str

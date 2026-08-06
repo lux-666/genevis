@@ -34,17 +34,26 @@ session through the appropriate recovery path.
 For real/operator runs with already prepared files, use the deterministic
 boundary instead: `gene-agent run --manifest PATH --run-config PATH --data-dir
 PATH [--non-interactive]`. Its file-authored run config must explicitly contain
-JSON arrays for `requested_stages` and `local_exec`; `requested_stages: null` is
-rejected, while `[]` is valid. The command validates/canonicalizes both files and
-converges on the same whole-run freeze and SQLite executor below. `session_id`
-belongs only to the manifest. Internal/TUI compatibility state may still use
-`None`, but that is not a legal public structured-run value.
+one `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
+Its literal order and repeated occurrences are preserved; the boolean is the
+local-process authorization for that occurrence.
+`requested_stages: null` is rejected, while `[]` is valid. The command
+validates/canonicalizes both files and converges on the same whole-run freeze
+and SQLite executor below. `session_id`
+belongs only to the manifest. An unfinished Plan Draft may still use `None`
+before it has selected a sequence; this is draft incompleteness, not an
+executable workflow meaning or second runtime route.
+
+The TUI-authored RunConfig payload explicitly writes
+`review_policy.max_blocked_seconds: 300` before validation and freeze so the
+operator-facing per-task configuration exposes the same editable default as a
+file-authored run.
 
 Current intake directly models PacBio HiFi reads, ONT reads, explicit paired
 Hi-C lanes, an explicit no-Hi-C fact, species facts, and a telomere motif when
 supplied. It does not currently collect clean long reads, an existing assembly,
-CLR, CycloneSEQ, short reads, or annotation evidence. Backend manifest and
-inventory support must not be mistaken for TUI support; see the
+CLR, CycloneSEQ, or short reads. Backend manifest and inventory support must
+not be mistaken for TUI support; see the
 [planned midstage node](tui-midstage-entry.md).
 
 ## Intent is not the execution plan
@@ -55,8 +64,14 @@ planner receives the confirmed manifest view and a method catalog derived from
 the descriptor registry. It produces the editable Plan Draft: stages, methods,
 planning-time parameters, and attention items.
 
-The operator can edit stages, methods, and appropriate parameters before the
-final confirmation. Runtime recommendations that require upstream evidence
+`selected_stage_occurrences` is the one editable draft sequence. Every strict
+`{stage, allow_local_execution}` object is an ordered occurrence, so duplicate
+stages may independently grant or withhold local-process authorization. The
+operator edits the complete ordered sequence, then confirms every occurrence's
+authorization; methods and parameters remain stage-scoped configuration and do
+not imply consent. At confirmation these objects are materialized unchanged as
+`requested_stages` and then become immutable `workflow_steps` with the implicit
+inventory occurrence. Runtime recommendations that require upstream evidence
 remain deferred. If the planning model fails or returns an invalid draft, the
 planning attempt stops and the durable draft remains resumable; the TUI does
 not invent a deterministic fallback stage plan.

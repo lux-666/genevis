@@ -172,7 +172,7 @@ def collect_method_artifacts(
                     "execution_metadata": execution_metadata or {},
                     "notes": [
                         "geneagent_review_required_before_promotion",
-                        "pre_hic_assembly_preserved_as_annotation_fallback",
+                        "pre_hic_assembly_preserved_as_fallback",
                     ],
                 },
                 ensure_ascii=False,

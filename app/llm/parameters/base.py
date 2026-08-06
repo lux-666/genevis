@@ -10,7 +10,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from app.llm.factory import build_chat_model
 from app.llm.json_response import parse_json_object, response_text
@@ -18,7 +18,9 @@ from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
 # Shared across all stages that use the v1 recommendation contract.
-PARAMETER_RECOMMENDATION_CONTRACT = "parameter_recommendation_v1"
+PARAMETER_RECOMMENDATION_CONTRACT: Literal["parameter_recommendation_v1"] = (
+    "parameter_recommendation_v1"
+)
 
 
 @dataclass(frozen=True)
@@ -142,14 +144,24 @@ def restore_parameter_decision(record: Mapping[str, Any]) -> ParameterDecision:
     )
 
 
-def build_adjustable_parameters(catalog: MethodParameterCatalog) -> dict[str, dict[str, Any]]:
+def build_adjustable_parameters(
+    catalog: MethodParameterCatalog,
+) -> dict[str, dict[str, Any]]:
     """Project L2-eligible catalog parameters into the model-facing allowlist."""
 
     return {
         name: {
             key: value
             for key, value in spec.model_dump(mode="json").items()
-            if key in {"value_type", "allowed_values", "min", "max", "description", "notes"}
+            if key
+            in {
+                "value_type",
+                "allowed_values",
+                "min",
+                "max",
+                "description",
+                "notes",
+            }
             and value is not None
         }
         for name, spec in catalog.parameters.items()

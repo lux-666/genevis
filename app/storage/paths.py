@@ -185,19 +185,45 @@ class SessionPaths:
     def checkpoint_db_path(self) -> Path:
         return self.checkpoints_dir / "checkpoints.sqlite"
 
-    def stage_artifacts_dir(self, stage: str) -> Path:
+    def workflow_step_artifacts_dir(self, workflow_step_id: str, stage: str) -> Path:
+        """Return the immutable-artifact root for one workflow occurrence."""
+
         return _contained_path(
-            self.artifacts_dir, _validate_path_component(stage, "stage")
+            self.artifacts_dir,
+            "steps",
+            validate_path_component(workflow_step_id, "workflow_step_id"),
+            validate_path_component(stage, "stage"),
         )
 
-    def stage_work_dir(self, stage: str) -> Path:
-        return _contained_path(self.work_dir, _validate_path_component(stage, "stage"))
+    def workflow_step_work_dir(self, workflow_step_id: str, stage: str) -> Path:
+        """Return the mutable-work root for one workflow occurrence."""
 
-    def artifact_path(self, stage: str, *parts: str | Path) -> Path:
-        return _contained_path(self.stage_artifacts_dir(stage), *parts)
+        return _contained_path(
+            self.work_dir,
+            "steps",
+            validate_path_component(workflow_step_id, "workflow_step_id"),
+            validate_path_component(stage, "stage"),
+        )
 
-    def work_path(self, stage: str, *parts: str | Path) -> Path:
-        return _contained_path(self.stage_work_dir(stage), *parts)
+    def workflow_step_artifact_path(
+        self,
+        workflow_step_id: str,
+        stage: str,
+        *parts: str | Path,
+    ) -> Path:
+        return _contained_path(
+            self.workflow_step_artifacts_dir(workflow_step_id, stage), *parts
+        )
+
+    def workflow_step_work_path(
+        self,
+        workflow_step_id: str,
+        stage: str,
+        *parts: str | Path,
+    ) -> Path:
+        return _contained_path(
+            self.workflow_step_work_dir(workflow_step_id, stage), *parts
+        )
 
     def report_path(self, *parts: str | Path) -> Path:
         return _contained_path(self.reports_dir, *parts)
@@ -229,7 +255,9 @@ class SessionPaths:
         return candidate
 
 
-def _validate_path_component(value: str, label: str) -> str:
+def validate_path_component(value: str, label: str) -> str:
+    """Validate and return one non-traversing path component."""
+
     if not isinstance(value, str) or not value.strip():
         raise DataLayoutError(f"{label} must be a non-empty string")
     path = Path(value)

@@ -16,7 +16,7 @@
 
 **Scope:** Current workflow sessions
 
-**Compatibility:** No legacy-session read, resume, migration, or dual-write contract
+**Release boundary:** Current pre-release sessions use one representation.
 
 ## 1. Purpose
 
@@ -26,7 +26,7 @@ must make those workflows auditable without allowing the same mutable fact to
 spread through artifacts, the artifact index, ledger events, checkpoints, and
 reports.
 
-Data v2 establishes one shared contract for all stages. The implemented
+The current data contract establishes one shared representation for all stages. The implemented
 Assembly, AutoHiC, and T2T parameter-recommendation loops use the same
 persistence contract rather than stage-specific audit envelopes.
 
@@ -35,30 +35,36 @@ Biological and stage contracts remain governed by their current specifications.
 
 ## 2. Product Decisions
 
-1. The project is still in development. Data v2 does not preserve compatibility
-   with old sessions.
+1. The project is still in development. New sessions use the current
+   representation only.
 2. Each `runs/<session_id>/` directory is the logical ownership boundary. Its
    run-owned audit and decision evidence must not depend on another session or
    a global content-addressed object store; external inputs remain explicit
    dependencies.
 3. Durable resume targets the latest safe frontier, especially a blocked human
    gate. Arbitrary historical-node time travel is not a product requirement.
-4. Existing report filenames and artifact types are not external compatibility
-   contracts.
+4. Report filenames and artifact types are internal implementation details.
 5. “Planner” in current parameter code means a stage parameter recommender. It
    does not mean method selection or parent-graph planning.
 6. Public deterministic runs use `gene-agent run --manifest PATH --run-config
    PATH --data-dir PATH [--non-interactive]`. The manifest solely owns the
    session identity; `data-dir` owns layout placement at
-   `runs/<session_id>/`. The run config must explicitly contain JSON arrays for
-   `requested_stages` and `local_exec`. `requested_stages` must not be `null`;
-   `[]` is the valid empty biological-stage plan. Internal/TUI compatibility
-   state may retain `None`, but the public structured boundary rejects it before
-   freeze or execution.
+   `runs/<session_id>/`. The run config must explicitly contain a
+   `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
+   The list preserves literal order and repeated stage occurrences; `stage` is
+   one occurrence's routing choice and `allow_local_execution` is its
+   process authorization. There is no separate local-execution array.
+   `requested_stages` must not be `null`; `[]` is the valid empty biological-
+   stage plan. `None` is only an unfinished planner/TUI draft, not executable
+   semantics, and the public structured boundary rejects it before freeze or
+   execution. Freeze projects the list into the only runtime authority:
+   `workflow_steps`, beginning with implicit `step-000-inventory` followed by
+   position-derived IDs such as `step-001-t2t`. Runtime cannot append, reorder,
+   or replace that sequence.
 
 ## 3. Replay Terminology
 
-Data v2 distinguishes two forms of replay:
+The current contract distinguishes two forms of replay:
 
 - **Audit replay** reconstructs the exact inputs, model request, saved model
   response, response-parse result, human decision, frozen command, execution
@@ -179,8 +185,8 @@ an object `compact` are not sufficient.
 | Raw model result | `model_response.json` | Response ref, validity enum |
 | Parsed parameter recommendation | `recommendation.json` | Recommendation ref/hash |
 | Response-shape parse result | `response_parse.json` | Ref, parsed/invalid status and parser error |
-| Human review request | immutable review request artifact | Request ID/ref/hash, gate ID |
-| Human decision | immutable decision artifact | Decision enum, actor, ref/hash |
+| Human review request | immutable review request artifact | Request ID/ref/hash, gate ID, workflow-step ID |
+| Human decision | immutable decision artifact | Decision enum, actor, ref/hash, workflow-step ID |
 | Frozen runner input | immutable frozen-attempt record | Ref and attempt status |
 | Executed script/command identity | frozen-attempt record plus retained `work/` script | Attempt ref and status |
 | Execution result | immutable execution record | Ref, terminal status, return code |
@@ -218,31 +224,20 @@ data/
         │   ├── index.jsonl
         │   ├── inputs/
         │   ├── snapshots/
-        │   ├── inventory/
-        │   ├── read_qc/
-        │   ├── genome_survey/
-        │   ├── assembly/
-        │   │   ├── parameter_recommendations/
-        │   │   │   └── 000/
-        │   │   ├── attempts/
-        │   │   │   └── 000/
-        │   │   └── outputs/
-        │   ├── assembly_review/
-        │   ├── hic_scaffolding/
-        │   │   ├── parameter_recommendations/
-        │   │   ├── attempts/
-        │   │   └── outputs/
-        │   ├── t2t/
-        │   │   └── outputs/
-        │   └── reviews/
-        │       └── <review_request_id>/
+        │   └── steps/
+        │       └── <workflow_step_id>/
+        │           └── <stage>/
+        │               ├── parameter_recommendations/
+        │               ├── attempts/
+        │               ├── outputs/
+        │               └── reviews/<review_request_id>/
         ├── reports/
         │   ├── current_status.json
         │   ├── assembly_review.md
         │   ├── session_summary.json
         │   └── session_summary.md
         └── work/
-            └── <stage>/...
+            └── steps/<workflow_step_id>/<stage>/...
 ```
 
 Rules:
@@ -258,8 +253,8 @@ Rules:
 - `control/run.json` is an accepted future metadata owner but is not currently
   created; see the replay-capability conformance entry.
 - Stage directories never repeat `<session_id>`.
-- Numeric recommendation and attempt directories use zero-padded, stage-local
-  IDs such as `000`, `001`, and `002`.
+- Numeric recommendation and attempt directories use zero-padded,
+  occurrence-local IDs such as `000`, `001`, and `002`.
 - `work/` is mutable while an attempt is being prepared, then retained as part
   of that run's resumable execution workspace. Resume validates referenced
   scripts in place.
@@ -280,7 +275,7 @@ Every storage-owned immutable artifact reference uses one typed contract:
 {
   "schema_version": 2,
   "artifact_id": "art_opaque_unique_id",
-  "path_ref": "artifacts/assembly/attempts/000/command.json",
+  "path_ref": "artifacts/steps/step-004-assembly/assembly/attempts/000/command.json",
   "sha256": "<sha256-of-exact-file-bytes>",
   "size_bytes": 1234,
   "artifact_type": "assembly.command"
@@ -306,7 +301,7 @@ Requirements:
 `artifacts/index.jsonl` is an append-only lookup index for immutable artifacts.
 Each row contains the full `ArtifactRef` plus:
 
-- stage and method IDs;
+- workflow-step, stage, and method IDs;
 - recommendation, attempt, or review ID when applicable;
 - creation timestamp;
 - producer event ID when available;
@@ -399,15 +394,6 @@ current ID; it never overwrites the refs on the preceding attempt. The sealed
 attempt manifest and terminal timeline include the same per-attempt refs,
 including the exact `frozen_attempt_ref` consumed by the runner.
 
-An operator-directed Assembly rerun at the review gate has a different
-parameter source and is outside that `ParameterAttempt` ownership rule. Its
-review decision owns the operator-supplied parameters and schedules a compact
-rerun request. The shared direct-attempt cursor then owns the exact frozen and
-execution refs through freeze and run; collect publishes the resulting
-candidate bundle. This path must not invoke the model again or synthesize
-recommendation/approval evidence solely to imitate the recommendation
-lifecycle.
-
 For a non-parameterized method, its typed stage cursor may own the frozen-attempt
 and execution-record refs directly. In both cases resume loads the frozen record
 and does not regenerate a command from current descriptors, catalogs,
@@ -432,8 +418,8 @@ form the contract.
 Every human gate creates an immutable request under:
 
 ```text
-artifacts/reviews/<review_request_id>/request.json
-artifacts/reviews/<review_request_id>/decision.json
+artifacts/steps/<workflow_step_id>/<stage>/reviews/<review_request_id>/request.json
+artifacts/steps/<workflow_step_id>/<stage>/reviews/<review_request_id>/decision.json
 ```
 
 Supporting evidence packets and visual attachments are immutable artifacts
@@ -491,6 +477,7 @@ Each `ledger/events.jsonl` row contains a common envelope:
   "session_id": "...",
   "timestamp": "...",
   "event_type": "attempt_succeeded",
+  "workflow_step_id": "step-004-assembly",
   "stage": "assembly",
   "subject_id": "attempt_000",
   "refs": [],
@@ -505,21 +492,24 @@ Requirements:
   node replay or process restart.
 - `refs` point to authoritative artifacts.
 - `summary` contains only bounded query fields.
-- Review events bind by review request ID, never only by stage name.
-- Route and skip facts use explicit events such as `stage_entered`,
-  `stage_skipped`, `stage_completed`, and `session_terminal`.
+- Review events bind by workflow-step ID and review request ID, never only by
+  stage name.
+- Route facts use `stage_entered`, `stage_completed`, and `session_terminal`.
+  A `stage_skipped` event is valid only for an explicit stage-local decision;
+  absent frozen occurrences never produce one.
 - Artifact metadata is not copied into ledger events. Attempt or review events
   carry only the artifact refs required to explain the causal transition.
 
-The full ordered route, skip reasons, review lifecycle, and terminal outcome
-must be reconstructible without checkpoint or reports.
+The full ordered route, explicit stage-local skip reasons, review lifecycle, and
+terminal outcome must be reconstructible without checkpoint or reports.
 
-## 14. Checkpoint v2
+## 14. Checkpoint
 
 Checkpoint state may contain:
 
 - session and thread IDs;
-- current stage and supervision state;
+- immutable `workflow_steps`, active occurrence index, current stage, and
+  supervision state;
 - current stage status cursor;
 - current parameter-recommendation ref;
 - current parameter-attempt ID and compact ordered `ParameterAttempt` chain, or
@@ -549,6 +539,11 @@ adapters and most writes go through those adapters, but the central boundary
 does not yet enforce one universal per-stage schema or reject every unknown
 cursor field. It does enforce JSON shape, known stage names, per-cursor and
 aggregate byte limits, and artifact-body/frozen-attempt embedding guards.
+The map represents only the active/latest cursor for each stage name. Entering
+a repeated occurrence replaces that stage slot from immutable `stage_seeds`;
+it must never be used as cross-occurrence history. Historical identity and
+evidence are keyed by `workflow_step_id` in artifacts, reviews, attempts, and
+ledger events.
 Bounded stage-owned review summaries are routing projections, not durable
 business truth; their owning evidence remains in indexed immutable artifacts.
 
@@ -598,18 +593,17 @@ Only the storage layer constructs run paths. The current `SessionPaths` surface
 used directly or through stage/storage helpers is:
 
 ```python
-paths.stage_artifacts_dir("assembly")
-paths.artifact_path("assembly", "parameter_recommendations", "000", "...")
-paths.artifact_path("assembly", "attempts", "000", "...")
-paths.artifact_path("reviews", review_request_id, "request.json")
-paths.stage_work_dir("assembly")
-paths.work_path("assembly", "attempts", "000", "...")
+paths.workflow_step_artifacts_dir(workflow_step_id, "assembly")
+paths.workflow_step_artifact_path(workflow_step_id, "assembly", "parameter_recommendations", "000", "...")
+paths.workflow_step_artifact_path(workflow_step_id, "assembly", "attempts", "000", "...")
+paths.workflow_step_artifact_path(workflow_step_id, "assembly", "reviews", review_request_id, "request.json")
+paths.workflow_step_work_dir(workflow_step_id, "assembly")
+paths.workflow_step_work_path(workflow_step_id, "assembly", "attempts", "000", "...")
 paths.report_path("session_summary.json")
 ```
 
-No stage may append `session_id` below `run_dir`, construct a `data/artifacts`
-path, or decide whether a path is legacy. Data v2 has one write layout and no
-legacy branch.
+No stage may append `session_id` below `run_dir` or construct a
+`data/artifacts` path. The current contract has one write layout.
 
 An architecture test should reject direct stage-level construction of
 `artifacts`, `work`, `ledger`, `checkpoints`, or `reports` roots outside the
@@ -691,17 +685,15 @@ cache cannot break those references. External-input manifests and stage-local
 absolute paths remain explicit dependencies and may still make execution replay
 unavailable after relocation or source removal.
 
-## 20. Compatibility Boundary
+## 20. Current Representation
 
-Data v2 has one current representation:
+Each pre-release session has one representation:
 
 - no dual write;
-- no fallback lookup of legacy flat paths;
-- no hash-only payload/profile runtime branch;
-- no `locate_session_data_dir` compatibility behavior for v2 commands;
-- no automatic migration of old checkpoints, ledgers, indexes, or reports;
-- no compatibility aliases for old report filenames or artifact types;
-- runtime code must not recreate or mix legacy data into a v2 run root.
+- no fallback path or hash-only payload/profile runtime branch;
+- no runtime migration or alternate-layout lookup;
+- no aliases for report filenames or artifact types;
+- runtime code does not mix layouts within one run root.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus
@@ -727,9 +719,9 @@ The current implementation enforces the following:
 - A blocked review resumes from the latest frontier using the checkpoint plus
   verified run-local refs and any declared external dependencies required by
   the stage.
-- Terminal compaction preserves reconstruction of stage order, skip reasons,
-  decisions, failures, and terminal outcome while retaining one standalone
-  checkpoint.
+- Terminal compaction preserves reconstruction of frozen occurrence order,
+  explicit stage-local skip reasons, decisions, failures, and terminal outcome
+  while retaining one standalone checkpoint.
 - Corrupting a referenced artifact causes replay/resume to fail closed.
 - Replaying a node does not duplicate ledger effects or artifact-index rows.
 - Recommendation rejection creates no execution attempt and consumes no retry
@@ -751,7 +743,7 @@ regenerable deletion candidate, even though only session summaries meet the
 durable-record-only regeneration boundary; `work/` is reported but explicitly
 retained. There is no filesystem deletion executor for unreachable immutable
 artifacts and no post-GC artifact-index compaction. These gaps are conformance
-debt, not a reduction of the Data v2 contract.
+debt, not a reduction of the current data contract.
 Genome Survey k-mer handoffs are typed `ArtifactRef` values in the checkpoint
-cursor and in frozen method dependencies; legacy path strings are rejected at
+cursor and in frozen method dependencies; plain path strings are rejected at
 the stage boundary.

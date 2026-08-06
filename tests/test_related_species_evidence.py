@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.reference.ncbi_metazoa import build_related_species_evidence_pack
 from app.review.persistence import load_review_request
@@ -16,6 +17,7 @@ from app.stages.assembly_review.nodes import (
     build_related_species_evidence_pack as build_review_evidence_pack,
 )
 from app.stages.assembly_review.nodes import human_review_gate
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 _HEADERS = [
@@ -37,6 +39,60 @@ _HEADERS = [
     "Assembly Type",
 ]
 
+_ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
+    {
+        "step_id": "step-000-inventory",
+        "stage": "inventory",
+        "allow_local_execution": False,
+    },
+    {
+        "step_id": "step-001-assembly",
+        "stage": "assembly",
+        "allow_local_execution": True,
+    },
+    {
+        "step_id": "step-002-assembly_review",
+        "stage": "assembly_review",
+        "allow_local_execution": True,
+    },
+    {
+        "step_id": "step-003-hic_scaffolding",
+        "stage": "hic_scaffolding",
+        "allow_local_execution": True,
+    },
+]
+
+
+def _candidate(candidate_id: str, method_name: str = "flye") -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "method_name": method_name,
+        "source": "test_fixture",
+        "status": "executed",
+        "bundle_ref": {
+            "schema_version": 2,
+            "artifact_id": f"bundle:{candidate_id}",
+            "path_ref": (
+                "artifacts/steps/step-001-assembly/assembly/"
+                f"candidates/{candidate_id}/candidate.json"
+            ),
+            "sha256": "0" * 64,
+            "size_bytes": 0,
+            "artifact_type": "draft_assembly.candidate",
+        },
+        "primary_output_ref": {
+            "schema_version": 2,
+            "artifact_id": f"primary:{candidate_id}",
+            "path_ref": (
+                "artifacts/steps/step-001-assembly/assembly/"
+                f"candidates/{candidate_id}/draft.fa"
+            ),
+            "sha256": "1" * 64,
+            "size_bytes": 0,
+            "artifact_type": "assembly.draft_assembly",
+        },
+    }
+
 
 class RelatedSpeciesEvidenceTests(unittest.TestCase):
     def _state(
@@ -47,11 +103,22 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             manifest_text,
             encoding="utf-8",
         )
-        return initial_state(
+        state = initial_state(
             session_id=session_id,
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
+            workflow_steps=_ASSEMBLY_REVIEW_WORKFLOW_STEPS,
+            stage_plan_ref="control/run_config.json",
+            stage_seeds={"assembly_review": {"status": "pending"}},
         )
+        state.update(
+            {
+                "workflow_step_index": 2,
+                "entered_workflow_step_index": 2,
+                "current_stage": "assembly_review",
+            }
+        )
+        return state
 
     def _reference_dir(self, tmpdir: str) -> Path:
         root = Path(tmpdir) / "ncbi_metazoa"
@@ -403,6 +470,13 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             self.assertEqual(evidence["matching_mode"], "same_genus")
             self.assertTrue(ref.exists())
             self.assertEqual(
+                ref.parent,
+                SessionPaths.from_run_dir(state["data_dir"])
+                .workflow_step_artifacts_dir(
+                    "step-002-assembly_review", "assembly_review"
+                ),
+            )
+            self.assertEqual(
                 json.loads(ref.read_text(encoding="utf-8"))["selected_records"],
                 evidence["selected_records"],
             )
@@ -427,13 +501,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
-                    "candidates": [
-                        {
-                            "candidate_id": "candidate-1",
-                            "method_name": "flye",
-                            "final_assembly_ref": "draft.fa",
-                        }
-                    ],
+                    "candidates": [_candidate("candidate-1")],
                     "signals": [],
                     "review_plan": {
                         "planned_signals": ["quast"],
@@ -444,7 +512,11 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             pack_update = build_review_evidence_pack(state)
             state["stage_outputs"] = pack_update["stage_outputs"]
 
-            review_update = human_review_gate(state)
+            with patch(
+                "app.stages.assembly_review.nodes._candidate_primary_output_path",
+                return_value="draft.fa",
+            ):
+                review_update = human_review_gate(state)
 
             ar_out = review_update["stage_outputs"]["assembly_review"]
             request = load_review_request(

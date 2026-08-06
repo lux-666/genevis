@@ -8,7 +8,6 @@ the assembly parameter loop.
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -61,7 +60,6 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_RECOMMENDATION,
     ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
     ASSEMBLY_PARAMETER_RESPONSE_PARSE,
-    ASSEMBLY_PARAMETER_REVIEW,
     ArtifactRef,
     ParameterAttempt,
     ParameterAttemptTask,
@@ -69,7 +67,6 @@ from app.schemas.artifacts import (
 )
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
-    AssemblyReviewEvidence,
     ExecutionFailureTrigger,
     ParameterAttemptEvidenceV3,
     ParameterExecutionEvidence,
@@ -79,7 +76,6 @@ from app.schemas.parameter_recommendation import (
     RecommendationInputSnapshotV3,
     RecommendationRetryContext,
     ResolvedParameterSources,
-    ReviewFailureTrigger,
 )
 from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
@@ -116,7 +112,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
     if assembly_out.get("status") not in {
         "selected",
         "retry_parameters_after_execution_failure",
-        "retry_parameters_after_review_failure",
     }:
         return {}
 
@@ -497,12 +492,12 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 "response_parse_ref": response_parse_ref.model_dump(mode="json"),
                 "recommendation_ref": recommendation_ref.model_dump(mode="json"),
                 "failure_signal_ref": (
-                    previous_attempt.get("review_ref")
-                    or previous_attempt.get("execution_ref")
+                    previous_attempt.get("execution_ref")
                     if previous_attempt
                     else None
                 ),
                 "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                "auto_decidable": False,
             },
             method_name="assembly.parameter_approval",
             artifact_type="assembly.parameter_approval.request",
@@ -530,7 +525,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         review_request_artifact_ref=persisted_request.request_ref.path_ref,
         review_request_id=persisted_request.review_request_id,
         auto_decidable=False,
-        pending_human_confirmation=True,
     )
     update.update(
         {
@@ -693,8 +687,6 @@ def apply_parameter_approval_decision(
     retry_counts = dict(assembly_out.get("retry_counts") or {})
     if cursor.task == "retry_after_execution_failure":
         retry_counts["execution"] = int(retry_counts.get("execution", 0)) + 1
-    elif cursor.task == "retry_after_review_failure":
-        retry_counts["review"] = int(retry_counts.get("review", 0)) + 1
     approved_cursor = cursor.model_copy(update={"status": "approved"})
     stage_update = update_assembly_stage_output(
         state,
@@ -778,106 +770,6 @@ def execution_retry_gate(state: TopLevelState) -> StateUpdate:
     )
 
 
-def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
-    """Persist review evidence and prepare a ref-only quality retry cursor."""
-
-    assembly_out = assembly_stage_output(state)
-    review_out = (state.get("stage_outputs") or {}).get("assembly_review") or {}
-    metrics_value = (
-        review_out.get("metrics")
-        or review_out.get("summary")
-        or assembly_out.get("review_metrics")
-    )
-    metrics = dict(metrics_value) if isinstance(metrics_value, dict) else {}
-    diagnosis = _review_failure_diagnosis(metrics)
-    try:
-        current_id = current_parameter_attempt(
-            assembly_out,
-            label="Assembly",
-        ).attempt_id
-    except ParameterAttemptStateError as exc:
-        return _fail_update(state, str(exc))
-    attempts = _validate_parameter_attempt_chain(
-        state,
-        assembly_out.get("parameter_attempts") or [],
-    )
-    previous = next(
-        (item for item in attempts if item.get("attempt_id") == current_id),
-        attempts[-1] if attempts else {},
-    )
-    if not previous:
-        return {}
-    review_ref = write_artifact(
-        state,
-        current_id,
-        "review.json",
-        {
-            "schema_version": 2,
-            "attempt_id": current_id,
-            "diagnosis": diagnosis,
-            "review_metrics": metrics,
-        },
-        artifact_type=ASSEMBLY_PARAMETER_REVIEW,
-        method_name="assembly.parameter_quality_gate",
-        scope="attempt",
-    )
-    previous = {
-        **previous,
-        "status": "reviewed" if diagnosis["passed"] else "review_failed",
-        "review_ref": review_ref.model_dump(mode="json"),
-    }
-    previous = _seal_parameter_attempt(state, previous)
-    updated_attempts = [
-        previous if item.get("attempt_id") == current_id else item for item in attempts
-    ]
-    compact_quality = {
-        "passed": bool(diagnosis["passed"]),
-        "failure_mode": diagnosis.get("failure_mode"),
-        "review_ref": review_ref.model_dump(mode="json"),
-    }
-    if diagnosis["passed"]:
-        return update_assembly_stage_output(
-            state,
-            {
-                "status": "parameter_quality_passed",
-                "quality_gate": compact_quality,
-                "parameter_attempts": updated_attempts,
-            },
-        )
-
-    retry_counts = dict(assembly_out.get("retry_counts") or {})
-    used = int(retry_counts.get("review", 0))
-    max_retries = _parameter_recommendation_config(state, assembly_out).get(
-        "max_review_retries", 2
-    )
-    if used >= int(max_retries):
-        return update_assembly_stage_output(
-            state,
-            {
-                "status": "review_parameter_retries_exhausted",
-                "quality_gate": compact_quality,
-                "parameter_attempts": updated_attempts,
-                "reason": "review_retry_budget_exhausted",
-            },
-        )
-    return update_assembly_stage_output(
-        state,
-        {
-            "status": "retry_parameters_after_review_failure",
-            "proposed_parameter_attempt_id": current_id + 1,
-            "parameter_attempts": updated_attempts,
-            "retry_counts": retry_counts,
-            "quality_gate": compact_quality,
-            "parameter_retry_request": {
-                "origin": "assembly_review",
-                "previous_attempt_id": current_id,
-                "previous_attempt_seal_hash": previous["seal_hash"],
-                "failure_ref": review_ref.model_dump(mode="json"),
-            },
-        },
-    )
-
-
 def _assembly_retry_context(
     task: str,
     attempt_history: tuple[ParameterAttemptEvidenceV3, ...],
@@ -889,19 +781,12 @@ def _assembly_retry_context(
         execution = latest.execution
         if execution is None:
             raise ValueError("Assembly execution retry has no execution evidence")
-        trigger: ExecutionFailureTrigger | ReviewFailureTrigger = (
-            ExecutionFailureTrigger(
-                status=execution.status,
-                return_code=execution.return_code,
-                failure_class=execution.failure_class,
-                status_detail=execution.status_detail,
-            )
+        trigger = ExecutionFailureTrigger(
+            status=execution.status,
+            return_code=execution.return_code,
+            failure_class=execution.failure_class,
+            status_detail=execution.status_detail,
         )
-    elif task == "retry_after_review_failure":
-        review = latest.review
-        if not isinstance(review, AssemblyReviewEvidence):
-            raise ValueError("Assembly review retry has no Assembly review evidence")
-        trigger = ReviewFailureTrigger(review=review)
     else:
         raise ValueError(f"unsupported Assembly parameter task: {task!r}")
     return RecommendationRetryContext(
@@ -1081,24 +966,6 @@ def hydrate_parameter_attempt(
             stderr_tail=stderr_tail,
         )
 
-    review: AssemblyReviewEvidence | None = None
-    if attempt.review_ref is not None:
-        review_record = read_artifact(
-            state,
-            attempt.review_ref,
-            expected_type=ASSEMBLY_PARAMETER_REVIEW,
-        )
-        if (
-            review_record.get("schema_version") != 2
-            or review_record.get("attempt_id") != attempt.attempt_id
-        ):
-            raise ValueError("Assembly review evidence is not bound to the attempt")
-        diagnosis = review_record.get("diagnosis")
-        metrics = review_record.get("review_metrics")
-        if not isinstance(diagnosis, dict) or not isinstance(metrics, dict):
-            raise ValueError("Assembly review evidence is malformed")
-        review = _assembly_review_evidence(diagnosis, metrics)
-
     return ParameterAttemptEvidenceV3(
         attempt_id=attempt.attempt_id,
         task=attempt.task,
@@ -1108,62 +975,6 @@ def hydrate_parameter_attempt(
         effective_parameters=resolved.effective_parameters,
         effective_sources=resolved.effective_source_by_parameter,
         execution=execution,
-        review=review,
-    )
-
-
-def _assembly_review_evidence(
-    diagnosis: dict[str, Any],
-    metrics: dict[str, Any],
-) -> AssemblyReviewEvidence:
-    quast_source = metrics.get("quast_metrics")
-    quast_metrics: dict[str, float] = {}
-    if isinstance(quast_source, dict):
-        for key in (
-            "gc_percent",
-            "l50",
-            "misassemblies",
-            "num_contigs",
-            "total_length",
-        ):
-            value = _float_or_none(quast_source.get(key))
-            if value is not None:
-                quast_metrics[key] = value
-
-    return AssemblyReviewEvidence(
-        failure_mode=(
-            str(diagnosis["failure_mode"])[:120]
-            if diagnosis.get("failure_mode") is not None
-            else None
-        ),
-        assembly_size=_float_or_none(
-            _first_metric(metrics, "assembly_size", "assembly_size_bp", "total_length")
-        ),
-        assembly_size_ratio=_float_or_none(metrics.get("assembly_size_ratio")),
-        contig_count=_int_or_none(
-            _first_metric(metrics, "contig_count", "num_contigs")
-        ),
-        contig_n50=_float_or_none(
-            _first_metric(metrics, "contig_n50", "n50", "n50_bp")
-        ),
-        contig_n90=_float_or_none(_first_metric(metrics, "contig_n90", "n90")),
-        largest_contig=_float_or_none(metrics.get("largest_contig")),
-        busco_complete=_float_or_none(
-            _first_metric(metrics, "busco_complete", "busco_complete_ratio")
-        ),
-        busco_single=_float_or_none(
-            _first_metric(metrics, "busco_single", "busco_single_ratio")
-        ),
-        busco_duplicate=_float_or_none(
-            _first_metric(metrics, "busco_duplicate", "busco_duplicate_ratio")
-        ),
-        busco_fragmented=_float_or_none(
-            _first_metric(metrics, "busco_fragmented", "busco_fragmented_ratio")
-        ),
-        busco_missing=_float_or_none(
-            _first_metric(metrics, "busco_missing", "busco_missing_ratio")
-        ),
-        quast_metrics=quast_metrics or None,
     )
 
 
@@ -1311,7 +1122,6 @@ def build_parameter_attempt_timeline(
             "reason": reason,
             "final_attempt_id": attempts[-1]["attempt_id"] if attempts else None,
             "execution_retries_used": int(retry_counts.get("execution", 0)),
-            "review_retries_used": int(retry_counts.get("review", 0)),
             "result_ref": assembly_out.get("draft_assembly_ref"),
             "parameter_rejection": assembly_out.get("parameter_rejection"),
         },
@@ -1346,8 +1156,6 @@ def _parameter_prompt_task(
     status = assembly_out.get("status")
     if status == "retry_parameters_after_execution_failure":
         return "retry_after_execution_failure"
-    if status == "retry_parameters_after_review_failure":
-        return "retry_after_review_failure"
     return "recommend_initial"
 
 
@@ -1388,7 +1196,6 @@ def _parameter_recommendation_config(
         config = {**assembly_config, **config}
     return {
         "max_execution_retries": _cursor_int(config.get("max_execution_retries"), 1),
-        "max_review_retries": _cursor_int(config.get("max_review_retries"), 2),
     }
 
 
@@ -1408,93 +1215,3 @@ def _cursor_int(value: JsonValue | None, default: int) -> int:
     raise TypeError(
         f"expected integer-compatible cursor value, got {type(value).__name__}"
     )
-
-
-def _review_failure_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:
-    complete = _float_or_none(
-        _first_metric(metrics, "busco_complete", "busco_complete_ratio")
-    )
-    duplicate = _float_or_none(
-        _first_metric(metrics, "busco_duplicate", "busco_duplicate_ratio")
-    )
-    size_ratio = _float_or_none(metrics.get("assembly_size_ratio"))
-    n50 = _float_or_none(_first_metric(metrics, "contig_n50", "n50"))
-    contig_count = _float_or_none(metrics.get("contig_count"))
-    normalized_complete = _ratio(complete)
-    normalized_duplicate = _ratio(duplicate)
-    passed = (
-        normalized_complete is not None
-        and normalized_complete >= 0.95
-        and (normalized_duplicate is None or normalized_duplicate <= 0.10)
-        and (size_ratio is None or 0.75 <= size_ratio <= 1.25)
-    )
-    if passed:
-        failure_mode = None
-        suggestions: dict[str, str] = {}
-    elif (
-        normalized_duplicate is not None
-        and normalized_duplicate >= 0.15
-        and size_ratio is not None
-        and size_ratio >= 1.20
-    ):
-        failure_mode = "under_purged"
-        suggestions = {"purge_level": "consider increasing"}
-    elif (
-        normalized_complete is not None
-        and normalized_complete <= 0.90
-        and size_ratio is not None
-        and size_ratio <= 0.80
-    ):
-        failure_mode = "over_purged"
-        suggestions = {"purge_level": "consider decreasing"}
-    elif (
-        n50 is not None
-        and contig_count is not None
-        and n50 < 1_000_000
-        and contig_count > 500
-    ):
-        failure_mode = "fragmented"
-        suggestions = {"overlap_parameters": "consider less aggressive filtering"}
-    elif normalized_complete is not None and normalized_complete <= 0.90:
-        failure_mode = "low_completeness"
-        suggestions = {"read_filtering": "consider retaining more reads"}
-    else:
-        failure_mode = "execution_or_metrics_missing"
-        suggestions = {}
-    return {
-        "passed": passed,
-        "failure_mode": failure_mode,
-        "metrics": metrics,
-        "suggestions": suggestions,
-    }
-
-
-def _first_metric(metrics: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if metrics.get(key) is not None:
-            return metrics.get(key)
-    return None
-
-
-def _float_or_none(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
-
-
-def _int_or_none(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed >= 0 else None
-
-
-def _ratio(value: float | None) -> float | None:
-    if value is None:
-        return None
-    return value / 100.0 if value > 1 else value

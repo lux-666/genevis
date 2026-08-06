@@ -16,13 +16,6 @@ ASSEMBLY_CANDIDATES_SPEC = ResourceSpec(
     asset_types=["assembly_fasta_registered"],
     allow_multiple=True,
 )
-MASKED_ASSEMBLY_SPEC = ResourceSpec(
-    resource_type="masked_assembly",
-    required=False,
-)
-PREDICTED_PROTEINS_SPEC = ResourceSpec(
-    resource_type="predicted_proteins",
-)
 LONG_READS_SPEC = ResourceSpec(
     resource_type="long_reads",
     asset_types=["clean_long_reads", "raw_long_reads"],

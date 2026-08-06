@@ -17,7 +17,7 @@
 
 ## Accepted entry modes
 
-| Entry mode | TUI fact | Manifest asset | Earliest normal stage |
+| Entry mode | TUI fact | Manifest asset | Recommended first analytical stage |
 |---|---|---|---|
 | `raw_reads` | Existing HiFi/ONT intake | `raw_long_reads` | Existing behavior |
 | `clean_long_reads` | One or more cleaned long-read files plus explicit `ont` or `pacbio_hifi` platform | `clean_long_reads` | `assembly` |
@@ -47,11 +47,18 @@ multi-assembly input remains unresolved rather than being guessed.
 ## Planning and freeze
 
 The accepted mode and confirmed asset are persisted in the mutable draft and
-materialized through the existing manifest models. The planner may begin clean
-reads at Assembly or an existing assembly at Assembly Review; it must not
-reinsert earlier stages merely because they precede that stage in the global
-order. The operator may still edit the Plan Draft, but normal stage input
-contracts continue to reject an impossible plan.
+materialized through the existing manifest models. The planner normally
+recommends Assembly for clean reads and Assembly Review for an existing
+assembly; this is a recommendation, not an entry constraint. The operator may
+edit the ordered occurrence plan without the global registry order reinserting,
+rejecting, or removing stages. Every reached stage still validates the logical
+resources its own contract requires.
+
+The public file-authored `gene-agent run` boundary freezes the literal
+`{stage, allow_local_execution}` occurrence list without applying a special
+existing-assembly ordering rule. Inventory registers the supplied assembly
+resource; stages absent from the list have no occurrence, and a reached stage
+either validates its inputs or reports its own input failure.
 
 Final confirmation uses the same whole-run freeze as every other TUI run. The
 feature must not introduce another executor, unchecked path override, second

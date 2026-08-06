@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Callable
-from unittest.mock import patch
 
 import pytest
-from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
+from app.control.workflow_plan import workflow_steps_from_run_config
 from app.entrypoints.ask_planner import _recommended_stages_from_manifest
-from app.entrypoints.review_interactive import ASSEMBLY_REVIEW_DOWNSTREAM_FLOW
 from app.entrypoints.tui_intake import deterministic_workflow_intent
 from app.graph.builder import build_graph
-from app.review.annotation_intake import DOWNSTREAM_FLOW
 from app.schemas.run_config import RunConfig
 from app.schemas.state import (
     StateUpdate,
@@ -22,7 +19,6 @@ from app.schemas.state import (
     initial_state,
     validate_stage_outputs,
 )
-from app.stages.base import append_route_trace
 from app.stages.base_polish.state import (
     read_base_polish_stage_output,
     update_base_polish_stage_output,
@@ -32,25 +28,8 @@ from app.stages.gapcloser.state import (
     update_gapcloser_stage_output,
 )
 from app.storage.ledger import Ledger
-from app.workflow import MANUAL_ONLY_STAGES, STAGE_ORDER, stages_through
+from app.workflow import MANUAL_ONLY_STAGES, stages_through
 from tests.data_v2 import v2_run_dir
-
-
-def _terminal_stage(stage: str):
-    """Build a no-process terminal stage used to stop legacy traversal tests."""
-
-    def complete(state: TopLevelState) -> StateUpdate:
-        return {
-            "current_stage": "done",
-            "supervision_state": "completed",
-            "route_trace": append_route_trace(state, f"{stage}_stage"),
-        }
-
-    graph = StateGraph(TopLevelState)
-    graph.add_node("complete", complete)
-    graph.add_edge(START, "complete")
-    graph.add_edge("complete", END)
-    return graph.compile()
 
 
 @pytest.mark.parametrize("stage", ["gapcloser", "base_polish"])
@@ -62,19 +41,27 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
         session_id = f"explicit-{stage}"
         ledger = Ledger(run_dir)
         ledger.create_session(session_id, "control/manifest.yaml")
+        config = RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {"stage": stage, "allow_local_execution": False}
+                ]
+            }
+        )
         state = initial_state(
             session_id=session_id,
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
-            requested_stages=[stage],  # type: ignore[list-item]
+            workflow_steps=workflow_steps_from_run_config(config),
         )
         state["current_stage"] = stage  # type: ignore[typeddict-item]
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 0
 
-        with patch("app.reports.review_report.write_operator_report"):
-            result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
-                state,
-                config={"configurable": {"thread_id": session_id}},
-            )
+        result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
+            state,
+            config={"configurable": {"thread_id": session_id}},
+        )
 
         reason = (
             f"{stage} is registered in the parent graph but has no implemented method"
@@ -86,7 +73,7 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
             "status": "blocked_not_implemented",
             "reason": reason,
         }
-        assert f"{stage}_stage" in result["route_trace"]
+        assert f"step-001-{stage}:{stage}_stage" in result["route_trace"]
 
         rows = ledger.read_event_rows(session_id)
         assert any(
@@ -101,61 +88,6 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
         assert len(terminals) == 1
         assert terminals[0]["summary"]["outcome"] == "failed"
         assert terminals[0]["stage"] == stage
-
-
-@pytest.mark.parametrize(
-    ("stage", "next_stage", "builder_name"),
-    [
-        ("gapcloser", "t2t", "build_t2t_stage"),
-        ("base_polish", "repeat_annotation", "build_repeat_annotation_stage"),
-    ],
-)
-def test_legacy_unscoped_traversal_skips_placeholder_without_success_evidence(
-    stage: str,
-    next_stage: str,
-    builder_name: str,
-) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        run_dir = v2_run_dir(tmp, f"legacy-{stage}")
-        session_id = f"legacy-{stage}"
-        ledger = Ledger(run_dir)
-        ledger.create_session(session_id, "control/manifest.yaml")
-        state = initial_state(
-            session_id=session_id,
-            input_manifest_ref="control/manifest.yaml",
-            data_dir=str(run_dir),
-            requested_stages=None,
-        )
-        state["current_stage"] = stage  # type: ignore[typeddict-item]
-
-        with patch(
-            f"app.graph.builder.{builder_name}",
-            return_value=_terminal_stage(next_stage),
-        ):
-            result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
-                state,
-                config={"configurable": {"thread_id": session_id}},
-            )
-
-        assert result["current_stage"] == "done"
-        assert result["skip_reasons"][stage] == "not_implemented"
-        assert stage not in result["stage_outputs"]
-        assert f"{stage}_stage" not in result["route_trace"]
-
-        rows = ledger.read_event_rows(session_id)
-        skipped = [
-            row
-            for row in rows
-            if row["event_type"] == "stage_skipped" and row["stage"] == stage
-        ]
-        assert len(skipped) == 1
-        assert skipped[0]["summary"]["reason"] == "not_implemented"
-        assert not any(
-            row["event_type"] in {"stage_completed", "stage_failed"}
-            and row["stage"] == stage
-            for row in rows
-        )
-
 
 @pytest.mark.parametrize(
     ("stage", "reader", "updater"),
@@ -226,13 +158,19 @@ def test_placeholder_stages_are_manual_only_but_requestable() -> None:
     assert "base_polish" not in intent.requested_stages
 
     parsed = RunConfig(
-        requested_stages=["gapcloser", "base_polish"],
-        local_exec=[],
+        requested_stages=[
+            {"stage": "gapcloser", "allow_local_execution": False},
+            {"stage": "base_polish", "allow_local_execution": False},
+        ],
     )
-    assert parsed.requested_stages == ["gapcloser", "base_polish"]
+    assert parsed.requested_stage_names() == ["gapcloser", "base_polish"]
     with pytest.raises(ValidationError):
         RunConfig.model_validate(
-            {"requested_stages": ["gapcloser"], "local_exec": ["gapcloser"]}
+            {
+                "requested_stages": [
+                    {"stage": "gapcloser", "allow_local_execution": True}
+                ]
+            }
         )
 
 
@@ -255,15 +193,11 @@ def test_manifest_recommendation_omits_manual_only_placeholders(tmp_path) -> Non
 
 
 def test_contig_only_route_does_not_enter_placeholders() -> None:
-    requested = ["read_qc", "genome_survey", "assembly"]
-    assert all(stage not in requested for stage in MANUAL_ONLY_STAGES)
-    assert STAGE_ORDER.index("gapcloser") > STAGE_ORDER.index("assembly")
-    assert STAGE_ORDER.index("base_polish") > STAGE_ORDER.index("assembly")
-
-
-def test_operator_downstream_flows_follow_canonical_parent_order() -> None:
-    expected = " -> ".join(STAGE_ORDER[STAGE_ORDER.index("assembly_review") :])
-    assert ASSEMBLY_REVIEW_DOWNSTREAM_FLOW == expected
-    assert DOWNSTREAM_FLOW == " -> ".join(
-        STAGE_ORDER[STAGE_ORDER.index("assembly_review") + 1 :]
+    assert stages_through("assembly") == [
+        "read_qc",
+        "genome_survey",
+        "assembly",
+    ]
+    assert all(
+        stage not in stages_through("assembly") for stage in MANUAL_ONLY_STAGES
     )

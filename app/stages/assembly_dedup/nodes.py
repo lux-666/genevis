@@ -10,6 +10,7 @@ from pathlib import Path
 from langgraph.graph.state import CompiledStateGraph
 
 from app.configuration import load_descriptor_registry
+from app.control.workflow_plan import advance_workflow_step
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
     artifact_input_dependency,
@@ -29,6 +30,7 @@ from app.schemas.artifacts import (
     ArtifactRef,
     AssemblyCandidateBundle,
 )
+from app.schemas.execution import InputDependency
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly_dedup.state import (
     AssemblyDedupCursor,
@@ -54,7 +56,6 @@ from app.storage.assembly_candidates import (
 )
 from app.storage.ledger import Ledger
 from app.storage.publish import shell_publish_file
-from app.workflow import next_stage_name
 
 ASSEMBLY_DEDUP_METHOD = "assembly_dedup.purge_dups"
 PURGE_DUPS_LIFECYCLE = MethodExecutionLifecycle(
@@ -139,9 +140,7 @@ def plan_purge_dups(state: TopLevelState) -> StateUpdate:
             "method_name": ASSEMBLY_DEDUP_METHOD,
             "input_assembly_ref": str(candidate.primary_output_path),
             "output_assembly_ref": str(dedup_dir / "purged_assembly.fasta"),
-            "input_member_ids": list(
-                candidate.bundle.input_member_ids["primary"]
-            ),
+            "input_member_ids": list(candidate.bundle.input_member_ids["primary"]),
             "input_member_platforms": list(
                 candidate.bundle.input_member_platforms["primary"]
             ),
@@ -211,9 +210,7 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         work_dir / f"primary_member_{index:03d}.paf.gz"
         for index in range(len(selected_members))
     ]
-    mapping_presets = [
-        _minimap2_preset(member.platform) for member in selected_members
-    ]
+    mapping_presets = [_minimap2_preset(member.platform) for member in selected_members]
     mapping_commands: list[str] = []
     for member, preset, member_bam, member_paf in zip(
         selected_members,
@@ -264,9 +261,7 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             ]
         )
     script_path.write_text(
-        "set -euo pipefail\n"
-        + "\n".join(mapping_commands)
-        + "\n"
+        "set -euo pipefail\n" + "\n".join(mapping_commands) + "\n"
         f"samtools index {shlex.quote(str(read_bam))}\n"
         f"cd {shlex.quote(str(artifact_dir))}\n"
         f"pbcstat {shlex.quote(str(read_paf))}\n"
@@ -289,7 +284,7 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     )
     script_path.chmod(0o755)
 
-    input_dependencies = [
+    input_dependencies: list[InputDependency] = [
         artifact_input_dependency(
             state,
             source_candidate.primary_output_ref,
@@ -344,9 +339,7 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             "input_assembly_ref": str(input_assembly_ref),
             "output_assembly_ref": str(output_assembly_ref),
             "input_member_ids": [member.member_id for member in selected_members],
-            "input_member_platforms": [
-                member.platform for member in selected_members
-            ],
+            "input_member_platforms": [member.platform for member in selected_members],
             "read_mapping_presets": mapping_presets,
             "read_bam_ref": str(read_bam),
             "read_paf_ref": str(read_paf),
@@ -396,8 +389,7 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
             },
         )
         update: StateUpdate = {
-            "current_stage": next_stage_name("assembly_dedup"),
-            "supervision_state": "running_stage",
+            **advance_workflow_step(state, "assembly_dedup"),
             "route_trace": append_route_trace(state, "assembly_dedup_stage"),
             **stage_update,
         }
@@ -473,9 +465,7 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
                     metadata={
                         "candidate_id": dedup_out.get("candidate_id"),
                         "dependency_refs": [
-                            source_candidate.primary_output_ref.model_dump(
-                                mode="json"
-                            )
+                            source_candidate.primary_output_ref.model_dump(mode="json")
                         ],
                     },
                 )
@@ -490,18 +480,14 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
         for artifact, ref in zip(artifacts, output_artifact_refs, strict=True)
     }
     primary_output = artifact_ref_by_path[output_assembly_ref.resolve(strict=False)]
-    candidate_id = (
-        f"{source_candidate.bundle.candidate_id}:{ASSEMBLY_DEDUP_METHOD}"
-    )
+    candidate_id = f"{source_candidate.bundle.candidate_id}:{ASSEMBLY_DEDUP_METHOD}"
     planned_candidate = AssemblyCandidateBundle(
         session_id=session_id,
         candidate_id=candidate_id,
         method_name=ASSEMBLY_DEDUP_METHOD,
         status="planned",
         input_type=source_candidate.bundle.input_type,
-        input_member_ids={
-            "primary": list(dedup_out.get("input_member_ids") or [])
-        },
+        input_member_ids={"primary": list(dedup_out.get("input_member_ids") or [])},
         input_member_platforms={
             "primary": list(dedup_out.get("input_member_platforms") or [])
         },
@@ -597,9 +583,7 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger = Ledger(data_dir)
     attempt_id = attempt.attempt_id
-    ledger.record_attempt_succeeded(
-        session_id, attempt, artifacts=artifact_payloads
-    )
+    ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
     for artifact in artifact_payloads:
         ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt_id)
 
@@ -608,22 +592,19 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
         {
             "status": "completed",
             "purged_assembly_ref": str(verified_purged.primary_output_path),
-            "purged_candidate_bundle_ref": verified_purged.ref.model_dump(
-                mode="json"
-            ),
+            "purged_candidate_bundle_ref": verified_purged.ref.model_dump(mode="json"),
             "purged_primary_output_ref": (
                 verified_purged.primary_output_ref.model_dump(mode="json")
             ),
             "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
         },
     )
-    update: StateUpdate = {
-        "current_stage": next_stage_name("assembly_dedup"),
-        "supervision_state": "running_stage",
+    completed_update: StateUpdate = {
+        **advance_workflow_step(state, "assembly_dedup"),
         "route_trace": append_route_trace(state, "assembly_dedup_stage"),
         **stage_update,
     }
-    update["resource_refs"] = update_resource_ref(
+    completed_update["resource_refs"] = update_resource_ref(
         state,
         "assembly",
         [str(verified_purged.primary_output_path)],
@@ -633,16 +614,14 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
             "primary_output_ref": verified_purged.primary_output_ref.model_dump(
                 mode="json"
             ),
-            "raw_candidate_bundle_ref": source_candidate.ref.model_dump(
-                mode="json"
-            ),
+            "raw_candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
             "raw_primary_output_ref": (
                 source_candidate.primary_output_ref.model_dump(mode="json")
             ),
             "deduplicated": True,
         },
     )
-    return update
+    return completed_update
 
 
 def fail_assembly_dedup(state: TopLevelState) -> StateUpdate:
@@ -669,7 +648,7 @@ def _selected_assembly_candidate(
     verified = load_executed_candidate_bundle(
         absolute_data_dir(state),
         state["session_id"],
-        raw_ref,
+        ArtifactRef.model_validate(raw_ref),
     )
     projected_primary = resolution.metadata.get("primary_output_ref")
     if projected_primary is None:
@@ -695,7 +674,7 @@ def _dedup_source_candidate(
     verified = load_executed_candidate_bundle(
         absolute_data_dir(state),
         state["session_id"],
-        raw_ref,
+        ArtifactRef.model_validate(raw_ref),
         expected_candidate_id=output.get("candidate_id"),
     )
     if (
@@ -730,25 +709,26 @@ def _selected_primary_members(
         raise ValueError("dedup primary member IDs/platforms are empty or mismatched")
     resolved = resolve_long_read_members(state)
     by_id: dict[str, RuntimeReadMember] = {}
-    for member in resolved:
-        if member.member_id in by_id:
+    for resolved_member in resolved:
+        if resolved_member.member_id in by_id:
             raise ValueError(
-                f"runtime long-read member ID is duplicated: {member.member_id!r}"
+                "runtime long-read member ID is duplicated: "
+                f"{resolved_member.member_id!r}"
             )
-        by_id[member.member_id] = member
+        by_id[resolved_member.member_id] = resolved_member
     selected: list[RuntimeReadMember] = []
     for member_id, platform in zip(member_ids, member_platforms, strict=True):
-        member = by_id.get(member_id)
-        if member is None:
+        selected_member: RuntimeReadMember | None = by_id.get(member_id)
+        if selected_member is None:
             raise ValueError(
                 f"candidate primary read member is unavailable: {member_id!r}"
             )
-        if member.platform != platform:
+        if selected_member.platform != platform:
             raise ValueError(
                 f"candidate primary read platform drifted for {member_id!r}: "
-                f"{member.platform!r} != {platform!r}"
+                f"{selected_member.platform!r} != {platform!r}"
             )
-        selected.append(member)
+        selected.append(selected_member)
     return selected
 
 

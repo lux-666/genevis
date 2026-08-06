@@ -38,6 +38,21 @@ from app.storage.paths import (
 )
 
 
+def workflow_state(paths: SessionPaths, step_id: str, stage: str) -> dict[str, object]:
+    """Build the minimum frozen occurrence context required by evidence APIs."""
+
+    return {
+        "session_id": paths.session_id,
+        "data_dir": str(paths.run_dir),
+        "workflow_steps": [{"step_id": step_id, "stage": stage}],
+        "workflow_step_index": 0,
+    }
+
+
+def workflow_metadata(step_id: str) -> dict[str, str]:
+    return {"workflow_step_id": step_id}
+
+
 class SessionPathsTests(unittest.TestCase):
     def test_run_paths_and_fixed_files_have_one_session_component(self):
         paths = SessionPaths("/tmp/gene-agent-data", "s1")
@@ -53,19 +68,29 @@ class SessionPathsTests(unittest.TestCase):
             paths.checkpoint_db_path, paths.checkpoints_dir / "checkpoints.sqlite"
         )
         self.assertEqual(
-            paths.artifact_path("assembly", "outputs", "draft.fa"),
-            paths.artifacts_dir / "assembly" / "outputs" / "draft.fa",
+            paths.workflow_step_artifact_path(
+                "step-001", "assembly", "outputs", "draft.fa"
+            ),
+            paths.artifacts_dir
+            / "steps"
+            / "step-001"
+            / "assembly"
+            / "outputs"
+            / "draft.fa",
         )
         self.assertNotIn(
             "s1",
-            paths.artifact_path("assembly", "outputs").relative_to(paths.run_dir).parts,
+            paths.workflow_step_artifact_path(
+                "step-001", "assembly", "outputs"
+            ).relative_to(paths.run_dir).parts,
         )
 
     def test_resume_requires_the_retained_work_script(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
-            work_dir = paths.work_path("read_qc", "attempt")
+            step_id = "step-001"
+            work_dir = paths.workflow_step_work_path(step_id, "read_qc", "attempt")
             work_dir.mkdir(parents=True)
             script = work_dir / "run.sh"
             script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -79,8 +104,9 @@ class SessionPathsTests(unittest.TestCase):
                 expected_outputs=[],
                 env=None,
                 env_spec=None,
+                metadata=workflow_metadata(step_id),
             )
-            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            state = workflow_state(paths, step_id, "read_qc")
             attempt_ref = persist_frozen_attempt(state, attempt)
             script.unlink()
 
@@ -96,7 +122,8 @@ class SessionPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
-            work_dir = paths.work_path("read_qc", "attempt")
+            step_id = "step-001"
+            work_dir = paths.workflow_step_work_path(step_id, "read_qc", "attempt")
             work_dir.mkdir(parents=True)
             script = work_dir / "run.sh"
             script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -110,8 +137,9 @@ class SessionPathsTests(unittest.TestCase):
                 expected_outputs=[],
                 env=None,
                 env_spec=None,
+                metadata=workflow_metadata(step_id),
             )
-            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            state = workflow_state(paths, step_id, "read_qc")
             attempt_ref = persist_frozen_attempt(state, attempt)
             script.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
 
@@ -127,6 +155,7 @@ class SessionPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
+            step_id = "step-001"
             outside_work = Path(tmpdir) / "outside-work"
             outside_work.mkdir()
             script = outside_work / "run.sh"
@@ -141,6 +170,7 @@ class SessionPathsTests(unittest.TestCase):
                 expected_outputs=[],
                 env=None,
                 env_spec=None,
+                metadata=workflow_metadata(step_id),
             )
 
             with self.assertRaisesRegex(
@@ -148,7 +178,7 @@ class SessionPathsTests(unittest.TestCase):
                 "working directory is outside",
             ):
                 persist_frozen_attempt(
-                    {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                    workflow_state(paths, step_id, "read_qc"),
                     attempt,
                 )
 
@@ -156,7 +186,8 @@ class SessionPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
-            work_dir = paths.work_path("read_qc", "attempt")
+            step_id = "step-001"
+            work_dir = paths.workflow_step_work_path(step_id, "read_qc", "attempt")
             work_dir.mkdir(parents=True)
             script = work_dir / "run.sh"
             script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -170,11 +201,12 @@ class SessionPathsTests(unittest.TestCase):
                 expected_outputs=[Path(tmpdir) / "outside-output.tsv"],
                 env=None,
                 env_spec=None,
+                metadata=workflow_metadata(step_id),
             )
 
             with self.assertRaisesRegex(DataLayoutError, "expected output is outside"):
                 persist_frozen_attempt(
-                    {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                    workflow_state(paths, step_id, "read_qc"),
                     attempt,
                 )
 
@@ -182,7 +214,8 @@ class SessionPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
-            work_dir = paths.work_path("read_qc", "attempt")
+            step_id = "step-001"
+            work_dir = paths.workflow_step_work_path(step_id, "read_qc", "attempt")
             work_dir.mkdir(parents=True)
             external_script = Path(tmpdir) / "external.sh"
             external_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -198,11 +231,12 @@ class SessionPathsTests(unittest.TestCase):
                 expected_outputs=[],
                 env=None,
                 env_spec=None,
+                metadata=workflow_metadata(step_id),
             )
 
             with self.assertRaisesRegex(DataLayoutError, "script resolves outside"):
                 persist_frozen_attempt(
-                    {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                    workflow_state(paths, step_id, "read_qc"),
                     attempt,
                 )
 
@@ -210,17 +244,20 @@ class SessionPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
-            work_dir = paths.work_path("hic_scaffolding", "autohic")
+            step_id = "step-001"
+            work_dir = paths.workflow_step_work_path(
+                step_id, "hic_scaffolding", "autohic"
+            )
             work_dir.mkdir(parents=True)
-            artifact_script = paths.artifact_path(
-                "hic_scaffolding", "attempts", "000", "run_autohic.sh"
+            artifact_script = paths.workflow_step_artifact_path(
+                step_id, "hic_scaffolding", "attempts", "000", "run_autohic.sh"
             )
             artifact_script.parent.mkdir(parents=True)
             artifact_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             script = work_dir / "run_autohic.sh"
             script.symlink_to(artifact_script)
-            expected_output = paths.artifact_path(
-                "hic_scaffolding", "outputs", "result.html"
+            expected_output = paths.workflow_step_artifact_path(
+                step_id, "hic_scaffolding", "outputs", "result.html"
             )
             attempt = build_frozen_attempt(
                 attempt_id="s1:hic_scaffolding:autohic",
@@ -232,8 +269,9 @@ class SessionPathsTests(unittest.TestCase):
                 expected_outputs=[expected_output],
                 env=None,
                 env_spec=None,
+                metadata=workflow_metadata(step_id),
             )
-            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            state = workflow_state(paths, step_id, "hic_scaffolding")
 
             attempt_ref = persist_frozen_attempt(state, attempt)
             loaded = load_frozen_attempt(
@@ -266,11 +304,17 @@ class SessionPathsTests(unittest.TestCase):
 
     def test_refs_are_normalized_and_contained_by_run_root(self):
         paths = SessionPaths("/tmp/gene-agent-data", "s1")
-        artifact = paths.artifact_path("assembly", "outputs", "draft.fa")
+        artifact = paths.workflow_step_artifact_path(
+            "step-001", "assembly", "outputs", "draft.fa"
+        )
 
-        self.assertEqual(paths.to_ref(artifact), "artifacts/assembly/outputs/draft.fa")
         self.assertEqual(
-            paths.resolve_ref("artifacts/assembly/outputs/draft.fa"), artifact
+            paths.to_ref(artifact),
+            "artifacts/steps/step-001/assembly/outputs/draft.fa",
+        )
+        self.assertEqual(
+            paths.resolve_ref("artifacts/steps/step-001/assembly/outputs/draft.fa"),
+            artifact,
         )
         for invalid in (
             "/tmp/escape",
@@ -325,7 +369,10 @@ class ArtifactIndexV2Tests(unittest.TestCase):
     def test_index_contains_canonical_ref_metadata_not_absolute_file_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
-            payload = paths.artifact_path("inventory", "registry.json")
+            step_id = "step-001"
+            payload = paths.workflow_step_artifact_path(
+                step_id, "inventory", "registry.json"
+            )
             payload.parent.mkdir(parents=True)
             payload.write_text("{}", encoding="utf-8")
             artifact = ArtifactMeta.from_file(
@@ -343,7 +390,10 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             records = read_artifact_records(paths.run_dir, "s1")
 
             self.assertEqual(len(refs), 1)
-            self.assertEqual(refs[0].path_ref, "artifacts/inventory/registry.json")
+            self.assertEqual(
+                refs[0].path_ref,
+                "artifacts/steps/step-001/inventory/registry.json",
+            )
             self.assertEqual(records[0]["artifact_id"], refs[0].artifact_id)
             self.assertEqual(records[0]["schema_version"], 2)
             self.assertEqual(records[0]["sha256"], refs[0].sha256)
@@ -357,7 +407,8 @@ class ArtifactIndexV2Tests(unittest.TestCase):
     def test_work_product_is_published_without_repeating_session_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
-            source = paths.work_path("assembly", "flye", "log")
+            step_id = "step-001"
+            source = paths.workflow_step_work_path(step_id, "assembly", "flye", "log")
             source.parent.mkdir(parents=True)
             source.write_text("assembly completed\n", encoding="utf-8")
             artifact = ArtifactMeta.from_file(
@@ -371,7 +422,10 @@ class ArtifactIndexV2Tests(unittest.TestCase):
 
             published = paths.resolve_ref(artifact_ref.path_ref)
             self.assertEqual(
-                published, paths.artifact_path("assembly", "outputs", "flye", "log")
+                published,
+                paths.workflow_step_artifact_path(
+                    step_id, "assembly", "outputs", "flye", "log"
+                ),
             )
             self.assertFalse(source.exists())
             self.assertNotIn("s1", published.relative_to(paths.run_dir).parts)
@@ -381,14 +435,17 @@ class ArtifactIndexV2Tests(unittest.TestCase):
     def test_explicit_publication_returns_readable_durable_ref_after_source_move(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
-            source = paths.work_path("gene_annotation", "miniprot", "candidate.gff3")
+            step_id = "step-001"
+            source = paths.workflow_step_work_path(
+                step_id, "assembly_review", "quast", "report.txt"
+            )
             source.parent.mkdir(parents=True)
             source.write_text("##gff-version 3\n", encoding="utf-8")
             artifact = ArtifactMeta.from_file(
                 source,
-                stage="gene_annotation",
-                method_name="gene_annotation.candidate.miniprot",
-                artifact_type="gene_annotation.candidate_gff",
+                stage="assembly_review",
+                method_name="assembly_review.eval.quast",
+                artifact_type="assembly_review.report",
             )
 
             published = publish_artifact_record(paths.run_dir, "s1", artifact)
@@ -400,8 +457,8 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             )
             self.assertEqual(
                 published.path,
-                paths.artifact_path(
-                    "gene_annotation", "outputs", "miniprot", "candidate.gff3"
+                paths.workflow_step_artifact_path(
+                    step_id, "assembly_review", "outputs", "quast", "report.txt"
                 ),
             )
             self.assertEqual(
@@ -412,14 +469,16 @@ class ArtifactIndexV2Tests(unittest.TestCase):
     def test_strict_registration_does_not_implicitly_publish_work_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
-            source = paths.work_path("gene_annotation", "miniprot", "candidate.gff3")
+            source = paths.workflow_step_work_path(
+                "step-001", "assembly_review", "quast", "report.txt"
+            )
             source.parent.mkdir(parents=True)
             source.write_text("##gff-version 3\n", encoding="utf-8")
             artifact = ArtifactMeta.from_file(
                 source,
-                stage="gene_annotation",
-                method_name="gene_annotation.candidate.miniprot",
-                artifact_type="gene_annotation.candidate_gff",
+                stage="assembly_review",
+                method_name="assembly_review.eval.quast",
+                artifact_type="assembly_review.report",
             )
 
             with self.assertRaises(DataLayoutError):
@@ -431,7 +490,9 @@ class ArtifactIndexV2Tests(unittest.TestCase):
     def test_collect_replay_recovers_moved_work_output_and_index_row(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
-            source = paths.work_path("read_qc", "seqkit", "stats.tsv")
+            source = paths.workflow_step_work_path(
+                "step-001", "read_qc", "seqkit", "stats.tsv"
+            )
             source.parent.mkdir(parents=True)
             source.write_text("file\tnum_seqs\nreads.fq\t2\n", encoding="utf-8")
 
@@ -462,7 +523,9 @@ class ArtifactIndexV2Tests(unittest.TestCase):
     def test_publication_rejects_a_source_already_below_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
-            destination = paths.artifact_path("inventory", "registry.json")
+            destination = paths.workflow_step_artifact_path(
+                "step-001", "inventory", "registry.json"
+            )
             destination.parent.mkdir(parents=True)
             destination.write_text("old bytes\n", encoding="utf-8")
             artifact = ArtifactMeta.from_file(
@@ -473,7 +536,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(
-                DataLayoutError, "outside the declared stage workspace"
+                DataLayoutError, "work path is outside"
             ):
                 publish_artifact_records(paths.run_dir, "s1", [artifact])
 
@@ -483,7 +546,9 @@ class ArtifactIndexV2Tests(unittest.TestCase):
     def test_identical_replay_reuses_ref_and_conflicting_bytes_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
-            source = paths.work_path("assembly", "flye", "log")
+            source = paths.workflow_step_work_path(
+                "step-001", "assembly", "flye", "log"
+            )
             source.parent.mkdir(parents=True)
             source.write_text("first output\n", encoding="utf-8")
             first = ArtifactMeta.from_file(
@@ -547,7 +612,9 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             with self.assertRaises(DataLayoutError):
                 publish_artifact_records(paths.run_dir, "s1", [report_meta])
 
-            repeated = paths.artifact_path("assembly", "s1", "draft.fa")
+            repeated = paths.workflow_step_artifact_path(
+                "step-001", "assembly", "s1", "draft.fa"
+            )
             repeated.parent.mkdir(parents=True)
             repeated.write_text(">draft\nA\n", encoding="utf-8")
             repeated_meta = ArtifactMeta.from_file(
@@ -566,6 +633,96 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             paths = self._paths(tmpdir)
             with self.assertRaises(DataLayoutError):
                 read_artifact_records(paths.run_dir, "s2")
+
+    def test_same_stage_occurrences_publish_to_isolated_work_and_artifact_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            first_step_id = "step-001"
+            second_step_id = "step-002"
+            first_source = paths.workflow_step_work_path(
+                first_step_id, "read_qc", "seqkit", "stats.tsv"
+            )
+            second_source = paths.workflow_step_work_path(
+                second_step_id, "read_qc", "seqkit", "stats.tsv"
+            )
+            first_source.parent.mkdir(parents=True)
+            second_source.parent.mkdir(parents=True)
+            first_source.write_text("first occurrence\n", encoding="utf-8")
+            second_source.write_text("second occurrence\n", encoding="utf-8")
+
+            first = publish_or_recover_work_artifact(
+                paths.run_dir,
+                "s1",
+                first_source,
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                artifact_type="read_qc.long_read_stats",
+            )
+            second = publish_or_recover_work_artifact(
+                paths.run_dir,
+                "s1",
+                second_source,
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                artifact_type="read_qc.long_read_stats",
+            )
+
+            self.assertNotEqual(first.path, second.path)
+            self.assertEqual(
+                first.path,
+                paths.workflow_step_artifact_path(
+                    first_step_id, "read_qc", "outputs", "seqkit", "stats.tsv"
+                ),
+            )
+            self.assertEqual(
+                second.path,
+                paths.workflow_step_artifact_path(
+                    second_step_id, "read_qc", "outputs", "seqkit", "stats.tsv"
+                ),
+            )
+            self.assertEqual(
+                first.path.read_text(encoding="utf-8"), "first occurrence\n"
+            )
+            self.assertEqual(
+                second.path.read_text(encoding="utf-8"), "second occurrence\n"
+            )
+            self.assertEqual(
+                [
+                    record["workflow_step_id"]
+                    for record in read_artifact_records(paths.run_dir, "s1")
+                ],
+                [first_step_id, second_step_id],
+            )
+
+    def test_explicit_destination_rejects_cross_occurrence_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            source = paths.workflow_step_work_path(
+                "step-001-read_qc", "read_qc", "seqkit", "stats.tsv"
+            )
+            source.parent.mkdir(parents=True)
+            source.write_text("first occurrence\n", encoding="utf-8")
+            artifact = ArtifactMeta.from_file(
+                source,
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                artifact_type="read_qc.long_read_stats",
+            )
+            destination = paths.workflow_step_artifact_path(
+                "step-002-read_qc", "read_qc", "stats.tsv"
+            )
+
+            with self.assertRaisesRegex(DataLayoutError, "same workflow step"):
+                publish_artifact_record(
+                    paths.run_dir,
+                    "s1",
+                    artifact,
+                    destination=destination,
+                )
+
+            self.assertTrue(source.is_file())
+            self.assertFalse(destination.exists())
+            self.assertFalse(paths.artifact_index_path.exists())
 
 
 class ImmutablePublishTests(unittest.TestCase):
@@ -588,11 +745,98 @@ class ImmutablePublishTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertEqual(destination.read_text(encoding="utf-8"), "first output\n")
 
+    def test_same_stage_occurrences_isolate_attempt_and_log_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = SessionPaths(tmpdir, "s1")
+            ensure_run_layout(paths)
+            step_ids = ("step-001", "step-002")
+            state = {
+                "session_id": "s1",
+                "data_dir": str(paths.run_dir),
+                "workflow_steps": [
+                    {"step_id": step_id, "stage": "read_qc"}
+                    for step_id in step_ids
+                ],
+                "workflow_step_index": 0,
+            }
+            attempts = []
+            for step_id in step_ids:
+                work_dir = paths.workflow_step_work_path(
+                    step_id, "read_qc", "seqkit_stats"
+                )
+                work_dir.mkdir(parents=True)
+                script = work_dir / "run.sh"
+                script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                (work_dir / "stdout.log").write_text(step_id, encoding="utf-8")
+                (work_dir / "stderr.log").write_text(step_id, encoding="utf-8")
+                attempts.append(
+                    build_frozen_attempt(
+                        attempt_id=f"s1:{step_id}:seqkit_stats",
+                        session_id="s1",
+                        stage="read_qc",
+                        method_name="read_qc.long_read_stats.seqkit_stats",
+                        script_path=script,
+                        working_dir=work_dir,
+                        expected_outputs=[],
+                        env=None,
+                        env_spec=None,
+                        metadata=workflow_metadata(step_id),
+                    )
+                )
+
+            attempt_refs = []
+            for index, attempt in enumerate(attempts):
+                state["workflow_step_index"] = index
+                attempt_refs.append(persist_frozen_attempt(state, attempt))
+
+            class WorkLogRunner:
+                def run(self, spec):
+                    return ExecutionResult(
+                        attempt_id=spec.attempt_id,
+                        success=True,
+                        return_code=0,
+                        stdout_path=spec.working_dir / "stdout.log",
+                        stderr_path=spec.working_dir / "stderr.log",
+                    )
+
+            outcomes = [
+                run_frozen_attempt(
+                    attempt,
+                    data_dir=paths.run_dir,
+                    fail_label="synthetic",
+                    runner=WorkLogRunner(),
+                )
+                for attempt in attempts
+            ]
+
+            self.assertNotEqual(attempt_refs[0].path_ref, attempt_refs[1].path_ref)
+            self.assertNotEqual(
+                outcomes[0].result.stdout_path, outcomes[1].result.stdout_path
+            )
+            for step_id, outcome in zip(step_ids, outcomes, strict=True):
+                self.assertTrue(outcome.success)
+                self.assertEqual(
+                    outcome.result.stdout_path.parent,
+                    paths.workflow_step_artifact_path(step_id, "read_qc", "logs"),
+                )
+                self.assertEqual(
+                    outcome.result.stderr_path.parent,
+                    paths.workflow_step_artifact_path(step_id, "read_qc", "logs"),
+                )
+                self.assertEqual(
+                    outcome.result.stdout_path.read_text(encoding="utf-8"), step_id
+                )
+            records = read_artifact_records(paths.run_dir, "s1")
+            self.assertEqual(
+                {record["workflow_step_id"] for record in records}, set(step_ids)
+            )
+
     def test_runner_publishes_logs_before_collectors_build_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
-            work = paths.work_path("read_qc", "seqkit_stats")
+            step_id = "step-001"
+            work = paths.workflow_step_work_path(step_id, "read_qc", "seqkit_stats")
             work.mkdir(parents=True)
             stdout = work / "log"
             stderr = work / "err"
@@ -614,8 +858,9 @@ class ImmutablePublishTests(unittest.TestCase):
                 expected_outputs=[],
                 env=None,
                 env_spec=None,
+                metadata=workflow_metadata(step_id),
             )
-            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            state = workflow_state(paths, step_id, "read_qc")
             frozen_attempt_ref = persist_frozen_attempt(state, attempt)
 
             class StaticRunner:
@@ -638,7 +883,7 @@ class ImmutablePublishTests(unittest.TestCase):
             self.assertTrue(outcome.success)
             self.assertEqual(
                 outcome.result.stdout_path.parent,
-                paths.artifact_path("read_qc", "logs"),
+                paths.workflow_step_artifact_path(step_id, "read_qc", "logs"),
             )
             self.assertNotIn(
                 "s1", outcome.result.stdout_path.relative_to(paths.run_dir).parts

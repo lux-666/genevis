@@ -36,7 +36,12 @@ def test_top_level_state_marks_runtime_invariants_as_required() -> None:
         "control_state",
         "supervision_state",
         "current_stage",
+        "workflow_steps",
+        "workflow_step_index",
+        "entered_workflow_step_index",
         "input_manifest_ref",
+        "stage_plan_ref",
+        "stage_seeds",
         "review_notes",
         "route_trace",
         "stage_outputs",
@@ -44,9 +49,7 @@ def test_top_level_state_marks_runtime_invariants_as_required() -> None:
     }
     assert {
         "thread_id",
-        "requested_stages",
         "asset_registry_ref",
-        "stage_plan_ref",
         "active_interrupt",
         "shared_parameters",
         "last_error",
@@ -119,7 +122,7 @@ def test_lifecycle_literals_and_interrupt_contract_are_bounded() -> None:
 
     hints = get_type_hints(ActiveInterrupt)
     assert hints["stage"] is DomainStage
-    assert ActiveInterrupt.__required_keys__ == {"stage"}
+    assert ActiveInterrupt.__required_keys__ == {"stage", "workflow_step_id"}
     assert {
         "gate_id",
         "reason",
@@ -140,7 +143,10 @@ def test_stage_outputs_are_typed_bounded_json_cursors() -> None:
                     "status": "frozen",
                     "frozen_attempt_ref": {
                         "schema_version": 2,
-                        "path_ref": "artifacts/assembly/attempts/a/attempt.json",
+                        "path_ref": (
+                            "artifacts/steps/step-001-assembly/assembly/"
+                            "attempts/a/attempt.json"
+                        ),
                     },
                 }
             }
@@ -208,18 +214,27 @@ def test_whole_state_budget_warns_at_target_and_rejects_at_hard_limit() -> None:
         ("route_trace", ["route"] * 17, "route_trace"),
         (
             "active_interrupt",
-            {"stage": "assembly", "reason": "x" * (4 * 1024)},
+            {
+                "stage": "assembly",
+                "workflow_step_id": "step-001-assembly",
+                "reason": "x" * (4 * 1024),
+            },
             "active_interrupt",
         ),
         (
             "active_interrupt",
-            {"stage": "assembly", "unexpected_payload": "not allowed"},
+            {
+                "stage": "assembly",
+                "workflow_step_id": "step-001-assembly",
+                "unexpected_payload": "not allowed",
+            },
             "unsupported fields",
         ),
         (
             "active_interrupt",
             {
                 "stage": "assembly",
+                "workflow_step_id": "step-001-assembly",
                 "request_ref": {"path_ref": "artifacts/request.json"},
             },
             "valid ArtifactRef",

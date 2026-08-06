@@ -1,15 +1,11 @@
 packages:
-  augustus: augustus.yaml
   busco: busco.yaml
-  diamond: diamond.yaml
-  gffread: gffread.yaml
   3ddna: 3ddna.yaml
   autohic: autohic.yaml
   flye: flye.yaml
   genomescope2: genomescope2.yaml
   hifiasm: hifiasm.yaml
   jellyfish: jellyfish.yaml
-  miniprot: miniprot.yaml
   minimap2: minimap2.yaml
   nextdenovo: nextdenovo.yaml
   purge_dups: purge_dups.yaml
@@ -17,7 +13,6 @@ packages:
   quast: quast.yaml
   juicer: juicer.yaml
   juicebox: juicebox.yaml
-  repeatmasker: repeatmasker.yaml
   seqkit: seqkit.yaml
 methods:
   assembly.candidate.flye: assembly/flye_candidate.yaml
@@ -29,15 +24,11 @@ methods:
   assembly_review.eval.busco: assembly_review/busco_eval.yaml
   genome_survey.kmer_count.jellyfish: genome_survey/jellyfish_kmer_count.yaml
   genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
-  gene_annotation.candidate.augustus: gene_annotation/augustus_candidate.yaml
-  gene_annotation.candidate.miniprot: gene_annotation/miniprot_candidate.yaml
-  function_annotation.candidate.diamond: function_annotation/diamond_candidate.yaml
   hic_scaffolding.candidate.autohic: hic_scaffolding/autohic_candidate.yaml
   t2t.alignment.minimap2: t2t/minimap2_telomere_alignment.yaml
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
   read_qc.length_filter.skip: read_qc/length_filter_skip.yaml
   read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
-  repeat_annotation.masking.repeatmasker: repeat_annotation/repeatmasker_masking.yaml
 by_stage:
   inventory: []
   read_qc:
@@ -61,10 +52,3 @@ by_stage:
     - hic_scaffolding.candidate.autohic
   t2t:
     - t2t.alignment.minimap2
-  repeat_annotation:
-    - repeat_annotation.masking.repeatmasker
-  gene_annotation:
-    - gene_annotation.candidate.augustus
-    - gene_annotation.candidate.miniprot
-  function_annotation:
-    - function_annotation.candidate.diamond

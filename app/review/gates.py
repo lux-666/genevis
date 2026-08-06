@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Callable, cast
 
-from app.schemas.state import StateUpdate, TopLevelState
+from app.control.workflow_plan import current_workflow_step_id
+from app.schemas.state import (
+    DOMAIN_STAGES,
+    DomainStage,
+    StateUpdate,
+    TopLevelState,
+)
 
 DecisionApplier = Callable[[TopLevelState, Any], StateUpdate]
 TimeoutApplier = Callable[[TopLevelState, Any, dict[str, Any]], StateUpdate]
+InterruptContextBuilder = Callable[[Mapping[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -20,7 +28,7 @@ class ReviewGateDeclaration:
     The registry only records how a gate is resumed, recommended, and prompted.
     """
 
-    stage: str
+    stage: DomainStage
     gate_id: str
     decisions_allowed: tuple[str, ...]
     decision_applier: str
@@ -38,7 +46,7 @@ class ReviewGateDeclaration:
     interrupt_context_builder: str | None = None
 
     @property
-    def key(self) -> tuple[str, str]:
+    def key(self) -> tuple[DomainStage, str]:
         return self.stage, self.gate_id
 
     def load_decision_applier(self) -> DecisionApplier:
@@ -65,7 +73,7 @@ class ReviewGateDeclaration:
 
     def load_interrupt_context_builder(
         self,
-    ) -> "Callable[[dict], dict] | None":
+    ) -> InterruptContextBuilder | None:
         """Load the stage-specific interrupt context builder, if registered."""
         if not self.interrupt_context_builder:
             return None
@@ -77,15 +85,19 @@ class ReviewGateDeclaration:
                 "interrupt_context_builder is not callable: "
                 f"{self.interrupt_context_builder}"
             )
-        return builder
+        return cast(InterruptContextBuilder, builder)
 
 
-_DECLARATIONS: dict[tuple[str, str], ReviewGateDeclaration] = {}
+_DECLARATIONS: dict[tuple[DomainStage, str], ReviewGateDeclaration] = {}
 
 
 def register_review_gate(declaration: ReviewGateDeclaration) -> ReviewGateDeclaration:
     if not declaration.stage:
         raise ValueError("review gate stage is required")
+    if declaration.stage not in DOMAIN_STAGES:
+        raise ValueError(
+            f"review gate stage is not a current domain stage: {declaration.stage}"
+        )
     if not declaration.gate_id:
         raise ValueError("review gate gate_id is required")
     if declaration.key in _DECLARATIONS:
@@ -110,7 +122,9 @@ def find_review_gate(
     if not stage:
         return None
     if gate_id:
-        return _DECLARATIONS.get((stage, gate_id))
+        if stage not in DOMAIN_STAGES:
+            return None
+        return _DECLARATIONS.get((cast(DomainStage, stage), gate_id))
     matches = [
         gate
         for (registered_stage, _), gate in _DECLARATIONS.items()
@@ -125,7 +139,7 @@ def is_registered_review_gate(stage: str | None, gate_id: str | None = None) -> 
     return find_review_gate(stage, gate_id) is not None
 
 
-def registered_review_stages() -> tuple[str, ...]:
+def registered_review_stages() -> tuple[DomainStage, ...]:
     return tuple(dict.fromkeys(stage for stage, _ in _DECLARATIONS))
 
 
@@ -134,19 +148,25 @@ def planned_review_gates(
 ) -> list[ReviewGateDeclaration]:
     """Return registered runtime gates in workflow and declaration order."""
 
-    stage_order = {stage: index for index, stage in enumerate(stages)}
-    indexed = [
-        (index, gate)
-        for index, gate in enumerate(_DECLARATIONS.values())
-        if gate.stage in stage_order
-    ]
-    return [
-        gate
-        for _, gate in sorted(
-            indexed,
-            key=lambda item: (stage_order[item[1].stage], item[1].plan_order, item[0]),
+    declarations = tuple(_DECLARATIONS.values())
+    return _planned_review_gates_in_workflow_order(stages, declarations)
+
+
+def _planned_review_gates_in_workflow_order(
+    stages: list[str] | tuple[str, ...],
+    declarations: tuple[ReviewGateDeclaration, ...],
+) -> list[ReviewGateDeclaration]:
+    """Preserve each planned stage occurrence; a stage may repeat in the plan."""
+
+    planned: list[ReviewGateDeclaration] = []
+    for stage in stages:
+        planned.extend(
+            sorted(
+                (gate for gate in declarations if gate.stage == stage),
+                key=lambda gate: gate.plan_order,
+            )
         )
-    ]
+    return planned
 
 
 def registered_review_stage_label() -> str:
@@ -155,6 +175,8 @@ def registered_review_stage_label() -> str:
 
 
 def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
+    """Return the optional LLM recommendation bundle for a registered gate."""
+
     return get_review_gate(stage, gate_id).prompt_bundle
 
 
@@ -162,6 +184,7 @@ def apply_review_gate_decision(
     state: TopLevelState,
     request: Any,
 ) -> StateUpdate:
+    _validate_review_occurrence(state, request)
     gate_id = getattr(request, "gate_id", None)
     active_interrupt = state.get("active_interrupt")
     if active_interrupt and active_interrupt.get("gate_id") == "parameter_approval":
@@ -178,6 +201,7 @@ def apply_review_gate_decision(
 def apply_review_gate_timeout(
     state: TopLevelState, request: Any, timeout: dict[str, Any]
 ) -> StateUpdate | None:
+    _validate_review_occurrence(state, request)
     gate_id = getattr(request, "gate_id", None)
     active_interrupt = state.get("active_interrupt")
     if active_interrupt:
@@ -187,6 +211,25 @@ def apply_review_gate_timeout(
     if applier is None:
         return None
     return applier(state, request, timeout)
+
+
+def _validate_review_occurrence(state: TopLevelState, request: Any) -> None:
+    """Reject a review resume targeting another workflow occurrence."""
+
+    stage = getattr(request, "stage", None)
+    if not isinstance(stage, str) or not stage:
+        raise ValueError("review request has no stage")
+    current_step_id = current_workflow_step_id(state, expected_stage=stage)
+    active_interrupt = state.get("active_interrupt")
+    if not active_interrupt:
+        return
+    if active_interrupt.get("stage") != stage:
+        raise ValueError("active review interrupt stage does not match the request")
+    interrupt_step_id = active_interrupt.get("workflow_step_id")
+    if not isinstance(interrupt_step_id, str) or not interrupt_step_id:
+        raise ValueError("active review interrupt has no workflow_step_id")
+    if interrupt_step_id != current_step_id:
+        raise ValueError("active review interrupt targets a different workflow step")
 
 
 register_review_gate(
@@ -242,8 +285,6 @@ register_review_gate(
         parameter_recommendation_notes=(
             "Assembly quality-gate failures route through the canonical v3 "
             "parameter recommendation and approval workflow.",
-            "Legacy human-selected rerun decisions and "
-            "metadata.rerun_parameters are unsupported.",
         ),
     )
 )
@@ -347,55 +388,5 @@ register_review_gate(
         parameter_recommendation_status="implemented",
         related_parameter_gate=("t2t", "parameter_approval"),
         plan_order=30,
-    )
-)
-
-register_review_gate(
-    ReviewGateDeclaration(
-        stage="repeat_annotation",
-        gate_id="mask_review",
-        decisions_allowed=("accept", "skip"),
-        decision_applier="app.stages.repeat_annotation.nodes:apply_mask_review_decision",
-        template_preferred_decision="accept",
-    )
-)
-
-register_review_gate(
-    ReviewGateDeclaration(
-        stage="gene_annotation",
-        gate_id="gene_method_planning_review",
-        decisions_allowed=("select_methods", "accept", "stop"),
-        decision_applier="app.stages.gene_annotation.nodes:apply_gene_method_planning_review_decision",
-        template_preferred_decision="select_methods",
-    )
-)
-
-register_review_gate(
-    ReviewGateDeclaration(
-        stage="gene_annotation",
-        gate_id="candidate_evidence_review",
-        decisions_allowed=("proceed_merge", "request_rerun", "stop"),
-        decision_applier="app.stages.gene_annotation.nodes:apply_candidate_evidence_review_decision",
-        template_preferred_decision="proceed_merge",
-    )
-)
-
-register_review_gate(
-    ReviewGateDeclaration(
-        stage="gene_annotation",
-        gate_id="merge_review",
-        decisions_allowed=("accept_weights", "adjust_weights", "stop"),
-        decision_applier="app.stages.gene_annotation.nodes:apply_merge_review_decision",
-        template_preferred_decision="accept_weights",
-    )
-)
-
-register_review_gate(
-    ReviewGateDeclaration(
-        stage="gene_annotation",
-        gate_id="final_gene_set_review",
-        decisions_allowed=("accept", "reject", "stop"),
-        decision_applier="app.stages.gene_annotation.nodes:apply_final_gene_set_review_decision",
-        template_preferred_decision="accept",
     )
 )

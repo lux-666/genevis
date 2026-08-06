@@ -2,29 +2,19 @@
 
 from __future__ import annotations
 
+from app.control.workflow_plan import current_workflow_step, seed_current_workflow_step
 from app.schemas.state import StateUpdate, TopLevelState
-from app.workflow import STAGE_ORDER, TERMINAL_STAGE, next_requested_stage
 
 
 def route_controller(state: TopLevelState) -> StateUpdate:
-    """Record that the parent graph evaluated routing.
-
-    Also skips stages not in requested_stages by advancing current_stage.
-    """
+    """Seed and dispatch exactly the active frozen workflow occurrence."""
     supervision = state.get("supervision_state")
     if supervision in ("failed_terminal", "completed", "blocked_human"):
         return {}
-    current = state.get("current_stage", "inventory")
-    requested = state.get("requested_stages")
-    if (
-        requested is not None
-        and current != "inventory"
-        and current != TERMINAL_STAGE
-        and current not in requested
-    ):
-        next_req = next_requested_stage(current, requested)
-        return {"supervision_state": "idle", "current_stage": next_req}
-    return {"supervision_state": "idle"}
+    step = current_workflow_step(state)
+    if step is None:
+        return {"current_stage": "done", "supervision_state": "completed"}
+    return {"supervision_state": "idle", **seed_current_workflow_step(state)}
 
 
 def route_from_current_stage(state: TopLevelState) -> str:
@@ -32,9 +22,7 @@ def route_from_current_stage(state: TopLevelState) -> str:
     supervision = state.get("supervision_state")
     if supervision in ("failed_terminal", "blocked_human"):
         return "end"
-    current_stage = state.get("current_stage", "inventory")
-    if current_stage == TERMINAL_STAGE:
+    step = current_workflow_step(state)
+    if step is None:
         return "end"
-    if current_stage not in STAGE_ORDER:
-        return "end"
-    return f"{current_stage}_stage"
+    return f"{step['stage']}_stage"

@@ -18,11 +18,13 @@ from app.storage.paths import (
     SessionPaths,
     ensure_run_layout,
     validate_data_layout,
+    validate_path_component,
 )
 from app.storage.publish import publish_file
 
 _ARTIFACT_NAMESPACE = uuid5(NAMESPACE_URL, "https://gene-agent.local/data-v2/artifact")
 _INDEX_ID_FIELDS = (
+    "workflow_step_id",
     "recommendation_id",
     "attempt_id",
     "review_id",
@@ -87,11 +89,13 @@ def publish_artifact_records(
 ) -> list[ArtifactRef]:
     """Move stage-work files into immutable storage and register them.
 
-    Sources must live below the matching ``work/<stage>/`` tree.  Files that
-    have already crossed the publication boundary must be passed to
+    Sources must live below the matching
+    ``work/steps/<workflow_step_id>/<stage>/`` tree.  Files that have already
+    crossed the publication boundary must be passed to
     :func:`register_artifact_records` instead.  Keeping the two operations
-    distinct prevents a producer from overwriting a fixed ``artifacts/`` path
-    and only discovering the conflict while appending the index row.
+    distinct prevents a producer from overwriting a fixed occurrence-scoped
+    artifact path and only discovering the conflict while appending the index
+    row.
     """
 
     return [
@@ -110,11 +114,12 @@ def publish_artifact_record(
     """Explicitly publish and index one artifact, returning its durable identity.
 
     Without an explicit destination, the source must live below the matching
-    ``work/<stage>/`` tree and is published to
-    ``artifacts/<stage>/outputs/``.  An explicit destination accepts any
-    run-local ``work/`` source and must point below the run's ``artifacts/``
-    tree; this supports fixed contract paths without allowing artifact-to-
-    artifact rewrites.
+    ``work/steps/<workflow_step_id>/<stage>/`` tree and is published to
+    ``artifacts/steps/<workflow_step_id>/<stage>/outputs/``.  An explicit
+    destination accepts a source from that same occurrence's work tree and
+    must point below its ``artifacts/steps/<workflow_step_id>/<stage>/`` tree;
+    this supports fixed contract paths without allowing cross-occurrence
+    attribution or artifact-to-artifact rewrites.
     """
 
     paths = _session_paths(data_dir, session_id)
@@ -390,6 +395,15 @@ def _registration_for(paths: SessionPaths, artifact: ArtifactMeta) -> dict[str, 
             f"session_id must not be repeated below the run root: {artifact_path}"
         )
 
+    workflow_step_id = _workflow_step_id_from_artifact_path(paths, artifact_path)
+    metadata = dict(artifact.metadata or {})
+    supplied_step_id = metadata.get("workflow_step_id")
+    if supplied_step_id is not None and supplied_step_id != workflow_step_id:
+        raise DataLayoutError(
+            "artifact workflow_step_id does not match its step-scoped path"
+        )
+    artifact.metadata = {**metadata, "workflow_step_id": workflow_step_id}
+
     path_ref = paths.to_ref(artifact_path)
     digest = sha256_file(artifact_path)
     size_bytes = artifact_path.stat().st_size
@@ -436,7 +450,10 @@ def _publish_work_backed_artifact(paths: SessionPaths, artifact: ArtifactMeta) -
 def _work_artifact_destination(paths: SessionPaths, source: Path, stage: str) -> Path:
     """Return the one durable output path for a declared stage-work file."""
 
-    stage_work_dir = paths.stage_work_dir(stage)
+    workflow_step_id = _workflow_step_id_from_work_path(paths, source)
+    stage_work_dir = paths.workflow_step_work_dir(
+        workflow_step_id, stage
+    )
     try:
         relative = source.relative_to(stage_work_dir)
     except ValueError as exc:
@@ -446,7 +463,9 @@ def _work_artifact_destination(paths: SessionPaths, source: Path, stage: str) ->
         ) from exc
     if paths.session_id in relative.parts:
         raise DataLayoutError(f"session_id must not be repeated below work/: {source}")
-    return paths.artifact_path(stage, "outputs", *relative.parts)
+    return paths.workflow_step_artifact_path(
+        workflow_step_id, stage, "outputs", *relative.parts
+    )
 
 
 def _publish_to_destination(
@@ -455,12 +474,20 @@ def _publish_to_destination(
     destination: Path | str,
 ) -> Path:
     source = Path(artifact.file_path).expanduser().resolve(strict=False)
-    _require_work_source(paths, source)
+    source_step_id = _require_work_source(paths, source)
     destination_path = _artifact_destination_path(paths, destination)
+    destination_step_id = _workflow_step_id_from_artifact_path(
+        paths, destination_path
+    )
+    if source_step_id != destination_step_id:
+        raise DataLayoutError(
+            "publication source and destination must belong to the same "
+            "workflow step"
+        )
     return publish_file(source, destination_path)
 
 
-def _require_work_source(paths: SessionPaths, source: Path) -> None:
+def _require_work_source(paths: SessionPaths, source: Path) -> str:
     try:
         relative = source.relative_to(paths.work_dir)
     except ValueError as exc:
@@ -469,6 +496,7 @@ def _require_work_source(paths: SessionPaths, source: Path) -> None:
         ) from exc
     if paths.session_id in relative.parts:
         raise DataLayoutError(f"session_id must not be repeated below work/: {source}")
+    return _workflow_step_id_from_work_path(paths, source)
 
 
 def _artifact_destination_path(
@@ -490,6 +518,32 @@ def _artifact_destination_path(
             f"session_id must not be repeated below the run root: {destination_path}"
         )
     return destination_path
+
+
+def _workflow_step_id_from_work_path(paths: SessionPaths, path: Path) -> str:
+    try:
+        relative = path.relative_to(paths.work_dir)
+    except ValueError as exc:
+        raise DataLayoutError(f"work path is outside {paths.work_dir}: {path}") from exc
+    if len(relative.parts) < 3 or relative.parts[0] != "steps":
+        raise DataLayoutError(
+            "workflow-owned work paths must be below work/steps/<workflow_step_id>/"
+        )
+    return validate_path_component(relative.parts[1], "workflow_step_id")
+
+
+def _workflow_step_id_from_artifact_path(paths: SessionPaths, path: Path) -> str:
+    try:
+        relative = path.relative_to(paths.artifacts_dir)
+    except ValueError as exc:
+        raise DataLayoutError(
+            f"artifact path is outside {paths.artifacts_dir}: {path}"
+        ) from exc
+    if len(relative.parts) < 3 or relative.parts[0] != "steps":
+        raise DataLayoutError(
+            "workflow-owned artifacts must be below artifacts/steps/<workflow_step_id>/"
+        )
+    return validate_path_component(relative.parts[1], "workflow_step_id")
 
 
 def _indexed_artifact_ref_for_path(
@@ -581,6 +635,16 @@ def _validate_record(record: Any, paths: SessionPaths, line_number: int) -> None
     if paths.session_id in relative.parts[1:]:
         raise DataLayoutError(
             f"artifact index row {line_number} repeats session_id below the run root"
+        )
+    workflow_step_id = record.get("workflow_step_id")
+    if not isinstance(workflow_step_id, str) or not workflow_step_id:
+        raise DataLayoutError(
+            f"artifact index row {line_number} has no workflow_step_id"
+        )
+    path_step_id = _workflow_step_id_from_artifact_path(paths, resolved)
+    if path_step_id != workflow_step_id:
+        raise DataLayoutError(
+            f"artifact index row {line_number} workflow_step_id does not match path"
         )
     if not isinstance(record["sha256"], str) or not _SHA256_PATTERN.fullmatch(
         record["sha256"]

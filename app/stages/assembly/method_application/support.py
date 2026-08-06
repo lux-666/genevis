@@ -11,7 +11,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
@@ -41,6 +41,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
     ArtifactMeta,
     ArtifactRef,
+    ArtifactRefJson,
     AssemblyCandidateBundle,
     AssemblyNativeOutput,
     ParameterAttempt,
@@ -108,6 +109,8 @@ class AssemblyNativeOutputDeclaration:
     ]
     native_role: str
     media_type: str
+
+
 _PARAMETER_KEY_BY_METHOD = {
     FLYE_METHOD: "flye_parameters",
     NEXTDENOVO_METHOD: "nextdenovo_parameters",
@@ -464,9 +467,7 @@ def collect_method_artifacts(
         attempt.metadata.get("planned_candidate_bundle_ref")
     )
     if attempt_plan_ref != plan_ref:
-        raise ValueError(
-            f"{lifecycle.name} frozen attempt candidate plan ref drifted"
-        )
+        raise ValueError(f"{lifecycle.name} frozen attempt candidate plan ref drifted")
     bundle_path = planned_candidate.path
     plan = planned_candidate.bundle
     draft_value = execution.attempt.metadata.get("draft_assembly_path")
@@ -662,8 +663,8 @@ def collect_method_artifacts(
         {
             "status": "draft_ready",
             "draft_assembly_ref": str(verified_bundle.primary_output_path),
-            "executed_candidate_bundle_ref": verified_bundle.ref.model_dump(
-                mode="json"
+            "executed_candidate_bundle_ref": cast(
+                ArtifactRefJson, verified_bundle.ref.model_dump(mode="json")
             ),
             "artifact_refs": ordered_unique(
                 [
@@ -731,7 +732,7 @@ def build_read_input_dependencies(
     member_ids: list[str] = list(
         (dict(output.get("assembly_input_member_ids") or {})).get(role) or []
     )
-    artifact_refs: list = list(
+    artifact_refs: list[Any] = list(
         (dict(output.get("assembly_input_artifact_refs") or {})).get(role) or []
     )
     path_list = list(paths)
@@ -774,14 +775,12 @@ def _planned_candidate_bundle(
     verified = load_planned_candidate_bundle(
         absolute_data_dir(state),
         state["session_id"],
-        raw_ref,
+        ArtifactRef.model_validate(raw_ref),
         expected_method_name=method_name,
         expected_parameter_attempt_id=parameter_attempt_id,
     )
     expected_member_ids = dict(output.get("assembly_input_member_ids") or {})
-    expected_platforms = dict(
-        output.get("assembly_input_member_platforms") or {}
-    )
+    expected_platforms = dict(output.get("assembly_input_member_platforms") or {})
     if (
         verified.bundle.input_type != output.get("input_type")
         or verified.bundle.input_member_ids != expected_member_ids

@@ -32,6 +32,10 @@ enter -> validate_inputs -> plan_methods -> method_subgraph
 - review may open a human gate;
 - commit updates the central logical resource table and advances routing.
 
+The frozen occurrence sequence decides which stage subgraphs are reached.  It
+does not prove that their biological inputs exist: every reached stage resolves
+and validates its own logical resources before it plans or runs a method.
+
 Unregistered future tools are not stage candidates. Adding one requires its
 descriptor, executable adapter, routing, run-config contract, and tests in the
 same change.
@@ -51,8 +55,12 @@ Current behavior:
 - publishes the asset registry;
 - initializes `long_reads`, `short_reads`, `hic_reads`, and `assembly` logical
   resources when the corresponding assets exist;
-- routes an existing assembly past read QC, survey, and assembly when those
-  stages are not needed.
+- registers an `assembly_fasta_registered` manifest asset as the central
+  `assembly` logical resource.
+
+An existing assembly does not rewrite or constrain the frozen occurrence
+sequence. `assembly_review` is the normal recommended first analytical
+occurrence for that input, not a public-run entry restriction.
 
 Ambiguous long DNA/RNA classification opens a review gate. Inventory does not
 run QC, survey, or assembly tools.
@@ -107,7 +115,7 @@ estimate exists when assembly requires one, the workflow fails with
 `GENOME_SIZE_UNAVAILABLE`. The checkpoint's `survey_input_family` and
 `resolved_assets` expose only the `short_reads` and `long_reads` logical
 families. Jellyfish publishes typed k-mer `ArtifactRef` objects, which
-GenomeScope2 consumes without path-string compatibility conversion.
+GenomeScope2 consumes it without a path-string conversion.
 
 ## 4. Assembly
 
@@ -164,6 +172,13 @@ Logical input and output:
 - requires `assembly`;
 - updates `assembly` after review or an approved corrective action.
 
+Assembly Review is a reusable, independent subgraph. Inventory registers an
+existing assembly through the same central `assembly` `ResourceRef` used by
+upstream-produced assemblies. When an Assembly Review occurrence is reached,
+the stage validates the assembly and the candidate/evidence required by its
+current operation; it must not bypass the resource contract with a bare
+`fasta_path`.
+
 Registered methods:
 
 - `assembly_review.eval.quast`;
@@ -191,9 +206,8 @@ Registered method:
 
 - `hic_scaffolding.candidate.autohic`.
 
-The parent graph bypasses this stage only when `hic_scaffolding` is not in the
-requested stage set. If the stage was requested, missing assembly, paired Hi-C
-reads, or runtime configuration enters the stage and produces a terminal
+This stage runs only when its frozen workflow occurrence is reached. Missing
+assembly, paired Hi-C reads, or runtime configuration then produces a terminal
 `blocked_missing_requirements` outcome. AutoHiC owns the Juicer/3D-DNA and
 model-assisted correction pipeline. Its adjustable L2 surface includes the
 restriction enzyme, edit rounds, correction switches, and error thresholds.
@@ -217,8 +231,8 @@ not create a review gate, and does not cause automatic retry or rollback.
 
 ## 8. GapCloser Placeholder
 
-Intended purpose: fill structural sequence gaps in the chromosome-scale
-assembly after Hi-C scaffolding and before T2T finishing.
+Intended purpose: fill structural sequence gaps in an assembly when an operator
+places this placeholder occurrence in the frozen workflow.
 
 Current contract:
 
@@ -226,13 +240,10 @@ Current contract:
   descriptor, local-execution configuration, artifact contract, or resource
   handoff;
 - automatic prefix expansion and manifest-derived recommendations omit it;
-- when absent from an explicit `requested_stages` list, normal parent routing
-  skips it;
-- an explicit request writes only a strict `blocked_not_implemented` cursor and
+- a frozen occurrence writes only a strict `blocked_not_implemented` cursor and
   terminates through the existing failed boundary;
-- an internal/TUI legacy `requested_stages = null` traversal records
-  `stage_skipped:not_implemented`, writes no stage cursor or completion trace,
-  and advances to T2T; public `gene-agent run` rejects JSON `null` before freeze.
+- an absent occurrence has no runtime behavior. `None` is only an unfinished
+  planner/TUI draft, and public `gene-agent run` rejects JSON `null` before freeze.
 
 This placeholder does not read or update the central `assembly` resource. Tool
 selection, input reads, expected products, validation, adoption, and provenance
@@ -250,12 +261,10 @@ Logical inputs and output:
   ONT, PacBio HiFi, CLR, and CycloneSEQ inputs;
 - updates `assembly` only when a materialized result is selected.
 
-On the first HPC golden path, the current assembly is the product adopted by
-`hic_scaffolding`. The present `gapcloser` placeholder cannot alter that
-handoff: an explicit GapCloser request stops before T2T, while an unrequested
-placeholder is skipped. T2T never consumes `hic_reads` directly. A configured
+T2T consumes the central assembly as it exists when that frozen occurrence is
+reached. It never consumes `hic_reads` directly. A configured
 `t2t.assembly_fasta_ref` is only an equality assertion against the current
-central assembly and cannot bypass the Hi-C adoption handoff.
+central assembly; it cannot bypass resource adoption by an earlier occurrence.
 
 Registered method:
 
@@ -285,8 +294,9 @@ and the source FASTA is never overwritten.
 
 ## 10. Base Polish Placeholder
 
-Intended purpose: correct base substitutions and small indels in the adopted
-T2T assembly before repeat annotation.
+Intended purpose: correct base substitutions and small indels in the assembly
+available when an operator places this placeholder occurrence in the frozen
+workflow.
 
 Current contract:
 
@@ -294,78 +304,11 @@ Current contract:
   descriptor, local-execution configuration, artifact contract, or resource
   handoff;
 - automatic stage recommendations omit it;
-- when absent from an explicit `requested_stages` list, normal parent routing
-  skips it;
-- an explicit request writes only a strict `blocked_not_implemented` cursor and
+- a frozen occurrence writes only a strict `blocked_not_implemented` cursor and
   terminates through the existing failed boundary;
-- an internal/TUI legacy `requested_stages = null` traversal records
-  `stage_skipped:not_implemented`, writes no stage cursor or completion trace,
-  and advances to Repeat Annotation; public `gene-agent run` rejects JSON
-  `null` before freeze.
+- an absent occurrence has no runtime behavior. `None` is only an unfinished
+  planner/TUI draft, and public `gene-agent run` rejects JSON `null` before freeze.
 
 This placeholder does not read or update the central `assembly` resource.
 Polishing-read choice, method selection, expected products, validation,
 adoption, and provenance remain future contracts.
-
-## 11. Repeat Annotation
-
-Purpose: mask repeats on the adopted assembly for downstream gene prediction.
-
-Logical input and output:
-
-- requires `assembly`;
-- publishes `masked_assembly`.
-
-Registered method:
-
-- `repeat_annotation.masking.repeatmasker`.
-
-Current local execution requires an explicitly operator-registered
-`repeat_library` asset whose path is materialized; there is no separately
-enforced `metadata.trusted` flag. RepeatMasker publishes masking output and
-annotation evidence. De-novo library discovery is currently planning-only, so
-the stage does not claim that an unregistered EDTA or RepeatModeler process ran.
-
-## 12. Gene Annotation
-
-Purpose: produce reviewed gene models and predicted proteins.
-
-Logical inputs and output:
-
-- prefers `masked_assembly`;
-- may fall back to `assembly` only with an explicit unmasked-fallback reason;
-- publishes `predicted_proteins`.
-
-Registered selectable methods:
-
-- `gene_annotation.candidate.augustus`;
-- `gene_annotation.candidate.miniprot`.
-
-Current helper executions are `gene_annotation.materialize.gffread`,
-`gene_annotation.merge.evm`, and `gene_annotation.busco`. Helpers are not
-operator-selectable stage methods.
-
-When gene models and predicted proteins are supplied in the manifest, the stage
-adopts those exact assets and records their provenance instead of running a
-predictor. Otherwise it executes the selected registered predictors, reviews
-their evidence, optionally merges retained candidates, materializes proteins,
-and records gene-set completeness. Evidence conflicts and unmasked fallback are
-review signals, not implicit method-selection rules.
-
-## 13. Function Annotation
-
-Purpose: attach database-backed homology annotations to predicted proteins.
-
-Logical input:
-
-- requires `predicted_proteins`.
-
-Registered method:
-
-- `function_annotation.candidate.diamond`.
-
-DIAMOND execution requires explicit database provenance whose input-protein ref
-matches the materialized proteins. The stage publishes annotation artifacts and
-terminal evidence; it does not create another cross-stage path resource.
-Unknown database versions, missing provenance, execution failure, or missing
-output prevent successful completion.

@@ -20,8 +20,8 @@ from langchain_core.runnables import RunnableConfig
 
 from app.review.gates import find_review_gate, registered_review_stage_label
 from app.schemas.state import ActiveInterrupt, validate_top_level_state
+from app.storage.artifacts import read_artifact_records
 from app.storage.paths import SessionPaths, locate_session_data_dir
-from app.workflow import STAGE_ORDER
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
@@ -35,22 +35,18 @@ InputWaiter = Callable[[TextIO, float], bool]
 # Rendering
 # ---------------------------------------------------------------------------
 
-ASSEMBLY_REVIEW_DOWNSTREAM_FLOW = " -> ".join(
-    STAGE_ORDER[STAGE_ORDER.index("assembly_review") :]
-)
-
 ASSEMBLY_REVIEW_DECISION_HELP = {
     "accept": (
-        "Approve the selected assembly and continue through the requested "
-        "downstream finishing and annotation stages in canonical order."
+        "Approve the selected assembly; execution then follows the remaining "
+        "frozen workflow steps."
     ),
     "pass": (
-        "Same as accept: pass the selected assembly through the requested "
-        "downstream stages in canonical order."
+        "Pass the selected assembly unchanged; execution then follows the "
+        "remaining frozen workflow steps."
     ),
     "continue_low_confidence": (
         "Continue downstream despite weak or incomplete evidence; "
-        "the next stage is still Hi-C scaffolding."
+        "the frozen workflow sequence determines what runs next."
     ),
     "purge": (
         "Use an already generated purged assembly as the downstream input; "
@@ -60,9 +56,7 @@ ASSEMBLY_REVIEW_DECISION_HELP = {
         "Use an already generated polished assembly as the downstream input; "
         "provide its output path and evidence."
     ),
-    "stop_human_review": (
-        "Stop here and leave downstream finishing and annotation stages unstarted."
-    ),
+    "stop_human_review": ("Stop here and leave downstream finishing stages unstarted."),
 }
 
 DECISION_LABELS = {
@@ -83,11 +77,6 @@ DECISION_LABELS = {
     "accept_selected_candidates": "accept T2T patch",
     "continue_without_patch": "continue without T2T patch",
     "stop_pipeline": "stop workflow",
-    "defer_annotation": "defer annotation",
-    "proceed_merge": "merge gene candidates",
-    "merge_with_evm": "merge with EVM",
-    "request_rerun": "request rerun",
-    "stop": "stop workflow",
     "continue": "continue",
     "approve_parameters": "approve recommended parameters",
     "reject_parameters": "reject recommended parameters",
@@ -99,10 +88,12 @@ DECISION_HELP = {
     "select_ont": "use the ONT assembly route.",
     "select_hifi": "use the HiFi assembly route.",
     "accept_candidate": (
-        "use the reviewed scaffold result and continue to T2T/annotation."
+        "use the reviewed scaffold result and continue through the remaining "
+        "frozen workflow steps."
     ),
     "keep_prior_assembly": (
-        "reject the AutoHiC result and continue with the prior contig assembly."
+        "reject the AutoHiC result, retain the prior contig assembly, and "
+        "continue through the remaining frozen workflow steps."
     ),
     "request_parameter_retry": (
         "seal this AutoHiC attempt and request a fresh sparse parameter recommendation."
@@ -113,11 +104,6 @@ DECISION_HELP = {
     "accept_selected_candidates": "use the selected T2T patch candidates.",
     "continue_without_patch": "continue without applying T2T patches.",
     "stop_pipeline": "stop the workflow here.",
-    "defer_annotation": "pause before annotation.",
-    "proceed_merge": "merge the selected gene annotation candidates.",
-    "merge_with_evm": "merge candidates through EVM.",
-    "request_rerun": "ask for another run before continuing.",
-    "stop": "stop the workflow here.",
     "continue": "continue past this gate.",
     "approve_parameters": (
         "approve this exact, hash-bound parameter recommendation and continue "
@@ -160,7 +146,7 @@ def _render_assembly_review(
 ) -> None:
     decisions = requirements.get("decisions_allowed", [])
     _render_choices(decisions)
-    _render_assembly_review_downstream_context(decisions)
+    _render_assembly_review_downstream_context(summary, decisions)
 
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_primary_output_refs") or {}
@@ -184,15 +170,39 @@ def _render_assembly_review(
             print(f"  {key}: {val}")
 
 
-def _render_assembly_review_downstream_context(decisions: list[str]) -> None:
+def _render_assembly_review_downstream_context(
+    summary: dict[str, Any], decisions: list[str]
+) -> None:
     print("\nafter_accepting_assembly:")
-    print(f"  flow: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
-    print(
-        "  note: accepting an assembly continues through requested downstream "
-        "stages in the canonical order shown above."
-    )
+    following_steps = _following_frozen_workflow_steps(summary)
+    if following_steps:
+        print(f"  next: {' -> '.join(following_steps)}")
+    print("  note: execution follows the remaining frozen workflow steps as written;")
+    print("        runtime does not append or reorder them.")
     if decisions:
         _render_decision_meanings(decisions)
+
+
+def _following_frozen_workflow_steps(summary: dict[str, Any]) -> list[str]:
+    """Return display labels for occurrences after the active frozen step."""
+
+    steps = summary.get("workflow_steps")
+    index = summary.get("workflow_step_index")
+    if not isinstance(steps, list) or type(index) is not int:
+        return []
+    if not 0 <= index < len(steps):
+        return []
+
+    labels: list[str] = []
+    for step in steps[index + 1 :]:
+        if not isinstance(step, dict):
+            return []
+        step_id = step.get("step_id")
+        stage = step.get("stage")
+        if not isinstance(step_id, str) or not isinstance(stage, str):
+            return []
+        labels.append(f"{step_id} ({stage})")
+    return labels
 
 
 def _render_hic_scaffolding(
@@ -326,13 +336,6 @@ def prompt_assembly_review_decision(
 ) -> dict[str, Any] | None:
     """Prompt the operator for an assembly_review decision. Returns None on cancel."""
     decisions = requirements.get("decisions_allowed", [])
-    if "rerun" in decisions:
-        print(
-            "error: legacy assembly_review rerun requirements are unsupported; "
-            "parameter retries must use the v3 recommendation and approval workflow",
-            file=sys.stderr,
-        )
-        return None
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_primary_output_refs") or {}
 
@@ -419,9 +422,7 @@ def _candidate_choice_descriptions(
     candidate_ids: list[str],
     candidate_refs: dict[str, Any],
 ) -> dict[str, str]:
-    return {
-        cid: _artifact_ref_label(candidate_refs.get(cid)) for cid in candidate_ids
-    }
+    return {cid: _artifact_ref_label(candidate_refs.get(cid)) for cid in candidate_ids}
 
 
 def _artifact_ref_label(value: Any) -> str:
@@ -482,8 +483,6 @@ def _print_selected_assembly_review_decision_effect(decision: str) -> None:
     if not help_text:
         return
     print(f"\neffect: {help_text}")
-    if decision in {"accept", "pass", "continue_low_confidence", "purge", "polish"}:
-        print(f"next: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
 
 
 def prompt_hic_scaffolding_decision(
@@ -1232,6 +1231,8 @@ def _checkpoint_blocked_summary(
 
     state = validate_top_level_state(snapshot.values)
     summary = inspect_state(state)
+    summary["workflow_steps"] = state["workflow_steps"]
+    summary["workflow_step_index"] = state["workflow_step_index"]
     summary["checkpoint_persistence"] = "sqlite"
     summary["durable_resume_available"] = True
     summary["latest_review_request_artifact"] = None
@@ -1261,17 +1262,38 @@ def persist_decision_artifact(
 ) -> Path:
     """Write a non-authoritative dry-run preview below the run work tree.
 
-    Applied decisions are persisted exactly once by the registered gate under
-    ``artifacts/reviews/<review_request_id>/decision.json``.  This helper is
-    retained for ``--dry-run`` only and deliberately does not register an
-    artifact or create a second source of truth.
+    Applied decisions are persisted exactly once by the registered gate below
+    that occurrence's step-scoped artifact tree.  This helper is retained for
+    ``--dry-run`` only and deliberately does not register an artifact or create
+    a second source of truth.
     """
 
     review_request_id = raw_decision.get("review_request_id")
     if not review_request_id:
         raise ValueError("decision preview requires review_request_id")
-    decision_dir = SessionPaths.from_run_dir(data_dir).work_path(
-        "reviews", review_request_id
+    paths = SessionPaths.from_run_dir(data_dir)
+    request_records = [
+        record
+        for record in read_artifact_records(paths.run_dir, session_id)
+        if record.get("stage") == stage
+        and record.get("review_request_id") == review_request_id
+    ]
+    workflow_step_ids = {
+        str(record.get("workflow_step_id"))
+        for record in request_records
+        if record.get("workflow_step_id")
+    }
+    if len(workflow_step_ids) != 1:
+        raise ValueError(
+            "decision preview could not resolve one workflow occurrence for "
+            f"review request {review_request_id!r}"
+        )
+    workflow_step_id = next(iter(workflow_step_ids))
+    decision_dir = paths.workflow_step_work_path(
+        workflow_step_id,
+        stage,
+        "reviews",
+        review_request_id,
     )
     decision_dir.mkdir(parents=True, exist_ok=True)
     decision_path = decision_dir / "decision.preview.json"
@@ -1301,7 +1323,6 @@ def run_interactive_review(
         execute_resume_transaction,
     )
     from app.graph.checkpointer import checkpoint_db_path
-    from app.review.annotation_intake import collect_annotation_intake_selection
 
     result = collect_gate_decision(session_id, data_dir)
     if result is None:
@@ -1335,7 +1356,6 @@ def run_interactive_review(
             request=request,
             source="interactive_review",
             checkpointer="sqlite",
-            annotation_intake_collector=collect_annotation_intake_selection,
         )
     except ResumeTransactionError as exc:
         if exc.phase == "validation":
@@ -1347,8 +1367,6 @@ def run_interactive_review(
     final = transaction.state
     if transaction.decision_artifact_path is not None:
         print(f"decision_artifact: {transaction.decision_artifact_path}")
-    if transaction.annotation_intake_artifact_ref is not None:
-        print(f"annotation_intake_plan: {transaction.annotation_intake_artifact_ref}")
 
     print(f"\nsession_id:        {session_id}")
     print(f"current_stage:     {final.get('current_stage', 'unknown')}")

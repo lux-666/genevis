@@ -1,6 +1,6 @@
 # Gene Agent
 
-Gene Agent 是一个面向长读长基因组组装与注释项目的 LangGraph 工作流
+Gene Agent 是一个面向长读长基因组组装项目的 LangGraph 工作流
 Agent。它把传统生信 pipeline 中分散的脚本、参数、人工判断和运行记录，
 整理成可恢复、可审计、可人机协同决策的工程化流程。
 
@@ -13,11 +13,11 @@ Agent。它把传统生信 pipeline 中分散的脚本、参数、人工判断�
 
 长读长基因组分析通常不是一次命令就能结束的任务。真实项目里会遇到：
 
-- 输入文件类型复杂：ONT、HiFi、CLR、CycloneSEQ long reads、short reads、Hi-C、已有 assembly、注释证据等。
-- 分析阶段长：read QC、genome survey、assembly、assembly review、Hi-C scaffolding、repeat/gene/function annotation。
-- 方法选择依赖上下文：同一阶段可能有 Flye、NextDenovo、QUAST、BUSCO、RepeatMasker、Miniprot、AUGUSTUS、DIAMOND 等不同工具。
-- 中间结果巨大：FASTQ、FASTA、BAM、GFF3、日志和指标表不适合塞进 agent state。
-- 生物学判断不能乱自动化：assembly 是否接受、Hi-C scaffolding 是否可信、gene set 是否进入下游，都需要证据和人工 gate。
+- 输入文件类型复杂：ONT、HiFi、CLR、CycloneSEQ long reads、short reads、Hi-C、已有 assembly 等。
+- 分析阶段长：read QC、genome survey、assembly、assembly review、Hi-C scaffolding、T2T finishing。
+- 方法选择依赖上下文：同一阶段可能有 Flye、NextDenovo、QUAST、BUSCO、AutoHiC、minimap2 等不同工具。
+- 中间结果巨大：FASTQ、FASTA、BAM、日志和指标表不适合塞进 agent state。
+- 生物学判断不能乱自动化：assembly 是否接受、Hi-C scaffolding 是否可信、T2T patch 是否采用，都需要证据和人工 gate。
 
 Gene Agent 的目标不是“替代所有生信专家”，而是把一个多阶段 genome project
 变成一个有状态、有证据、有恢复能力的工作流系统。
@@ -35,9 +35,6 @@ inventory
 -> gapcloser
 -> t2t
 -> base_polish
--> repeat_annotation
--> gene_annotation
--> function_annotation
 -> done
 ```
 
@@ -75,15 +72,9 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 | assembly_review | QUAST、BUSCO |
 | hic_scaffolding | AutoHiC（内部使用 Juicer、3D-DNA 和模型校正） |
 | t2t | minimap2 |
-| repeat_annotation | RepeatMasker |
-| gene_annotation | AUGUSTUS、Miniprot |
-| function_annotation | DIAMOND blastp |
 
 `gapcloser` 和 `base_polish` 不在 descriptor registry 中，也不允许写入
-`local_exec`。它们目前只有父图位置、严格状态合同和显式失败边界，没有可执行方法。
-
-Gene Annotation 还会运行不可由操作员选择的内部 helper：gffread、EVM 和
-BUSCO；它们不属于 stage 的 `by_stage` 方法列表。
+`allow_local_execution: true`。它们目前只有父图位置、严格状态合同和显式失败边界，没有可执行方法。
 
 未实现的方法不进入 registry，也不出现在当前能力表中。
 
@@ -91,7 +82,8 @@ BUSCO；它们不属于 stage 的 `by_stage` 方法列表。
 
 ```text
 app/
-  workflow.py   canonical stage order, navigation, and terminal failure routing
+  workflow.py   stage registry order, default planning, and failure predicates
+  control/      frozen occurrence plan plus lifecycle and resume semantics
   domains/      stage-neutral biological rules and shared input parsing
   graph/        parent LangGraph, route controller, checkpoint factory
   stages/       one subgraph per biological workflow stage
@@ -99,7 +91,6 @@ app/
   execution/    env resolution, frozen attempts, local runner, process evidence
   storage/      run layout, artifact publication/index, parameter evidence, ledger
   review/       review gate registry, policies, recommendation/resume helpers
-  control/      lifecycle and resume semantics
   reports/      operator reports and run traces
   entrypoints/  CLI boundaries, planner/TUI, review/resume commands
 
@@ -132,9 +123,13 @@ gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interact
 
 `manifest` 是唯一的 `session_id` 所有者；`data-dir` 是布局根目录，运行输出固定在
 `<data-dir>/runs/<session_id>/`。命令在写出任何运行输入之前校验并规范化两个文件，
-要求 run config 显式提供 JSON 数组 `requested_stages` 和 `local_exec`；其中
-`requested_stages` 不得为 `null`，但 `[]` 是有效的空业务阶段计划。随后命令冻结请求
-stages 及保守的依赖闭包，并以 SQLite 执行已冻结的会话。冻结发布顺序为
+要求 run config 显式提供 `requested_stages` JSON 对象列表；每项形如
+`{"stage": "assembly_review", "allow_local_execution": true}`，其中 stage
+定义一个有序 occurrence，布尔值只授权该 occurrence 启动本地进程。列表允许重复
+stage 和任意顺序；冻结时会在首位隐式加入 `step-000-inventory`，其余 `step_id`
+由列表位置生成。`requested_stages` 不得为 `null`，但 `[]` 是有效的 inventory-only
+计划。随后命令冻结 occurrence 序列及保守的依赖闭包，并以 SQLite 执行已冻结的
+会话。冻结发布顺序为
 `input_manifest.yaml`、`run_config.json`、`dependency_manifest.json`，最后才是提交标记
 `frozen_inputs.json`。
 
@@ -183,7 +178,7 @@ Describe what you want to do (e.g. '对 /path/reads.fa 以卵鳎为目标物种�
 这时输入一句话任务，例如：
 
 ```text
-对 /data/project/reads.fastq.gz 以卵鳎为目标物种进行 chromosome 级别基因组组装和注释
+对 /data/project/reads.fastq.gz 以卵鳎为目标物种进行 chromosome 级别基因组组装
 ```
 
 TUI 的实际流程是：
@@ -191,98 +186,75 @@ TUI 的实际流程是：
 1. 让用户用自然语言描述任务。
 2. 用 LLM intent parser 和保守的本地识别器确定 intake 追问范围；这一步只决定还要问哪些样本事实，不决定最终 stages。
 3. 逐项确认当前 intake 支持的 HiFi、ONT、成对 Hi-C、物种和 telomere motif，并持续重建 `manifest_draft.yaml`。
-4. intake 完成后，把原始请求、确认后的 manifest 和现有 method catalog 交给 LLM，生成一个复用 `AskPlanState` 字段的 Plan Draft：stages、methods 和部分 planning-time parameters。
-5. 进入现有 `Plan Draft` 页面，展示 session、data dir、manifest、inputs、stages、methods、parameters 和 attention 项。
-6. 在 draft 里可以按 `Enter/c` 继续，按 stage 编号编辑单个 stage，按 `s` 编辑 stage list，按 `r` 丢弃当前 draft；丢弃后可通过 `/resume` 重新生成。
-7. 进入单个 stage 后，可以按 `m` 改 method，按 `p` 改 parameters，按 `b` 返回 draft。依赖上游结果的运行期推荐参数仍显示为 deferred，不在这里伪造数值。
+4. intake 完成后，把原始请求、确认后的 manifest 和现有 method catalog 交给 LLM，生成一个复用 `AskPlanState` 字段的 Plan Draft：有序 `{stage, allow_local_execution}` occurrence、methods 和部分 planning-time parameters。
+5. 进入现有 `Plan Draft` 页面，展示 session、data dir、manifest、inputs、occurrences、methods、parameters 和 attention 项。
+6. 在 draft 里可以按 `Enter/c` 继续，按 occurrence 编号编辑单项，按 `s` 编辑可重复的有序 occurrence list，按 `r` 丢弃当前 draft；丢弃后可通过 `/resume` 重新生成。
+7. 进入单个 occurrence 后，可以按 `l` 单独授权/拒绝本地执行，按 `m` 改 stage-scoped method，按 `p` 改 parameters，按 `b` 返回 draft。依赖上游结果的运行期推荐参数仍显示为 deferred，不在这里伪造数值。
 8. draft 锁定后不会立刻执行；TUI 会再展示 final run plan 并询问 `Proceed?`。拒绝时返回同一个 Plan Draft 继续编辑。
-9. 用户确认后，TUI 写出 run config，把选中的 stage 写成 `requested_stages`，把获准在本机启动工具的 stage 写成 `local_exec`。
+9. 用户确认后，TUI 原样写出 occurrence 对象；每个布尔值只授权对应 occurrence 是否可在本机启动工具。
 10. TUI 冻结输入后，在同一进程内调用 session executor；不会再拼装或启动另一个 CLI 命令。运行中遇到 human gate 时，TUI 在 sqlite checkpoint 上收集决策、写 decision artifact、更新 checkpoint 并继续 graph。
 
 当前 TUI intake 的输入范围是 PacBio HiFi、ONT 和显式成对的 Hi-C reads，外加
-物种及 telomere motif。CLR、CycloneSEQ、short reads、已有 assembly 和 annotation
-reference/evidence assets 尚未接入这段追问流程。后端已有的 annotation stages 不会
-因此删除；LLM 可以把它们放进 draft，用户也可以编辑，但所需资产仍必须由当前已接入
-的上游产物满足。规划 LLM 失败或返回非法 draft 时，本次规划中止并保留草稿供
+物种及 telomere motif。CLR、CycloneSEQ、short reads 和已有 assembly 尚未接入
+这段追问流程。规划 LLM 失败或返回非法 draft 时，本次规划中止并保留草稿供
 `/resume` 重试，不使用确定性 stage plan 回退。
-
-Plan 层控制的是“这次项目要走哪些 stage”。底层 planner 和 stage contract 可以
-表达从已有 assembly 开始做注释的计划，例如：
-
-```text
-assembly_review -> repeat_annotation -> gene_annotation -> function_annotation
-```
-
-但当前 TUI intake 尚未收集 existing-assembly asset，因此这条输入入口属于后续接入
-范围，不应把上面的 plan 表达能力理解为当前 TUI 已经能完成该资产登记。
 
 如果要从 raw long reads 做完整主线，可以选择：
 
 ```text
 read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
 -> hic_scaffolding -> gapcloser -> t2t -> base_polish
--> repeat_annotation -> gene_annotation
--> function_annotation
 ```
 
-上面展示 canonical parent order；自动计划会省略两个 manual-only
-placeholder，直到对应方法、资源交接和执行合同真正实现。
+上面只是默认推荐顺序，不是运行时 successor 表；冻结的 run config 可以重排或重复
+stage。自动计划会省略两个 manual-only placeholder，直到对应方法、资源交接和执行
+合同真正实现。
 
 TUI 最终会把选择落到 run config：
 
 ```json
 {
   "requested_stages": [
-    "read_qc",
-    "genome_survey",
-    "assembly",
-    "assembly_dedup",
-    "assembly_review",
-    "repeat_annotation",
-    "gene_annotation",
-    "function_annotation"
-  ],
-  "local_exec": [
-    "read_qc",
-    "genome_survey",
-    "assembly",
-    "assembly_dedup",
-    "assembly_review"
+    {"stage": "read_qc", "allow_local_execution": true},
+    {"stage": "genome_survey", "allow_local_execution": true},
+    {"stage": "assembly", "allow_local_execution": true},
+    {"stage": "assembly_dedup", "allow_local_execution": true},
+    {"stage": "assembly_review", "allow_local_execution": true}
   ]
 }
 ```
 
-`requested_stages` 决定 parent graph 需要推进哪些业务阶段；未请求的阶段由路由
-和 stage contract 跳过或不进入。对公共 `gene-agent run`，它必须是显式、非 `null`
-的 JSON 数组；`null` 只保留给内部/TUI 兼容状态，不能作为结构化运行输入。
+`requested_stages` 的字面顺序就是业务 occurrence 顺序；未列出的 stage 没有运行时
+occurrence，也不会伪造 skipped 事件。每个 item 的 `allow_local_execution` 只决定
+该 occurrence 能否启动本地进程。对公共 `gene-agent run`，它必须是显式、非
+`null` 的 JSON 对象列表；`None` 只表示 planner/TUI 尚未完成的草稿，不能进入冻结
+或运行边界。
 
 ### 2. RunConfig Layer: choose execution and parameters
 
-`requested_stages` 只说明“要走哪些阶段”。是否真的运行本地工具，以及每个工具
-的参数，由 `local_exec` 和各 stage 的 config 控制。
+`requested_stages` 的每个对象同时说明“要走哪个阶段”和“该阶段是否授权本地执行”。
+方法参数仍由各 stage 的 config 控制。
 
 示例：从 long reads 做 read QC、Flye assembly、purge_dups 和 QUAST/BUSCO
-review，但暂时不执行 annotation 工具：
+review：
 
 ```json
 {
   "requested_stages": [
-    "read_qc",
-    "genome_survey",
-    "assembly",
-    "assembly_dedup",
-    "assembly_review",
-    "repeat_annotation",
-    "gene_annotation",
-    "function_annotation"
+    {"stage": "read_qc", "allow_local_execution": true},
+    {"stage": "genome_survey", "allow_local_execution": true},
+    {"stage": "assembly", "allow_local_execution": true},
+    {"stage": "assembly_dedup", "allow_local_execution": true},
+    {"stage": "assembly_review", "allow_local_execution": true}
   ],
-  "local_exec": [
-    "read_qc",
-    "genome_survey",
-    "assembly",
-    "assembly_dedup",
-    "assembly_review"
-  ],
+  "review_policy": {
+    "max_blocked_seconds": 300,
+    "stages": {
+      "assembly_review": {
+        "max_blocked_seconds": -1
+      }
+    }
+  },
   "shared_parameters": {
     "platform": "ont",
     "read_type": "ont_raw"
@@ -329,10 +301,11 @@ review，但暂时不执行 annotation 工具：
 `genome_size_estimate`；RunConfig 不重复保存该值。运行中由 genome survey
 得到的测量值则保留为独立的 stage output。
 
-`local_exec` 是本地执行授权边界：只有列在这里的 stage 才能启动本地工具，
-`assembly_dedup` 也遵守同一规则。一个 stage 可以出现在 `requested_stages` 但不在
-`local_exec`；此时它不得运行本地命令，具体是跳过、阻塞还是消费已有 evidence，
-由该 stage 的运行契约决定。
+`allow_local_execution` 是 occurrence 级本地执行授权边界：只有为 `true` 的
+requested-stage 对象才可启动本地工具，`assembly_dedup` 也遵守同一规则。同名
+stage 的两个 occurrence 可以分别授权或拒绝本地执行。对象的 stage 仍可被
+请求而其布尔值为 `false`；此时它不得运行本地命令，并由该 stage 的运行契约决定
+如何验证输入和处理该 occurrence。
 
 `review_policy.max_blocked_seconds` 的默认值是 `300`。可在
 `review_policy.stages.<stage>.max_blocked_seconds` 为已注册的 review stage 覆盖；
@@ -361,20 +334,20 @@ artifact registry、目标级别和已有产物决定执行、跳过或阻塞。
 
 几个实际例子：
 
-- **existing assembly input**：如果 manifest 只提供已有 assembly，inventory 会
-  直接把主线推进到 `assembly_review`，并记录 `read_qc`、`genome_survey`、
-  `assembly` 的 skip reason。
-- **Hi-C scaffolding**：父图只在 `requested_stages` 选择了
-  `hic_scaffolding` 时进入该子图；未选择时直接路由到下一个请求的 stage。
-  一旦选择，stage 会检查 contig assembly、成对 Hi-C R1/R2 reads 和 AutoHiC
+- **existing assembly input**：如果 manifest 提供已有 assembly，Inventory 将它注册为
+  central `assembly` resource。`assembly_review` 是通常推荐的首个分析 occurrence，
+  不是公共 `gene-agent run` 的冻结前限制；公共 run 保留操作者提供的 occurrence
+  顺序。每个实际到达的 stage 自行校验其输入，未列 stage 没有 occurrence，也不会生成
+  synthetic skip。
+- **Hi-C scaffolding**：父图只在当前冻结 occurrence 是 `hic_scaffolding` 时进入
+  该子图；未列入 `requested_stages` 就没有这个 occurrence，也不产生 bypass/skip
+  事件。一旦到达，stage 会检查 contig assembly、成对 Hi-C R1/R2 reads 和 AutoHiC
   运行配置，缺少必要条件会以 `blocked_missing_requirements` 终止，而不会写
   stage-local skip。AutoHiC 是固定且唯一的方法；LLM 推荐限制酶并等待人工
   批准后，AutoHiC 内部完成 Juicer mapping、3D-DNA scaffolding、深度学习
   纠错、染色体划分和 HTML report 生成，最后进入染色体组装采纳 gate。
-- **human gates**：`assembly_review`、`hic_scaffolding`、`t2t`、`gene_annotation`
-  等阶段会在需要人工判断时进入 `blocked_human`，并写 review request artifact。
-- **provenance gates**：`function_annotation` 需要明确的 database provenance；
-  没有数据库来源时不会假装成功。
+- **human gates**：`assembly_review`、`hic_scaffolding`、`t2t` 等阶段会在需要
+  人工判断时进入 `blocked_human`，并写 review request artifact。
 
 manifest 中的目标级别会影响 stage 内部决策：
 
@@ -399,7 +372,9 @@ assets:
 ```
 
 如果目标仅为 contig level，规划时不应选择 `hic_scaffolding`；父图会按
-`requested_stages` 绕过它。用户明确选择 Hi-C 后，stage 就按 AutoHiC 流程执行。
+冻结的 `requested_stages` 根本不创建该 occurrence。用户明确选择 Hi-C 后，只有
+对应 occurrence 的 `allow_local_execution: true` 才允许按 AutoHiC 流程启动本地
+工具。
 
 ## Inspect / Review / Resume
 
@@ -489,7 +464,6 @@ Intentional boundaries:
 - No in-agent remote execution. Real heavy bioinformatics runs happen by running the same CLI inside the server/HPC checkout.
 - Real execution is opt-in per stage. The agent should not silently launch expensive tools.
 - Unimplemented methods remain outside the descriptor registry.
-- Function annotation requires explicit database provenance before terminal completion.
 - Large biological files stay outside graph state.
 
 ## Read More

@@ -1,18 +1,19 @@
 """Structured run-config contract for frozen-session execution.
 
-The TUI freezes this document before execution. It supplies the stages opted
-into local execution, shared biological facts, and executor-owned settings.
+The TUI freezes this document before execution. It supplies requested stages
+with explicit local-execution authorization, shared biological facts, and
+executor-owned settings.
 
-The schema rejects unknown stages, unknown fields, and the combination of
-requesting local `assembly` execution without the three required Flye
-parameters. It does not invent defaults, does not carry descriptor or env
-facts, and is not a method catalog.
+The schema rejects unknown stages, unknown fields, and local `assembly`
+authorization without the selected method's required parameters. It does not
+invent execution consent, does not carry descriptor or env facts, and is not a
+method catalog.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
@@ -21,6 +22,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     ValidationError,
     field_validator,
     model_validator,
@@ -32,9 +34,10 @@ from app.domains.assembly.selection import (
     normalize_read_type,
 )
 from app.review.gates import registered_review_stages
-from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.manifest import InputManifest, Platform
 from app.schemas.shared_parameters import SpeciesFacts
+from app.schemas.state import MAX_WORKFLOW_STEPS
+from app.workflow import MANUAL_ONLY_STAGES
 
 RequestableStage = Literal[
     "read_qc",
@@ -46,22 +49,6 @@ RequestableStage = Literal[
     "gapcloser",
     "t2t",
     "base_polish",
-    "repeat_annotation",
-    "gene_annotation",
-    "function_annotation",
-]
-
-LocalExecStage = Literal[
-    "read_qc",
-    "genome_survey",
-    "assembly",
-    "assembly_dedup",
-    "assembly_review",
-    "hic_scaffolding",
-    "t2t",
-    "repeat_annotation",
-    "gene_annotation",
-    "function_annotation",
 ]
 
 AssemblyMethod = Literal["flye", "nextdenovo", "hifiasm", "hifiasm_ont"]
@@ -243,7 +230,7 @@ class AssemblyRunConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_read_type_method_consistency(self) -> "AssemblyRunConfig":
-        """Validate explicit method/read-type compatibility for legacy route hints."""
+        """Validate explicit method/read-type compatibility for route hints."""
         method = infer_assembly_method(self)
         if method is None or self.assembly_route == "auto":
             return self
@@ -265,9 +252,7 @@ class AssemblyRunConfig(BaseModel):
         if self.assembly_method is None:
             return self
         provided = _provided_assembly_parameter_methods(self)
-        unexpected = [
-            method for method in provided if method != self.assembly_method
-        ]
+        unexpected = [method for method in provided if method != self.assembly_method]
         if unexpected:
             required_key = f"assembly.{self.assembly_method}_parameters"
             raise ValueError(
@@ -281,7 +266,8 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
     """Validate the method/parameter contract after all local-exec inputs merge."""
     if assembly is None:
         raise ValueError(
-            "run_config: local_exec includes 'assembly' but "
+            "run_config: requested_stages[assembly].allow_local_execution is true "
+            "but "
             "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
             "assembly.hifiasm_parameters, or assembly.hifiasm_ont_parameters is missing"
         )
@@ -319,7 +305,8 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
     provided = _provided_assembly_parameter_methods(assembly)
     if not provided:
         raise ValueError(
-            "run_config: local_exec includes 'assembly' but "
+            "run_config: requested_stages[assembly].allow_local_execution is true "
+            "but "
             "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
             "assembly.hifiasm_parameters, or assembly.hifiasm_ont_parameters is missing"
         )
@@ -333,15 +320,21 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
 def validate_genome_size_execution_plan(
     run_config: "RunConfig",
     manifest: InputManifest,
-    *,
-    local_stages: Sequence[str] | None = None,
 ) -> None:
     """Require a provided size unless an earlier local survey can produce it."""
 
-    effective_local = list(
-        local_stages if local_stages is not None else run_config.local_exec
-    )
-    if "assembly" not in effective_local or run_config.assembly is None:
+    if run_config.assembly is None:
+        return
+
+    def is_local(index: int) -> bool:
+        return run_config.requested_stages[index].allow_local_execution
+
+    local_assembly_indexes = [
+        index
+        for index, request in enumerate(run_config.requested_stages)
+        if request.stage == "assembly" and is_local(index)
+    ]
+    if not local_assembly_indexes:
         return
 
     method = infer_assembly_method(run_config.assembly)
@@ -351,12 +344,6 @@ def validate_genome_size_execution_plan(
     if manifest.genome_size_estimate:
         return
 
-    requested = list(run_config.requested_stages or [])
-    survey_precedes_assembly = not requested or (
-        "genome_survey" in requested
-        and "assembly" in requested
-        and requested.index("genome_survey") < requested.index("assembly")
-    )
     has_survey_reads = any(
         asset.asset_type
         in {
@@ -367,12 +354,20 @@ def validate_genome_size_execution_plan(
         }
         for asset in manifest.assets
     )
-    survey_is_executable = (
-        "genome_survey" in effective_local
-        and run_config.genome_survey is not None
+    survey_is_configured = (
+        run_config.genome_survey is not None
         and run_config.genome_survey.survey_parameters is not None
     )
-    if survey_precedes_assembly and survey_is_executable and has_survey_reads:
+    every_assembly_has_prior_survey = all(
+        any(
+            earlier.stage == "genome_survey" and is_local(earlier_index)
+            for earlier_index, earlier in enumerate(
+                run_config.requested_stages[:assembly_index]
+            )
+        )
+        for assembly_index in local_assembly_indexes
+    )
+    if survey_is_configured and has_survey_reads and every_assembly_has_prior_survey:
         return
 
     raise ValueError(
@@ -491,7 +486,6 @@ class AssemblyReviewRunConfig(BaseModel):
 
     quast: QuastRunParameters | None = None
     busco: BuscoRunParameters | None = None
-    max_reruns: int = Field(default=3, ge=1, le=10)
     related_species_reference_dir: str | None = None
 
 
@@ -516,22 +510,13 @@ class HiCScaffoldingRunConfig(BaseModel):
     max_review_retries: int = Field(default=1, ge=0)
 
 
-class FunctionAnnotationRunConfig(BaseModel):
-    """Run-config block for user-supplied function database provenance."""
+class RequestedStage(BaseModel):
+    """One requested workflow stage and its explicit local-execution consent."""
 
     model_config = ConfigDict(extra="forbid")
 
-    database_provenance: list[FunctionDatabaseProvenance] | None = Field(
-        default=None, min_length=1
-    )
-
-
-class GeneAnnotationRunConfig(BaseModel):
-    """Run-config block for gene-annotation lineage/species hints."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    lineage_or_species_hints: dict[str, Any] = Field(default_factory=dict)
+    stage: RequestableStage
+    allow_local_execution: StrictBool
 
 
 class RunConfig(BaseModel):
@@ -539,8 +524,9 @@ class RunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    local_exec: list[LocalExecStage] = Field(default_factory=list)
-    requested_stages: list[RequestableStage] | None = None
+    requested_stages: list[RequestedStage] = Field(
+        max_length=MAX_WORKFLOW_STEPS - 1
+    )
     shared_parameters: RunConfigSharedParameters | None = None
     read_qc: ReadQCRunConfig | None = None
     genome_survey: GenomeSurveyRunConfig | None = None
@@ -548,34 +534,65 @@ class RunConfig(BaseModel):
     assembly_review: AssemblyReviewRunConfig | None = None
     hic_scaffolding: HiCScaffoldingRunConfig | None = None
     t2t: T2TRunConfig | None = None
-    gene_annotation: GeneAnnotationRunConfig | None = None
-    function_annotation: FunctionAnnotationRunConfig | None = None
     review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
 
     @model_validator(mode="after")
     def _require_method_parameters_when_assembly_local(self) -> "RunConfig":
-        if "assembly" in self.local_exec:
+        if self.any_occurrence_allows_local_execution("assembly"):
             validate_local_assembly_execution(self.assembly)
-        if "hic_scaffolding" in self.local_exec and self.hic_scaffolding is None:
+        if (
+            self.any_occurrence_allows_local_execution("hic_scaffolding")
+            and self.hic_scaffolding is None
+        ):
             raise ValueError(
-                "run_config: local_exec includes 'hic_scaffolding' but "
+                "run_config: requested_stages[hic_scaffolding].allow_local_execution "
+                "is true but "
                 "hic_scaffolding execution config is missing"
             )
         return self
 
     @model_validator(mode="after")
-    def _require_local_exec_for_approved_filter(self) -> "RunConfig":
+    def _validate_requested_stages(self) -> "RunConfig":
+        invalid_local = [
+            request.stage
+            for request in self.requested_stages
+            if request.allow_local_execution
+            and request.stage in MANUAL_ONLY_STAGES
+        ]
+        if invalid_local:
+            raise ValueError(
+                "run_config.requested_stages allow_local_execution is unsupported "
+                "for manual-only/non-local stage(s): "
+                + ", ".join(invalid_local)
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_local_execution_for_approved_filter(self) -> "RunConfig":
         if (
             self.read_qc
             and self.read_qc.length_filter
             and self.read_qc.length_filter.approved
-            and "read_qc" not in self.local_exec
+            and not self.any_occurrence_allows_local_execution("read_qc")
         ):
             raise ValueError(
                 "run_config: read_qc.length_filter.approved is true but "
-                "'read_qc' is not in local_exec"
+                "requested_stages[read_qc].allow_local_execution is not true"
             )
         return self
+
+    def requested_stage_names(self) -> list[RequestableStage]:
+        """Return the exact frozen occurrence sequence, including repeats."""
+
+        return [request.stage for request in self.requested_stages]
+
+    def any_occurrence_allows_local_execution(self, stage: str) -> bool:
+        """Return whether any declared occurrence grants local-process consent."""
+
+        return any(
+            request.stage == stage and request.allow_local_execution
+            for request in self.requested_stages
+        )
 
 
 def canonicalize_run_config_paths(

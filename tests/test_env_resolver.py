@@ -83,12 +83,6 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         )
         self.assertTrue(all(pkg.install_root for pkg in packages))
 
-        repeatmasker_spec = resolver.resolve(
-            stage="repeat_annotation",
-            method_name="repeat_annotation.masking.repeatmasker",
-        )
-        self.assertTrue(repeatmasker_spec.conda_env or repeatmasker_spec.conda_prefix)
-        self.assertEqual(repeatmasker_spec.required_tools, ["RepeatMasker"])
 
     def test_method_override_beats_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

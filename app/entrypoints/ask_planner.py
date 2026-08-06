@@ -1,11 +1,11 @@
-"""Staged planning helpers used by the TUI and annotation intake."""
+"""Staged planning helpers used by the TUI."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from pathlib import Path
-from typing import AbstractSet, Any
+from typing import AbstractSet, Any, cast
 
 import yaml
 from pydantic import ValidationError
@@ -18,11 +18,14 @@ from app.schemas.ask_plan import (
     AskClarificationRequest,
     AskClarificationResponse,
     AskPlanState,
+    PlanStageOccurrence,
 )
 from app.schemas.manifest import InputManifest
 from app.schemas.run_config import (
+    DEFAULT_REVIEW_MAX_BLOCKED_SECONDS,
     AutoHiCRunParameters,
     HifiasmRunParameters,
+    RequestableStage,
     RunConfig,
 )
 from app.schemas.shared_parameters import SharedParameters
@@ -36,10 +39,6 @@ from .planner_catalog import (
 from .planner_catalog import (
     load_planner_method_catalog,
 )
-
-FUNCTION_DATABASE_PROVENANCE_FIELD = "function_annotation.database_provenance"
-FUNCTION_ANNOTATION_DIAMOND_METHOD = "function_annotation.candidate.diamond"
-
 
 _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE = {
     "assembly.candidate.flye",
@@ -64,9 +63,6 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
     "assembly_review": "choose_many",
     "hic_scaffolding": "pipeline",
     "t2t": "choose_many",
-    "repeat_annotation": "choose_many",
-    "gene_annotation": "choose_many",
-    "function_annotation": "choose_many",
 }
 
 READ_QC_STATS_METHOD = "read_qc.long_read_stats.seqkit_stats"
@@ -119,11 +115,14 @@ def _executable_methods_for_stage(stage: str) -> list[dict[str, Any]]:
 
 
 def _auto_fill_pipeline_methods(
-    execution_order: list[str],
+    occurrences: list[PlanStageOccurrence],
 ) -> dict[str, str | list[str]]:
     """Auto-fill methods for pipeline stages (all executable methods run)."""
     result: dict[str, str | list[str]] = {}
-    for stage in execution_order:
+    for occurrence in occurrences:
+        if not occurrence.allow_local_execution:
+            continue
+        stage = occurrence.stage
         if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
             methods = [m["method_name"] for m in _executable_methods_for_stage(stage)]
             if methods:
@@ -136,15 +135,6 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
         return list(READ_QC_DEFAULT_METHODS)
     if stage == "hic_scaffolding":
         return ["hic_scaffolding.candidate.autohic"]
-    if stage == "repeat_annotation":
-        return ["repeat_annotation.masking.repeatmasker"]
-    if stage == "gene_annotation":
-        return [
-            "gene_annotation.candidate.miniprot",
-            "gene_annotation.candidate.augustus",
-        ]
-    if stage == "function_annotation":
-        return ["function_annotation.candidate.diamond"]
     if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
         methods = [m["method_name"] for m in _executable_methods_for_stage(stage)]
         return methods or None
@@ -154,13 +144,14 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
 def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
     """Build an evidence-prefilled draft plan from the parsed workflow goal.
 
-    Returns an unconfirmed candidate AskPlanState with target stages,
-    execution order, safe default methods, and inferred parameters
+    Returns an unconfirmed candidate AskPlanState with the target stage
+    sequence, safe default methods, and inferred parameters
     prefilled. Returns None when no workflow goal was parsed, so the caller
     falls back to manual stage selection.
 
     Contract: the result is a *candidate*, not committed state. The fields it
-    reuses (selected_stages/selected_methods/...) carry recommended values, not
+    reuses (selected_stage_occurrences/selected_methods/...) carry recommended
+    values, not
     operator-confirmed ones. The caller must show it for approval and only feed
     it to next_clarification once the operator accepts; on reject it must be
     discarded. A dedicated AskPlanDraft model is unnecessary because this value
@@ -171,7 +162,16 @@ def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
         return None
     draft = merge_clarification_response(
         plan,
-        AskClarificationResponse(kind="stage_selection", selected_stages=target),
+        AskClarificationResponse(
+            kind="stage_selection",
+            selected_stage_occurrences=[
+                PlanStageOccurrence(
+                    stage=cast(RequestableStage, stage),
+                    allow_local_execution=True,
+                )
+                for stage in target
+            ],
+        ),
     )
     draft = _fill_draft_default_methods(draft)
     draft = _auto_fill_inferred_defaults(draft)
@@ -186,7 +186,7 @@ def _fill_draft_default_methods(plan: AskPlanState) -> AskPlanState:
     interactive flow would do the same.
     """
     filled = _fill_missing_method_defaults(plan, dict(plan.selected_methods or {}))
-    for stage in plan.resolved_execution_order or []:
+    for stage in _locally_enabled_stage_names(plan):
         if stage in filled or stage not in _STAGES_NEEDING_METHOD_SELECTION:
             continue
         default = _draft_default_methods_for_stage(plan, stage)
@@ -241,9 +241,7 @@ def next_clarification(
     plan: AskPlanState, *, ask_plan_ref: str | Path
 ) -> AskClarificationRequest | None:
     ref = str(Path(str(ask_plan_ref)).expanduser().resolve(strict=False))
-    if plan.selected_stages is None:
-        return _stage_selection_request(plan, ref)
-    if plan.resolved_execution_order is None:
+    if plan.selected_stage_names is None:
         return _stage_selection_request(plan, ref)
     if _needs_method_selection(plan):
         return _method_selection_request(plan, ref)
@@ -259,13 +257,11 @@ def merge_clarification_response(
     plan: AskPlanState, response: AskClarificationResponse
 ) -> AskPlanState:
     if response.kind == "stage_selection":
-        stages = list(response.selected_stages or [])
-        order = _resolve_execution_order(stages)
-        pipeline_methods = _auto_fill_pipeline_methods(order)
+        occurrences = list(response.selected_stage_occurrences or [])
+        pipeline_methods = _auto_fill_pipeline_methods(occurrences)
         return plan.model_copy(
             update={
-                "selected_stages": stages,
-                "resolved_execution_order": order,
+                "selected_stage_occurrences": occurrences,
                 "selected_methods": pipeline_methods or None,
                 "method_parameters": None,
                 "stage_parameters": None,
@@ -322,14 +318,24 @@ def merge_clarification_response(
 
 
 def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
-    local_stages = []
-    for stage in plan.resolved_execution_order or []:
-        if _stage_has_method(plan, stage):
-            local_stages.append(stage)
+    if plan.selected_stage_names is None:
+        raise ValueError("cannot build a run config from an unfinished plan draft")
+    requested_occurrences = list(plan.selected_stage_occurrences or [])
+    requested_stages = [occurrence.stage for occurrence in requested_occurrences]
+    local_execution = [
+        occurrence.allow_local_execution for occurrence in requested_occurrences
+    ]
+    local_stages = [
+        stage
+        for stage, allowed in zip(requested_stages, local_execution, strict=True)
+        if allowed
+    ]
 
-    payload: dict[str, Any] = {"local_exec": local_stages}
-    if plan.resolved_execution_order:
-        payload["requested_stages"] = plan.resolved_execution_order
+    payload: dict[str, Any] = {
+        "review_policy": {
+            "max_blocked_seconds": DEFAULT_REVIEW_MAX_BLOCKED_SECONDS,
+        },
+    }
     if plan.shared_parameters:
         runtime_only = {"estimated_genome_size"}
         shared_parameters = plan.shared_parameters.model_dump(
@@ -353,23 +359,19 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
             payload["assembly_review"] = ar_config
     if "hic_scaffolding" in local_stages:
         hic_config = _build_hic_scaffolding_config(plan)
-        if hic_config:
-            payload["hic_scaffolding"] = hic_config
-        else:
-            payload["local_exec"].remove("hic_scaffolding")
+        payload["hic_scaffolding"] = hic_config or {}
     if "t2t" in local_stages:
         payload["t2t"] = _build_t2t_config(plan)
-    if "function_annotation" in local_stages:
-        fn_config = _build_function_annotation_config(plan)
-        if fn_config:
-            payload["function_annotation"] = fn_config
+    payload["requested_stages"] = [
+        occurrence.model_dump(mode="json") for occurrence in requested_occurrences
+    ]
     RunConfig.model_validate(payload)
     return payload
 
 
 def _build_assembly_execution_config(
     plan: AskPlanState,
-    local_stages: list[str],
+    local_stages: Collection[str],
 ) -> dict[str, Any] | None:
     """Translate the one executable assembly selection into the run-config API."""
     if "assembly" not in local_stages:
@@ -387,9 +389,7 @@ def _build_assembly_execution_config(
     config_method = method_name.rsplit(".", 1)[-1]
     supplied = dict((plan.method_parameters or {}).get(method_name) or {})
     allowed_parameter_fields = (
-        HifiasmRunParameters.model_fields
-        if config_method == "hifiasm"
-        else {"threads"}
+        HifiasmRunParameters.model_fields if config_method == "hifiasm" else {"threads"}
     )
     params = {
         name: value
@@ -424,7 +424,9 @@ def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
     if request.kind == "stage_selection":
         return {
             "kind": "stage_selection",
-            "selected_stages": request.choices.get("suggested_stages", []),
+            "selected_stage_occurrences": request.choices.get(
+                "suggested_stage_occurrences", []
+            ),
         }
     if request.kind == "method_selection":
         methods_by_stage = request.choices.get("methods_by_stage", {})
@@ -452,7 +454,14 @@ def _stage_selection_request(
     plan: AskPlanState, ask_plan_ref: str
 ) -> AskClarificationRequest:
     available = _all_selectable_stages()
-    suggested = _suggested_stages(plan, available)
+    suggested_stages = _suggested_stages(plan, available)
+    suggested = [
+        PlanStageOccurrence(
+            stage=cast(RequestableStage, stage),
+            allow_local_execution=True,
+        )
+        for stage in suggested_stages
+    ]
     return AskClarificationRequest(
         status="clarification_required",
         kind="stage_selection",
@@ -460,9 +469,19 @@ def _stage_selection_request(
         ask_plan_ref=ask_plan_ref,
         manifest_ref=plan.manifest_ref,
         question="Which workflow stages should run?",
-        choices={"available_stages": available, "suggested_stages": suggested},
-        required_fields=["selected_stages"],
-        response_schema={"kind": "stage_selection", "selected_stages": suggested},
+        choices={
+            "available_stages": available,
+            "suggested_stage_occurrences": [
+                occurrence.model_dump(mode="json") for occurrence in suggested
+            ],
+        },
+        required_fields=["selected_stage_occurrences"],
+        response_schema={
+            "kind": "stage_selection",
+            "selected_stage_occurrences": [
+                occurrence.model_dump(mode="json") for occurrence in suggested
+            ],
+        },
         next_action=_next_action(ask_plan_ref),
     )
 
@@ -472,7 +491,7 @@ def _method_selection_request(
 ) -> AskClarificationRequest:
     methods_by_stage: dict[str, list[dict[str, Any]]] = {}
     defaults: dict[str, str | list[str]] = {}
-    for stage in plan.resolved_execution_order or []:
+    for stage in _locally_enabled_stage_names(plan):
         if stage not in _STAGES_NEEDING_METHOD_SELECTION:
             continue
         stage_methods = _executable_methods_for_stage(stage)
@@ -534,8 +553,6 @@ def _parameter_values_request(
             continue
         for param in cap["required_parameters"]:
             all_fields.append(f"{method}.{param}")
-    if _function_annotation_needs_database_provenance(plan):
-        all_fields.append(FUNCTION_DATABASE_PROVENANCE_FIELD)
     display_fields = all_fields if all_fields else missing_fields
     choices: dict[str, Any] = {
         "defaults": defaults,
@@ -594,8 +611,15 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         "session_id": plan.session_id,
         "data_dir": plan.data_dir,
         "manifest_ref": plan.manifest_ref,
-        "selected_stages": plan.selected_stages,
-        "resolved_execution_order": plan.resolved_execution_order,
+        "selected_stage_occurrences": (
+            [
+                occurrence.model_dump(mode="json")
+                for occurrence in plan.selected_stage_occurrences
+            ]
+            if plan.selected_stage_occurrences is not None
+            else None
+        ),
+        "selected_stage_names": plan.selected_stage_names,
         "stage_roles": _classify_stage_roles(plan),
     }
     entry = plan.entry_request or {}
@@ -619,7 +643,7 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
     runtime_parameter_contracts = _runtime_parameter_contracts(plan)
     if runtime_parameter_contracts:
         summary["runtime_parameter_contracts"] = runtime_parameter_contracts
-    decision_points = _runtime_decision_points(plan.resolved_execution_order or [])
+    decision_points = _runtime_decision_points(plan.selected_stage_names or [])
     if decision_points:
         summary["runtime_decision_points"] = decision_points
     # Load manifest once and pass it through to all parameter inference functions
@@ -745,8 +769,8 @@ def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
             contract["user_constraints"] = constraints
         contracts.append(contract)
 
-    selected_stages = set(plan.resolved_execution_order or plan.selected_stages or [])
-    if "hic_scaffolding" in selected_stages:
+    locally_enabled_stages = set(_locally_enabled_stage_names(plan))
+    if "hic_scaffolding" in locally_enabled_stages:
         try:
             autohic_catalog = load_autohic_parameter_catalog()
         except (FileNotFoundError, ValueError):
@@ -875,7 +899,10 @@ def _stage_plan_details(
     asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
     roles = _classify_stage_roles(plan)
     details: list[dict[str, Any]] = []
-    for stage in plan.resolved_execution_order or []:
+    for occurrence_index, occurrence in enumerate(
+        plan.selected_stage_occurrences or []
+    ):
+        stage = occurrence.stage
         selected = (plan.selected_methods or {}).get(stage)
         selected_methods = (
             selected if isinstance(selected, list) else [selected] if selected else []
@@ -896,8 +923,9 @@ def _stage_plan_details(
             )
         status = "configured" if stage_methods else _stage_without_method_status(stage)
         detail: dict[str, Any] = {
+            "occurrence_index": occurrence_index,
             "stage": stage,
-            "role": roles.get(stage),
+            "role": roles[occurrence_index],
             "status": status,
             "methods": stage_methods,
             "inputs": _stage_input_status(stage, asset_types),
@@ -926,10 +954,7 @@ def _stage_input_status(
     stage: str,
     asset_types: AbstractSet[str],
 ) -> list[str]:
-    if (
-        stage == "hic_scaffolding"
-        and "hic_reads_registered" not in asset_types
-    ):
+    if stage == "hic_scaffolding" and "hic_reads_registered" not in asset_types:
         return ["missing paired Hi-C reads in manifest"]
     return []
 
@@ -952,22 +977,8 @@ def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
         recommended.append("assembly_review")
     if "hic_reads_registered" in asset_types:
         recommended.append("hic_scaffolding")
-    has_assembly_path = (
-        "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types
-    )
-    if has_assembly_path:
-        recommended.extend(
-            ["t2t", "repeat_annotation", "gene_annotation", "function_annotation"]
-        )
-    if "repeat_library" in asset_types:
-        recommended.append("repeat_annotation")
-    if (
-        "raw_rnaseq_reads" in asset_types
-        or "raw_isoseq_or_long_rna_reads" in asset_types
-    ):
-        recommended.append("gene_annotation")
-    if "gene_models" in asset_types or "predicted_proteins" in asset_types:
-        recommended.extend(["gene_annotation", "function_annotation"])
+    if "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types:
+        recommended.append("t2t")
     return list(dict.fromkeys(recommended))
 
 
@@ -1007,11 +1018,6 @@ def _input_assets_from_manifest(manifest_ref: str) -> list[dict[str, Any]]:
     ]
 
 
-def _resolve_execution_order(selected: list[str]) -> list[str]:
-    selected_set = set(selected)
-    return [stage for stage in STAGE_ORDER if stage in selected_set]
-
-
 def _check_conditional_requirements(
     method: str,
     cap: dict[str, Any],
@@ -1033,9 +1039,10 @@ def _check_conditional_requirements(
 
 
 def _needs_method_selection(plan: AskPlanState) -> bool:
+    locally_enabled = _locally_enabled_stage_names(plan)
     if plan.selected_methods is not None:
         # Check if all non-pipeline stages have methods selected
-        for stage in plan.resolved_execution_order or []:
+        for stage in locally_enabled:
             if (
                 stage in _STAGES_NEEDING_METHOD_SELECTION
                 and stage not in plan.selected_methods
@@ -1044,13 +1051,17 @@ def _needs_method_selection(plan: AskPlanState) -> bool:
         return False
     return any(
         stage in _STAGES_NEEDING_METHOD_SELECTION
-        for stage in plan.resolved_execution_order or []
+        for stage in locally_enabled
     )
 
 
 def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
-    """Yield (stage, method_name) pairs, flattening list values."""
+    """Yield locally enabled ``(stage, method_name)`` pairs, flattening lists."""
+
+    locally_enabled = set(_locally_enabled_stage_names(plan))
     for stage, methods in (plan.selected_methods or {}).items():
+        if stage not in locally_enabled:
+            continue
         if isinstance(methods, list):
             for m in methods:
                 yield stage, m
@@ -1117,7 +1128,7 @@ def _fill_missing_method_defaults(
     plan: AskPlanState, methods: dict[str, str | list[str]]
 ) -> dict[str, str | list[str]]:
     filled = dict(methods)
-    for stage in plan.resolved_execution_order or []:
+    for stage in _locally_enabled_stage_names(plan):
         if stage in filled or stage not in _STAGES_NEEDING_METHOD_SELECTION:
             continue
         default = _default_methods_for_stage(stage)
@@ -1166,23 +1177,6 @@ def _build_genome_survey_config(plan: AskPlanState) -> dict[str, Any] | None:
     return {"survey_parameters": survey_params} if survey_params else None
 
 
-def _build_function_annotation_config(plan: AskPlanState) -> dict[str, Any] | None:
-    params = (plan.stage_parameters or {}).get("function_annotation") or {}
-    provenance = params.get("database_provenance")
-    if not provenance:
-        methods = (plan.selected_methods or {}).get("function_annotation")
-        method_list = (
-            methods if isinstance(methods, list) else [methods] if methods else []
-        )
-        if plan.confirmed and FUNCTION_ANNOTATION_DIAMOND_METHOD in method_list:
-            raise ValueError(
-                "function_annotation.database_provenance is required for "
-                "DIAMOND execution"
-            )
-        return None
-    return {"database_provenance": provenance}
-
-
 def _build_t2t_config(plan: AskPlanState) -> dict[str, Any]:
     params = dict((plan.method_parameters or {}).get("t2t.alignment.minimap2") or {})
     payload: dict[str, Any] = {}
@@ -1228,7 +1222,7 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
     ):
         return True
     if (
-        (plan.resolved_execution_order or [])
+        (plan.selected_stage_names or [])
         and any(
             method in _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE
             for _, method in _iter_selected_methods(plan)
@@ -1249,8 +1243,6 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
                     return True
             if not provided:
                 return True
-    if _function_annotation_needs_database_provenance(plan):
-        return True
     return False
 
 
@@ -1331,25 +1323,7 @@ def _missing_parameters_and_defaults(
                 missing_fields.append(f"{method}.{param}")
         # Check conditional requirements declared in method descriptor
         missing_fields.extend(_check_conditional_requirements(method, cap, merged))
-    function_params = dict(
-        (plan.stage_parameters or {}).get("function_annotation") or {}
-    )
-    if function_params:
-        stage_defaults["function_annotation"] = function_params
-    if _function_annotation_needs_database_provenance(plan):
-        missing_fields.append(FUNCTION_DATABASE_PROVENANCE_FIELD)
     return missing_fields, defaults, shared_defaults, stage_defaults, warnings
-
-
-def _function_annotation_needs_database_provenance(plan: AskPlanState) -> bool:
-    methods = (plan.selected_methods or {}).get("function_annotation")
-    method_list = methods if isinstance(methods, list) else [methods] if methods else []
-    if FUNCTION_ANNOTATION_DIAMOND_METHOD not in method_list:
-        return False
-    provenance = ((plan.stage_parameters or {}).get("function_annotation") or {}).get(
-        "database_provenance"
-    )
-    return not provenance
 
 
 def _infer_parameter_defaults(
@@ -1472,11 +1446,15 @@ def _assembly_needs_shared_genome_size(plan: AskPlanState) -> bool:
 
 
 def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
-    "Defer when executable Survey precedes assembly with short or long genomic reads."
-    order = plan.resolved_execution_order or []
-    if "genome_survey" not in order or "assembly" not in order:
-        return False
-    if order.index("genome_survey") > order.index("assembly"):
+    """Defer only when every local Assembly has a prior local Survey."""
+
+    occurrences = list(plan.selected_stage_occurrences or [])
+    local_assembly_indexes = [
+        index
+        for index, occurrence in enumerate(occurrences)
+        if occurrence.stage == "assembly" and occurrence.allow_local_execution
+    ]
+    if not local_assembly_indexes:
         return False
     selected = (plan.selected_methods or {}).get("genome_survey")
     method_list = (
@@ -1484,6 +1462,16 @@ def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
     )
     executable = set(method_list)
     if executable != GENOME_SURVEY_EXECUTABLE_METHODS:
+        return False
+    every_assembly_has_prior_survey = all(
+        any(
+            earlier.stage == "genome_survey"
+            and earlier.allow_local_execution
+            for earlier in occurrences[:assembly_index]
+        )
+        for assembly_index in local_assembly_indexes
+    )
+    if not every_assembly_has_prior_survey:
         return False
     manifest = _load_manifest(plan.manifest_ref)
     return bool(
@@ -1507,70 +1495,48 @@ def _genome_size_must_be_collected(plan: AskPlanState) -> bool:
     ) and not _can_defer_genome_size_to_survey(plan)
 
 
-def _stage_has_method(plan: AskPlanState, stage: str) -> bool:
-    if stage == "read_qc":
-        return stage in (plan.resolved_execution_order or []) or stage in (
-            plan.selected_stages or []
+def _locally_enabled_stage_names(plan: AskPlanState) -> list[str]:
+    """Return unique stage names with at least one locally enabled occurrence."""
+
+    return list(
+        dict.fromkeys(
+            occurrence.stage
+            for occurrence in plan.selected_stage_occurrences or []
+            if occurrence.allow_local_execution
         )
-    value = (plan.selected_methods or {}).get(stage)
-    if not value:
-        return _STAGE_SELECTION_MODE.get(stage) == "pipeline"
-    methods = value if isinstance(value, list) else [value]
-    return any(_get_method_descriptor(m) is not None for m in methods)
+    )
 
 
-def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
-    """Label each stage in execution order as executable or dependency."""
-    selected = set(plan.selected_stages or [])
-    roles: dict[str, str] = {}
-    for stage in plan.resolved_execution_order or []:
-        if _stage_has_method(plan, stage):
-            if stage in selected:
-                roles[stage] = "executable"
-            else:
-                roles[stage] = "dependency"
-        elif stage not in selected:
-            roles[stage] = "dependency"
-        else:
-            roles[stage] = "executable"
-    return roles
+def _classify_stage_roles(plan: AskPlanState) -> list[str]:
+    """Return one display role for each ordered occurrence."""
+
+    return [
+        "executable" if occurrence.allow_local_execution else "dependency"
+        for occurrence in plan.selected_stage_occurrences or []
+    ]
 
 
 def _plan_validation_warnings(plan: AskPlanState) -> list[str]:
     warnings: list[str] = []
     manifest = _load_manifest(plan.manifest_ref)
     asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
-    order = plan.resolved_execution_order or []
+    order = plan.selected_stage_names or []
     if "hic_scaffolding" in order:
         if "hic_reads_registered" not in asset_types:
             warnings.append(
                 "hic_scaffolding: no paired Hi-C reads in manifest; selected stage "
                 "will block on missing inputs"
             )
-    assembly_available = (
-        "assembly" in order or "assembly_fasta_registered" in asset_types
-    )
-    if "assembly_review" in order and not assembly_available:
-        warnings.append(
-            "assembly_review: no assembly stage upstream and no "
-            "assembly_fasta_registered in manifest; stage will fail without an assembly"
-        )
-    if "gene_annotation" in order and not assembly_available:
-        has_provided = (
-            "gene_models" in asset_types and "predicted_proteins" in asset_types
-        )
-        if not has_provided:
+    assembly_available = "assembly_fasta_registered" in asset_types
+    for occurrence_index, stage in enumerate(order, start=1):
+        if stage == "assembly":
+            assembly_available = True
+        elif stage == "assembly_review" and not assembly_available:
             warnings.append(
-                "gene_annotation: no assembly upstream and no provided "
-                "gene_models/predicted_proteins in manifest; stage will fail "
-                "without a genome"
-            )
-    if "function_annotation" in order and "gene_annotation" not in order:
-        if "predicted_proteins" not in asset_types and "gene_models" not in asset_types:
-            warnings.append(
-                "function_annotation: no gene_annotation upstream and no "
-                "predicted_proteins/gene_models in manifest; stage will fail "
-                "without protein input"
+                "assembly_review occurrence "
+                f"{occurrence_index}: no assembly stage upstream and no "
+                "assembly_fasta_registered in manifest; stage will fail without "
+                "an assembly"
             )
     return warnings
 

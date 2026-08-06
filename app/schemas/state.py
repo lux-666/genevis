@@ -50,9 +50,6 @@ DomainStage = Literal[
     "gapcloser",
     "t2t",
     "base_polish",
-    "repeat_annotation",
-    "gene_annotation",
-    "function_annotation",
     "done",
 ]
 
@@ -72,6 +69,8 @@ JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 StageCursor: TypeAlias = dict[str, JsonValue]
 StageOutputs: TypeAlias = dict[DomainStage, StageCursor]
 ResourceRefs: TypeAlias = dict[str, dict[str, JsonValue]]
+
+MAX_WORKFLOW_STEPS = 64
 
 DOMAIN_STAGES: frozenset[str] = frozenset(get_args(DomainStage))
 
@@ -132,6 +131,88 @@ def replace_stage_outputs(
     """LangGraph reducer that validates every replacement before checkpointing."""
 
     return validate_stage_outputs(update)
+
+
+def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
+    """Validate the immutable occurrence list used by runtime routing."""
+
+    if not isinstance(value, list) or not value:
+        raise TypeError("workflow_steps must be a non-empty list")
+    if len(value) > MAX_WORKFLOW_STEPS:
+        raise ValueError(f"workflow_steps exceeds {MAX_WORKFLOW_STEPS} items")
+
+    steps: list[WorkflowStep] = []
+    for index, raw_step in enumerate(value):
+        if not isinstance(raw_step, Mapping):
+            raise TypeError(f"workflow_steps[{index}] must be a JSON object")
+        unknown = set(raw_step).difference(WorkflowStep.__annotations__)
+        missing = set(WorkflowStep.__required_keys__).difference(raw_step)
+        if unknown:
+            raise ValueError(
+                f"workflow_steps[{index}] contains unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
+        if missing:
+            raise ValueError(
+                f"workflow_steps[{index}] is missing required fields: "
+                + ", ".join(sorted(missing))
+            )
+        stage = raw_step.get("stage")
+        if stage not in DOMAIN_STAGES or stage == "done":
+            raise ValueError(f"workflow_steps[{index}].stage is not executable")
+        allow_local = raw_step.get("allow_local_execution")
+        if type(allow_local) is not bool:
+            raise TypeError(
+                f"workflow_steps[{index}].allow_local_execution must be a bool"
+            )
+        expected_id = f"step-{index:03d}-{stage}"
+        if raw_step.get("step_id") != expected_id:
+            raise ValueError(
+                f"workflow_steps[{index}].step_id must be {expected_id!r}"
+            )
+        steps.append(
+            {
+                "step_id": expected_id,
+                "stage": cast(DomainStage, stage),
+                "allow_local_execution": allow_local,
+            }
+        )
+
+    if steps[0]["stage"] != "inventory":
+        raise ValueError("workflow_steps must begin with inventory")
+    if any(step["stage"] == "inventory" for step in steps[1:]):
+        raise ValueError("inventory may appear only as the first workflow step")
+    return steps
+
+
+def freeze_workflow_steps(
+    current: list["WorkflowStep"] | None,
+    update: object,
+) -> list["WorkflowStep"]:
+    """Accept the plan once and reject runtime append, reorder, or replacement."""
+
+    validated = validate_workflow_steps(update)
+    # LangGraph initializes list-valued reducer channels with ``[]`` before it
+    # applies the invocation input.  A valid workflow plan is never empty, so
+    # that reducer identity is the only additional first-write state we accept.
+    if current not in (None, []) and current != validated:
+        raise ValueError("workflow_steps are immutable after graph initialization")
+    return validated
+
+
+def freeze_stage_seeds(
+    current: StageOutputs | None,
+    update: Mapping[str, object] | None,
+) -> StageOutputs:
+    """Accept frozen RunConfig cursor seeds once and reject later mutation."""
+
+    validated = validate_stage_outputs(update)
+    # Dict-valued reducer channels likewise start at ``{}``.  Runtime code has
+    # no writer for this channel after initialization; this branch permits the
+    # graph's reducer identity to receive the frozen seed projection.
+    if current not in (None, {}) and current != validated:
+        raise ValueError("stage_seeds are immutable after graph initialization")
+    return validated
 
 
 def validate_resource_refs(value: Mapping[str, object] | None) -> ResourceRefs:
@@ -232,6 +313,8 @@ def validate_top_level_state(value: Mapping[str, object]) -> "TopLevelState":
     for name, field_value in value.items():
         validate_state_field(name, field_value)
 
+    _validate_workflow_cursor(value)
+
     serialized_bytes = _canonical_json_size(value)
     if serialized_bytes > TOP_LEVEL_STATE_HARD_MAX_BYTES:
         raise ValueError(
@@ -256,6 +339,16 @@ def validate_state_field(name: str, value: object) -> None:
     _validate_json_value(value, path=name)
     if name == "stage_outputs":
         validate_stage_outputs(cast(Mapping[str, object] | None, value))
+    elif name == "stage_seeds":
+        validate_stage_outputs(cast(Mapping[str, object] | None, value))
+    elif name == "workflow_steps":
+        validate_workflow_steps(value)
+    elif name in {"workflow_step_index", "entered_workflow_step_index"}:
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer")
+    elif name == "stage_plan_ref":
+        if not isinstance(value, str) or not value.strip():
+            raise TypeError("stage_plan_ref must be a non-empty string")
     elif name == "resource_refs":
         validate_resource_refs(cast(Mapping[str, object] | None, value))
     elif name == "active_interrupt":
@@ -273,6 +366,32 @@ def validate_state_field(name: str, value: object) -> None:
         )
 
 
+def _validate_workflow_cursor(value: Mapping[str, object]) -> None:
+    """Validate the compact plan cursor against its immutable projection."""
+
+    steps = validate_workflow_steps(value.get("workflow_steps"))
+    index = value.get("workflow_step_index")
+    entered = value.get("entered_workflow_step_index")
+    current_stage = value.get("current_stage")
+    if type(index) is not int or not 0 <= index <= len(steps):
+        raise ValueError("workflow_step_index is outside workflow_steps")
+    if type(entered) is not int or not -1 <= entered < len(steps):
+        raise ValueError("entered_workflow_step_index is outside workflow_steps")
+    if entered > index or index - entered > 1:
+        raise ValueError(
+            "entered_workflow_step_index must identify the active or just-completed "
+            "workflow step"
+        )
+    expected_stage: object = "done" if index == len(steps) else steps[index]["stage"]
+    if current_stage != expected_stage:
+        raise ValueError(
+            "current_stage does not match workflow_step_index: "
+            f"expected {expected_stage!r}, got {current_stage!r}"
+        )
+    if index == 0 and entered not in {-1, 0}:
+        raise ValueError("the initial workflow cursor has an invalid entered index")
+
+
 def _validate_active_interrupt(value: object) -> None:
     if value is None:
         return
@@ -284,8 +403,19 @@ def _validate_active_interrupt(value: object) -> None:
             "active_interrupt contains unsupported fields: "
             + ", ".join(sorted(unknown))
         )
+    missing = set(ActiveInterrupt.__required_keys__).difference(value)
+    if missing:
+        raise ValueError(
+            "active_interrupt is missing required fields: "
+            + ", ".join(sorted(missing))
+        )
     if value.get("stage") not in DOMAIN_STAGES:
         raise ValueError("active_interrupt.stage must be a known domain stage")
+    workflow_step_id = value.get("workflow_step_id")
+    if not isinstance(workflow_step_id, str) or not workflow_step_id.strip():
+        raise ValueError(
+            "active_interrupt.workflow_step_id must be a non-empty string"
+        )
     request_ref = value.get("request_ref")
     if request_ref is not None:
         from app.schemas.artifacts import ArtifactRef
@@ -342,6 +472,7 @@ class ActiveInterrupt(TypedDict, total=False):
     """Bounded checkpoint pointer to an immutable human-review request."""
 
     stage: Required[DomainStage]
+    workflow_step_id: Required[str]
     gate_id: NotRequired[str | None]
     reason: NotRequired[str]
     blocked_at: NotRequired[str]
@@ -352,6 +483,14 @@ class ActiveInterrupt(TypedDict, total=False):
     previous_attempt_id: NotRequired[int | None]
     task: NotRequired[str]
     recommendation_hash: NotRequired[str]
+
+
+class WorkflowStep(TypedDict):
+    """One immutable occurrence in the frozen linear workflow plan."""
+
+    step_id: str
+    stage: DomainStage
+    allow_local_execution: bool
 
 
 class TopLevelState(TypedDict, total=False):
@@ -366,14 +505,24 @@ class TopLevelState(TypedDict, total=False):
     # Current supervision status used by routing, review gates, and entrypoints.
     supervision_state: Required[SupervisionState]
 
-    # Workflow position and requested stage subset.
+    # Workflow position.  The frozen RunConfig is authoritative; these fields
+    # are its immutable, checkpoint-sized routing projection.
     current_stage: Required[DomainStage]
-    requested_stages: NotRequired[list[DomainStage] | None]
+    workflow_steps: Required[
+        Annotated[list[WorkflowStep], freeze_workflow_steps]
+    ]
+    workflow_step_index: Required[int]
+    entered_workflow_step_index: Required[int]
 
     # Durable references to external contracts and compact artifact indexes.
     input_manifest_ref: Required[str]
     asset_registry_ref: NotRequired[dict[str, Any] | None]
-    stage_plan_ref: NotRequired[str | None]
+    stage_plan_ref: Required[str]
+
+    # Immutable per-stage configuration seeds projected from the frozen
+    # RunConfig.  A repeated occurrence starts from this seed rather than a
+    # prior occurrence's completed cursor.
+    stage_seeds: Required[Annotated[StageOutputs, freeze_stage_seeds]]
 
     # Human-review or pause metadata. Keep payloads short and ref-heavy.
     active_interrupt: NotRequired[ActiveInterrupt | None]
@@ -397,8 +546,8 @@ class TopLevelState(TypedDict, total=False):
     # Maps logical resource names to their current locations and metadata.
     resource_refs: NotRequired[Annotated[ResourceRefs, replace_resource_refs]]
 
-    # Stage skip reasons keyed by stage name.
-    skip_reasons: Required[dict[DomainStage, str]]
+    # Stage skip reasons keyed by workflow step ID.
+    skip_reasons: Required[dict[str, str]]
 
 
 class StateUpdate(TypedDict, total=False):
@@ -410,10 +559,13 @@ class StateUpdate(TypedDict, total=False):
     control_state: ControlState
     supervision_state: SupervisionState
     current_stage: DomainStage
-    requested_stages: list[DomainStage] | None
+    workflow_steps: list[WorkflowStep]
+    workflow_step_index: int
+    entered_workflow_step_index: int
     input_manifest_ref: str
     asset_registry_ref: dict[str, Any] | None
-    stage_plan_ref: str | None
+    stage_plan_ref: str
+    stage_seeds: StageOutputs
     active_interrupt: ActiveInterrupt | None
     shared_parameters: SharedParameters | dict[str, Any] | None
     last_error: str | None
@@ -421,7 +573,7 @@ class StateUpdate(TypedDict, total=False):
     route_trace: list[str]
     stage_outputs: StageOutputs
     resource_refs: ResourceRefs
-    skip_reasons: dict[DomainStage, str]
+    skip_reasons: dict[str, str]
 
 
 def initial_state(
@@ -429,20 +581,35 @@ def initial_state(
     session_id: str,
     input_manifest_ref: str,
     data_dir: str = "data",
-    requested_stages: list[DomainStage] | None = None,
+    workflow_steps: list[WorkflowStep] | None = None,
+    stage_plan_ref: str = "control/run_config.json",
+    stage_seeds: StageOutputs | None = None,
 ) -> TopLevelState:
     """Build the minimal parent graph state."""
+    steps = validate_workflow_steps(
+        workflow_steps
+        or [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            }
+        ]
+    )
     return TopLevelState(
         session_id=session_id,
         thread_id=session_id,
         data_dir=data_dir,
         control_state="running",
         supervision_state="idle",
-        current_stage="inventory",
-        requested_stages=requested_stages,
+        current_stage=steps[0]["stage"],
+        workflow_steps=steps,
+        workflow_step_index=0,
+        entered_workflow_step_index=-1,
         input_manifest_ref=input_manifest_ref,
         asset_registry_ref=None,
-        stage_plan_ref=None,
+        stage_plan_ref=stage_plan_ref,
+        stage_seeds=validate_stage_outputs(stage_seeds),
         active_interrupt=None,
         shared_parameters=None,
         last_error=None,

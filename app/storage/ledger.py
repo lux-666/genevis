@@ -36,6 +36,7 @@ _RESERVED_PAYLOAD_KEYS = frozenset(
         "session_id",
         "timestamp",
         "event_type",
+        "workflow_step_id",
         "subject_id",
     }
 )
@@ -51,6 +52,22 @@ _REF_KEYS = frozenset(
         "rationale_artifact_ref",
         "registry_ref",
         "review_request_artifact_ref",
+    }
+)
+_OCCURRENCE_EVENT_TYPES = frozenset(
+    {
+        "artifact_registered",
+        "assets_registered",
+        "attempt_recorded",
+        "attempt_started",
+        "attempt_succeeded",
+        "attempt_failed",
+        "review_requested",
+        "review_decision",
+        "stage_entered",
+        "stage_skipped",
+        "stage_completed",
+        "stage_failed",
     }
 )
 
@@ -109,6 +126,7 @@ class Ledger:
         error: str | None = None,
     ) -> None:
         """Record an attempt status without copying its execution manifest."""
+        workflow_step_id = _workflow_step_id_from_attempt(attempt)
         self.record_event(
             session_id,
             "attempt_recorded",
@@ -118,6 +136,7 @@ class Ledger:
                 "error": error,
             },
             stage=attempt.stage,
+            workflow_step_id=workflow_step_id,
             subject_id=attempt.attempt_id,
             refs=self._artifact_refs(artifacts or []),
             idempotency_key=f"attempt:{attempt.attempt_id}:recorded:{status}",
@@ -127,11 +146,13 @@ class Ledger:
         self, session_id: str, attempt: FrozenAttemptSpec
     ) -> None:
         """Append an idempotent attempt-start event."""
+        workflow_step_id = _workflow_step_id_from_attempt(attempt)
         self.record_event(
             session_id,
             "attempt_started",
             {"method_name": attempt.method_name},
             stage=attempt.stage,
+            workflow_step_id=workflow_step_id,
             subject_id=attempt.attempt_id,
             idempotency_key=f"attempt:{attempt.attempt_id}:started",
         )
@@ -144,11 +165,13 @@ class Ledger:
         artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Append an attempt-success event referring to its output evidence."""
+        workflow_step_id = _workflow_step_id_from_attempt(attempt)
         self.record_event(
             session_id,
             "attempt_succeeded",
             {"method_name": attempt.method_name},
             stage=attempt.stage,
+            workflow_step_id=workflow_step_id,
             subject_id=attempt.attempt_id,
             refs=self._artifact_refs(artifacts or []),
             idempotency_key=f"attempt:{attempt.attempt_id}:succeeded",
@@ -164,6 +187,7 @@ class Ledger:
         artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Append an attempt-failure event with a bounded diagnostic summary."""
+        workflow_step_id = _workflow_step_id_from_attempt(attempt)
         self.record_event(
             session_id,
             "attempt_failed",
@@ -173,6 +197,7 @@ class Ledger:
                 "error": error,
             },
             stage=attempt.stage,
+            workflow_step_id=workflow_step_id,
             subject_id=attempt.attempt_id,
             refs=self._artifact_refs(artifacts or []),
             idempotency_key=f"attempt:{attempt.attempt_id}:failed",
@@ -200,12 +225,23 @@ class Ledger:
         """Record the causal registration without copying index metadata."""
         artifact_record = _as_mapping(artifact)
         ref = self._artifact_ref(artifact_record)
+        indexed_record = self._indexed_artifact_record(ref)
+        workflow_step_id = _require_workflow_step_id(
+            indexed_record.get("workflow_step_id")
+        )
+        indexed_stage = indexed_record.get("stage")
+        if not isinstance(indexed_stage, str) or not indexed_stage:
+            raise DataLayoutError("artifact index record has no stage")
+        supplied_stage = _optional_text(artifact_record.get("stage"))
+        if supplied_stage is not None and supplied_stage != indexed_stage:
+            raise DataLayoutError("artifact stage does not match its artifact index")
         artifact_id = str(ref.get("artifact_id") or ref.get("path_ref") or "unknown")
         self.record_event(
             session_id,
             "artifact_registered",
             {"attempt_id": attempt_id},
-            stage=_optional_text(artifact_record.get("stage")),
+            stage=indexed_stage,
+            workflow_step_id=workflow_step_id,
             subject_id=artifact_id,
             refs=[ref],
             idempotency_key=f"artifact:{artifact_id}:registered",
@@ -218,6 +254,7 @@ class Ledger:
         *,
         registry_ref: Any,
         ambiguous: bool = False,
+        workflow_step_id: str,
     ) -> None:
         """Record inventory cardinality and the authoritative registry ref."""
         registry = self._path_ref("registry_ref", registry_ref)
@@ -227,6 +264,7 @@ class Ledger:
             "assets_registered",
             {"asset_count": len(assets), "ambiguous": ambiguous},
             stage="inventory",
+            workflow_step_id=_require_workflow_step_id(workflow_step_id),
             subject_id=subject_id,
             refs=[registry],
             idempotency_key=f"asset-registry:{subject_id}:registered",
@@ -240,31 +278,24 @@ class Ledger:
         reason: str,
         signals: list[dict[str, Any]] | None = None,
         candidates: list[dict[str, Any]] | None = None,
-        review_request_artifact_ref: Any = None,
+        review_request_artifact_ref: Any,
         auto_decidable: bool | None = None,
-        policy_mode: str | None = None,
-        pending_human_confirmation: bool | None = None,
         review_request_id: str | None = None,
     ) -> None:
         """Record a request by ID; full signals/candidates remain in its artifact."""
-        refs: list[dict[str, Any]] = []
-        if review_request_artifact_ref:
-            request_ref = self._path_ref(
-                "review_request_artifact_ref", review_request_artifact_ref
-            )
-            refs.append(request_ref)
-        else:
-            request_ref = None
-        request_id = (
-            review_request_id
-            or _review_request_id_from_ref(request_ref)
-            or _stable_subject(
-                "review",
-                stage,
-                str((request_ref or {}).get("path_ref") or ""),
-                reason,
-            )
+        request_ref = self._path_ref(
+            "review_request_artifact_ref", review_request_artifact_ref
         )
+        request_record = self._indexed_artifact_record(request_ref)
+        workflow_step_id = _require_workflow_step_id(
+            request_record.get("workflow_step_id")
+        )
+        if request_record.get("stage") != stage:
+            raise DataLayoutError("review request stage does not match its artifact")
+        indexed_request_id = _require_review_request_id(request_record)
+        if review_request_id is not None and review_request_id != indexed_request_id:
+            raise DataLayoutError("review request ID does not match its artifact index")
+        request_id = indexed_request_id
         payload: dict[str, Any] = {
             "reason": reason,
             "signal_count": len(signals or []),
@@ -273,17 +304,14 @@ class Ledger:
         }
         if auto_decidable is not None:
             payload["auto_decidable"] = auto_decidable
-        if policy_mode is not None:
-            payload["policy_mode"] = policy_mode
-        if pending_human_confirmation is not None:
-            payload["pending_human_confirmation"] = pending_human_confirmation
         self.record_event(
             session_id,
             "review_requested",
             payload,
             stage=stage,
+            workflow_step_id=workflow_step_id,
             subject_id=request_id,
-            refs=refs,
+            refs=[request_ref],
             idempotency_key=f"review:{request_id}:requested",
         )
 
@@ -304,18 +332,23 @@ class Ledger:
         rationale_artifact_ref: Any = None,
         review_request_id: str | None = None,
     ) -> None:
-        """Record a bounded decision bound to the latest matching request ID."""
-        request_id = review_request_id or self._latest_open_review_request_id(stage)
-        if request_id is None:
-            request_id = _stable_subject(
-                "review",
-                stage,
-                gate_id or "",
-                _reference_identity(artifact_ref),
+        """Record a bounded decision bound to its indexed request occurrence."""
+        if artifact_ref is None:
+            raise DataLayoutError("review decision requires its decision artifact ref")
+        decision_ref = self._path_ref("artifact_ref", artifact_ref)
+        decision_record = self._indexed_artifact_record(decision_ref)
+        workflow_step_id = _require_workflow_step_id(
+            decision_record.get("workflow_step_id")
+        )
+        if decision_record.get("stage") != stage:
+            raise DataLayoutError("review decision stage does not match its artifact")
+        indexed_request_id = _require_review_request_id(decision_record)
+        if review_request_id is not None and review_request_id != indexed_request_id:
+            raise DataLayoutError(
+                "review decision request ID does not match its artifact"
             )
-        refs: list[dict[str, Any]] = []
-        if artifact_ref:
-            refs.append(self._path_ref("artifact_ref", artifact_ref))
+        request_id = indexed_request_id
+        refs: list[dict[str, Any]] = [decision_ref]
         if rationale_artifact_ref:
             refs.append(
                 self._path_ref("rationale_artifact_ref", rationale_artifact_ref)
@@ -337,6 +370,7 @@ class Ledger:
             "review_decision",
             payload,
             stage=stage,
+            workflow_step_id=workflow_step_id,
             subject_id=request_id,
             refs=refs,
             idempotency_key=f"review:{request_id}:decision",
@@ -347,6 +381,7 @@ class Ledger:
         session_id: str,
         stage: str,
         *,
+        workflow_step_id: str,
         route_node: str | None = None,
         idempotency_key: str | None = None,
     ) -> None:
@@ -355,8 +390,9 @@ class Ledger:
             "stage_entered",
             {"route_node": route_node},
             stage=stage,
-            subject_id=stage,
-            idempotency_key=idempotency_key,
+            workflow_step_id=_require_workflow_step_id(workflow_step_id),
+            subject_id=workflow_step_id,
+            idempotency_key=idempotency_key or f"stage-entered:{workflow_step_id}",
         )
 
     def record_stage_skipped(
@@ -364,6 +400,7 @@ class Ledger:
         session_id: str,
         stage: str,
         *,
+        workflow_step_id: str,
         reason: str,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
@@ -373,9 +410,10 @@ class Ledger:
             "stage_skipped",
             {"reason": reason},
             stage=stage,
-            subject_id=stage,
+            workflow_step_id=_require_workflow_step_id(workflow_step_id),
+            subject_id=workflow_step_id,
             refs=refs,
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key or f"stage-skipped:{workflow_step_id}",
         )
 
     def record_stage_completed(
@@ -383,6 +421,7 @@ class Ledger:
         session_id: str,
         stage: str,
         *,
+        workflow_step_id: str,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
     ) -> None:
@@ -391,9 +430,10 @@ class Ledger:
             "stage_completed",
             {},
             stage=stage,
-            subject_id=stage,
+            workflow_step_id=_require_workflow_step_id(workflow_step_id),
+            subject_id=workflow_step_id,
             refs=refs,
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key or f"stage-completed:{workflow_step_id}",
         )
 
     def record_stage_failed(
@@ -401,6 +441,7 @@ class Ledger:
         session_id: str,
         stage: str,
         *,
+        workflow_step_id: str,
         error: str | None = None,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
@@ -410,9 +451,10 @@ class Ledger:
             "stage_failed",
             {"error": error},
             stage=stage,
-            subject_id=stage,
+            workflow_step_id=_require_workflow_step_id(workflow_step_id),
+            subject_id=workflow_step_id,
             refs=refs,
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key or f"stage-failed:{workflow_step_id}",
         )
 
     def record_session_terminal(
@@ -492,6 +534,7 @@ class Ledger:
         payload: Mapping[str, Any] | None = None,
         *,
         stage: str | None = None,
+        workflow_step_id: str | None = None,
         subject_id: str | None = None,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
@@ -509,6 +552,14 @@ class Ledger:
                 "ledger payload cannot override envelope fields: " + ", ".join(reserved)
             )
         stage = stage or _optional_text(raw.pop("stage", None))
+        if workflow_step_id is None:
+            workflow_step_id = _optional_text(raw.pop("workflow_step_id", None))
+        else:
+            raw.pop("workflow_step_id", None)
+        if event_type in _OCCURRENCE_EVENT_TYPES:
+            workflow_step_id = _require_workflow_step_id(workflow_step_id)
+        elif workflow_step_id is not None:
+            workflow_step_id = _require_workflow_step_id(workflow_step_id)
         subject_id = subject_id or _subject_from_payload(raw)
         explicit_refs = list(refs or [])
         payload_refs, summary_input = self._split_payload(raw)
@@ -519,6 +570,7 @@ class Ledger:
             "session_id": session_id,
             "event_type": event_type,
             "stage": stage,
+            "workflow_step_id": workflow_step_id,
             "subject_id": subject_id,
             "refs": normalized_refs,
             "summary": summary,
@@ -553,6 +605,7 @@ class Ledger:
                     "timestamp": _now(),
                     "event_type": event_type,
                     "stage": stage,
+                    "workflow_step_id": workflow_step_id,
                     "subject_id": subject_id,
                     "refs": normalized_refs,
                     "summary": summary,
@@ -604,6 +657,7 @@ class Ledger:
             "timestamp",
             "event_type",
             "stage",
+            "workflow_step_id",
             "subject_id",
             "refs",
             "summary",
@@ -626,6 +680,20 @@ class Ledger:
         if not isinstance(row["refs"], list) or not isinstance(row["summary"], dict):
             raise LedgerFormatError(
                 f"invalid refs/summary in ledger row at line {line_number}"
+            )
+        workflow_step_id = row["workflow_step_id"]
+        if workflow_step_id is not None and (
+            not isinstance(workflow_step_id, str) or not workflow_step_id
+        ):
+            raise LedgerFormatError(
+                f"invalid workflow_step_id in ledger row at line {line_number}"
+            )
+        if (
+            row["event_type"] in _OCCURRENCE_EVENT_TYPES
+            and not isinstance(workflow_step_id, str)
+        ):
+            raise LedgerFormatError(
+                f"occurrence event lacks workflow_step_id at line {line_number}"
             )
         if _json_size(row["summary"]) > SUMMARY_MAX_BYTES:
             raise LedgerFormatError(
@@ -828,7 +896,36 @@ class Ledger:
     def _artifact_refs(self, artifacts: Iterable[Any]) -> list[dict[str, Any]]:
         return [self._artifact_ref(artifact) for artifact in artifacts]
 
-    def _latest_open_review_request_id(self, stage: str) -> str | None:
+    def _workflow_step_id_for_artifact_ref(self, ref: Mapping[str, Any]) -> str:
+        record = self._indexed_artifact_record(ref)
+        return _require_workflow_step_id(record.get("workflow_step_id"))
+
+    def _review_request_id_for_artifact_ref(self, ref: Mapping[str, Any]) -> str:
+        return _require_review_request_id(self._indexed_artifact_record(ref))
+
+    def _indexed_artifact_record(self, ref: Mapping[str, Any]) -> dict[str, Any]:
+        path_ref = ref.get("path_ref")
+        if not isinstance(path_ref, str) or not path_ref:
+            raise DataLayoutError("artifact ref has no path_ref")
+        record = next(
+            (
+                candidate
+                for candidate in read_artifact_records(
+                    self.paths.run_dir, self.paths.session_id
+                )
+                if candidate.get("path_ref") == path_ref
+            ),
+            None,
+        )
+        if record is None:
+            raise DataLayoutError(
+                f"artifact ref is not present in the index: {path_ref}"
+            )
+        return record
+
+    def _latest_open_review_request_id(
+        self, stage: str, workflow_step_id: str
+    ) -> str | None:
         events = self.read_events(self.paths.session_id)
         decided = {
             str(event.get("review_request_id") or event.get("subject_id"))
@@ -839,6 +936,7 @@ class Ledger:
             if (
                 event.get("event_type") != "review_requested"
                 or event.get("stage") != stage
+                or event.get("workflow_step_id") != workflow_step_id
             ):
                 continue
             request_id = str(event.get("review_request_id") or event.get("subject_id"))
@@ -877,6 +975,7 @@ def _semantic_body(row: Mapping[str, Any]) -> dict[str, Any]:
             "session_id",
             "event_type",
             "stage",
+            "workflow_step_id",
             "subject_id",
             "refs",
             "summary",
@@ -1024,6 +1123,23 @@ def _is_asset_ref_key(key: str) -> bool:
 
 def _optional_text(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _require_workflow_step_id(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise DataLayoutError("workflow_step_id must be a non-empty string")
+    return value
+
+
+def _workflow_step_id_from_attempt(attempt: FrozenAttemptSpec) -> str:
+    return _require_workflow_step_id((attempt.metadata or {}).get("workflow_step_id"))
+
+
+def _require_review_request_id(record: Mapping[str, Any]) -> str:
+    value = record.get("review_request_id")
+    if not isinstance(value, str) or not value:
+        raise DataLayoutError("review artifact has no indexed review_request_id")
+    return value
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:

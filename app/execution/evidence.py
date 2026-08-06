@@ -178,12 +178,18 @@ def persist_frozen_attempt(
     if attempt.session_id != state.get("session_id"):
         raise DataLayoutError("frozen attempt session does not match the run state")
     validate_frozen_attempt_for_run(state.get("data_dir", ""), attempt)
+    workflow_step_id = _workflow_step_id_from_attempt(attempt)
+    if workflow_step_id != _workflow_step_id_from_state(
+        state, expected_stage=attempt.stage
+    ):
+        raise DataLayoutError("frozen attempt targets another workflow step")
     payload = {
         "schema_version": 2,
         "record_type": "frozen_attempt",
         "stage": attempt.stage,
         "method_name": attempt.method_name,
         "attempt_id": attempt.attempt_id,
+        "workflow_step_id": workflow_step_id,
         "attempt": attempt.model_dump(mode="json"),
     }
     return _persist_record(
@@ -206,14 +212,24 @@ def load_frozen_attempt(
 ) -> FrozenAttemptSpec:
     """Integrity-check and hydrate one attempt descriptor from its ref."""
 
+    ref = value if isinstance(value, ArtifactRef) else ArtifactRef.model_validate(value)
     payload = _load_record(
         state,
-        value,
+        ref,
         expected_type=frozen_attempt_artifact_type(expected_stage),
     )
     if payload.get("record_type") != "frozen_attempt":
         raise DataLayoutError("attempt evidence has the wrong record type")
     attempt = FrozenAttemptSpec.model_validate(payload.get("attempt"))
+    payload_step_id = payload.get("workflow_step_id")
+    attempt_step_id = _workflow_step_id_from_attempt(attempt)
+    artifact_step_id = _workflow_step_id_from_artifact_ref(state, ref)
+    if (
+        not isinstance(payload_step_id, str)
+        or payload_step_id != attempt_step_id
+        or payload_step_id != artifact_step_id
+    ):
+        raise DataLayoutError("attempt evidence workflow step identity mismatch")
     if attempt.attempt_id != payload.get("attempt_id"):
         raise DataLayoutError("attempt evidence identity mismatch")
     if (
@@ -237,7 +253,10 @@ def validate_frozen_attempt_for_run(
 
     paths = SessionPaths.from_run_dir(data_dir)
     paths.require_session_id(attempt.session_id)
-    stage_work_dir = paths.stage_work_dir(attempt.stage).resolve(strict=False)
+    workflow_step_id = _workflow_step_id_from_attempt(attempt)
+    stage_work_dir = paths.workflow_step_work_dir(
+        workflow_step_id, attempt.stage
+    ).resolve(strict=False)
     declared_working_dir = attempt.working_dir.expanduser().absolute()
     working_dir = declared_working_dir.resolve(strict=False)
     declared_script_path = attempt.script_path.expanduser().absolute()
@@ -302,12 +321,24 @@ def persist_execution_result(
         if isinstance(frozen_attempt_ref, ArtifactRef)
         else ArtifactRef.model_validate(frozen_attempt_ref)
     )
+    attempt = load_frozen_attempt(
+        state,
+        frozen_ref,
+        expected_stage=stage,
+        expected_method_name=method_name,
+    )
+    workflow_step_id = _workflow_step_id_from_attempt(attempt)
+    if workflow_step_id != _workflow_step_id_from_state(state, expected_stage=stage):
+        raise DataLayoutError("execution result targets another workflow step")
+    if result.attempt_id != attempt.attempt_id:
+        raise DataLayoutError("execution result does not match its frozen attempt")
     payload = {
         "schema_version": 2,
         "record_type": "execution_result",
         "stage": stage,
         "method_name": method_name,
         "attempt_id": result.attempt_id,
+        "workflow_step_id": workflow_step_id,
         "frozen_attempt_ref": frozen_ref.model_dump(mode="json"),
         "boundary_failure": boundary_failure,
         "result": build_execution_evidence(
@@ -346,6 +377,19 @@ def load_execution_evidence(
     )
     if payload.get("record_type") != "execution_result":
         raise DataLayoutError("execution evidence has the wrong record type")
+    payload_step_id = payload.get("workflow_step_id")
+    current_step_id = _workflow_step_id_from_state(state, expected_stage=expected_stage)
+    if not isinstance(payload_step_id, str) or payload_step_id != current_step_id:
+        raise DataLayoutError("execution evidence targets another workflow step")
+    frozen_ref = ArtifactRef.model_validate(payload.get("frozen_attempt_ref"))
+    frozen_attempt = load_frozen_attempt(
+        state,
+        frozen_ref,
+        expected_stage=expected_stage,
+        expected_method_name=expected_method_name,
+    )
+    if _workflow_step_id_from_attempt(frozen_attempt) != payload_step_id:
+        raise DataLayoutError("execution evidence does not match its frozen step")
     result = validate_execution_evidence(
         state,
         payload.get("result") or {},
@@ -354,6 +398,7 @@ def load_execution_evidence(
     if (
         result.attempt_id != payload.get("attempt_id")
         or payload.get("stage") != expected_stage
+        or result.attempt_id != frozen_attempt.attempt_id
     ):
         raise DataLayoutError("execution evidence identity mismatch")
     if (
@@ -367,8 +412,7 @@ def load_execution_evidence(
             if isinstance(expected_frozen_attempt_ref, ArtifactRef)
             else ArtifactRef.model_validate(expected_frozen_attempt_ref)
         )
-        actual_ref = ArtifactRef.model_validate(payload.get("frozen_attempt_ref"))
-        if actual_ref != expected_ref:
+        if frozen_ref != expected_ref:
             raise DataLayoutError("execution evidence has the wrong frozen attempt")
     return result
 
@@ -389,6 +433,7 @@ def recover_execution_result(
         if isinstance(frozen_attempt_ref, ArtifactRef)
         else ArtifactRef.model_validate(frozen_attempt_ref)
     )
+    workflow_step_id = _workflow_step_id_from_frozen_ref(state, frozen_ref)
     candidates = [
         record
         for record in read_artifact_records(state.get("data_dir", ""), session_id)
@@ -396,6 +441,7 @@ def recover_execution_result(
         and record.get("stage") == stage
         and record.get("method_id") == method_name
         and record.get("attempt_id") == attempt_id
+        and record.get("workflow_step_id") == workflow_step_id
     ]
     if not candidates:
         return None
@@ -462,6 +508,7 @@ def _persist_record(
     paths = SessionPaths.from_run_dir(state.get("data_dir", ""))
     paths.require_session_id(session_id)
     ensure_run_layout(paths)
+    workflow_step_id = _workflow_step_id_from_state(state, expected_stage=stage)
 
     encoded = (
         json.dumps(
@@ -473,7 +520,7 @@ def _persist_record(
         + "\n"
     ).encode("utf-8")
     digest = sha256(encoded).hexdigest()
-    session_prefix = f"{session_id}:{stage}:"
+    session_prefix = f"{session_id}:{workflow_step_id}:"
     local_attempt_id = (
         attempt_id[len(session_prefix) :]
         if attempt_id.startswith(session_prefix)
@@ -482,14 +529,16 @@ def _persist_record(
     safe_attempt_id = (
         re.sub(r"[^A-Za-z0-9_.-]+", "_", local_attempt_id).strip("_") or "attempt"
     )
-    temporary = paths.work_path(
+    temporary = paths.workflow_step_work_path(
+        workflow_step_id,
         stage,
         "execution_evidence",
         f".{kind}.{uuid4().hex}.json",
     )
     temporary.parent.mkdir(parents=True, exist_ok=True)
     temporary.write_bytes(encoded)
-    destination = paths.artifact_path(
+    destination = paths.workflow_step_artifact_path(
+        workflow_step_id,
         stage,
         "attempts",
         safe_attempt_id,
@@ -500,7 +549,11 @@ def _persist_record(
         stage=stage,
         method_name=method_name,
         artifact_type=artifact_type,
-        metadata={"attempt_id": attempt_id, **dict(metadata or {})},
+        metadata={
+            "attempt_id": attempt_id,
+            "workflow_step_id": workflow_step_id,
+            **dict(metadata or {}),
+        },
     )
     return publish_artifact_record(
         paths.run_dir,
@@ -532,3 +585,70 @@ def _load_record(
     if not isinstance(payload, dict) or payload.get("schema_version") != 2:
         raise DataLayoutError(f"execution evidence is not schema v2: {ref.path_ref}")
     return payload
+
+
+def _workflow_step_id_from_attempt(attempt: FrozenAttemptSpec) -> str:
+    value = (attempt.metadata or {}).get("workflow_step_id")
+    if not isinstance(value, str) or not value.strip():
+        raise DataLayoutError("frozen attempt is missing workflow_step_id metadata")
+    return value
+
+
+def _workflow_step_id_from_artifact_ref(
+    state: Mapping[str, Any], ref: ArtifactRef
+) -> str:
+    """Resolve an artifact's occurrence identity from the verified index row."""
+
+    session_id = str(state.get("session_id") or "")
+    matches = [
+        record
+        for record in read_artifact_records(state.get("data_dir", ""), session_id)
+        if record.get("artifact_id") == ref.artifact_id
+        and record.get("path_ref") == ref.path_ref
+        and record.get("sha256") == ref.sha256
+    ]
+    if len(matches) != 1:
+        raise DataLayoutError("execution evidence artifact identity is ambiguous")
+    value = matches[0].get("workflow_step_id")
+    if not isinstance(value, str) or not value.strip():
+        raise DataLayoutError("execution evidence artifact has no workflow_step_id")
+    return value
+
+
+def _workflow_step_id_from_state(
+    state: Mapping[str, Any], *, expected_stage: str
+) -> str:
+    steps = state.get("workflow_steps")
+    index = state.get("workflow_step_index")
+    if not isinstance(steps, list) or type(index) is not int:
+        raise DataLayoutError("execution evidence requires the frozen workflow step")
+    if not 0 <= index < len(steps):
+        raise DataLayoutError("execution evidence has no active workflow step")
+    step = steps[index]
+    if not isinstance(step, Mapping) or step.get("stage") != expected_stage:
+        raise DataLayoutError(
+            "execution evidence stage does not match active workflow step"
+        )
+    step_id = step.get("step_id")
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise DataLayoutError("active workflow step has no step_id")
+    return step_id
+
+
+def _workflow_step_id_from_frozen_ref(
+    state: Mapping[str, Any], ref: ArtifactRef
+) -> str:
+    attempt = load_frozen_attempt(
+        state,
+        ref,
+        expected_stage=_stage_from_frozen_attempt_ref(state, ref),
+    )
+    return _workflow_step_id_from_attempt(attempt)
+
+
+def _stage_from_frozen_attempt_ref(state: Mapping[str, Any], ref: ArtifactRef) -> str:
+    payload = _load_record(state, ref, expected_type=ref.artifact_type)
+    stage = payload.get("stage")
+    if not isinstance(stage, str) or not stage:
+        raise DataLayoutError("frozen attempt evidence has no stage")
+    return stage

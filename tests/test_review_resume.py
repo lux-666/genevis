@@ -24,7 +24,7 @@ from app.control.lifecycle import (
 )
 from app.reports.review_report import write_operator_report
 from app.review.base import ResumeReviewRequest, load_resume_review_request
-from app.review.persistence import persist_review_request
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
@@ -58,7 +58,10 @@ class ReviewResumeTests(unittest.TestCase):
             decision="accept",
             candidate_id="flye",
             decided_by="llm_provisional",
-            rationale_artifact_ref="artifacts/assembly_review/recommendation.json",
+            rationale_artifact_ref=(
+                "artifacts/steps/step-002-assembly_review/assembly_review/"
+                "recommendation.json"
+            ),
         )
 
         self.assertEqual(request.decided_by, "llm_provisional")
@@ -77,6 +80,54 @@ class ReviewResumeTests(unittest.TestCase):
             "review_request_artifact_ref",
             summary["latest_artifact_refs"]["assembly_review"],
         )
+        self.assertEqual(
+            summary["decision_requirements"]["workflow_step_id"],
+            "step-002-assembly_review",
+        )
+
+    def test_resume_rejects_interrupt_bound_to_another_stage_occurrence(self):
+        state = _assembly_blocked_state()
+        state.update(
+            {
+                "workflow_steps": [
+                    {
+                        "step_id": "step-000-inventory",
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-001-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-002-hic_scaffolding",
+                        "stage": "hic_scaffolding",
+                        "allow_local_execution": False,
+                    },
+                    {
+                        "step_id": "step-003-assembly_review",
+                        "stage": "assembly_review",
+                        "allow_local_execution": False,
+                    },
+                ],
+                "workflow_step_index": 3,
+                "entered_workflow_step_index": 3,
+            }
+        )
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="accept",
+            candidate_id="flye",
+            **_review_binding(state),
+        )
+
+        with self.assertRaisesRegex(
+            ResumeValidationError,
+            "does not match the current frozen workflow step",
+        ):
+            resume_review_state(state, request)
 
     def test_resume_assembly_review_accept_advances_to_hic(self):
         state = _assembly_blocked_state()
@@ -158,7 +209,10 @@ class ReviewResumeTests(unittest.TestCase):
             method_name="external_purge_dups",
             metadata={
                 "human_approved_action": True,
-                "action_output_ref": "work/assembly/flye.purged.fasta",
+                "action_output_ref": (
+                    "work/steps/step-002-assembly_review/assembly_review/"
+                    "flye.purged.fasta"
+                ),
                 "evidence_refs": ["assembly_eval_bundle.json"],
             },
             **_review_binding(state),
@@ -366,38 +420,6 @@ class ReviewResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ResumeValidationError, "unknown"):
             resume_review_state(state, request)
 
-    def test_resume_assembly_rejects_legacy_rerun_decision(self):
-        state = _assembly_blocked_state()
-        request = ResumeReviewRequest(
-            session_id="s1",
-            stage="assembly_review",
-            decision="rerun",
-            **_review_binding(state),
-        )
-
-        with self.assertRaisesRegex(ResumeValidationError, "not allowed"):
-            resume_review_state(state, request)
-
-    def test_resume_assembly_rejects_legacy_rerun_with_complete_metadata(self):
-        state = _assembly_blocked_state()
-        request = ResumeReviewRequest(
-            session_id="s1",
-            stage="assembly_review",
-            decision="rerun",
-            candidate_id="flye",
-            metadata={
-                "rerun_parameters": {
-                    "read_type": "nano-raw",
-                    "estimated_genome_size": 100,
-                    "threads": 1,
-                }
-            },
-            **_review_binding(state),
-        )
-
-        with self.assertRaisesRegex(ResumeValidationError, "not allowed"):
-            resume_review_state(state, request)
-
     def test_resume_assembly_stop_records_failed_terminal(self):
         state = _assembly_blocked_state()
         request = ResumeReviewRequest(
@@ -463,9 +485,6 @@ class ReviewResumeTests(unittest.TestCase):
         )
         notes = proposal["parameter_recommendation_notes"]
         self.assertTrue(any("canonical v3" in note for note in notes))
-        self.assertTrue(
-            any("metadata.rerun_parameters are unsupported" in note for note in notes)
-        )
         self.assertNotIn(
             "rerun",
             summary["decision_requirements"]["decisions_allowed"],
@@ -498,7 +517,7 @@ class ReviewResumeTests(unittest.TestCase):
         update = resume_review_state(state, request)
 
         self.assertIsNone(update["active_interrupt"])
-        self.assertEqual(update["current_stage"], "t2t")
+        self.assertEqual(update["current_stage"], "gapcloser")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
         self.assertEqual(
             hic_out["selected_method_name"], "hic_scaffolding.candidate.autohic"
@@ -550,7 +569,7 @@ class ReviewResumeTests(unittest.TestCase):
 
         update = resume_review_state(state, request)
 
-        self.assertEqual(update["current_stage"], "t2t")
+        self.assertEqual(update["current_stage"], "gapcloser")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
         self.assertEqual(
             hic_out["output_assembly_ref"],
@@ -601,7 +620,8 @@ class ReviewResumeTests(unittest.TestCase):
             candidate_id="flye",
             decided_by="llm_provisional",
             rationale_artifact_ref=(
-                "artifacts/reviews/review_assembly/recommendation.json"
+                "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
+                "review_assembly/recommendation.json"
             ),
             **_review_binding(state),
         )
@@ -630,7 +650,10 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["decided_by"], "llm_provisional")
         self.assertEqual(
             ar_out["rationale_artifact_ref"],
-            "artifacts/reviews/review_assembly/recommendation.json",
+            (
+                "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
+                "review_assembly/recommendation.json"
+            ),
         )
         self.assertEqual(ar_out["selected_candidate_id"], "flye")
 
@@ -775,6 +798,7 @@ class ReviewResumeTests(unittest.TestCase):
                 "supervision_state": "blocked_human",
                 "stage_outputs": {"assembly": {"status": "blocked_human"}},
             }
+            state.update(_frozen_workflow("assembly", "assembly_review"))
             persisted = persist_review_request(
                 state,
                 stage="assembly",
@@ -817,6 +841,7 @@ class ReviewResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths.from_run_dir(v2_run_dir(tmp, "s1"))
             state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            state.update(_frozen_workflow("assembly_review", "hic_scaffolding"))
             persisted = persist_review_request(
                 state,
                 stage="assembly_review",
@@ -854,11 +879,7 @@ class ReviewResumeTests(unittest.TestCase):
     def test_inspect_session_decision_requirements_none_when_no_unresolved(self):
         state = _assembly_blocked_state()
         # Add a decision after the request → unresolved goes away.
-        from app.storage.ledger import Ledger
-
-        Ledger(state["data_dir"]).record_review_decision(
-            "s1", "assembly_review", decision="accept", candidate_id="flye"
-        )
+        _record_review_decision(state, decision="accept", candidate_id="flye")
 
         summary = inspect_session("s1", state["data_dir"])
 
@@ -869,11 +890,26 @@ class ReviewResumeTests(unittest.TestCase):
         from app.storage.ledger import Ledger
 
         ledger = Ledger(state["data_dir"])
-        ledger.record_review_decision(
-            "s1", "assembly_review", decision="accept", candidate_id="flye"
+        _record_review_decision(state, decision="accept", candidate_id="flye")
+        hic_state = {**state, **_frozen_workflow("hic_scaffolding", "gapcloser")}
+        hic_request = persist_review_request(
+            hic_state,
+            stage="hic_scaffolding",
+            gate_id="hic_scaffolding",
+            reason="hic_scaffolding_human_decision_required",
+            payload={
+                "stage": "hic_scaffolding",
+                "gate_id": "hic_scaffolding",
+                "reason": "hic_scaffolding_human_decision_required",
+                "decisions_allowed": ["accept_candidate", "stop_human_review"],
+            },
         )
         ledger.record_review_requested(
-            "s1", "hic_scaffolding", reason="hic_scaffolding_human_decision_required"
+            "s1",
+            "hic_scaffolding",
+            reason="hic_scaffolding_human_decision_required",
+            review_request_artifact_ref=hic_request.request_ref.model_dump(mode="json"),
+            review_request_id=hic_request.review_request_id,
         )
 
         summary = inspect_session("s1", state["data_dir"])
@@ -881,6 +917,38 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(summary["supervision_state"], "blocked_human")
         self.assertEqual(
             summary["latest_unresolved_review_request"]["stage"], "hic_scaffolding"
+        )
+
+    def test_inspect_session_keeps_repeated_stage_occurrences_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = v2_run_dir(Path(tmp) / "data", "s1")
+            from app.storage.ledger import Ledger
+
+            ledger = Ledger(data_dir)
+            ledger.create_session("s1", "control/manifest.yaml")
+            ledger.record_stage_entered(
+                "s1",
+                "assembly",
+                workflow_step_id="step-001-assembly",
+                route_node="route_controller",
+            )
+            ledger.record_stage_entered(
+                "s1",
+                "assembly",
+                workflow_step_id="step-003-assembly",
+                route_node="route_controller",
+            )
+
+            summary = inspect_session("s1", data_dir)
+
+        self.assertEqual(summary["current_stage"], "assembly")
+        self.assertEqual(summary["current_workflow_step_id"], "step-003-assembly")
+        self.assertEqual(
+            summary["route_trace"],
+            [
+                "step-001-assembly:route_controller",
+                "step-003-assembly:route_controller",
+            ],
         )
 
     def test_inspect_session_does_not_treat_operator_report_as_lifecycle_truth(self):
@@ -942,7 +1010,7 @@ class ReviewResumeTests(unittest.TestCase):
             ledger.record_session_terminal(
                 session_id,
                 outcome="completed",
-                stage="function_annotation",
+                stage="base_polish",
             )
 
             summary = inspect_session(session_id, data_dir)
@@ -1095,8 +1163,12 @@ def _publish_assembly_candidate(
     source: Path,
 ) -> dict:
     paths = SessionPaths.from_run_dir(data_dir)
-    candidate_dir = paths.artifact_path("assembly", candidate_id)
-    work_dir = paths.work_path("assembly", candidate_id)
+    candidate_dir = paths.workflow_step_artifact_path(
+        "step-001-assembly", "assembly", "candidates", candidate_id
+    )
+    work_dir = paths.workflow_step_work_path(
+        "step-001-assembly", "assembly", candidate_id
+    )
     work_dir.mkdir(parents=True, exist_ok=True)
 
     primary = publish_artifact_record(
@@ -1177,8 +1249,11 @@ def _assembly_blocked_state(
     tmp = tempfile.mkdtemp()
     session_id = "s1"
     data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+    paths = SessionPaths.from_run_dir(data_dir)
     for method in ("flye", "canu"):
-        draft = data_dir / "work" / "assembly" / method / "draft.fasta"
+        draft = paths.workflow_step_work_path(
+            "step-001-assembly", "assembly", method, "draft.fasta"
+        )
         draft.parent.mkdir(parents=True, exist_ok=True)
         draft.write_text(">ctg1\nACGT\n", encoding="utf-8")
     candidates = [
@@ -1187,7 +1262,9 @@ def _assembly_blocked_state(
             session_id,
             candidate_id=method,
             method_name=f"assembly.candidate.{method}",
-            source=data_dir / "work" / "assembly" / method / "draft.fasta",
+            source=paths.workflow_step_work_path(
+                "step-001-assembly", "assembly", method, "draft.fasta"
+            ),
         )
         for method in ("flye", "canu")
     ]
@@ -1212,7 +1289,10 @@ def _assembly_blocked_state(
         "notes": [],
         "report_refs": {
             "assembly_review_report": "reports/assembly_review.md",
-            "review_packet": "artifacts/assembly_review/assembly_review_packet.json",
+            "review_packet": (
+                "artifacts/steps/step-002-assembly_review/assembly_review/"
+                "assembly_review_packet.json"
+            ),
             "candidate_comparison": "candidate_comparison.json",
         },
         "candidate_comparison_context": {
@@ -1246,6 +1326,7 @@ def _assembly_blocked_state(
         },
         "skip_reasons": {},
     }
+    state.update(_frozen_workflow("assembly_review", "hic_scaffolding"))
     persisted = persist_review_request(
         state,
         stage="assembly_review",
@@ -1280,12 +1361,17 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
     tmp = tempfile.mkdtemp()
     session_id = "s1"
     data_dir = v2_run_dir(Path(tmp) / "data", session_id)
-    pre_hic = data_dir / "work" / "hic_scaffolding" / "pre_hic.fasta"
-    scaffold = data_dir / "work" / "hic_scaffolding" / "autohic.fasta"
+    paths = SessionPaths.from_run_dir(data_dir)
+    pre_hic = paths.workflow_step_work_path(
+        "step-001-assembly_review", "assembly_review", "pre_hic.fasta"
+    )
+    scaffold = paths.workflow_step_work_path(
+        "step-002-hic_scaffolding", "hic_scaffolding", "autohic.fasta"
+    )
     pre_hic.parent.mkdir(parents=True, exist_ok=True)
+    scaffold.parent.mkdir(parents=True, exist_ok=True)
     pre_hic.write_text(">ctg1\nACGT\n", encoding="utf-8")
     scaffold.write_text(">chr1\nACGT\n", encoding="utf-8")
-    paths = SessionPaths.from_run_dir(data_dir)
     published_pre_hic = publish_artifact_record(
         data_dir,
         session_id,
@@ -1295,7 +1381,8 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
             method_name="assembly_review.contract",
             artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
         ),
-        destination=paths.artifact_path(
+        destination=paths.workflow_step_artifact_path(
+            "step-001-assembly_review",
             "assembly_review",
             "selected_assembly.fasta",
         ),
@@ -1309,7 +1396,8 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
             method_name="hic_scaffolding.candidate.autohic",
             artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
         ),
-        destination=paths.artifact_path(
+        destination=paths.workflow_step_artifact_path(
+            "step-002-hic_scaffolding",
             "hic_scaffolding",
             "autohic",
             "scaffold.fasta",
@@ -1351,14 +1439,13 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
                 paths=[str(pre_hic)],
                 source_stage="assembly_review",
                 metadata={
-                    "primary_output_ref": published_pre_hic.ref.model_dump(
-                        mode="json"
-                    )
+                    "primary_output_ref": published_pre_hic.ref.model_dump(mode="json")
                 },
             ).to_dict()
         },
         "skip_reasons": {},
     }
+    state.update(_frozen_workflow("hic_scaffolding", "gapcloser"))
     payload = {
         "stage": "hic_scaffolding",
         "gate_id": "hic_scaffolding",
@@ -1419,6 +1506,64 @@ def _read_events(state: dict) -> list[dict]:
     from app.storage.ledger import Ledger
 
     return Ledger(state["data_dir"]).read_events(state["session_id"])
+
+
+def _record_review_decision(
+    state: dict,
+    *,
+    decision: str,
+    candidate_id: str | None = None,
+) -> None:
+    interrupt = state["active_interrupt"]
+    decision_ref = persist_review_decision(
+        state["data_dir"],
+        session_id=state["session_id"],
+        review_request_id=interrupt["review_request_id"],
+        stage=interrupt["stage"],
+        gate_id=interrupt["gate_id"],
+        decision={"decision": decision, "candidate_id": candidate_id},
+        request_hash=interrupt["request_hash"],
+        request_ref=interrupt["request_ref"],
+    )
+    from app.storage.ledger import Ledger
+
+    Ledger(state["data_dir"]).record_review_decision(
+        state["session_id"],
+        interrupt["stage"],
+        decision=decision,
+        gate_id=interrupt["gate_id"],
+        candidate_id=candidate_id,
+        artifact_ref=decision_ref,
+        review_request_id=interrupt["review_request_id"],
+    )
+
+
+def _frozen_workflow(stage: str, next_stage: str) -> dict:
+    stages = ["inventory"]
+    if stage == "assembly_review":
+        stages.append("assembly")
+    elif stage == "hic_scaffolding":
+        stages.append("assembly_review")
+    if stage != "inventory":
+        stages.append(stage)
+    if next_stage != "done":
+        stages.append(next_stage)
+    step_index = stages.index(stage)
+    return {
+        "current_stage": stage,
+        "workflow_steps": [
+            {
+                "step_id": f"step-{index:03d}-{item}",
+                "stage": item,
+                "allow_local_execution": False,
+            }
+            for index, item in enumerate(stages)
+        ],
+        "workflow_step_index": step_index,
+        "entered_workflow_step_index": step_index,
+        "stage_plan_ref": "control/run_config.json",
+        "stage_seeds": {},
+    }
 
 
 if __name__ == "__main__":

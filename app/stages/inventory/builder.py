@@ -58,6 +58,7 @@ def _review_gate(state: TopLevelState) -> StateUpdate:
             mode="json"
         ),
         auto_decidable=False,
+        review_request_id=persisted_request.review_request_id,
     )
     update = update_inventory_stage_output(
         state,

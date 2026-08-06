@@ -24,18 +24,49 @@ from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import ROUTE_TRACE_LIMIT
+from app.schemas.state import initial_state
 from app.storage.artifacts import read_artifact_records, register_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
 
+_DEFAULT_REQUESTED_STAGES = (
+    "read_qc",
+    "genome_survey",
+    "assembly",
+    "assembly_review",
+)
 
-def _run(tmp: str, session_id: str = "s1", *, create: bool = True) -> SessionPaths:
+
+def _run(
+    tmp: str,
+    session_id: str = "s1",
+    *,
+    create: bool = True,
+    requested_stages: tuple[str, ...] = _DEFAULT_REQUESTED_STAGES,
+) -> SessionPaths:
     paths = SessionPaths(tmp, session_id)
     ensure_run_layout(paths)
     if create:
         paths.manifest_path.write_text("session_id: s1\n", encoding="utf-8")
+        paths.run_config_path.write_text(
+            json.dumps(
+                {
+                    "requested_stages": [
+                        {"stage": stage, "allow_local_execution": False}
+                        for stage in requested_stages
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
         Ledger(paths.run_dir).create_session(session_id, str(paths.manifest_path))
     return paths
+
+
+def _step_id(stage: str, *, occurrence: int = 0) -> str:
+    stages = ("inventory", *_DEFAULT_REQUESTED_STAGES)
+    index = [index for index, value in enumerate(stages) if value == stage][occurrence]
+    return f"step-{index:03d}-{stage}"
 
 
 def _attempt(
@@ -44,18 +75,22 @@ def _attempt(
     stage: str,
     method: str,
     outcome: str,
+    workflow_step_id: str | None = None,
 ) -> None:
-    attempt_id = f"{stage}:attempt_000"
+    workflow_step_id = workflow_step_id or _step_id(stage)
+    attempt_id = f"{workflow_step_id}:{stage}:attempt_000"
     ledger.record_event(
         session_id,
         "attempt_started",
         {"attempt_id": attempt_id, "stage": stage, "method_name": method},
+        workflow_step_id=workflow_step_id,
     )
     if outcome == "succeeded":
         ledger.record_event(
             session_id,
             "attempt_succeeded",
             {"attempt_id": attempt_id, "stage": stage, "method_name": method},
+            workflow_step_id=workflow_step_id,
         )
     elif outcome == "failed":
         ledger.record_event(
@@ -68,6 +103,7 @@ def _attempt(
                 "return_code": 1,
                 "error": "tool boom\nERROR conda.cli.main_run:execute(142): failed",
             },
+            workflow_step_id=workflow_step_id,
         )
 
 
@@ -79,11 +115,15 @@ def _register_artifact(
     artifact_type: str,
     payload: dict | None = None,
     metadata: dict | None = None,
+    workflow_step_id: str | None = None,
+    artifact_name: str | None = None,
 ) -> Path:
-    file_path = paths.artifact_path(
+    workflow_step_id = workflow_step_id or _step_id(stage)
+    file_path = paths.workflow_step_artifact_path(
+        workflow_step_id,
         stage,
         "evidence",
-        f"{artifact_type.replace('.', '_')}.json",
+        artifact_name or f"{artifact_type.replace('.', '_')}.json",
     )
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(json.dumps(payload or {}), encoding="utf-8")
@@ -102,6 +142,32 @@ def _stage(trace: dict, name: str) -> dict:
     return next(stage for stage in trace["stages"] if stage["stage"] == name)
 
 
+def _workflow_state(paths: SessionPaths, *, workflow_step_index: int) -> dict:
+    steps = [
+        {
+            "step_id": f"step-{index:03d}-{stage}",
+            "stage": stage,
+            "allow_local_execution": False,
+        }
+        for index, stage in enumerate(("inventory", *_DEFAULT_REQUESTED_STAGES))
+    ]
+    state = initial_state(
+        session_id=paths.session_id,
+        input_manifest_ref=paths.to_ref(paths.manifest_path),
+        data_dir=str(paths.run_dir),
+        workflow_steps=steps,
+        stage_plan_ref=paths.to_ref(paths.run_config_path),
+    )
+    state.update(
+        {
+            "workflow_step_index": workflow_step_index,
+            "entered_workflow_step_index": workflow_step_index,
+            "current_stage": steps[workflow_step_index]["stage"],
+        }
+    )
+    return state
+
+
 class SessionSummaryBuildTests(unittest.TestCase):
     def test_inspect_route_trace_keeps_only_latest_sixteen_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,6 +177,7 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 ledger.record_stage_entered(
                     "s1",
                     f"stage_{index}",
+                    workflow_step_id=f"step-{index:03d}-stage_{index}",
                     route_node=f"route_{index}",
                     idempotency_key=f"route-test-{index}",
                 )
@@ -119,14 +186,19 @@ class SessionSummaryBuildTests(unittest.TestCase):
 
             self.assertEqual(
                 summary["route_trace"],
-                [f"route_{index}" for index in range(4, ROUTE_TRACE_LIMIT + 4)],
+                [
+                    f"step-{index:03d}-stage_{index}:route_{index}"
+                    for index in range(4, ROUTE_TRACE_LIMIT + 4)
+                ],
             )
 
     def test_attempt_and_request_bound_decision_are_reconstructed(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
-            ledger.record_stage_entered("s1", "read_qc")
+            ledger.record_stage_entered(
+                "s1", "read_qc", workflow_step_id=_step_id("read_qc")
+            )
             _attempt(
                 ledger,
                 "s1",
@@ -155,13 +227,17 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 review_request_artifact_ref=str(request),
                 review_request_id="review_001",
             )
-            ledger.record_review_decision(
+            ledger.record_event(
                 "s1",
-                "assembly_review",
-                decision="accept",
-                candidate_id="flye",
-                decided_by="human",
-                review_request_id="review_001",
+                "review_decision",
+                {
+                    "stage": "assembly_review",
+                    "review_request_id": "review_001",
+                    "decision": "accept",
+                    "candidate_id": "flye",
+                    "decided_by": "human",
+                },
+                workflow_step_id=_step_id("assembly_review"),
             )
 
             trace = build_session_trace(paths.run_dir, "s1")
@@ -195,6 +271,46 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 "assembly.candidate.nextdenovo",
             )
 
+    def test_repeated_stage_occurrences_have_distinct_trace_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp, requested_stages=("read_qc", "read_qc"))
+            ledger = Ledger(paths.run_dir)
+            first_step_id = "step-001-read_qc"
+            second_step_id = "step-002-read_qc"
+            for step_id in (first_step_id, second_step_id):
+                ledger.record_stage_entered("s1", "read_qc", workflow_step_id=step_id)
+                _attempt(
+                    ledger,
+                    "s1",
+                    "read_qc",
+                    "read_qc.long_read_stats.seqkit_stats",
+                    "succeeded",
+                    workflow_step_id=step_id,
+                )
+                ledger.record_stage_completed("s1", "read_qc", workflow_step_id=step_id)
+
+            trace = build_session_trace(paths.run_dir, "s1")
+            read_qc_steps = [
+                stage for stage in trace["stages"] if stage["stage"] == "read_qc"
+            ]
+
+            self.assertEqual(
+                [stage["workflow_step_id"] for stage in read_qc_steps],
+                [first_step_id, second_step_id],
+            )
+            self.assertEqual(
+                [stage["status"] for stage in read_qc_steps],
+                [STAGE_STATUS_EXECUTED, STAGE_STATUS_EXECUTED],
+            )
+            self.assertEqual(
+                [
+                    event["workflow_step_id"]
+                    for event in trace["route"]
+                    if event["event_type"] == "stage_entered"
+                ],
+                [first_step_id, second_step_id],
+            )
+
     def test_terminal_failure_is_reconstructed_without_current_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
@@ -223,7 +339,7 @@ class SessionSummaryBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             persisted = persist_review_request(
-                {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                _workflow_state(paths, workflow_step_index=4),
                 stage="assembly_review",
                 gate_id="assembly_review",
                 reason="assembly_review_human_decision_required",
@@ -242,8 +358,6 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 reason="assembly_review_human_decision_required",
                 review_request_artifact_ref=persisted.request_ref,
                 review_request_id=persisted.review_request_id,
-                auto_decidable=False,
-                pending_human_confirmation=True,
             )
 
             trace = build_session_trace(paths.run_dir, "s1")
@@ -256,6 +370,10 @@ class SessionSummaryBuildTests(unittest.TestCase):
             self.assertEqual(
                 trace["blocked"]["decisions_allowed"], ["accept", "reject"]
             )
+            self.assertFalse(
+                {"policy_mode", "pending_human_confirmation"}
+                & _stage(trace, "assembly_review")["review"].keys()
+            )
             self.assertEqual(
                 summary["active_interrupt"]["review_request_id"],
                 persisted.review_request_id,
@@ -266,9 +384,21 @@ class SessionSummaryBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
-            ledger.record_stage_entered("s1", "read_qc", route_node="route_controller")
-            ledger.record_stage_completed("s1", "read_qc")
-            ledger.record_stage_skipped("s1", "genome_survey", reason="not_requested")
+            ledger.record_stage_entered(
+                "s1",
+                "read_qc",
+                workflow_step_id=_step_id("read_qc"),
+                route_node="route_controller",
+            )
+            ledger.record_stage_completed(
+                "s1", "read_qc", workflow_step_id=_step_id("read_qc")
+            )
+            ledger.record_stage_skipped(
+                "s1",
+                "genome_survey",
+                workflow_step_id=_step_id("genome_survey"),
+                reason="not_requested",
+            )
 
             trace = build_session_trace(paths.run_dir, "s1")
 
@@ -290,29 +420,37 @@ class SessionSummaryBuildTests(unittest.TestCase):
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
             for request_id in ("review_001", "review_002"):
-                request = paths.artifact_path("reviews", request_id, "request.json")
-                request.parent.mkdir(parents=True, exist_ok=True)
-                request.write_text("{}", encoding="utf-8")
+                request = _register_artifact(
+                    paths,
+                    stage="assembly_review",
+                    method="assembly_review.request",
+                    artifact_type="assembly_review.request",
+                    metadata={"review_request_id": request_id},
+                    artifact_name=f"{request_id}.json",
+                )
                 ledger.record_review_requested(
                     "s1",
                     "assembly_review",
                     reason="operator_required",
                     review_request_artifact_ref=str(request),
                     review_request_id=request_id,
-                    auto_decidable=False,
-                    pending_human_confirmation=True,
                 )
-            ledger.record_review_decision(
+            ledger.record_event(
                 "s1",
-                "assembly_review",
-                decision="accept",
-                review_request_id="review_001",
+                "review_decision",
+                {
+                    "stage": "assembly_review",
+                    "review_request_id": "review_001",
+                    "decision": "accept",
+                    "decided_by": "human",
+                },
+                workflow_step_id=_step_id("assembly_review"),
             )
 
             trace = build_session_trace(paths.run_dir, "s1")
             pending = {
                 item["review_request_id"]: item["resolved"]
-                for item in trace["pending_human_confirmations"]
+                for item in trace["pending_review_requests"]
             }
 
             self.assertEqual(pending, {"review_001": True, "review_002": False})
@@ -358,7 +496,9 @@ class SessionSummaryWriteTests(unittest.TestCase):
             first_payload = json.loads(
                 Path(first["json_ref"]).read_text(encoding="utf-8")
             )
-            ledger.record_stage_entered("s1", "read_qc")
+            ledger.record_stage_entered(
+                "s1", "read_qc", workflow_step_id=_step_id("read_qc")
+            )
             second = write_session_trace(paths.run_dir, "s1")
             second_payload = json.loads(
                 Path(second["json_ref"]).read_text(encoding="utf-8")

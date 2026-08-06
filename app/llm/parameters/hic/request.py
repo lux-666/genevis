@@ -7,7 +7,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.llm.parameters.base import (
-    PARAMETER_RECOMMENDATION_CONTRACT,
+    PARAMETER_RECOMMENDATION_CONTRACT as _PARAMETER_RECOMMENDATION_CONTRACT,
+)
+from app.llm.parameters.base import (
     build_adjustable_parameters,
 )
 from app.schemas.artifacts import ParameterAttemptTask
@@ -21,6 +23,16 @@ from app.schemas.parameter_recommendation import (
 AUTOHIC_METHOD: Literal["hic_scaffolding.candidate.autohic"] = (
     "hic_scaffolding.candidate.autohic"
 )
+PARAMETER_RECOMMENDATION_CONTRACT: Literal["parameter_recommendation_v1"] = (
+    _PARAMETER_RECOMMENDATION_CONTRACT
+)
+
+__all__ = [
+    "AUTOHIC_METHOD",
+    "PARAMETER_RECOMMENDATION_CONTRACT",
+    "AutoHiCParameterRequest",
+    "build_autohic_parameter_request",
+]
 
 
 class _StrictRequestModel(BaseModel):

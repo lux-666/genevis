@@ -83,16 +83,6 @@ class MethodDescriptor(StrictDescriptorModel):
     human_review_triggers: list[str] = Field(default_factory=list)
     defaults: dict[str, Any] = Field(default_factory=dict)
     resource_hints: ResourceHints = Field(default_factory=ResourceHints)
-    # Gene-annotation taxonomy / candidate-bundle contract (all optional so
-    # existing descriptors stay valid). category groups methods (ab_initio,
-    # homology, integration, merge); materialize_outputs lists the standardized
-    # candidate files the method must produce on disk.
-    category: str | None = None
-    recommended_default: str | bool | None = None
-    materialize_outputs: list[str] = Field(default_factory=list)
-    readiness_rules: list[str] = Field(default_factory=list)
-    review_notes: list[str] = Field(default_factory=list)
-    evm: dict[str, str] | None = None
     parameter_catalog: str | None = None
     planner: PlannerMetadata = Field(default_factory=PlannerMetadata)
 

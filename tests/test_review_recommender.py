@@ -11,6 +11,7 @@ from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
 from app.review.recommender import RecommendationError, recommend_review_decision
+from app.schemas.state import initial_state
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -35,9 +36,52 @@ class _FakeChat:
         return _Response(self.content)
 
 
+_ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
+    {
+        "step_id": "step-000-inventory",
+        "stage": "inventory",
+        "allow_local_execution": False,
+    },
+    {
+        "step_id": "step-001-assembly",
+        "stage": "assembly",
+        "allow_local_execution": True,
+    },
+    {
+        "step_id": "step-002-assembly_review",
+        "stage": "assembly_review",
+        "allow_local_execution": True,
+    },
+    {
+        "step_id": "step-003-hic_scaffolding",
+        "stage": "hic_scaffolding",
+        "allow_local_execution": True,
+    },
+]
+
+
+def _assembly_review_state(run_dir: Path) -> dict:
+    state = initial_state(
+        session_id="s1",
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(run_dir),
+        workflow_steps=_ASSEMBLY_REVIEW_WORKFLOW_STEPS,
+        stage_plan_ref="control/run_config.json",
+        stage_seeds={"assembly_review": {"status": "pending"}},
+    )
+    state.update(
+        {
+            "workflow_step_index": 2,
+            "entered_workflow_step_index": 2,
+            "current_stage": "assembly_review",
+        }
+    )
+    return state
+
+
 def _persist_request(run_dir: Path, request: ReviewPayload):
     return persist_review_request(
-        {"session_id": "s1", "data_dir": str(run_dir)},
+        _assembly_review_state(run_dir),
         stage=request.stage,
         gate_id=request.gate_id or request.stage,
         reason=request.reason,
@@ -98,8 +142,17 @@ class ReviewRecommenderTests(unittest.TestCase):
             self.assertEqual(decision.review_request_id, persisted.review_request_id)
             self.assertEqual(decision.review_request_hash, persisted.request_hash)
             self.assertTrue(decision.rationale_artifact_ref)
-            artifact_path = SessionPaths.from_run_dir(run_dir).resolve_ref(
-                decision.rationale_artifact_ref
+            paths = SessionPaths.from_run_dir(run_dir)
+            self.assertEqual(persisted.workflow_step_id, "step-002-assembly_review")
+            artifact_path = paths.resolve_ref(decision.rationale_artifact_ref)
+            self.assertEqual(
+                artifact_path.parent,
+                paths.workflow_step_artifact_path(
+                    persisted.workflow_step_id,
+                    "assembly_review",
+                    "reviews",
+                    persisted.review_request_id,
+                ),
             )
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
             self.assertEqual(artifact["model"], "fake-model-v1")

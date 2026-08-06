@@ -15,7 +15,6 @@ from app.entrypoints.ask_planner import (
     _auto_fill_inferred_defaults,
     _extract_busco_version,
     _infer_parameter_defaults,
-    _plan_validation_warnings,
     _recommended_stages_from_manifest,
     build_initial_plan_draft,
     build_planner_method_catalog,
@@ -24,11 +23,21 @@ from app.entrypoints.ask_planner import (
     merge_clarification_response,
     next_clarification,
 )
-from app.schemas.ask_plan import AskClarificationResponse, AskPlanState
+from app.schemas.ask_plan import (
+    AskClarificationResponse,
+    AskPlanState,
+    PlanStageOccurrence,
+)
 from app.schemas.descriptors import DescriptorRegistry
 
 
 def _base_plan(**overrides) -> AskPlanState:
+    stages = overrides.pop("stage_names", None)
+    if stages is not None:
+        overrides["selected_stage_occurrences"] = [
+            PlanStageOccurrence(stage=stage, allow_local_execution=True)
+            for stage in stages
+        ]
     base = dict(
         session_id="s1",
         data_dir="data",
@@ -43,25 +52,21 @@ def _read_qc_default_methods() -> list[str]:
     return [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP]
 
 
-def _diamond_provenance(
-    proteins_ref: str = "/data/proteins.fa",
-) -> list[dict[str, str]]:
+def _requested_stage_names(payload: dict) -> list[str]:
+    return [request["stage"] for request in payload["requested_stages"]]
+
+
+def _local_execution_stage_names(payload: dict) -> list[str]:
     return [
-        {
-            "method_name": "function_annotation.candidate.diamond",
-            "database_name": "UniProt",
-            "database_version": "2026_02",
-            "snapshot_date": "2026-05-16",
-            "database_source_ref": "/db/uniprot/2026_02.dmnd",
-            "descriptor_version": "diamond.yaml",
-            "input_proteins_ref": proteins_ref,
-        }
+        request["stage"]
+        for request in payload["requested_stages"]
+        if request["allow_local_execution"]
     ]
 
 
 class AskPlanSchemaTests(unittest.TestCase):
-    def test_stage_selection_requires_selected_stages(self):
-        with self.assertRaisesRegex(ValueError, "selected_stages"):
+    def test_stage_selection_requires_occurrences(self):
+        with self.assertRaisesRegex(ValueError, "selected_stage_occurrences"):
             AskClarificationResponse(kind="stage_selection")
 
     def test_method_selection_requires_selected_methods(self):
@@ -84,29 +89,43 @@ class AskPlanSchemaTests(unittest.TestCase):
         )
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
 
-    def test_parameter_values_accepts_stage_parameters_only(self):
-        response = AskClarificationResponse(
-            kind="parameter_values",
-            stage_parameters={
-                "function_annotation": {"database_provenance": _diamond_provenance()}
-            },
-        )
-        self.assertEqual(
-            response.stage_parameters["function_annotation"]["database_provenance"][0][
-                "database_name"
-            ],
-            "UniProt",
-        )
-
     def test_confirm_requires_confirmed(self):
         with self.assertRaisesRegex(ValueError, "confirmed"):
             AskClarificationResponse(kind="confirm")
 
     def test_valid_stage_selection(self):
         response = AskClarificationResponse(
-            kind="stage_selection", selected_stages=["read_qc", "assembly"]
+            kind="stage_selection",
+            selected_stage_occurrences=[
+                {"stage": "read_qc", "allow_local_execution": True},
+                {"stage": "assembly", "allow_local_execution": True},
+            ],
         )
-        self.assertEqual(response.selected_stages, ["read_qc", "assembly"])
+        self.assertEqual(
+            [occurrence.stage for occurrence in response.selected_stage_occurrences],
+            ["read_qc", "assembly"],
+        )
+
+    def test_stage_occurrence_rejects_unknown_stage(self):
+        with self.assertRaisesRegex(ValueError, "stage"):
+            PlanStageOccurrence(
+                stage="not_a_stage",
+                allow_local_execution=False,
+            )
+
+    def test_plan_state_rejects_removed_execution_order_field(self):
+        with self.assertRaisesRegex(ValueError, "resolved_execution_order"):
+            _base_plan(resolved_execution_order=["assembly"])
+
+    def test_plan_state_rejects_legacy_selected_stages_field(self):
+        with self.assertRaisesRegex(ValueError, "selected_stages"):
+            AskPlanState(
+                session_id="s1",
+                data_dir="data",
+                entry_request={},
+                manifest_ref="test.yaml",
+                selected_stages=["assembly"],
+            )
 
 
 class AskPlannerStageSelectionTests(unittest.TestCase):
@@ -123,8 +142,14 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
 
         self.assertEqual(result.kind, "stage_selection")
-        self.assertEqual(result.choices["suggested_stages"], ["assembly"])
-        self.assertEqual(result.response_schema["selected_stages"], ["assembly"])
+        self.assertEqual(
+            result.choices["suggested_stage_occurrences"],
+            [{"stage": "assembly", "allow_local_execution": True}],
+        )
+        self.assertEqual(
+            result.response_schema["selected_stage_occurrences"],
+            [{"stage": "assembly", "allow_local_execution": True}],
+        )
 
     def test_stage_selection_keeps_requested_execution_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,13 +165,33 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             )
             plan = _base_plan(manifest_ref=str(manifest))
             response = AskClarificationResponse(
-                kind="stage_selection", selected_stages=["assembly"]
+                kind="stage_selection",
+                selected_stage_occurrences=[
+                    {"stage": "assembly", "allow_local_execution": True}
+                ],
             )
             updated = merge_clarification_response(plan, response)
-            self.assertEqual(updated.selected_stages, ["assembly"])
-            self.assertEqual(updated.resolved_execution_order, ["assembly"])
+            self.assertEqual(updated.selected_stage_names, ["assembly"])
 
-    def test_annotation_only_with_raw_reads_does_not_auto_add_assembly(self):
+    def test_stage_selection_keeps_custom_order_and_repeated_occurrences(self):
+        plan = _base_plan()
+        response = AskClarificationResponse(
+            kind="stage_selection",
+            selected_stage_occurrences=[
+                {"stage": "assembly_review", "allow_local_execution": True},
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "assembly_review", "allow_local_execution": True},
+            ],
+        )
+
+        updated = merge_clarification_response(plan, response)
+
+        self.assertEqual(
+            updated.selected_stage_names,
+            ["assembly_review", "assembly", "assembly_review"],
+        )
+
+    def test_t2t_only_with_raw_reads_does_not_auto_add_assembly(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -160,14 +205,14 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             )
             plan = _base_plan(manifest_ref=str(manifest))
             response = AskClarificationResponse(
-                kind="stage_selection", selected_stages=["gene_annotation"]
+                kind="stage_selection",
+                selected_stage_occurrences=[
+                    {"stage": "t2t", "allow_local_execution": True}
+                ],
             )
             updated = merge_clarification_response(plan, response)
+            self.assertEqual(updated.selected_stage_names, ["t2t"])
 
-            self.assertEqual(updated.resolved_execution_order, ["gene_annotation"])
-            self.assertNotIn("assembly", updated.resolved_execution_order)
-            self.assertNotIn("assembly_review", updated.resolved_execution_order)
-            self.assertNotIn("repeat_annotation", updated.resolved_execution_order)
 
     def test_plan_summary_includes_input_assets_from_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -210,7 +255,6 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             plan = _base_plan(
                 manifest_ref=str(manifest_path),
                 entry_request={"command": "run", "manifest": str(manifest_path)},
-                resolved_execution_order=["assembly"],
                 selected_methods={"assembly": "assembly.candidate.flye"},
             )
             manifest = planner._load_manifest(str(manifest_path))
@@ -246,8 +290,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
                 entry_request={"requested_stages": ["assembly"]},
             )
             draft = build_initial_plan_draft(plan)
-            self.assertEqual(draft.selected_stages, ["assembly"])
-            self.assertEqual(draft.resolved_execution_order, ["assembly"])
+            self.assertEqual(draft.selected_stage_names, ["assembly"])
             self.assertEqual(
                 draft.selected_methods["assembly"], "assembly.candidate.flye"
             )
@@ -294,12 +337,11 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                entry_request={"requested_stages": ["assembly", "gene_annotation"]},
+                entry_request={"requested_stages": ["assembly", "assembly_review"]},
             )
             draft = build_initial_plan_draft(plan)
-            self.assertEqual(draft.selected_stages, ["assembly", "gene_annotation"])
             self.assertEqual(
-                draft.resolved_execution_order, ["assembly", "gene_annotation"]
+                draft.selected_stage_names, ["assembly", "assembly_review"]
             )
 
     def test_pipeline_draft_prefills_recommended_methods_and_default_parameters(self):
@@ -416,8 +458,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 
     def test_method_selection_includes_non_pipeline_stages(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "method_selection")
@@ -441,8 +482,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 
     def test_assembly_review_method_selection_uses_registered_method_names(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         method_names = {
@@ -455,16 +495,14 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 
     def test_assembly_dedup_is_default_auto_without_method_or_parameter_questions(self):
         plan = _base_plan(
-            selected_stages=["assembly_dedup"],
-            resolved_execution_order=["assembly_dedup"],
+            stage_names=["assembly_dedup"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "confirm")
 
     def test_read_qc_only_asks_for_filter_choice(self):
         plan = _base_plan(
-            selected_stages=["read_qc"],
-            resolved_execution_order=["read_qc"],
+            stage_names=["read_qc"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "method_selection")
@@ -474,8 +512,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 
     def test_empty_method_name_rejected(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
         )
         response = AskClarificationResponse(
             kind="method_selection", selected_methods={"assembly": ""}
@@ -485,8 +522,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 
     def test_unknown_method_name_rejected(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
         )
         response = AskClarificationResponse(
             kind="method_selection",
@@ -497,20 +533,18 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 
     def test_method_name_must_belong_to_selected_stage(self):
         plan = _base_plan(
-            selected_stages=["genome_survey"],
-            resolved_execution_order=["genome_survey"],
+            stage_names=["genome_survey"],
         )
         response = AskClarificationResponse(
             kind="method_selection",
-            selected_methods={"genome_survey": "function_annotation.candidate.diamond"},
+            selected_methods={"genome_survey": "assembly_review.eval.quast"},
         )
         with self.assertRaisesRegex(ValueError, "method is not valid"):
             merge_clarification_response(plan, response)
 
     def test_genome_survey_rejects_partial_executable_selection(self):
         plan = _base_plan(
-            selected_stages=["genome_survey"],
-            resolved_execution_order=["genome_survey"],
+            stage_names=["genome_survey"],
         )
         response = AskClarificationResponse(
             kind="method_selection",
@@ -521,8 +555,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 
     def test_read_qc_rejects_multiple_filter_choices(self):
         plan = _base_plan(
-            selected_stages=["read_qc"],
-            resolved_execution_order=["read_qc"],
+            stage_names=["read_qc"],
         )
         response = AskClarificationResponse(
             kind="method_selection",
@@ -541,8 +574,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
 class AskPlannerParameterTests(unittest.TestCase):
     def test_flye_requests_shared_facts_without_requesting_threads(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -577,8 +609,7 @@ class AskPlannerParameterTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                selected_stages=["genome_survey", "assembly"],
-                resolved_execution_order=["genome_survey", "assembly"],
+                stage_names=["genome_survey", "assembly"],
                 selected_methods={
                     "genome_survey": [
                         "genome_survey.kmer_count.jellyfish",
@@ -619,8 +650,7 @@ class AskPlannerParameterTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                selected_stages=["genome_survey", "assembly"],
-                resolved_execution_order=["genome_survey", "assembly"],
+                stage_names=["genome_survey", "assembly"],
                 selected_methods={
                     "genome_survey": [
                         "genome_survey.kmer_count.jellyfish",
@@ -656,8 +686,7 @@ class AskPlannerParameterTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                selected_stages=["genome_survey", "assembly"],
-                resolved_execution_order=["genome_survey", "assembly"],
+                stage_names=["genome_survey", "assembly"],
                 selected_methods={
                     "genome_survey": [
                         "genome_survey.kmer_count.jellyfish",
@@ -698,12 +727,55 @@ class AskPlannerParameterTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                selected_stages=["genome_survey", "assembly"],
-                resolved_execution_order=["genome_survey", "assembly"],
+                stage_names=["genome_survey", "assembly"],
                 selected_methods={
                     "genome_survey": [
                         "genome_survey.kmer_count.meryl",
                         "genome_survey.model.smudgeplot",
+                    ],
+                    "assembly": "assembly.candidate.flye",
+                },
+            )
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertTrue(
+            any("estimated_genome_size" in field for field in result.required_fields)
+        )
+        self.assertNotIn("deferred_shared_parameters", result.choices)
+
+    def test_nonlocal_prior_survey_does_not_authorize_genome_size_defer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            long_reads = Path(tmp) / "long.fq"
+            long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\nassets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths:\n      - {long_reads}\n"
+                "    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stage_occurrences=[
+                    PlanStageOccurrence(
+                        stage="genome_survey",
+                        allow_local_execution=False,
+                    ),
+                    PlanStageOccurrence(
+                        stage="assembly",
+                        allow_local_execution=True,
+                    ),
+                    PlanStageOccurrence(
+                        stage="genome_survey",
+                        allow_local_execution=True,
+                    ),
+                ],
+                selected_methods={
+                    "genome_survey": [
+                        "genome_survey.kmer_count.jellyfish",
+                        "genome_survey.model.genomescope2",
                     ],
                     "assembly": "assembly.candidate.flye",
                 },
@@ -730,8 +802,7 @@ class AskPlannerParameterTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                selected_stages=["read_qc", "assembly"],
-                resolved_execution_order=["read_qc", "assembly"],
+                stage_names=["read_qc", "assembly"],
                 selected_methods={
                     "read_qc": _read_qc_default_methods(),
                     "assembly": "assembly.candidate.flye",
@@ -763,8 +834,7 @@ class AskPlannerParameterTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                selected_stages=["read_qc", "assembly"],
-                resolved_execution_order=["read_qc", "assembly"],
+                stage_names=["read_qc", "assembly"],
                 selected_methods={
                     "read_qc": _read_qc_default_methods(),
                     "assembly": "assembly.candidate.flye",
@@ -792,8 +862,7 @@ class AskPlannerParameterTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                selected_stages=["read_qc", "assembly"],
-                resolved_execution_order=["read_qc", "assembly"],
+                stage_names=["read_qc", "assembly"],
                 selected_methods={
                     "read_qc": _read_qc_default_methods(),
                     "assembly": "assembly.candidate.flye",
@@ -811,8 +880,7 @@ class AskPlannerParameterTests(unittest.TestCase):
 
     def test_parameter_response_derives_read_type_from_platform(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -835,8 +903,7 @@ class AskPlannerParameterTests(unittest.TestCase):
 
     def test_genome_survey_jellyfish_does_not_request_read_length(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "genome_survey"],
-            resolved_execution_order=["read_qc", "genome_survey"],
+            stage_names=["read_qc", "genome_survey"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "genome_survey": [
@@ -882,8 +949,7 @@ class AskPlannerParameterTests(unittest.TestCase):
                     "data_dir": "data",
                     "genome_size_estimate": 5000000,
                 },
-                selected_stages=["read_qc", "assembly"],
-                resolved_execution_order=["read_qc", "assembly"],
+                stage_names=["read_qc", "assembly"],
                 selected_methods={
                     "read_qc": _read_qc_default_methods(),
                     "assembly": "assembly.candidate.flye",
@@ -900,8 +966,7 @@ class AskPlannerParameterTests(unittest.TestCase):
 class AskPlannerConfirmTests(unittest.TestCase):
     def test_confirm_step_after_parameters(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -915,16 +980,15 @@ class AskPlannerConfirmTests(unittest.TestCase):
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "confirm")
         self.assertEqual(result.status, "confirm_required")
-        self.assertIn("resolved_execution_order", result.summary)
         self.assertIn("run_config_preview", result.summary)
-        self.assertIn("stage_roles", result.summary)
-        self.assertEqual(result.summary["stage_roles"]["read_qc"], "executable")
-        self.assertEqual(result.summary["stage_roles"]["assembly"], "executable")
+        self.assertEqual(
+            result.summary["stage_roles"],
+            ["executable", "executable"],
+        )
 
     def test_confirm_response_completes_plan(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -943,8 +1007,7 @@ class AskPlannerConfirmTests(unittest.TestCase):
 
     def test_confirm_rejected_stays_unconfirmed(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -959,10 +1022,9 @@ class AskPlannerConfirmTests(unittest.TestCase):
         updated = merge_clarification_response(plan, response)
         self.assertFalse(updated.confirmed)
 
-    def test_confirm_labels_dependency_stage(self):
+    def test_confirm_labels_only_selected_stage_occurrences(self):
         plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -975,16 +1037,13 @@ class AskPlannerConfirmTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "confirm")
-        roles = result.summary["stage_roles"]
-        self.assertEqual(roles["read_qc"], "dependency")
-        self.assertEqual(roles["assembly"], "executable")
+        self.assertEqual(result.summary["stage_roles"], ["executable"])
 
 
 class AskPlannerRunConfigTests(unittest.TestCase):
     def test_build_run_config_from_confirmed_plan_with_advanced_flye_overrides(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -997,7 +1056,13 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             confirmed=True,
         )
         payload = build_run_config_payload(plan)
-        self.assertEqual(sorted(payload["local_exec"]), ["assembly", "read_qc"])
+        self.assertEqual(
+            sorted(_local_execution_stage_names(payload)), ["assembly", "read_qc"]
+        )
+        self.assertEqual(
+            payload["review_policy"],
+            {"max_blocked_seconds": 300},
+        )
         self.assertEqual(payload["read_qc"]["length_filter"]["method"], "skip")
         self.assertEqual(payload["shared_parameters"]["read_type"], "ont_raw")
         self.assertNotIn("estimated_genome_size", payload["shared_parameters"])
@@ -1005,8 +1070,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_executes_selected_nextdenovo_method(self):
         plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["assembly"],
+            stage_names=["assembly"],
             selected_methods={"assembly": "assembly.candidate.nextdenovo"},
             shared_parameters={
                 "platform": "ont",
@@ -1019,7 +1083,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(payload["local_exec"], ["assembly"])
+        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
         self.assertEqual(
             payload["assembly"],
             {
@@ -1032,8 +1096,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_executes_selected_hifiasm_method(self):
         plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["assembly"],
+            stage_names=["assembly"],
             selected_methods={"assembly": "assembly.candidate.hifiasm"},
             shared_parameters={
                 "platform": "pacbio_hifi",
@@ -1046,7 +1109,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(payload["local_exec"], ["assembly"])
+        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
         self.assertEqual(
             payload["assembly"],
             {
@@ -1058,8 +1121,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_executes_selected_hifiasm_ont_method(self):
         plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["assembly"],
+            stage_names=["assembly"],
             selected_methods={"assembly": "assembly.candidate.hifiasm_ont"},
             shared_parameters={
                 "platform": "ont",
@@ -1072,7 +1134,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(payload["local_exec"], ["assembly"])
+        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
         self.assertEqual(
             payload["assembly"],
             {
@@ -1084,8 +1146,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_rejects_multiple_executable_assembly_methods(self):
         plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["assembly"],
+            stage_names=["assembly"],
             selected_methods={
                 "assembly": [
                     "assembly.candidate.flye",
@@ -1109,8 +1170,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_uses_shared_assembly_parameters(self):
         plan = _base_plan(
-            selected_stages=["read_qc", "assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            stage_names=["read_qc", "assembly"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "assembly": "assembly.candidate.flye",
@@ -1132,22 +1192,80 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             {"threads": 8},
         )
 
-    def test_build_run_config_keeps_assembly_dedup_out_of_local_exec(self):
+    def test_build_run_config_includes_assembly_dedup_as_locally_executable(self):
         plan = _base_plan(
-            selected_stages=["assembly_dedup"],
-            resolved_execution_order=["assembly_dedup"],
+            stage_names=["assembly_dedup"],
             confirmed=True,
         )
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(payload["local_exec"], [])
-        self.assertEqual(payload["requested_stages"], ["assembly_dedup"])
+        self.assertEqual(_local_execution_stage_names(payload), ["assembly_dedup"])
+        self.assertEqual(_requested_stage_names(payload), ["assembly_dedup"])
+
+    def test_build_run_config_preserves_selected_stage_occurrences_and_order(self):
+        plan = _base_plan(
+            stage_names=["assembly_dedup", "read_qc", "assembly_dedup"],
+            selected_methods={"read_qc": _read_qc_default_methods()},
+            confirmed=True,
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(
+            payload["requested_stages"],
+            [
+                {"stage": "assembly_dedup", "allow_local_execution": True},
+                {"stage": "read_qc", "allow_local_execution": True},
+                {"stage": "assembly_dedup", "allow_local_execution": True},
+            ],
+        )
+
+    def test_build_run_config_preserves_per_occurrence_local_execution_consent(self):
+        plan = _base_plan(
+            selected_stage_occurrences=[
+                PlanStageOccurrence(stage="t2t", allow_local_execution=False),
+                PlanStageOccurrence(
+                    stage="assembly_review", allow_local_execution=True
+                ),
+                PlanStageOccurrence(stage="t2t", allow_local_execution=True),
+            ],
+            selected_methods={
+                "assembly_review": "assembly_review.eval.quast",
+                "t2t": "t2t.alignment.minimap2",
+            },
+            confirmed=True,
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(
+            payload["requested_stages"],
+            [
+                {"stage": "t2t", "allow_local_execution": False},
+                {"stage": "assembly_review", "allow_local_execution": True},
+                {"stage": "t2t", "allow_local_execution": True},
+            ],
+        )
+        self.assertEqual(
+            build_run_plan_summary(plan)["stage_roles"],
+            ["dependency", "executable", "executable"],
+        )
+
+    def test_only_locally_enabled_occurrences_require_method_selection(self):
+        plan = _base_plan(
+            selected_stage_occurrences=[
+                PlanStageOccurrence(stage="t2t", allow_local_execution=False)
+            ]
+        )
+
+        clarification = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertEqual(clarification.kind, "confirm")
 
     def test_build_run_config_for_assembly_goal_uses_requested_boundary(self):
         plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["assembly"],
+            stage_names=["assembly"],
             selected_methods={"assembly": "assembly.candidate.flye"},
             shared_parameters={
                 "platform": "ont",
@@ -1160,16 +1278,15 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(payload["requested_stages"], ["assembly"])
-        self.assertEqual(payload["local_exec"], ["assembly"])
-        self.assertNotIn("read_qc", payload["requested_stages"])
-        self.assertNotIn("assembly_review", payload["requested_stages"])
-        self.assertNotIn("repeat_annotation", payload["requested_stages"])
+        self.assertEqual(_requested_stage_names(payload), ["assembly"])
+        self.assertEqual(_local_execution_stage_names(payload), ["assembly"])
+        self.assertNotIn("read_qc", _requested_stage_names(payload))
+        self.assertNotIn("assembly_review", _requested_stage_names(payload))
+        self.assertNotIn("base_polish", _requested_stage_names(payload))
 
     def test_build_run_config_excludes_t2t_recommendation_parameters(self):
         plan = _base_plan(
-            selected_stages=["t2t"],
-            resolved_execution_order=["t2t"],
+            stage_names=["t2t"],
             selected_methods={"t2t": "t2t.alignment.minimap2"},
             method_parameters={
                 "t2t.alignment.minimap2": {
@@ -1188,15 +1305,14 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(payload["local_exec"], ["t2t"])
+        self.assertEqual(_local_execution_stage_names(payload), ["t2t"])
         self.assertEqual(payload["t2t"]["mode"], "manual_review")
         self.assertNotIn("telomere_motif", payload["t2t"])
         self.assertNotIn("thresholds", payload["t2t"])
 
     def test_build_run_config_uses_selected_read_qc_filter(self):
         plan = _base_plan(
-            selected_stages=["read_qc"],
-            resolved_execution_order=["read_qc"],
+            stage_names=["read_qc"],
             selected_methods={
                 "read_qc": [
                     READ_QC_STATS_METHOD,
@@ -1210,8 +1326,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_uses_selected_seqkit_filter_threshold(self):
         plan = _base_plan(
-            selected_stages=["read_qc"],
-            resolved_execution_order=["read_qc"],
+            stage_names=["read_qc"],
             selected_methods={
                 "read_qc": [
                     READ_QC_STATS_METHOD,
@@ -1235,8 +1350,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self,
     ):
         plan = _base_plan(
-            selected_stages=["read_qc", "genome_survey"],
-            resolved_execution_order=["read_qc", "genome_survey"],
+            stage_names=["read_qc", "genome_survey"],
             selected_methods={
                 "read_qc": _read_qc_default_methods(),
                 "genome_survey": [
@@ -1263,8 +1377,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_rejects_seqkit_filter_without_threshold(self):
         plan = _base_plan(
-            selected_stages=["read_qc"],
-            resolved_execution_order=["read_qc"],
+            stage_names=["read_qc"],
             selected_methods={
                 "read_qc": [
                     READ_QC_STATS_METHOD,
@@ -1278,8 +1391,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_uses_quast_parameters(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={"assembly_review": "assembly_review.eval.quast"},
             method_parameters={"assembly_review.eval.quast": {"threads": 4}},
             confirmed=True,
@@ -1289,8 +1401,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_quast_and_busco_multi_select(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": [
                     "assembly_review.eval.quast",
@@ -1310,7 +1421,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             confirmed=True,
         )
         payload = build_run_config_payload(plan)
-        self.assertIn("assembly_review", payload["local_exec"])
+        self.assertIn("assembly_review", _local_execution_stage_names(payload))
         self.assertEqual(payload["assembly_review"]["quast"], {"threads": 4})
         self.assertEqual(
             payload["assembly_review"]["busco"],
@@ -1325,8 +1436,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
     def test_build_run_config_raises_valueerror_for_partial_busco_params(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": ["assembly_review.eval.busco"],
             },
@@ -1344,8 +1454,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 class AskPlannerBuscoFlowTests(unittest.TestCase):
     def test_busco_appears_as_executable_in_method_choices(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "method_selection")
@@ -1360,8 +1469,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
     def test_busco_parameter_clarification_asks_for_all_fields(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": [
                     "assembly_review.eval.quast",
@@ -1385,8 +1493,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
     def test_missing_busco_fields_block_confirmation(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": ["assembly_review.eval.busco"],
             },
@@ -1402,8 +1509,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
     def test_build_run_config_payload_with_busco_after_auto_fill(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": [
                     "assembly_review.eval.quast",
@@ -1425,7 +1531,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
         config = build_run_config_payload(_auto_fill_inferred_defaults(plan))
 
-        self.assertIn("assembly_review", config["local_exec"])
+        self.assertIn("assembly_review", _local_execution_stage_names(config))
         self.assertEqual(config["assembly_review"]["quast"]["threads"], 2)
         self.assertEqual(
             config["assembly_review"]["busco"]["lineage_name"], "embryophyta_odb10"
@@ -1433,8 +1539,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
     def test_busco_lineage_path_warning_surfaces_in_plan(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": ["assembly_review.eval.busco"],
             },
@@ -1457,8 +1562,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
     def test_busco_defaults_derived_from_lineage_path(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": ["assembly_review.eval.busco"],
             },
@@ -1486,8 +1590,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
     def test_busco_defaults_no_version_when_undetectable(self):
         plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
+            stage_names=["assembly_review"],
             selected_methods={
                 "assembly_review": ["assembly_review.eval.busco"],
             },
@@ -1531,9 +1634,6 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             "gapcloser",
             "t2t",
             "base_polish",
-            "repeat_annotation",
-            "gene_annotation",
-            "function_annotation",
         ]
         self.assertEqual(available, expected)
 
@@ -1549,9 +1649,6 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             "gapcloser",
             "t2t",
             "base_polish",
-            "repeat_annotation",
-            "gene_annotation",
-            "function_annotation",
         ]
         self.assertEqual(available, expected)
 
@@ -1583,301 +1680,9 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             self.assertIn("assembly_dedup", recommended)
             self.assertNotIn("gapcloser", recommended)
             self.assertNotIn("base_polish", recommended)
-            self.assertIn("repeat_annotation", recommended)
-            self.assertIn("gene_annotation", recommended)
-            self.assertIn("function_annotation", recommended)
-
-    def test_recommended_stages_for_gene_models(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            gff = Path(tmp) / "genes.gff3"
-            gff.write_text("##gff-version 3\n", encoding="utf-8")
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\nassets:\n"
-                "  - asset_type: gene_models\n"
-                f"    paths:\n      - {gff}\n"
-                "    format: gff3\n",
-                encoding="utf-8",
-            )
-            recommended = _recommended_stages_from_manifest(str(manifest))
-            self.assertIn("gene_annotation", recommended)
-            self.assertIn("function_annotation", recommended)
-
     def test_recommended_stages_empty_for_missing_manifest(self):
         recommended = _recommended_stages_from_manifest("/nonexistent/manifest.yaml")
         self.assertEqual(recommended, [])
-
-
-class AskPlannerAnnotationMethodTests(unittest.TestCase):
-    def test_gene_annotation_method_selection(self):
-        plan = _base_plan(
-            selected_stages=["gene_annotation"],
-            resolved_execution_order=["gene_annotation"],
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        self.assertIn("gene_annotation", result.choices["methods_by_stage"])
-        methods = {
-            m["method_name"]
-            for m in result.choices["methods_by_stage"]["gene_annotation"]
-        }
-        self.assertIn("gene_annotation.candidate.miniprot", methods)
-        self.assertIn("gene_annotation.candidate.augustus", methods)
-        for m in result.choices["methods_by_stage"]["gene_annotation"]:
-            self.assertNotIn("execution_support", m)
-        defaults = result.choices["defaults"]["gene_annotation"]
-        self.assertIn("gene_annotation.candidate.miniprot", defaults)
-        self.assertIn("gene_annotation.candidate.augustus", defaults)
-
-    def test_function_annotation_method_selection(self):
-        plan = _base_plan(
-            selected_stages=["function_annotation"],
-            resolved_execution_order=["function_annotation"],
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        self.assertIn("function_annotation", result.choices["methods_by_stage"])
-        defaults = result.choices["defaults"]["function_annotation"]
-        self.assertIn("function_annotation.candidate.diamond", defaults)
-
-    def test_function_annotation_diamond_default_requires_database_provenance(self):
-        plan = _base_plan(
-            selected_stages=["function_annotation"],
-            resolved_execution_order=["function_annotation"],
-            selected_methods={
-                "function_annotation": ["function_annotation.candidate.diamond"],
-            },
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "parameter_values")
-        self.assertIn("function_annotation.database_provenance", result.required_fields)
-        self.assertIn("stage_parameters", result.response_schema)
-
-    def test_function_annotation_diamond_provenance_written_to_run_config(self):
-        provenance = _diamond_provenance()
-        plan = _base_plan(
-            selected_stages=["function_annotation"],
-            resolved_execution_order=["function_annotation"],
-            selected_methods={
-                "function_annotation": ["function_annotation.candidate.diamond"],
-            },
-        )
-        updated = merge_clarification_response(
-            plan,
-            AskClarificationResponse(
-                kind="parameter_values",
-                stage_parameters={
-                    "function_annotation": {"database_provenance": provenance}
-                },
-            ),
-        )
-        self.assertIsNone(
-            next_clarification(
-                updated.model_copy(update={"confirmed": True}),
-                ask_plan_ref="/tmp/plan.json",
-            )
-        )
-        payload = build_run_config_payload(updated)
-        self.assertIn("function_annotation", payload.get("local_exec", []))
-        self.assertEqual(
-            payload["function_annotation"]["database_provenance"], provenance
-        )
-
-    def test_hic_scaffolding_has_no_method_selection_step(self):
-        plan = _base_plan(
-            selected_stages=["hic_scaffolding"],
-            resolved_execution_order=["hic_scaffolding"],
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "confirm")
-        summary = build_run_plan_summary(plan)
-        self.assertIn(
-            {
-                "stage": "hic_scaffolding",
-                "method": "hic_scaffolding.candidate.autohic",
-                "status": "deferred",
-                "trigger_gate": {
-                    "stage": "hic_scaffolding",
-                    "gate_id": "parameter_approval",
-                },
-                "parameter_names": [
-                    "restriction_enzyme",
-                    "number_of_edit_rounds",
-                    "translocation_adjust",
-                    "inversion_adjust",
-                    "debris_adjust",
-                    "error_max_epoch",
-                    "error_min_len",
-                    "error_max_len",
-                    "error_filter_score",
-                    "error_filter_iou_score",
-                ],
-            },
-            summary["runtime_parameter_contracts"],
-        )
-
-    def test_selected_hic_stage_is_local_without_planning_time_model_paths(self):
-        plan = _base_plan(
-            selected_stages=["hic_scaffolding"],
-            resolved_execution_order=["hic_scaffolding"],
-            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
-            method_parameters={
-                "hic_scaffolding.candidate.autohic": {"restriction_enzyme": "MboI"},
-            },
-        )
-
-        payload = build_run_config_payload(plan)
-        summary = build_run_plan_summary(plan)
-
-        self.assertIn("hic_scaffolding", payload["local_exec"])
-        self.assertEqual(
-            payload["hic_scaffolding"]["autohic_parameters"]["restriction_enzyme"],
-            "MboI",
-        )
-        self.assertNotIn("hic_scaffolding_plan_candidates", summary)
-        autohic_defaults = summary["parameter_defaults"][
-            "hic_scaffolding.candidate.autohic"
-        ]
-        self.assertEqual(
-            autohic_defaults,
-            {"restriction_enzyme": "MboI"},
-        )
-        self.assertEqual(
-            payload["hic_scaffolding"]["autohic_parameters"]["python_command"],
-            "python3.9",
-        )
-        self.assertNotIn(
-            "threads",
-            payload["hic_scaffolding"]["autohic_parameters"],
-        )
-        self.assertNotIn("missing_parameter_fields", summary)
-
-    def test_complete_autohic_candidate_is_emitted_as_local_run_config(self):
-        plan = _base_plan(
-            selected_stages=["hic_scaffolding"],
-            resolved_execution_order=["hic_scaffolding"],
-            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
-            method_parameters={
-                "hic_scaffolding.candidate.autohic": {
-                    "restriction_enzyme": "DpnII",
-                    "error_model_ref": "/models/error_model.pth",
-                    "chromosome_model_ref": "/models/chr_model.pth",
-                }
-            },
-        )
-
-        payload = build_run_config_payload(plan)
-        self.assertIn("hic_scaffolding", payload["local_exec"])
-        self.assertEqual(
-            payload["hic_scaffolding"]["autohic_parameters"]["restriction_enzyme"],
-            "DpnII",
-        )
-        self.assertNotIn("method", payload["hic_scaffolding"])
-        self.assertNotIn(
-            "chromosome_model_ref",
-            payload["hic_scaffolding"]["autohic_parameters"],
-        )
-
-    def test_repeat_annotation_method_selection(self):
-        plan = _base_plan(
-            selected_stages=["repeat_annotation"],
-            resolved_execution_order=["repeat_annotation"],
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        methods = {
-            m["method_name"]
-            for m in result.choices["methods_by_stage"]["repeat_annotation"]
-        }
-        self.assertIn("repeat_annotation.masking.repeatmasker", methods)
-
-    def test_diamond_function_annotation_requires_database_provenance_for_run_config(
-        self,
-    ):
-        plan = _base_plan(
-            selected_stages=["function_annotation"],
-            resolved_execution_order=["function_annotation"],
-            selected_methods={
-                "function_annotation": ["function_annotation.candidate.diamond"],
-            },
-            confirmed=True,
-        )
-        with self.assertRaisesRegex(ValueError, "database_provenance"):
-            build_run_config_payload(plan)
-
-
-class AskPlannerValidationWarningTests(unittest.TestCase):
-    def test_function_annotation_without_protein_input_warns(self):
-        plan = _base_plan(
-            selected_stages=["function_annotation"],
-            resolved_execution_order=["function_annotation"],
-            selected_methods={
-                "function_annotation": ["function_annotation.candidate.diamond"],
-            },
-        )
-        warnings = _plan_validation_warnings(plan)
-        self.assertTrue(
-            any("function_annotation" in w and "protein input" in w for w in warnings)
-        )
-
-    def test_function_annotation_with_gene_annotation_no_warning(self):
-        plan = _base_plan(
-            selected_stages=["gene_annotation", "function_annotation"],
-            resolved_execution_order=["gene_annotation", "function_annotation"],
-            selected_methods={
-                "gene_annotation": ["gene_annotation.candidate.augustus"],
-                "function_annotation": ["function_annotation.candidate.diamond"],
-            },
-        )
-        warnings = _plan_validation_warnings(plan)
-        self.assertFalse(any("protein input" in w for w in warnings))
-
-    def test_hic_without_reads_warns(self):
-        plan = _base_plan(
-            selected_stages=["hic_scaffolding"],
-            resolved_execution_order=["hic_scaffolding"],
-            selected_methods={
-                "hic_scaffolding": "hic_scaffolding.candidate.autohic",
-            },
-        )
-        warnings = _plan_validation_warnings(plan)
-        self.assertTrue(
-            any("hic_scaffolding" in w and "Hi-C reads" in w for w in warnings)
-        )
-
-    def test_assembly_review_without_assembly_warns(self):
-        plan = _base_plan(
-            selected_stages=["assembly_review"],
-            resolved_execution_order=["assembly_review"],
-            selected_methods={"assembly_review": ["assembly_review.eval.quast"]},
-        )
-        warnings = _plan_validation_warnings(plan)
-        self.assertTrue(
-            any("assembly_review" in w and "without an assembly" in w for w in warnings)
-        )
-
-    def test_gene_annotation_without_assembly_warns(self):
-        plan = _base_plan(
-            selected_stages=["gene_annotation"],
-            resolved_execution_order=["gene_annotation"],
-            selected_methods={"gene_annotation": ["gene_annotation.candidate.braker3"]},
-        )
-        warnings = _plan_validation_warnings(plan)
-        self.assertTrue(
-            any("gene_annotation" in w and "without a genome" in w for w in warnings)
-        )
-
-    def test_gene_annotation_with_assembly_no_genome_warning(self):
-        plan = _base_plan(
-            selected_stages=["assembly", "gene_annotation"],
-            resolved_execution_order=["assembly", "gene_annotation"],
-            selected_methods={
-                "assembly": "assembly.candidate.flye",
-                "gene_annotation": ["gene_annotation.candidate.braker3"],
-            },
-        )
-        warnings = _plan_validation_warnings(plan)
-        self.assertFalse(any("without a genome" in w for w in warnings))
 
 
 if __name__ == "__main__":

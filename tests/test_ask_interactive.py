@@ -14,6 +14,7 @@ from app.entrypoints.ask_interactive import (
     _group_missing_fields_by_scope,
     _parse_genome_size,
     _prompt_parameter_values,
+    _prompt_stage_selection,
     _prompt_text_value,
     _render_confirm,
     _render_draft_review,
@@ -26,10 +27,20 @@ from app.entrypoints.ask_planner import (
     build_run_plan_summary,
     next_clarification,
 )
-from app.schemas.ask_plan import AskClarificationRequest, AskPlanState
+from app.schemas.ask_plan import (
+    AskClarificationRequest,
+    AskPlanState,
+    PlanStageOccurrence,
+)
 
 
 def _base_plan(**overrides) -> AskPlanState:
+    stages = overrides.pop("stage_names", None)
+    if stages is not None:
+        overrides["selected_stage_occurrences"] = [
+            PlanStageOccurrence(stage=stage, allow_local_execution=True)
+            for stage in stages
+        ]
     base = dict(
         session_id="s1",
         data_dir="data",
@@ -74,8 +85,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             self.assertIsNotNone(draft)
-            self.assertEqual(draft.selected_stages, ["assembly"])
-            self.assertEqual(draft.resolved_execution_order, ["assembly"])
+            self.assertEqual(draft.selected_stage_names, ["assembly"])
             self.assertEqual(
                 draft.selected_methods["assembly"], "assembly.candidate.flye"
             )
@@ -103,7 +113,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
                 entry_request={"requested_stages": ["assembly"]},
             )
             draft = build_initial_plan_draft(plan)
-            self.assertEqual(draft.selected_stages, ["assembly"])
+            self.assertEqual(draft.selected_stage_names, ["assembly"])
             self.assertNotIn("assembly", draft.selected_methods or {})
 
     def test_multi_stage_goal_keeps_requested_execution_boundary(self):
@@ -120,12 +130,11 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             plan = _base_plan(
                 manifest_ref=str(manifest),
-                entry_request={"requested_stages": ["assembly", "gene_annotation"]},
+                entry_request={"requested_stages": ["assembly", "assembly_review"]},
             )
             draft = build_initial_plan_draft(plan)
-            self.assertEqual(draft.selected_stages, ["assembly", "gene_annotation"])
             self.assertEqual(
-                draft.resolved_execution_order, ["assembly", "gene_annotation"]
+                draft.selected_stage_names, ["assembly", "assembly_review"]
             )
 
     def test_assembly_goal_draft_accepted_asks_only_for_missing_genome_size(self):
@@ -155,6 +164,43 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
 
 
 class InteractiveLoopTests(unittest.TestCase):
+    def test_stage_sequence_prompt_keeps_duplicates_and_collects_each_consent(self):
+        request = AskClarificationRequest(
+            status="clarification_required",
+            kind="stage_selection",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Which stages?",
+            choices={
+                "available_stages": ["t2t", "assembly_review"],
+                "suggested_stage_occurrences": [],
+            },
+            required_fields=["selected_stage_occurrences"],
+            response_schema={"kind": "stage_selection"},
+            next_action={},
+        )
+        with (
+            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
+            patch(
+                "builtins.input",
+                side_effect=["t2t,assembly_review,t2t", "n", "y", "y"],
+            ),
+        ):
+            response = _prompt_stage_selection(request)
+
+        self.assertEqual(
+            [
+                item.model_dump(mode="json")
+                for item in response.selected_stage_occurrences
+            ],
+            [
+                {"stage": "t2t", "allow_local_execution": False},
+                {"stage": "assembly_review", "allow_local_execution": True},
+                {"stage": "t2t", "allow_local_execution": True},
+            ],
+        )
+
     """Tests exercise the plain-text fallback path (questionary disabled)."""
 
     def test_confirm_render_includes_shared_parameters(self):
@@ -169,8 +215,7 @@ class InteractiveLoopTests(unittest.TestCase):
                 "session_id": "s1",
                 "data_dir": "data",
                 "manifest_ref": "test.yaml",
-                "resolved_execution_order": ["assembly"],
-                "stage_roles": {"assembly": "executable"},
+                "stage_roles": ["executable"],
                 "selected_methods": {"assembly": "assembly.candidate.flye"},
                 "shared_parameters": {
                     "read_type": "ont_raw",
@@ -213,8 +258,7 @@ class InteractiveLoopTests(unittest.TestCase):
 
     def test_parameter_prompt_does_not_collect_autohic_inputs(self):
         plan = _base_plan(
-            selected_stages=["hic_scaffolding"],
-            resolved_execution_order=["hic_scaffolding"],
+            stage_names=["hic_scaffolding"],
             selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
         )
         clarification = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
@@ -222,8 +266,7 @@ class InteractiveLoopTests(unittest.TestCase):
 
     def test_parameter_prompt_does_not_ask_for_autohic_runtime_defaults(self):
         plan = _base_plan(
-            selected_stages=["hic_scaffolding"],
-            resolved_execution_order=["hic_scaffolding"],
+            stage_names=["hic_scaffolding"],
             selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
             method_parameters={"hic_scaffolding.candidate.autohic": {"threads": 40}},
         )
@@ -232,8 +275,7 @@ class InteractiveLoopTests(unittest.TestCase):
 
     def test_hic_draft_hides_and_rejects_method_selection(self):
         plan = _base_plan(
-            selected_stages=["hic_scaffolding"],
-            resolved_execution_order=["hic_scaffolding"],
+            stage_names=["hic_scaffolding"],
             selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
         )
         with (
@@ -243,7 +285,7 @@ class InteractiveLoopTests(unittest.TestCase):
                 "app.entrypoints.ask_interactive._edit_stage_methods"
             ) as edit_methods,
         ):
-            updated = _edit_draft_stage(plan, "hic_scaffolding")
+            updated = _edit_draft_stage(plan, 0)
 
         self.assertEqual(updated, plan)
         edit_methods.assert_not_called()
@@ -251,76 +293,6 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertNotIn("m      change method", rendered)
         self.assertNotIn("methods:", rendered)
         self.assertIn("fixed AutoHiC pipeline", rendered)
-
-    def test_parameter_prompt_accepts_function_database_provenance_fields(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"stage_defaults": {}},
-            required_fields=["function_annotation.database_provenance"],
-            response_schema={},
-            next_action={},
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "uniprot.dmnd"
-            db_path.write_text("placeholder", encoding="utf-8")
-            plan = _base_plan(
-                data_dir="/data",
-                selected_stages=["function_annotation"],
-                resolved_execution_order=["function_annotation"],
-                selected_methods={
-                    "function_annotation": ["function_annotation.candidate.diamond"]
-                },
-            )
-            inputs = iter([str(db_path), "UniProt", "2026_02"])
-            with (
-                patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-                patch("builtins.input", side_effect=lambda _: next(inputs)),
-            ):
-                response = _prompt_parameter_values(req, plan)
-
-        self.assertIsNotNone(response.stage_parameters)
-        provenance = response.stage_parameters["function_annotation"][
-            "database_provenance"
-        ]
-        self.assertEqual(
-            provenance[0]["method_name"], "function_annotation.candidate.diamond"
-        )
-        self.assertEqual(provenance[0]["database_name"], "UniProt")
-        self.assertIsNone(provenance[0]["input_proteins_ref"])
-
-    def test_parameter_prompt_rejects_missing_function_database_path(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"stage_defaults": {}},
-            required_fields=["function_annotation.database_provenance"],
-            response_schema={},
-            next_action={},
-        )
-        plan = _base_plan(
-            data_dir="/data",
-            selected_stages=["function_annotation"],
-            resolved_execution_order=["function_annotation"],
-            selected_methods={
-                "function_annotation": ["function_annotation.candidate.diamond"]
-            },
-        )
-        inputs = iter(["/missing/db1.dmnd", "/missing/db2.dmnd", "/missing/db3.dmnd"])
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch("builtins.input", side_effect=lambda _: next(inputs)),
-        ):
-            with self.assertRaises(_UserAbort):
-                _prompt_parameter_values(req, plan)
 
     def test_parameter_prompt_accepts_platform_default(self):
         req = AskClarificationRequest(
@@ -418,8 +390,7 @@ class InteractiveLoopTests(unittest.TestCase):
 
     def test_edit_draft_stage_returns_after_repeated_invalid_actions(self):
         plan = _base_plan(
-            selected_stages=["assembly"],
-            resolved_execution_order=["assembly"],
+            stage_names=["assembly"],
             selected_methods={"assembly": "assembly.candidate.flye"},
         )
         inputs = iter(["x", "?", "nope"])
@@ -427,7 +398,7 @@ class InteractiveLoopTests(unittest.TestCase):
             patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
             patch("builtins.input", side_effect=lambda _: next(inputs)),
         ):
-            updated = _edit_draft_stage(plan, "assembly")
+            updated = _edit_draft_stage(plan, 0)
         self.assertEqual(updated, plan)
 
     def test_required_text_value_reprompts_then_aborts_on_empty_input(self):
@@ -512,8 +483,8 @@ class PlanPreviewRenderTests(unittest.TestCase):
             "data_dir": "data",
             "manifest_ref": "test.yaml",
             "source_paths": ["/in/reads.fastq"],
-            "resolved_execution_order": ["read_qc", "assembly"],
-            "stage_roles": {"read_qc": "dependency", "assembly": "executable"},
+            "selected_stage_names": ["read_qc", "assembly"],
+            "stage_roles": ["dependency", "executable"],
             "selected_methods": {"assembly": "assembly.candidate.flye"},
         }
         with patch("sys.stdout", new_callable=io.StringIO) as stdout:
@@ -535,11 +506,8 @@ class PlanPreviewRenderTests(unittest.TestCase):
             "data_dir": "data",
             "manifest_ref": "test.yaml",
             "intent_parse_source": "deterministic_fallback",
-            "resolved_execution_order": ["genome_survey", "hic_scaffolding"],
-            "stage_roles": {
-                "genome_survey": "executable",
-                "hic_scaffolding": "executable",
-            },
+            "stage_roles": ["executable", "executable"],
+            "selected_stage_names": ["genome_survey", "hic_scaffolding"],
             "selected_methods": {
                 "genome_survey": [
                     "genome_survey.kmer_count.jellyfish",
@@ -664,8 +632,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             "session_id": "s1",
             "data_dir": "data",
             "manifest_ref": "test.yaml",
-            "resolved_execution_order": ["assembly"],
-            "stage_roles": {"assembly": "executable"},
+            "stage_roles": ["executable"],
             "selected_methods": {"assembly": "assembly.candidate.flye"},
         }
         req = AskClarificationRequest(
@@ -726,13 +693,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
 
     def test_plan_summary_exposes_generic_deferred_human_gate_contract(self):
         plan = _base_plan(
-            selected_stages=["assembly", "assembly_review", "hic_scaffolding", "t2t"],
-            resolved_execution_order=[
-                "assembly",
-                "assembly_review",
-                "hic_scaffolding",
-                "t2t",
-            ],
+            stage_names=["assembly", "assembly_review", "hic_scaffolding", "t2t"],
             selected_methods={},
         )
 
@@ -807,14 +768,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
                         "t2t",
                     ]
                 },
-                selected_stages=[
-                    "read_qc",
-                    "genome_survey",
-                    "assembly",
-                    "assembly_review",
-                    "t2t",
-                ],
-                resolved_execution_order=[
+                stage_names=[
                     "read_qc",
                     "genome_survey",
                     "assembly",
@@ -871,7 +825,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
                     "command": "run",
                     "manifest": str(manifest),
                     "data_dir": tmp,
-                    "requested_stages": ["assembly", "gene_annotation"],
+                    "requested_stages": ["assembly", "assembly_review"],
                 },
             )
             draft = build_initial_plan_draft(plan)
@@ -881,11 +835,10 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn("Plan Draft", rendered)
             self.assertIn(f"raw_long_reads [ont/fasta]: {reads}", rendered)
             self.assertIn("1. assembly", rendered)
-            self.assertIn("2. gene_annotation", rendered)
+            self.assertIn("2. assembly_review", rendered)
             self.assertIn("1          edit assembly", rendered)
-            self.assertIn("2          edit gene_annotation", rendered)
+            self.assertIn("2          edit assembly_review", rendered)
             self.assertNotIn("read_qc", rendered)
-            self.assertNotIn("repeat_annotation", rendered)
             self.assertNotIn("assembly_review: pending", rendered)
             self.assertIn("Actions:", rendered)
 

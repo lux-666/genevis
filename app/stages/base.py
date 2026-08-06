@@ -8,6 +8,7 @@ from typing import Any, TypeVar, cast
 
 from pydantic import TypeAdapter
 
+from app.control.workflow_plan import current_workflow_step_id
 from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.schemas.state import (
     DOMAIN_STAGES,
@@ -54,15 +55,17 @@ def session_paths(state: TopLevelState) -> SessionPaths:
 
 
 def stage_artifacts_dir(state: TopLevelState, stage: str, *parts: str) -> Path:
-    """Return a path below ``artifacts/<stage>/`` for this run."""
+    """Return a path below this occurrence's ``artifacts/steps/<id>/`` root."""
 
-    return session_paths(state).artifact_path(stage, *parts)
+    step_id = current_workflow_step_id(state, expected_stage=stage)
+    return session_paths(state).workflow_step_artifact_path(step_id, stage, *parts)
 
 
 def stage_work_dir(state: TopLevelState, stage: str, *parts: str) -> Path:
-    """Return a path below ``work/<stage>/`` for this run."""
+    """Return a path below this occurrence's ``work/steps/<id>/`` root."""
 
-    return session_paths(state).work_path(stage, *parts)
+    step_id = current_workflow_step_id(state, expected_stage=stage)
+    return session_paths(state).workflow_step_work_path(step_id, stage, *parts)
 
 
 def resolve_run_ref(state: TopLevelState, path_ref: str | Path) -> Path:
@@ -138,9 +141,13 @@ def update_validated_stage_output(
 
 
 def append_route_trace(state: TopLevelState, *items: str) -> list[str]:
-    """Append route items while retaining only the newest bounded history."""
+    """Append step-qualified route items with bounded checkpoint history."""
 
-    return [*list(state.get("route_trace") or []), *items][-ROUTE_TRACE_LIMIT:]
+    workflow_step_id = current_workflow_step_id(state)
+    return [
+        *list(state.get("route_trace") or []),
+        *(f"{workflow_step_id}:{item}" for item in items),
+    ][-ROUTE_TRACE_LIMIT:]
 
 
 def load_assets_from_registry(

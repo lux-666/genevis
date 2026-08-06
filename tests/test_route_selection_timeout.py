@@ -53,8 +53,22 @@ def _blocked_route_state(
         session_id=session_id,
         data_dir=str(run_dir),
         input_manifest_ref="control/manifest.yaml",
+        workflow_steps=[
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            {
+                "step_id": "step-001-assembly",
+                "stage": "assembly",
+                "allow_local_execution": False,
+            },
+        ],
     )
     state["current_stage"] = "assembly"
+    state["workflow_step_index"] = 1
+    state["entered_workflow_step_index"] = 1
     if recommended_selection is None and recommended_route in _RECOMMENDED_SELECTIONS:
         recommended_selection = {
             **_RECOMMENDED_SELECTIONS[recommended_route],

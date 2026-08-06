@@ -17,6 +17,37 @@ from app.stages.assembly_review.nodes import (
 from tests.data_v2 import v2_run_dir
 
 
+def _candidate(candidate_id: str, method_name: str = "flye") -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "method_name": method_name,
+        "source": "test_fixture",
+        "status": "executed",
+        "bundle_ref": {
+            "schema_version": 2,
+            "artifact_id": f"bundle:{candidate_id}",
+            "path_ref": (
+                "artifacts/steps/step-001-assembly/assembly/"
+                f"{candidate_id}/candidate.json"
+            ),
+            "sha256": "0" * 64,
+            "size_bytes": 0,
+            "artifact_type": "draft_assembly.candidate",
+        },
+        "primary_output_ref": {
+            "schema_version": 2,
+            "artifact_id": f"primary:{candidate_id}",
+            "path_ref": (
+                "artifacts/steps/step-001-assembly/assembly/"
+                f"{candidate_id}/draft.fa"
+            ),
+            "sha256": "1" * 64,
+            "size_bytes": 0,
+            "artifact_type": "assembly.draft_assembly",
+        },
+    }
+
+
 class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
     def _state(self, tmpdir: str, session_id: str, manifest_text: str) -> dict:
         run_dir = v2_run_dir(tmpdir, session_id)
@@ -24,11 +55,36 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             manifest_text,
             encoding="utf-8",
         )
-        return initial_state(
+        state = initial_state(
             session_id=session_id,
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-002-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                },
+            ],
         )
+        state.update(
+            {
+                "current_stage": "assembly_review",
+                "workflow_step_index": 2,
+                "entered_workflow_step_index": 2,
+            }
+        )
+        return state
 
     def test_statistics_and_notebook_node_with_unavailable_snapshot(self):
         """Node handles an unavailable snapshot and writes valid fallback outputs."""
@@ -50,13 +106,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
-                    "candidates": [
-                        {
-                            "candidate_id": "c1",
-                            "method_name": "flye",
-                            "final_assembly_ref": "draft.fa",
-                        }
-                    ],
+                    "candidates": [_candidate("c1")],
                     "signals": [],
                     # Point to an empty reference dir with a manifest but no
                     # TSV or lineage files.
@@ -97,13 +147,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
-                    "candidates": [
-                        {
-                            "candidate_id": "c1",
-                            "method_name": "flye",
-                            "final_assembly_ref": "draft.fa",
-                        }
-                    ],
+                    "candidates": [_candidate("c1")],
                     "signals": [
                         {
                             "candidate_id": "c1",

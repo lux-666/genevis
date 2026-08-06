@@ -6,14 +6,12 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 
-from app.control.errors import (
-    ResumeValidationError,
-    UnsupportedLifecycleOperationError,
-)
+from app.control import errors as control_errors
+from app.control.workflow_plan import current_workflow_step_id
 from app.review.approval import ensure_decision_allowed, load_verified_interrupt_request
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
@@ -33,6 +31,9 @@ from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+
+ResumeValidationError = control_errors.ResumeValidationError
+UnsupportedLifecycleOperationError = control_errors.UnsupportedLifecycleOperationError
 
 
 def finalize_terminal_state(
@@ -140,6 +141,7 @@ def inspect_state(
     summary: dict[str, Any] = {
         "session_id": snapshot.get("session_id"),
         "current_stage": snapshot.get("current_stage"),
+        "current_workflow_step_id": _current_workflow_step_id(snapshot),
         "supervision_state": snapshot.get("supervision_state"),
         "active_interrupt": active_interrupt,
         "stage_statuses": _stage_statuses(snapshot),
@@ -189,9 +191,6 @@ def inspect_session(
     latest_decision_artifact = _artifact_for_ref(artifacts, latest_decision_ref)
     if latest_decision_artifact is None and latest_decision_ref:
         latest_decision_artifact = {"path_ref": latest_decision_ref}
-    latest_function_bundle = _latest_artifact(
-        artifacts, lambda a: a.get("artifact_type") == "function_annotation.bundle"
-    )
     current_status_path = paths.report_path("current_status.json")
     session_summary_path = paths.report_path("session_summary.json")
     latest_operator_report = (
@@ -239,6 +238,9 @@ def inspect_session(
                     )
                     or {}
                 ).get("sha256"),
+                expected_workflow_step_id=str(
+                    latest_unresolved_review_request.get("workflow_step_id") or ""
+                ),
             )
         except ResumeValidationError as exc:
             decision_requirements = None
@@ -249,12 +251,12 @@ def inspect_session(
         latest_unresolved_review_request,
         decision_requirements,
     )
-    current_stage = _latest_stage(events)
-    route_trace = [
-        str(event.get("route_node") or event.get("stage"))
-        for event in events
-        if event.get("event_type") == "stage_entered" and event.get("stage")
-    ][-ROUTE_TRACE_LIMIT:]
+    latest_stage = _latest_stage_projection(events)
+    current_stage = latest_stage.get("stage") if latest_stage else None
+    current_workflow_step_id = (
+        latest_stage.get("workflow_step_id") if latest_stage else None
+    )
+    route_trace = _durable_route_trace(events)
     last_error = _latest_error(events)
     latest_failed_report = (
         latest_operator_report if supervision_state == "failed_terminal" else None
@@ -267,6 +269,7 @@ def inspect_session(
         "session_id": session_id,
         "session": session,
         "current_stage": current_stage,
+        "current_workflow_step_id": current_workflow_step_id,
         "supervision_state": supervision_state,
         "active_interrupt": active_interrupt,
         "route_trace": route_trace,
@@ -291,7 +294,6 @@ def inspect_session(
         # Reports are optional, derived views. Their contents are never lifecycle truth.
         "latest_operator_report_payload": None,
         "latest_final_report": latest_final_report,
-        "latest_function_annotation_bundle": latest_function_bundle,
         "latest_relevant_artifacts": _latest_relevant_artifacts(artifacts),
         "decision_requirements": decision_requirements,
         "artifact_count": len(artifacts),
@@ -419,6 +421,7 @@ def _validated_resume_context(
         raise ResumeValidationError(
             "resume stage does not match active_interrupt.stage"
         )
+    _validate_active_interrupt_workflow_step(state, active_interrupt)
     active_gate_id = active_interrupt.get("gate_id")
     if (
         active_gate_id == "parameter_approval"
@@ -533,6 +536,43 @@ def _stage_statuses(state: Mapping[str, Any]) -> dict[str, str]:
     return statuses
 
 
+def _current_workflow_step_id(state: Mapping[str, Any]) -> str | None:
+    """Return the frozen current occurrence ID, if this is a valid plan state."""
+
+    try:
+        return current_workflow_step_id(state)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _validate_active_interrupt_workflow_step(
+    state: Mapping[str, Any],
+    active_interrupt: Mapping[str, Any],
+) -> str:
+    """Require a blocked request to target exactly the current frozen occurrence."""
+
+    interrupt_step_id = active_interrupt.get("workflow_step_id")
+    if not isinstance(interrupt_step_id, str) or not interrupt_step_id:
+        raise ResumeValidationError(
+            "resume requires active_interrupt.workflow_step_id"
+        )
+    try:
+        current_step_id = current_workflow_step_id(
+            cast(TopLevelState, state),
+            expected_stage=str(active_interrupt.get("stage") or ""),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ResumeValidationError(
+            "resume requires a valid frozen workflow step for active_interrupt"
+        ) from exc
+    if interrupt_step_id != current_step_id:
+        raise ResumeValidationError(
+            "active_interrupt.workflow_step_id does not match the current frozen "
+            "workflow step"
+        )
+    return current_step_id
+
+
 def _latest_artifact_refs(state: Mapping[str, Any]) -> dict[str, Any]:
     refs: dict[str, Any] = {}
     for key in ("asset_registry_ref", "stage_plan_ref"):
@@ -557,6 +597,7 @@ def _decision_requirements_from_state(
 ) -> dict[str, Any] | None:
     if not active_interrupt:
         return None
+    _validate_active_interrupt_workflow_step(state, active_interrupt)
     _ref, record = load_verified_interrupt_request(state, active_interrupt)
     payload = record.get("payload")
     if not isinstance(payload, dict):
@@ -565,6 +606,7 @@ def _decision_requirements_from_state(
         **payload,
         **dict(record.get("bindings") or {}),
         "stage": record.get("stage"),
+        "workflow_step_id": record.get("workflow_step_id"),
         "gate_id": record.get("gate_id"),
         "review_request_id": record.get("review_request_id"),
         "request_ref": active_interrupt.get("request_ref"),
@@ -671,6 +713,7 @@ def _with_review_requirements(
             if key in active_interrupt:
                 enriched[key] = active_interrupt.get(key)
     for key in (
+        "workflow_step_id",
         "auto_decidable",
         "max_blocked_seconds",
         "review_request_artifact_ref",
@@ -755,15 +798,21 @@ def _latest_unresolved_review_request(
     events: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     decided_ids = {
-        str(event.get("review_request_id") or event.get("subject_id"))
+        (
+            str(event.get("workflow_step_id") or ""),
+            str(event.get("review_request_id") or event.get("subject_id")),
+        )
         for event in events
         if event.get("event_type") == "review_decision"
     }
     for event in reversed(events):
         if event.get("event_type") != "review_requested":
             continue
-        request_id = str(event.get("review_request_id") or event.get("subject_id"))
-        if request_id not in decided_ids:
+        request_identity = (
+            str(event.get("workflow_step_id") or ""),
+            str(event.get("review_request_id") or event.get("subject_id")),
+        )
+        if request_identity not in decided_ids:
             return event
     return None
 
@@ -810,12 +859,8 @@ def _event_ref(event: dict[str, Any], role: str) -> dict[str, Any] | None:
 
 def _latest_relevant_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     relevant_prefixes = (
-        "annotation.",
         "assembly_review.",
         "hic_scaffolding.",
-        "repeat_annotation.",
-        "gene_annotation.",
-        "function_annotation.",
     )
     relevant: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -841,11 +886,32 @@ def _terminal_supervision_state(outcome: Any) -> str:
     return normalized
 
 
-def _latest_stage(events: list[dict[str, Any]]) -> str | None:
+def _latest_stage_projection(events: list[dict[str, Any]]) -> dict[str, str] | None:
     for event in reversed(events):
-        if event.get("stage"):
-            return str(event["stage"])
+        stage = event.get("stage")
+        workflow_step_id = event.get("workflow_step_id")
+        if stage and workflow_step_id:
+            return {
+                "stage": str(stage),
+                "workflow_step_id": str(workflow_step_id),
+            }
     return None
+
+
+def _durable_route_trace(events: list[dict[str, Any]]) -> list[str]:
+    """Project durable route entries as the same step-qualified trace as state."""
+
+    trace: list[str] = []
+    for event in events:
+        if event.get("event_type") != "stage_entered" or not event.get("stage"):
+            continue
+        step_id = event.get("workflow_step_id")
+        node = event.get("route_node") or event.get("stage")
+        if isinstance(step_id, str) and step_id:
+            trace.append(f"{step_id}:{node}")
+        else:
+            trace.append(str(node))
+    return trace[-ROUTE_TRACE_LIMIT:]
 
 
 def _latest_error(events: list[dict[str, Any]]) -> str | None:
@@ -865,6 +931,7 @@ def _durable_interrupt_projection(
         return None
     projected = {
         "stage": request.get("stage"),
+        "workflow_step_id": request.get("workflow_step_id"),
         "review_request_id": request.get("review_request_id")
         or request.get("subject_id"),
         "reason": request.get("reason"),
@@ -898,14 +965,10 @@ def build_next_action(
     if summary.get("supervision_state") == "completed":
         refs = _artifact_refs(
             summary.get("latest_final_report"),
-            summary.get("latest_function_annotation_bundle"),
         )
         return {
             "kind": "completed",
-            "summary": (
-                "Workflow completed; inspect the listed final report and function "
-                "annotation artifacts."
-            ),
+            "summary": ("Workflow completed; inspect the listed final report."),
             "required_fields": [],
             "relevant_refs": refs,
         }
@@ -1034,9 +1097,7 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     }
     if requirements.get("candidate_ids"):
         candidate_ids = list(requirements.get("candidate_ids") or [])
-        candidate_refs = dict(
-            requirements.get("candidate_primary_output_refs") or {}
-        )
+        candidate_refs = dict(requirements.get("candidate_primary_output_refs") or {})
         guidance["candidate_ids"] = candidate_ids
         guidance["candidate_primary_output_refs"] = candidate_refs
         if "candidate_ids" in gate.required_resume_fields:
@@ -1435,54 +1496,6 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
     missing_input = _report_missing_input(payload)
     if missing_input:
         return _missing_input_next_action(missing_input)
-    if _is_function_protein_artifact_error(last_error):
-        return {
-            "kind": "materialized_proteins_required",
-            "summary": (
-                "Function annotation requires a materialized local predicted-proteins "
-                "FASTA matching database_provenance input_proteins_ref."
-            ),
-            "stage": stage or "function_annotation",
-            "last_error": last_error,
-            "required_fields": [
-                "manifest.assets[predicted_proteins].paths[0]",
-                "stage_outputs.gene_annotation.proteins_fasta_ref",
-                "function_annotation.database_provenance[*].input_proteins_ref",
-            ],
-            "manifest_asset_type": "predicted_proteins",
-            "run_config_path": (
-                "function_annotation.database_provenance[*].input_proteins_ref"
-            ),
-            "relevant_refs": _artifact_refs(
-                payload.get("relevant_refs"),
-                summary.get("latest_relevant_artifacts"),
-            ),
-        }
-    if "database_provenance" in last_error:
-        required_fields = [
-            "method_name",
-            "database_name",
-            "database_version",
-            "snapshot_date",
-            "database_source_ref",
-            "input_proteins_ref",
-            "command or descriptor_version",
-        ]
-        return {
-            "kind": "provenance_required",
-            "summary": (
-                "Function annotation requires database_provenance records matching a "
-                "materialized proteins_fasta_ref."
-            ),
-            "stage": stage or "function_annotation",
-            "last_error": last_error,
-            "required_fields": required_fields,
-            "run_config_path": "function_annotation.database_provenance",
-            "relevant_refs": _artifact_refs(
-                payload.get("relevant_refs"),
-                summary.get("latest_relevant_artifacts"),
-            ),
-        }
     return {
         "kind": "failed_terminal",
         "summary": last_error,
@@ -1494,17 +1507,6 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
             summary.get("latest_relevant_artifacts"),
         ),
     }
-
-
-def _is_function_protein_artifact_error(last_error: str) -> bool:
-    return any(
-        marker in last_error
-        for marker in (
-            "protein artifact not found for function_annotation",
-            "protein artifact is not a file for function_annotation",
-            "proteins_fasta_ref must be a local file path for function_annotation",
-        )
-    )
 
 
 def _candidate_comparison_relevant_refs(context: Any) -> dict[str, Any]:
@@ -1543,6 +1545,7 @@ def _decision_requirements_from_artifact(
     paths: SessionPaths,
     expected_request_id: str,
     expected_request_hash: str | None = None,
+    expected_workflow_step_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Load requirements only after validating the indexed immutable ref."""
     if not artifact:
@@ -1585,6 +1588,13 @@ def _decision_requirements_from_artifact(
         raise ResumeValidationError(
             "ledger review_request_id does not match the request artifact"
         )
+    if (
+        expected_workflow_step_id
+        and record.get("workflow_step_id") != expected_workflow_step_id
+    ):
+        raise ResumeValidationError(
+            "ledger workflow_step_id does not match the request artifact"
+        )
     payload = record.get("payload")
     if not isinstance(payload, dict):
         raise ResumeValidationError("review request artifact payload is invalid")
@@ -1592,6 +1602,7 @@ def _decision_requirements_from_artifact(
         **payload,
         **dict(record.get("bindings") or {}),
         "stage": record.get("stage"),
+        "workflow_step_id": record.get("workflow_step_id"),
         "gate_id": record.get("gate_id"),
         "review_request_id": expected_request_id,
         "request_ref": ref.model_dump(mode="json"),

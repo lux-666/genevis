@@ -9,7 +9,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from app.entrypoints.run import _run_bootstrap
 from app.execution.env_resolver import EnvResolver

@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence, cast
 from uuid import uuid4
 
+from app.control.workflow_plan import current_workflow_step_id
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_BASIS,
@@ -48,9 +49,11 @@ from app.schemas.parameter_recommendation import (
     RecommendationDependencyRefs,
     RecommendationInputSnapshotV3,
 )
+from app.schemas.state import TopLevelState
 from app.storage.artifacts import (
     artifact_ref_for_path,
     publish_artifact_record,
+    read_artifact_records,
     recover_published_artifact,
     resolve_artifact_ref,
 )
@@ -162,7 +165,13 @@ def load_parameter_recommendation_chain_v3(
     """Load one exact v3 chain; pre-v3 roots and mixed identities fail closed."""
 
     types = _PARAMETER_ARTIFACT_TYPES[expected_stage]
-    ref = _verified_ref(state, manifest_ref)
+    workflow_step_id = _active_workflow_step_id(state, expected_stage=expected_stage)
+    ref = _verified_current_occurrence_ref(
+        state,
+        manifest_ref,
+        workflow_step_id=workflow_step_id,
+        label="recommendation manifest",
+    )
     manifest_record = read_parameter_json(
         state,
         ref,
@@ -185,11 +194,24 @@ def load_parameter_recommendation_chain_v3(
             f"recommendation method mismatch: expected {expected_method_id!r}, "
             f"got {manifest.method_id!r}"
         )
+    if manifest.previous_attempt_manifest_ref is not None:
+        _verified_current_occurrence_ref(
+            state,
+            manifest.previous_attempt_manifest_ref,
+            workflow_step_id=workflow_step_id,
+            label="previous attempt manifest",
+        )
 
     refs = manifest.refs
-    input_record = read_parameter_json(
+    input_snapshot_ref = _verified_current_occurrence_ref(
         state,
         refs.input_snapshot_ref,
+        workflow_step_id=workflow_step_id,
+        label="recommendation input snapshot",
+    )
+    input_record = read_parameter_json(
+        state,
+        input_snapshot_ref,
         expected_type=types.input_snapshot,
     )
     _require_schema(input_record, 3, "recommendation input snapshot")
@@ -200,9 +222,15 @@ def load_parameter_recommendation_chain_v3(
             "invalid schema-3 recommendation input snapshot"
         ) from exc
 
-    basis_snapshot = read_parameter_json(
+    basis_snapshot_ref = _verified_current_occurrence_ref(
         state,
         refs.basis_snapshot_ref,
+        workflow_step_id=workflow_step_id,
+        label="recommendation basis snapshot",
+    )
+    basis_snapshot = read_parameter_json(
+        state,
+        basis_snapshot_ref,
         expected_type=types.basis_snapshot,
     )
     _require_schema(basis_snapshot, 3, "recommendation basis snapshot")
@@ -220,27 +248,51 @@ def load_parameter_recommendation_chain_v3(
             "recommendation catalog snapshot is invalid"
         ) from exc
 
-    model_request = read_parameter_json(
+    model_request_ref = _verified_current_occurrence_ref(
         state,
         refs.model_request_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter model request",
+    )
+    model_request = read_parameter_json(
+        state,
+        model_request_ref,
         expected_type=types.model_request,
     )
     _require_schema(model_request, 3, "parameter model request")
-    model_response = read_parameter_json(
+    model_response_ref = _verified_current_occurrence_ref(
         state,
         refs.model_response_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter model response",
+    )
+    model_response = read_parameter_json(
+        state,
+        model_response_ref,
         expected_type=types.model_response,
     )
     _require_schema(model_response, 2, "parameter model response")
-    response_parse = read_parameter_json(
+    response_parse_ref = _verified_current_occurrence_ref(
         state,
         refs.response_parse_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter response parse",
+    )
+    response_parse = read_parameter_json(
+        state,
+        response_parse_ref,
         expected_type=types.response_parse,
     )
     _require_schema(response_parse, 1, "parameter response parse")
-    recommendation = read_parameter_json(
+    recommendation_ref = _verified_current_occurrence_ref(
         state,
         refs.recommendation_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter recommendation",
+    )
+    recommendation = read_parameter_json(
+        state,
+        recommendation_ref,
         expected_type=types.recommendation,
     )
     _require_schema(recommendation, 2, "parameter recommendation")
@@ -302,6 +354,7 @@ def load_approved_parameter_chain_v3(
         raise ParameterEvidenceError("unsupported_parameter_recommendation_schema")
     if validated_attempt.method_id != expected_method_id:
         raise ParameterEvidenceError("approved parameter attempt method mismatch")
+    workflow_step_id = _active_workflow_step_id(state, expected_stage=expected_stage)
     chain = load_parameter_recommendation_chain_v3(
         state,
         manifest_ref=validated_attempt.recommendation_manifest_ref,
@@ -321,9 +374,15 @@ def load_approved_parameter_chain_v3(
         )
 
     types = _PARAMETER_ARTIFACT_TYPES[expected_stage]
-    approval = read_parameter_json(
+    approval_decision_ref = _verified_current_occurrence_ref(
         state,
         validated_attempt.approval_decision_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter approval decision",
+    )
+    approval = read_parameter_json(
+        state,
+        approval_decision_ref,
         expected_type=types.approval_decision,
     )
     _require_schema(approval, 2, "parameter approval decision")
@@ -356,6 +415,12 @@ def load_approved_parameter_chain_v3(
         raise ParameterEvidenceError(
             "parameter approval manifest ref does not match the attempt"
         )
+    _verified_current_occurrence_ref(
+        state,
+        approved_manifest_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter approval manifest",
+    )
 
     request_ref_value = approval.get("request_ref")
     try:
@@ -366,6 +431,12 @@ def load_approved_parameter_chain_v3(
         ) from exc
     if approval.get("request_hash") != request_ref.sha256:
         raise ParameterEvidenceError("parameter approval request hash mismatch")
+    request_ref = _verified_current_occurrence_ref(
+        state,
+        request_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter approval request",
+    )
     review_request = read_parameter_json(state, request_ref)
     _require_schema(review_request, 2, "parameter approval request")
     if (
@@ -392,6 +463,12 @@ def load_approved_parameter_chain_v3(
         raise ParameterEvidenceError(
             "parameter approval request does not match the recommendation manifest"
         )
+    _verified_current_occurrence_ref(
+        state,
+        requested_manifest_ref,
+        workflow_step_id=workflow_step_id,
+        label="parameter approval request manifest",
+    )
 
     # Force shape validation at the approved boundary, including unknown L2 keys
     # later rejected by the shared resolver.
@@ -510,8 +587,12 @@ def publish_parameter_json(
     ).encode("utf-8")
     paths, _session_id = _session_paths(state)
     stage_component = _safe_component(stage, label="stage")
+    workflow_step_id = current_workflow_step_id(
+        cast(TopLevelState, state), expected_stage=stage_component
+    )
     file_component = _safe_component(filename, label="filename")
-    temporary = paths.work_path(
+    temporary = paths.workflow_step_work_path(
+        workflow_step_id,
         stage_component,
         "parameter_persistence",
         f".{file_component}.{uuid4().hex}.tmp",
@@ -558,6 +639,9 @@ def publish_parameter_file(
     stage_component = _safe_component(stage, label="stage")
     file_component = _safe_component(filename, label="filename")
     paths, session_id = _session_paths(state)
+    workflow_step_id = current_workflow_step_id(
+        cast(TopLevelState, state), expected_stage=stage_component
+    )
     raw_source_path = Path(source).expanduser()
     if raw_source_path.is_symlink():
         raise ParameterEvidenceError(
@@ -570,8 +654,18 @@ def publish_parameter_file(
         raise ParameterEvidenceError(
             "parameter evidence source must be below the run work directory"
         ) from exc
+    active_work_dir = paths.workflow_step_work_dir(
+        workflow_step_id, stage_component
+    ).resolve(strict=False)
+    try:
+        source_path.relative_to(active_work_dir)
+    except ValueError as exc:
+        raise ParameterEvidenceError(
+            "parameter evidence source targets another workflow occurrence"
+        ) from exc
     directory = "parameter_recommendations" if scope == "recommendation" else "attempts"
-    destination = paths.artifact_path(
+    destination = paths.workflow_step_artifact_path(
+        workflow_step_id,
         stage_component,
         directory,
         f"{identifier:03d}",
@@ -582,7 +676,10 @@ def publish_parameter_file(
         stage=stage_component,
         method_name=method_name,
         artifact_type=artifact_type,
-        metadata={f"{scope}_id": identifier},
+        metadata={
+            f"{scope}_id": identifier,
+            "workflow_step_id": workflow_step_id,
+        },
     )
     return publish_artifact_record(
         paths.run_dir,
@@ -653,8 +750,12 @@ def recover_parameter_json(
     stage_component = _safe_component(stage, label="stage")
     file_component = _safe_component(filename, label="filename")
     paths, session_id = _session_paths(state)
+    workflow_step_id = current_workflow_step_id(
+        cast(TopLevelState, state), expected_stage=stage_component
+    )
     directory = "parameter_recommendations" if scope == "recommendation" else "attempts"
-    destination = paths.artifact_path(
+    destination = paths.workflow_step_artifact_path(
+        workflow_step_id,
         stage_component,
         directory,
         f"{identifier:03d}",
@@ -668,7 +769,10 @@ def recover_parameter_json(
             stage=stage_component,
             method_name=method_name,
             artifact_type=expected_type,
-            metadata={f"{scope}_id": identifier},
+            metadata={
+                f"{scope}_id": identifier,
+                "workflow_step_id": workflow_step_id,
+            },
         )
     except (OSError, ValueError) as exc:
         raise ParameterEvidenceError(
@@ -706,6 +810,51 @@ def _verified_ref(
         raise ParameterEvidenceError(
             "invalid or unreadable parameter artifact ref"
         ) from exc
+    return ref
+
+
+def _active_workflow_step_id(
+    state: Mapping[str, Any],
+    *,
+    expected_stage: Literal["assembly", "hic_scaffolding", "t2t"],
+) -> str:
+    """Return the active occurrence ID required by parameter execution."""
+
+    try:
+        return current_workflow_step_id(
+            cast(TopLevelState, state), expected_stage=expected_stage
+        )
+    except (TypeError, ValueError) as exc:
+        raise ParameterEvidenceError(
+            "parameter evidence requires the active workflow occurrence"
+        ) from exc
+
+
+def _verified_current_occurrence_ref(
+    state: Mapping[str, Any],
+    value: ArtifactRef | Mapping[str, Any],
+    *,
+    workflow_step_id: str,
+    label: str,
+) -> ArtifactRef:
+    """Verify a ref and require its indexed artifact to belong to this occurrence."""
+
+    ref = _verified_ref(state, value)
+    paths, session_id = _session_paths(state)
+    matches = [
+        record
+        for record in read_artifact_records(paths.run_dir, session_id)
+        if record.get("artifact_id") == ref.artifact_id
+        and record.get("path_ref") == ref.path_ref
+        and record.get("sha256") == ref.sha256
+        and record.get("artifact_type") == ref.artifact_type
+    ]
+    if len(matches) != 1:
+        raise ParameterEvidenceError(f"{label} artifact identity is ambiguous")
+    if matches[0].get("workflow_step_id") != workflow_step_id:
+        raise ParameterEvidenceError(
+            f"{label} targets another workflow occurrence"
+        )
     return ref
 
 

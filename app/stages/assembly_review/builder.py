@@ -97,7 +97,6 @@ def build_stage() -> CompiledStateGraph[
         "parameter_quality_gate",
         route_after_parameter_quality_gate,
         {
-            "replan": END,
             "related_species_sanity_check": "related_species_sanity_check",
             "fail": "fail",
         },

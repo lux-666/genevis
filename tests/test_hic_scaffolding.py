@@ -52,9 +52,9 @@ from app.storage.artifacts import (
     read_artifact_records,
     resolve_artifact_ref,
 )
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-from app.workflow import next_stage_name
 from tests.data_v2 import v2_run_dir
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
@@ -128,7 +128,31 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=[
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-assembly_review",
+                    "stage": "assembly_review",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-002-hic_scaffolding",
+                    "stage": "hic_scaffolding",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-003-gapcloser",
+                    "stage": "gapcloser",
+                    "allow_local_execution": False,
+                },
+            ],
         )
+        state["workflow_step_index"] = 2
+        state["entered_workflow_step_index"] = 2
         state["current_stage"] = "hic_scaffolding"
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
@@ -205,7 +229,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         registry_path: str | Path,
     ) -> dict:
         paths = SessionPaths.from_run_dir(data_dir)
-        source = paths.work_path(
+        source = paths.workflow_step_work_path(
+            "step-000-inventory",
             "inventory",
             f"asset_registry_{os.urandom(4).hex()}.json",
         )
@@ -373,7 +398,36 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "    package_tools: [autohic, juicer, three_d_dna]\n",
             encoding="utf-8",
         )
+        self._freeze_autohic_dependencies(tmpdir, envs_yaml)
         return envs_yaml
+
+    def _freeze_autohic_dependencies(self, tmpdir: str, envs_yaml: Path) -> None:
+        """Give local AutoHiC tests the same immutable dependency contract as a run."""
+        manifest_read = Path(tmpdir) / "frozen_dependency_input.fastq"
+        manifest_read.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        paths = SessionPaths(Path(tmpdir), "s1")
+        freeze_session_inputs(
+            paths,
+            manifest_draft={
+                "session_id": "s1",
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(manifest_read)],
+                        "platform": "ont",
+                        "format": "fastq",
+                    }
+                ],
+            },
+            run_config_draft={
+                "requested_stages": [
+                    {"stage": "hic_scaffolding", "allow_local_execution": True}
+                ],
+                "hic_scaffolding": {},
+            },
+            config_path=envs_yaml,
+            selected_methods={"hic_scaffolding": AUTOHIC_METHOD},
+        )
 
     def _run_to_parameter_gate(
         self,
@@ -510,13 +564,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 result["active_interrupt"]["gate_id"], "parameter_approval"
             )
             self.assertFalse(hic["parameter_attempts"])
-            recommendation_path = (
-                Path(result["data_dir"])
-                / "artifacts"
-                / "hic_scaffolding"
-                / "parameter_recommendations"
-                / "000"
-                / "recommendation.json"
+            recommendation_path = SessionPaths.from_run_dir(
+                result["data_dir"]
+            ).workflow_step_artifact_path(
+                "step-002-hic_scaffolding",
+                "hic_scaffolding",
+                "parameter_recommendations",
+                "000",
+                "recommendation.json",
             )
             recommendation = json.loads(
                 recommendation_path.read_text(encoding="utf-8")
@@ -563,7 +618,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 if asset["asset_type"] == "hic_reads_registered":
                     asset["metadata"]["arbitrary_raw_metadata"] = "must-not-leak"
             _paths = SessionPaths.from_run_dir(state["data_dir"])
-            _source = _paths.work_path(
+            _source = _paths.workflow_step_work_path(
+                "step-000-inventory",
                 "inventory",
                 f"asset_registry_{os.urandom(4).hex()}.json",
             )
@@ -590,13 +646,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             ):
                 result = build_stage().invoke(state)
 
-            request_path = (
-                Path(result["data_dir"])
-                / "artifacts"
-                / "hic_scaffolding"
-                / "parameter_recommendations"
-                / "000"
-                / "model_request.json"
+            request_path = SessionPaths.from_run_dir(
+                result["data_dir"]
+            ).workflow_step_artifact_path(
+                "step-002-hic_scaffolding",
+                "hic_scaffolding",
+                "parameter_recommendations",
+                "000",
+                "model_request.json",
             )
             persisted = json.loads(request_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["messages"], model.messages)
@@ -648,8 +705,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             state = self._configured_state(tmpdir, assembly, reads)
             paths = SessionPaths.from_run_dir(state["data_dir"])
 
-            assembly_source = paths.work_path(
-                "assembly_review", "pre_hic_assembly.fasta"
+            assembly_source = paths.workflow_step_work_path(
+                "step-001-assembly_review",
+                "assembly_review",
+                "pre_hic_assembly.fasta",
             )
             assembly_source.parent.mkdir(parents=True, exist_ok=True)
             assembly_source.write_bytes(assembly.read_bytes())
@@ -664,7 +723,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 ),
             )
 
-            registry_source = paths.work_path("inventory", "registry.json")
+            registry_source = paths.workflow_step_work_path(
+                "step-000-inventory", "inventory", "registry.json"
+            )
             registry_source.parent.mkdir(parents=True, exist_ok=True)
             registry_source.write_text(
                 json.dumps(
@@ -712,13 +773,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             result = self._run_to_parameter_gate(state)
 
-            snapshot_path = (
-                Path(result["data_dir"])
-                / "artifacts"
-                / "hic_scaffolding"
-                / "parameter_recommendations"
-                / "000"
-                / "input_snapshot.json"
+            snapshot_path = SessionPaths.from_run_dir(
+                result["data_dir"]
+            ).workflow_step_artifact_path(
+                "step-002-hic_scaffolding",
+                "hic_scaffolding",
+                "parameter_recommendations",
+                "000",
+                "input_snapshot.json",
             )
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             self.assertEqual(
@@ -935,9 +997,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(
                 str(frozen_attempt.script_path),
                 str(
-                    Path(frozen_state["data_dir"])
-                    / "work"
-                    / "hic_scaffolding"
+                    SessionPaths.from_run_dir(
+                        frozen_state["data_dir"]
+                    ).workflow_step_work_dir(
+                        "step-002-hic_scaffolding",
+                        "hic_scaffolding",
+                    )
                     / "autohic"
                     / "run_autohic.sh"
                 ),
@@ -1149,11 +1214,13 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(executed_attempt["status"], "executed")
             self.assertEqual(
                 executed_attempt["frozen_parameters_ref"]["path_ref"],
-                "artifacts/hic_scaffolding/attempts/000/frozen_parameters.json",
+                "artifacts/steps/step-002-hic_scaffolding/hic_scaffolding/"
+                "attempts/000/frozen_parameters.json",
             )
             self.assertEqual(
                 executed_attempt["command_ref"]["path_ref"],
-                "artifacts/hic_scaffolding/attempts/000/command.json",
+                "artifacts/steps/step-002-hic_scaffolding/hic_scaffolding/"
+                "attempts/000/command.json",
             )
             self.assertEqual(
                 executed_attempt["execution_ref"]["artifact_type"],
@@ -1161,7 +1228,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertTrue(
                 executed_attempt["execution_ref"]["path_ref"].startswith(
-                    "artifacts/hic_scaffolding/attempts/"
+                    "artifacts/steps/step-002-hic_scaffolding/hic_scaffolding/"
+                    "attempts/"
                 )
             )
             self.assertEqual(
@@ -1178,13 +1246,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             ):
                 self.assertTrue(Path(candidate[key]).is_file(), key)
 
-            config = (
-                Path(result["data_dir"])
-                / "work"
-                / "hic_scaffolding"
-                / "autohic"
-                / "cfg-autohic.txt"
-            ).read_text(encoding="utf-8")
+            config = SessionPaths.from_run_dir(result["data_dir"])
+            config = config.workflow_step_work_dir(
+                "step-002-hic_scaffolding",
+                "hic_scaffolding",
+            ) / "autohic" / "cfg-autohic.txt"
+            config = config.read_text(encoding="utf-8")
             self.assertIn("ENZYME=MboI", config)
             self.assertIn(f"ERROR_PRETRAINED_MODEL={error_model.resolve()}", config)
             self.assertIn(
@@ -1301,7 +1368,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 adopted["current_stage"],
-                next_stage_name("hic_scaffolding"),
+                "gapcloser",
             )
             self.assertEqual(
                 adopted["stage_outputs"]["hic_scaffolding"]["output_assembly_ref"],
@@ -1433,7 +1500,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertIsNotNone(hic["parameter_attempts"][0]["execution_ref"])
             self.assertNotIn(
-                "annotation_continues_on_pre_hic_assembly_fallback",
+                "pre_hic_assembly_preserved_as_fallback",
                 hic.get("notes") or [],
             )
             self.assertIsNone(result.get("active_interrupt"))

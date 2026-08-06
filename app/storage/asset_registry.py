@@ -112,7 +112,8 @@ def _resolve_registry_path(
 ) -> Path:
     if isinstance(raw_ref, str):
         raise ValueError(
-            f"asset_registry_ref must be an ArtifactRef dict, got bare string: {raw_ref!r}"
+            "asset_registry_ref must be an ArtifactRef dict, got bare string: "
+            f"{raw_ref!r}"
         )
     if isinstance(raw_ref, ArtifactRef):
         ref = raw_ref

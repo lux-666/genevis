@@ -29,7 +29,10 @@ def _summary(wait_seconds: int) -> dict:
             "decisions_allowed": ["continue", "stop_human_review"],
             "review_request_id": "review_1",
             "request_hash": "a" * 64,
-            "review_request_artifact_ref": ("artifacts/reviews/review_1/request.json"),
+            "review_request_artifact_ref": (
+                "artifacts/steps/step-000-inventory/inventory/reviews/"
+                "review_1/request.json"
+            ),
             "max_blocked_seconds": wait_seconds,
         },
         "latest_review_request_artifact": None,
@@ -50,7 +53,10 @@ def _route_summary(wait_seconds: int) -> dict:
         "decisions_allowed": ["select_hifi", "stop_human_review"],
         "review_request_id": "review_1",
         "request_hash": "a" * 64,
-        "review_request_artifact_ref": "artifacts/reviews/review_1/request.json",
+        "review_request_artifact_ref": (
+            "artifacts/steps/step-001-assembly/assembly/reviews/"
+            "review_1/request.json"
+        ),
         "max_blocked_seconds": wait_seconds,
         "recommended_route": "hifi",
         "recommended_assembly_selection": {

@@ -74,6 +74,4 @@ def _planner_method_spec(descriptor: MethodDescriptor) -> dict[str, Any]:
         spec["selection_role"] = planner.selection_role
     if planner.display_name:
         spec["display_name"] = planner.display_name
-    if descriptor.category:
-        spec["category"] = descriptor.category
     return spec

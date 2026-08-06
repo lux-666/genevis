@@ -11,8 +11,8 @@ from typing import Literal
 from pydantic import ConfigDict, with_config
 from typing_extensions import TypedDict
 
-from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.artifacts import (
+    ArtifactRefJson,
     ParameterAttemptStatus,
     ParameterAttemptTask,
     ParameterRecommendationStatus,

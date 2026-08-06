@@ -28,14 +28,6 @@ AssetType = Literal[
     "hic_alignment_bam",
     "hic_merged_nodups",
     "chromosome_scaffolded_assembly",
-    "repeat_library",
-    "repeat_annotation",
-    "softmasked_genome",
-    "gene_models",
-    "predicted_proteins",
-    "transcripts_fasta",
-    "function_database",
-    "function_annotation",
 ]
 
 

@@ -45,8 +45,7 @@ from app.stages.assembly.state import (
     update_assembly_stage_output,
     validated_assembly_stage_payload,
 )
-from app.stages.base import absolute_data_dir
-from app.storage.paths import SessionPaths
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.storage.publish import shell_publish_file
 
 LIFECYCLE = MethodExecutionLifecycle(
@@ -120,11 +119,13 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
     thread_binding = execution_contract.l0_executor_values()
     approved_attempt = approved_bundle.attempt
     parameter_attempt_id = approved_attempt.attempt_id
-    paths = SessionPaths.from_run_dir(data_dir)
     attempt_scope = f"{parameter_attempt_id:03d}"
-    working_dir = paths.work_path("assembly", "attempts", attempt_scope, "hifiasm")
+    working_dir = stage_work_dir(
+        state, "assembly", "attempts", attempt_scope, "hifiasm"
+    )
     output_dir = working_dir / "hifiasm_out"
-    artifact_dir = paths.artifact_path(
+    artifact_dir = stage_artifacts_dir(
+        state,
         "assembly", "attempts", attempt_scope, "outputs", "hifiasm"
     )
     working_dir.mkdir(parents=True, exist_ok=True)

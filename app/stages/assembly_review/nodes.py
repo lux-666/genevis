@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 from pathlib import Path
@@ -20,6 +21,7 @@ from uuid import uuid4
 import yaml
 
 from app.control.lifecycle import ResumeValidationError
+from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.reference.ncbi_metazoa import (
     build_related_species_evidence_pack as _build_related_species_evidence_pack,
 )
@@ -28,7 +30,12 @@ from app.reference.ncbi_metazoa import (
 )
 from app.reference.ncbi_metazoa import species_name_from_metadata
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
-from app.review.persistence import persist_review_decision, persist_review_request
+from app.review.persistence import (
+    ReviewPersistenceError,
+    load_review_request,
+    persist_review_decision,
+    persist_review_request,
+)
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_DRAFT_ASSEMBLY,
@@ -47,12 +54,9 @@ from app.schemas.artifacts import (
 )
 from app.schemas.plan import AssemblyReviewPlan
 from app.schemas.state import (
-    DOMAIN_STAGES,
     ActiveInterrupt,
-    DomainStage,
     StateUpdate,
     TopLevelState,
-    validate_stage_outputs,
 )
 from app.stages.assembly.method_application.support import (
     ASSEMBLY_EXECUTION_CONTRACT_KEY,
@@ -175,9 +179,7 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
             )
             projected_primary = assembly.metadata.get(projected_primary_key)
             if projected_primary is None:
-                raise ValueError(
-                    f"assembly resource has no {projected_primary_key}"
-                )
+                raise ValueError(f"assembly resource has no {projected_primary_key}")
             if (
                 ArtifactRef.model_validate(projected_primary)
                 != verified.primary_output_ref
@@ -330,7 +332,7 @@ def evaluate_review_rules(state: TopLevelState) -> StateUpdate:
 
 
 def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
-    """Route Phase10 assembly-review failures back to assembly parameter replan."""
+    """Record an Assembly Review-owned parameter-quality diagnosis."""
 
     stage_outputs = dict(state.get("stage_outputs") or {})
     assembly_out = dict(stage_outputs.get("assembly") or {})
@@ -339,53 +341,14 @@ def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
 
     ar_out = assembly_review_output(state)
     metrics = _phase10_review_metrics(ar_out, assembly_out)
-    gate_state = state.copy()
+    diagnosis = _parameter_quality_diagnosis(metrics)
+    update: dict[str, Any] = {
+        "parameter_quality_gate": diagnosis,
+        "parameter_quality_checked": True,
+    }
     if metrics and not ar_out.get("metrics"):
-        gate_state.update(update_assembly_review_output(state, {"metrics": metrics}))
-
-    from app.stages.assembly.parameters.workflow import (
-        parameter_quality_gate as assembly_parameter_quality_gate,
-    )
-
-    gate_update = assembly_parameter_quality_gate(gate_state)
-    updated_outputs = dict(gate_update.get("stage_outputs") or stage_outputs)
-    updated_assembly = dict(updated_outputs.get("assembly") or {})
-    quality_gate = updated_assembly.get("quality_gate")
-    updated_state = state.copy()
-    updated_state["stage_outputs"] = validate_stage_outputs(updated_outputs)
-
-    if updated_assembly.get("status") == "retry_parameters_after_review_failure":
-        review_update = update_assembly_review_output(
-            updated_state,
-            {
-                "status": "parameter_replan_requested",
-                "parameter_quality_gate": quality_gate,
-            },
-        )
-        return {
-            "current_stage": "assembly",
-            "supervision_state": "running_stage",
-            "active_interrupt": None,
-            **review_update,
-        }
-
-    if updated_assembly.get("status") == "review_parameter_retries_exhausted":
-        return update_assembly_review_output(
-            updated_state,
-            {
-                "parameter_quality_gate": quality_gate,
-                "parameter_retries_exhausted": True,
-                "parameter_quality_checked": True,
-            },
-        )
-
-    return update_assembly_review_output(
-        updated_state,
-        {
-            "parameter_quality_gate": quality_gate,
-            "parameter_quality_checked": True,
-        },
-    )
+        update["metrics"] = metrics
+    return update_assembly_review_output(state, update)
 
 
 def build_related_species_evidence_pack(state: TopLevelState) -> StateUpdate:
@@ -681,6 +644,84 @@ def _phase10_review_metrics(
     return metrics
 
 
+def _parameter_quality_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Classify review signals without changing Assembly attempt evidence."""
+    complete = _float_metric(metrics, "busco_complete", "busco_complete_ratio")
+    duplicate = _float_metric(metrics, "busco_duplicate", "busco_duplicate_ratio")
+    size_ratio = _float_or_none(metrics.get("assembly_size_ratio"))
+    n50 = _float_metric(metrics, "contig_n50", "n50")
+    contig_count = _float_or_none(metrics.get("contig_count"))
+    normalized_complete = _as_ratio(complete)
+    normalized_duplicate = _as_ratio(duplicate)
+    passed = (
+        normalized_complete is not None
+        and normalized_complete >= 0.95
+        and (normalized_duplicate is None or normalized_duplicate <= 0.10)
+        and (size_ratio is None or 0.75 <= size_ratio <= 1.25)
+    )
+    if passed:
+        failure_mode = None
+        suggestions: dict[str, str] = {}
+    elif (
+        normalized_duplicate is not None
+        and normalized_duplicate >= 0.15
+        and size_ratio is not None
+        and size_ratio >= 1.20
+    ):
+        failure_mode = "under_purged"
+        suggestions = {"purge_level": "consider increasing"}
+    elif (
+        normalized_complete is not None
+        and normalized_complete <= 0.90
+        and size_ratio is not None
+        and size_ratio <= 0.80
+    ):
+        failure_mode = "over_purged"
+        suggestions = {"purge_level": "consider decreasing"}
+    elif (
+        n50 is not None
+        and contig_count is not None
+        and n50 < 1_000_000
+        and contig_count > 500
+    ):
+        failure_mode = "fragmented"
+        suggestions = {"overlap_parameters": "consider less aggressive filtering"}
+    elif normalized_complete is not None and normalized_complete <= 0.90:
+        failure_mode = "low_completeness"
+        suggestions = {"read_filtering": "consider retaining more reads"}
+    else:
+        failure_mode = "execution_or_metrics_missing"
+        suggestions = {}
+    return {
+        "passed": passed,
+        "failure_mode": failure_mode,
+        "metrics": metrics,
+        "suggestions": suggestions,
+    }
+
+
+def _float_metric(metrics: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _float_or_none(metrics.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _as_ratio(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return value / 100.0 if value > 1 else value
+
+
 def human_review_gate(state: TopLevelState) -> StateUpdate:
     """Set an active interrupt for unresolved assembly review decisions."""
     ar_out = assembly_review_output(state)
@@ -706,12 +747,12 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
         notes=[
             "Thresholds for BUSCO and QUAST require human approval before application.",
             (
-                "Accept continues with the selected assembly to Hi-C scaffolding, "
-                "then T2T, then annotation stages."
+                "Accept continues with the selected assembly to Hi-C scaffolding "
+                "and then T2T."
             ),
             (
-                "Assembly parameter retries use the v3 recommendation, approval, "
-                "and frozen-attempt workflow before this gate."
+                "Assembly execution-failure retries use the v3 recommendation, "
+                "approval, and frozen-attempt workflow before this gate."
             ),
             "Stop leaves downstream stages unstarted.",
         ],
@@ -772,8 +813,6 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
 
 def commit_assembly_review(state: TopLevelState) -> StateUpdate:
     """Commit the assembly review decision and advance routing."""
-    from app.workflow import next_stage_name, skipped_stages_until_next
-
     ar_out = assembly_review_output(state)
 
     decision = ar_out.get("decision", "stop_human_review")
@@ -831,6 +870,10 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
             current_verified_candidate = publish_derived_assembly_candidate(
                 absolute_data_dir(state),
                 state["session_id"],
+                workflow_step_id=current_workflow_step_id(
+                    state,
+                    expected_stage="assembly_review",
+                ),
                 source_candidate=selected_verified,
                 primary_output_ref=published_action.ref,
                 stage="assembly_review",
@@ -839,25 +882,14 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
             )
             output_assembly_ref = str(current_verified_candidate.primary_output_path)
             final_assembly_ref = output_assembly_ref
-            current_primary_output_ref = (
-                current_verified_candidate.primary_output_ref
-            )
+            current_primary_output_ref = current_verified_candidate.primary_output_ref
         pre_action_ref = selected_path
     else:
+        if final_assembly_ref is None:
+            raise ValueError("assembly_review has no final assembly ref")
         output_assembly_ref = final_assembly_ref
         pre_action_ref = ar_out.get("pre_action_assembly_ref") or final_assembly_ref
     trace = append_route_trace(state, "assembly_review_stage")
-    next_stage = next_stage_name(
-        "assembly_review",
-        state.get("requested_stages"),
-    )
-    skip_reasons = dict(state.get("skip_reasons") or {})
-    for skipped_stage in skipped_stages_until_next(
-        "assembly_review",
-        state.get("requested_stages"),
-    ):
-        if skipped_stage in DOMAIN_STAGES:
-            skip_reasons.setdefault(cast(DomainStage, skipped_stage), "not_requested")
     decided_by = ar_out.get("decided_by", "human")
     rationale_artifact_ref = ar_out.get("rationale_artifact_ref")
     action_metadata = {
@@ -895,12 +927,9 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
         notes=ar_out.get("notes", []),
         metadata=action_metadata,
     )
-    review_request_id = ar_out.get("review_request_id")
-    review_request_hash = ar_out.get("review_request_hash")
-    if not review_request_id or not review_request_hash:
-        raise ResumeValidationError(
-            "assembly_review decision is missing review request binding"
-        )
+    review_request_id, review_request_hash, review_request_ref = (
+        _assembly_review_binding(state, output=ar_out)
+    )
     decision_ref = persist_review_decision(
         data_dir,
         session_id=state["session_id"],
@@ -909,6 +938,7 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
         gate_id="assembly_review",
         decision=decision_artifact,
         request_hash=review_request_hash,
+        request_ref=review_request_ref,
         method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
         artifact_type="assembly_review.decision",
     )
@@ -958,10 +988,8 @@ def commit_assembly_review(state: TopLevelState) -> StateUpdate:
         )
 
     update: StateUpdate = {
-        "current_stage": next_stage,
-        "supervision_state": "completed" if next_stage == "done" else "running_stage",
+        **advance_workflow_step(state, "assembly_review"),
         "route_trace": trace,
-        "skip_reasons": skip_reasons,
     }
 
     if selected_candidate_id:
@@ -1029,17 +1057,9 @@ def apply_assembly_review_resume_decision(
             "assembly review resume requires stage assembly_review"
         )
     ar_out = assembly_review_output(state)
-    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
-    review_request_id = request.review_request_id or active_interrupt.get(
-        "review_request_id"
+    review_request_id, review_request_hash, review_request_ref = (
+        _assembly_review_binding(state, request=request, output=ar_out)
     )
-    review_request_hash = request.review_request_hash or active_interrupt.get(
-        "request_hash"
-    )
-    if not review_request_id or not review_request_hash:
-        raise ResumeValidationError(
-            "assembly_review decision is missing review request binding"
-        )
     candidates = ar_out.get("candidates") or []
     candidates_by_id = {
         candidate.get("candidate_id"): candidate for candidate in candidates
@@ -1090,6 +1110,7 @@ def apply_assembly_review_resume_decision(
         "rationale_artifact_ref": request.rationale_artifact_ref,
         "review_request_id": review_request_id,
         "review_request_hash": review_request_hash,
+        "review_request_artifact_ref": review_request_ref.model_dump(mode="json"),
     }
     if action_payload["action_type"] == "purge":
         review_payload["purged_assembly"] = action_payload["final_assembly_ref"]
@@ -1214,17 +1235,9 @@ def _stop_assembly_review(
         notes=request.notes,
         metadata=request.metadata,
     )
-    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
-    review_request_id = request.review_request_id or active_interrupt.get(
-        "review_request_id"
+    review_request_id, review_request_hash, review_request_ref = (
+        _assembly_review_binding(state, request=request, output=ar_out)
     )
-    review_request_hash = request.review_request_hash or active_interrupt.get(
-        "request_hash"
-    )
-    if not review_request_id or not review_request_hash:
-        raise ResumeValidationError(
-            "assembly_review stop decision is missing review request binding"
-        )
     decision_ref = persist_review_decision(
         data_dir,
         session_id=state["session_id"],
@@ -1233,6 +1246,7 @@ def _stop_assembly_review(
         gate_id="assembly_review",
         decision=decision_artifact,
         request_hash=review_request_hash,
+        request_ref=review_request_ref,
         method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
         artifact_type="assembly_review.decision",
     )
@@ -1268,6 +1282,56 @@ def _stop_assembly_review(
         **review_update,
         "last_error": "assembly_review stopped by human review decision",
     }
+
+
+def _assembly_review_binding(
+    state: TopLevelState,
+    *,
+    request: ResumeReviewRequest | None = None,
+    output: AssemblyReviewCursor | None = None,
+) -> tuple[str, str, ArtifactRef]:
+    """Load and verify the immutable request bound to an assembly-review decision."""
+
+    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
+    review_output = output or assembly_review_output(state)
+    review_request_id = (
+        (request.review_request_id if request is not None else None)
+        or active_interrupt.get("review_request_id")
+        or review_output.get("review_request_id")
+    )
+    review_request_hash = (
+        (request.review_request_hash if request is not None else None)
+        or active_interrupt.get("request_hash")
+        or review_output.get("review_request_hash")
+    )
+    request_ref_value = active_interrupt.get("request_ref") or review_output.get(
+        "review_request_artifact_ref"
+    )
+    if not review_request_id or not review_request_hash or request_ref_value is None:
+        raise ResumeValidationError(
+            "assembly_review decision is missing review request binding"
+        )
+    try:
+        request_ref = ArtifactRef.model_validate(request_ref_value)
+        request_record = load_review_request(
+            state.get("data_dir", "data"), request_ref, session_id=state["session_id"]
+        )
+    except (ReviewPersistenceError, ValueError, TypeError) as exc:
+        raise ResumeValidationError(
+            "assembly_review review request is missing or changed"
+        ) from exc
+    workflow_step_id = active_interrupt.get(
+        "workflow_step_id"
+    ) or current_workflow_step_id(state, expected_stage="assembly_review")
+    if (
+        request_ref.sha256 != str(review_request_hash)
+        or request_record.get("review_request_id") != str(review_request_id)
+        or request_record.get("stage") != "assembly_review"
+        or request_record.get("gate_id") != "assembly_review"
+        or request_record.get("workflow_step_id") != workflow_step_id
+    ):
+        raise ResumeValidationError("assembly_review review request binding mismatch")
+    return str(review_request_id), str(review_request_hash), request_ref
 
 
 def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
@@ -1522,9 +1586,7 @@ def _candidate_comparison_context(
             if candidate.get("candidate_id")
         ],
         "candidate_primary_output_refs": {
-            str(candidate.get("candidate_id")): dict(
-                candidate["primary_output_ref"]
-            )
+            str(candidate.get("candidate_id")): dict(candidate["primary_output_ref"])
             for candidate in candidates
             if candidate.get("candidate_id")
         },
@@ -1858,11 +1920,14 @@ def _publish_review_action_output(
             "assembly_review action output has no review request identity"
         )
     filename = f"{safe_request_id}.{action_type}.fasta"
-    destination = stage_artifacts_dir(
-        state,
-        "assembly_review",
-        "actions",
-    ) / filename
+    destination = (
+        stage_artifacts_dir(
+            state,
+            "assembly_review",
+            "actions",
+        )
+        / filename
+    )
     temporary = stage_work_dir(
         state,
         "assembly_review",
@@ -1879,9 +1944,7 @@ def _publish_review_action_output(
         metadata={
             "candidate_id": selected.bundle.candidate_id,
             "candidate_bundle_ref": selected.ref.model_dump(mode="json"),
-            "dependency_refs": [
-                selected.primary_output_ref.model_dump(mode="json")
-            ],
+            "dependency_refs": [selected.primary_output_ref.model_dump(mode="json")],
             "review_request_id": review_request_id,
         },
     )
@@ -1907,11 +1970,18 @@ _EVAL_SIGNAL_NAMES = {"quast", "busco"}
 
 
 def _assembly_review_auto_decidable(ar_out: AssemblyReviewCursor) -> bool:
+    """Require complete candidate-level QUAST and BUSCO evidence for LLM review."""
+
     candidates = ar_out.get("candidates") or []
-    if not any(isinstance(c, dict) and c.get("candidate_id") for c in candidates):
+    if not any(
+        isinstance(candidate, dict) and candidate.get("candidate_id")
+        for candidate in candidates
+    ):
         return False
 
-    signals = [s for s in (ar_out.get("signals") or []) if isinstance(s, dict)]
+    signals = [
+        signal for signal in (ar_out.get("signals") or []) if isinstance(signal, dict)
+    ]
     for candidate in candidates:
         candidate_id = candidate.get("candidate_id")
         has_quast = any(

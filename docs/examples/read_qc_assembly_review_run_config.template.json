@@ -1,6 +1,9 @@
 {
-  "requested_stages": ["read_qc", "assembly", "assembly_review"],
-  "local_exec": ["read_qc", "assembly", "assembly_review"],
+  "requested_stages": [
+    {"stage": "read_qc", "allow_local_execution": true},
+    {"stage": "assembly", "allow_local_execution": true},
+    {"stage": "assembly_review", "allow_local_execution": true}
+  ],
   "review_policy": {
     "max_blocked_seconds": 300,
     "stages": {

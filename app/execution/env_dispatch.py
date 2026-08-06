@@ -16,7 +16,6 @@ from typing import Protocol
 
 from typing_extensions import TypedDict
 
-from app.execution import env_resolver
 from app.execution.env_resolver import (
     EnvResolver,
     EnvSpec,
@@ -87,7 +86,7 @@ def resolve_method_env(
         # the env-config is absent (e.g. tests that drive the PATH-only bypass with
         # a PATH-only stage output) there are no packages to preflight, fall
         # through to the ``(None, [], None)`` PATH-only bypass.
-        resolver = _frozen_or_live_resolver(data_dir=data_dir, config_path=config_path)
+        resolver = _dependency_resolver(data_dir=data_dir, config_path=config_path)
         if resolver is not None:
             spec = resolver.resolve(stage=stage, method_name=method_name)
             packages = resolver.packages_for_spec(spec)
@@ -112,12 +111,12 @@ def resolve_method_env(
             return None, packages, None
         return None, [], None
 
-    resolver = _frozen_or_live_resolver(data_dir=data_dir, config_path=config_path)
+    resolver = _dependency_resolver(data_dir=data_dir, config_path=config_path)
     if resolver is None:
-        # This branch is reachable only for the existing PATH-only test and
-        # override behavior when no active config exists.  A frozen session
-        # never reaches it: incomplete/tampered frozen contracts raise above.
-        resolver = EnvResolver(config_path)
+        raise DataLayoutError(
+            "method execution requires a frozen dependency contract or an "
+            "explicit config_path"
+        )
     spec = resolver.resolve(stage=stage, method_name=method_name)
     conda_result = preflight(spec)
     if conda_result.status != "ok":
@@ -170,17 +169,16 @@ def resolve_method_env(
     return spec, packages, None
 
 
-def _frozen_or_live_resolver(
+def _dependency_resolver(
     *,
     data_dir: str | Path,
     config_path: Path | None,
 ) -> _DependencyResolver | None:
-    """Return the run snapshot resolver when one exists, else live config.
+    """Return the frozen resolver, or an explicitly injected config resolver.
 
-    New-format frozen sessions are intentionally strict: even an explicit
-    ``config_path`` injection cannot replace the recorded machine dependency
-    contract.  Legacy runs with no frozen-input signal retain their previous
-    live-config behavior while the TUI migration is in progress.
+    A committed frozen session always owns dependency resolution. ``config_path``
+    remains only as an explicit pre-freeze/test seam and cannot replace a
+    recorded snapshot. There is no implicit active-config fallback.
     """
 
     try:
@@ -199,9 +197,6 @@ def _frozen_or_live_resolver(
 
     if config_path is not None:
         return EnvResolver(config_path)
-    active = env_resolver.active_config_path()
-    if active.exists():
-        return EnvResolver(active)
     return None
 
 

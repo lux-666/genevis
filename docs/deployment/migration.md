@@ -53,9 +53,6 @@ by the methods you intend to execute.
 | Assembly Dedup | `minimap2`, `samtools`, `pbcstat`, `calcuts`, `split_fa`, `gzip`, `purge_dups`, `get_seqs` |
 | Assembly Review | `quast.py`, `busco` |
 | T2T | `minimap2` |
-| Repeat Annotation | `RepeatMasker` |
-| Gene Annotation | `augustus`, `miniprot`, `gffread`, `EVidenceModeler`, `busco` |
-| Function Annotation | `diamond` |
 
 Install the required subset with Bioconda/Conda Forge or the deployment method
 appropriate to the server. Missing commands produce structured preflight
@@ -108,18 +105,16 @@ Schema-valid templates live in `docs/examples/`:
 
 - `real_data_manifest.template.yaml`;
 - `read_qc_assembly_review_run_config.template.json`;
-- `busco_run_config.template.json`;
-- `existing_assembly_repeatmasker_manifest.template.yaml`;
-- `existing_assembly_provided_annotation_manifest.template.yaml`;
-- `repeatmasker_run_config.template.json`;
-- `e2e_manifest.template.yaml`;
-- `e2e_run_config.template.json`.
+- `existing_assembly_manifest.template.yaml` paired with
+  `assembly_review_run_config.template.json`.
 
 Copy a template to a server-local directory and replace placeholder paths. Do
 not commit private paths or real sample metadata.
 
-For the two assembly examples, the operator-provided genome-size estimate lives
-in the paired manifest. The run config contains execution choices only.
+For the raw-read assembly example, the operator-provided genome-size estimate
+lives in the paired manifest. The existing-assembly review example does not
+require a genome-size estimate; both run configs contain execution choices
+only.
 
 ## Start an Operator Run
 
@@ -135,12 +130,17 @@ gene-agent run \
 
 The manifest owns `session_id`; output is written to
 `<data-dir>/runs/<session_id>/`. The command validates and canonicalizes both
-files before freezing them and their dependency snapshot. It requires explicit
-JSON arrays for `requested_stages` and `local_exec` in the run config;
-`requested_stages: null` is rejected, while `[]` is valid. Use `--non-interactive`
-for automation: a human gate persists `blocked_human` and prints `inspect`,
-`review`, and `resume` continuation commands. The TUI is an optional
-conversational intake/planning alternative that uses the same frozen executor.
+files before freezing them and their dependency snapshot. It requires one
+`requested_stages` list of `{stage, allow_local_execution}` objects in the run
+config; the boolean authorizes local process execution only for that occurrence.
+`requested_stages: null` is rejected, while `[]` is valid. Inventory registers
+an `assembly_fasta_registered` input as the central assembly resource;
+`assembly_review` is the recommended review-only entry, but the executor does
+not reject, reorder, or fill the frozen occurrence sequence by registry order.
+Use `--non-interactive` for automation: a human gate persists `blocked_human`
+and prints `inspect`, `review`, and `resume` continuation commands. The TUI is
+an optional conversational intake/planning alternative that uses the same
+frozen executor.
 
 ## Verification
 

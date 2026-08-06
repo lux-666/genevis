@@ -110,9 +110,6 @@ watermark. Both limitations are recorded in
   must not become an apply list without per-report eligibility checks.
 - `work/` is retained because frozen attempts may still refer to scripts there;
   it is outside automatic cleanup.
-- The Genome Survey legacy string-reference window is recorded in
-  [architecture conformance](../reference/conformance.md). It is not permission
-  for new producers to bypass indexed artifact refs.
 - Reports are implemented projections, but a general automatic garbage
   collector is planned/debt, not a current product capability.
 - `reports/current_status.json` is not currently reconstructed by a dedicated

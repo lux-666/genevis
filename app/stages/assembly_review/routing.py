@@ -22,7 +22,6 @@ QuastRoute = Literal["fail", "busco", "evaluate_rules"]
 EvaluationRoute = Literal["fail", "generate_comparison", "human_gate"]
 QualityGateRoute = Literal[
     "fail",
-    "replan",
     "parameter_quality_gate",
     "related_species_sanity_check",
 ]
@@ -81,23 +80,13 @@ def _has_available_review_metrics(ar_out: AssemblyReviewCursor) -> bool:
 
 
 def route_after_parameter_quality_gate(state: TopLevelState) -> QualityGateRoute:
-    """Route Phase10 parameter-quality gate or continue normal review."""
+    """Route the review-owned quality diagnosis or continue normal review."""
     ar_out = _output(state)
     if is_terminal_failure(ar_out.get("status")):
         return "fail"
-    if (
-        state.get("current_stage") == "assembly"
-        and ar_out.get("status") == "parameter_replan_requested"
-    ):
-        return "replan"
     assembly_out = (state.get("stage_outputs") or {}).get("assembly") or {}
-    if (
-        assembly_out.get("parameter_attempts")
-        and ar_out.get("status") != "parameter_replan_requested"
-    ):
+    if assembly_out.get("parameter_attempts"):
         if ar_out.get("parameter_quality_checked"):
-            return "related_species_sanity_check"
-        if ar_out.get("parameter_retries_exhausted"):
             return "related_species_sanity_check"
         # Only enter quality gate if metrics are available (not pending/unconfigured)
         if _has_available_review_metrics(ar_out):

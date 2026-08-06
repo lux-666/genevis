@@ -20,19 +20,24 @@ this document defines how materialized resources move between stages.
 `stage_outputs` contains stage-private, checkpointable cursors and may hold
 status, metrics, evidence refs, and recovery metadata. A downstream stage must
 not scan another stage's output or guess a key name to locate an input file.
+It is a current-occurrence scratch projection, not a history table: when a
+same-named stage occurrence is entered again, its slot is replaced from the
+frozen stage seed. Prior occurrence history remains in step-scoped artifacts,
+review records, execution evidence, and ledger events.
 
 A persisted `ResourceRef` has this shape:
 
 ```json
 {
   "resource_type": "assembly",
-  "paths": ["/run/artifacts/assembly/draft.fasta"],
+  "paths": ["/run/artifacts/steps/step-004-assembly/assembly/draft.fasta"],
   "source_stage": "assembly",
+  "workflow_step_id": "step-004-assembly",
   "metadata": {
     "candidate_bundle_ref": {
       "schema_version": 2,
       "artifact_id": "art_...",
-      "path_ref": "artifacts/assembly/attempts/000/candidates/hifiasm_candidate.executed.json",
+      "path_ref": "artifacts/steps/step-004-assembly/assembly/attempts/000/candidates/hifiasm_candidate.executed.json",
       "sha256": "...",
       "size_bytes": 1234,
       "artifact_type": "draft_assembly.candidate"
@@ -47,6 +52,7 @@ Current constraints:
 
 - the table key and `resource_type` must match;
 - `paths` contains at least one non-empty string;
+- a stage-produced resource records the exact producing `workflow_step_id`;
 - the complete table is JSON-only and at most 128 KiB;
 - reducers validate and replace the complete table;
 - stage nodes return a delta and do not mutate input state;
@@ -97,21 +103,18 @@ table and never mutates the supplied state.
 | `gapcloser` | none: registered placeholder with no executable input contract | none |
 | `t2t` | current adopted `assembly`, `long_reads` | `assembly` |
 | `base_polish` | none: registered placeholder with no executable input contract | none |
-| `repeat_annotation` | `assembly` | `masked_assembly` |
-| `gene_annotation` | `masked_assembly`; explicit fallback to `assembly` | `predicted_proteins` |
-| `function_annotation` | `predicted_proteins` | no cross-stage path resource |
 
 Runtime stage adapters enforce these direct dependencies. Genome Survey
 already admits a short-read-only run and prefers short DNA reads when both
 families are present. `resource_specs.py` owns only canonical resource
 resolution; stages do not share a second declarative planning table.
 
-Hi-C reads stop at `hic_scaffolding`. After human adoption, that stage replaces
-the central `assembly` resource. The current `gapcloser` placeholder neither
-reads nor updates it; an explicit request stops before T2T. When GapCloser is
-not requested, T2T resolves the current assembly and the long-read set; it does
-not consume `hic_reads` or a contact map directly. The current `base_polish`
-placeholder likewise publishes no resource.
+Hi-C reads stop at `hic_scaffolding`. After human adoption, that occurrence
+replaces the central `assembly` resource. The current `gapcloser` placeholder
+neither reads nor updates it; if a GapCloser occurrence is reached it stops
+there. Any later T2T occurrence resolves the then-current assembly and the
+long-read set; it does not consume `hic_reads` or a contact map directly. The
+current `base_polish` placeholder likewise publishes no resource.
 
 Candidate bundles, review decisions, execution evidence, reports, and metrics
 remain artifacts. They may be referenced from resource metadata but do not form

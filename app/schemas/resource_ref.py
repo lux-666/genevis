@@ -21,12 +21,14 @@ class ResourceRef:
         resource_type: Logical resource name ('long_reads', 'assembly', etc.)
         paths: One or more file paths for this resource
         source_stage: Which stage produced this resource (None for manifest)
+        workflow_step_id: Frozen occurrence that produced this resource
         metadata: Optional metadata (size, count, quality metrics, etc.)
     """
 
     resource_type: str
     paths: list[str]
     source_stage: str | None = None
+    workflow_step_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -40,6 +42,11 @@ class ResourceRef:
             isinstance(path, str) and path.strip() for path in self.paths
         ):
             raise ValueError("paths must contain at least one non-empty string")
+        if self.workflow_step_id is not None and (
+            not isinstance(self.workflow_step_id, str)
+            or not self.workflow_step_id.strip()
+        ):
+            raise ValueError("workflow_step_id must be a non-empty string or None")
         if not isinstance(self.metadata, dict):
             raise TypeError("metadata must be a dictionary")
 
@@ -49,6 +56,7 @@ class ResourceRef:
             "resource_type": self.resource_type,
             "paths": list(self.paths),
             "source_stage": self.source_stage,
+            "workflow_step_id": self.workflow_step_id,
             "metadata": dict(self.metadata),
         }
 
@@ -56,7 +64,13 @@ class ResourceRef:
     def from_dict(cls, data: Mapping[str, Any]) -> "ResourceRef":
         """Reconstruct from JSON dict."""
         unknown = set(data).difference(
-            {"resource_type", "paths", "source_stage", "metadata"}
+            {
+                "resource_type",
+                "paths",
+                "source_stage",
+                "workflow_step_id",
+                "metadata",
+            }
         )
         if unknown:
             raise ValueError(
@@ -78,6 +92,11 @@ class ResourceRef:
                 if data.get("source_stage") is not None
                 else None
             ),
+            workflow_step_id=(
+                str(data["workflow_step_id"])
+                if data.get("workflow_step_id") is not None
+                else None
+            ),
             metadata=dict(metadata),
         )
 
@@ -87,7 +106,5 @@ LOGICAL_RESOURCES = {
     "long_reads": "Long-read sequencing data (ONT, PacBio)",
     "short_reads": "Short-read sequencing data (Illumina)",
     "assembly": "Assembly result (updated by dedup/review/hic/t2t)",
-    "masked_assembly": "Repeat-masked assembly",
-    "predicted_proteins": "Predicted protein sequences",
     "hic_reads": "Hi-C sequencing data",
 }
