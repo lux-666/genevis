@@ -71,8 +71,8 @@ persisted sparse recommendation + verified schema-3 manifest
 The timer starts after persistence and request binding. It never calls the
 recommender, edits the mapping, merges defaults, or selects a different
 proposal. The operator sees the same exact mapping when claiming the gate, and
-the automatic path approves it unchanged through the existing stage decision
-applier.
+the automatic path approves it unchanged through the same typed
+intent/application lifecycle as a manual decision.
 
 ## Shared lifecycle, stage-specific biology
 
@@ -129,5 +129,6 @@ is initial-only; this page does not imply a T2T parameter-retry route.
 There is no automatic fallback recommendation, parameter-patch semantics, or
 silent default synthesis at the model boundary. Model failure becomes
 `response_invalid`; human rejection creates no execution attempt. Timeout
-approval is limited to the exact persisted recommendation and delegates all
-stage-specific validation to the existing decision applier.
+approval is limited to the exact persisted recommendation. The shared
+intent/application transaction then performs registered stage validation,
+durable preparation, and verified pure checkpoint application.

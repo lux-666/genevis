@@ -9,6 +9,11 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.control.projections import (
+    ProgressProjectionInput,
+    ProjectionBoundary,
+    progress_projection_input,
+)
 from app.control.workflow_plan import current_workflow_step, workflow_step_by_id
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
@@ -44,7 +49,8 @@ def build_graph(
     backend: CheckpointerBackend = DEFAULT_CHECKPOINTER_BACKEND,
     data_dir: str = "data",
     verified_inputs: "FrozenInputBundle | None" = None,
-    on_controller_transition: Callable[[TopLevelState], None] | None = None,
+    on_controller_transition: Callable[[ProgressProjectionInput], None] | None = None,
+    projection_boundary: ProjectionBoundary | None = None,
 ) -> CompiledStateGraph[
     TopLevelState,
     None,
@@ -58,6 +64,7 @@ def build_graph(
     factory so a CLI run can choose sqlite or memory persistence.
     """
     graph = StateGraph(TopLevelState)
+    progress_boundary = projection_boundary or ProjectionBoundary()
 
     def operator_route_controller(state: TopLevelState) -> StateUpdate:
         session_id = state.get("session_id")
@@ -68,14 +75,12 @@ def build_graph(
             "current_stage",
             state.get("current_stage", "inventory"),
         )
-        if (
-            routed_stage == TERMINAL_STAGE
-            and supervision not in {"failed_terminal", "blocked_human"}
-        ):
+        if routed_stage == TERMINAL_STAGE and supervision not in {
+            "failed_terminal",
+            "blocked_human",
+        }:
             route_update["supervision_state"] = "completed"
-        routed_state = {**state, **route_update}
-        routed_supervision = route_update.get("supervision_state", supervision)
-        routed_error = route_update.get("last_error", state.get("last_error"))
+        routed_state = cast(TopLevelState, {**state, **route_update})
         if session_id:
             from app.storage.ledger import Ledger
 
@@ -114,10 +119,7 @@ def build_graph(
                     settled_cursor,
                     role_prefix=f"stage.{settled_stage}",
                 )
-                if (
-                    supervision == "failed_terminal"
-                    and workflow_index == entered_index
-                ):
+                if supervision == "failed_terminal" and workflow_index == entered_index:
                     ledger.record_stage_failed(
                         session_id,
                         settled_stage,
@@ -127,9 +129,7 @@ def build_graph(
                         idempotency_key=f"stage-failed:{settled_step_id}",
                     )
                 elif workflow_index == entered_index + 1:
-                    completion_marker = (
-                        f"{settled_step_id}:{settled_stage}_stage"
-                    )
+                    completion_marker = f"{settled_step_id}:{settled_stage}_stage"
                     if completion_marker in (state.get("route_trace") or []):
                         ledger.record_stage_completed(
                             session_id,
@@ -155,41 +155,13 @@ def build_graph(
                         idempotency_key=f"stage-entered:{step['step_id']}",
                     )
 
-            terminal_refs = ledger.references_from(
-                routed_state,
-                role_prefix="terminal",
-            )
-            if routed_supervision == "failed_terminal":
-                ledger.record_session_terminal(
-                    session_id,
-                    outcome="failed",
-                    stage=routed_stage,
-                    error=routed_error,
-                    refs=terminal_refs,
-                    idempotency_key="session-terminal:failed",
-                )
-            elif (
-                routed_supervision == "completed"
-                or routed_stage == TERMINAL_STAGE
-            ):
-                ledger.record_session_terminal(
-                    session_id,
-                    outcome="completed",
-                    stage=routed_stage,
-                    refs=terminal_refs,
-                    idempotency_key="session-terminal:completed",
-                )
-
-        if supervision in {"failed_terminal", "blocked_human"} and session_id:
-            from app.reports.review_report import write_operator_report
-
-            write_operator_report(
-                runtime_data_dir,
-                session_id,
-                {**state, "checkpoint_persistence": backend},
-            )
         if on_controller_transition is not None:
-            on_controller_transition(cast(TopLevelState, routed_state))
+            progress_boundary.run(
+                "attached_progress",
+                on_controller_transition,
+                progress_projection_input(routed_state),
+                disable_after_failure=True,
+            )
         return route_update
 
     graph.add_node("route_controller", operator_route_controller)

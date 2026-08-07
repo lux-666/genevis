@@ -564,8 +564,7 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
     from app.schemas.ask_plan import PlanStageOccurrence
 
     occurrences = [
-        PlanStageOccurrence.model_validate(occurrence)
-        for occurrence in raw_occurrences
+        PlanStageOccurrence.model_validate(occurrence) for occurrence in raw_occurrences
     ]
     stages = [occurrence.stage for occurrence in occurrences]
     invalid_stages = set(stages).difference(_all_selectable_stages())
@@ -574,8 +573,7 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
             f"Plan Draft contains unknown stages: {sorted(invalid_stages)}"
         )
     requested_scope = [
-        str(stage)
-        for stage in (plan.entry_request or {}).get("requested_stages", [])
+        str(stage) for stage in (plan.entry_request or {}).get("requested_stages", [])
     ]
     if requested_scope and stages != requested_scope:
         raise ValueError(
@@ -603,7 +601,8 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
     missing_method_stages = {
         stage
         for stage in candidate.selected_stage_names or []
-        if stage in _STAGES_NEEDING_METHOD_SELECTION and stage not in methods
+        if stage in _STAGES_NEEDING_METHOD_SELECTION
+        and stage not in methods
         and any(
             occurrence.stage == stage and occurrence.allow_local_execution
             for occurrence in candidate.selected_stage_occurrences or []
@@ -902,8 +901,12 @@ def _resume_tui_session(data_dir: str, session_id: str) -> int:
     if supervision == "blocked_human":
         blocked = draft.model_copy(update={"lifecycle": "blocked_review"})
         save_tui_session_draft(blocked)
-        with frozen_execution_lock(paths):
-            return run_interactive_review(session_id, str(paths.run_dir))
+        with frozen_execution_lock(paths) as lease:
+            return run_interactive_review(
+                session_id,
+                str(paths.run_dir),
+                lease=lease,
+            )
     if supervision in {"completed", "failed_terminal", "terminal"}:
         return _create_child_rerun(draft)
 

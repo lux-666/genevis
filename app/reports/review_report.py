@@ -164,32 +164,31 @@ def _selected_result_refs(
 
 
 def _pending_review_requests(
-    events: list[dict[str, Any]],
-    decisions: list[dict[str, Any]] | None = None,
+    review_occurrences: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Project pending review requests using request IDs, never stage alone."""
-    del decisions  # decisions are read directly so their request IDs are retained.
-    decided_request_ids = {
-        str(event.get("review_request_id") or event.get("subject_id"))
-        for event in events
-        if event.get("event_type") == "review_decision"
-    }
-    pending: list[dict[str, Any]] = []
-    for event in events:
-        if event.get("event_type") != "review_requested":
-            continue
-        request_id = str(event.get("review_request_id") or event.get("subject_id"))
-        pending.append(
-            {
-                "review_request_id": request_id,
-                "timestamp": event.get("timestamp"),
-                "stage": event.get("stage"),
-                "reason": event.get("reason"),
-                "review_request_artifact_ref": event.get("review_request_artifact_ref"),
-                "resolved": request_id in decided_request_ids,
-            }
-        )
-    return pending
+    """Project request resolution only from the shared review-status records."""
+
+    return [
+        {
+            key: occurrence.get(key)
+            for key in (
+                "workflow_step_id",
+                "review_request_id",
+                "request_hash",
+                "timestamp",
+                "stage",
+                "gate_id",
+                "reason",
+                "review_request_artifact_ref",
+                "status",
+                "resolved",
+                "resolution_basis",
+                "integrity_error",
+            )
+            if occurrence.get(key) is not None
+        }
+        for occurrence in review_occurrences
+    ]
 
 
 def _normalize_ref(paths: SessionPaths, value: Any) -> str | None:

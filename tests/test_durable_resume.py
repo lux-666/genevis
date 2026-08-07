@@ -48,7 +48,9 @@ from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
-def _freeze_durable_inputs(run_dir: Path) -> FrozenInputBundle:
+def _freeze_durable_inputs(
+    run_dir: Path, *, include_downstream_stage: bool = False
+) -> FrozenInputBundle:
     paths = SessionPaths.from_run_dir(run_dir)
     reads = paths.run_dir / "fixture_reads.fastq"
     reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -73,17 +75,15 @@ def _freeze_durable_inputs(run_dir: Path) -> FrozenInputBundle:
         "default:\n  fallback_env: test-env\npackages: {}\n",
         encoding="utf-8",
     )
-    run_config = RunConfig.model_validate(
-        {
-            "requested_stages": [
-                {"stage": "assembly", "allow_local_execution": False},
-                {
-                    "stage": "assembly_review",
-                    "allow_local_execution": False,
-                },
-            ]
-        }
-    )
+    requested_stages = [
+        {"stage": "assembly", "allow_local_execution": False},
+        {"stage": "assembly_review", "allow_local_execution": False},
+    ]
+    if include_downstream_stage:
+        requested_stages.append(
+            {"stage": "base_polish", "allow_local_execution": False}
+        )
+    run_config = RunConfig.model_validate({"requested_stages": requested_stages})
     freeze_session_inputs(
         paths,
         manifest_draft=paths.manifest_path,
@@ -106,9 +106,13 @@ def _build_blocked_state(
     run_dir: Path,
     *,
     session_id: str = "s1",
+    include_downstream_stage: bool = False,
 ) -> tuple[dict, PersistedReviewRequest, Path]:
     paths = SessionPaths.from_run_dir(run_dir)
-    verified_inputs = _freeze_durable_inputs(run_dir)
+    verified_inputs = _freeze_durable_inputs(
+        run_dir,
+        include_downstream_stage=include_downstream_stage,
+    )
     assembly_step_id = "step-001-assembly"
     draft_path = paths.workflow_step_work_path(
         assembly_step_id, "assembly", "draft.fasta"
@@ -118,8 +122,7 @@ def _build_blocked_state(
     candidate_id = "flye"
     method_name = "assembly.candidate.flye"
     candidate_dir = (
-        paths.workflow_step_artifacts_dir(assembly_step_id, "assembly")
-        / candidate_id
+        paths.workflow_step_artifacts_dir(assembly_step_id, "assembly") / candidate_id
     )
     primary = publish_artifact_record(
         run_dir,
@@ -486,6 +489,18 @@ class DurableResumeTests(unittest.TestCase):
                 [],
                 "no review_decision should be written for an invalid resume",
             )
+            paths = SessionPaths.from_run_dir(run_dir)
+            intent_path = paths.workflow_step_artifact_path(
+                "step-002-assembly_review",
+                "assembly_review",
+                "reviews",
+                persisted.review_request_id,
+                "intent.json",
+            )
+            self.assertFalse(
+                intent_path.exists(),
+                "invalid resume must not commit intent",
+            )
             # F3: an invalid decision should still emit resume_started +
             # resume_failed so the audit trail records the attempt.
             started = [e for e in ledger_events if e["event_type"] == "resume_started"]
@@ -542,7 +557,10 @@ class DurableResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_root = Path(tmp) / "data"
             run_dir = v2_run_dir(data_root, "s1")
-            state, persisted, draft_path = _build_blocked_state(run_dir)
+            state, persisted, draft_path = _build_blocked_state(
+                run_dir,
+                include_downstream_stage=True,
+            )
             _seed_blocked_checkpoint(run_dir, state)
 
             decision_path = run_dir / "control" / "decision.json"

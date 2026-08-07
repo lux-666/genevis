@@ -67,6 +67,7 @@ from app.stages.base import (
 from app.storage.artifacts import (
     publish_artifact_record,
     publish_or_recover_work_artifact,
+    record_registered_artifacts,
     register_artifact_records,
 )
 from app.storage.assembly_candidates import (
@@ -646,10 +647,12 @@ def collect_method_artifacts(
     ledger.record_attempt_succeeded(
         attempt.session_id, attempt, artifacts=artifact_payloads
     )
-    for artifact in artifact_payloads:
-        ledger.record_artifact_registered(
-            attempt.session_id, artifact, attempt_id=attempt.attempt_id
-        )
+    record_registered_artifacts(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        artifact_payloads,
+        attempt_id=attempt.attempt_id,
+    )
 
     substeps = dict(output.get("substeps") or {})
     substeps[substep_name] = {

@@ -49,7 +49,8 @@ uses the same frozen publication and executor. Other public subcommands are
 `inspect`, `storage-audit`, `resume`, `review`, and `bootstrap`.
 
 `execute_frozen_session` validates the frozen control documents, obtains a
-per-session execution lock, creates the Ledger session, constructs the small
+per-session execution lock and active `FrozenExecutionLease`, creates the
+Ledger session, constructs the small
 `TopLevelState`, projects run-config values into their owned stage cursors,
 builds the parent graph with the resulting executor-owned `FrozenInputBundle`,
 and invokes it with the session ID as the LangGraph thread ID. Inventory
@@ -66,16 +67,18 @@ blocked checkpoint remains recoverable through `inspect`, `review`, and
 The frozen RunConfig review policy defaults to
 `review_policy.max_blocked_seconds: 300` and permits per-stage overrides only
 for stages registered with the review registry. `-1` waits indefinitely; `0`
-immediately triggers the gate's existing automatic resolver when it is eligible;
-a positive value starts an Enter-claim countdown that triggers the same resolver
-at expiry. The timer never chooses from registry defaults. Assembly Review keeps
-its evidence-qualified LLM recommender, assembly route selection keeps its
-recommendation timeout applier, and Assembly, AutoHiC, and T2T parameter
-approval share one resolver that accepts only the persisted recommendation
-bound to the immutable request. Gates without a resolver remain manual. If an
-automatic transaction fails while that same request is still a verified
-`blocked_human` checkpoint, the attached terminal falls back to manual review;
-identity or integrity drift fails closed.
+immediately normalizes the gate's eligible automatic request; a positive value
+starts an Enter-claim countdown that uses the same registered timeout-request
+normalizer at expiry. The timer never chooses from registry defaults. Assembly
+Review keeps its evidence-qualified LLM recommender, assembly route selection
+uses its registered recommendation normalizer, and Assembly, AutoHiC, and T2T
+parameter approval share a normalizer that accepts only the persisted
+recommendation bound to the immutable request. Gates without a normalizer remain
+manual. The resume transaction receives the active lease and a
+`ProjectionBoundary`; it may fall back to a manual decision only before intent
+commit (`awaiting_decision`). A committed automatic intent is recovered with
+`request=None`, never replaced by a manual decision. Identity or integrity
+drift fails closed.
 This mechanism exists only while the originating run is foreground and
 interactive. Enter cancels it and opens manual prompts. Ctrl-C, EOF, process
 exit preserve a durable human block; there is no daemon/background timer.
@@ -121,13 +124,14 @@ review briefs, Enter-claim countdowns, manual decisions, automatic timeout
 decisions, and terminal summaries. Entry points must not implement parallel
 gate or progress loops.
 
-Attached progress is rendered directly from the verified frozen workflow plan
-and the current graph control state at the existing parent-controller
-transition. A corresponding Ledger occurrence event is committed before its
-durable transition is presented. Detached inspection reads the verified frozen
-workflow plan, Ledger occurrence events, checkpoint summary, and execution lock
-on demand. Neither path publishes a progress artifact, progress table,
-background watcher, event bus, or second progress authority.
+Attached progress is rendered from the scalar-only `progress_projection_input`
+derived at the parent-controller transition. A corresponding Ledger occurrence
+event is committed before its durable transition is presented. Detached
+inspection reads the verified frozen workflow plan, Ledger occurrence events,
+SQLite checkpoint availability, and the execution progress marker/lock on
+demand; checkpoint contents do not independently define status. Neither path
+publishes a progress artifact, progress table, background watcher, event bus,
+or second progress authority.
 
 ## Parent graph
 
@@ -206,10 +210,13 @@ requires; omitted stages have neither an occurrence nor a synthetic skip.
 an immutable request. `failed_terminal` stops the run and records bounded error
 evidence. A successful route reaches `done` and terminal completion.
 
-Only completed or failed sessions are eligible for terminal checkpoint
-compaction. Compaction preserves the latest terminal checkpoint and does not
-delete immutable artifacts. A compaction failure is caught and recorded as
-`terminal_compaction_skipped`. Report generation runs before that guarded
-compaction block: a report exception is surfaced as a terminal-finalization
-error (and as the `terminal_report` phase during resume), although it still does
-not rewrite the biological state already committed by the graph.
+Only completed or failed sessions are eligible for authoritative terminal
+finalization. The finalizer proves the terminal checkpoint, writes/reuses one
+canonical Ledger terminal singleton, then attempts checkpoint compaction.
+Compaction preserves the latest terminal checkpoint and does not delete
+immutable artifacts; a compaction failure is an operational warning, not a
+different lifecycle outcome. Report and workflow-state projections run through
+`ProjectionBoundary` as best-effort presentation work: ordinary projection
+exceptions become bounded warnings and cannot contaminate lifecycle, review
+status, checkpoint, or terminal authority. The remaining debt is report
+regeneration coverage, not projection-exception handling.

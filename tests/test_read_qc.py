@@ -12,7 +12,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import inspect_session
 from app.graph.builder import build_graph
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta
@@ -170,8 +169,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             encoding="utf-8",
         )
         artifact = ArtifactMeta.from_file(
-            source, stage="inventory",
-            method_name="inventory.register_assets", artifact_type="asset_registry"
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
         )
         published = publish_artifact_record(data_dir, session_id, artifact)
         return published.ref.model_dump(mode="json")
@@ -188,7 +189,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         state["entered_workflow_step_index"] = 1
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
-            if registry_ref is not None else None
+            if registry_ref is not None
+            else None
         )
         return state
 
@@ -247,7 +249,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("raw_long_reads", result["last_error"])
 
-    def test_parent_graph_missing_raw_read_writes_operator_report(self):
+    def test_parent_graph_missing_raw_read_returns_lifecycle_state_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "data"
             missing = Path(tmpdir) / "missing.fastq"
@@ -281,13 +283,17 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("missing", result["last_error"])
             run_dir = Path(result["data_dir"])
             report_ref = run_dir / "reports" / "current_status.json"
-            report = json.loads(report_ref.read_text(encoding="utf-8"))
-            self.assertEqual(report["next_action"]["kind"], "missing_input")
-            self.assertEqual(report["next_action"]["blocked_input_ref"], str(missing))
-            summary = inspect_session("s1", run_dir)
-            self.assertEqual(summary["next_action"]["kind"], "failed_terminal")
+            self.assertFalse(report_ref.exists())
+            rows = Ledger(run_dir).read_event_rows("s1")
+            failure = next(
+                row
+                for row in rows
+                if row["event_type"] == "stage_failed" and row["stage"] == "read_qc"
+            )
+            self.assertIn("missing", failure["summary"]["error"])
             artifact_index = run_dir / "artifacts" / "index.jsonl"
             artifact_types = (
                 [
@@ -828,9 +834,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("seqkit", result["last_error"])
             paths = SessionPaths.from_run_dir(result["data_dir"])
-            stats_dir = paths.workflow_step_artifacts_dir(
-                "step-001-read_qc", "read_qc"
-            )
+            stats_dir = paths.workflow_step_artifacts_dir("step-001-read_qc", "read_qc")
             self.assertFalse((stats_dir / "seqkit_stats.tsv").exists())
             ledger_events = [
                 json.loads(line)
@@ -881,8 +885,10 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             encoding="utf-8",
         )
         artifact = ArtifactMeta.from_file(
-            source, stage="inventory",
-            method_name="inventory.register_assets", artifact_type="asset_registry"
+            source,
+            stage="inventory",
+            method_name="inventory.register_assets",
+            artifact_type="asset_registry",
         )
         published = publish_artifact_record(data_dir, session_id, artifact)
         return published.ref.model_dump(mode="json")
@@ -899,7 +905,8 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
         state["entered_workflow_step_index"] = 1
         state["asset_registry_ref"] = (
             self._publish_registry_ref(state["data_dir"], "s1", registry_ref)
-            if registry_ref is not None else None
+            if registry_ref is not None
+            else None
         )
         return state
 
@@ -1144,9 +1151,7 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                 script_path = work_dir / "seqkit_stats/run_seqkit_stats.sh"
                 self.assertTrue(script_path.exists())
                 script_text = script_path.read_text(encoding="utf-8")
-                expected_work_output = (
-                    work_dir / "seqkit_stats/seqkit_stats.tsv"
-                )
+                expected_work_output = work_dir / "seqkit_stats/seqkit_stats.tsv"
                 self.assertIn(str(expected_work_output), script_text)
                 # And the script must NOT carry the bare relative form
                 # that would resolve from the runner's cwd.

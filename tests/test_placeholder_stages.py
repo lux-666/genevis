@@ -42,11 +42,7 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
         ledger = Ledger(run_dir)
         ledger.create_session(session_id, "control/manifest.yaml")
         config = RunConfig.model_validate(
-            {
-                "requested_stages": [
-                    {"stage": stage, "allow_local_execution": False}
-                ]
-            }
+            {"requested_stages": [{"stage": stage, "allow_local_execution": False}]}
         )
         state = initial_state(
             session_id=session_id,
@@ -85,9 +81,8 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
             for row in rows
         )
         terminals = [row for row in rows if row["event_type"] == "session_terminal"]
-        assert len(terminals) == 1
-        assert terminals[0]["summary"]["outcome"] == "failed"
-        assert terminals[0]["stage"] == stage
+        assert terminals == []
+
 
 @pytest.mark.parametrize(
     ("stage", "reader", "updater"),
@@ -198,6 +193,4 @@ def test_contig_only_route_does_not_enter_placeholders() -> None:
         "genome_survey",
         "assembly",
     ]
-    assert all(
-        stage not in stages_through("assembly") for stage in MANUAL_ONLY_STAGES
-    )
+    assert all(stage not in stages_through("assembly") for stage in MANUAL_ONLY_STAGES)

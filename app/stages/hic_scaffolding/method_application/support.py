@@ -28,6 +28,7 @@ from app.stages.hic_scaffolding.state import (
 from app.storage.artifacts import (
     publish_or_recover_work_artifact,
     read_artifact_records,
+    record_registered_artifacts,
     register_artifact_records,
 )
 from app.storage.ledger import Ledger
@@ -317,10 +318,12 @@ def collect_method_artifacts(
             ledger.record_attempt_succeeded(
                 attempt.session_id, attempt, artifacts=payloads
             )
-        for artifact in payloads:
-            ledger.record_artifact_registered(
-                attempt.session_id, artifact, attempt_id=attempt.attempt_id
-            )
+        record_registered_artifacts(
+            data_dir,
+            attempt.session_id,
+            payloads,
+            attempt_id=attempt.attempt_id,
+        )
 
     return update_hic_output(
         state,

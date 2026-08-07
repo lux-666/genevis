@@ -204,8 +204,9 @@ resolver, and a positive value provides an Enter-claim countdown before
 triggering that resolver at expiry. The timer starts only after the immutable
 review request exists. It must never invent a decision from registry defaults.
 For `parameter_approval`, the registered resolver may only approve the exact
-persisted recommendation bound by that request, and it must delegate all
-stage-specific validation and effects to the existing decision applier.
+persisted recommendation bound by that request. The registered typed
+intent/application lifecycle performs the gate-specific validation and durable
+effects before pure checkpoint application.
 
 Preserve each resolver's immutable request bindings, evidence eligibility,
 decision origin, rationale artifact, and countdown audit metadata. Resolver

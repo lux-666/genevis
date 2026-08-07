@@ -24,7 +24,15 @@ import yaml
 from langchain_core.runnables import RunnableConfig
 
 from app.config import default_data_root
-from app.control.lifecycle import finalize_terminal_state
+from app.control.lifecycle import (
+    TerminalFinalizationError,
+    finalize_authoritative_terminal,
+)
+from app.control.projections import (
+    ProgressProjectionInput,
+    ProjectionBoundary,
+    project_workflow_state,
+)
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.domains.assembly.selection import (
     AssemblySelection,
@@ -48,14 +56,14 @@ from app.schemas.state import (
     TopLevelState,
     initial_state,
     validate_stage_outputs,
-    validate_workflow_steps,
+    validate_top_level_state,
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
-    from app.storage.frozen_inputs import FrozenInputBundle
+    from app.storage.frozen_inputs import FrozenExecutionLease, FrozenInputBundle
 
 
 _ASSEMBLY_METHOD_NAMES = {
@@ -352,8 +360,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     resume_parser.add_argument(
         "--decision-file",
         dest="decision_file",
-        required=True,
-        help="Path to a JSON decision file matching ResumeReviewRequest",
+        default=None,
+        help=(
+            "Path to a JSON decision file matching ResumeReviewRequest. Omit only "
+            "to recover an already committed immutable review intent."
+        ),
     )
     resume_parser.add_argument(
         "--data-dir", default=default_data_root(), help="Workflow data root"
@@ -464,35 +475,52 @@ def _foreground_review_available() -> bool:
         return False
 
 
-def _render_attached_progress(state: TopLevelState) -> None:
+def _render_attached_progress(progress: ProgressProjectionInput) -> None:
     """Render ephemeral occurrence progress from the frozen graph cursor."""
 
-    steps = validate_workflow_steps(state.get("workflow_steps"))
-    index = state.get("workflow_step_index")
-    if type(index) is not int or not 0 <= index <= len(steps):
-        raise ValueError("workflow_step_index is outside the frozen workflow plan")
-
-    skipped_ids = set((state.get("skip_reasons") or {}).keys())
-    skipped = sum(1 for step in steps[:index] if step["step_id"] in skipped_ids)
-    completed = index - skipped
-    current = steps[index] if index < len(steps) else None
-    current_step_id = current["step_id"] if current is not None else "-"
-    current_stage = (
-        current["stage"]
-        if current is not None
-        else str(state.get("current_stage") or "done")
-    )
-    supervision = state.get("supervision_state")
     progress_state = {
         "blocked_human": "blocked",
         "failed_terminal": "failed",
         "completed": "completed",
-    }.get(str(supervision), "running")
+    }.get(progress.supervision_state, "running")
     print(
-        f"progress: finished={index}/{len(steps)} completed={completed} "
-        f"skipped={skipped} current={current_step_id} stage={current_stage} "
+        f"progress: finished={progress.workflow_step_index}/"
+        f"{progress.total_workflow_steps} "
+        f"completed={progress.completed_workflow_steps} "
+        f"skipped={progress.skipped_workflow_steps} "
+        f"current={progress.workflow_step_id or '-'} "
+        f"stage={progress.current_stage} "
         f"state={progress_state}"
     )
+
+
+def _print_projection_warnings(boundary: ProjectionBoundary) -> None:
+    for warning in boundary.warnings:
+        print(
+            f"warning: {warning.name} projection failed: "
+            f"{warning.error_type}: {warning.message}",
+            file=sys.stderr,
+        )
+
+
+def _return_with_projection_warnings(
+    boundary: ProjectionBoundary,
+) -> int:
+    """Flush isolated projection diagnostics before an executor early return."""
+
+    _print_projection_warnings(boundary)
+    return 1
+
+
+def _print_resume_transaction_warnings(transaction: Any) -> None:
+    for warning in transaction.operational_warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    if transaction.compaction_warning:
+        print(
+            "warning: terminal checkpoint compaction skipped: "
+            f"{transaction.compaction_warning}",
+            file=sys.stderr,
+        )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -567,7 +595,7 @@ def execute_frozen_session(
 
     try:
         paths = SessionPaths(data_dir, session_id)
-        with frozen_execution_lock(paths):
+        with frozen_execution_lock(paths) as lease:
             bundle = validate_frozen_inputs(paths)
             progress = frozen_execution_progress(paths)
             if progress == "partial":
@@ -580,6 +608,7 @@ def execute_frozen_session(
                 checkpointer=checkpointer,
                 resume_checkpoint=progress == "checkpoint",
                 interactive_gate=interactive_gate,
+                lease=lease,
             )
     except FrozenExecutionActiveError as exc:
         print(f"error: frozen session is already active: {exc}", file=sys.stderr)
@@ -598,6 +627,7 @@ def _execute_verified_frozen_session(
     checkpointer: CheckpointerBackend | None,
     resume_checkpoint: bool,
     interactive_gate: bool,
+    lease: "FrozenExecutionLease",
 ) -> int:
     """Seed and execute a graph from one already-verified frozen bundle."""
 
@@ -646,6 +676,7 @@ def _execute_verified_frozen_session(
     if shared_parameters:
         state["shared_parameters"] = shared_parameters
 
+    projection_boundary = ProjectionBoundary()
     graph = build_graph(
         backend=backend,
         data_dir=run_dir,
@@ -653,29 +684,58 @@ def _execute_verified_frozen_session(
         on_controller_transition=(
             _render_attached_progress if interactive_gate else None
         ),
+        projection_boundary=projection_boundary,
     )
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     resumed_from_blocked_checkpoint = False
     try:
-        result: dict[str, Any] | None = None
+        result: TopLevelState | None = None
         if resume_checkpoint:
             get_state = getattr(graph, "get_state", None)
             if callable(get_state):
                 checkpoint = get_state(config)
                 checkpoint_values = getattr(checkpoint, "values", None)
-                if (
-                    isinstance(checkpoint_values, dict)
-                    and checkpoint_values.get("session_id") == session_id
-                    and checkpoint_values.get("supervision_state") == "blocked_human"
+                if isinstance(checkpoint_values, dict) and (
+                    checkpoint_values.get("session_id") == session_id
                 ):
-                    result = dict(checkpoint_values)
-                    resumed_from_blocked_checkpoint = True
+                    checkpoint_supervision = checkpoint_values.get("supervision_state")
+                    terminal_read = Ledger(run_dir).read_canonical_terminal(session_id)
+                    if terminal_read is not None:
+                        terminal_outcome = (
+                            terminal_read["canonical"].get("summary") or {}
+                        ).get("outcome")
+                        terminal_outcome_key = (
+                            terminal_outcome
+                            if isinstance(terminal_outcome, str)
+                            else ""
+                        )
+                        expected_supervision = {
+                            "completed": "completed",
+                            "failed": "failed_terminal",
+                        }.get(terminal_outcome_key)
+                        if checkpoint_supervision != expected_supervision:
+                            raise RuntimeError(
+                                "canonical Ledger terminal conflicts with the "
+                                "resumable checkpoint"
+                            )
+                        result = validate_top_level_state(checkpoint_values)
+                    elif checkpoint_supervision in {
+                        "blocked_human",
+                        "completed",
+                        "failed_terminal",
+                    }:
+                        result = validate_top_level_state(checkpoint_values)
+                        resumed_from_blocked_checkpoint = (
+                            checkpoint_supervision == "blocked_human"
+                        )
         if result is None:
-            result = graph.invoke(None if resume_checkpoint else state, config=config)
+            result = validate_top_level_state(
+                graph.invoke(None if resume_checkpoint else state, config=config)
+            )
     except Exception as exc:
-        # A stage bug must still leave an operator-readable durable terminal
-        # record.  Prefer the latest checkpoint values because the in-memory
-        # initial state may be several stages behind the node that raised.
+        # Prefer the latest checkpoint because the in-memory seed may be several
+        # stages behind the node that raised. A proven terminal checkpoint wins
+        # over the observer/invoke exception and must never be rewritten failed.
         latest_state = dict(state)
         try:
             snapshot = graph.get_state(config)
@@ -683,10 +743,54 @@ def _execute_verified_frozen_session(
             if isinstance(snapshot_values, dict):
                 latest_state.update(snapshot_values)
         except Exception:
-            # Failure reporting must not hide the original graph exception when
-            # a backend cannot expose a checkpoint snapshot.
             pass
         error = f"{type(exc).__name__}: {exc}"
+        canonical_terminal = Ledger(run_dir).read_canonical_terminal(session_id)
+        latest_supervision = latest_state.get("supervision_state")
+        if latest_supervision in {"completed", "failed_terminal"}:
+            try:
+                finalized = finalize_authoritative_terminal(
+                    graph,
+                    config,
+                    latest_state,
+                    session_id,
+                    run_dir,
+                    backend,
+                )
+            except TerminalFinalizationError as terminal_exc:
+                print(
+                    "error: terminal checkpoint could not be reconciled after "
+                    f"invoke raised: {terminal_exc}",
+                    file=sys.stderr,
+                )
+                return _return_with_projection_warnings(projection_boundary)
+            result = finalized.state
+            project_workflow_state(
+                projection_boundary,
+                result,
+                data_dir=run_dir,
+                session_id=session_id,
+            )
+            _print_projection_warnings(projection_boundary)
+            if finalized.compaction_warning:
+                print(
+                    "warning: terminal checkpoint compaction skipped: "
+                    f"{finalized.compaction_warning}",
+                    file=sys.stderr,
+                )
+            print(
+                "warning: workflow invoke raised after a terminal checkpoint; "
+                f"preserving {latest_supervision}: {error}",
+                file=sys.stderr,
+            )
+            return 0 if latest_supervision == "completed" else 1
+        if canonical_terminal is not None:
+            print(
+                "error: canonical Ledger terminal conflicts with a nonterminal "
+                f"checkpoint after invoke raised: {error}",
+                file=sys.stderr,
+            )
+            return _return_with_projection_warnings(projection_boundary)
         failure_result = {
             **latest_state,
             "session_id": session_id,
@@ -694,21 +798,34 @@ def _execute_verified_frozen_session(
             "input_manifest_ref": manifest_ref,
             "supervision_state": "failed_terminal",
             "last_error": error,
-            "checkpoint_persistence": backend,
         }
-        compaction_warning = finalize_terminal_state(
-            graph,
-            config,
-            failure_result,
-            session_id,
-            run_dir,
-            backend,
-            report_kind="operator",
-        )
-        if compaction_warning:
+        try:
+            finalized = finalize_authoritative_terminal(
+                graph,
+                config,
+                failure_result,
+                session_id,
+                run_dir,
+                backend,
+                normalize_failure=True,
+            )
+        except TerminalFinalizationError as terminal_exc:
             print(
-                "error: failed to persist/compact terminal failure checkpoint: "
-                f"{compaction_warning}",
+                f"error: failed to persist terminal failure checkpoint: {terminal_exc}",
+                file=sys.stderr,
+            )
+            return _return_with_projection_warnings(projection_boundary)
+        project_workflow_state(
+            projection_boundary,
+            finalized.state,
+            data_dir=run_dir,
+            session_id=session_id,
+        )
+        _print_projection_warnings(projection_boundary)
+        if finalized.compaction_warning:
+            print(
+                "warning: terminal checkpoint compaction skipped: "
+                f"{finalized.compaction_warning}",
                 file=sys.stderr,
             )
         print(f"error: workflow invoke failed: {error}", file=sys.stderr)
@@ -732,14 +849,15 @@ def _execute_verified_frozen_session(
                 result,
                 session_id,
                 run_dir,
-                verified_inputs=bundle,
+                lease=lease,
+                projection_boundary=projection_boundary,
             )
         except ResumeTransactionError as exc:
             print(
                 f"error: resume {exc.phase} failed: {exc}",
                 file=sys.stderr,
             )
-            return 1
+            return _return_with_projection_warnings(projection_boundary)
         supervision = result.get("supervision_state", "unknown")
         terminal_finalized_by_resume = supervision in {"completed", "failed_terminal"}
 
@@ -783,16 +901,31 @@ def _execute_verified_frozen_session(
     print(f"run_config_ref: {paths.run_config_path.resolve(strict=False)}")
 
     compaction_warning = None
-    if not terminal_finalized_by_resume:
-        compaction_warning = finalize_terminal_state(
-            graph,
-            config,
-            result,
-            session_id,
-            run_dir,
-            backend,
-            report_kind="final",
-        )
+    if not terminal_finalized_by_resume and supervision in {
+        "completed",
+        "failed_terminal",
+    }:
+        try:
+            finalized = finalize_authoritative_terminal(
+                graph,
+                config,
+                dict(result),
+                session_id,
+                run_dir,
+                backend,
+            )
+        except TerminalFinalizationError as exc:
+            print(f"error: terminal finalization failed: {exc}", file=sys.stderr)
+            return _return_with_projection_warnings(projection_boundary)
+        result = finalized.state
+        compaction_warning = finalized.compaction_warning
+    project_workflow_state(
+        projection_boundary,
+        result,
+        data_dir=run_dir,
+        session_id=session_id,
+    )
+    _print_projection_warnings(projection_boundary)
     if compaction_warning:
         print(
             f"warning: terminal checkpoint compaction skipped: {compaction_warning}",
@@ -931,13 +1064,14 @@ def _same_verified_blocked_review(
 def _interactive_gate_loop(
     graph: Any,
     config: RunnableConfig,
-    result: dict[str, Any],
+    result: TopLevelState,
     session_id: str,
     data_dir: str,
     *,
+    lease: "FrozenExecutionLease",
+    projection_boundary: ProjectionBoundary,
     claim_waiter: Any | None = None,
-    verified_inputs: "FrozenInputBundle | None" = None,
-) -> dict[str, Any]:
+) -> TopLevelState:
     """Loop on foreground human gates until completion, cancellation, or failure."""
     from app.control.errors import ResumeValidationError
     from app.control.lifecycle import (
@@ -1124,7 +1258,8 @@ def _interactive_gate_loop(
                 checkpointer="sqlite",
                 blocked_timeout_seconds=blocked_timeout_seconds,
                 event_context=event_context,
-                verified_inputs=verified_inputs,
+                lease=lease,
+                projection_boundary=projection_boundary,
             )
         except ResumeTransactionError as exc:
             if source == "foreground_countdown":
@@ -1149,8 +1284,42 @@ def _interactive_gate_loop(
                     elapsed_seconds=elapsed_seconds,
                 )
                 print(
-                    f"error: automatic review transaction failed: {exc}; "
-                    "checking whether manual review can continue",
+                    f"error: automatic review transaction failed: {exc}",
+                    file=sys.stderr,
+                )
+                if exc.review_status != "awaiting_decision":
+                    print(
+                        "automatic decision is already committed; recovering the "
+                        "same intent instead of prompting for a replacement",
+                        file=sys.stderr,
+                    )
+                    try:
+                        transaction = execute_resume_transaction(
+                            graph=graph,
+                            config=config,
+                            session_id=session_id,
+                            data_dir=data_dir,
+                            request=None,
+                            source="foreground_recovery",
+                            checkpointer="sqlite",
+                            blocked_timeout_seconds=None,
+                            event_context={"recovery_after_phase": exc.phase},
+                            lease=lease,
+                            projection_boundary=projection_boundary,
+                        )
+                    except ResumeTransactionError as recovery_exc:
+                        print(
+                            "error: committed automatic review recovery failed at "
+                            f"{recovery_exc.phase}: {recovery_exc}",
+                            file=sys.stderr,
+                        )
+                        break
+                    _print_resume_transaction_warnings(transaction)
+                    result = transaction.state
+                    continue
+                print(
+                    "automatic failure occurred before intent commit; checking "
+                    "whether manual review can continue",
                     file=sys.stderr,
                 )
                 fallback_summary = load_blocked_gate_summary(session_id, data_dir)
@@ -1182,7 +1351,8 @@ def _interactive_gate_loop(
                         checkpointer="sqlite",
                         blocked_timeout_seconds=None,
                         event_context=None,
-                        verified_inputs=verified_inputs,
+                        lease=lease,
+                        projection_boundary=projection_boundary,
                     )
                 except ResumeTransactionError as manual_exc:
                     print(
@@ -1197,6 +1367,7 @@ def _interactive_gate_loop(
                 )
                 break
 
+        _print_resume_transaction_warnings(transaction)
         result = transaction.state
         if transaction.decision_artifact_path is not None:
             print(f"decision_artifact: {transaction.decision_artifact_path}")
@@ -1498,16 +1669,18 @@ def _run_resume(args: argparse.Namespace) -> int:
         )
         return 1
 
-    try:
-        decision = load_resume_review_request(args.decision_file)
-    except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    decision = None
+    if args.decision_file is not None:
+        try:
+            decision = load_resume_review_request(args.decision_file)
+        except FileNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
-    if decision.session_id != args.session_id:
+    if decision is not None and decision.session_id != args.session_id:
         print(
             "error: decision session_id "
             f"{decision.session_id!r} does not match CLI --session-id "
@@ -1516,11 +1689,9 @@ def _run_resume(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # The control-layer resume transaction re-checks that
-    # state.session_id == decision.session_id. That is intentional
-    # defense-in-depth: the helper is also called directly by the
-    # in-process resume tests in `tests/test_review_resume.py`, where
-    # this CLI guard does not run. Keep both checks in place.
+    # When a decision file is supplied, the transaction re-checks its full
+    # occurrence identity.  Without one, only an already committed intent may
+    # be recovered; an awaiting request still fails closed.
 
     from app.graph.checkpointer import checkpoint_db_path
 
@@ -1539,47 +1710,60 @@ def _run_resume(args: argparse.Namespace) -> int:
         return 1
 
     config: RunnableConfig = {"configurable": {"thread_id": args.session_id}}
+    projection_boundary = ProjectionBoundary()
     try:
         paths = SessionPaths.from_run_dir(data_dir)
-        from app.storage.frozen_inputs import validate_frozen_inputs
+        from app.storage.frozen_inputs import (
+            FrozenExecutionActiveError,
+            frozen_execution_lock,
+            validate_frozen_inputs,
+        )
 
-        verified_inputs = validate_frozen_inputs(paths)
-        graph = build_graph(
-            backend=backend,
-            data_dir=str(data_dir),
-            verified_inputs=verified_inputs,
-        )
-        decision_path = _snapshot_resume_decision(
-            Path(args.decision_file), paths, decision
-        )
-        decision_ref = paths.to_ref(decision_path)
-    except (OSError, ValueError) as exc:
-        print(
-            f"error: resume decision could not be materialized: {exc}", file=sys.stderr
-        )
+        with frozen_execution_lock(paths) as lease:
+            verified_inputs = validate_frozen_inputs(paths)
+            graph = build_graph(
+                backend=backend,
+                data_dir=str(data_dir),
+                verified_inputs=verified_inputs,
+                projection_boundary=projection_boundary,
+            )
+            event_context: dict[str, Any] = {}
+            if decision is not None:
+                assert args.decision_file is not None
+                decision_path = _snapshot_resume_decision(
+                    Path(args.decision_file), paths, decision
+                )
+                event_context["decision_file_ref"] = paths.to_ref(decision_path)
+            transaction = execute_resume_transaction(
+                graph=graph,
+                config=config,
+                session_id=args.session_id,
+                data_dir=data_dir,
+                request=decision,
+                source="cli" if decision is not None else "cli_recovery",
+                checkpointer=backend,
+                event_context=event_context,
+                lease=lease,
+                projection_boundary=projection_boundary,
+            )
+    except FrozenExecutionActiveError as exc:
+        print(f"error: frozen session is already active: {exc}", file=sys.stderr)
         return 1
-    event_context = {
-        "decision_file_ref": decision_ref,
-    }
-    try:
-        transaction = execute_resume_transaction(
-            graph=graph,
-            config=config,
-            session_id=args.session_id,
-            data_dir=data_dir,
-            request=decision,
-            source="cli",
-            checkpointer=backend,
-            event_context=event_context,
-            verified_inputs=verified_inputs,
-        )
     except ResumeTransactionError as exc:
+        _print_projection_warnings(projection_boundary)
         if exc.phase == "validation":
             print(f"error: resume rejected: {exc}", file=sys.stderr)
         else:
             print(f"error: resume {exc.phase} failed: {exc}", file=sys.stderr)
         return 1
+    except (OSError, ValueError) as exc:
+        print(
+            f"error: resume decision could not be materialized: {exc}", file=sys.stderr
+        )
+        return 1
 
+    _print_resume_transaction_warnings(transaction)
+    _print_projection_warnings(projection_boundary)
     result = transaction.state
     current_stage = result.get("current_stage", "unknown")
     supervision = result.get("supervision_state", "unknown")

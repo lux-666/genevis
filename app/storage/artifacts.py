@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Iterable, Mapping, TextIO
 from uuid import NAMESPACE_URL, uuid5
 
 from app.integrity import sha256_file
@@ -302,6 +302,35 @@ def register_artifact_records(
     return refs
 
 
+def record_registered_artifacts(
+    data_dir: Path | str,
+    session_id: str,
+    artifacts: Iterable[ArtifactRef | Mapping[str, Any] | ArtifactMeta],
+    *,
+    attempt_id: str | None = None,
+) -> None:
+    """Append causal registration facts only after a producer's success boundary.
+
+    Index registration itself intentionally has no implicit Ledger side effect:
+    a later collection failure may leave an index-only orphan. Successful
+    producers call this one boundary once their semantic publish is complete.
+    """
+
+    from app.storage.ledger import Ledger
+
+    ledger = Ledger(data_dir)
+    for artifact in artifacts:
+        if isinstance(artifact, ArtifactMeta):
+            artifact = artifact.model_dump(mode="json")
+        elif isinstance(artifact, ArtifactRef):
+            artifact = artifact.model_dump(mode="json")
+        ledger.record_artifact_registered(
+            session_id,
+            artifact,
+            attempt_id=attempt_id,
+        )
+
+
 def resolve_artifact_ref(
     data_dir: Path | str,
     session_id: str,
@@ -451,9 +480,7 @@ def _work_artifact_destination(paths: SessionPaths, source: Path, stage: str) ->
     """Return the one durable output path for a declared stage-work file."""
 
     workflow_step_id = _workflow_step_id_from_work_path(paths, source)
-    stage_work_dir = paths.workflow_step_work_dir(
-        workflow_step_id, stage
-    )
+    stage_work_dir = paths.workflow_step_work_dir(workflow_step_id, stage)
     try:
         relative = source.relative_to(stage_work_dir)
     except ValueError as exc:
@@ -476,13 +503,10 @@ def _publish_to_destination(
     source = Path(artifact.file_path).expanduser().resolve(strict=False)
     source_step_id = _require_work_source(paths, source)
     destination_path = _artifact_destination_path(paths, destination)
-    destination_step_id = _workflow_step_id_from_artifact_path(
-        paths, destination_path
-    )
+    destination_step_id = _workflow_step_id_from_artifact_path(paths, destination_path)
     if source_step_id != destination_step_id:
         raise DataLayoutError(
-            "publication source and destination must belong to the same "
-            "workflow step"
+            "publication source and destination must belong to the same workflow step"
         )
     return publish_file(source, destination_path)
 

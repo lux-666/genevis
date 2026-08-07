@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 
@@ -15,12 +16,14 @@ from app.control.workflow_plan import (
     current_workflow_step_id,
     workflow_steps_from_run_config,
 )
+from app.review.application import (
+    ReviewApplicationError,
+    canonicalize_review_intent_request,
+)
 from app.review.approval import ensure_decision_allowed, load_verified_interrupt_request
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
     ReviewGateDeclaration,
-    apply_review_gate_decision,
-    apply_review_gate_timeout,
     find_review_gate,
     get_review_gate,
     registered_review_stage_label,
@@ -28,21 +31,36 @@ from app.review.gates import (
 from app.review.interrupt_context import generic_interrupt_context
 from app.review.persistence import ReviewPersistenceError, load_review_request
 from app.review.records import counts_by_origin, decision_records
+from app.review.status import ReviewStatusProjection, project_review_history
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.limits import ROUTE_TRACE_LIMIT
-from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
+from app.schemas.state import (
+    ActiveInterrupt,
+    TopLevelState,
+    validate_top_level_state,
+)
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-
-if TYPE_CHECKING:
-    from app.storage.frozen_inputs import FrozenInputBundle
 
 ResumeValidationError = control_errors.ResumeValidationError
 UnsupportedLifecycleOperationError = control_errors.UnsupportedLifecycleOperationError
 
 
-def finalize_terminal_state(
+class TerminalFinalizationError(RuntimeError):
+    """Raised when a terminal checkpoint cannot be proven authoritative."""
+
+
+@dataclass(frozen=True)
+class TerminalFinalizationResult:
+    """Proven terminal checkpoint, singleton Ledger row, and soft warning."""
+
+    state: TopLevelState
+    terminal_event: dict[str, Any]
+    compaction_warning: str | None = None
+
+
+def finalize_authoritative_terminal(
     graph: Any,
     config: RunnableConfig,
     state: dict[str, Any],
@@ -50,40 +68,37 @@ def finalize_terminal_state(
     data_dir: str | Path,
     checkpointer: str,
     *,
-    report_kind: Literal["operator", "final"],
-) -> str | None:
-    """No-op active states; report terminals and soft-fail SQLite compaction."""
-    if state.get("supervision_state") not in {"completed", "failed_terminal"}:
-        return None
+    normalize_failure: bool = False,
+) -> TerminalFinalizationResult:
+    """Prove terminal checkpoint, append one terminal fact, then compact.
+
+    Projection writers are deliberately absent.  An ambiguous failure update
+    is always followed by a checkpoint reread; matching persisted values win.
+    """
+
+    supervision = state.get("supervision_state")
+    if supervision not in {"completed", "failed_terminal"}:
+        raise TerminalFinalizationError(
+            "authoritative terminal finalization requires a terminal state"
+        )
+    if normalize_failure and supervision != "failed_terminal":
+        raise TerminalFinalizationError(
+            "normalize_failure requires supervision_state=failed_terminal"
+        )
 
     paths = SessionPaths.from_run_dir(data_dir)
     paths.require_session_id(session_id)
     ledger = Ledger(paths.run_dir)
-    terminal_state = {**state, "session_id": session_id, "data_dir": str(paths.run_dir)}
+    terminal_state = {
+        **state,
+        "session_id": session_id,
+        "data_dir": str(paths.run_dir),
+        "active_interrupt": None,
+    }
 
-    from app.reports import review_report
-
-    if report_kind == "operator":
-        refs = ledger.references_from(terminal_state, role_prefix="terminal.failure")
-        ledger.record_session_terminal(
-            session_id,
-            outcome="failed",
-            stage=terminal_state.get("current_stage"),
-            error=terminal_state.get("last_error"),
-            refs=refs,
-            idempotency_key="session-terminal:failed",
-        )
-        review_report.write_operator_report(paths.run_dir, session_id, terminal_state)
-    else:
-        review_report.write_final_review_report(paths.run_dir, session_id)
-
-    saver = getattr(graph, "checkpointer", None)
-    if checkpointer != "sqlite" or saver is None:
-        return None
-
-    try:
-        checkpoint_state = terminal_state
-        if report_kind == "operator":
+    update_error: Exception | None = None
+    if normalize_failure:
+        try:
             graph.update_state(
                 config,
                 {
@@ -92,10 +107,73 @@ def finalize_terminal_state(
                     "active_interrupt": None,
                 },
             )
-            checkpoint_values = getattr(graph.get_state(config), "values", None)
-            if not isinstance(checkpoint_values, dict):
-                raise RuntimeError("persisted terminal checkpoint has no state values")
-            checkpoint_state = {**terminal_state, **checkpoint_values}
+        except Exception as exc:
+            update_error = exc
+
+    try:
+        snapshot = graph.get_state(config)
+        checkpoint_values = getattr(snapshot, "values", None)
+        if not isinstance(checkpoint_values, dict):
+            raise TerminalFinalizationError(
+                "persisted terminal checkpoint has no state values"
+            )
+        checkpoint_state = validate_top_level_state(checkpoint_values)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        if update_error is not None:
+            detail = (
+                f"update_state raised {type(update_error).__name__}: {update_error}; "
+                f"checkpoint reread failed: {detail}"
+            )
+        raise TerminalFinalizationError(
+            f"terminal checkpoint could not be verified: {detail}"
+        ) from exc
+
+    expected = {
+        "session_id": session_id,
+        "supervision_state": supervision,
+        "current_stage": terminal_state.get("current_stage"),
+        "active_interrupt": None,
+    }
+    if supervision == "failed_terminal":
+        expected["last_error"] = terminal_state.get("last_error")
+    for field, value in expected.items():
+        if checkpoint_state.get(field) != value:
+            detail = (
+                f"terminal checkpoint {field} does not match: "
+                f"expected {value!r}, got {checkpoint_state.get(field)!r}"
+            )
+            if update_error is not None:
+                detail += (
+                    f" after update_state raised {type(update_error).__name__}: "
+                    f"{update_error}"
+                )
+            raise TerminalFinalizationError(detail)
+
+    outcome: Literal["completed", "failed"] = (
+        "completed" if supervision == "completed" else "failed"
+    )
+    refs = ledger.references_from(
+        checkpoint_state,
+        role_prefix=f"terminal.{outcome}",
+    )
+    terminal_event = ledger.record_session_terminal(
+        session_id,
+        outcome=outcome,
+        stage=checkpoint_state.get("current_stage"),
+        error=(checkpoint_state.get("last_error") if outcome == "failed" else None),
+        refs=refs,
+    )
+
+    saver = getattr(graph, "checkpointer", None)
+    if checkpointer != "sqlite" or saver is None:
+        return TerminalFinalizationResult(
+            state=checkpoint_state,
+            terminal_event=terminal_event,
+        )
+
+    compaction_warning: str | None = None
+    try:
         from app.graph.checkpoint_compaction import compact_terminal_checkpoint
 
         compacted = compact_terminal_checkpoint(saver, config, checkpoint_state)
@@ -107,7 +185,8 @@ def finalize_terminal_state(
             {"error": error},
             idempotency_key="terminal-compaction:skipped",
         )
-        return error
+        compaction_warning = error
+        compacted = False
 
     if compacted:
         ledger.record_event(
@@ -116,7 +195,11 @@ def finalize_terminal_state(
             {"checkpoint_count": 1},
             idempotency_key="terminal-compaction:completed",
         )
-    return None
+    return TerminalFinalizationResult(
+        state=checkpoint_state,
+        terminal_event=terminal_event,
+        compaction_warning=compaction_warning,
+    )
 
 
 def inspect_state(
@@ -179,14 +262,47 @@ def inspect_session(
     session = ledger.read_session(session_id)
     events = ledger.read_events(session_id)
     artifacts = read_artifact_records(paths.run_dir, session_id)
-    latest_review_request = _latest_event(events, "review_requested")
-    latest_review_decision = _latest_event(events, "review_decision")
-    latest_env_preflight_block = _latest_event(events, "env_preflight_blocked")
-    latest_terminal = _latest_event(events, "session_terminal")
-    review_decisions = decision_records(events)
+    review_history = project_review_history(paths.run_dir, session_id)
+    review_occurrences = review_history.records()
+    terminal_sequence = int(
+        (review_history.canonical_terminal or {}).get("sequence") or 0
+    )
+    authoritative_events = [
+        event
+        for event in events
+        if terminal_sequence == 0
+        or int(event.get("sequence") or 0) <= terminal_sequence
+    ]
+    authoritative_occurrences = [
+        occurrence
+        for occurrence in review_history.occurrences
+        if terminal_sequence == 0
+        or int(occurrence.request_sequence or 0) <= terminal_sequence
+    ]
+    latest_review_projection = (
+        authoritative_occurrences[-1] if authoritative_occurrences else None
+    )
+    latest_active_review = review_history.latest_unapplied
+    latest_review_request = (
+        dict(latest_review_projection.request_event)
+        if latest_review_projection is not None
+        and latest_review_projection.request_event is not None
+        else None
+    )
+    latest_review_decision = _latest_event(authoritative_events, "review_decision")
+    latest_env_preflight_block = _latest_event(
+        authoritative_events, "env_preflight_blocked"
+    )
+    latest_terminal = review_history.canonical_terminal
+    review_decisions = decision_records(authoritative_events)
     decisions_by_origin = counts_by_origin(review_decisions)
-    latest_review_lifecycle_event = _latest_review_lifecycle_event(events)
-    latest_unresolved_review_request = _latest_unresolved_review_request(events)
+    latest_review_lifecycle_event = _latest_review_lifecycle_event(authoritative_events)
+    latest_unresolved_review_request = (
+        dict(latest_active_review.request_event)
+        if latest_active_review is not None
+        and latest_active_review.request_event is not None
+        else None
+    )
     latest_request_ref = (
         latest_unresolved_review_request or latest_review_request or {}
     ).get("review_request_artifact_ref")
@@ -207,19 +323,12 @@ def inspect_session(
     )
 
     supervision_state = "unknown"
-    if latest_unresolved_review_request and (
-        latest_terminal is None
-        or int(latest_unresolved_review_request.get("sequence") or 0)
-        > int(latest_terminal.get("sequence") or 0)
-    ):
-        supervision_state = "blocked_human"
-    elif latest_terminal:
+    if latest_terminal:
         supervision_state = _terminal_supervision_state(latest_terminal.get("outcome"))
-    elif (
-        latest_review_lifecycle_event
-        and latest_review_lifecycle_event.get("event_type") == "review_decision"
-    ):
-        supervision_state = "review_decision_recorded"
+    elif latest_active_review is not None:
+        supervision_state = "blocked_human"
+    elif review_history.integrity_errors:
+        supervision_state = "review_integrity_error"
     elif session:
         supervision_state = "running"
 
@@ -228,7 +337,9 @@ def inspect_session(
     checkpoint_persistence = "sqlite" if durable_available else "memory_only"
 
     decision_requirements_error: str | None = None
-    if latest_unresolved_review_request:
+    if latest_unresolved_review_request and (
+        latest_active_review is not None and latest_active_review.accepts_new_decision
+    ):
         try:
             decision_requirements = _decision_requirements_from_artifact(
                 latest_request_artifact,
@@ -256,14 +367,15 @@ def inspect_session(
     active_interrupt = _durable_interrupt_projection(
         latest_unresolved_review_request,
         decision_requirements,
+        review_status=latest_active_review,
     )
-    latest_stage = _latest_stage_projection(events)
+    latest_stage = _latest_stage_projection(authoritative_events)
     current_stage = latest_stage.get("stage") if latest_stage else None
     current_workflow_step_id = (
         latest_stage.get("workflow_step_id") if latest_stage else None
     )
-    route_trace = _durable_route_trace(events)
-    last_error = _latest_error(events)
+    route_trace = _durable_route_trace(authoritative_events)
+    last_error = _latest_error(authoritative_events)
     latest_failed_report = (
         latest_operator_report if supervision_state == "failed_terminal" else None
     )
@@ -272,7 +384,7 @@ def inspect_session(
     )
     workflow_progress, execution = _inspect_execution_read_model(
         paths,
-        events,
+        authoritative_events,
         supervision_state=supervision_state,
         latest_unresolved_review_request=latest_unresolved_review_request,
         current_workflow_step_id=current_workflow_step_id,
@@ -324,6 +436,18 @@ def inspect_session(
         "decisions_by_origin": decisions_by_origin,
         "latest_review_lifecycle_event": latest_review_lifecycle_event,
         "latest_unresolved_review_request": latest_unresolved_review_request,
+        "latest_review_status": (
+            latest_active_review.to_record()
+            if latest_active_review is not None
+            else (
+                latest_review_projection.to_record()
+                if latest_review_projection is not None
+                else None
+            )
+        ),
+        "review_occurrences": review_occurrences,
+        "review_status_integrity_errors": list(review_history.integrity_errors),
+        "terminal_integrity": review_history.terminal_integrity,
         "latest_review_request_artifact": latest_request_artifact,
         "latest_review_decision_artifact": latest_decision_artifact,
         "latest_operator_report": latest_operator_report,
@@ -340,7 +464,12 @@ def inspect_session(
     }
     if decision_requirements_error:
         summary["review_request_verification_error"] = decision_requirements_error
-    if latest_unresolved_review_request and blocked_timeout_seconds is not None:
+    if (
+        latest_unresolved_review_request
+        and latest_active_review is not None
+        and latest_active_review.accepts_new_decision
+        and blocked_timeout_seconds is not None
+    ):
         summary["blocked_timeout"] = _durable_blocked_timeout_status(
             latest_unresolved_review_request,
             blocked_timeout_seconds,
@@ -352,28 +481,37 @@ def inspect_session(
     return summary
 
 
-def resume_review_state(
+def normalize_resume_review_request(
     state: TopLevelState,
     request: ResumeReviewRequest,
     *,
     blocked_timeout_seconds: float | None = None,
     decision_source: str = "manual",
     now: datetime | None = None,
-    verified_inputs: "FrozenInputBundle | None" = None,
-) -> StateUpdate:
-    """Apply a validated human review decision to an in-memory blocked state."""
+) -> ResumeReviewRequest:
+    """Validate one proposal and return the canonical request to commit.
+
+    This boundary performs no artifact, Ledger, or checkpoint writes. Automatic
+    timeout rules may only normalize the request; durable preparation is owned
+    by the review-application coordinator.
+    """
 
     active_interrupt, request_record = _validated_resume_context(state, request)
-    ensure_decision_allowed(request_record, request)
+    active_gate_id = active_interrupt.get("gate_id")
+    canonical_request = (
+        request.model_copy(update={"gate_id": active_gate_id})
+        if request.gate_id is None and isinstance(active_gate_id, str)
+        else request
+    )
+    ensure_decision_allowed(request_record, canonical_request)
     if blocked_timeout_seconds is not None:
         if decision_source != "foreground_countdown":
             raise ResumeValidationError(
                 "foreground review decisions require foreground_countdown "
                 "decision source"
             )
-        if (
-            isinstance(blocked_timeout_seconds, bool)
-            or not isinstance(blocked_timeout_seconds, (int, float))
+        if isinstance(blocked_timeout_seconds, bool) or not isinstance(
+            blocked_timeout_seconds, (int, float)
         ):
             raise ResumeValidationError(
                 "foreground review decisions require a numeric countdown timeout"
@@ -384,51 +522,57 @@ def resume_review_state(
                 "foreground countdown timeout does not match the verified "
                 "review request"
             )
-        if request.decided_by == "human":
+        if canonical_request.decided_by == "human":
             raise ResumeValidationError(
                 "foreground review countdown requires an automatic decision origin"
             )
         _validate_foreground_automatic_request(
             active_interrupt,
-            request,
+            canonical_request,
             configured_seconds=configured_seconds,
         )
-    elif request.decided_by == "auto_rule":
+    elif canonical_request.decided_by == "auto_rule":
         raise ResumeValidationError(
             "auto_rule decisions are only valid in the foreground countdown path"
         )
 
-    timeout = _blocked_timeout_status(
-        active_interrupt, blocked_timeout_seconds, now=now
-    )
+    final_request = canonical_request
+    final_record = request_record
     if blocked_timeout_seconds is not None:
+        timeout = _blocked_timeout_status(
+            active_interrupt, blocked_timeout_seconds, now=now
+        )
         if not timeout or not timeout.get("expired"):
             raise ResumeValidationError("foreground review countdown has not expired")
-        if request.decided_by == "auto_rule":
-            return _timeout_expired_update(state, request, timeout)
-
+        if canonical_request.decided_by == "auto_rule":
+            try:
+                gate = get_review_gate(
+                    canonical_request.stage,
+                    canonical_request.gate_id,
+                )
+            except KeyError as exc:
+                raise ResumeValidationError(
+                    f"Unsupported timeout stage: {canonical_request.stage}"
+                ) from exc
+            normalizer = gate.load_timeout_request_normalizer()
+            if normalizer is None:
+                raise ResumeValidationError(
+                    f"review gate {canonical_request.stage}/{gate.gate_id} has no "
+                    "automatic timeout resolver"
+                )
+            normalized = normalizer(state, canonical_request, timeout)
+            _active, normalized_record = _validated_resume_context(state, normalized)
+            ensure_decision_allowed(normalized_record, normalized)
+            final_request = normalized
+            final_record = normalized_record
     try:
-        if verified_inputs is None:
-            return apply_review_gate_decision(state, request)
-        return apply_review_gate_decision(
+        return canonicalize_review_intent_request(
             state,
-            request,
-            verified_inputs=verified_inputs,
+            final_request,
+            request_record=final_record,
         )
-    except KeyError as exc:
-        raise ResumeValidationError(
-            f"Unsupported resume stage: {request.stage}"
-        ) from exc
-
-
-def validate_resume_review_state(
-    state: TopLevelState,
-    request: ResumeReviewRequest,
-) -> None:
-    """Validate blocked-state identity and allowed decision without side effects."""
-
-    _active_interrupt, request_record = _validated_resume_context(state, request)
-    ensure_decision_allowed(request_record, request)
+    except ReviewApplicationError as exc:
+        raise ResumeValidationError(str(exc)) from exc
 
 
 def reject_unsupported_lifecycle_operation(operation: str) -> None:
@@ -437,20 +581,6 @@ def reject_unsupported_lifecycle_operation(operation: str) -> None:
             f"{operation} is not a resume operation and is not implemented in "
             "the current lifecycle contract."
         )
-
-
-def _validate_common_resume_state(
-    state: TopLevelState, request: ResumeReviewRequest
-) -> None:
-    _active_interrupt, request_record = _validated_resume_context(state, request)
-    ensure_decision_allowed(request_record, request)
-
-
-def _validate_resume_identity(
-    state: TopLevelState, request: ResumeReviewRequest
-) -> ActiveInterrupt:
-    active_interrupt, _request_record = _validated_resume_context(state, request)
-    return active_interrupt
 
 
 def _validated_resume_context(
@@ -516,24 +646,6 @@ def _validated_resume_context(
     return active_interrupt, request_record
 
 
-def _timeout_expired_update(
-    state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
-) -> StateUpdate:
-    """Apply one gate-specific foreground timeout resolver."""
-    try:
-        timeout_update = apply_review_gate_timeout(state, request, timeout)
-    except KeyError as exc:
-        raise ResumeValidationError(
-            f"Unsupported timeout stage: {request.stage}"
-        ) from exc
-    if timeout_update is not None:
-        return timeout_update
-    raise ResumeValidationError(
-        f"review gate {request.stage}/{request.gate_id or '<default>'} has no "
-        "automatic timeout resolver"
-    )
-
-
 def _review_request_max_blocked_seconds(request_record: Mapping[str, Any]) -> int:
     payload = request_record.get("payload")
     value = payload.get("max_blocked_seconds") if isinstance(payload, dict) else None
@@ -551,9 +663,10 @@ def _validate_foreground_automatic_request(
     configured_seconds: int,
 ) -> None:
     request_ref = active_interrupt.get("request_ref")
-    expected_rationale = (
-        request_ref.get("path_ref") if isinstance(request_ref, dict) else None
-    )
+    try:
+        expected_rationale = ArtifactRef.model_validate(request_ref)
+    except (TypeError, ValueError):
+        expected_rationale = None
     metadata = request.metadata
     elapsed_seconds = metadata.get("elapsed_seconds")
     if (
@@ -600,9 +713,7 @@ def _validate_active_interrupt_workflow_step(
 
     interrupt_step_id = active_interrupt.get("workflow_step_id")
     if not isinstance(interrupt_step_id, str) or not interrupt_step_id:
-        raise ResumeValidationError(
-            "resume requires active_interrupt.workflow_step_id"
-        )
+        raise ResumeValidationError("resume requires active_interrupt.workflow_step_id")
     try:
         current_step_id = current_workflow_step_id(
             cast(TopLevelState, state),
@@ -836,30 +947,11 @@ def _latest_review_lifecycle_event(
     events: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     for event in reversed(events):
-        if event.get("event_type") in {"review_requested", "review_decision"}:
-            return event
-    return None
-
-
-def _latest_unresolved_review_request(
-    events: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    decided_ids = {
-        (
-            str(event.get("workflow_step_id") or ""),
-            str(event.get("review_request_id") or event.get("subject_id")),
-        )
-        for event in events
-        if event.get("event_type") == "review_decision"
-    }
-    for event in reversed(events):
-        if event.get("event_type") != "review_requested":
-            continue
-        request_identity = (
-            str(event.get("workflow_step_id") or ""),
-            str(event.get("review_request_id") or event.get("subject_id")),
-        )
-        if request_identity not in decided_ids:
+        if event.get("event_type") in {
+            "review_requested",
+            "review_decision",
+            "review_applied",
+        }:
             return event
     return None
 
@@ -1084,6 +1176,8 @@ def _latest_error(events: list[dict[str, Any]]) -> str | None:
 def _durable_interrupt_projection(
     request: dict[str, Any] | None,
     requirements: dict[str, Any] | None,
+    *,
+    review_status: ReviewStatusProjection | None = None,
 ) -> dict[str, Any] | None:
     if request is None:
         return None
@@ -1100,6 +1194,10 @@ def _durable_interrupt_projection(
         projected["decisions_allowed"] = list(
             requirements.get("decisions_allowed") or []
         )
+    if review_status is not None:
+        projected["review_status"] = review_status.status
+        if review_status.integrity_error is not None:
+            projected["integrity_error"] = review_status.integrity_error
     return {key: value for key, value in projected.items() if value is not None}
 
 
@@ -1114,6 +1212,51 @@ def build_next_action(
             ),
             "required_fields": [],
             "relevant_refs": [],
+        }
+
+    review_status = summary.get("latest_review_status")
+    if (
+        summary.get("supervision_state") == "blocked_human"
+        and isinstance(review_status, Mapping)
+        and review_status.get("integrity_error")
+    ):
+        return {
+            "kind": "review_integrity_error",
+            "summary": str(review_status["integrity_error"]),
+            "stage": review_status.get("stage"),
+            "review_status": review_status.get("status"),
+            "required_fields": [],
+            "relevant_refs": _artifact_refs(
+                review_status.get("intent_ref"),
+                review_status.get("application_ref"),
+                summary.get("latest_review_request_artifact"),
+            ),
+        }
+    if (
+        summary.get("supervision_state") == "blocked_human"
+        and isinstance(review_status, Mapping)
+        and review_status.get("requires_recovery") is True
+    ):
+        abs_data_dir = str(Path(data_dir).expanduser().resolve(strict=False))
+        session_id = summary.get("session_id")
+        return {
+            "kind": "review_recovery_required",
+            "summary": (
+                "A review decision is already committed; recover that exact "
+                "intent instead of submitting a different decision."
+            ),
+            "stage": review_status.get("stage"),
+            "review_status": review_status.get("status"),
+            "required_fields": [],
+            "command": (
+                "gene-agent resume "
+                f"--session-id {session_id} --data-dir {abs_data_dir} "
+                "--checkpointer sqlite"
+            ),
+            "relevant_refs": _artifact_refs(
+                review_status.get("intent_ref"),
+                review_status.get("application_ref"),
+            ),
         }
 
     requirements = summary.get("decision_requirements")
@@ -1224,20 +1367,11 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     recommended_route_decision = (
         f"select_{recommended_route}" if isinstance(recommended_route, str) else None
     )
-    if gate.timeout_applier and recommended_route_decision in decisions_allowed:
+    if (
+        gate.normalize_timeout_request
+        and recommended_route_decision in decisions_allowed
+    ):
         decision = str(recommended_route_decision)
-    guidance = {
-        "decisions_allowed": decisions_allowed,
-        "review_request_artifact_ref": requirements.get("review_request_artifact_ref"),
-    }
-    if requirements.get("runtime_proposal"):
-        guidance["runtime_proposal"] = dict(requirements["runtime_proposal"])
-    if requirements.get("report_refs"):
-        guidance["report_refs"] = dict(requirements.get("report_refs") or {})
-    if requirements.get("candidate_comparison_context"):
-        guidance["candidate_comparison_context"] = dict(
-            requirements.get("candidate_comparison_context") or {}
-        )
     template: dict[str, Any] = {
         "session_id": summary.get("session_id"),
         "stage": stage,
@@ -1246,19 +1380,14 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
         "review_request_hash": requirements.get("request_hash"),
         "decision": decision,
         "notes": ["replace this note with the operator rationale"],
-        "metadata": {
-            **dict(requirements.get("resume_metadata") or {}),
-            "template_guidance": guidance,
-        },
+        "metadata": dict(requirements.get("resume_metadata") or {}),
         "decided_by": "human",
         "rationale_artifact_ref": None,
     }
+    required_fields = set(gate.required_resume_fields_for(decision))
     if requirements.get("candidate_ids"):
         candidate_ids = list(requirements.get("candidate_ids") or [])
-        candidate_refs = dict(requirements.get("candidate_primary_output_refs") or {})
-        guidance["candidate_ids"] = candidate_ids
-        guidance["candidate_primary_output_refs"] = candidate_refs
-        if "candidate_ids" in gate.required_resume_fields:
+        if "candidate_ids" in required_fields:
             template["candidate_ids"] = candidate_ids
         else:
             selected_candidate = candidate_ids[0] if candidate_ids else "<candidate_id>"
@@ -1266,12 +1395,11 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
             template["rejected_candidates"] = []
     if requirements.get("candidate_methods"):
         candidate_methods = list(requirements.get("candidate_methods") or [])
-        guidance["candidate_methods"] = candidate_methods
         template["method_name"] = (
             candidate_methods[0] if candidate_methods else "<method_name>"
         )
     recommended_selection = requirements.get("recommended_assembly_selection")
-    if gate.timeout_applier and isinstance(recommended_selection, dict):
+    if gate.normalize_timeout_request and isinstance(recommended_selection, dict):
         recommended_method = recommended_selection.get("primary_method")
         if recommended_method:
             template["method_name"] = str(recommended_method)
@@ -1303,7 +1431,7 @@ def foreground_automatic_decision_label(
     gate = find_review_gate(stage, gate_id if isinstance(gate_id, str) else None)
     if gate is None:
         return None
-    if gate.timeout_applier:
+    if gate.normalize_timeout_request:
         return str(build_resume_decision_template(summary).get("decision") or "rule")
     if gate.prompt_bundle and requirements.get("auto_decidable") is True:
         return "LLM review recommendation"
@@ -1390,13 +1518,14 @@ def build_foreground_auto_resume_request(
             }
         )
 
-    if not gate.timeout_applier:
+    if not gate.normalize_timeout_request:
         raise ResumeValidationError(
             f"review gate {stage}/{gate.gate_id} has no eligible automatic resolver"
         )
 
     template = build_resume_decision_template(summary)
-    for field_name in gate.required_resume_fields:
+    template_decision = str(template.get("decision") or "")
+    for field_name in gate.required_resume_fields_for(template_decision):
         field_value = template.get(field_name)
         if not field_value or (
             isinstance(field_value, str)
@@ -1407,12 +1536,14 @@ def build_foreground_auto_resume_request(
                 "foreground automatic resolver request is missing required field "
                 f"{field_name!r}"
             )
-    rationale_ref = requirements.get("review_request_artifact_ref")
-    if not isinstance(rationale_ref, str) or not rationale_ref:
+    rationale_ref = requirements.get("request_ref")
+    try:
+        rationale_artifact_ref = ArtifactRef.model_validate(rationale_ref)
+    except (TypeError, ValueError) as exc:
         raise ResumeValidationError(
             "foreground automatic resolver requires the verified review request "
             "artifact"
-        )
+        ) from exc
     payload = {
         **template,
         "notes": ["accepted by the foreground review countdown"],
@@ -1421,7 +1552,7 @@ def build_foreground_auto_resume_request(
             **countdown_metadata,
         },
         "decided_by": "auto_rule",
-        "rationale_artifact_ref": rationale_ref,
+        "rationale_artifact_ref": rationale_artifact_ref.model_dump(mode="json"),
     }
     try:
         return ResumeReviewRequest.model_validate(payload)
@@ -1484,8 +1615,12 @@ def _review_gate_next_action(
     ]
     gate = find_review_gate(stage, requirements.get("gate_id"))
     if gate is not None:
+        decisions_allowed = list(requirements.get("decisions_allowed") or [])
+        preferred = _preferred_template_decision(gate, decisions_allowed)
         fields.extend(
-            field for field in gate.required_resume_fields if field not in fields
+            field
+            for field in gate.required_resume_fields_for(preferred)
+            if field not in fields
         )
     return {
         "kind": "review_decision_required",

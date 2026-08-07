@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from typing_extensions import TypedDict
 
@@ -32,9 +33,16 @@ from app.llm.parameters.hic.request import (
     PARAMETER_RECOMMENDATION_CONTRACT,
     build_autohic_parameter_request,
 )
+from app.review.application import (
+    PreparedReviewApplication,
+    ReviewIntentV1,
+    VerifiedReviewApplication,
+)
 from app.review.approval import (
+    ParameterApprovalEffectV1,
     ensure_decision_allowed,
     load_verified_interrupt_request,
+    parameter_approval_decision,
     persist_parameter_approval_decision,
     validate_parameter_approval_bindings,
     validate_parameter_recommendation_manifest,
@@ -60,6 +68,7 @@ from app.schemas.artifacts import (
     ParameterAttemptTask,
     ParameterRecommendationCursor,
 )
+from app.schemas.parameter_cursors import ParameterAttemptJson
 from app.schemas.parameter_recommendation import (
     AutoHiCRecommendationContext,
     AutoHiCReviewEvidence,
@@ -499,11 +508,23 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
     )
 
 
-def apply_autohic_parameter_approval_decision(
+@dataclass(frozen=True)
+class _ValidatedAutoHiCParameterApproval:
+    request: ResumeReviewRequest
+    decision: Literal["approve_parameters", "reject_parameters"]
+    request_id: str
+    request_ref: ArtifactRef
+    cursor: ParameterRecommendationCursor
+    manifest_ref: ArtifactRef
+    manifest: ParameterRecommendationManifestV3
+
+
+def _validate_autohic_parameter_approval(
     state: TopLevelState,
     request: ResumeReviewRequest,
-) -> StateUpdate:
-    """Apply a human decision bound to the immutable AutoHiC recommendation."""
+    request_record: dict[str, Any],
+) -> _ValidatedAutoHiCParameterApproval:
+    """Validate one exact AutoHiC parameter-approval occurrence without writes."""
 
     if request.stage != "hic_scaffolding" or request.gate_id != "parameter_approval":
         raise ResumeValidationError(
@@ -518,12 +539,15 @@ def apply_autohic_parameter_approval_decision(
         raise ResumeValidationError("no unresolved AutoHiC parameter_approval gate")
 
     validate_parameter_approval_bindings(interrupt, request)
-    if request.decision not in {"approve_parameters", "reject_parameters"}:
-        raise ResumeValidationError("unsupported AutoHiC parameter approval decision")
-    request_ref, request_record = load_verified_interrupt_request(state, interrupt)
-    ensure_decision_allowed(request_record, request)
+    decision = parameter_approval_decision(request)
+    request_ref, verified_record = load_verified_interrupt_request(state, interrupt)
+    if request_record != verified_record:
+        raise ResumeValidationError(
+            "AutoHiC parameter approval request record is stale"
+        )
+    ensure_decision_allowed(verified_record, request)
 
-    payload = request_record.get("payload") or {}
+    payload = verified_record.get("payload") or {}
     try:
         cursor = ParameterRecommendationCursor.model_validate(
             hic_out.get("current_parameter_recommendation")
@@ -582,23 +606,104 @@ def apply_autohic_parameter_approval_decision(
     if not isinstance(request_id, str) or not request_id:
         raise ResumeValidationError("AutoHiC parameter approval request ID is missing")
 
+    return _ValidatedAutoHiCParameterApproval(
+        request=request,
+        decision=decision,
+        request_id=request_id,
+        request_ref=request_ref,
+        cursor=cursor,
+        manifest_ref=manifest_ref,
+        manifest=chain.manifest,
+    )
+
+
+def validate_autohic_parameter_intent_request(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    request_record: dict[str, Any],
+) -> ResumeReviewRequest:
+    """Registry hook validating an AutoHiC parameter approval before intent write."""
+
+    return _validate_autohic_parameter_approval(state, request, request_record).request
+
+
+def prepare_autohic_parameter_approval_application(
+    state: TopLevelState,
+    intent: ReviewIntentV1,
+) -> PreparedReviewApplication:
+    """Recheck and durably prepare one AutoHiC parameter decision."""
+
+    interrupt = state.get("active_interrupt") or _hic_output(state).get(
+        "active_interrupt"
+    )
+    if not isinstance(interrupt, dict):
+        raise ResumeValidationError("no unresolved AutoHiC parameter_approval gate")
+    _request_ref, request_record = load_verified_interrupt_request(state, interrupt)
+    validated = _validate_autohic_parameter_approval(
+        state, intent.request, request_record
+    )
     decision_ref = persist_parameter_approval_decision(
         state,
         stage="hic_scaffolding",
-        request_id=request_id,
-        request_ref=request_ref,
-        request=request,
-        manifest_ref=manifest_ref,
+        request_id=validated.request_id,
+        request_ref=validated.request_ref,
+        request=validated.request,
+        manifest_ref=validated.manifest_ref,
         method_name=_APPROVAL_METHOD,
         artifact_type=HIC_PARAMETER_APPROVAL_DECISION,
     )
-    if request.decision == "reject_parameters":
+    approved_attempt = None
+    try:
+        if validated.decision == "approve_parameters":
+            approved_attempt = ParameterAttempt(
+                schema_version=3,
+                attempt_id=validated.cursor.recommendation_id,
+                method_id=AUTOHIC_METHOD,
+                status="recommended",
+                task=validated.cursor.task,
+                previous_attempt_id=validated.cursor.previous_attempt_id,
+                recommendation_manifest_ref=validated.manifest_ref,
+                approval_decision_ref=decision_ref,
+                recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
+                previous_attempt_seal_hash=validated.cursor.previous_attempt_seal_hash,
+            )
+    except ValueError as exc:
+        raise ResumeValidationError(
+            "approved AutoHiC parameter attempt could not be recorded"
+        ) from exc
+    return PreparedReviewApplication(
+        effect_kind="hic_scaffolding.parameter_approval.v1",
+        effect=ParameterApprovalEffectV1(
+            decision=validated.decision,
+            decision_ref=decision_ref,
+            manifest_ref=validated.manifest_ref,
+            cursor=validated.cursor,
+            approved_attempt=approved_attempt,
+            rejection_reason="autohic_parameter_recommendation_rejected_by_human",
+        ),
+        decision_ref=decision_ref,
+        required_refs=(validated.manifest_ref,),
+    )
+
+
+def apply_autohic_parameter_approval_application(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> StateUpdate:
+    """Project a verified AutoHiC approval effect without durable side effects."""
+
+    effect = application.effect
+    if not isinstance(effect, ParameterApprovalEffectV1):
+        raise TypeError("AutoHiC parameter approval has an invalid effect model")
+    hic_out = _hic_output(state)
+    cursor = effect.cursor
+    if effect.decision == "reject_parameters":
         stage_update = _update_hic_output(
             state,
             {
                 "status": "failed",
                 "failure_kind": "parameter_recommendation_rejected",
-                "reason": "autohic_parameter_recommendation_rejected_by_human",
+                "reason": effect.rejection_reason,
                 "active_interrupt": None,
                 "current_parameter_recommendation": cursor.model_copy(
                     update={"status": "rejected"}
@@ -609,28 +714,15 @@ def apply_autohic_parameter_approval_decision(
             "current_stage": "hic_scaffolding",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
-            "last_error": "autohic_parameter_recommendation_rejected_by_human",
+            "last_error": effect.rejection_reason,
             **stage_update,
         }
-
-    try:
-        attempt = ParameterAttempt(
-            schema_version=3,
-            attempt_id=cursor.recommendation_id,
-            method_id=AUTOHIC_METHOD,
-            status="recommended",
-            task=cursor.task,
-            previous_attempt_id=cursor.previous_attempt_id,
-            recommendation_manifest_ref=manifest_ref,
-            approval_decision_ref=decision_ref,
-            recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
-            previous_attempt_seal_hash=cursor.previous_attempt_seal_hash,
-        )
-    except ValueError as exc:
-        raise ResumeValidationError(
-            "approved AutoHiC parameter attempt could not be recorded"
-        ) from exc
-    attempts.append(attempt.model_dump(mode="json"))
+    if effect.approved_attempt is None:
+        raise TypeError("approved AutoHiC parameter effect has no attempt")
+    attempts = list(hic_out.get("parameter_attempts") or [])
+    attempts.append(
+        cast(ParameterAttemptJson, effect.approved_attempt.model_dump(mode="json"))
+    )
     retry_counts = dict(hic_out.get("retry_counts") or {})
     if cursor.task == "retry_after_execution_failure":
         retry_counts["execution"] = int(retry_counts.get("execution", 0)) + 1
@@ -1030,9 +1122,7 @@ def _hydrate_parameter_attempt(
     execution: ParameterExecutionEvidence | None = None
     if attempt.execution_ref is not None:
         if attempt.frozen_attempt_ref is None:
-            raise ValueError(
-                "AutoHiC execution evidence has no frozen-attempt binding"
-            )
+            raise ValueError("AutoHiC execution evidence has no frozen-attempt binding")
         execution_evidence = load_execution_evidence(
             state,
             attempt.execution_ref,

@@ -13,6 +13,7 @@ import math
 import select
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, TextIO, cast
 
@@ -25,7 +26,7 @@ from app.storage.paths import SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
-    from app.storage.frozen_inputs import FrozenInputBundle
+    from app.storage.frozen_inputs import FrozenExecutionLease, FrozenInputBundle
 
 _MAX_INVALID_PROMPT_ATTEMPTS = 3
 GateClaimResult = Literal["claimed", "expired", "cancelled"]
@@ -1339,10 +1340,12 @@ def run_interactive_review(
     data_dir: str,
     *,
     dry_run: bool = False,
+    lease: "FrozenExecutionLease | None" = None,
 ) -> int:
     """Full interactive review flow: inspect → prompt → validate → persist → resume."""
     located = locate_session_data_dir(data_dir, session_id)
     data_dir = str(located or SessionPaths(data_dir, session_id).run_dir)
+    from app.control.lifecycle import inspect_session
     from app.control.resume_transaction import (
         ResumeTransactionError,
         execute_resume_transaction,
@@ -1358,16 +1361,35 @@ def run_interactive_review(
         print(f"error: frozen inputs could not be verified: {exc}", file=sys.stderr)
         return 1
 
-    result = collect_gate_decision(
-        session_id,
-        data_dir,
-        verified_inputs=verified_inputs,
-    )
-    if result is None:
-        return 1
-    request, raw_decision = result
+    summary = inspect_session(session_id, data_dir)
+    latest_review_status = summary.get("latest_review_status")
+    if isinstance(latest_review_status, Mapping):
+        recover_without_prompt = (
+            latest_review_status.get("accepts_new_decision") is not True
+        )
+    else:
+        recover_without_prompt = False
+    if recover_without_prompt:
+        request = None
+        raw_decision = None
+    else:
+        result = collect_gate_decision(
+            session_id,
+            data_dir,
+            verified_inputs=verified_inputs,
+        )
+        if result is None:
+            return 1
+        request, raw_decision = result
 
     if dry_run:
+        if request is None or raw_decision is None:
+            print(
+                "error: an immutable review intent is already committed; "
+                "rerun without --dry-run to recover it",
+                file=sys.stderr,
+            )
+            return 1
         decision_path = persist_decision_artifact(
             raw_decision, request.stage, session_id, data_dir
         )
@@ -1380,47 +1402,88 @@ def run_interactive_review(
         print(f"error: no checkpoint database at {db_path}", file=sys.stderr)
         return 1
 
+    from app.control.projections import ProjectionBoundary
     from app.graph.builder import build_graph
+    from app.storage.frozen_inputs import (
+        FrozenExecutionActiveError,
+        frozen_execution_lock,
+        validate_frozen_inputs,
+    )
 
+    projection_boundary = ProjectionBoundary()
+
+    def apply_with_lease(active_lease: "FrozenExecutionLease") -> int:
+        try:
+            active_lease.require_active(paths)
+            current_inputs = validate_frozen_inputs(paths)
+            graph = build_graph(
+                backend="sqlite",
+                data_dir=data_dir,
+                verified_inputs=current_inputs,
+                projection_boundary=projection_boundary,
+            )
+            config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+            transaction = execute_resume_transaction(
+                graph=graph,
+                config=config,
+                session_id=session_id,
+                data_dir=data_dir,
+                request=request,
+                source=(
+                    "interactive_review"
+                    if request is not None
+                    else "interactive_review_recovery"
+                ),
+                checkpointer="sqlite",
+                lease=active_lease,
+                projection_boundary=projection_boundary,
+            )
+        except ResumeTransactionError as exc:
+            if exc.phase == "validation":
+                print(f"error: resume rejected: {exc}", file=sys.stderr)
+            else:
+                print(f"error: resume {exc.phase} failed: {exc}", file=sys.stderr)
+            return 1
+        except (OSError, ValueError) as exc:
+            print(f"error: frozen inputs could not be verified: {exc}", file=sys.stderr)
+            return 1
+
+        final = transaction.state
+        if transaction.decision_artifact_path is not None:
+            print(f"decision_artifact: {transaction.decision_artifact_path}")
+        for operational_warning in transaction.operational_warnings:
+            print(f"warning: {operational_warning}", file=sys.stderr)
+        if transaction.compaction_warning:
+            print(
+                "warning: terminal checkpoint compaction skipped: "
+                f"{transaction.compaction_warning}",
+                file=sys.stderr,
+            )
+        for projection_warning in projection_boundary.warnings:
+            print(
+                f"warning: {projection_warning.name} projection failed: "
+                f"{projection_warning.error_type}: {projection_warning.message}",
+                file=sys.stderr,
+            )
+
+        print(f"\nsession_id:        {session_id}")
+        print(f"current_stage:     {final.get('current_stage', 'unknown')}")
+        print(f"supervision_state: {final.get('supervision_state', 'unknown')}")
+        print(f"route_trace:       {final.get('route_trace', [])}")
+
+        if final.get("supervision_state") == "failed_terminal":
+            print(
+                f"error: {final.get('last_error', 'unknown failure')}",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
+    if lease is not None:
+        return apply_with_lease(lease)
     try:
-        graph = build_graph(
-            backend="sqlite",
-            data_dir=data_dir,
-            verified_inputs=verified_inputs,
-        )
-    except (OSError, ValueError) as exc:
-        print(f"error: frozen inputs could not be verified: {exc}", file=sys.stderr)
+        with frozen_execution_lock(paths) as acquired_lease:
+            return apply_with_lease(acquired_lease)
+    except FrozenExecutionActiveError as exc:
+        print(f"error: frozen session is already active: {exc}", file=sys.stderr)
         return 1
-    config: RunnableConfig = {"configurable": {"thread_id": session_id}}
-
-    try:
-        transaction = execute_resume_transaction(
-            graph=graph,
-            config=config,
-            session_id=session_id,
-            data_dir=data_dir,
-            request=request,
-            source="interactive_review",
-            checkpointer="sqlite",
-            verified_inputs=verified_inputs,
-        )
-    except ResumeTransactionError as exc:
-        if exc.phase == "validation":
-            print(f"error: resume rejected: {exc}", file=sys.stderr)
-        else:
-            print(f"error: resume {exc.phase} failed: {exc}", file=sys.stderr)
-        return 1
-
-    final = transaction.state
-    if transaction.decision_artifact_path is not None:
-        print(f"decision_artifact: {transaction.decision_artifact_path}")
-
-    print(f"\nsession_id:        {session_id}")
-    print(f"current_stage:     {final.get('current_stage', 'unknown')}")
-    print(f"supervision_state: {final.get('supervision_state', 'unknown')}")
-    print(f"route_trace:       {final.get('route_trace', [])}")
-
-    if final.get("supervision_state") == "failed_terminal":
-        print(f"error: {final.get('last_error', 'unknown failure')}", file=sys.stderr)
-        return 1
-    return 0

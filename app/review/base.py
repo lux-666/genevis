@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.schemas.artifacts import ArtifactRef
+
 ReviewDecisionOrigin = Literal["human", "llm_provisional", "auto_rule"]
 
 
@@ -62,7 +64,7 @@ class ResumeReviewRequest(BaseModel):
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     decided_by: ReviewDecisionOrigin = "human"
-    rationale_artifact_ref: str | None = None
+    rationale_artifact_ref: ArtifactRef | None = None
 
     @model_validator(mode="after")
     def _require_rationale_for_non_human(self) -> "ResumeReviewRequest":

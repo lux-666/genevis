@@ -13,10 +13,17 @@ from app.control.errors import ResumeValidationError
 from app.control.lifecycle import (
     build_foreground_auto_resume_request,
     inspect_state,
-    resume_review_state,
+    normalize_resume_review_request,
 )
 from app.integrity import sha256_file
+from app.review.application import (
+    VerifiedReviewApplication,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
+from app.review.gates import get_review_gate
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_COMMAND,
@@ -40,7 +47,6 @@ from app.stages.assembly.parameters.storage import (
 )
 from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
 from app.storage.artifacts import read_artifact_records
-from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
     load_approved_parameter_chain_v3,
@@ -85,6 +91,43 @@ class _FailingModel:
         )
         assert request_path.is_file()
         raise RuntimeError("model unavailable")
+
+
+def _apply_review_application(
+    state: dict,
+    request: ResumeReviewRequest,
+    *,
+    source: str = "test",
+    blocked_timeout_seconds: float | None = None,
+    now: datetime | None = None,
+) -> tuple[dict, VerifiedReviewApplication]:
+    """Exercise the durable intent/application boundary before pure projection."""
+
+    canonical = normalize_resume_review_request(
+        state,
+        request,
+        blocked_timeout_seconds=blocked_timeout_seconds,
+        decision_source=source,
+        now=now,
+    )
+    intent = persist_review_intent(
+        state,
+        canonical,
+        source=source,
+        blocked_timeout_seconds=blocked_timeout_seconds,
+    )
+    gate = get_review_gate(canonical.stage, canonical.gate_id)
+    prepared = gate.load_prepare_application()(state, intent.intent)
+    application_ref = persist_review_application(
+        state,
+        intent=intent,
+        prepared=prepared,
+    )
+    application = load_verified_review_application(
+        state["data_dir"],
+        application_ref,
+    )
+    return dict(gate.load_apply_application()(state, application)), application
 
 
 def _response(**overrides: int) -> dict:
@@ -324,7 +367,7 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
         update = recommend_assembly_parameters(state)
     blocked = _blocked_state(state, update)
 
-    approved = resume_review_state(
+    approved, _application = _apply_review_application(
         blocked, _decision_request(blocked, "approve_parameters")
     )
     attempt = ParameterAttempt.model_validate(
@@ -348,7 +391,7 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
     ):
         second_update = recommend_assembly_parameters(second_state)
     second_blocked = _blocked_state(second_state, second_update)
-    rejected = resume_review_state(
+    rejected, _application = _apply_review_application(
         second_blocked,
         _decision_request(second_blocked, "reject_parameters"),
     )
@@ -390,11 +433,11 @@ def test_foreground_countdown_auto_approves_bound_parameters_with_audit(
         == blocked["active_interrupt"]["recommendation_hash"]
     )
 
-    approved = resume_review_state(
+    approved, application = _apply_review_application(
         blocked,
         request,
         blocked_timeout_seconds=300,
-        decision_source="foreground_countdown",
+        source="foreground_countdown",
         now=now,
     )
     attempt = ParameterAttempt.model_validate(
@@ -410,8 +453,7 @@ def test_foreground_countdown_auto_approves_bound_parameters_with_audit(
     )
     assert decision["decided_by"] == "auto_rule"
     assert (
-        decision["rationale_artifact_ref"]
-        == blocked["active_interrupt"]["request_ref"]["path_ref"]
+        decision["rationale_artifact_ref"] == blocked["active_interrupt"]["request_ref"]
     )
     assert decision["automatic_resolution"] == {
         "source": "foreground_countdown",
@@ -429,26 +471,8 @@ def test_foreground_countdown_auto_approves_bound_parameters_with_audit(
         )
     }
 
-    decisions = [
-        event
-        for event in Ledger(blocked["data_dir"]).read_events("s1")
-        if event["event_type"] == "review_decision"
-    ]
-    assert len(decisions) == 1
-    assert decisions[0]["decided_by"] == "auto_rule"
-    assert (
-        decisions[0]["rationale_artifact_ref"]
-        == blocked["active_interrupt"]["request_ref"]["path_ref"]
-    )
-    assert decisions[0]["metadata"] == {
-        "attempt_id": blocked["active_interrupt"]["attempt_id"],
-        "task": blocked["active_interrupt"]["task"],
-        "recommendation_hash": blocked["active_interrupt"]["recommendation_hash"],
-        "automatic_source": "foreground_countdown",
-        "automatic_configured_seconds": 300,
-        "automatic_elapsed_seconds": 300.0,
-        "automatic_outcome": "approve_persisted_recommendation",
-    }
+    assert application.application.effect_kind == "assembly.parameter_approval.v1"
+    assert application.application.decision_ref == attempt.approval_decision_ref
 
 
 def test_parameter_countdown_reject_decision_fails_closed(tmp_path: Path) -> None:
@@ -473,11 +497,11 @@ def test_parameter_countdown_reject_decision_fails_closed(tmp_path: Path) -> Non
         ResumeValidationError,
         match="automatic parameter approval can only approve",
     ):
-        resume_review_state(
+        _apply_review_application(
             blocked,
             request,
             blocked_timeout_seconds=300,
-            decision_source="foreground_countdown",
+            source="foreground_countdown",
             now=now,
         )
 
@@ -495,7 +519,7 @@ def test_parameter_chains_reject_an_earlier_same_stage_occurrence(
     ):
         update = recommend_assembly_parameters(state)
     blocked = _blocked_state(state, update)
-    approval_update = resume_review_state(
+    approval_update, _application = _apply_review_application(
         blocked,
         _decision_request(blocked, "approve_parameters"),
     )
@@ -604,7 +628,7 @@ def test_freeze_uses_approved_snapshot_after_mutable_genome_state_changes(
     ):
         recommendation_update = recommend_assembly_parameters(state)
     blocked = _blocked_state(state, recommendation_update)
-    approval_update = resume_review_state(
+    approval_update, _application = _apply_review_application(
         blocked,
         _decision_request(blocked, "approve_parameters"),
     )

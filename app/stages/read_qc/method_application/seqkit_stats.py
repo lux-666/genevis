@@ -32,7 +32,10 @@ from app.stages.read_qc.method_application.support import (
     read_qc_output,
     update_read_qc_output,
 )
-from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.artifacts import (
+    publish_or_recover_work_artifact,
+    record_registered_artifacts,
+)
 from app.storage.ledger import Ledger
 
 LIFECYCLE = MethodExecutionLifecycle(
@@ -196,10 +199,12 @@ def collect_seqkit_artifacts(state: TopLevelState) -> StateUpdate:
     ledger = Ledger(state.get("data_dir", "data"))
     payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=payloads)
-    for artifact in payloads:
-        ledger.record_artifact_registered(
-            attempt.session_id, artifact, attempt_id=attempt.attempt_id
-        )
+    record_registered_artifacts(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        payloads,
+        attempt_id=attempt.attempt_id,
+    )
     return update_read_qc_output(
         state,
         {

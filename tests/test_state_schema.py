@@ -51,6 +51,7 @@ def test_top_level_state_marks_runtime_invariants_as_required() -> None:
         "thread_id",
         "asset_registry_ref",
         "active_interrupt",
+        "review_application_ref",
         "shared_parameters",
         "last_error",
     } <= TopLevelState.__optional_keys__
@@ -61,6 +62,29 @@ def test_initial_state_populates_all_declared_top_level_fields() -> None:
 
     assert set(state) == set(TopLevelState.__annotations__)
     assert TopLevelState.__required_keys__ <= state.keys()
+    assert state["review_application_ref"] is None
+
+
+def test_review_application_ref_must_be_a_structural_artifact_ref() -> None:
+    state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    state["review_application_ref"] = {
+        "schema_version": 2,
+        "artifact_id": "art_0123456789abcdef0123456789abcdef",
+        "path_ref": (
+            "artifacts/steps/step-001-assembly/assembly/reviews/"
+            "review_001/application.json"
+        ),
+        "sha256": "a" * 64,
+        "size_bytes": 123,
+        "artifact_type": "review.application.v1",
+    }
+
+    validated = validate_top_level_state(state)
+    assert validated["review_application_ref"] == state["review_application_ref"]
+
+    state["review_application_ref"] = {"path_ref": "application.json"}
+    with pytest.raises(ValueError, match="valid ArtifactRef"):
+        validate_top_level_state(state)
 
 
 def test_state_update_is_partial_and_cannot_introduce_new_channels() -> None:

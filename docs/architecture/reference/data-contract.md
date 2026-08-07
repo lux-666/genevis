@@ -473,8 +473,8 @@ The timer starts only after the immutable request exists. For
 `parameter_approval`, timeout resolution means approving the exact persisted
 recommendation bound by the request; it does not generate, edit, merge, or
 replace parameter values. Resolver eligibility, immutable request and
-recommendation bindings, rationale artifacts, and stage-specific appliers
-remain authoritative. A countdown-triggered automatic decision additionally
+recommendation bindings, rationale artifacts, and the registered typed
+intent/application lifecycle remain authoritative. A countdown-triggered automatic decision additionally
 requires the internal resume transaction source and bound countdown metadata to
 identify the current `foreground_countdown`; its decision origin remains
 resolver-owned (`llm_provisional` or `auto_rule`), and request metadata cannot
@@ -486,10 +486,11 @@ session does not invoke an already-blocked checkpoint or restore the timer.
 Later manual review/resume must not infer elapsed time from `blocked_at` and has
 no public timeout override or strict/auto mode.
 
-The review registry is the sole declaration and dispatch point for gate IDs,
-allowed decisions, occurrence validation, and timing metadata. It does not own
-stage payload meaning, prompt branches, or the state/resource effects of a
-decision; those remain with the registered stage applier and interactive code.
+The review registry is the sole declaration and typed dispatch point for gate
+IDs, allowed decisions, occurrence validation, timing metadata, and each
+gate's prepare/apply contract. It does not own stage payload meaning or prompt
+branches: registered stage preparation owns durable domain effects, and
+registered verified application projects the typed effect into checkpoint state.
 
 ## 13. Ledger v2
 

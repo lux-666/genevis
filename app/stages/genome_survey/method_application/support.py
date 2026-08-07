@@ -13,7 +13,10 @@ from app.stages.genome_survey.state import (
     genome_survey_output,
     update_genome_survey_output,
 )
-from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.artifacts import (
+    publish_or_recover_work_artifact,
+    record_registered_artifacts,
+)
 from app.storage.ledger import Ledger
 
 
@@ -72,9 +75,9 @@ def record_attempt_success(
     ledger.record_attempt_succeeded(
         attempt.session_id, attempt, artifacts=artifact_payloads
     )
-    for artifact in artifact_payloads:
-        ledger.record_artifact_registered(
-            attempt.session_id,
-            artifact,
-            attempt_id=attempt.attempt_id,
-        )
+    record_registered_artifacts(
+        data_dir,
+        attempt.session_id,
+        artifact_payloads,
+        attempt_id=attempt.attempt_id,
+    )

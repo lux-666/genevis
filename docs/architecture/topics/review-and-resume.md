@@ -16,17 +16,22 @@
 
 ## Durable gate model
 
-A human gate has three different records:
+A human gate is a four-state durable protocol:
 
-1. the stage publishes an immutable review-request artifact;
-2. the checkpoint stores only a bounded interrupt cursor with request ref,
-   request hash, `workflow_step_id`, stage, gate, and attempt bindings;
-3. the operator decision is published once beneath that request identity and
-   binds the request hash.
+1. `awaiting_decision`: the stage has published an immutable review-request
+   artifact and the checkpoint carries only a bounded interrupt cursor with
+   request ref, request hash, `workflow_step_id`, stage, gate, and bindings;
+2. `decision_committed`: a normalized `ResumeReviewRequest` has been written
+   as the immutable review intent for that exact request identity;
+3. `application_prepared`: the gate has prepared and published a typed review
+   application artifact, including its verified decision artifact and required
+   refs;
+4. `applied`: the checkpoint proves that same verified application ref was
+   projected and the graph may continue.
 
 The prompt shown to a person is a projection of the request, not the recovery
-authority. A checkpoint must not embed the full request or decision body, and a
-Ledger event must not replace either artifact.
+authority. A checkpoint must not embed a full request, intent, decision, or
+application body, and a Ledger event must not replace those artifacts.
 
 Stage names are not review identities: a frozen plan can contain the same stage
 more than once. Every review request, decision, Ledger event, and review path
@@ -42,12 +47,14 @@ current occurrence, active interrupt, decision requirements, and actionable
 review next step. An unverified Ledger projection cannot authorize resume.
 
 The review registry centralizes gate declarations, allowed decisions,
-occurrence validation, dispatch, and timing metadata. The external resume DTO
-is one strict `ResumeReviewRequest` with a string decision field. Stage
-appliers and interactive code still own payload semantics, prompt branches, and
-the state/resource effects of a decision; parameter approval, assembly
-adoption, Hi-C adoption, and T2T adoption therefore remain different
-gate-scoped vocabularies and effects.
+occurrence validation, typed prepare/apply dispatch, and timing metadata. The
+external resume DTO is one strict `ResumeReviewRequest` with a string decision
+field. Normalization validates a proposal without writes; prepare owns durable,
+gate-specific decision/evidence creation; verified apply is a pure projection
+of the registered typed application into checkpoint state. Parameter approval,
+assembly adoption, Hi-C adoption, and T2T adoption therefore remain different
+gate-scoped vocabularies and effects without entrypoints owning a second apply
+path.
 
 ## Foreground review policy
 
@@ -61,19 +68,21 @@ The values have exactly these meanings during the original attached executor,
 whether produced by structured `run` files or a confirmed TUI draft:
 
 - `-1`: wait indefinitely for an operator decision.
-- `0`: immediately trigger that gate's existing automatic resolver, if eligible.
+- `0`: immediately normalize that gate's eligible automatic request, if any.
 - a positive integer: display an Enter-claim countdown, then trigger the same
-  resolver if it expires.
+  normalizer if it expires.
 
-The timer never supplies a decision. Assembly Review retains its existing
+The timer never supplies a default decision. Assembly Review retains its
 evidence eligibility and bound LLM recommendation artifact; assembly route
-selection retains its recommendation timeout applier. Assembly, AutoHiC, and
-T2T parameter approval share a resolver that accepts only the recommendation
-bound to the immutable request. A gate with no eligible resolver remains
-manual. A failed automatic transaction returns to manual review in the same
-terminal only while the same verified `blocked_human` request remains; any
-identity or integrity drift fails closed. Enter claims the gate, cancels the
-timer, and opens the normal manual prompts.
+selection uses its registered timeout-request normalizer. Assembly, AutoHiC,
+and T2T parameter approval use the same registered normalizer to bind only the
+recommendation in the immutable request. A gate with no eligible normalizer
+remains manual. A failed automatic transaction may return to manual review only
+while its `review_status` is `awaiting_decision` and the same verified
+`blocked_human` request remains. Once intent is committed, the operator cannot
+replace it: recovery re-enters the transaction with `request=None` and applies
+that committed intent. Any identity or integrity drift fails closed. Enter
+claims the gate, cancels the timer, and opens the normal manual prompts.
 The timer is not a durable scheduler: Ctrl-C, EOF, or process exit leaves the
 request and `blocked_human` checkpoint intact. Missing TTY capability prevents
 a new run from freezing in the first place. There is no daemon or background wake-up.
@@ -82,6 +91,18 @@ does not invoke it, and prints manual recovery commands. A later `review` or
 `resume` is always a manual recovery action; it never reconstructs or expires
 a countdown from the prior `blocked_at` time. Strict/auto review modes and a
 public resume timeout override are not part of the interface.
+
+### Example policy override
+
+The three JSON examples
+`docs/examples/assembly_review_run_config.template.json`,
+`docs/examples/read_qc_assembly_review_run_config.template.json`, and
+`docs/examples/repeated_stage_occurrences_run_config.template.json` deliberately
+set the global default to `300` while setting
+`review_policy.stages.assembly_review.max_blocked_seconds` to `-1`. JSON does
+not permit comments: in each example this is an intentional per-stage override
+that makes Assembly Review wait permanently for a human decision; it does not
+inherit or eventually use the global 300-second countdown.
 
 ## Parameter-approval timeout behavior
 
@@ -100,20 +121,22 @@ For every registered parameter-approval gate:
   approve/reject prompt when claimed, and approves the same recommendation at
   expiry.
 
-One shared timeout applier enforces `decision=approve_parameters` and
-`decided_by=auto_rule`, enrich the audit metadata, and then delegate to the
-stage's existing parameter decision applier. Assembly, AutoHiC, and T2T retain
-their current request, recommendation-manifest, attempt-chain, predecessor,
-and workflow-occurrence validation; timeout handling must not duplicate those
-stage rules.
+One shared timeout-request normalizer enforces `decision=approve_parameters`
+and `decided_by=auto_rule` and enriches audit metadata. It performs no state
+or durable application mutation; the common intent/application protocol then
+delegates preparation and verified pure apply to the registered stage gate.
+Assembly, AutoHiC, and T2T retain their request, recommendation-manifest,
+attempt-chain, predecessor, and workflow-occurrence validation without timeout
+handling duplicating those stage rules.
 
 The automatic decision binds the immutable review request and recommendation
 hash and records the foreground-countdown source plus configured and elapsed
-seconds. A claimed gate remains a human decision. If automatic construction or
-application fails and the durable checkpoint still verifies as
-`blocked_human`, the same foreground terminal returns to manual review. Broken
-request, evidence, checkpoint, or occurrence integrity fails closed instead of
-fabricating approval.
+seconds. A claimed gate remains a human decision. If automatic normalization or
+transaction preparation fails before intent commit and the durable checkpoint
+still verifies as `blocked_human`, the same foreground terminal returns to
+manual review. A committed intent is recovered, never replaced by a manual
+decision. Broken request, evidence, checkpoint, or occurrence integrity fails
+closed instead of fabricating approval.
 
 ## Resume validation
 
@@ -137,21 +160,25 @@ file claims otherwise.
 The resume flow is:
 
 ```text
-record resume start
-  -> read and validate blocked checkpoint
-  -> validate the structured decision against the immutable request
-  -> gate applier publishes the canonical decision artifact
-  -> return the gate-specific compact state update
-  -> graph.update_state(...)
+acquire the active FrozenExecutionLease
+  -> read checkpoint and project the shared review status
+  -> normalize the supplied proposal only when status is awaiting_decision
+  -> persist immutable intent
+  -> gate prepare creates typed decision/evidence effect
+  -> persist and verify immutable application
+  -> verified gate apply returns a pure compact state update
+  -> graph.update_state(...) and prove application in the checkpoint
   -> graph.invoke(None, ...)
-  -> finalize a terminal outcome when reached
+  -> finalize the authoritative terminal singleton when reached
   -> record resume completion or failure
 ```
 
 This is an idempotence-aware saga across artifacts, Ledger, and SQLite
 checkpoint operations. It is not an ACID transaction spanning those stores.
-Each durable step is therefore replay-aware and validates the evidence left by
-earlier steps.
+Each durable step is replay-aware and validates the evidence left by earlier
+steps. The shared status projection is the recovery decision point: a later
+call with `request=None` recovers a committed/application-prepared intent,
+whereas a replacement decision is legal only in `awaiting_decision`.
 
 ## Decision effects
 

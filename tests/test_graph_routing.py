@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.control.projections import ProgressProjectionInput
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.graph.builder import build_graph
 from app.graph.routing import route_controller, route_from_current_stage
@@ -124,14 +125,10 @@ class GraphRoutingTests(unittest.TestCase):
                 ["step-000-inventory:inventory_stage"],
             )
             rows = ledger.read_event_rows("empty-plan")
+            self.assertFalse(any(row["event_type"] == "stage_skipped" for row in rows))
             self.assertFalse(
-                any(row["event_type"] == "stage_skipped" for row in rows)
+                any(row["event_type"] == "session_terminal" for row in rows)
             )
-            terminals = [
-                row for row in rows if row["event_type"] == "session_terminal"
-            ]
-            self.assertEqual(len(terminals), 1)
-            self.assertEqual(terminals[0]["summary"]["outcome"], "completed")
 
     def test_attached_progress_observes_ledger_after_each_controller_transition(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -173,11 +170,11 @@ class GraphRoutingTests(unittest.TestCase):
             )
             observations: list[tuple[int, str, list[str]]] = []
 
-            def observe_progress(routed_state: dict[str, object]) -> None:
+            def observe_progress(progress: ProgressProjectionInput) -> None:
                 observations.append(
                     (
-                        int(routed_state["workflow_step_index"]),
-                        str(routed_state["supervision_state"]),
+                        progress.workflow_step_index,
+                        progress.supervision_state,
                         [
                             row["event_type"]
                             for row in ledger.read_event_rows("attached-progress")
@@ -202,7 +199,7 @@ class GraphRoutingTests(unittest.TestCase):
             self.assertNotIn("stage_completed", observations[0][2])
             self.assertEqual(observations[1][0:2], (1, "completed"))
             self.assertIn("stage_completed", observations[1][2])
-            self.assertIn("session_terminal", observations[1][2])
+            self.assertNotIn("session_terminal", observations[1][2])
 
     def test_graph_runs_two_occurrences_of_the_same_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -296,8 +293,7 @@ class GraphRoutingTests(unittest.TestCase):
             completed = [
                 row
                 for row in ledger.read_event_rows("repeat-read-qc")
-                if row["event_type"] == "stage_completed"
-                and row["stage"] == "read_qc"
+                if row["event_type"] == "stage_completed" and row["stage"] == "read_qc"
             ]
             self.assertEqual(
                 [row["workflow_step_id"] for row in completed],

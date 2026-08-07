@@ -38,8 +38,7 @@ from app.stages.genome_survey.state import (
 from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
 from app.stages.resource_resolution import ResourceResolution, resolve_stage_resource
 from app.stages.resource_specs import LONG_READS_SPEC, SHORT_READS_SPEC
-from app.storage.artifacts import publish_artifact_record
-from app.storage.ledger import Ledger
+from app.storage.artifacts import publish_artifact_record, record_registered_artifacts
 
 FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
@@ -613,9 +612,7 @@ def _record_result(
             state, "genome_survey", "genome_survey_result.json"
         ),
     ).path
-    Ledger(data_dir).record_artifact_registered(
-        state["session_id"], artifact.model_dump(mode="json")
-    )
+    record_registered_artifacts(data_dir, state["session_id"], [artifact])
     artifact_refs = [str(artifact.file_path)]
     if preserve_artifact_refs:
         artifact_refs = [

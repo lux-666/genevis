@@ -5,15 +5,18 @@ from __future__ import annotations
 import io
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.control.errors import ResumeValidationError
+from app.control.projections import ProjectionBoundary
 from app.control.resume_transaction import ResumeTransactionError
 from app.entrypoints.review_interactive import wait_for_gate_claim
 from app.entrypoints.run import _interactive_gate_loop
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
+from app.storage.frozen_inputs import FrozenExecutionLease
 
 
 def _summary(wait_seconds: int) -> dict:
@@ -56,9 +59,19 @@ def _route_summary(wait_seconds: int) -> dict:
         "review_request_id": "review_1",
         "request_hash": "a" * 64,
         "review_request_artifact_ref": (
-            "artifacts/steps/step-001-assembly/assembly/reviews/"
-            "review_1/request.json"
+            "artifacts/steps/step-001-assembly/assembly/reviews/review_1/request.json"
         ),
+        "request_ref": {
+            "schema_version": 2,
+            "artifact_id": "test-route-review-request",
+            "path_ref": (
+                "artifacts/steps/step-001-assembly/assembly/reviews/"
+                "review_1/request.json"
+            ),
+            "sha256": "a" * 64,
+            "size_bytes": 1,
+            "artifact_type": "assembly.route_selection.request",
+        },
         "max_blocked_seconds": wait_seconds,
         "recommended_route": "hifi",
         "recommended_assembly_selection": {
@@ -81,18 +94,21 @@ def _human_request(
     )
 
 
-def test_parameter_approval_gates_share_the_foreground_timeout_resolver():
-    resolver_paths = {
-        get_review_gate(stage, "parameter_approval").timeout_applier
+def test_parameter_approval_gates_share_the_foreground_timeout_normalizer():
+    normalizer_paths = {
+        get_review_gate(stage, "parameter_approval").normalize_timeout_request
         for stage in ("assembly", "hic_scaffolding", "t2t")
     }
 
-    assert resolver_paths == {"app.review.approval:apply_parameter_approval_timeout"}
+    assert normalizer_paths == {
+        "app.review.approval:normalize_parameter_approval_timeout_request"
+    }
     for stage in ("assembly", "hic_scaffolding", "t2t"):
         gate = get_review_gate(stage, "parameter_approval")
         assert gate.template_preferred_decision == "approve_parameters"
         assert (
-            gate.load_timeout_applier().__name__ == "apply_parameter_approval_timeout"
+            gate.load_timeout_request_normalizer().__name__
+            == "normalize_parameter_approval_timeout_request"
         )
 
 
@@ -176,13 +192,14 @@ class ForegroundGateLoopTests(unittest.TestCase):
         summary: dict | None = None,
         summary_sequence: list[dict] | None = None,
         execute_side_effect: list[object] | None = None,
-        verified_inputs: object | None = None,
     ) -> tuple[dict, Mock, Mock, Mock]:
         summary = summary or _summary(wait_seconds)
         completed_transaction = SimpleNamespace(
             state={"supervision_state": "completed", "current_stage": "done"},
             decision_artifact_path=None,
             annotation_intake_artifact_ref=None,
+            operational_warnings=(),
+            compaction_warning=None,
         )
         execute = Mock(
             return_value=completed_transaction,
@@ -190,6 +207,12 @@ class ForegroundGateLoopTests(unittest.TestCase):
         )
         collect = Mock(return_value=collected)
         waiter = Mock(return_value=claim)
+        lease = FrozenExecutionLease(
+            session_id="s1",
+            run_dir=Path("/tmp/run"),
+            active=True,
+        )
+        projection_boundary = ProjectionBoundary()
         result = {
             "session_id": "s1",
             "supervision_state": "blocked_human",
@@ -218,8 +241,9 @@ class ForegroundGateLoopTests(unittest.TestCase):
                 result,
                 "s1",
                 "/tmp/run",
+                lease=lease,
+                projection_boundary=projection_boundary,
                 claim_waiter=waiter,
-                verified_inputs=verified_inputs,
             )
         return final, execute, collect, waiter
 
@@ -232,11 +256,9 @@ class ForegroundGateLoopTests(unittest.TestCase):
         execute.assert_not_called()
 
     def test_zero_immediately_runs_existing_route_resolver(self):
-        verified_inputs = object()
         final, execute, collect, waiter = self._run_loop(
             0,
             summary=_route_summary(0),
-            verified_inputs=verified_inputs,
         )
 
         self.assertEqual(final["supervision_state"], "completed")
@@ -247,7 +269,8 @@ class ForegroundGateLoopTests(unittest.TestCase):
         self.assertEqual(call["blocked_timeout_seconds"], 0.0)
         self.assertEqual(call["request"].decision, "select_hifi")
         self.assertEqual(call["request"].decided_by, "auto_rule")
-        self.assertIs(call["verified_inputs"], verified_inputs)
+        self.assertTrue(call["lease"].active)
+        self.assertIsInstance(call["projection_boundary"], ProjectionBoundary)
 
     def test_zero_falls_back_to_manual_when_existing_resolver_fails(self):
         with patch(
@@ -290,13 +313,19 @@ class ForegroundGateLoopTests(unittest.TestCase):
         completed = SimpleNamespace(
             state={"supervision_state": "completed", "current_stage": "done"},
             decision_artifact_path=None,
+            operational_warnings=(),
+            compaction_warning=None,
         )
         final, execute, collect, waiter = self._run_loop(
             0,
             summary=_route_summary(0),
             collected=(human, human.model_dump(mode="json")),
             execute_side_effect=[
-                ResumeTransactionError("decision_apply", "resolver failed"),
+                ResumeTransactionError(
+                    "decision_apply",
+                    "resolver failed",
+                    review_status="awaiting_decision",
+                ),
                 completed,
             ],
         )
@@ -327,7 +356,11 @@ class ForegroundGateLoopTests(unittest.TestCase):
             summary=original,
             summary_sequence=[original, invalid],
             execute_side_effect=[
-                ResumeTransactionError("validation", "request changed")
+                ResumeTransactionError(
+                    "validation",
+                    "request changed",
+                    review_status="awaiting_decision",
+                )
             ],
         )
 
@@ -364,6 +397,39 @@ class ForegroundGateLoopTests(unittest.TestCase):
         waiter.assert_not_called()
         collect.assert_called_once()
         self.assertEqual(execute.call_args.kwargs["source"], "interactive_gate")
+
+    def test_committed_auto_transaction_failure_recovers_same_intent(self):
+        completed = SimpleNamespace(
+            state={"supervision_state": "completed", "current_stage": "done"},
+            decision_artifact_path=None,
+            operational_warnings=(),
+            compaction_warning=None,
+        )
+        final, execute, collect, waiter = self._run_loop(
+            0,
+            summary=_route_summary(0),
+            execute_side_effect=[
+                ResumeTransactionError(
+                    "decision_apply",
+                    "resolver failed after commit",
+                    review_status="decision_committed",
+                ),
+                completed,
+            ],
+        )
+
+        self.assertEqual(final["supervision_state"], "completed")
+        waiter.assert_not_called()
+        collect.assert_not_called()
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(
+            execute.call_args_list[0].kwargs["source"],
+            "foreground_countdown",
+        )
+        recovery = execute.call_args_list[1].kwargs
+        self.assertEqual(recovery["source"], "foreground_recovery")
+        self.assertIsNone(recovery["request"])
+        self.assertIsNone(recovery["blocked_timeout_seconds"])
 
     def test_cancelled_countdown_leaves_original_gate_blocked(self):
         final, execute, collect, waiter = self._run_loop(

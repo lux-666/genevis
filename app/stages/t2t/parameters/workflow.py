@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.control.lifecycle import ResumeValidationError
@@ -43,9 +44,16 @@ from app.llm.parameters.t2t.request import (
     T2T_METHOD,
     build_t2t_parameter_request,
 )
+from app.review.application import (
+    PreparedReviewApplication,
+    ReviewIntentV1,
+    VerifiedReviewApplication,
+)
 from app.review.approval import (
+    ParameterApprovalEffectV1,
     ensure_decision_allowed,
     load_verified_interrupt_request,
+    parameter_approval_decision,
     persist_parameter_approval_decision,
     validate_parameter_approval_bindings,
     validate_parameter_recommendation_manifest,
@@ -832,10 +840,23 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
     )
 
 
-def apply_t2t_parameter_approval_decision(
-    state: TopLevelState, request: ResumeReviewRequest
-) -> StateUpdate:
-    """Apply one fully bound decision for T2T's initial recommendation."""
+@dataclass(frozen=True)
+class _ValidatedT2TParameterApproval:
+    request: ResumeReviewRequest
+    decision: Literal["approve_parameters", "reject_parameters"]
+    request_id: str
+    request_ref: ArtifactRef
+    cursor: ParameterRecommendationCursor
+    manifest_ref: ArtifactRef
+    manifest: ParameterRecommendationManifestV3
+
+
+def _validate_t2t_parameter_approval(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    request_record: dict[str, Any],
+) -> _ValidatedT2TParameterApproval:
+    """Validate one exact T2T parameter-approval occurrence without writes."""
 
     if request.stage != "t2t" or request.gate_id != "parameter_approval":
         raise ResumeValidationError(
@@ -851,12 +872,13 @@ def apply_t2t_parameter_approval_decision(
         raise ResumeValidationError("no unresolved T2T parameter_approval gate")
 
     validate_parameter_approval_bindings(interrupt, request)
-    if request.decision not in {"approve_parameters", "reject_parameters"}:
-        raise ResumeValidationError("unsupported T2T parameter approval decision")
-    request_ref, request_record = load_verified_interrupt_request(state, interrupt)
-    ensure_decision_allowed(request_record, request)
+    decision = parameter_approval_decision(request)
+    request_ref, verified_record = load_verified_interrupt_request(state, interrupt)
+    if request_record != verified_record:
+        raise ResumeValidationError("T2T parameter approval request record is stale")
+    ensure_decision_allowed(verified_record, request)
 
-    payload = request_record.get("payload") or {}
+    payload = verified_record.get("payload") or {}
     try:
         ArtifactRef.model_validate(interrupt.get("request_ref"))
         cursor = ParameterRecommendationCursor.model_validate(
@@ -938,22 +960,94 @@ def apply_t2t_parameter_approval_decision(
     if not isinstance(request_id, str) or not request_id:
         raise ResumeValidationError("T2T parameter approval request ID is missing")
 
+    return _ValidatedT2TParameterApproval(
+        request=request,
+        decision=decision,
+        request_id=request_id,
+        request_ref=request_ref,
+        cursor=cursor,
+        manifest_ref=manifest_ref,
+        manifest=manifest,
+    )
+
+
+def validate_t2t_parameter_intent_request(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    request_record: dict[str, Any],
+) -> ResumeReviewRequest:
+    """Registry hook validating a T2T parameter approval before intent write."""
+
+    return _validate_t2t_parameter_approval(state, request, request_record).request
+
+
+def prepare_t2t_parameter_approval_application(
+    state: TopLevelState, intent: ReviewIntentV1
+) -> PreparedReviewApplication:
+    """Recheck and durably prepare one T2T parameter decision."""
+
+    output = read_t2t_stage_output(state)
+    interrupt = state.get("active_interrupt") or output.get("active_interrupt")
+    if not isinstance(interrupt, dict):
+        raise ResumeValidationError("no unresolved T2T parameter_approval gate")
+    _request_ref, request_record = load_verified_interrupt_request(state, interrupt)
+    validated = _validate_t2t_parameter_approval(state, intent.request, request_record)
+
     decision_ref = persist_parameter_approval_decision(
         state,
         stage="t2t",
-        request_id=request_id,
-        request_ref=request_ref,
-        request=request,
-        manifest_ref=manifest_ref,
+        request_id=validated.request_id,
+        request_ref=validated.request_ref,
+        request=validated.request,
+        manifest_ref=validated.manifest_ref,
         method_name=_APPROVAL_METHOD,
         artifact_type=T2T_PARAMETER_APPROVAL_DECISION,
     )
-    if request.decision == "reject_parameters":
+    approved_attempt = None
+    if validated.decision == "approve_parameters":
+        approved_attempt = ParameterAttempt(
+            schema_version=3,
+            attempt_id=validated.manifest.recommendation_id,
+            method_id=validated.manifest.method_id,
+            status="recommended",
+            task=validated.manifest.task,
+            previous_attempt_id=validated.manifest.previous_attempt_id,
+            recommendation_manifest_ref=validated.manifest_ref,
+            approval_decision_ref=decision_ref,
+            recommendation_contract=validated.manifest.recommendation_contract,
+            previous_attempt_seal_hash=validated.manifest.previous_attempt_seal_hash,
+        )
+    return PreparedReviewApplication(
+        effect_kind="t2t.parameter_approval.v1",
+        effect=ParameterApprovalEffectV1(
+            decision=validated.decision,
+            decision_ref=decision_ref,
+            manifest_ref=validated.manifest_ref,
+            cursor=validated.cursor,
+            approved_attempt=approved_attempt,
+            rejection_reason="t2t_parameter_recommendation_rejected_by_human",
+        ),
+        decision_ref=decision_ref,
+        required_refs=(validated.manifest_ref,),
+    )
+
+
+def apply_t2t_parameter_approval_application(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> StateUpdate:
+    """Project a verified T2T approval effect without durable side effects."""
+
+    effect = application.effect
+    if not isinstance(effect, ParameterApprovalEffectV1):
+        raise TypeError("T2T parameter approval has an invalid effect model")
+    cursor = effect.cursor
+    if effect.decision == "reject_parameters":
         stage_update = update_t2t_stage_output(
             state,
             {
                 "status": "failed",
-                "reason": "t2t_parameter_recommendation_rejected_by_human",
+                "reason": effect.rejection_reason,
                 "active_interrupt": None,
                 "current_parameter_recommendation": cursor.model_copy(
                     update={"status": "rejected"}
@@ -965,28 +1059,18 @@ def apply_t2t_parameter_approval_decision(
             "current_stage": "t2t",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
-            "last_error": "t2t_parameter_recommendation_rejected_by_human",
+            "last_error": effect.rejection_reason,
             **stage_update,
         }
-    attempt = ParameterAttempt(
-        schema_version=3,
-        attempt_id=manifest.recommendation_id,
-        method_id=manifest.method_id,
-        status="recommended",
-        task=manifest.task,
-        previous_attempt_id=manifest.previous_attempt_id,
-        recommendation_manifest_ref=chain.manifest_ref,
-        approval_decision_ref=decision_ref,
-        recommendation_contract=manifest.recommendation_contract,
-        previous_attempt_seal_hash=manifest.previous_attempt_seal_hash,
-    )
+    if effect.approved_attempt is None:
+        raise TypeError("approved T2T parameter effect has no attempt")
     stage_update = update_t2t_stage_output(
         state,
         {
             "status": "parameters_approved",
             "active_interrupt": None,
-            "current_parameter_attempt_id": manifest.recommendation_id,
-            "parameter_attempts": [attempt.model_dump(mode="json")],
+            "current_parameter_attempt_id": cursor.recommendation_id,
+            "parameter_attempts": [effect.approved_attempt.model_dump(mode="json")],
             "current_parameter_recommendation": cursor.model_copy(
                 update={"status": "approved"}
             ).model_dump(mode="json"),

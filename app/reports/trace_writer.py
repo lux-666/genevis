@@ -39,6 +39,23 @@ SESSION_SUMMARY_MARKDOWN_FILENAME = "session_summary.md"
 _NOISE_ARTIFACT_TYPES = frozenset({"command.stdout", "command.stderr"})
 # Artifact-type prefixes the operator should open first, in priority order.
 _OPEN_FIRST_PREFIXES = ("assembly_review.",)
+# Terminal traces accept only references emitted by an explicit successful
+# publication, registration, review, or completed-stage semantic boundary.
+# Generic and failure diagnostics can carry refs for recovery, but never prove
+# that an indexed artifact belongs in the terminal evidence projection.
+_ARTIFACT_PROVING_EVENT_TYPES = frozenset(
+    {
+        "artifact_registered",
+        "assets_registered",
+        "attempt_succeeded",
+        "review_requested",
+        "review_decision",
+        "review_applied",
+        "registered_assembly_candidate_bound",
+        "stage_completed",
+    }
+)
+ArtifactIdentity = tuple[str, str, str, int, str]
 
 
 def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]:
@@ -49,15 +66,40 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
     ledger = Ledger(paths.run_dir)
     session = ledger.read_session(session_id)
     events = ledger.read_events(session_id)
-    artifacts = read_artifact_records(paths.run_dir, session_id)
+    authoritative_events, post_terminal_events, canonical_terminal = (
+        _authoritative_event_boundary(ledger, session_id, events)
+    )
+    artifacts = _authoritative_artifacts(
+        read_artifact_records(paths.run_dir, session_id),
+        authoritative_events,
+        canonical_terminal,
+    )
     summary = inspect_session(session_id, paths.run_dir)
+    review_occurrences = _authoritative_review_occurrences(
+        summary.get("review_occurrences") or [],
+        canonical_terminal,
+    )
 
     decisions = [
-        event for event in events if event.get("event_type") == "review_decision"
+        event
+        for event in authoritative_events
+        if event.get("event_type") == "review_decision"
     ]
-    stages = _build_stage_records(paths, events, artifacts, summary)
-    gaps = _build_gaps(session, events, decisions)
-    route = _route_records(events)
+    stages = _build_stage_records(
+        paths,
+        authoritative_events,
+        artifacts,
+        summary,
+        review_occurrences,
+    )
+    gaps = _build_gaps(
+        session,
+        authoritative_events,
+        decisions,
+        review_occurrences,
+        summary,
+    )
+    route = _route_records(authoritative_events)
     observed_path = [
         record["stage"] for record in route if record["event_type"] == "stage_entered"
     ]
@@ -69,7 +111,7 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
         ]
 
     trace: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "report_type": "session_summary",
         "session_id": session_id,
         "session_found": session is not None,
@@ -85,12 +127,18 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
         "stages": stages,
         "decisions": [_decision_record(decision) for decision in decisions],
         "decisions_by_origin": counts_by_origin(decisions),
-        "pending_review_requests": _pending_review_requests(events),
+        "pending_review_requests": _pending_review_requests(review_occurrences),
         "open_first": _open_first_artifacts(artifacts),
-        "failures": _failures(events),
+        "failures": _failures(authoritative_events),
         "blocked": _blocked_summary(summary),
         "next_action": summary.get("next_action"),
         "ledger_event_count": len(events),
+        "authoritative_ledger_event_count": len(authoritative_events),
+        "terminal_integrity": _terminal_integrity_diagnostic(
+            canonical_terminal,
+            post_terminal_events,
+            summary.get("terminal_integrity"),
+        ),
         "artifact_count": len(artifacts),
         "gaps": gaps,
     }
@@ -99,17 +147,194 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
     return trace
 
 
+def _authoritative_event_boundary(
+    ledger: Ledger,
+    session_id: str,
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+    """Split business facts from immutable-history terminal diagnostics."""
+
+    terminal_read = ledger.read_canonical_terminal(session_id)
+    canonical_terminal = (
+        terminal_read.get("canonical") if terminal_read is not None else None
+    )
+    terminal_sequence = _event_sequence(canonical_terminal)
+    if terminal_sequence is None:
+        return list(events), [], canonical_terminal
+    return (
+        [
+            event
+            for event in events
+            if (_event_sequence(event) or 0) <= terminal_sequence
+        ],
+        [
+            event
+            for event in events
+            if (_event_sequence(event) or 0) > terminal_sequence
+            and not _is_post_terminal_maintenance_event(event)
+        ],
+        canonical_terminal,
+    )
+
+
+def _authoritative_artifacts(
+    artifacts: list[dict[str, Any]],
+    authoritative_events: list[dict[str, Any]],
+    canonical_terminal: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Keep terminal traces to index artifacts proven before the terminal.
+
+    A v2 artifact index has no Ledger sequence, so its own order cannot prove
+    whether an item predates a terminal. A complete artifact ref in a
+    successful semantic event (including ``attempt_succeeded`` or
+    ``artifact_registered``) is the causal link. Failed-attempt and failed-stage
+    refs deliberately cannot prove an artifact: collection may leave those as
+    index-only orphans. Report projections use their fixed report paths rather
+    than this index, so there is deliberately no broad report-artifact exception.
+    """
+
+    if _event_sequence(canonical_terminal) is None:
+        return list(artifacts)
+
+    terminal_sequence = _event_sequence(canonical_terminal)
+    assert terminal_sequence is not None
+
+    proven_identities: set[ArtifactIdentity] = set()
+    for event in authoritative_events:
+        # The terminal row is a boundary, never publication evidence. A ref on
+        # that row cannot establish when its indexed artifact was produced.
+        event_sequence = _event_sequence(event)
+        if event_sequence is None or event_sequence >= terminal_sequence:
+            continue
+        if event.get("event_type") not in _ARTIFACT_PROVING_EVENT_TYPES:
+            continue
+        for ref in event.get("refs") or []:
+            identity = _complete_artifact_identity(ref)
+            if identity is None:
+                continue
+            proven_identities.add(identity)
+
+    return [
+        artifact
+        for artifact in artifacts
+        if _complete_artifact_identity(artifact) in proven_identities
+    ]
+
+
+def _complete_artifact_identity(value: Any) -> ArtifactIdentity | None:
+    """Return an index-joinable identity only for a complete ArtifactRef."""
+
+    if not isinstance(value, dict):
+        return None
+    artifact_id = value.get("artifact_id")
+    path_ref = value.get("path_ref")
+    sha256 = value.get("sha256")
+    size_bytes = value.get("size_bytes")
+    artifact_type = value.get("artifact_type")
+    if not (
+        isinstance(artifact_id, str)
+        and artifact_id
+        and isinstance(path_ref, str)
+        and path_ref
+        and isinstance(sha256, str)
+        and sha256
+        and type(size_bytes) is int
+        and size_bytes >= 0
+        and isinstance(artifact_type, str)
+        and artifact_type
+    ):
+        return None
+    return artifact_id, path_ref, sha256, size_bytes, artifact_type
+
+
+def _is_post_terminal_maintenance_event(event: dict[str, Any]) -> bool:
+    """Accept only finalizer-shaped compaction facts after a terminal row."""
+
+    event_type = event.get("event_type")
+    if not isinstance(event_type, str):
+        return False
+    expected_key = {
+        "terminal_compaction_completed": "terminal-compaction:completed",
+        "terminal_compaction_skipped": "terminal-compaction:skipped",
+    }.get(event_type)
+    if expected_key is None or event.get("idempotency_key") != expected_key:
+        return False
+    if any(
+        event.get(field) is not None
+        for field in ("stage", "workflow_step_id", "subject_id")
+    ):
+        return False
+    if event.get("refs") not in (None, []):
+        return False
+    summary = event.get("summary")
+    if not isinstance(summary, dict):
+        return False
+    if event_type == "terminal_compaction_completed":
+        return summary == {"checkpoint_count": 1}
+    return (
+        set(summary) == {"error"}
+        and isinstance(summary["error"], str)
+        and bool(summary["error"])
+    )
+
+
+def _authoritative_review_occurrences(
+    occurrences: list[dict[str, Any]],
+    canonical_terminal: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Exclude requests appended after the irreversible session outcome."""
+
+    terminal_sequence = _event_sequence(canonical_terminal)
+    if terminal_sequence is None:
+        return list(occurrences)
+    return [
+        occurrence
+        for occurrence in occurrences
+        if (_event_sequence(occurrence, key="request_sequence") or 0)
+        <= terminal_sequence
+    ]
+
+
+def _terminal_integrity_diagnostic(
+    canonical_terminal: dict[str, Any] | None,
+    post_terminal_events: list[dict[str, Any]],
+    terminal_integrity: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Expose terminal-after rows without granting them projection authority."""
+
+    if not post_terminal_events and terminal_integrity is None:
+        return None
+    diagnostic: dict[str, Any] = {
+        "canonical_terminal_sequence": _event_sequence(canonical_terminal),
+        "post_terminal_event_count": len(post_terminal_events),
+    }
+    if terminal_integrity is not None:
+        diagnostic["terminal_history"] = terminal_integrity
+    if post_terminal_events:
+        diagnostic["post_terminal_events"] = [
+            {
+                "sequence": event.get("sequence"),
+                "event_type": event.get("event_type"),
+                "stage": event.get("stage"),
+                "workflow_step_id": event.get("workflow_step_id"),
+            }
+            for event in post_terminal_events
+        ]
+    return diagnostic
+
+
 def _build_stage_records(
     paths: SessionPaths,
     events: list[dict[str, Any]],
     artifacts: list[dict[str, Any]],
     summary: dict[str, Any],
+    review_occurrences: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     steps = _workflow_steps_for_trace(paths, events, artifacts)
     methods_by_step = _methods_by_workflow_step(events)
     artifacts_by_step = _artifact_refs_by_workflow_step(artifacts)
     candidate_methods_by_step = _candidate_methods_by_workflow_step(artifacts)
-    review_by_step = _review_events_by_workflow_step(events)
+    reviews_by_step = _review_events_by_workflow_step(events, review_occurrences)
     lifecycle_by_step = _stage_lifecycle_by_workflow_step(events)
     blocked_step_id = _blocked_workflow_step_id(summary, events)
     failed_step_id = _failed_workflow_step_id(events, summary)
@@ -120,7 +345,7 @@ def _build_stage_records(
         stage = step["stage"]
         methods = methods_by_step.get(step_id, [])
         stage_artifacts = artifacts_by_step.get(step_id, [])
-        review = review_by_step.get(step_id)
+        reviews = reviews_by_step.get(step_id, [])
         candidate_methods = candidate_methods_by_step.get(step_id, [])
         lifecycle = lifecycle_by_step.get(step_id)
         status = _stage_status(
@@ -128,7 +353,7 @@ def _build_stage_records(
             methods=methods,
             stage_artifacts=stage_artifacts,
             candidate_methods=candidate_methods,
-            review=review,
+            reviews=reviews,
             blocked_step_id=blocked_step_id,
             failed_step_id=failed_step_id,
             lifecycle=lifecycle,
@@ -139,12 +364,12 @@ def _build_stage_records(
             "status": status,
             "methods": methods,
             "artifact_refs": _stage_artifacts_for_trace(stage_artifacts),
-            "timing": _stage_timing(methods, review, lifecycle),
+            "timing": _stage_timing(methods, reviews, lifecycle),
         }
         if candidate_methods:
             record["candidate_methods"] = candidate_methods
-        if review:
-            record["review"] = review
+        if reviews:
+            record["reviews"] = reviews
         if lifecycle:
             record["lifecycle"] = lifecycle
         records.append(record)
@@ -294,57 +519,71 @@ def _candidate_methods_by_workflow_step(
 
 def _review_events_by_workflow_step(
     events: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    requests: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for event in events:
-        event_type = event.get("event_type")
-        stage = str(event.get("stage", ""))
-        if not stage:
+    review_occurrences: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group full occurrence identities without stage/request-ID merging."""
+
+    requests: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for occurrence in review_occurrences:
+        step_id = occurrence.get("workflow_step_id")
+        request_id = occurrence.get("review_request_id")
+        request_hash = occurrence.get("request_hash")
+        if not all(
+            isinstance(value, str) and value
+            for value in (step_id, request_id, request_hash)
+        ):
             continue
+        key = (str(step_id), str(request_id), str(request_hash))
+        requests[key] = {
+            key_name: occurrence.get(key_name)
+            for key_name in (
+                "workflow_step_id",
+                "stage",
+                "gate_id",
+                "review_request_id",
+                "request_hash",
+                "reason",
+                "review_request_artifact_ref",
+                "status",
+                "resolved",
+                "resolution_basis",
+                "integrity_error",
+                "request_sequence",
+            )
+            if occurrence.get(key_name) is not None
+        }
+        requests[key]["requested_at"] = occurrence.get("timestamp")
+
+    for event in events:
+        if event.get("event_type") not in {"review_decision", "review_applied"}:
+            continue
+        step_id = str(event.get("workflow_step_id") or "")
         request_id = str(
             event.get("review_request_id") or event.get("subject_id") or ""
         )
-        if event_type == "review_requested":
-            entry = requests.setdefault(
-                request_id,
-                {
-                    "stage": stage,
-                    "workflow_step_id": event.get("workflow_step_id"),
-                },
-            )
-            if request_id not in order:
-                order.append(request_id)
-            entry["review_request_id"] = request_id
-            entry["requested_at"] = event.get("timestamp")
-            entry["reason"] = event.get("reason")
-            entry["review_request_artifact_ref"] = event.get(
-                "review_request_artifact_ref"
-            )
-        elif event_type == "review_decision":
-            entry = requests.setdefault(
-                request_id,
-                {
-                    "stage": stage,
-                    "workflow_step_id": event.get("workflow_step_id"),
-                    "review_request_id": request_id,
-                },
-            )
-            if request_id not in order:
-                order.append(request_id)
-            entry["decided_at"] = event.get("timestamp")
-            entry["decision"] = event.get("decision")
-            entry["decided_by"] = event.get("decided_by") or "human"
-            entry["candidate_id"] = event.get("candidate_id")
-            entry["method_name"] = event.get("method_name")
-            entry["rationale_artifact_ref"] = event.get("rationale_artifact_ref")
-            entry["decision_artifact_ref"] = event.get("artifact_ref")
-    by_step: dict[str, dict[str, Any]] = {}
-    for request_id in order:
-        entry = requests[request_id]
-        step_id = entry.get("workflow_step_id")
-        if isinstance(step_id, str) and step_id:
-            by_step[step_id] = entry
+        request_hash = str(event.get("request_hash") or "")
+        if not step_id or not request_id or not request_hash:
+            continue
+        entry = requests.get((step_id, request_id, request_hash))
+        if entry is None:
+            continue
+        if event.get("event_type") == "review_applied":
+            entry["applied_at"] = event.get("timestamp")
+            entry["application_id"] = event.get("application_id")
+            continue
+        entry["decided_at"] = event.get("timestamp")
+        entry["decision"] = event.get("decision")
+        entry["decided_by"] = event.get("decided_by") or "human"
+        entry["candidate_id"] = event.get("candidate_id")
+        entry["method_name"] = event.get("method_name")
+        entry["rationale_artifact_ref"] = event.get("rationale_artifact_ref")
+        entry["decision_artifact_ref"] = event.get("artifact_ref")
+
+    by_step: dict[str, list[dict[str, Any]]] = {}
+    for (step_id, _request_id, _request_hash), entry in requests.items():
+        by_step.setdefault(step_id, []).append(entry)
+    for entries in by_step.values():
+        entries.sort(key=lambda entry: int(entry.get("request_sequence") or 0))
     return by_step
 
 
@@ -379,7 +618,7 @@ def _stage_status(
     methods: list[dict[str, Any]],
     stage_artifacts: list[dict[str, Any]],
     candidate_methods: list[dict[str, Any]],
-    review: dict[str, Any] | None,
+    reviews: list[dict[str, Any]],
     blocked_step_id: str | None,
     failed_step_id: str | None,
     lifecycle: dict[str, Any] | None,
@@ -396,7 +635,7 @@ def _stage_status(
         return STAGE_STATUS_SKIPPED
     if lifecycle and lifecycle.get("completed_at"):
         return STAGE_STATUS_COMPLETED
-    if review and review.get("decision"):
+    if any(review.get("status") == "applied" for review in reviews):
         return STAGE_STATUS_COMPLETED
     if candidate_methods or stage_artifacts:
         return STAGE_STATUS_PLANNED_ONLY
@@ -405,7 +644,7 @@ def _stage_status(
 
 def _stage_timing(
     methods: list[dict[str, Any]],
-    review: dict[str, Any] | None,
+    reviews: list[dict[str, Any]],
     lifecycle: dict[str, Any] | None,
 ) -> dict[str, Any]:
     timestamps = [
@@ -423,10 +662,27 @@ def _stage_timing(
         timing["started_at"] = min(timestamps)
     if finished:
         timing["finished_at"] = max(finished)
-    if review and review.get("requested_at"):
-        timing["review_requested_at"] = review["requested_at"]
-    if review and review.get("decided_at"):
-        timing["review_decided_at"] = review["decided_at"]
+    requested = [
+        review["requested_at"]
+        for review in reviews
+        if isinstance(review.get("requested_at"), str)
+    ]
+    decided = [
+        review["decided_at"]
+        for review in reviews
+        if isinstance(review.get("decided_at"), str)
+    ]
+    applied = [
+        review["applied_at"]
+        for review in reviews
+        if isinstance(review.get("applied_at"), str)
+    ]
+    if requested:
+        timing["review_requested_at"] = min(requested)
+    if decided:
+        timing["review_decided_at"] = max(decided)
+    if applied:
+        timing["review_applied_at"] = max(applied)
     if lifecycle:
         for key in ("entered_at", "skipped_at", "completed_at"):
             if lifecycle.get(key):
@@ -438,6 +694,7 @@ def _decision_record(decision: dict[str, Any]) -> dict[str, Any]:
     return {
         "review_request_id": decision.get("review_request_id")
         or decision.get("subject_id"),
+        "request_hash": decision.get("request_hash"),
         "workflow_step_id": decision.get("workflow_step_id"),
         "stage": decision.get("stage"),
         "gate_id": decision.get("gate_id"),
@@ -514,7 +771,12 @@ def _blocked_summary(summary: dict[str, Any]) -> dict[str, Any] | None:
         "stage": requirements.get("stage") or next_action.get("stage"),
         "decisions_allowed": requirements.get("decisions_allowed") or [],
         "pending_human_action": next_action.get("summary"),
-        "resume_command": next_action.get("resume_command"),
+        "resume_command": next_action.get("resume_command")
+        or next_action.get("command"),
+        "review_status": (summary.get("latest_review_status") or {}).get("status"),
+        "integrity_error": (summary.get("latest_review_status") or {}).get(
+            "integrity_error"
+        ),
         "review_request_artifact_ref": (
             summary.get("latest_review_request_artifact") or {}
         ).get("path_ref")
@@ -582,6 +844,8 @@ def _build_gaps(
     session: dict[str, Any] | None,
     events: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
+    review_occurrences: list[dict[str, Any]],
+    summary: dict[str, Any],
 ) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
     if session is None:
@@ -609,16 +873,23 @@ def _build_gaps(
                 ),
             }
         )
-    request_ids = {
-        str(event.get("review_request_id") or event.get("subject_id"))
-        for event in events
-        if event.get("event_type") == "review_requested"
+    request_occurrences = {
+        (
+            str(occurrence.get("workflow_step_id") or ""),
+            str(occurrence.get("review_request_id") or ""),
+            str(occurrence.get("request_hash") or ""),
+        )
+        for occurrence in review_occurrences
     }
     orphan_decisions = [
         decision
         for decision in decisions
-        if str(decision.get("review_request_id") or decision.get("subject_id"))
-        not in request_ids
+        if (
+            str(decision.get("workflow_step_id") or ""),
+            str(decision.get("review_request_id") or decision.get("subject_id") or ""),
+            str(decision.get("request_hash") or ""),
+        )
+        not in request_occurrences
     ]
     if orphan_decisions:
         gaps.append(
@@ -627,8 +898,26 @@ def _build_gaps(
                 "kind": GAP_UNAVAILABLE,
                 "detail": (
                     f"{len(orphan_decisions)} review decision event(s) have no "
-                    "matching request ID."
+                    "matching workflow occurrence, request ID, and request hash."
                 ),
+            }
+        )
+    review_errors = [
+        str(error)
+        for error in summary.get("review_status_integrity_errors") or []
+        if error
+    ]
+    review_errors.extend(
+        str(occurrence["integrity_error"])
+        for occurrence in review_occurrences
+        if occurrence.get("integrity_error")
+    )
+    if review_errors:
+        gaps.append(
+            {
+                "field": "review_status",
+                "kind": GAP_UNAVAILABLE,
+                "detail": "; ".join(dict.fromkeys(review_errors))[:4096],
             }
         )
     return gaps
@@ -656,6 +945,21 @@ def _route_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             record["route_node"] = event["route_node"]
         route.append(record)
     return route
+
+
+def _event_sequence(
+    record: dict[str, Any] | None,
+    *,
+    key: str = "sequence",
+) -> int | None:
+    if not isinstance(record, dict):
+        return None
+    sequence = record.get(key)
+    if isinstance(sequence, int):
+        return sequence
+    if isinstance(sequence, str) and sequence.isdigit():
+        return int(sequence)
+    return None
 
 
 def _first_error_line(error: Any) -> str | None:
@@ -707,8 +1011,7 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
     lines.append("")
     for stage in trace.get("stages", []):
         lines.append(
-            f"### {stage['workflow_step_id']} / {stage['stage']} — "
-            f"{stage['status']}"
+            f"### {stage['workflow_step_id']} / {stage['stage']} — {stage['status']}"
         )
         timing = stage.get("timing") or {}
         if timing:
@@ -732,11 +1035,12 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
                 f"- candidate {candidate.get('method_name')}: "
                 f"execution_enabled={enabled}"
             )
-        review = stage.get("review")
-        if review:
+        for review in stage.get("reviews") or []:
             if review.get("decision"):
                 lines.append(
-                    f"- review: {review.get('decision')} by {review.get('decided_by')}"
+                    f"- review {review.get('review_request_id')}: "
+                    f"{review.get('decision')} by {review.get('decided_by')} "
+                    f"[{review.get('status')}]"
                     + (
                         f" (candidate {review['candidate_id']})"
                         if review.get("candidate_id")
@@ -744,7 +1048,10 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
                     )
                 )
             elif review.get("reason"):
-                lines.append(f"- review: requested ({review.get('reason')})")
+                lines.append(
+                    f"- review {review.get('review_request_id')}: requested "
+                    f"({review.get('reason')}) [{review.get('status')}]"
+                )
             for ref_key in (
                 "review_request_artifact_ref",
                 "rationale_artifact_ref",

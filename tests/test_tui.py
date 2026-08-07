@@ -232,7 +232,11 @@ class TuiWorkflowTests(unittest.TestCase):
                 }.items()
             }
 
-            def review_while_locked(*_args):
+            captured: dict[str, object] = {}
+
+            def review_while_locked(*_args, lease):
+                lease.require_active(paths)
+                captured["lease"] = lease
                 with self.assertRaises(FrozenExecutionActiveError):
                     with frozen_execution_lock(paths):
                         pass
@@ -251,7 +255,11 @@ class TuiWorkflowTests(unittest.TestCase):
                 code = _resume_tui_session(str(data_dir), parent.session_id)
 
             self.assertEqual(code, 1)
-            review.assert_called_once_with(parent.session_id, str(paths.run_dir))
+            review.assert_called_once_with(
+                parent.session_id,
+                str(paths.run_dir),
+                lease=captured["lease"],
+            )
             self.assertEqual(
                 load_tui_session_draft(data_dir, parent.session_id).lifecycle,
                 "blocked_review",

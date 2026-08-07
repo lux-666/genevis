@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable, cast
 
-from app.control.workflow_plan import current_workflow_step_id
+from pydantic import BaseModel
+
 from app.schemas.state import (
     DOMAIN_STAGES,
     DomainStage,
@@ -16,11 +17,25 @@ from app.schemas.state import (
 )
 
 if TYPE_CHECKING:
-    from app.storage.frozen_inputs import FrozenInputBundle
+    from app.review.application import (
+        PreparedReviewApplication,
+        ReviewIntentV1,
+        VerifiedReviewApplication,
+    )
+    from app.review.base import ResumeReviewRequest
 
-DecisionApplier = Callable[[TopLevelState, Any], StateUpdate]
-TimeoutApplier = Callable[[TopLevelState, Any, dict[str, Any]], StateUpdate]
 InterruptContextBuilder = Callable[[Mapping[str, Any]], dict[str, Any]]
+PrepareApplication = Callable[
+    [TopLevelState, "ReviewIntentV1"], "PreparedReviewApplication"
+]
+ApplyApplication = Callable[[TopLevelState, "VerifiedReviewApplication"], StateUpdate]
+TimeoutRequestNormalizer = Callable[
+    [TopLevelState, "ResumeReviewRequest", dict[str, Any]], "ResumeReviewRequest"
+]
+IntentRequestValidator = Callable[
+    [TopLevelState, "ResumeReviewRequest", Mapping[str, Any]],
+    "ResumeReviewRequest",
+]
 
 
 @dataclass(frozen=True)
@@ -34,12 +49,19 @@ class ReviewGateDeclaration:
     stage: DomainStage
     gate_id: str
     decisions_allowed: tuple[str, ...]
-    decision_applier: str
+    intent_metadata_model: str
+    validate_intent_request: str
+    effect_kind: str
+    effect_model: str
+    prepare_application: str
+    apply_application: str
     prompt_bundle: str | None = None
     prompt_adapter: str = "generic"
     template_preferred_decision: str | None = None
-    required_resume_fields: tuple[str, ...] = field(default_factory=tuple)
-    timeout_applier: str | None = None
+    required_resume_fields_by_decision: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
+    normalize_timeout_request: str | None = None
     proposal_kind: str = "human_review"
     proposal_label: str | None = None
     parameter_recommendation_status: str = "not_applicable"
@@ -51,28 +73,6 @@ class ReviewGateDeclaration:
     @property
     def key(self) -> tuple[DomainStage, str]:
         return self.stage, self.gate_id
-
-    def load_decision_applier(self) -> DecisionApplier:
-        module_name, function_name = self.decision_applier.rsplit(":", 1)
-        module = import_module(module_name)
-        applier = getattr(module, function_name)
-        if not callable(applier):
-            raise TypeError(
-                f"review gate applier is not callable: {self.decision_applier}"
-            )
-        return cast(DecisionApplier, applier)
-
-    def load_timeout_applier(self) -> TimeoutApplier | None:
-        if not self.timeout_applier:
-            return None
-        module_name, function_name = self.timeout_applier.rsplit(":", 1)
-        module = import_module(module_name)
-        applier = getattr(module, function_name)
-        if not callable(applier):
-            raise TypeError(
-                f"review gate timeout applier is not callable: {self.timeout_applier}"
-            )
-        return cast(TimeoutApplier, applier)
 
     def load_interrupt_context_builder(
         self,
@@ -89,6 +89,65 @@ class ReviewGateDeclaration:
                 f"{self.interrupt_context_builder}"
             )
         return cast(InterruptContextBuilder, builder)
+
+    def load_prepare_application(self) -> PrepareApplication:
+        return cast(PrepareApplication, self._load_callable(self.prepare_application))
+
+    def load_validate_intent_request(self) -> IntentRequestValidator:
+        return cast(
+            IntentRequestValidator,
+            self._load_callable(self.validate_intent_request),
+        )
+
+    def load_apply_application(self) -> ApplyApplication:
+        return cast(ApplyApplication, self._load_callable(self.apply_application))
+
+    def load_timeout_request_normalizer(self) -> TimeoutRequestNormalizer | None:
+        if not self.normalize_timeout_request:
+            return None
+        return cast(
+            TimeoutRequestNormalizer,
+            self._load_callable(self.normalize_timeout_request),
+        )
+
+    def decode_effect(self, value: Any) -> BaseModel:
+        module_name, class_name = self.effect_model.rsplit(":", 1)
+        model = getattr(import_module(module_name), class_name)
+        if not isinstance(model, type) or not issubclass(model, BaseModel):
+            raise TypeError(
+                f"review gate effect_model is not a Pydantic model: {self.effect_model}"
+            )
+        return model.model_validate(value)
+
+    def decode_intent_metadata(self, value: Any) -> BaseModel:
+        module_name, class_name = self.intent_metadata_model.rsplit(":", 1)
+        model = getattr(import_module(module_name), class_name)
+        if not isinstance(model, type) or not issubclass(model, BaseModel):
+            raise TypeError(
+                "review gate intent_metadata_model is not a Pydantic model: "
+                f"{self.intent_metadata_model}"
+            )
+        return model.model_validate(value)
+
+    def required_resume_fields_for(self, decision: str) -> tuple[str, ...]:
+        return tuple(self.required_resume_fields_by_decision.get(decision, ()))
+
+    def declared_resume_fields(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                field_name
+                for fields in self.required_resume_fields_by_decision.values()
+                for field_name in fields
+            )
+        )
+
+    @staticmethod
+    def _load_callable(path: str) -> Callable[..., Any]:
+        module_name, function_name = path.rsplit(":", 1)
+        function = getattr(import_module(module_name), function_name)
+        if not callable(function):
+            raise TypeError(f"review gate hook is not callable: {path}")
+        return cast(Callable[..., Any], function)
 
 
 _DECLARATIONS: dict[tuple[DomainStage, str], ReviewGateDeclaration] = {}
@@ -183,78 +242,29 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
     return get_review_gate(stage, gate_id).prompt_bundle
 
 
-def apply_review_gate_decision(
-    state: TopLevelState,
-    request: Any,
-    *,
-    verified_inputs: "FrozenInputBundle | None" = None,
-) -> StateUpdate:
-    _validate_review_occurrence(state, request)
-    gate_id = getattr(request, "gate_id", None)
-    active_interrupt = state.get("active_interrupt")
-    if active_interrupt and active_interrupt.get("gate_id") == "parameter_approval":
-        if gate_id != "parameter_approval":
-            raise ValueError(
-                "parameter approval resume requires explicit gate_id=parameter_approval"
-            )
-    elif active_interrupt:
-        gate_id = active_interrupt.get("gate_id") or gate_id
-    gate = get_review_gate(request.stage, gate_id)
-    applier = gate.load_decision_applier()
-    if gate.decision_applier == (
-        "app.stages.inventory.nodes:apply_inventory_resume_decision"
-    ):
-        return cast(Callable[..., StateUpdate], applier)(
-            state,
-            request,
-            verified_inputs=verified_inputs,
-        )
-    return applier(state, request)
-
-
-def apply_review_gate_timeout(
-    state: TopLevelState, request: Any, timeout: dict[str, Any]
-) -> StateUpdate | None:
-    _validate_review_occurrence(state, request)
-    gate_id = getattr(request, "gate_id", None)
-    active_interrupt = state.get("active_interrupt")
-    if active_interrupt:
-        gate_id = active_interrupt.get("gate_id") or gate_id
-    gate = get_review_gate(request.stage, gate_id)
-    applier = gate.load_timeout_applier()
-    if applier is None:
-        return None
-    return applier(state, request, timeout)
-
-
-def _validate_review_occurrence(state: TopLevelState, request: Any) -> None:
-    """Reject a review resume targeting another workflow occurrence."""
-
-    stage = getattr(request, "stage", None)
-    if not isinstance(stage, str) or not stage:
-        raise ValueError("review request has no stage")
-    current_step_id = current_workflow_step_id(state, expected_stage=stage)
-    active_interrupt = state.get("active_interrupt")
-    if not active_interrupt:
-        return
-    if active_interrupt.get("stage") != stage:
-        raise ValueError("active review interrupt stage does not match the request")
-    interrupt_step_id = active_interrupt.get("workflow_step_id")
-    if not isinstance(interrupt_step_id, str) or not interrupt_step_id:
-        raise ValueError("active review interrupt has no workflow_step_id")
-    if interrupt_step_id != current_step_id:
-        raise ValueError("active review interrupt targets a different workflow step")
-
-
 register_review_gate(
     ReviewGateDeclaration(
         stage="assembly",
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),
-        decision_applier=(
-            "app.stages.assembly.parameters.workflow:apply_parameter_approval_decision"
+        intent_metadata_model="app.review.approval:ParameterApprovalMetadataV1",
+        validate_intent_request=(
+            "app.stages.assembly.parameters.workflow:"
+            "validate_assembly_parameter_intent_request"
         ),
-        timeout_applier="app.review.approval:apply_parameter_approval_timeout",
+        effect_kind="assembly.parameter_approval.v1",
+        effect_model="app.review.approval:ParameterApprovalEffectV1",
+        prepare_application=(
+            "app.stages.assembly.parameters.workflow:"
+            "prepare_parameter_approval_application"
+        ),
+        apply_application=(
+            "app.stages.assembly.parameters.workflow:"
+            "apply_parameter_approval_application"
+        ),
+        normalize_timeout_request=(
+            "app.review.approval:normalize_parameter_approval_timeout_request"
+        ),
         prompt_adapter="generic",
         template_preferred_decision="approve_parameters",
         proposal_kind="parameter_recommendation",
@@ -269,7 +279,16 @@ register_review_gate(
         stage="inventory",
         gate_id="inventory_review",
         decisions_allowed=("continue", "stop_human_review"),
-        decision_applier="app.stages.inventory.nodes:apply_inventory_resume_decision",
+        intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+        validate_intent_request=(
+            "app.stages.inventory.nodes:validate_inventory_review_intent_request"
+        ),
+        effect_kind="inventory.review_application.v1",
+        effect_model="app.stages.inventory.nodes:InventoryReviewApplicationEffectV1",
+        prepare_application=(
+            "app.stages.inventory.nodes:prepare_inventory_review_application"
+        ),
+        apply_application="app.stages.inventory.nodes:apply_inventory_review_application",
         template_preferred_decision="continue",
     )
 )
@@ -286,14 +305,33 @@ register_review_gate(
             "continue_low_confidence",
             "stop_human_review",
         ),
-        decision_applier="app.stages.assembly_review.nodes:apply_assembly_review_resume_decision",
+        intent_metadata_model=(
+            "app.stages.assembly_review.nodes:AssemblyReviewIntentMetadataV1"
+        ),
+        validate_intent_request=(
+            "app.stages.assembly_review.nodes:validate_assembly_review_intent_request"
+        ),
+        effect_kind="assembly_review.review_application.v1",
+        effect_model="app.stages.assembly_review.nodes:AssemblyReviewEffectV1",
+        prepare_application=(
+            "app.stages.assembly_review.nodes:prepare_assembly_review_application"
+        ),
+        apply_application=(
+            "app.stages.assembly_review.nodes:apply_assembly_review_application"
+        ),
         interrupt_context_builder=(
             "app.review.interrupt_context:assembly_review_interrupt_context"
         ),
         prompt_bundle="review.assembly_review_recommend",
         prompt_adapter="assembly_review",
         template_preferred_decision="accept",
-        required_resume_fields=("candidate_id",),
+        required_resume_fields_by_decision={
+            "accept": ("candidate_id",),
+            "pass": ("candidate_id",),
+            "purge": ("candidate_id",),
+            "polish": ("candidate_id",),
+            "continue_low_confidence": ("candidate_id",),
+        },
         proposal_kind="assembly_candidate_review",
         proposal_label="Assembly result and evidence review",
         parameter_recommendation_status="mixed",
@@ -315,11 +353,26 @@ register_review_gate(
             "select_hifi",
             "stop_human_review",
         ),
-        decision_applier="app.stages.assembly.nodes:apply_route_decision",
+        intent_metadata_model=(
+            "app.stages.assembly.nodes:AssemblyRouteSelectionMetadataV1"
+        ),
+        validate_intent_request=(
+            "app.stages.assembly.nodes:validate_route_selection_intent_request"
+        ),
+        effect_kind="assembly.route_selection.v1",
+        effect_model=(
+            "app.stages.assembly.nodes:AssemblyRouteSelectionApplicationEffectV1"
+        ),
+        prepare_application=(
+            "app.stages.assembly.nodes:prepare_route_selection_application"
+        ),
+        apply_application="app.stages.assembly.nodes:apply_route_selection_application",
         interrupt_context_builder=(
             "app.review.interrupt_context:assembly_route_selection_interrupt_context"
         ),
-        timeout_applier="app.stages.assembly.nodes:apply_selection_timeout",
+        normalize_timeout_request=(
+            "app.stages.assembly.nodes:normalize_selection_timeout_request"
+        ),
         prompt_adapter="generic",
         template_preferred_decision="select_ont",
         plan_order=10,
@@ -331,11 +384,24 @@ register_review_gate(
         stage="hic_scaffolding",
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),
-        decision_applier=(
+        intent_metadata_model="app.review.approval:ParameterApprovalMetadataV1",
+        validate_intent_request=(
             "app.stages.hic_scaffolding.parameters.workflow:"
-            "apply_autohic_parameter_approval_decision"
+            "validate_autohic_parameter_intent_request"
         ),
-        timeout_applier="app.review.approval:apply_parameter_approval_timeout",
+        effect_kind="hic_scaffolding.parameter_approval.v1",
+        effect_model="app.review.approval:ParameterApprovalEffectV1",
+        prepare_application=(
+            "app.stages.hic_scaffolding.parameters.workflow:"
+            "prepare_autohic_parameter_approval_application"
+        ),
+        apply_application=(
+            "app.stages.hic_scaffolding.parameters.workflow:"
+            "apply_autohic_parameter_approval_application"
+        ),
+        normalize_timeout_request=(
+            "app.review.approval:normalize_parameter_approval_timeout_request"
+        ),
         interrupt_context_builder=(
             "app.review.interrupt_context:hic_scaffolding_interrupt_context"
         ),
@@ -358,7 +424,20 @@ register_review_gate(
             "request_parameter_retry",
             "stop_human_review",
         ),
-        decision_applier="app.stages.hic_scaffolding.nodes:apply_hic_scaffolding_resume_decision",
+        intent_metadata_model=("app.review.application:ForegroundReviewMetadataV1"),
+        validate_intent_request=(
+            "app.stages.hic_scaffolding.nodes:"
+            "validate_hic_scaffolding_review_intent_request"
+        ),
+        effect_kind="hic_scaffolding.review_application.v1",
+        effect_model=("app.stages.hic_scaffolding.nodes:HiCScaffoldingReviewEffectV1"),
+        prepare_application=(
+            "app.stages.hic_scaffolding.nodes:"
+            "prepare_hic_scaffolding_review_application"
+        ),
+        apply_application=(
+            "app.stages.hic_scaffolding.nodes:apply_hic_scaffolding_review_application"
+        ),
         interrupt_context_builder=(
             "app.review.interrupt_context:hic_scaffolding_interrupt_context"
         ),
@@ -377,10 +456,23 @@ register_review_gate(
         stage="t2t",
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),
-        decision_applier=(
-            "app.stages.t2t.parameters.workflow:apply_t2t_parameter_approval_decision"
+        intent_metadata_model="app.review.approval:ParameterApprovalMetadataV1",
+        validate_intent_request=(
+            "app.stages.t2t.parameters.workflow:validate_t2t_parameter_intent_request"
         ),
-        timeout_applier="app.review.approval:apply_parameter_approval_timeout",
+        effect_kind="t2t.parameter_approval.v1",
+        effect_model="app.review.approval:ParameterApprovalEffectV1",
+        prepare_application=(
+            "app.stages.t2t.parameters.workflow:"
+            "prepare_t2t_parameter_approval_application"
+        ),
+        apply_application=(
+            "app.stages.t2t.parameters.workflow:"
+            "apply_t2t_parameter_approval_application"
+        ),
+        normalize_timeout_request=(
+            "app.review.approval:normalize_parameter_approval_timeout_request"
+        ),
         prompt_adapter="generic",
         template_preferred_decision="approve_parameters",
         proposal_kind="parameter_recommendation",
@@ -399,10 +491,17 @@ register_review_gate(
             "continue_without_patch",
             "stop_pipeline",
         ),
-        decision_applier="app.stages.t2t.nodes:apply_t2t_review_decision",
+        intent_metadata_model=("app.review.application:ForegroundReviewMetadataV1"),
+        validate_intent_request=("app.stages.t2t.nodes:validate_t2t_intent_request"),
+        effect_kind="t2t.review_application.v1",
+        effect_model="app.stages.t2t.nodes:T2TReviewEffectV1",
+        prepare_application="app.stages.t2t.nodes:prepare_t2t_review_application",
+        apply_application="app.stages.t2t.nodes:apply_t2t_review_application",
         prompt_adapter="t2t",
         template_preferred_decision="accept_selected_candidates",
-        required_resume_fields=("candidate_ids",),
+        required_resume_fields_by_decision={
+            "accept_selected_candidates": ("candidate_ids",),
+        },
         proposal_kind="finishing_candidate_review",
         proposal_label="T2T finishing candidate review",
         parameter_recommendation_status="implemented",

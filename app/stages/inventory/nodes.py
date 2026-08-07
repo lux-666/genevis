@@ -10,13 +10,29 @@ import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
+from pydantic import (
+    JsonValue as PydanticJsonValue,
+)
 from typing_extensions import TypedDict
 
+from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.integrity import sha256_file
+from app.review.application import (
+    PreparedReviewApplication,
+    ReviewIntentV1,
+    VerifiedReviewApplication,
+)
+from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
     ReviewPersistenceError,
     load_review_request,
@@ -48,9 +64,65 @@ from app.storage.assembly_candidates import publish_registered_assembly_candidat
 from app.storage.frozen_inputs import (
     FrozenInputBundle,
     RegisteredReadDeclaration,
+    validate_frozen_inputs,
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+
+
+class InventoryResourceEffectV1(BaseModel):
+    """One bounded inventory resource projection prepared for checkpoint apply."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    resource_name: str = Field(min_length=1, max_length=128)
+    resource_type: str = Field(min_length=1, max_length=128)
+    paths: tuple[str, ...] = Field(min_length=1, max_length=10_000)
+    source_stage: str | None = None
+    workflow_step_id: str | None = None
+    metadata: dict[str, PydanticJsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_resource_ref(self) -> "InventoryResourceEffectV1":
+        ResourceRef.from_dict(
+            {
+                "resource_type": self.resource_type,
+                "paths": list(self.paths),
+                "source_stage": self.source_stage,
+                "workflow_step_id": self.workflow_step_id,
+                "metadata": self.metadata,
+            }
+        )
+        return self
+
+
+class InventoryReviewApplicationEffectV1(BaseModel):
+    """Typed durable effect for the ``inventory_review`` gate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    decision: Literal["continue", "stop_human_review"]
+    asset_registry_ref: ArtifactRef | None = None
+    registered_asset_ids: tuple[str, ...] = Field(default=(), max_length=10_000)
+    resources: tuple[InventoryResourceEffectV1, ...] = Field(default=(), max_length=32)
+
+    @model_validator(mode="after")
+    def validate_decision_effect(self) -> "InventoryReviewApplicationEffectV1":
+        if self.decision == "continue":
+            if self.asset_registry_ref is None:
+                raise ValueError(
+                    "inventory continue effect requires asset_registry_ref"
+                )
+            if not self.registered_asset_ids:
+                raise ValueError("inventory continue effect requires registered assets")
+        elif (
+            self.asset_registry_ref is not None
+            or self.registered_asset_ids
+            or self.resources
+        ):
+            raise ValueError("inventory stop effect must not include registration data")
+        return self
 
 
 def _build_asset_records(
@@ -636,20 +708,18 @@ def commit_inventory(state: TopLevelState) -> StateUpdate:
     }
 
 
-def apply_inventory_resume_decision(
+def prepare_inventory_review_application(
     state: TopLevelState,
-    request: Any,
-    *,
-    verified_inputs: FrozenInputBundle | None = None,
-) -> StateUpdate:
-    """Apply a human inventory review decision."""
-    review_request_id, review_request_hash, review_request_ref = (
-        _inventory_review_binding(state, request)
+    intent: ReviewIntentV1,
+) -> PreparedReviewApplication:
+    """Durably prepare the inventory gate effect before checkpoint apply."""
+
+    _validate_inventory_intent(state, intent)
+    review_request_id, review_request_hash, review_request_ref, request_record = (
+        _inventory_review_binding(state, intent)
     )
-    resume_inputs = (
-        _require_verified_inputs(verified_inputs, state=state)
-        if request.decision in {"continue", "accept"}
-        else None
+    request = validate_inventory_review_intent_request(
+        state, intent.request, request_record
     )
     decision_ref = persist_review_decision(
         state["data_dir"],
@@ -663,68 +733,173 @@ def apply_inventory_resume_decision(
         method_name="inventory.contract",
         artifact_type="inventory.review_decision",
     )
-    Ledger(state["data_dir"]).record_review_decision(
-        state["session_id"],
-        "inventory",
-        decision=request.decision,
-        artifact_ref=decision_ref.model_dump(mode="json"),
-        notes=list(getattr(request, "notes", []) or []),
-        metadata=dict(getattr(request, "metadata", {}) or {}),
-        decided_by=getattr(request, "decided_by", "human"),
-        rationale_artifact_ref=getattr(request, "rationale_artifact_ref", None),
-        review_request_id=review_request_id,
+    if request.decision == "stop_human_review":
+        return PreparedReviewApplication(
+            effect_kind="inventory.review_application.v1",
+            effect=InventoryReviewApplicationEffectV1(
+                decision="stop_human_review",
+            ),
+            decision_ref=decision_ref,
+        )
+
+    # Resume preparation independently re-verifies the durable frozen-input
+    # contract.  The compiled graph's ephemeral bundle is deliberately not a
+    # review-gate input.
+    bundle = validate_frozen_inputs(SessionPaths.from_run_dir(state["data_dir"]))
+    _require_verified_inputs(bundle, state=state)
+    restored = update_inventory_stage_output(state, {"status": "validated"})
+    validated_state = validate_top_level_state({**state, **dict(restored)})
+    registration = register_assets(validated_state, verified_inputs=bundle)
+    registry_ref = ArtifactRef.model_validate(registration["asset_registry_ref"])
+    registered_assets = registration["stage_outputs"]["inventory"].get(
+        "registered_assets", []
     )
-    if request.decision in {"stop_human_review", "stop"}:
+    if not isinstance(registered_assets, list) or not all(
+        isinstance(asset_id, str) for asset_id in registered_assets
+    ):
+        raise ValueError("inventory registration produced invalid registered_assets")
+    registered_asset_ids = [str(asset_id) for asset_id in registered_assets]
+    resources = _inventory_resource_effects(registration.get("resource_refs", {}))
+    effect = InventoryReviewApplicationEffectV1(
+        decision="continue",
+        asset_registry_ref=registry_ref,
+        registered_asset_ids=tuple(registered_asset_ids),
+        resources=resources,
+    )
+    return PreparedReviewApplication(
+        effect_kind="inventory.review_application.v1",
+        effect=effect,
+        decision_ref=decision_ref,
+    )
+
+
+def apply_inventory_review_application(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> StateUpdate:
+    """Purely project a verified inventory application into checkpoint state."""
+
+    effect = application.effect
+    if not isinstance(effect, InventoryReviewApplicationEffectV1):
+        raise TypeError("inventory review application has an unexpected effect")
+    if application.application.effect_kind != "inventory.review_application.v1":
+        raise ValueError("inventory review application has an unexpected effect_kind")
+    _validate_inventory_application_state(state, application)
+
+    if effect.decision == "stop_human_review":
         return {
             "current_stage": "inventory",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
             "last_error": "inventory review stopped by human decision",
         }
-    if request.decision not in {"continue", "accept"}:
-        raise ValueError(f"unsupported inventory decision: {request.decision}")
 
-    # The review gate temporarily changes the status to ``blocked_human``.
-    # Asset registration still consumes the already-validated inventory
-    # payload, so restore that control status before invoking it.  This is a
-    # state transition only; no validation or selection policy is repeated.
-    restored = update_inventory_stage_output(state, {"status": "validated"})
-    validated_state = validate_top_level_state({**state, **dict(restored)})
-    register_update = register_assets(
-        validated_state,
-        verified_inputs=resume_inputs,
-    )
-    registered_state = validate_top_level_state(
-        {**validated_state, **dict(register_update)}
-    )
-    commit_update = commit_inventory(registered_state)
-    decision_update = update_inventory_stage_output(
-        registered_state,
+    if effect.asset_registry_ref is None:
+        raise ValueError("inventory continue application is missing asset_registry_ref")
+    stage_update = update_inventory_stage_output(
+        state,
         {
-            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
+            "status": "completed",
+            "registered_assets": list(effect.registered_asset_ids),
         },
     )
-    result: StateUpdate = {}
-    result.update(register_update)
-    result.update(commit_update)
-    result["stage_outputs"] = decision_update["stage_outputs"]
-    result["active_interrupt"] = None
-    return result
+    commit_update = commit_inventory(state)
+    return {
+        **stage_update,
+        **commit_update,
+        "asset_registry_ref": effect.asset_registry_ref.model_dump(mode="json"),
+        "resource_refs": _resource_refs_from_effect(effect.resources),
+        "active_interrupt": None,
+    }
+
+
+def _validate_inventory_intent(state: TopLevelState, intent: ReviewIntentV1) -> None:
+    if intent.stage != "inventory" or intent.gate_id != "inventory_review":
+        raise ValueError(
+            "inventory review application requires inventory/inventory_review"
+        )
+    if intent.session_id != state["session_id"]:
+        raise ValueError("inventory review intent session_id does not match state")
+    if intent.workflow_step_id != current_workflow_step_id(
+        state, expected_stage="inventory"
+    ):
+        raise ValueError(
+            "inventory review intent workflow_step_id does not match state"
+        )
+
+
+def validate_inventory_review_intent_request(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    request_record: Mapping[str, Any],
+) -> ResumeReviewRequest:
+    """Validate one inventory decision before its intent is persisted.
+
+    The coordinator supplies a verified immutable request record.  This helper
+    deliberately only reads state and returns the request unchanged so the
+    same checks can be repeated immediately before prepare writes artifacts.
+    """
+
+    if request.session_id != state["session_id"]:
+        raise ResumeValidationError("inventory review request session_id mismatch")
+    if request.stage != "inventory" or request.gate_id != "inventory_review":
+        raise ResumeValidationError(
+            "inventory review requires inventory/inventory_review"
+        )
+    workflow_step_id = current_workflow_step_id(state, expected_stage="inventory")
+    active_interrupt = state.get("active_interrupt")
+    if not isinstance(active_interrupt, Mapping):
+        raise ResumeValidationError("inventory review requires an active_interrupt")
+    try:
+        request_ref = ArtifactRef.model_validate(active_interrupt.get("request_ref"))
+    except (TypeError, ValueError) as exc:
+        raise ResumeValidationError(
+            "inventory review active_interrupt has no valid request_ref"
+        ) from exc
+    if (
+        request.review_request_id != active_interrupt.get("review_request_id")
+        or request.review_request_hash != active_interrupt.get("request_hash")
+        or request.review_request_hash != request_ref.sha256
+        or active_interrupt.get("workflow_step_id") != workflow_step_id
+        or request_record.get("review_request_id") != request.review_request_id
+        or request_record.get("stage") != "inventory"
+        or request_record.get("gate_id") != "inventory_review"
+        or request_record.get("workflow_step_id") != workflow_step_id
+    ):
+        raise ResumeValidationError("inventory review request binding mismatch")
+    if request.decision not in {"continue", "stop_human_review"}:
+        raise ResumeValidationError(
+            f"unsupported inventory decision: {request.decision}"
+        )
+    return request
+
+
+def _validate_inventory_application_state(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> None:
+    identity = application.application
+    if identity.session_id != state["session_id"]:
+        raise ValueError("inventory review application session_id does not match state")
+    if identity.stage != "inventory" or identity.gate_id != "inventory_review":
+        raise ValueError("inventory review application has an unexpected gate")
+    if identity.workflow_step_id != current_workflow_step_id(
+        state, expected_stage="inventory"
+    ):
+        raise ValueError(
+            "inventory review application workflow_step_id does not match state"
+        )
 
 
 def _inventory_review_binding(
-    state: TopLevelState, request: Any
-) -> tuple[str, str, ArtifactRef]:
-    """Return the verified, immutable request binding for inventory decisions."""
+    state: TopLevelState, intent: ReviewIntentV1
+) -> tuple[str, str, ArtifactRef, dict[str, Any]]:
+    """Return the verified, immutable request binding for inventory intent."""
 
     active_interrupt: Mapping[str, Any] = state.get("active_interrupt") or {}
     inventory_out = read_inventory_stage_output(state)
-    review_request_id = getattr(
-        request, "review_request_id", None
-    ) or active_interrupt.get("review_request_id")
-    review_request_hash = getattr(
-        request, "review_request_hash", None
-    ) or active_interrupt.get("request_hash")
+    review_request_id = intent.review_request_id
+    review_request_hash = intent.request_hash
     request_ref_value = active_interrupt.get("request_ref") or inventory_out.get(
         "review_request_artifact_ref"
     )
@@ -746,9 +921,48 @@ def _inventory_review_binding(
         or request_record.get("stage") != "inventory"
         or request_record.get("gate_id") != "inventory_review"
         or request_record.get("workflow_step_id") != workflow_step_id
+        or workflow_step_id != intent.workflow_step_id
     ):
         raise ValueError("inventory review request binding mismatch")
-    return str(review_request_id), str(review_request_hash), request_ref
+    return str(review_request_id), str(review_request_hash), request_ref, request_record
+
+
+def _inventory_resource_effects(
+    resource_refs: object,
+) -> tuple[InventoryResourceEffectV1, ...]:
+    if not isinstance(resource_refs, Mapping):
+        raise ValueError("inventory registration produced invalid resource_refs")
+    effects: list[InventoryResourceEffectV1] = []
+    for resource_name, raw_ref in sorted(resource_refs.items()):
+        if not isinstance(resource_name, str) or not isinstance(raw_ref, Mapping):
+            raise ValueError("inventory registration produced invalid resource ref")
+        resource = ResourceRef.from_dict(raw_ref)
+        effects.append(
+            InventoryResourceEffectV1(
+                resource_name=resource_name,
+                resource_type=resource.resource_type,
+                paths=tuple(resource.paths),
+                source_stage=resource.source_stage,
+                workflow_step_id=resource.workflow_step_id,
+                metadata=resource.metadata,
+            )
+        )
+    return tuple(effects)
+
+
+def _resource_refs_from_effect(
+    resources: tuple[InventoryResourceEffectV1, ...],
+) -> ResourceRefs:
+    return {
+        resource.resource_name: ResourceRef(
+            resource_type=resource.resource_type,
+            paths=list(resource.paths),
+            source_stage=resource.source_stage,
+            workflow_step_id=resource.workflow_step_id,
+            metadata=dict(resource.metadata),
+        ).to_dict()
+        for resource in resources
+    }
 
 
 class _ResourceMetadataAccumulator(TypedDict):

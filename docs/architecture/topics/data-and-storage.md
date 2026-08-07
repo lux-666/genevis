@@ -35,9 +35,9 @@ interchangeable copies of one database.
 | Asset registry | Identity, declaration provenance, platform/format, path, and verification facts for inventory-registered external input members | Which derived output is currently adopted by later stages |
 | Immutable artifacts | Exact evidence and produced file bytes for recommendations, reviews, commands, executions, and biological outputs | Causal ordering by themselves |
 | Artifact index | Run-local artifact location, type, hash, size, producer identity, and compact dependency metadata | Business status, review decisions, model reasoning, or workflow routing |
-| Ledger | Idempotent causal events and their order, with refs to the evidence that proves each transition | Evidence bodies, asset registries, result tables, or the latest resume cursor |
+| Ledger | Idempotent causal events, shared review-status facts, and the one canonical terminal singleton, with refs to evidence | Evidence bodies, asset registries, result tables, or the latest resume cursor |
 | Checkpoint | The latest bounded control frontier and compact refs needed to continue | Audit history, durable business truth, reports, logs, commands, or model payloads |
-| Reports | Operator/read-model projections; session summaries are regenerable from durable records, while current-status and Assembly Review gaps are tracked below | Workflow control, artifact identity, causal events, or resume |
+| Reports | Operator/read-model projections; session summaries are regenerable from durable records, while current-status and Assembly Review gaps are tracked below | Workflow control, artifact identity, causal events, review status, or resume |
 
 This ownership split is the core rule. A small immutable projection may appear
 outside its owner for routing or display, but the projection does not become a
@@ -47,11 +47,12 @@ belong to the [run-data contract](../reference/data-contract.md).
 ## Progress is direct consumption, not another store
 
 Interactive execution introduces no durable progress projection. While a
-process is attached, the terminal consumes the verified
-frozen workflow plan and current compact graph control state directly at the
-parent-controller boundary. After detachment, `inspect` consumes the verified
-frozen plan, Ledger occurrence events, checkpoint summary, and the existing
-execution lock directly.
+process is attached, the terminal consumes the scalar-only
+`progress_projection_input` derived from the verified frozen workflow plan and
+current compact graph control state at the parent-controller boundary. After
+detachment, `inspect` consumes the verified frozen plan, Ledger occurrence
+events, SQLite checkpoint availability, and the execution progress marker/lock
+directly; checkpoint contents do not independently define status authority.
 
 Counts such as `finished=2/5` are presentation-time arithmetic. They are not
 written to an artifact, report, Ledger event, checkpoint field, progress table,
@@ -105,14 +106,15 @@ attempt bodies. Most stages add typed cursor adapters, but the central boundary
 does not yet impose one universal schema on every stage-local cursor. Do not
 claim that stronger invariant.
 
-The report subsystem's current-status and session-summary projections have
-source watermarks and no ledger or artifact-index side effects. Deleting a
-report must not alter resume or audit truth. Session-summary views are
-regenerated from the Ledger and indexed artifacts. The current-status writer
-also consumes the live compact result supplied at a blocked or failed boundary.
-The stage-owned `assembly_review.md` projection is generated from live stage
-state and its indexed review packet and does not currently embed the standard
-watermark. Both limitations are recorded in
+Reports run behind `ProjectionBoundary`: a normal projection failure is retained
+as a bounded operational warning and cannot alter review status, checkpoint,
+Ledger terminal authority, or resume outcome. Deleting a report must not alter
+resume or audit truth. Session-summary views are regenerated from the Ledger
+and indexed artifacts. The current-status writer still consumes the live compact
+result supplied at a blocked or failed boundary. The stage-owned
+`assembly_review.md` projection is generated from live stage state and its
+indexed review packet and does not currently embed the standard watermark. Both
+regeneration limitations are recorded in
 [architecture conformance](../reference/conformance.md).
 
 ## Current limits and debt

@@ -111,8 +111,8 @@ def persist_review_request(
             "frozen RunConfig policy"
         )
     request_body["max_blocked_seconds"] = effective_wait
-    portable_payload = _portable_value(paths, request_body)
-    portable_bindings = _portable_value(paths, dict(bindings or {}))
+    portable_payload = portable_review_value(paths, request_body)
+    portable_bindings = portable_review_value(paths, dict(bindings or {}))
     identity_payload = {
         "schema_version": 2,
         "workflow_step_id": workflow_step_id,
@@ -122,7 +122,7 @@ def persist_review_request(
         "bindings": portable_bindings,
         "payload": portable_payload,
     }
-    identity_bytes = _canonical_bytes(identity_payload)
+    identity_bytes = canonical_review_bytes(identity_payload)
     review_request_id = f"review_{sha256(identity_bytes).hexdigest()[:24]}"
     record = {
         **identity_payload,
@@ -131,7 +131,7 @@ def persist_review_request(
     destination = paths.workflow_step_artifact_path(
         workflow_step_id, stage, "reviews", review_request_id, "request.json"
     )
-    ref = _publish_json(
+    ref = publish_review_json_record(
         paths,
         session_id=state["session_id"],
         destination=destination,
@@ -210,7 +210,7 @@ def persist_review_recommendation(
         "review_request_id": review_request_id,
         "request_ref": ref.model_dump(mode="json"),
         "request_hash": request_hash,
-        **_portable_value(paths, recommendation_body),
+        **portable_review_value(paths, recommendation_body),
     }
     destination = paths.workflow_step_artifact_path(
         workflow_step_id,
@@ -219,7 +219,7 @@ def persist_review_recommendation(
         review_request_id,
         "recommendation.json",
     )
-    return _publish_json(
+    return publish_review_json_record(
         paths,
         session_id=session_id,
         destination=destination,
@@ -288,12 +288,12 @@ def persist_review_decision(
             if validated_request_ref is not None
             else None
         ),
-        "decision": _portable_value(paths, _dump_payload(decision)),
+        "decision": portable_review_value(paths, _dump_payload(decision)),
     }
     destination = paths.workflow_step_artifact_path(
         workflow_step_id, stage, "reviews", review_request_id, "decision.json"
     )
-    return _publish_json(
+    return publish_review_json_record(
         paths,
         session_id=session_id,
         destination=destination,
@@ -343,7 +343,7 @@ def _paths_for_state(state: TopLevelState) -> SessionPaths:
     return paths
 
 
-def _publish_json(
+def publish_review_json_record(
     paths: SessionPaths,
     *,
     session_id: str,
@@ -410,13 +410,15 @@ def _validate_optional_ref(
     )
 
 
-def _portable_value(paths: SessionPaths, value: Any) -> Any:
+def portable_review_value(paths: SessionPaths, value: Any) -> Any:
     if hasattr(value, "model_dump"):
-        return _portable_value(paths, value.model_dump(mode="json"))
+        return portable_review_value(paths, value.model_dump(mode="json"))
     if isinstance(value, Mapping):
-        return {str(key): _portable_value(paths, item) for key, item in value.items()}
+        return {
+            str(key): portable_review_value(paths, item) for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [_portable_value(paths, item) for item in value]
+        return [portable_review_value(paths, item) for item in value]
     if isinstance(value, Path):
         value = str(value)
     if isinstance(value, str):
@@ -529,7 +531,7 @@ def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) ->
         "payload": body,
     }
     expected_id = (
-        f"review_{sha256(_canonical_bytes(identity_payload)).hexdigest()[:24]}"
+        f"review_{sha256(canonical_review_bytes(identity_payload)).hexdigest()[:24]}"
     )
     if request_id != expected_id:
         raise ReviewPersistenceError(
@@ -537,7 +539,7 @@ def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) ->
         )
 
 
-def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
+def canonical_review_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(
         payload,
         ensure_ascii=False,

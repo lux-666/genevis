@@ -16,7 +16,7 @@ Required fields:
   "rejected_candidates": [],
   "notes": ["short rationale string; notes must be an array of strings"],
   "metadata": {
-    "evidence_refs": ["artifact refs used for the recommendation"],
+    "evidence_refs": ["verified run-relative file refs copied from the review request"],
     "available_signals": ["signal names whose status is available"],
     "missing_or_pending_signals": ["signal names whose status is pending/missing/failed"]
   }
@@ -31,6 +31,7 @@ Rules:
 - `notes` MUST be a JSON array of strings, never a single string.
 - `rejected_candidates` MUST be a JSON array, even when empty.
 - `metadata` MUST be a JSON object.
+- Every `metadata.evidence_refs` value MUST be a normalized run-relative file ref already present in the review request. Never emit an absolute path, `..`, or an invented file.
 - Do not invent biological thresholds.
 - `review_request_json.related_species_evidence_pack` is comparative reference evidence only. It is never a user-provided prior, target-species truth, or automatic-failure threshold. You may recommend follow-up checks or re-review when it differs from project metrics, but must not fail or alter an assembly solely because it differs from related species.
 - Do not invent evidence, candidates, methods, or artifact refs.
@@ -51,7 +52,7 @@ Example conservative output when only partial evidence exists:
   "rejected_candidates": [],
   "notes": ["Only QUAST evidence is available; BUSCO and contamination_check are pending, so a human should confirm before continuing."],
   "metadata": {
-    "evidence_refs": ["/path/to/quast_summary.json"],
+    "evidence_refs": ["artifacts/steps/step-002-assembly_review/assembly_review/quast_summary.json"],
     "available_signals": ["quast"],
     "missing_or_pending_signals": ["busco", "contamination_check"]
   }

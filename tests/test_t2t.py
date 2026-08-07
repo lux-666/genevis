@@ -11,12 +11,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError, resume_review_state
+from app.control.lifecycle import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
 from app.integrity import sha256_file
+from app.review.application import (
+    ReviewApplicationIdentity,
+    ReviewApplicationIntegrityError,
+    ReviewIntentConflictError,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
-from app.schemas.artifacts import ArtifactMeta
+from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
@@ -24,17 +32,24 @@ from app.schemas.state import initial_state
 from app.stages.t2t.builder import build_stage
 from app.stages.t2t.nodes import (
     _CANDIDATE_FIELDS,
+    T2TReviewEffectV1,
     _candidate_rows,
     _materialize_t2t_patches,
     _t2t_adoption_decision_ref,
+    apply_t2t_review_application,
     build_t2t_candidates,
     commit_t2t,
+    prepare_t2t_review_application,
     scan_read_telomeres,
 )
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.execution import (
     T2TExecutionThresholds,
     T2TFrozenExecutionInputs,
+)
+from app.stages.t2t.parameters.workflow import (
+    apply_t2t_parameter_approval_application,
+    prepare_t2t_parameter_approval_application,
 )
 from app.storage.artifacts import publish_artifact_record, read_artifact_records
 from app.storage.assembly_candidates import (
@@ -107,6 +122,71 @@ class T2TDescriptorTests(unittest.TestCase):
 
 
 class T2TStageTests(unittest.TestCase):
+    def test_nonselection_review_clears_candidate_ids_without_reordering_notes(self):
+        from app.stages.t2t.nodes import validate_t2t_intent_request
+
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="t2t",
+            gate_id="t2t_review",
+            decision="continue_without_patch",
+            candidate_ids=["chr2:right", "chr1:left", "chr2:right"],
+            notes=["first note", "second note"],
+        )
+
+        canonical = validate_t2t_intent_request({}, request, {})
+
+        self.assertEqual(canonical.candidate_ids, [])
+        self.assertEqual(canonical.notes, ["first note", "second note"])
+
+    def test_accept_review_canonicalizes_and_validates_candidate_ids(self):
+        from app.stages.t2t.nodes import validate_t2t_intent_request
+
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="t2t",
+            gate_id="t2t_review",
+            decision="accept_selected_candidates",
+            candidate_ids=["chr2:right", "chr1:left", "chr2:right"],
+            notes=["first note", "second note"],
+        )
+        request_record = {
+            "payload": {
+                "candidates": [
+                    {"candidate_id": "chr1:left"},
+                    {"candidate_id": "chr2:right"},
+                ]
+            }
+        }
+
+        with patch(
+            "app.stages.t2t.nodes._selectable_t2t_candidate_ids",
+            return_value={"chr1:left", "chr2:right"},
+        ):
+            canonical = validate_t2t_intent_request({}, request, request_record)
+
+            self.assertEqual(canonical.candidate_ids, ["chr1:left", "chr2:right"])
+            self.assertEqual(canonical.notes, ["first note", "second note"])
+            with self.assertRaisesRegex(ResumeValidationError, "requires a human"):
+                validate_t2t_intent_request(
+                    {},
+                    request.model_copy(update={"decided_by": "auto_rule"}),
+                    request_record,
+                )
+            with self.assertRaisesRegex(ResumeValidationError, "immutable review"):
+                validate_t2t_intent_request(
+                    {},
+                    request.model_copy(update={"candidate_ids": ["unknown"]}),
+                    request_record,
+                )
+
+        with patch(
+            "app.stages.t2t.nodes._selectable_t2t_candidate_ids",
+            return_value={"chr1:left"},
+        ):
+            with self.assertRaisesRegex(ResumeValidationError, "current selectable"):
+                validate_t2t_intent_request({}, request, request_record)
+
     def _publish_assembly_input(
         self, state: dict, source_path: Path, *, label: str = "assembly"
     ) -> Path:
@@ -230,18 +310,34 @@ class T2TStageTests(unittest.TestCase):
                 "previous_attempt_id",
                 "recommendation_hash",
             )
-            update = resume_review_state(
+            request = ResumeReviewRequest(
+                session_id=result["session_id"],
+                stage="t2t",
+                gate_id="parameter_approval",
+                decision="approve_parameters",
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+                metadata={key: interrupt[key] for key in metadata_keys},
+            )
+            persisted_intent = persist_review_intent(
+                result, request, source="test_t2t_parameter_approval"
+            )
+            prepared = prepare_t2t_parameter_approval_application(
+                result, persisted_intent.intent
+            )
+            application_ref = persist_review_application(
                 result,
-                ResumeReviewRequest(
-                    session_id=result["session_id"],
-                    stage="t2t",
-                    gate_id="parameter_approval",
-                    decision="approve_parameters",
-                    review_request_id=interrupt["review_request_id"],
-                    review_request_hash=interrupt["request_hash"],
-                    metadata={key: interrupt[key] for key in metadata_keys},
+                intent=persisted_intent,
+                prepared=prepared,
+            )
+            verified = load_verified_review_application(
+                result["data_dir"],
+                application_ref,
+                expected_identity=ReviewApplicationIdentity.from_intent(
+                    persisted_intent.intent
                 ),
             )
+            update = apply_t2t_parameter_approval_application(result, verified)
             current = {**result, **update}
         self.fail("T2T exceeded the bounded parameter-approval loop")
 
@@ -324,6 +420,27 @@ class T2TStageTests(unittest.TestCase):
             "species_facts": {"scientific_name": "Homo sapiens", "taxon_id": 9606}
         }
         return state
+
+    def _apply_t2t_review(self, blocked: dict, request: ResumeReviewRequest) -> dict:
+        """Exercise the gate's durable intent → application → pure apply path."""
+
+        persisted_intent = persist_review_intent(
+            blocked, request, source="test_t2t_review"
+        )
+        prepared = prepare_t2t_review_application(blocked, persisted_intent.intent)
+        application_ref = persist_review_application(
+            blocked,
+            intent=persisted_intent,
+            prepared=prepared,
+        )
+        verified = load_verified_review_application(
+            blocked["data_dir"],
+            application_ref,
+            expected_identity=ReviewApplicationIdentity.from_intent(
+                persisted_intent.intent
+            ),
+        )
+        return {**blocked, **apply_t2t_review_application(blocked, verified)}
 
     def _fake_minimap2(
         self,
@@ -440,7 +557,7 @@ class T2TStageTests(unittest.TestCase):
             ]
             self.assertIn("attempt_succeeded", event_types)
 
-            result = resume_review_state(
+            result = self._apply_t2t_review(
                 blocked,
                 ResumeReviewRequest(
                     session_id="s1",
@@ -559,7 +676,7 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(selected_candidate_ids, ["chr1:right"])
             self.assertEqual(candidate_rows[0]["supporting_reads"].count(","), 0)
 
-            resumed = resume_review_state(
+            resumed = self._apply_t2t_review(
                 blocked,
                 ResumeReviewRequest(
                     session_id="s1",
@@ -893,7 +1010,7 @@ class T2TStageTests(unittest.TestCase):
                 review_request_id=blocked["active_interrupt"]["review_request_id"],
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
-            resumed = resume_review_state(blocked, request)
+            resumed = self._apply_t2t_review(blocked, request)
 
             self.assertEqual(resumed["current_stage"], "assembly_review")
             self.assertEqual(resumed["supervision_state"], "running_stage")
@@ -939,7 +1056,7 @@ class T2TStageTests(unittest.TestCase):
                 for record in read_artifact_records(blocked["data_dir"], "s1")
             )
 
-            resumed = resume_review_state(blocked, request)
+            resumed = self._apply_t2t_review(blocked, request)
 
             self.assertEqual(resumed["current_stage"], "assembly_review")
             t2t = resumed["stage_outputs"]["t2t"]
@@ -1031,7 +1148,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
             blocked = self._invoke_with_parameter_approval(state)
-            resumed = resume_review_state(
+            resumed = self._apply_t2t_review(
                 blocked,
                 ResumeReviewRequest(
                     session_id="s1",
@@ -1092,26 +1209,22 @@ class T2TStageTests(unittest.TestCase):
                 ResumeValidationError,
                 "review evidence changed before adoption",
             ):
-                resume_review_state(blocked, request)
+                self._apply_t2t_review(blocked, request)
 
-            continue_update = resume_review_state(
-                blocked,
-                ResumeReviewRequest(
-                    session_id="s1",
-                    stage="t2t",
-                    gate_id="t2t_review",
-                    decision="continue_without_patch",
-                    review_request_id=blocked["active_interrupt"]["review_request_id"],
-                    review_request_hash=blocked["active_interrupt"]["request_hash"],
-                ),
-            )
-            resumed = {**blocked, **continue_update}
-            t2t = resumed["stage_outputs"]["t2t"]
-            self.assertEqual(t2t["output_assembly_ref"], t2t["input_assembly_ref"])
-            self.assertEqual(
-                resumed["resource_refs"]["assembly"]["paths"],
-                [t2t["input_assembly_ref"]],
-            )
+            with self.assertRaises(ReviewIntentConflictError):
+                self._apply_t2t_review(
+                    blocked,
+                    ResumeReviewRequest(
+                        session_id="s1",
+                        stage="t2t",
+                        gate_id="t2t_review",
+                        decision="continue_without_patch",
+                        review_request_id=blocked["active_interrupt"][
+                            "review_request_id"
+                        ],
+                        review_request_hash=blocked["active_interrupt"]["request_hash"],
+                    ),
+                )
 
     def test_review_resume_refuses_to_overwrite_a_newer_assembly_resource(self):
         for decision in ("accept_selected_candidates", "continue_without_patch"):
@@ -1160,19 +1273,19 @@ class T2TStageTests(unittest.TestCase):
                 artifacts_before = read_artifact_records(blocked["data_dir"], "s1")
                 events_before = Ledger(blocked["data_dir"]).read_events("s1")
 
-                update = resume_review_state(blocked, request)
-
-                self.assertEqual(update["current_stage"], "t2t")
-                self.assertEqual(update["supervision_state"], "failed_terminal")
-                self.assertIn("changed since input resolution", update["last_error"])
-                self.assertNotIn("resource_refs", update)
+                with self.assertRaisesRegex(
+                    ResumeValidationError,
+                    "changed since input resolution",
+                ):
+                    self._apply_t2t_review(blocked, request)
                 self.assertEqual(
                     blocked["resource_refs"]["assembly"]["paths"],
                     [str(published_stale)],
                 )
+                artifacts_after = read_artifact_records(blocked["data_dir"], "s1")
+                self.assertEqual(len(artifacts_after), len(artifacts_before) + 1)
                 self.assertEqual(
-                    read_artifact_records(blocked["data_dir"], "s1"),
-                    artifacts_before,
+                    artifacts_after[-1]["artifact_type"], "review.intent.v1"
                 )
                 self.assertEqual(
                     Ledger(blocked["data_dir"]).read_events("s1"),
@@ -1200,7 +1313,7 @@ class T2TStageTests(unittest.TestCase):
                 ResumeValidationError,
                 "requires a human review decision",
             ):
-                resume_review_state(
+                self._apply_t2t_review(
                     blocked,
                     ResumeReviewRequest(
                         session_id="s1",
@@ -1213,18 +1326,76 @@ class T2TStageTests(unittest.TestCase):
                         ],
                         review_request_hash=blocked["active_interrupt"]["request_hash"],
                         decided_by="llm_provisional",
-                        rationale_artifact_ref="llm:t2t-adoption",
+                        rationale_artifact_ref=ArtifactRef.model_validate(
+                            blocked["active_interrupt"]["request_ref"]
+                        ),
                     ),
                 )
 
-            self.assertEqual(
-                read_artifact_records(blocked["data_dir"], "s1"),
-                artifacts_before,
-            )
+            artifacts_after = read_artifact_records(blocked["data_dir"], "s1")
+            self.assertEqual(artifacts_after, artifacts_before)
             self.assertEqual(
                 Ledger(blocked["data_dir"]).read_events("s1"),
                 events_before,
             )
+
+    def test_review_application_loader_verifies_adopted_input_refs(self):
+        for field_name in ("input_candidate_bundle_ref", "input_primary_ref"):
+            with (
+                self.subTest(field_name=field_name),
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
+                assembly, reads = self._write_inputs(tmpdir)
+                state = self._state(tmpdir, assembly, reads)
+                state["stage_outputs"]["t2t"] = {
+                    "execution_mode": "local",
+                    "mode": "manual_review",
+                    "env": {
+                        "PATH": str(self._fake_minimap2(tmpdir))
+                        + os.pathsep
+                        + os.environ["PATH"]
+                    },
+                }
+                blocked = self._invoke_with_parameter_approval(state)
+                request = ResumeReviewRequest(
+                    session_id="s1",
+                    stage="t2t",
+                    gate_id="t2t_review",
+                    decision="accept_selected_candidates",
+                    candidate_ids=["chr1:right"],
+                    review_request_id=blocked["active_interrupt"]["review_request_id"],
+                    review_request_hash=blocked["active_interrupt"]["request_hash"],
+                )
+                intent = persist_review_intent(
+                    blocked,
+                    request,
+                    source="test_t2t_review",
+                )
+                prepared = prepare_t2t_review_application(blocked, intent.intent)
+                self.assertIsInstance(prepared.effect, T2TReviewEffectV1)
+                effect = prepared.effect
+                assert isinstance(effect, T2TReviewEffectV1)
+                input_ref = getattr(effect, field_name)
+                self.assertIsNotNone(input_ref)
+                assert input_ref is not None
+                application_ref = persist_review_application(
+                    blocked,
+                    intent=intent,
+                    prepared=prepared,
+                )
+                input_path = SessionPaths.from_run_dir(blocked["data_dir"]).resolve_ref(
+                    input_ref.path_ref
+                )
+                input_path.write_bytes(input_path.read_bytes() + b"\n")
+
+                with self.assertRaisesRegex(
+                    ReviewApplicationIntegrityError,
+                    "integrity mismatch",
+                ):
+                    load_verified_review_application(
+                        blocked["data_dir"],
+                        application_ref,
+                    )
 
     def test_manual_review_resume_stop_pipeline_does_not_enter_downstream(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1249,7 +1420,7 @@ class T2TStageTests(unittest.TestCase):
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
-            stopped = resume_review_state(blocked, request)
+            stopped = self._apply_t2t_review(blocked, request)
 
             self.assertEqual(stopped["current_stage"], "t2t")
             self.assertEqual(stopped["supervision_state"], "failed_terminal")

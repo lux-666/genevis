@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.control.lifecycle import TerminalFinalizationResult
 from app.entrypoints.run import execute_frozen_session
 from app.execution.dependency_snapshot import (
     capture_dependency_snapshot,
@@ -23,6 +24,7 @@ from app.schemas.state import initial_state
 from app.stages.inventory.nodes import register_assets, validate_inputs
 from app.storage.artifacts import resolve_artifact_ref
 from app.storage.frozen_inputs import (
+    FrozenExecutionLease,
     FrozenInputConflictError,
     FrozenInputIntegrityError,
     FrozenInputValidationError,
@@ -60,15 +62,26 @@ def _local_stage_requests(*stages: str) -> list[dict[str, object]]:
     return _stage_requests(*stages, local=stages)
 
 
+def _finalized_terminal(*args, **_kwargs) -> TerminalFinalizationResult:
+    return TerminalFinalizationResult(state=args[2], terminal_event={})
+
+
 class _FrozenExecutionGraph:
-    def __init__(self) -> None:
+    def __init__(self, *, resumed_state: dict | None = None) -> None:
         self.invocations: list[tuple[object, dict]] = []
+        self.resumed_state = resumed_state
 
     def invoke(self, state, config):
         self.invocations.append((state, config))
+        base_state = state if isinstance(state, dict) else self.resumed_state
+        if base_state is None:
+            raise AssertionError("resumed execution requires a checkpoint state")
         return {
+            **base_state,
             "current_stage": "done",
             "supervision_state": "completed",
+            "workflow_step_index": len(base_state["workflow_steps"]),
+            "entered_workflow_step_index": len(base_state["workflow_steps"]) - 1,
             "route_trace": [],
         }
 
@@ -997,7 +1010,7 @@ class FrozenInputTests(unittest.TestCase):
 
             def fake_initial_state(**kwargs):
                 captured.update(kwargs)
-                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+                return initial_state(**kwargs)
 
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -1008,7 +1021,11 @@ class FrozenInputTests(unittest.TestCase):
                 patch(
                     "app.entrypoints.run.initial_state", side_effect=fake_initial_state
                 ),
-                patch("app.entrypoints.run.finalize_terminal_state", return_value=None),
+                patch(
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=_finalized_terminal,
+                ),
+                patch("app.entrypoints.run.project_workflow_state"),
                 patch(
                     "app.execution.dependency_snapshot.EnvResolver",
                     side_effect=AssertionError("live config must not be loaded"),
@@ -1075,6 +1092,42 @@ class FrozenInputTests(unittest.TestCase):
             self.assertIn("already active", stderr.getvalue())
             build_graph.assert_not_called()
 
+    def test_execution_lock_yields_one_active_session_bound_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, manifest, run_config, envs = self._fixture(Path(tmp))
+            freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+            )
+
+            with frozen_execution_lock(paths) as lease:
+                self.assertIsInstance(lease, FrozenExecutionLease)
+                lease.require_active(paths)
+                self.assertTrue(lease.active)
+                self.assertEqual(lease.session_id, paths.session_id)
+                self.assertEqual(lease.run_dir, paths.run_dir)
+
+            self.assertFalse(lease.active)
+            with self.assertRaisesRegex(ValueError, "inactive"):
+                lease.require_active(paths)
+
+    def test_execution_lease_rejects_a_different_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, manifest, run_config, envs = self._fixture(Path(tmp))
+            freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+            )
+            other = SessionPaths(paths.data_root, "s2")
+
+            with frozen_execution_lock(paths) as lease:
+                with self.assertRaisesRegex(ValueError, "does not match"):
+                    lease.require_active(other)
+
     def test_checkpoint_execution_continues_without_fresh_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
@@ -1103,10 +1156,19 @@ class FrozenInputTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            graph = _FrozenExecutionGraph()
+            graph = _FrozenExecutionGraph(
+                resumed_state=initial_state(
+                    session_id="s1",
+                    input_manifest_ref="control/input_manifest.yaml",
+                    data_dir=str(paths.run_dir),
+                )
+            )
             with (
                 patch("app.entrypoints.run.build_graph", return_value=graph),
-                patch("app.entrypoints.run.finalize_terminal_state", return_value=None),
+                patch(
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=_finalized_terminal,
+                ),
             ):
                 code = execute_frozen_session(
                     "s1",

@@ -102,10 +102,10 @@ The gate's frozen `max_blocked_seconds` controls only the default decision for
 that persisted mapping. `-1` requires manual approve/reject, `0` immediately
 approves it, and a positive value allows Enter to claim manual review before
 expiry approves it. The timeout path submits `approve_parameters` for the
-same request and recommendation hash, then delegate to the existing stage
-decision applier. It may not edit the mapping, call the recommender, select a
-fallback, or bypass request, occurrence, manifest, predecessor, or attempt-chain
-validation.
+same request and recommendation hash, then follows the registered typed
+intent/application transaction. It may not edit the mapping, call the
+recommender, select a fallback, or bypass request, occurrence, manifest,
+predecessor, or attempt-chain validation.
 
 Execution is a separate boundary. After approval, command construction may
 still reject a parameter that cannot be represented safely by the selected

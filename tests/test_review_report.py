@@ -10,11 +10,18 @@ from pathlib import Path
 from app.control.lifecycle import (
     ResumeValidationError,
     inspect_state,
-    resume_review_state,
+    normalize_resume_review_request,
 )
 from app.reports.review_report import write_final_review_report, write_operator_report
+from app.review.application import (
+    ReviewApplicationIdentity,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest, ReviewPayload
-from app.review.persistence import persist_review_decision, persist_review_request
+from app.review.gates import get_review_gate
+from app.review.persistence import persist_review_request
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
 
@@ -111,6 +118,85 @@ def _review_state(paths: SessionPaths, stage: str, **updates: object) -> dict:
     }
 
 
+def _review_occurrence(
+    paths: SessionPaths,
+    *,
+    stage: str,
+    gate_id: str,
+    reason: str,
+    decisions_allowed: list[str],
+    decision: str | None = None,
+    applied: bool = False,
+):
+    """Persist one request and, optionally, its intent/application lifecycle."""
+
+    state = _review_state(paths, stage)
+    persisted = persist_review_request(
+        state,
+        stage=stage,
+        gate_id=gate_id,
+        reason=reason,
+        payload=ReviewPayload(
+            stage=stage,
+            gate_id=gate_id,
+            reason=reason,
+            decisions_allowed=decisions_allowed,
+        ),
+    )
+    state.update(
+        {
+            "supervision_state": "blocked_human",
+            "active_interrupt": persisted.compact_interrupt(
+                stage=stage,
+                gate_id=gate_id,
+                reason=reason,
+            ),
+        }
+    )
+    ledger = Ledger(paths.run_dir)
+    ledger.record_review_requested(
+        paths.session_id,
+        stage,
+        reason=reason,
+        review_request_artifact_ref=persisted.request_ref,
+        review_request_id=persisted.review_request_id,
+    )
+    if decision is None:
+        return persisted, None
+
+    request = ResumeReviewRequest(
+        session_id=paths.session_id,
+        stage=stage,
+        gate_id=gate_id,
+        review_request_id=persisted.review_request_id,
+        review_request_hash=persisted.request_hash,
+        decision=decision,
+    )
+    canonical = normalize_resume_review_request(state, request)
+    intent = persist_review_intent(state, canonical, source="test")
+    gate = get_review_gate(stage, gate_id)
+    prepared = gate.load_prepare_application()(state, intent.intent)
+    application_ref = persist_review_application(
+        state,
+        intent=intent,
+        prepared=prepared,
+    )
+    application = load_verified_review_application(paths.run_dir, application_ref)
+    identity = ReviewApplicationIdentity.from_intent(intent.intent)
+    ledger.record_review_decision(
+        paths.session_id,
+        application_ref=application.ref,
+        expected_identity=identity,
+    )
+    if applied:
+        ledger.record_review_applied(
+            paths.session_id,
+            application_ref=application.ref,
+            expected_identity=identity,
+        )
+    return persisted, application
+
+
 class ReviewReportTests(unittest.TestCase):
     def test_inspect_loads_decision_requirements_from_verified_request(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,7 +254,7 @@ class ReviewReportTests(unittest.TestCase):
                 decision="accept",
             )
             with self.assertRaisesRegex(ResumeValidationError, "review_request_hash"):
-                resume_review_state(state, wrong_hash)
+                normalize_resume_review_request(state, wrong_hash)
 
             request = ResumeReviewRequest(
                 session_id="s1",
@@ -183,57 +269,38 @@ class ReviewReportTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ResumeValidationError, "integrity mismatch"):
-                resume_review_state(state, request)
+                normalize_resume_review_request(state, request)
 
     def test_unified_summary_lists_pending_review_requests_and_decisions(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
-            persisted = _request(
+            persisted, _application = _review_occurrence(
                 paths,
                 stage="hic_scaffolding",
                 gate_id="hic_scaffolding",
+                reason="hic_scaffolding_human_decision_required",
                 decisions_allowed=["select_method", "skip"],
             )
-            assembly_request = _request(
+            prepared_request, prepared_application = _review_occurrence(
                 paths,
                 stage="assembly_review",
                 gate_id="assembly_review",
-                decisions_allowed=["accept"],
+                reason="assembly_review_prepared",
+                decisions_allowed=["stop_human_review"],
+                decision="stop_human_review",
             )
-            ledger.record_review_requested(
-                "s1",
-                "hic_scaffolding",
-                reason="hic_scaffolding_human_decision_required",
-                review_request_artifact_ref=persisted.request_ref,
-                review_request_id=persisted.review_request_id,
-            )
-            ledger.record_review_requested(
-                "s1",
-                "assembly_review",
-                reason="assembly_review_human_decision_required",
-                review_request_artifact_ref=assembly_request.request_ref,
-                review_request_id=assembly_request.review_request_id,
-            )
-            decision_ref = persist_review_decision(
-                paths.run_dir,
-                session_id="s1",
-                review_request_id=assembly_request.review_request_id,
+            applied_request, applied_application = _review_occurrence(
+                paths,
                 stage="assembly_review",
                 gate_id="assembly_review",
-                decision={"candidate_id": "flye"},
-                request_hash=assembly_request.request_hash,
-                request_ref=assembly_request.request_ref,
+                reason="assembly_review_applied",
+                decisions_allowed=["stop_human_review"],
+                decision="stop_human_review",
+                applied=True,
             )
-            ledger.record_review_decision(
-                "s1",
-                "assembly_review",
-                decision="accept",
-                candidate_id="flye",
-                decided_by="llm_provisional",
-                artifact_ref=decision_ref,
-                review_request_id=assembly_request.review_request_id,
-            )
+            self.assertIsNotNone(prepared_application)
+            self.assertIsNotNone(applied_application)
 
             before_events = len(ledger.read_event_rows("s1"))
             before_index = paths.artifact_index_path.read_bytes()
@@ -244,14 +311,34 @@ class ReviewReportTests(unittest.TestCase):
                 Path(report_ref), paths.report_path("session_summary.json")
             )
             self.assertEqual(report["report_type"], "session_summary")
+            occurrences = {
+                item["review_request_id"]: item
+                for item in report["pending_review_requests"]
+            }
             self.assertEqual(
-                report["pending_review_requests"][0]["review_request_id"],
-                persisted.review_request_id,
+                occurrences[persisted.review_request_id]["status"],
+                "awaiting_decision",
             )
-            self.assertEqual(report["decisions_by_origin"]["llm_provisional"], 1)
+            self.assertFalse(occurrences[persisted.review_request_id]["resolved"])
             self.assertEqual(
-                report["decisions"][0]["review_request_id"],
-                assembly_request.review_request_id,
+                occurrences[prepared_request.review_request_id]["status"],
+                "application_prepared",
+            )
+            self.assertFalse(
+                occurrences[prepared_request.review_request_id]["resolved"]
+            )
+            self.assertEqual(
+                occurrences[applied_request.review_request_id]["status"], "applied"
+            )
+            self.assertTrue(occurrences[applied_request.review_request_id]["resolved"])
+            self.assertEqual(
+                occurrences[applied_request.review_request_id]["resolution_basis"],
+                "review_applied",
+            )
+            self.assertEqual(report["decisions_by_origin"]["human"], 2)
+            self.assertEqual(
+                {item["review_request_id"] for item in report["decisions"]},
+                {prepared_request.review_request_id, applied_request.review_request_id},
             )
             self.assertEqual(len(ledger.read_event_rows("s1")), before_events)
             self.assertEqual(paths.artifact_index_path.read_bytes(), before_index)

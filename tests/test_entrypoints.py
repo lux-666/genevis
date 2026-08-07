@@ -14,6 +14,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.control.lifecycle import TerminalFinalizationError, TerminalFinalizationResult
+from app.control.projections import ProjectionBoundary
+from app.control.resume_transaction import (
+    ResumeTransactionError,
+    ResumeTransactionResult,
+)
 from app.entrypoints.run import (
     _build_assembly_selection,
     _execute_verified_frozen_session,
@@ -36,7 +42,7 @@ from app.schemas.artifacts import ArtifactRef
 from app.schemas.run_config import AssemblyRunConfig, RunConfig
 from app.schemas.state import initial_state
 from app.storage.artifacts import read_artifact_records
-from app.storage.frozen_inputs import freeze_session_inputs
+from app.storage.frozen_inputs import FrozenExecutionLease, freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
 from tests.data_v2 import v2_run_dir
@@ -49,7 +55,24 @@ class _FakeGraph:
 
     def invoke(self, state, config):
         self.invocations.append((state, config))
-        return self.result
+        return {
+            **state,
+            **self.result,
+            "workflow_step_index": len(state["workflow_steps"]),
+            "entered_workflow_step_index": len(state["workflow_steps"]) - 1,
+        }
+
+
+def _active_lease(paths: SessionPaths) -> FrozenExecutionLease:
+    return FrozenExecutionLease(
+        session_id=paths.session_id,
+        run_dir=paths.run_dir,
+        active=True,
+    )
+
+
+def _finalized_terminal(*args, **_kwargs) -> TerminalFinalizationResult:
+    return TerminalFinalizationResult(state=args[2], terminal_event={})
 
 
 class _FakeResumeGraph:
@@ -519,17 +542,8 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(template["decision"], "accept")
             self.assertEqual(template["candidate_id"], "flye")
             self.assertNotIn("final_assembly_ref", template)
-            self.assertEqual(
-                template["metadata"]["template_guidance"][
-                    "candidate_primary_output_refs"
-                ]["flye"],
-                _artifact_ref_json("flye"),
-            )
+            self.assertNotIn("template_guidance", template["metadata"])
             self.assertEqual(template["decided_by"], "human")
-            self.assertIn(
-                "assembly_review_report",
-                template["metadata"]["template_guidance"]["report_refs"],
-            )
 
     def test_inspect_json_includes_review_next_action(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -641,7 +655,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
             )
 
             def fake_initial_state(**kwargs):
-                return dict(kwargs, stage_outputs={})
+                return initial_state(**kwargs)
 
             with (
                 patch("app.entrypoints.run.Ledger"),
@@ -651,9 +665,10 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     side_effect=fake_initial_state,
                 ),
                 patch(
-                    "app.entrypoints.run.finalize_terminal_state",
-                    return_value=None,
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=_finalized_terminal,
                 ),
+                patch("app.entrypoints.run.project_workflow_state"),
             ):
                 code, stdout, stderr = _capture_cli(
                     _execute_verified_frozen_session,
@@ -661,6 +676,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     checkpointer="memory",
                     resume_checkpoint=False,
                     interactive_gate=False,
+                    lease=_active_lease(paths),
                 )
 
         state = graph.invocations[0][0] if graph.invocations else {}
@@ -782,6 +798,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     checkpointer="memory",
                     resume_checkpoint=False,
                     interactive_gate=False,
+                    lease=_active_lease(paths),
                 )
 
         self.assertEqual(code, 1)
@@ -791,6 +808,113 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
             stderr,
         )
         build_graph.assert_not_called()
+
+    def test_terminal_finalization_failure_flushes_projection_warning_once(self):
+        run_config = RunConfig(requested_stages=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "s1")
+            bundle = SimpleNamespace(paths=paths, run_config=run_config)
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
+
+            def fail_projection() -> None:
+                raise RuntimeError("renderer unavailable")
+
+            def build_with_failed_projection(**kwargs):
+                kwargs["projection_boundary"].run("progress", fail_projection)
+                return graph
+
+            with (
+                patch("app.entrypoints.run.Ledger"),
+                patch(
+                    "app.entrypoints.run.build_graph",
+                    side_effect=build_with_failed_projection,
+                ),
+                patch(
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=TerminalFinalizationError("checkpoint mismatch"),
+                ),
+            ):
+                code, stdout, stderr = _capture_cli(
+                    _execute_verified_frozen_session,
+                    bundle,
+                    checkpointer="memory",
+                    resume_checkpoint=False,
+                    interactive_gate=False,
+                    lease=_active_lease(paths),
+                )
+
+        warning = (
+            "warning: progress projection failed: RuntimeError: renderer unavailable"
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("supervision_state: completed", stdout)
+        self.assertEqual(stderr.count(warning), 1)
+        self.assertIn(
+            "error: terminal finalization failed: checkpoint mismatch",
+            stderr,
+        )
+
+    def test_interactive_outer_failure_flushes_projection_warning_once(self):
+        run_config = RunConfig(requested_stages=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "s1")
+            bundle = SimpleNamespace(paths=paths, run_config=run_config)
+
+            class _BlockedGraph:
+                def invoke(self, state, config):
+                    return {
+                        **state,
+                        "supervision_state": "blocked_human",
+                        "active_interrupt": {
+                            "stage": "inventory",
+                            "workflow_step_id": "step-000-inventory",
+                        },
+                        "stage_outputs": {"inventory": {"status": "blocked_human"}},
+                    }
+
+            graph = _BlockedGraph()
+
+            def fail_projection() -> None:
+                raise RuntimeError("operator report unavailable")
+
+            def fail_interactive(*_args, **kwargs):
+                kwargs["projection_boundary"].run("operator_report", fail_projection)
+                raise ResumeTransactionError("checkpoint", "checkpoint update failed")
+
+            with (
+                patch("app.entrypoints.run.Ledger"),
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run._interactive_gate_loop",
+                    side_effect=fail_interactive,
+                ),
+            ):
+                code, stdout, stderr = _capture_cli(
+                    _execute_verified_frozen_session,
+                    bundle,
+                    checkpointer="sqlite",
+                    resume_checkpoint=False,
+                    interactive_gate=True,
+                    lease=_active_lease(paths),
+                )
+
+        warning = (
+            "warning: operator_report projection failed: RuntimeError: "
+            "operator report unavailable"
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr.count(warning), 1)
+        self.assertIn(
+            "error: resume checkpoint failed: checkpoint update failed",
+            stderr,
+        )
 
 
 class ResumeCLITests(unittest.TestCase):
@@ -825,6 +949,14 @@ class ResumeCLITests(unittest.TestCase):
         # Default is None at the parser level; backend resolution falls
         # through to GENE_AGENT_CHECKPOINTER, then DEFAULT_CHECKPOINTER_BACKEND.
         self.assertIsNone(args.checkpointer)
+
+    def test_parser_accepts_committed_intent_recovery_without_decision_file(self):
+        args = _parse_args(["resume", "--session-id", "s1", "--data-dir", "out"])
+
+        self.assertEqual(args.command, "resume")
+        self.assertEqual(args.session_id, "s1")
+        self.assertIsNone(args.decision_file)
+        self.assertEqual(args.data_dir, "out")
 
     def test_resume_rejects_removed_max_blocked_seconds_override(self):
         with self.assertRaises(SystemExit):
@@ -933,7 +1065,7 @@ class ResumeCLITests(unittest.TestCase):
             decision = self._write_decision(Path(tmp) / "decision.json")
             verified_inputs = object()
             graph = object()
-            transaction_result = SimpleNamespace(
+            transaction_result = ResumeTransactionResult(
                 state={
                     "current_stage": "done",
                     "supervision_state": "completed",
@@ -971,9 +1103,105 @@ class ResumeCLITests(unittest.TestCase):
         self.assertEqual(stderr, "")
         validate.assert_called_once_with(paths)
         self.assertIs(build.call_args.kwargs["verified_inputs"], verified_inputs)
-        self.assertIs(
-            execute.call_args.kwargs["verified_inputs"],
-            verified_inputs,
+        self.assertIsInstance(
+            build.call_args.kwargs["projection_boundary"], ProjectionBoundary
+        )
+        self.assertIsInstance(execute.call_args.kwargs["lease"], FrozenExecutionLease)
+        self.assertIsInstance(
+            execute.call_args.kwargs["projection_boundary"], ProjectionBoundary
+        )
+
+    def test_resume_without_decision_file_recovers_committed_intent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            paths = SessionPaths.from_run_dir(run_dir)
+            paths.checkpoint_db_path.write_text("", encoding="utf-8")
+            transaction_result = ResumeTransactionResult(
+                state={
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                    "active_interrupt": None,
+                },
+                decision_artifact_path=None,
+            )
+
+            with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=object(),
+                ),
+                patch("app.entrypoints.run.build_graph", return_value=object()),
+                patch(
+                    "app.control.resume_transaction.execute_resume_transaction",
+                    return_value=transaction_result,
+                ) as execute,
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id="s1",
+                        decision_file=None,
+                        data_dir=str(data_root),
+                        checkpointer="sqlite",
+                    ),
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIsNone(execute.call_args.kwargs["request"])
+        self.assertEqual(execute.call_args.kwargs["source"], "cli_recovery")
+        self.assertEqual(execute.call_args.kwargs["event_context"], {})
+
+    def test_resume_failure_still_prints_isolated_projection_warnings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            paths = SessionPaths.from_run_dir(run_dir)
+            paths.checkpoint_db_path.write_text("", encoding="utf-8")
+
+            def fail_projection() -> None:
+                raise RuntimeError("status projection unavailable")
+
+            def fail_transaction(**kwargs) -> None:
+                kwargs["projection_boundary"].run(
+                    "review_status",
+                    fail_projection,
+                )
+                raise ResumeTransactionError("checkpoint", "checkpoint update failed")
+
+            with (
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=object(),
+                ),
+                patch("app.entrypoints.run.build_graph", return_value=object()),
+                patch(
+                    "app.control.resume_transaction.execute_resume_transaction",
+                    side_effect=fail_transaction,
+                ),
+            ):
+                code, stdout, stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id="s1",
+                        decision_file=None,
+                        data_dir=str(data_root),
+                        checkpointer="sqlite",
+                    ),
+                )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn(
+            "warning: review_status projection failed: RuntimeError: "
+            "status projection unavailable",
+            stderr,
+        )
+        self.assertIn(
+            "error: resume checkpoint failed: checkpoint update failed",
+            stderr,
         )
 
     def test_resume_started_records_resolved_session_data_dir(self):
@@ -1037,12 +1265,16 @@ class ResumeCLITests(unittest.TestCase):
                 ),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.control.resume_transaction.resume_review_state",
-                    return_value={
-                        "current_stage": "done",
-                        "supervision_state": "completed",
-                    },
-                ),
+                    "app.control.resume_transaction.execute_resume_transaction",
+                    return_value=ResumeTransactionResult(
+                        state={
+                            "current_stage": "done",
+                            "supervision_state": "completed",
+                            "route_trace": [],
+                        },
+                        decision_artifact_path=None,
+                    ),
+                ) as execute,
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_resume,
@@ -1056,11 +1288,10 @@ class ResumeCLITests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
-            events = Ledger(run_dir).read_events(session_id)
-            started = [
-                event for event in events if event["event_type"] == "resume_started"
-            ]
-            self.assertEqual(started[0]["data_dir"], str(run_dir))
+            self.assertEqual(execute.call_args.kwargs["data_dir"], run_dir)
+            self.assertIsInstance(
+                execute.call_args.kwargs["lease"], FrozenExecutionLease
+            )
 
 
 class CheckpointerBackendResolutionTests(unittest.TestCase):

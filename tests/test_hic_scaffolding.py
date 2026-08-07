@@ -11,9 +11,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.control.lifecycle import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
 from app.execution.lifecycle import load_method_executions, run_method_attempts
+from app.review.application import (
+    ReviewApplicationIdentity,
+    ReviewApplicationIntegrityError,
+    ReviewIntentV1,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
+from app.review.approval import (
+    ParameterApprovalEffectV1,
+    ParameterApprovalMetadataV1,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
@@ -36,14 +50,16 @@ from app.stages.hic_scaffolding.method_application.autohic import (
     freeze_autohic_attempt,
 )
 from app.stages.hic_scaffolding.nodes import (
-    apply_hic_scaffolding_resume_decision,
+    apply_hic_scaffolding_review_application,
+    prepare_hic_scaffolding_review_application,
     resolve_hic_inputs,
 )
 from app.stages.hic_scaffolding.parameters.catalog import (
     load_autohic_parameter_catalog,
 )
 from app.stages.hic_scaffolding.parameters.workflow import (
-    apply_autohic_parameter_approval_decision,
+    apply_autohic_parameter_approval_application,
+    prepare_autohic_parameter_approval_application,
     recommend_autohic_parameters,
 )
 from app.storage.artifacts import (
@@ -494,7 +510,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "recommendation_hash",
             )
         }
-        update = apply_autohic_parameter_approval_decision(
+        update = self._apply_parameter_approval(
             blocked,
             ResumeReviewRequest(
                 session_id="s1",
@@ -508,6 +524,55 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             ),
         )
         return {**blocked, **update}
+
+    @staticmethod
+    def _apply_parameter_approval(state: dict, request: ResumeReviewRequest) -> dict:
+        persisted_intent = persist_review_intent(state, request, source="test")
+        prepared = prepare_autohic_parameter_approval_application(
+            state, persisted_intent.intent
+        )
+        gate = SimpleNamespace(
+            effect_kind="hic_scaffolding.parameter_approval.v1",
+            decode_effect=ParameterApprovalEffectV1.model_validate,
+            decode_intent_metadata=ParameterApprovalMetadataV1.model_validate,
+        )
+        with patch("app.review.application.get_review_gate", return_value=gate):
+            application_ref = persist_review_application(
+                state,
+                intent=persisted_intent,
+                prepared=prepared,
+            )
+            verified = load_verified_review_application(
+                state["data_dir"],
+                application_ref,
+                expected_identity=ReviewApplicationIdentity.from_intent(
+                    persisted_intent.intent
+                ),
+            )
+        return apply_autohic_parameter_approval_application(state, verified)
+
+    @staticmethod
+    def _apply_hic_scaffolding_review(
+        state: dict,
+        request: ResumeReviewRequest,
+    ) -> dict:
+        persisted_intent = persist_review_intent(state, request, source="test")
+        prepared = prepare_hic_scaffolding_review_application(
+            state, persisted_intent.intent
+        )
+        application_ref = persist_review_application(
+            state,
+            intent=persisted_intent,
+            prepared=prepared,
+        )
+        verified = load_verified_review_application(
+            state["data_dir"],
+            application_ref,
+            expected_identity=ReviewApplicationIdentity.from_intent(
+                persisted_intent.intent
+            ),
+        )
+        return apply_hic_scaffolding_review_application(state, verified)
 
     def _ran_autohic_state(self, tmpdir: str) -> tuple[dict, object]:
         assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
@@ -903,10 +968,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             interrupt = blocked["active_interrupt"]
             with self.assertRaisesRegex(
-                ResumeValidationError,
-                "metadata missing bindings",
+                ReviewApplicationIntegrityError,
+                "metadata failed the registered gate schema",
             ):
-                apply_autohic_parameter_approval_decision(
+                self._apply_parameter_approval(
                     blocked,
                     ResumeReviewRequest(
                         session_id="s1",
@@ -1335,25 +1400,56 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn("command.stderr", artifact_types)
 
             interrupt = result["active_interrupt"]
-            artifacts_before = read_artifact_records(result["data_dir"], "s1")
-            events_before = Ledger(result["data_dir"]).read_events("s1")
+            nonhuman_request = ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="hic_scaffolding",
+                decision="accept_candidate",
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+                decided_by="llm_provisional",
+                rationale_artifact_ref=ArtifactRef.model_validate(
+                    interrupt["request_ref"]
+                ),
+            )
             with self.assertRaisesRegex(
                 ResumeValidationError,
                 "requires a human review decision",
             ):
-                apply_hic_scaffolding_resume_decision(
+                prepare_hic_scaffolding_review_application(
                     result,
-                    ResumeReviewRequest(
+                    ReviewIntentV1(
                         session_id="s1",
+                        workflow_step_id=interrupt["workflow_step_id"],
                         stage="hic_scaffolding",
                         gate_id="hic_scaffolding",
-                        decision="accept_candidate",
                         review_request_id=interrupt["review_request_id"],
-                        review_request_hash=interrupt["request_hash"],
-                        decided_by="llm_provisional",
-                        rationale_artifact_ref="llm:autohic-adoption",
+                        request_hash=interrupt["request_hash"],
+                        request_ref=ArtifactRef.model_validate(
+                            interrupt["request_ref"]
+                        ),
+                        source="test",
+                        request=nonhuman_request,
                     ),
                 )
+
+            accepted_request = ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="hic_scaffolding",
+                decision="accept_candidate",
+                notes=["accepted AutoHiC chromosome assembly"],
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+                rationale_artifact_ref=ArtifactRef.model_validate(
+                    interrupt["request_ref"]
+                ),
+            )
+            persisted_intent = persist_review_intent(
+                result, accepted_request, source="test"
+            )
+            artifacts_before = read_artifact_records(result["data_dir"], "s1")
+            events_before = Ledger(result["data_dir"]).read_events("s1")
 
             stale_result = {
                 **result,
@@ -1371,16 +1467,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 ResumeValidationError,
                 "current assembly no longer matches",
             ):
-                apply_hic_scaffolding_resume_decision(
-                    stale_result,
-                    ResumeReviewRequest(
-                        session_id="s1",
-                        stage="hic_scaffolding",
-                        gate_id="hic_scaffolding",
-                        decision="accept_candidate",
-                        review_request_id=interrupt["review_request_id"],
-                        review_request_hash=interrupt["request_hash"],
-                    ),
+                prepare_hic_scaffolding_review_application(
+                    stale_result, persisted_intent.intent
                 )
 
             self.assertEqual(
@@ -1391,18 +1479,62 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 Ledger(result["data_dir"]).read_events("s1"),
                 events_before,
             )
-            adopted = apply_hic_scaffolding_resume_decision(
+            prepared = prepare_hic_scaffolding_review_application(
                 result,
-                ResumeReviewRequest(
-                    session_id="s1",
-                    stage="hic_scaffolding",
-                    gate_id="hic_scaffolding",
-                    decision="accept_candidate",
-                    notes=["accepted AutoHiC chromosome assembly"],
-                    review_request_id=interrupt["review_request_id"],
-                    review_request_hash=interrupt["request_hash"],
+                persisted_intent.intent,
+            )
+            effect = prepared.effect
+            self.assertEqual(
+                effect.pre_hic_assembly_ref.path_ref,
+                SessionPaths.from_run_dir(result["data_dir"]).to_ref(
+                    result["stage_outputs"]["hic_scaffolding"]["pre_hic_assembly_ref"]
                 ),
             )
+            self.assertEqual(
+                effect.output_assembly_ref.path_ref,
+                SessionPaths.from_run_dir(result["data_dir"]).to_ref(
+                    candidate["scaffold_fasta"]
+                ),
+            )
+            self.assertEqual(
+                effect.assembly_resource.path.path_ref,
+                effect.output_assembly_ref.path_ref,
+            )
+            self.assertEqual(
+                effect.rationale_artifact_ref,
+                ArtifactRef.model_validate(interrupt["request_ref"]),
+            )
+            effect_payload = effect.model_dump(mode="json")
+            with self.assertRaises(ValidationError):
+                type(effect).model_validate(
+                    {**effect_payload, "pre_hic_assembly_ref": "../escape.fa"}
+                )
+            with self.assertRaises(ValidationError):
+                type(effect).model_validate(
+                    {**effect_payload, "rationale_artifact_ref": "not-an-artifact-ref"}
+                )
+            application_ref = persist_review_application(
+                result,
+                intent=persisted_intent,
+                prepared=prepared,
+            )
+            verified = load_verified_review_application(
+                result["data_dir"],
+                application_ref,
+                expected_identity=ReviewApplicationIdentity.from_intent(
+                    persisted_intent.intent
+                ),
+            )
+            scaffold_path = Path(candidate["scaffold_fasta"])
+            scaffold_bytes = scaffold_path.read_bytes()
+            scaffold_path.unlink()
+            with self.assertRaisesRegex(
+                ResumeValidationError,
+                "review effect file is missing",
+            ):
+                apply_hic_scaffolding_review_application(result, verified)
+            scaffold_path.write_bytes(scaffold_bytes)
+            adopted = apply_hic_scaffolding_review_application(result, verified)
             self.assertEqual(
                 adopted["current_stage"],
                 "gapcloser",
@@ -1413,6 +1545,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             assembly_resource = adopted["resource_refs"]["assembly"]
             self.assertEqual(assembly_resource["paths"], [candidate["scaffold_fasta"]])
+            self.assertEqual(
+                adopted["stage_outputs"]["hic_scaffolding"]["rationale_artifact_ref"],
+                interrupt["request_ref"]["path_ref"],
+            )
             self.assertEqual(
                 assembly_resource["metadata"]["primary_output_ref"]["artifact_type"],
                 "hic_scaffolding.chromosome_scaffolded_assembly",
@@ -1428,6 +1564,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(
                 decision_record["request_ref"]["sha256"],
                 interrupt["request_hash"],
+            )
+            self.assertEqual(
+                decision_record["decision"]["metadata"]["rationale_artifact_ref"],
+                interrupt["request_ref"],
             )
             derived_candidate = load_executed_candidate_bundle(
                 result["data_dir"],
@@ -1473,7 +1613,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 record["artifact_type"] == "draft_assembly.candidate"
                 for record in read_artifact_records(result["data_dir"], "s1")
             )
-            kept = apply_hic_scaffolding_resume_decision(
+            kept = self._apply_hic_scaffolding_review(
                 result,
                 ResumeReviewRequest(
                     session_id="s1",
@@ -1509,6 +1649,207 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 for record in read_artifact_records(result["data_dir"], "s1")
             )
             self.assertEqual(kept_candidate_count, source_candidate_count)
+
+    def test_keep_prior_review_tracks_inherited_dynamic_metadata_ref(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ran, _attempt = self._ran_autohic_state(tmpdir)
+            result = build_stage().invoke(ran)
+            registry_ref = ArtifactRef.model_validate(result["asset_registry_ref"])
+            assembly = ResourceRef.from_dict(result["resource_refs"]["assembly"])
+            result = {
+                **result,
+                "resource_refs": {
+                    **result["resource_refs"],
+                    "assembly": ResourceRef(
+                        resource_type=assembly.resource_type,
+                        paths=list(assembly.paths),
+                        source_stage=assembly.source_stage,
+                        workflow_step_id=assembly.workflow_step_id,
+                        metadata={
+                            **assembly.metadata,
+                            "inherited": {
+                                "source_asset_registry_ref": registry_ref.model_dump(
+                                    mode="json"
+                                )
+                            },
+                        },
+                    ).to_dict(),
+                },
+            }
+            interrupt = result["active_interrupt"]
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="hic_scaffolding",
+                decision="keep_prior_assembly",
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+            )
+            persisted_intent = persist_review_intent(
+                result, request, source="test_dynamic_metadata"
+            )
+            prepared = prepare_hic_scaffolding_review_application(
+                result, persisted_intent.intent
+            )
+            application_ref = persist_review_application(
+                result,
+                intent=persisted_intent,
+                prepared=prepared,
+            )
+            verified = load_verified_review_application(
+                result["data_dir"],
+                application_ref,
+                expected_identity=ReviewApplicationIdentity.from_intent(
+                    persisted_intent.intent
+                ),
+            )
+
+            self.assertIn(registry_ref, verified.application.required_refs)
+            self.assertEqual(
+                verified.effect.assembly_resource.metadata["inherited"][
+                    "source_asset_registry_ref"
+                ],
+                registry_ref.model_dump(mode="json"),
+            )
+
+            registry_path = resolve_artifact_ref(
+                result["data_dir"], result["session_id"], registry_ref
+            )
+            registry_path.write_text("corrupted\n", encoding="utf-8")
+            with self.assertRaises(ReviewApplicationIntegrityError):
+                load_verified_review_application(
+                    result["data_dir"],
+                    application_ref,
+                    expected_identity=ReviewApplicationIdentity.from_intent(
+                        persisted_intent.intent
+                    ),
+                )
+            registry_path.unlink()
+            with self.assertRaises(ReviewApplicationIntegrityError):
+                load_verified_review_application(
+                    result["data_dir"],
+                    application_ref,
+                    expected_identity=ReviewApplicationIdentity.from_intent(
+                        persisted_intent.intent
+                    ),
+                )
+
+    def test_keep_prior_review_rejects_external_dynamic_metadata_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ran, _attempt = self._ran_autohic_state(tmpdir)
+            result = build_stage().invoke(ran)
+            assembly = ResourceRef.from_dict(result["resource_refs"]["assembly"])
+            result = {
+                **result,
+                "resource_refs": {
+                    **result["resource_refs"],
+                    "assembly": ResourceRef(
+                        resource_type=assembly.resource_type,
+                        paths=list(assembly.paths),
+                        source_stage=assembly.source_stage,
+                        workflow_step_id=assembly.workflow_step_id,
+                        metadata={
+                            **assembly.metadata,
+                            "inherited": {
+                                "external_tool_output": "/outside/run/out.fa"
+                            },
+                        },
+                    ).to_dict(),
+                },
+            }
+            interrupt = result["active_interrupt"]
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="hic_scaffolding",
+                decision="keep_prior_assembly",
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+            )
+            persisted_intent = persist_review_intent(
+                result, request, source="test_dynamic_metadata"
+            )
+            prepared = prepare_hic_scaffolding_review_application(
+                result, persisted_intent.intent
+            )
+
+            with self.assertRaisesRegex(
+                ReviewApplicationIntegrityError,
+                "external absolute path in dynamic metadata",
+            ):
+                persist_review_application(
+                    result,
+                    intent=persisted_intent,
+                    prepared=prepared,
+                )
+
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            application_path = paths.workflow_step_artifact_path(
+                persisted_intent.intent.workflow_step_id,
+                persisted_intent.intent.stage,
+                "reviews",
+                persisted_intent.intent.review_request_id,
+                "application.json",
+            )
+            self.assertFalse(application_path.exists())
+
+    def test_keep_prior_review_normalizes_run_root_dynamic_metadata_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ran, _attempt = self._ran_autohic_state(tmpdir)
+            result = build_stage().invoke(ran)
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            run_root_file = paths.artifacts_dir / "metadata" / "inherited.txt"
+            run_root_file.parent.mkdir(parents=True, exist_ok=True)
+            run_root_file.write_text("inside run root\n", encoding="utf-8")
+            assembly = ResourceRef.from_dict(result["resource_refs"]["assembly"])
+            result = {
+                **result,
+                "resource_refs": {
+                    **result["resource_refs"],
+                    "assembly": ResourceRef(
+                        resource_type=assembly.resource_type,
+                        paths=list(assembly.paths),
+                        source_stage=assembly.source_stage,
+                        workflow_step_id=assembly.workflow_step_id,
+                        metadata={
+                            **assembly.metadata,
+                            "inherited": {"tool_output": str(run_root_file)},
+                        },
+                    ).to_dict(),
+                },
+            }
+            interrupt = result["active_interrupt"]
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="hic_scaffolding",
+                decision="keep_prior_assembly",
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+            )
+            persisted_intent = persist_review_intent(
+                result, request, source="test_dynamic_metadata"
+            )
+            prepared = prepare_hic_scaffolding_review_application(
+                result, persisted_intent.intent
+            )
+            application_ref = persist_review_application(
+                result,
+                intent=persisted_intent,
+                prepared=prepared,
+            )
+            verified = load_verified_review_application(
+                result["data_dir"],
+                application_ref,
+                expected_identity=ReviewApplicationIdentity.from_intent(
+                    persisted_intent.intent
+                ),
+            )
+
+            self.assertEqual(
+                verified.effect.assembly_resource.metadata["inherited"]["tool_output"],
+                paths.to_ref(run_root_file),
+            )
 
     def test_missing_models_after_approval_is_requirements_block_not_execution_failure(
         self,
@@ -1905,7 +2246,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 reviewed = build_stage().invoke(approved)
             interrupt = reviewed["active_interrupt"]
 
-            retry_requested = apply_hic_scaffolding_resume_decision(
+            retry_requested = self._apply_hic_scaffolding_review(
                 reviewed,
                 ResumeReviewRequest(
                     session_id="s1",
@@ -1986,7 +2327,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
                 attempt_one_review = build_stage().invoke(attempt_one)
             review_interrupt = attempt_one_review["active_interrupt"]
-            attempt_two_requested = apply_hic_scaffolding_resume_decision(
+            attempt_two_requested = self._apply_hic_scaffolding_review(
                 attempt_one_review,
                 ResumeReviewRequest(
                     session_id="s1",

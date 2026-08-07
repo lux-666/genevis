@@ -42,7 +42,10 @@ from app.stages.assembly_review.method_application.support import (
 )
 from app.stages.assembly_review.state import AssemblyReviewCursor
 from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
-from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.artifacts import (
+    publish_or_recover_work_artifact,
+    record_registered_artifacts,
+)
 from app.storage.ledger import Ledger
 
 QUAST_METHOD = "assembly_review.eval.quast"
@@ -297,10 +300,12 @@ def collect_quast_artifacts(state: TopLevelState) -> StateUpdate:
             metric_refs.append(str(summary_path))
             payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
             ledger.record_attempt_succeeded(session_id, attempt, artifacts=payloads)
-            for artifact in payloads:
-                ledger.record_artifact_registered(
-                    session_id, artifact, attempt_id=attempt.attempt_id
-                )
+            record_registered_artifacts(
+                data_dir,
+                session_id,
+                payloads,
+                attempt_id=attempt.attempt_id,
+            )
             artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
             metadata.update(
                 {"metrics": metrics, "quast_summary_ref": str(summary_path)}

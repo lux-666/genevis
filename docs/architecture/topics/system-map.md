@@ -53,7 +53,7 @@ as a parameterized AutoHiC attempt.
 
 | Module | Owns |
 |---|---|
-| `app/entrypoints/` | Public structured `run` CLI, optional mutable TUI/planning UI, shared whole-run freeze handoff, and inspect/review/resume surfaces |
+| `app/entrypoints/` | Public structured `run` CLI, optional mutable TUI/planning UI, shared whole-run freeze handoff, lease-scoped inspect/review/resume surfaces, and best-effort terminal presentation |
 | `app/workflow.py` and `app/graph/` | Stage registration/default planning, frozen-occurrence routing, checkpointer construction, and parent lifecycle event boundary |
 | `app/domains/` | Stage-neutral biological rules and shared typed input interpretation without workflow side effects |
 | `app/stages/` | Compiled biological subgraphs, method routing, command preparation, collection, review, and resource commit |
@@ -61,9 +61,9 @@ as a parameterized AutoHiC attempt.
 | `app/schemas/` | Cross-module state, plan, descriptor, artifact, execution, and manifest contracts |
 | `app/execution/` | Attempt freeze/run/collect kernel, Runner boundary, environment selection, and durable process evidence |
 | `app/storage/` | Run layout, immutable publication/index, Ledger, frozen inputs, and durable evidence records |
-| `app/review/` | Gate declarations, allowed decisions, occurrence validation, dispatch, timing metadata, and immutable request/decision handling; stage code owns payload semantics, prompt branches, and resume effects |
-| `app/control/` | Inspect, resume, timeout, terminalization, and other lifecycle coordination |
-| `app/reports/` | Operator-status and session-trace projections without control authority; only the session summary currently has a durable-record-only regeneration path |
+| `app/review/` | Gate declarations, allowed decisions, occurrence validation, timeout-request normalization, immutable request/intent/application handling, and registered typed prepare/apply dispatch |
+| `app/control/` | Shared review-status projection, lease-checked resume transaction coordination, inspect, authoritative terminal finalization, and lifecycle recovery |
+| `app/reports/` | Best-effort operator-status and session-trace projections without control authority; only the session summary currently has a durable-record-only regeneration path |
 
 These modules connect through typed contracts and refs. Their directory order
 is not a pipeline, and no module may create a private replacement for an owner
@@ -74,9 +74,11 @@ listed in this table.
 The checkpoint is a recovery cursor, not a database of the workflow. Current
 logical files move through `resource_refs`; original input identity stays in
 the asset registry; immutable bodies and produced files live in artifacts; the
-artifact index proves identity and bytes; the Ledger records causal events;
-reports are regenerable views. Follow [Data and storage](data-and-storage.md)
-when deciding where a new fact belongs.
+artifact index proves identity and bytes; the Ledger records causal events and
+the canonical terminal singleton; the shared review-status projection governs
+whether a decision may be supplied or an existing intent must be recovered;
+reports are regenerable views where supported. Follow
+[Data and storage](data-and-storage.md) when deciding where a new fact belongs.
 
 ## Current product boundary
 

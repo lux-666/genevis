@@ -15,6 +15,13 @@ from pydantic import ValidationError
 from app.control.lifecycle import ResumeValidationError
 from app.llm.parameters.t2t.motif import T2TMotifRequest
 from app.llm.parameters.t2t.request import T2TParameterRequest
+from app.review.application import (
+    ReviewApplicationIdentity,
+    ReviewApplicationIntegrityError,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request, persist_review_request
 from app.schemas.artifacts import (
@@ -39,8 +46,9 @@ from app.stages.t2t.parameters.storage import (
     write_artifact as write_t2t_parameter_artifact,
 )
 from app.stages.t2t.parameters.workflow import (
-    apply_t2t_parameter_approval_decision,
+    apply_t2t_parameter_approval_application,
     freeze_t2t_parameters,
+    prepare_t2t_parameter_approval_application,
     recommend_t2t_parameters,
     resolve_t2t_telomere_motif,
 )
@@ -217,7 +225,37 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "telomere_motif": "TTAGGG",
             },
         )
-        return self._recommend(self._resolve_provided(state), {"min_mapq": 35})
+        return self._as_blocked_parameter_approval(
+            self._recommend(self._resolve_provided(state), {"min_mapq": 35})
+        )
+
+    @staticmethod
+    def _as_blocked_parameter_approval(blocked: dict) -> dict:
+        blocked["active_interrupt"] = blocked["stage_outputs"]["t2t"][
+            "active_interrupt"
+        ]
+        blocked["supervision_state"] = "blocked_human"
+        return blocked
+
+    @staticmethod
+    def _apply_parameter_approval(state: dict, request: ResumeReviewRequest) -> dict:
+        persisted_intent = persist_review_intent(state, request, source="test")
+        prepared = prepare_t2t_parameter_approval_application(
+            state, persisted_intent.intent
+        )
+        application_ref = persist_review_application(
+            state,
+            intent=persisted_intent,
+            prepared=prepared,
+        )
+        verified = load_verified_review_application(
+            state["data_dir"],
+            application_ref,
+            expected_identity=ReviewApplicationIdentity.from_intent(
+                persisted_intent.intent
+            ),
+        )
+        return apply_t2t_parameter_approval_application(state, verified)
 
     @staticmethod
     def _parameter_approval_request(
@@ -273,6 +311,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
             bindings=record["bindings"],
         )
         output["active_interrupt"] = replacement
+        blocked["active_interrupt"] = replacement
         cursor = dict(output["current_parameter_recommendation"])
         cursor["review_request_id"] = persisted.review_request_id
         cursor["review_request_ref"] = persisted.request_ref.model_dump(mode="json")
@@ -773,9 +812,11 @@ class T2TMotifResolutionTests(unittest.TestCase):
                     patch(
                         "app.review.approval.persist_review_decision"
                     ) as persist_decision,
-                    self.assertRaises(ResumeValidationError),
+                    self.assertRaises(
+                        (ResumeValidationError, ReviewApplicationIntegrityError)
+                    ),
                 ):
-                    apply_t2t_parameter_approval_decision(blocked, request)
+                    self._apply_parameter_approval(blocked, request)
                 persist_decision.assert_not_called()
 
     def test_parameter_approval_validates_cursor_and_payload_before_write(self):
@@ -833,9 +874,11 @@ class T2TMotifResolutionTests(unittest.TestCase):
                     patch(
                         "app.review.approval.persist_review_decision"
                     ) as persist_decision,
-                    self.assertRaises(ResumeValidationError),
+                    self.assertRaises(
+                        (ResumeValidationError, ReviewApplicationIntegrityError)
+                    ),
                 ):
-                    apply_t2t_parameter_approval_decision(blocked, request)
+                    self._apply_parameter_approval(blocked, request)
                 persist_decision.assert_not_called()
 
     def test_parameter_approval_validates_manifest_identity_before_write(self):
@@ -881,9 +924,11 @@ class T2TMotifResolutionTests(unittest.TestCase):
                     patch(
                         "app.review.approval.persist_review_decision"
                     ) as persist_decision,
-                    self.assertRaises(ResumeValidationError),
+                    self.assertRaises(
+                        (ResumeValidationError, ReviewApplicationIntegrityError)
+                    ),
                 ):
-                    apply_t2t_parameter_approval_decision(blocked, request)
+                    self._apply_parameter_approval(blocked, request)
                 persist_decision.assert_not_called()
 
     def test_parameter_approval_requires_initial_empty_attempt_head_before_write(self):
@@ -904,9 +949,11 @@ class T2TMotifResolutionTests(unittest.TestCase):
                     patch(
                         "app.review.approval.persist_review_decision"
                     ) as persist_decision,
-                    self.assertRaises(ResumeValidationError),
+                    self.assertRaises(
+                        (ResumeValidationError, ReviewApplicationIntegrityError)
+                    ),
                 ):
-                    apply_t2t_parameter_approval_decision(blocked, request)
+                    self._apply_parameter_approval(blocked, request)
                 persist_decision.assert_not_called()
 
     def test_parameter_approval_derives_attempt_identity_from_validated_manifest(self):
@@ -920,7 +967,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 expected_method_id=cursor["method_id"],
             )
 
-            approved = apply_t2t_parameter_approval_decision(
+            approved = self._apply_parameter_approval(
                 blocked,
                 self._parameter_approval_request(blocked),
             )
@@ -947,8 +994,10 @@ class T2TMotifResolutionTests(unittest.TestCase):
             )
 
             approved_state = self._merge(blocked, approved)
-            with self.assertRaises(ResumeValidationError):
-                apply_t2t_parameter_approval_decision(
+            with self.assertRaises(
+                (ResumeValidationError, ReviewApplicationIntegrityError)
+            ):
+                self._apply_parameter_approval(
                     approved_state,
                     self._parameter_approval_request(blocked),
                 )
@@ -957,7 +1006,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             blocked = self._blocked_parameter_approval(tmpdir)
 
-            rejected = apply_t2t_parameter_approval_decision(
+            rejected = self._apply_parameter_approval(
                 blocked,
                 self._parameter_approval_request(blocked, decision="reject_parameters"),
             )
@@ -984,9 +1033,11 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 patch(
                     "app.review.approval.persist_review_decision"
                 ) as persist_decision,
-                self.assertRaises(ResumeValidationError),
+                self.assertRaises(
+                    (ResumeValidationError, ReviewApplicationIntegrityError)
+                ),
             ):
-                apply_t2t_parameter_approval_decision(blocked, request)
+                self._apply_parameter_approval(blocked, request)
             persist_decision.assert_not_called()
 
     def test_freeze_uses_persisted_catalog_and_persists_all_source_views(self):
@@ -998,7 +1049,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
                     "telomere_motif": "TTAGGG",
                 },
             )
-            blocked = self._recommend(self._resolve_provided(state), {"min_mapq": 35})
+            blocked = self._as_blocked_parameter_approval(
+                self._recommend(self._resolve_provided(state), {"min_mapq": 35})
+            )
             interrupt = stage_output(blocked, "t2t")["active_interrupt"]
             metadata_keys = (
                 "attempt_id",
@@ -1006,7 +1059,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "previous_attempt_id",
                 "recommendation_hash",
             )
-            approval = apply_t2t_parameter_approval_decision(
+            approval = self._apply_parameter_approval(
                 blocked,
                 ResumeReviewRequest(
                     session_id="s1",
@@ -1147,7 +1200,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "app.stages.t2t.parameters.workflow.load_t2t_parameter_catalog",
                 return_value=incomplete_catalog,
             ):
-                blocked = self._recommend(self._resolve_provided(state))
+                blocked = self._as_blocked_parameter_approval(
+                    self._recommend(self._resolve_provided(state))
+                )
             interrupt = stage_output(blocked, "t2t")["active_interrupt"]
             metadata_keys = (
                 "attempt_id",
@@ -1155,7 +1210,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "previous_attempt_id",
                 "recommendation_hash",
             )
-            approval = apply_t2t_parameter_approval_decision(
+            approval = self._apply_parameter_approval(
                 blocked,
                 ResumeReviewRequest(
                     session_id="s1",

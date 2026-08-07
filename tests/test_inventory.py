@@ -10,9 +10,16 @@ from pathlib import Path
 
 import yaml
 
-from app.control.lifecycle import resume_review_state
+from app.control.lifecycle import normalize_resume_review_request
 from app.control.workflow_plan import workflow_steps_from_run_config
+from app.review.application import (
+    ReviewApplicationIdentity,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
+from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
@@ -98,9 +105,7 @@ class InventoryStageTests(unittest.TestCase):
             session_id=session_id,
             input_manifest_ref=paths.to_ref(paths.input_manifest_path),
             data_dir=str(manifest_path.parents[1]),
-            workflow_steps=workflow_steps_from_run_config(
-                verified_inputs.run_config
-            ),
+            workflow_steps=workflow_steps_from_run_config(verified_inputs.run_config),
         )
         if shared_parameters is not None:
             state["shared_parameters"] = dict(shared_parameters)
@@ -156,9 +161,9 @@ class InventoryStageTests(unittest.TestCase):
 
             for mismatch, mismatched_state in cases:
                 with self.subTest(mismatch=mismatch):
-                    result = build_stage(
-                        verified_inputs=verified_inputs
-                    ).invoke(mismatched_state)
+                    result = build_stage(verified_inputs=verified_inputs).invoke(
+                        mismatched_state
+                    )
 
                     self.assertEqual(
                         result["supervision_state"],
@@ -387,13 +392,25 @@ class InventoryStageTests(unittest.TestCase):
                 review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
-            with self.assertRaisesRegex(ValueError, "verified FrozenInputBundle"):
-                resume_review_state(blocked, decision)
-            update = resume_review_state(
+            canonical = normalize_resume_review_request(blocked, decision)
+            intent = persist_review_intent(
                 blocked,
-                decision,
-                verified_inputs=verified_inputs,
+                canonical,
+                source="test_inventory_review",
             )
+            gate = get_review_gate(canonical.stage, canonical.gate_id)
+            prepared = gate.load_prepare_application()(blocked, intent.intent)
+            application_ref = persist_review_application(
+                blocked,
+                intent=intent,
+                prepared=prepared,
+            )
+            application = load_verified_review_application(
+                blocked["data_dir"],
+                application_ref,
+                expected_identity=ReviewApplicationIdentity.from_intent(intent.intent),
+            )
+            update = gate.load_apply_application()(blocked, application)
 
             self.assertIsNone(update["active_interrupt"])
             self.assertEqual(update["current_stage"], "read_qc")

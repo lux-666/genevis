@@ -14,9 +14,16 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app.entrypoints.run as run_entry
+from app.control.lifecycle import TerminalFinalizationResult
+from app.control.projections import (
+    ProjectionBoundary,
+    progress_projection_input,
+)
 from app.control.resume_transaction import ResumeTransactionError
 from app.graph.builder import build_graph
 from app.schemas.run_config import RunConfig
+from app.schemas.state import initial_state as build_initial_state
+from app.storage.frozen_inputs import FrozenExecutionLease
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 
@@ -34,6 +41,43 @@ def _capture_call(function, *args, **kwargs):
 
 def _leave_blocked(_graph, _config, result, *_args, **_kwargs):
     return result
+
+
+def _active_lease(paths: SessionPaths) -> FrozenExecutionLease:
+    return FrozenExecutionLease(
+        session_id=paths.session_id,
+        run_dir=paths.run_dir,
+        active=True,
+    )
+
+
+def _finalized_terminal(*args, **_kwargs) -> TerminalFinalizationResult:
+    return TerminalFinalizationResult(state=args[2], terminal_event={})
+
+
+def _completed_state(state: dict, *, config: dict) -> dict:
+    del config
+    return {
+        **state,
+        "current_stage": "done",
+        "supervision_state": "completed",
+        "workflow_step_index": len(state["workflow_steps"]),
+        "entered_workflow_step_index": len(state["workflow_steps"]) - 1,
+        "route_trace": [],
+    }
+
+
+def _blocked_state(state: dict, *, config: dict) -> dict:
+    del config
+    index = state["workflow_step_index"]
+    return {
+        **state,
+        "current_stage": state["workflow_steps"][index]["stage"],
+        "supervision_state": "blocked_human",
+        "entered_workflow_step_index": index,
+        "route_trace": ["assembly_stage"],
+        "active_interrupt": None,
+    }
 
 
 def _prepared_inputs(
@@ -219,7 +263,7 @@ class AttachedProgressTests(unittest.TestCase):
 
         _result, stdout, stderr = _capture_call(
             run_entry._render_attached_progress,
-            state,
+            progress_projection_input(state),
         )
 
         self.assertEqual(stderr, "")
@@ -631,8 +675,8 @@ class FrozenExecutionBoundaryTests(unittest.TestCase):
         bundle = SimpleNamespace()
 
         @contextlib.contextmanager
-        def fake_lock(_paths):
-            yield
+        def fake_lock(paths):
+            yield _active_lease(paths)
 
         with tempfile.TemporaryDirectory() as tmp:
             expected_paths = SessionPaths(tmp, "frozen-session")
@@ -665,11 +709,20 @@ class FrozenExecutionBoundaryTests(unittest.TestCase):
         lock.assert_called_once_with(expected_paths)
         validate.assert_called_once_with(expected_paths)
         progress.assert_called_once_with(expected_paths)
-        execute.assert_called_once_with(
-            bundle,
-            checkpointer="memory",
-            resume_checkpoint=True,
-            interactive_gate=False,
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.args, (bundle,))
+        self.assertEqual(
+            execute.call_args.kwargs,
+            {
+                "checkpointer": "memory",
+                "resume_checkpoint": True,
+                "interactive_gate": False,
+                "lease": execute.call_args.kwargs["lease"],
+            },
+        )
+        self.assertIsInstance(
+            execute.call_args.kwargs["lease"],
+            FrozenExecutionLease,
         )
 
     def test_partial_execution_is_normalized_before_helper(self):
@@ -739,15 +792,15 @@ class FrozenHelperTests(unittest.TestCase):
                 ),
             )
             graph = Mock()
-            graph.invoke.return_value = {
-                "current_stage": "done",
-                "supervision_state": "completed",
-                "route_trace": [],
-            }
+            graph.invoke.side_effect = _completed_state
             with (
                 patch("app.entrypoints.run.Ledger"),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
-                patch("app.entrypoints.run.finalize_terminal_state", return_value=None),
+                patch(
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=_finalized_terminal,
+                ),
+                patch("app.entrypoints.run.project_workflow_state"),
             ):
                 code, _stdout, stderr = _capture_call(
                     run_entry._execute_verified_frozen_session,
@@ -755,6 +808,7 @@ class FrozenHelperTests(unittest.TestCase):
                     checkpointer="sqlite",
                     resume_checkpoint=False,
                     interactive_gate=False,
+                    lease=_active_lease(paths),
                 )
 
         self.assertEqual(code, 0)
@@ -822,26 +876,15 @@ class FrozenHelperTests(unittest.TestCase):
                 run_config=RunConfig(requested_stages=[]),
             )
             graph = Mock()
-            graph.invoke.return_value = {
-                "current_stage": "assembly_review",
-                "supervision_state": "blocked_human",
-                "route_trace": ["assembly_stage"],
-                "active_interrupt": {"kind": "review"},
-            }
-            seeded_state = {
-                "session_id": "frozen-session",
-                "stage_outputs": {},
-            }
+            graph.invoke.side_effect = _blocked_state
 
             with (
                 patch("app.entrypoints.run.Ledger") as ledger,
                 patch(
-                    "app.entrypoints.run.initial_state", return_value=seeded_state
+                    "app.entrypoints.run.initial_state",
+                    side_effect=build_initial_state,
                 ) as initial,
                 patch("app.entrypoints.run.build_graph", return_value=graph) as build,
-                patch(
-                    "app.entrypoints.run.finalize_terminal_state", return_value=None
-                ) as finalize,
                 patch("app.entrypoints.run._interactive_gate_loop") as gate_loop,
             ):
                 code, stdout, stderr = _capture_call(
@@ -850,6 +893,7 @@ class FrozenHelperTests(unittest.TestCase):
                     checkpointer="sqlite",
                     resume_checkpoint=False,
                     interactive_gate=False,
+                    lease=_active_lease(paths),
                 )
 
         self.assertEqual(code, 0)
@@ -872,18 +916,19 @@ class FrozenHelperTests(unittest.TestCase):
         ledger.return_value.create_session.assert_called_once_with(
             "frozen-session", "control/input_manifest.yaml"
         )
-        build.assert_called_once_with(
-            backend="sqlite",
-            data_dir=str(paths.run_dir),
-            verified_inputs=bundle,
-            on_controller_transition=None,
+        build.assert_called_once()
+        self.assertEqual(build.call_args.kwargs["backend"], "sqlite")
+        self.assertEqual(build.call_args.kwargs["data_dir"], str(paths.run_dir))
+        self.assertIs(build.call_args.kwargs["verified_inputs"], bundle)
+        self.assertIsNone(build.call_args.kwargs["on_controller_transition"])
+        self.assertIsInstance(
+            build.call_args.kwargs["projection_boundary"], ProjectionBoundary
         )
         graph.invoke.assert_called_once_with(
-            seeded_state,
+            graph.invoke.call_args.args[0],
             config={"configurable": {"thread_id": "frozen-session"}},
         )
         gate_loop.assert_not_called()
-        finalize.assert_called_once()
         self.assertIn("supervision_state: blocked_human", stdout)
         self.assertIn("inspect_command: gene-agent inspect", stdout)
         self.assertIn("review_command: gene-agent review", stdout)
@@ -903,19 +948,19 @@ class FrozenHelperTests(unittest.TestCase):
                 run_config=RunConfig(requested_stages=[]),
             )
             graph = Mock()
-            graph.invoke.return_value = {
-                "current_stage": "done",
-                "supervision_state": "completed",
-                "route_trace": [],
-            }
+            graph.invoke.side_effect = _completed_state
             with (
                 patch("app.entrypoints.run.Ledger"),
                 patch(
                     "app.entrypoints.run.initial_state",
-                    return_value={"stage_outputs": {}},
+                    side_effect=build_initial_state,
                 ) as initial,
                 patch("app.entrypoints.run.build_graph", return_value=graph),
-                patch("app.entrypoints.run.finalize_terminal_state", return_value=None),
+                patch(
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=_finalized_terminal,
+                ),
+                patch("app.entrypoints.run.project_workflow_state"),
             ):
                 code, _stdout, stderr = _capture_call(
                     run_entry._execute_verified_frozen_session,
@@ -923,6 +968,7 @@ class FrozenHelperTests(unittest.TestCase):
                     checkpointer="sqlite",
                     resume_checkpoint=False,
                     interactive_gate=False,
+                    lease=_active_lease(paths),
                 )
 
         self.assertEqual(code, 0)
@@ -947,16 +993,12 @@ class FrozenHelperTests(unittest.TestCase):
                 run_config=RunConfig(requested_stages=[]),
             )
             graph = Mock()
-            graph.invoke.return_value = {
-                "current_stage": "assembly_review",
-                "supervision_state": "blocked_human",
-                "route_trace": [],
-            }
+            graph.invoke.side_effect = _blocked_state
             with (
                 patch("app.entrypoints.run.Ledger"),
                 patch(
                     "app.entrypoints.run.initial_state",
-                    return_value={"stage_outputs": {}},
+                    side_effect=build_initial_state,
                 ),
                 patch("app.entrypoints.run.build_graph", return_value=graph) as build,
                 patch(
@@ -966,10 +1008,6 @@ class FrozenHelperTests(unittest.TestCase):
                         "stale review decision",
                     ),
                 ) as gate_loop,
-                patch(
-                    "app.entrypoints.run.finalize_terminal_state",
-                    return_value=None,
-                ) as finalize,
             ):
                 code, stdout, stderr = _capture_call(
                     run_entry._execute_verified_frozen_session,
@@ -977,6 +1015,7 @@ class FrozenHelperTests(unittest.TestCase):
                     checkpointer="sqlite",
                     resume_checkpoint=False,
                     interactive_gate=True,
+                    lease=_active_lease(paths),
                 )
 
         self.assertEqual(code, 1)
@@ -985,15 +1024,14 @@ class FrozenHelperTests(unittest.TestCase):
             stderr,
             "error: resume validation failed: stale review decision\n",
         )
-        self.assertIs(
-            gate_loop.call_args.kwargs["verified_inputs"],
-            bundle,
+        self.assertTrue(gate_loop.call_args.kwargs["lease"].active)
+        self.assertIsInstance(
+            gate_loop.call_args.kwargs["projection_boundary"], ProjectionBoundary
         )
         self.assertIs(
             build.call_args.kwargs["on_controller_transition"],
             run_entry._render_attached_progress,
         )
-        finalize.assert_not_called()
 
     def test_existing_blocked_checkpoint_does_not_restore_foreground_countdown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1002,38 +1040,36 @@ class FrozenHelperTests(unittest.TestCase):
                 paths=paths,
                 run_config=RunConfig(requested_stages=[]),
             )
-            blocked_state = {
-                "session_id": "frozen-session",
-                "current_stage": "assembly_review",
-                "supervision_state": "blocked_human",
-                "route_trace": [],
-                "active_interrupt": {
-                    "stage": "assembly_review",
-                    "gate_id": "assembly_review",
-                    "review_request_id": "review-existing",
-                },
-            }
+            blocked_state = build_initial_state(
+                session_id="frozen-session",
+                input_manifest_ref="control/input_manifest.yaml",
+                data_dir=str(paths.run_dir),
+            )
+            blocked_state.update(
+                {
+                    "supervision_state": "blocked_human",
+                    "entered_workflow_step_index": 0,
+                }
+            )
             graph = Mock()
             graph.get_state.return_value = SimpleNamespace(values=blocked_state)
             with (
-                patch("app.entrypoints.run.Ledger"),
+                patch("app.entrypoints.run.Ledger") as ledger,
                 patch(
                     "app.entrypoints.run.initial_state",
-                    return_value={"stage_outputs": {}},
+                    side_effect=build_initial_state,
                 ),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch("app.entrypoints.run._interactive_gate_loop") as gate_loop,
-                patch(
-                    "app.entrypoints.run.finalize_terminal_state",
-                    return_value=None,
-                ),
             ):
+                ledger.return_value.read_canonical_terminal.return_value = None
                 code, stdout, stderr = _capture_call(
                     run_entry._execute_verified_frozen_session,
                     bundle,
                     checkpointer="sqlite",
                     resume_checkpoint=True,
                     interactive_gate=True,
+                    lease=_active_lease(paths),
                 )
 
         self.assertEqual(code, 0)
@@ -1061,18 +1097,21 @@ class FrozenHelperTests(unittest.TestCase):
                 values={"current_stage": "assembly", "route_trace": ["inventory"]}
             )
             with (
-                patch("app.entrypoints.run.Ledger"),
+                patch("app.entrypoints.run.Ledger") as ledger,
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_terminal_state", return_value=None
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=_finalized_terminal,
                 ) as finalize,
             ):
+                ledger.return_value.read_canonical_terminal.return_value = None
                 code, stdout, stderr = _capture_call(
                     run_entry._execute_verified_frozen_session,
                     bundle,
                     checkpointer="sqlite",
                     resume_checkpoint=False,
                     interactive_gate=False,
+                    lease=_active_lease(paths),
                 )
 
         self.assertEqual(code, 1)
@@ -1086,11 +1125,10 @@ class FrozenHelperTests(unittest.TestCase):
         self.assertEqual(failure["input_manifest_ref"], "control/input_manifest.yaml")
         self.assertEqual(failure["supervision_state"], "failed_terminal")
         self.assertEqual(failure["last_error"], "RuntimeError: stage exploded")
-        self.assertEqual(failure["checkpoint_persistence"], "sqlite")
         self.assertEqual(failure["current_stage"], "assembly")
         self.assertEqual(
             finalize.call_args.kwargs,
-            {"report_kind": "operator"},
+            {"normalize_failure": True},
         )
 
 

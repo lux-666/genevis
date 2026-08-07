@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 from uuid import uuid4
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
 from app.configuration import load_descriptor_registry
 from app.control.errors import ResumeValidationError
-from app.control.workflow_plan import advance_workflow_step
+from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
 from app.domains.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
@@ -45,6 +47,12 @@ from app.execution.parameter_attempts import (
     current_parameter_attempt,
 )
 from app.knowledge.packs import load_knowledge_pack
+from app.review.application import (
+    ForegroundReviewMetadataV1,
+    PreparedReviewApplication,
+    ReviewIntentV1,
+    VerifiedReviewApplication,
+)
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -123,6 +131,92 @@ RecommendedAssemblyRoute = Literal["cyclone", "ont", "hifi", "insufficient_data"
 InputProfileSource = Literal[
     "manifest", "run_config", "run_config_explicit", "llm_inferred"
 ]
+
+
+class AssemblyRouteTimeoutAuditV1(BaseModel):
+    """Exact expired-countdown proof committed by route auto-selection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    configured_seconds: int | float = Field(ge=0)
+    elapsed_seconds: int | float = Field(ge=0)
+    expired: Literal[True]
+
+    @field_validator("configured_seconds", "elapsed_seconds", mode="before")
+    @classmethod
+    def reject_boolean_seconds(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("route timeout seconds must be numeric")
+        return value
+
+    @model_validator(mode="after")
+    def validate_elapsed(self) -> "AssemblyRouteTimeoutAuditV1":
+        if self.elapsed_seconds < self.configured_seconds:
+            raise ValueError("route timeout elapsed_seconds is too small")
+        return self
+
+
+class AssemblyRouteSelectionMetadataV1(ForegroundReviewMetadataV1):
+    """Strict, canonical metadata accepted by the route-selection gate."""
+
+    read_type: str | None = None
+    shared_read_type: str | None = None
+    blocked_timeout: AssemblyRouteTimeoutAuditV1 | None = None
+    auto_accepted: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def validate_automatic_audit(self) -> "AssemblyRouteSelectionMetadataV1":
+        automatic_values = (self.blocked_timeout, self.auto_accepted)
+        if all(value is None for value in automatic_values):
+            return self
+        if any(value is None for value in automatic_values):
+            raise ValueError("route automatic metadata must be complete")
+        if self.source != "foreground_countdown":
+            raise ValueError("route automatic metadata requires countdown source")
+        assert self.blocked_timeout is not None
+        if self.configured_seconds != self.blocked_timeout.configured_seconds:
+            raise ValueError("route timeout configured_seconds mismatch")
+        if self.elapsed_seconds != self.blocked_timeout.elapsed_seconds:
+            raise ValueError("route timeout elapsed_seconds mismatch")
+        return self
+
+
+class AssemblyRouteSelectionApplicationEffectV1(BaseModel):
+    """Typed durable effect for the ``assembly/route_selection`` gate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    decision: Literal[
+        "select_cyclone", "select_ont", "select_hifi", "stop_human_review"
+    ]
+    selected_route: SelectedAssemblyRoute | None = None
+    assembly_selection: AssemblySelection | None = None
+    route_decision: AssemblyRouteDecision | None = None
+    decision_ref: ArtifactRef
+
+    @model_validator(mode="after")
+    def validate_decision_effect(self) -> "AssemblyRouteSelectionApplicationEffectV1":
+        if self.decision == "stop_human_review":
+            if any(
+                value is not None
+                for value in (
+                    self.selected_route,
+                    self.assembly_selection,
+                    self.route_decision,
+                )
+            ):
+                raise ValueError("route stop effect must not contain a selection")
+            return self
+        if (
+            self.selected_route is None
+            or self.assembly_selection is None
+            or self.route_decision is None
+        ):
+            raise ValueError("route selection effect requires a complete selection")
+        if self.route_decision.selected_route != self.selected_route:
+            raise ValueError("route decision selected_route does not match effect")
+        return self
 
 
 class RouteRecommendation(TypedDict):
@@ -555,27 +649,23 @@ def select_route(state: TopLevelState) -> StateUpdate:
     )
 
 
-def apply_route_decision(
+def prepare_route_selection_application(
     state: TopLevelState,
-    request: ResumeReviewRequest,
-    *,
-    _selection_source: str = "human",
-) -> StateUpdate:
-    """Apply a human or timeout assembly-selection gate decision.
+    intent: ReviewIntentV1,
+) -> PreparedReviewApplication:
+    """Durably prepare an assembly route-selection application effect."""
 
-    Args:
-        state: Current state
-        request: Resume request
-        _selection_source: Internal source set by timeout logic, not user-controllable
-    """
-    if request.stage != "assembly":
-        raise ResumeValidationError("assembly selection resume requires stage assembly")
+    _validate_route_selection_intent(state, intent)
+    (
+        review_request_id,
+        review_request_hash,
+        review_request_ref,
+        request_record,
+    ) = _route_review_binding(state, intent)
+    request = validate_route_selection_intent_request(
+        state, intent.request, request_record
+    )
     if request.decision == "stop_human_review":
-        (
-            review_request_id,
-            review_request_hash,
-            review_request_ref,
-        ) = _route_review_binding(state, request)
         decision_ref = persist_review_decision(
             state["data_dir"],
             session_id=state["session_id"],
@@ -588,24 +678,14 @@ def apply_route_decision(
             method_name="assembly.route_selector",
             artifact_type=ASSEMBLY_ROUTE_DECISION,
         )
-        Ledger(state["data_dir"]).record_review_decision(
-            state["session_id"],
-            "assembly",
-            gate_id="route_selection",
-            decision=request.decision,
-            notes=list(request.notes),
-            artifact_ref=decision_ref.model_dump(mode="json"),
-            metadata=request.metadata,
-            decided_by=request.decided_by,
-            rationale_artifact_ref=request.rationale_artifact_ref,
-            review_request_id=review_request_id,
+        return PreparedReviewApplication(
+            effect_kind="assembly.route_selection.v1",
+            effect=AssemblyRouteSelectionApplicationEffectV1(
+                decision="stop_human_review",
+                decision_ref=decision_ref,
+            ),
+            decision_ref=decision_ref,
         )
-        return {
-            "current_stage": "assembly",
-            "supervision_state": "failed_terminal",
-            "active_interrupt": None,
-            "last_error": "assembly route selection stopped by human review",
-        }
 
     selected_route = ROUTE_DECISION_MAP.get(request.decision)
     if selected_route is None:
@@ -618,14 +698,17 @@ def apply_route_decision(
         request, assembly_out, selected_route
     )
     method = _requested_method(request, assembly_out, read_type)
+    selection_source: Literal["human", "timeout"] = (
+        "timeout" if request.decided_by == "auto_rule" else "human"
+    )
     try:
         selection = AssemblySelection(
             read_type=read_type,
             primary_method=method,
-            source="timeout" if _selection_source == "timeout" else "human",
+            source=selection_source,
             rationale="; ".join(request.notes)
             if request.notes
-            else f"{_selection_source} selected {selected_route} read type",
+            else f"{selection_source} selected {selected_route} read type",
             metadata={
                 "resume_decision": request.decision,
                 **request.metadata,
@@ -636,9 +719,8 @@ def apply_route_decision(
         raise ResumeValidationError(str(exc)) from exc
 
     decided_by: Literal["auto_rule", "human_override"] = (
-        "auto_rule" if _selection_source == "timeout" else "human_override"
+        "auto_rule" if selection_source == "timeout" else "human_override"
     )
-
     decision = AssemblyRouteDecision(
         session_id=state["session_id"],
         selected_route=selected_route,
@@ -653,9 +735,6 @@ def apply_route_decision(
             "read_type_source": read_type_source,
         },
     )
-    review_request_id, review_request_hash, review_request_ref = _route_review_binding(
-        state, request
-    )
     decision_ref = persist_review_decision(
         state["data_dir"],
         session_id=state["session_id"],
@@ -668,30 +747,62 @@ def apply_route_decision(
         method_name="assembly.route_selector",
         artifact_type=ASSEMBLY_ROUTE_DECISION,
     )
-    Ledger(state["data_dir"]).record_review_decision(
-        state["session_id"],
-        "assembly",
-        gate_id="route_selection",
-        decision=request.decision,
-        method_name=method,
-        notes=list(request.notes),
-        artifact_ref=decision_ref.model_dump(mode="json"),
-        metadata=request.metadata,
-        decided_by=decided_by,
-        rationale_artifact_ref=request.rationale_artifact_ref,
-        review_request_id=review_request_id,
+    return PreparedReviewApplication(
+        effect_kind="assembly.route_selection.v1",
+        effect=AssemblyRouteSelectionApplicationEffectV1(
+            decision=cast(
+                Literal["select_cyclone", "select_ont", "select_hifi"],
+                request.decision,
+            ),
+            selected_route=selected_route,
+            assembly_selection=selection,
+            route_decision=decision,
+            decision_ref=decision_ref,
+        ),
+        decision_ref=decision_ref,
     )
 
+
+def apply_route_selection_application(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> StateUpdate:
+    """Purely project a verified route-selection application into state."""
+
+    effect = application.effect
+    if not isinstance(effect, AssemblyRouteSelectionApplicationEffectV1):
+        raise TypeError("route selection application has an unexpected effect")
+    if application.application.effect_kind != "assembly.route_selection.v1":
+        raise ValueError("route selection application has an unexpected effect_kind")
+    _validate_route_selection_application_state(state, application)
+    if application.application.decision_ref != effect.decision_ref:
+        raise ValueError("route selection effect decision_ref does not match envelope")
+
+    if effect.decision == "stop_human_review":
+        return {
+            "current_stage": "assembly",
+            "supervision_state": "failed_terminal",
+            "active_interrupt": None,
+            "last_error": "assembly route selection stopped by human review",
+        }
+
+    if (
+        effect.selected_route is None
+        or effect.assembly_selection is None
+        or effect.route_decision is None
+    ):
+        raise ValueError("route selection application is missing a complete selection")
     stage_update = update_assembly_stage_output(
         state,
         {
             "status": "route_selected",
-            "route_decision": decision.model_dump(mode="json"),
-            "route_decision_ref": decision_ref.model_dump(mode="json"),
+            "route_decision": effect.route_decision.model_dump(mode="json"),
+            "route_decision_ref": effect.decision_ref.model_dump(mode="json"),
             "assembly_selection": cast(
-                AssemblySelectionCursor, selection.model_dump(mode="json")
+                AssemblySelectionCursor,
+                effect.assembly_selection.model_dump(mode="json"),
             ),
-            "selected_route": selected_route,
+            "selected_route": effect.selected_route,
         },
     )
     return {
@@ -702,17 +813,129 @@ def apply_route_decision(
     }
 
 
-def _route_review_binding(
+def _validate_route_selection_intent(
+    state: TopLevelState,
+    intent: ReviewIntentV1,
+) -> None:
+    if intent.stage != "assembly" or intent.gate_id != "route_selection":
+        raise ResumeValidationError(
+            "assembly route application requires assembly/route_selection"
+        )
+    if intent.session_id != state["session_id"]:
+        raise ResumeValidationError(
+            "assembly route intent session_id does not match state"
+        )
+    if intent.workflow_step_id != current_workflow_step_id(
+        state, expected_stage="assembly"
+    ):
+        raise ResumeValidationError(
+            "assembly route intent workflow_step_id does not match state"
+        )
+
+
+def validate_route_selection_intent_request(
     state: TopLevelState,
     request: ResumeReviewRequest,
-) -> tuple[str, str, ArtifactRef]:
+    request_record: Mapping[str, Any],
+) -> ResumeReviewRequest:
+    """Validate and canonicalize a route-selection request before intent write."""
+
+    if request.session_id != state["session_id"]:
+        raise ResumeValidationError("assembly route request session_id mismatch")
+    if request.stage != "assembly" or request.gate_id != "route_selection":
+        raise ResumeValidationError(
+            "assembly route review requires assembly/route_selection"
+        )
+    workflow_step_id = current_workflow_step_id(state, expected_stage="assembly")
+    active_interrupt = state.get("active_interrupt")
+    if not isinstance(active_interrupt, Mapping):
+        raise ResumeValidationError(
+            "assembly route review requires an active_interrupt"
+        )
+    try:
+        request_ref = ArtifactRef.model_validate(active_interrupt.get("request_ref"))
+    except (TypeError, ValueError) as exc:
+        raise ResumeValidationError(
+            "assembly route active_interrupt has no valid request_ref"
+        ) from exc
+    if (
+        request.review_request_id != active_interrupt.get("review_request_id")
+        or request.review_request_hash != active_interrupt.get("request_hash")
+        or request.review_request_hash != request_ref.sha256
+        or active_interrupt.get("workflow_step_id") != workflow_step_id
+        or request_record.get("review_request_id") != request.review_request_id
+        or request_record.get("stage") != "assembly"
+        or request_record.get("gate_id") != "route_selection"
+        or request_record.get("workflow_step_id") != workflow_step_id
+    ):
+        raise ResumeValidationError("assembly route review request binding mismatch")
+    if request.decision not in {
+        "select_cyclone",
+        "select_ont",
+        "select_hifi",
+        "stop_human_review",
+    }:
+        raise ResumeValidationError(
+            f"unsupported assembly selection decision: {request.decision}"
+        )
+
+    if request.decision == "stop_human_review":
+        metadata = dict(request.metadata)
+        metadata.pop("read_type", None)
+        metadata.pop("shared_read_type", None)
+        return request.model_copy(
+            update={
+                "candidate_id": None,
+                "candidate_ids": [],
+                "method_name": None,
+                "rejected_candidates": [],
+                "metadata": metadata,
+            }
+        )
+
+    selected_route = ROUTE_DECISION_MAP[request.decision]
+    assembly_out = assembly_stage_output(state)
+    read_type, _read_type_source = _requested_read_type(
+        request, assembly_out, selected_route
+    )
+    method = _requested_method(request, assembly_out, read_type)
+    metadata = dict(request.metadata)
+    metadata["read_type"] = read_type
+    metadata.pop("shared_read_type", None)
+    return request.model_copy(
+        update={
+            "method_name": method,
+            "metadata": metadata,
+        }
+    )
+
+
+def _validate_route_selection_application_state(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> None:
+    identity = application.application
+    if identity.session_id != state["session_id"]:
+        raise ResumeValidationError(
+            "assembly route application session_id does not match state"
+        )
+    if identity.stage != "assembly" or identity.gate_id != "route_selection":
+        raise ResumeValidationError("assembly route application has an unexpected gate")
+    if identity.workflow_step_id != current_workflow_step_id(
+        state, expected_stage="assembly"
+    ):
+        raise ResumeValidationError(
+            "assembly route application workflow_step_id does not match state"
+        )
+
+
+def _route_review_binding(
+    state: TopLevelState,
+    intent: ReviewIntentV1,
+) -> tuple[str, str, ArtifactRef, dict[str, Any]]:
     active_interrupt: Mapping[str, object] = state.get("active_interrupt") or {}
-    review_request_id = request.review_request_id or active_interrupt.get(
-        "review_request_id"
-    )
-    review_request_hash = request.review_request_hash or active_interrupt.get(
-        "request_hash"
-    )
+    review_request_id = intent.review_request_id
+    review_request_hash = intent.request_hash
     request_ref_value = active_interrupt.get("request_ref")
     if not review_request_id or not review_request_hash or request_ref_value is None:
         raise ResumeValidationError(
@@ -734,15 +957,16 @@ def _route_review_binding(
         or request_record.get("gate_id") != "route_selection"
         or request_record.get("workflow_step_id")
         != active_interrupt.get("workflow_step_id")
+        or active_interrupt.get("workflow_step_id") != intent.workflow_step_id
     ):
         raise ResumeValidationError("assembly route review request binding mismatch")
-    return str(review_request_id), str(review_request_hash), request_ref
+    return str(review_request_id), str(review_request_hash), request_ref, request_record
 
 
-def apply_selection_timeout(
+def normalize_selection_timeout_request(
     state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
-) -> StateUpdate:
-    """Commit the current assembly recommendation after a configured timeout."""
+) -> ResumeReviewRequest:
+    """Normalize a timed-out route review into its recommended resume request."""
     active_interrupt: Mapping[str, object] = state.get("active_interrupt") or {}
     request_ref = active_interrupt.get("request_ref")
     try:
@@ -789,13 +1013,16 @@ def apply_selection_timeout(
             ],
             "metadata": {
                 **request.metadata,
+                "source": "foreground_countdown",
+                "configured_seconds": timeout.get("configured_seconds"),
+                "elapsed_seconds": timeout.get("elapsed_seconds"),
                 "read_type": selection_payload.get("read_type"),
                 "blocked_timeout": timeout,
                 "auto_accepted": True,
             },
         }
     )
-    return apply_route_decision(state, timeout_request, _selection_source="timeout")
+    return timeout_request
 
 
 def build_assembly_candidate_set(state: TopLevelState) -> StateUpdate:

@@ -36,7 +36,7 @@ from app.stages.assembly_review.state import (
     update_assembly_review_output,
 )
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
-from app.storage.artifacts import publish_artifact_record
+from app.storage.artifacts import publish_artifact_record, record_registered_artifacts
 from app.storage.assembly_candidates import (
     VerifiedExecutedCandidate,
     load_executed_candidate_bundle,
@@ -206,6 +206,11 @@ def write_json_artifact(
             state["session_id"],
             artifact,
             destination=path,
+        )
+        record_registered_artifacts(
+            data_dir,
+            state["session_id"],
+            [published.ref],
         )
     finally:
         temporary.unlink(missing_ok=True)

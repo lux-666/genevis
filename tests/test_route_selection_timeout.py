@@ -12,11 +12,19 @@ from app.control.lifecycle import (
     _blocked_timeout_status,
     build_foreground_auto_resume_request,
     inspect_state,
-    resume_review_state,
+    normalize_resume_review_request,
     review_max_blocked_seconds,
 )
+from app.review.application import (
+    ReviewApplicationIdentity,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
+from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
+from app.schemas.artifacts import ArtifactRef
 from app.schemas.state import initial_state
 from app.stages.assembly.nodes import block_assembly_for_human, select_route
 from app.storage.ledger import Ledger
@@ -145,6 +153,40 @@ def _auto_request(state: dict) -> ResumeReviewRequest:
     )
 
 
+def _apply_route_review(
+    state: dict,
+    request: ResumeReviewRequest,
+    *,
+    blocked_timeout_seconds: float | None = None,
+    decision_source: str = "manual",
+) -> dict:
+    canonical = normalize_resume_review_request(
+        state,
+        request,
+        blocked_timeout_seconds=blocked_timeout_seconds,
+        decision_source=decision_source,
+    )
+    intent = persist_review_intent(
+        state,
+        canonical,
+        source=decision_source,
+        blocked_timeout_seconds=blocked_timeout_seconds,
+    )
+    gate = get_review_gate(canonical.stage, canonical.gate_id)
+    prepared = gate.load_prepare_application()(state, intent.intent)
+    application_ref = persist_review_application(
+        state,
+        intent=intent,
+        prepared=prepared,
+    )
+    application = load_verified_review_application(
+        state["data_dir"],
+        application_ref,
+        expected_identity=ReviewApplicationIdentity.from_intent(intent.intent),
+    )
+    return dict(gate.load_apply_application()(state, application))
+
+
 def test_route_request_persists_effective_wait_without_policy_mode():
     with tempfile.TemporaryDirectory() as tmpdir:
         state = _blocked_route_state(tmpdir, "persist_wait", wait_seconds=600)
@@ -178,7 +220,7 @@ def test_route_countdown_accepts_registered_recommendation(
 
         assert request.decision == expected_decision
         assert request.method_name == expected_method
-        result = resume_review_state(
+        result = _apply_route_review(
             state,
             request,
             blocked_timeout_seconds=300,
@@ -195,7 +237,7 @@ def test_route_countdown_accepts_registered_recommendation(
 def test_manual_resume_after_deadline_uses_human_decision_without_timeout():
     with tempfile.TemporaryDirectory() as tmpdir:
         state = _blocked_route_state(tmpdir, "manual_after_deadline")
-        result = resume_review_state(state, _human_request(state, "select_ont"))
+        result = _apply_route_review(state, _human_request(state, "select_ont"))
 
     assembly = result["stage_outputs"]["assembly"]
     assert assembly["selected_route"] == "ont"
@@ -209,7 +251,7 @@ def test_auto_rule_request_without_foreground_timeout_is_rejected():
         request = _auto_request(state)
 
         with pytest.raises(ResumeValidationError, match="foreground countdown"):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 request,
                 decision_source="foreground_countdown",
@@ -222,7 +264,7 @@ def test_auto_rule_request_requires_foreground_decision_source():
         request = _auto_request(state)
 
         with pytest.raises(ResumeValidationError, match="decision source"):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 request,
                 blocked_timeout_seconds=300,
@@ -239,7 +281,7 @@ def test_auto_rule_request_before_foreground_deadline_is_rejected():
         request = _auto_request(state)
 
         with pytest.raises(ResumeValidationError, match="has not expired"):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 request,
                 blocked_timeout_seconds=300,
@@ -253,7 +295,7 @@ def test_auto_rule_timeout_must_match_verified_request():
         request = _auto_request(state)
 
         with pytest.raises(ResumeValidationError, match="does not match"):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 request,
                 blocked_timeout_seconds=0,
@@ -267,7 +309,7 @@ def test_auto_rule_request_requires_verified_foreground_metadata():
         request = _auto_request(state).model_copy(update={"metadata": {}})
 
         with pytest.raises(ResumeValidationError, match="not bound"):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 request,
                 blocked_timeout_seconds=300,
@@ -292,7 +334,7 @@ def test_indefinite_wait_rejects_auto_rule_even_with_internal_timeout():
             review_request_id=interrupt["review_request_id"],
             review_request_hash=interrupt["request_hash"],
             decided_by="auto_rule",
-            rationale_artifact_ref=interrupt["request_ref"]["path_ref"],
+            rationale_artifact_ref=ArtifactRef.model_validate(interrupt["request_ref"]),
             metadata={
                 "source": "foreground_countdown",
                 "configured_seconds": -1,
@@ -301,7 +343,7 @@ def test_indefinite_wait_rejects_auto_rule_even_with_internal_timeout():
         )
 
         with pytest.raises(ResumeValidationError, match="has not expired"):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 request,
                 blocked_timeout_seconds=-1,
@@ -317,7 +359,7 @@ def test_expired_timeout_rejects_human_request():
             ResumeValidationError,
             match="foreground_countdown decision source",
         ):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 _human_request(state, "select_hifi"),
                 blocked_timeout_seconds=300,
@@ -339,7 +381,7 @@ def test_invalid_route_recommendation_leaves_gate_blocked():
         request = _auto_request(state)
 
         with pytest.raises(ResumeValidationError, match="invalid read type"):
-            resume_review_state(
+            _apply_route_review(
                 state,
                 request,
                 blocked_timeout_seconds=300,

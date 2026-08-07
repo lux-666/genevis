@@ -1826,11 +1826,72 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
             "review_request_hash": state["active_interrupt"]["request_hash"],
         }
 
+    def test_json_artifacts_record_registered_refs_after_publication(self):
+        from app.schemas.artifacts import (
+            ASSEMBLY_CANDIDATE_COMPARISON,
+            ASSEMBLY_REVIEW_ACTION,
+            ASSEMBLY_REVIEW_EVAL_BUNDLE,
+            ASSEMBLY_REVIEW_PACKET,
+            ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
+        )
+        from app.stages.assembly_review.method_application.support import (
+            write_json_artifact,
+        )
+        from app.storage.artifacts import artifact_ref_for_path
+        from app.storage.ledger import Ledger
+
+        artifact_types = (
+            ASSEMBLY_REVIEW_EVAL_BUNDLE,
+            ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
+            ASSEMBLY_CANDIDATE_COMPARISON,
+            ASSEMBLY_REVIEW_PACKET,
+            ASSEMBLY_REVIEW_ACTION,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir)
+            for index, artifact_type in enumerate(artifact_types):
+                path = write_json_artifact(
+                    state,
+                    f"registered-{index}.json",
+                    {"artifact_type": artifact_type},
+                    artifact_type=artifact_type,
+                )
+                ref = artifact_ref_for_path(
+                    state["data_dir"],
+                    state["session_id"],
+                    path,
+                    expected_type=artifact_type,
+                )
+                registered = [
+                    event
+                    for event in Ledger(state["data_dir"]).read_event_rows(
+                        state["session_id"]
+                    )
+                    if event["event_type"] == "artifact_registered"
+                    and event["subject_id"] == ref.artifact_id
+                ]
+
+                self.assertEqual(len(registered), 1)
+                self.assertEqual(
+                    registered[0]["refs"],
+                    [
+                        {
+                            "role": "artifact",
+                            "artifact_id": ref.artifact_id,
+                            "path_ref": ref.path_ref,
+                            "sha256": ref.sha256,
+                            "size_bytes": ref.size_bytes,
+                            "artifact_type": ref.artifact_type,
+                        }
+                    ],
+                )
+
     def test_unsupported_review_decision_fails_closed(self):
         from app.control.lifecycle import ResumeValidationError
+        from app.review.application import persist_review_intent
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (
-            apply_assembly_review_resume_decision,
+            prepare_assembly_review_application,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1849,7 +1910,198 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
                 ResumeValidationError,
                 "unsupported assembly_review decision: invalid",
             ):
-                apply_assembly_review_resume_decision(state, request)
+                intent = persist_review_intent(state, request, source="review")
+                prepare_assembly_review_application(state, intent.intent)
+
+    def test_validates_rejected_candidate_set_and_rejects_unknown_ids(self):
+        from app.control.lifecycle import ResumeValidationError
+        from app.review.approval import load_verified_interrupt_request
+        from app.review.base import ResumeReviewRequest
+        from app.stages.assembly_review.nodes import (
+            validate_assembly_review_intent_request,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir, extra_candidate_count=1)
+            candidate_ids = [
+                candidate["candidate_id"]
+                for candidate in state["stage_outputs"]["assembly_review"]["candidates"]
+            ]
+            selected, rejected = candidate_ids
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="accept",
+                candidate_id=selected,
+                rejected_candidates=[rejected, rejected],
+                notes=["keep this order"],
+                **self._review_binding(state),
+            )
+
+            _ref, request_record = load_verified_interrupt_request(
+                state, state["active_interrupt"]
+            )
+            canonical = validate_assembly_review_intent_request(
+                state, request, request_record
+            )
+
+            self.assertEqual(canonical.rejected_candidates, [rejected])
+            self.assertEqual(canonical.notes, ["keep this order"])
+            with self.assertRaisesRegex(
+                ResumeValidationError, "unsupported assembly_review decision"
+            ):
+                validate_assembly_review_intent_request(
+                    state,
+                    request.model_copy(update={"decision": "invalid"}),
+                    request_record,
+                )
+            with self.assertRaisesRegex(ResumeValidationError, "unknown.*rejected"):
+                validate_assembly_review_intent_request(
+                    state,
+                    request.model_copy(update={"rejected_candidates": ["unknown"]}),
+                    request_record,
+                )
+            stopped = validate_assembly_review_intent_request(
+                state,
+                request.model_copy(
+                    update={
+                        "decision": "stop_human_review",
+                        "candidate_id": "unknown",
+                        "candidate_ids": ["unknown"],
+                        "rejected_candidates": ["unknown"],
+                        "method_name": "assembly.candidate.flye",
+                        "metadata": {
+                            "action_output_ref": "work/action.fasta",
+                            "evidence_refs": ["work/evidence.txt"],
+                            "human_approved_action": True,
+                            "provenance_ref": "work/provenance.json",
+                        },
+                    }
+                ),
+                request_record,
+            )
+            self.assertIsNone(stopped.candidate_id)
+            self.assertEqual(stopped.candidate_ids, [])
+            self.assertEqual(stopped.rejected_candidates, [])
+            self.assertIsNone(stopped.method_name)
+            self.assertEqual(stopped.metadata, {})
+
+    def test_transform_intent_rejects_external_and_missing_file_refs(self):
+        from app.control.lifecycle import ResumeValidationError
+        from app.review.approval import load_verified_interrupt_request
+        from app.review.base import ResumeReviewRequest
+        from app.stages.assembly_review.nodes import (
+            validate_assembly_review_intent_request,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir)
+            candidate_id = state["stage_outputs"]["assembly_review"]["candidates"][0][
+                "candidate_id"
+            ]
+            _ref, request_record = load_verified_interrupt_request(
+                state, state["active_interrupt"]
+            )
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="purge",
+                candidate_id=candidate_id,
+                method_name="assembly.candidate.flye",
+                metadata={
+                    "action_output_ref": "../outside.fasta",
+                    "human_approved_action": True,
+                    "evidence_notes": ["human-verified purge"],
+                },
+                **self._review_binding(state),
+            )
+            with self.assertRaisesRegex(ResumeValidationError, "run-relative"):
+                validate_assembly_review_intent_request(state, request, request_record)
+
+            missing = request.model_copy(
+                update={
+                    "metadata": {
+                        **request.metadata,
+                        "action_output_ref": "work/missing-action.fasta",
+                    }
+                }
+            )
+            with self.assertRaisesRegex(ResumeValidationError, "materialized file"):
+                validate_assembly_review_intent_request(state, missing, request_record)
+
+    def test_prepared_effect_uses_typed_refs_and_decision_metadata(self):
+        from pydantic import ValidationError
+
+        from app.review.application import RunRelativeFileRef, persist_review_intent
+        from app.review.base import ResumeReviewRequest
+        from app.stages.assembly_review.nodes import (
+            prepare_assembly_review_application,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir)
+            paths = SessionPaths.from_run_dir(state["data_dir"])
+            rationale_path = paths.workflow_step_work_path(
+                "step-002-assembly_review", "assembly_review", "rationale.json"
+            )
+            rationale_path.parent.mkdir(parents=True, exist_ok=True)
+            rationale_path.write_text('{"reason":"manual review"}', encoding="utf-8")
+            rationale_ref = publish_artifact_record(
+                state["data_dir"],
+                state["session_id"],
+                ArtifactMeta.from_file(
+                    rationale_path,
+                    stage="assembly_review",
+                    method_name="assembly_review.contract",
+                    artifact_type="review.rationale",
+                ),
+            ).ref
+            candidate_id = state["stage_outputs"]["assembly_review"]["candidates"][0][
+                "candidate_id"
+            ]
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="accept",
+                candidate_id=candidate_id,
+                rationale_artifact_ref=rationale_ref,
+                **self._review_binding(state),
+            )
+            intent = persist_review_intent(
+                state, request, source="assembly-review-test"
+            )
+            prepared = prepare_assembly_review_application(state, intent.intent)
+            effect = prepared.effect
+
+            self.assertIsInstance(effect.pre_action_assembly_ref, RunRelativeFileRef)
+            self.assertIsInstance(effect.final_assembly_ref, RunRelativeFileRef)
+            self.assertIsInstance(effect.output_assembly_ref, RunRelativeFileRef)
+            self.assertEqual(effect.rationale_artifact_ref, rationale_ref)
+            self.assertFalse(effect.output_assembly_ref.path_ref.startswith("/"))
+            self.assertTrue(
+                paths.resolve_ref(effect.output_assembly_ref.path_ref).is_file()
+            )
+
+            decision_path = paths.resolve_ref(effect.decision_ref.path_ref)
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                decision["decision"]["metadata"]["rationale_artifact_ref"],
+                rationale_ref.model_dump(mode="json"),
+            )
+            self.assertEqual(
+                decision["decision"]["metadata"]["output_primary_ref"],
+                effect.primary_output_ref.model_dump(mode="json"),
+            )
+
+            with self.assertRaises(ValidationError):
+                ResumeReviewRequest(
+                    session_id=state["session_id"],
+                    stage="assembly_review",
+                    decision="accept",
+                    candidate_id=candidate_id,
+                    rationale_artifact_ref="not-an-artifact-ref",
+                    **self._review_binding(state),
+                )
 
     def test_candidate_comparison_replay_reuses_existing_artifact(self):
         """Reuse comparison output when candidates and signals are unchanged."""

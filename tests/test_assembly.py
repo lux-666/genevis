@@ -10,14 +10,21 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import resume_review_state
+from app.control.lifecycle import normalize_resume_review_request
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
     validate_assembly_selection,
 )
 from app.integrity import sha256_file
+from app.review.application import (
+    ReviewApplicationIdentity,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
+from app.review.gates import get_review_gate
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
@@ -272,10 +279,26 @@ class AssemblyStageTests(unittest.TestCase):
         )
 
     def _approve_parameter_gate(self, blocked: dict) -> dict:
-        approval_update = resume_review_state(
+        request = AssemblyStageTests._parameter_approval_request(self, blocked)
+        canonical = normalize_resume_review_request(blocked, request)
+        intent = persist_review_intent(
             blocked,
-            AssemblyStageTests._parameter_approval_request(self, blocked),
+            canonical,
+            source="test_assembly_parameter_approval",
         )
+        gate = get_review_gate(canonical.stage, canonical.gate_id)
+        prepared = gate.load_prepare_application()(blocked, intent.intent)
+        application_ref = persist_review_application(
+            blocked,
+            intent=intent,
+            prepared=prepared,
+        )
+        application = load_verified_review_application(
+            blocked["data_dir"],
+            application_ref,
+            expected_identity=ReviewApplicationIdentity.from_intent(intent.intent),
+        )
+        approval_update = gate.load_apply_application()(blocked, application)
         return {**blocked, **approval_update}
 
     def _invoke_with_parameter_approvals(self, state: dict) -> dict:

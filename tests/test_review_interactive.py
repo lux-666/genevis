@@ -12,6 +12,10 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from app.control.resume_transaction import (
+    ResumeTransactionError,
+    ResumeTransactionResult,
+)
 from app.entrypoints.review_interactive import (
     _prompt_choice,
     build_decision_brief,
@@ -28,6 +32,7 @@ from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
+from app.storage.frozen_inputs import FrozenExecutionLease
 from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
 
@@ -83,11 +88,7 @@ def _review_occurrence_state(
 def _verified_inputs_for_review(stage: str) -> SimpleNamespace:
     return SimpleNamespace(
         run_config=RunConfig.model_validate(
-            {
-                "requested_stages": [
-                    {"stage": stage, "allow_local_execution": False}
-                ]
-            }
+            {"requested_stages": [{"stage": stage, "allow_local_execution": False}]}
         )
     )
 
@@ -482,7 +483,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
             )
             verified_inputs = object()
             graph = object()
-            transaction_result = SimpleNamespace(
+            transaction_result = ResumeTransactionResult(
                 state={
                     "current_stage": "done",
                     "supervision_state": "completed",
@@ -492,6 +493,15 @@ class RunInteractiveReviewTests(unittest.TestCase):
             )
 
             with (
+                patch(
+                    "app.control.lifecycle.inspect_session",
+                    return_value={
+                        "latest_review_status": {
+                            "status": "awaiting_decision",
+                            "accepts_new_decision": True,
+                        },
+                    },
+                ),
                 patch(
                     "app.entrypoints.review_interactive.collect_gate_decision",
                     return_value=(request, request.model_dump(mode="json")),
@@ -512,16 +522,66 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 code = run_interactive_review(session_id, str(data_root))
 
         self.assertEqual(code, 0)
-        validate.assert_called_once()
+        self.assertEqual(validate.call_count, 2)
         self.assertEqual(validate.call_args.args[0].run_dir, run_dir)
         self.assertIs(
             collect.call_args.kwargs["verified_inputs"],
             verified_inputs,
         )
         self.assertIs(build.call_args.kwargs["verified_inputs"], verified_inputs)
-        self.assertIs(
-            execute.call_args.kwargs["verified_inputs"],
-            verified_inputs,
+        self.assertIsInstance(execute.call_args.kwargs["lease"], FrozenExecutionLease)
+        self.assertIn("projection_boundary", execute.call_args.kwargs)
+        self.assertIn("projection_boundary", build.call_args.kwargs)
+
+    def test_committed_intent_recovers_without_prompting_for_new_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_id = "review-recovery"
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, session_id)
+            checkpoint_db = run_dir / "checkpoints" / "checkpoints.sqlite"
+            checkpoint_db.write_text("", encoding="utf-8")
+            verified_inputs = object()
+            graph = object()
+            transaction_result = ResumeTransactionResult(
+                state={
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                },
+                decision_artifact_path=None,
+            )
+
+            with (
+                patch(
+                    "app.control.lifecycle.inspect_session",
+                    return_value={
+                        "latest_review_status": {
+                            "status": "decision_committed",
+                            "accepts_new_decision": False,
+                        },
+                    },
+                ),
+                patch(
+                    "app.entrypoints.review_interactive.collect_gate_decision"
+                ) as collect,
+                patch(
+                    "app.storage.frozen_inputs.validate_frozen_inputs",
+                    return_value=verified_inputs,
+                ),
+                patch("app.graph.builder.build_graph", return_value=graph),
+                patch(
+                    "app.control.resume_transaction.execute_resume_transaction",
+                    return_value=transaction_result,
+                ) as execute,
+            ):
+                code = run_interactive_review(session_id, str(data_root))
+
+        self.assertEqual(code, 0)
+        collect.assert_not_called()
+        self.assertIsNone(execute.call_args.kwargs["request"])
+        self.assertEqual(
+            execute.call_args.kwargs["source"],
+            "interactive_review_recovery",
         )
 
     def test_session_not_found_returns_error(self):
@@ -578,6 +638,15 @@ class RunInteractiveReviewTests(unittest.TestCase):
             )
             raw_decision = request.model_dump(mode="json")
             with (
+                patch(
+                    "app.control.lifecycle.inspect_session",
+                    return_value={
+                        "latest_review_status": {
+                            "status": "awaiting_decision",
+                            "accepts_new_decision": True,
+                        },
+                    },
+                ),
                 patch(
                     "app.entrypoints.review_interactive.collect_gate_decision",
                     return_value=(request, raw_decision),
@@ -647,6 +716,15 @@ class RunInteractiveReviewTests(unittest.TestCase):
             decision_path.write_text("{}\n", encoding="utf-8")
             with (
                 patch(
+                    "app.control.lifecycle.inspect_session",
+                    return_value={
+                        "latest_review_status": {
+                            "status": "awaiting_decision",
+                            "accepts_new_decision": True,
+                        },
+                    },
+                ),
+                patch(
                     "app.entrypoints.review_interactive.collect_gate_decision",
                     return_value=(request, raw_decision),
                 ),
@@ -655,19 +733,19 @@ class RunInteractiveReviewTests(unittest.TestCase):
                     return_value=SimpleNamespace(),
                 ),
                 patch("app.graph.builder.build_graph", return_value=graph),
-                patch("app.control.resume_transaction.validate_resume_review_state"),
                 patch(
-                    "app.control.resume_transaction.resume_review_state",
-                    return_value={"supervision_state": "running_stage"},
-                ),
+                    "app.control.resume_transaction.execute_resume_transaction",
+                    side_effect=ResumeTransactionError(
+                        "checkpoint_apply",
+                        "update boom",
+                        review_status="application_prepared",
+                    ),
+                ) as execute,
             ):
                 code = run_interactive_review(session_id, str(data_dir))
 
             self.assertEqual(code, 1)
-            events = Ledger(data_dir).read_events(session_id)
-            self.assertTrue(
-                any(event["event_type"] == "resume_failed" for event in events)
-            )
+            execute.assert_called_once()
 
     def test_dry_run_rejects_invalid_frozen_inputs_before_any_side_effect(self):
         with tempfile.TemporaryDirectory() as tmp:

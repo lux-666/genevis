@@ -8,8 +8,18 @@ import unittest
 from pathlib import Path
 
 from app.entrypoints.run import _record_automatic_review_failure
+from app.review.application import (
+    PreparedReviewApplication,
+    ReviewApplicationIdentity,
+    persist_review_application,
+    persist_review_intent,
+)
+from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import ROUTE_TRACE_LIMIT
+from app.schemas.state import initial_state
+from app.stages.inventory.nodes import InventoryReviewApplicationEffectV1
 from app.storage.artifacts import register_artifact_records
 from app.storage.ledger import (
     LEDGER_SCHEMA_VERSION,
@@ -126,7 +136,7 @@ class LedgerV2Tests(unittest.TestCase):
                 reason="approval_required",
                 signals=[{"large": "x" * 10_000}],
                 candidates=[{"candidate_id": "flye", "large": "y" * 10_000}],
-                review_request_artifact_ref=request,
+                review_request_artifact_ref=paths.resolve_ref(request.path_ref),
                 review_request_id="review_001",
             )
 
@@ -139,44 +149,101 @@ class LedgerV2Tests(unittest.TestCase):
             self.assertEqual(row["summary"]["signal_count"], 1)
             self.assertEqual(row["summary"]["candidate_count"], 1)
             self.assertEqual(
-                row["refs"][0]["path_ref"], request.path_ref
+                row["refs"][0],
+                {
+                    **request.model_dump(mode="json", exclude={"schema_version"}),
+                    "role": "review_request_artifact_ref",
+                },
             )
 
-    def test_review_decisions_bind_to_request_id_not_stage(self):
+    def test_review_decisions_bind_to_full_request_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
             ledger.create_session("s1", str(paths.manifest_path))
-            for request_id in ("review_001", "review_002"):
-                request = _register_artifact(
-                    paths,
-                    workflow_step_id="step-001-assembly_review",
-                    stage="assembly_review",
-                    parts=("reviews", request_id, "request.json"),
-                    artifact_type="review.request",
-                    metadata={"review_request_id": request_id},
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(paths.run_dir),
+            )
+            state.update(
+                {
+                    "entered_workflow_step_index": 0,
+                    "supervision_state": "blocked_human",
+                    "stage_outputs": {"inventory": {"status": "blocked_human"}},
+                }
+            )
+            persisted_requests = []
+            for suffix in ("first", "second"):
+                request = persist_review_request(
+                    state,
+                    stage="inventory",
+                    gate_id="inventory_review",
+                    reason=f"operator_required_{suffix}",
+                    payload=ReviewPayload(
+                        stage="inventory",
+                        gate_id="inventory_review",
+                        reason=f"operator_required_{suffix}",
+                        decisions_allowed=["continue", "stop_human_review"],
+                    ),
                 )
+                persisted_requests.append(request)
                 ledger.record_review_requested(
                     "s1",
-                    "assembly_review",
+                    "inventory",
                     reason="operator_required",
-                    review_request_artifact_ref=request,
-                    review_request_id=request_id,
+                    review_request_artifact_ref=request.request_ref,
+                    review_request_id=request.review_request_id,
                 )
-            decision = _register_artifact(
-                paths,
-                workflow_step_id="step-001-assembly_review",
-                stage="assembly_review",
-                parts=("reviews", "review_001", "decision.json"),
-                artifact_type="review.decision",
-                metadata={"review_request_id": "review_001"},
+            selected = persisted_requests[0]
+            state["active_interrupt"] = selected.compact_interrupt(
+                stage="inventory",
+                gate_id="inventory_review",
+                reason="operator_required_first",
             )
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="inventory",
+                gate_id="inventory_review",
+                review_request_id=selected.review_request_id,
+                review_request_hash=selected.request_hash,
+                decision="stop_human_review",
+            )
+            intent = persist_review_intent(state, request, source="review")
+            required_ref = _register_artifact(
+                paths,
+                workflow_step_id="step-000-inventory",
+                stage="inventory",
+                parts=("reviews", selected.review_request_id, "required.json"),
+                artifact_type="inventory.review.required",
+            )
+            decision_ref = persist_review_decision(
+                paths.run_dir,
+                session_id="s1",
+                review_request_id=selected.review_request_id,
+                stage="inventory",
+                gate_id="inventory_review",
+                decision=request,
+                request_hash=selected.request_hash,
+                request_ref=selected.request_ref,
+            )
+            application_ref = persist_review_application(
+                state,
+                intent=intent,
+                prepared=PreparedReviewApplication(
+                    effect_kind="inventory.review_application.v1",
+                    effect=InventoryReviewApplicationEffectV1(
+                        decision="stop_human_review"
+                    ),
+                    decision_ref=decision_ref,
+                    required_refs=(required_ref,),
+                ),
+            )
+            identity = ReviewApplicationIdentity.from_intent(intent.intent)
             ledger.record_review_decision(
                 "s1",
-                "assembly_review",
-                decision="accept",
-                review_request_id="review_001",
-                artifact_ref=decision,
+                application_ref=application_ref,
+                expected_identity=identity,
             )
 
             decisions = [
@@ -184,8 +251,23 @@ class LedgerV2Tests(unittest.TestCase):
                 for event in ledger.read_events("s1")
                 if event["event_type"] == "review_decision"
             ]
-            self.assertEqual(decisions[0]["subject_id"], "review_001")
-            self.assertEqual(decisions[0]["review_request_id"], "review_001")
+            self.assertEqual(decisions[0]["subject_id"], selected.review_request_id)
+            self.assertEqual(
+                decisions[0]["review_request_id"], selected.review_request_id
+            )
+            self.assertEqual(decisions[0]["request_hash"], selected.request_hash)
+            required_event_ref = next(
+                ref
+                for ref in decisions[0]["refs"]
+                if ref.get("role") == "application_required_ref"
+            )
+            self.assertEqual(
+                required_event_ref,
+                {
+                    **required_ref.model_dump(mode="json", exclude={"schema_version"}),
+                    "role": "application_required_ref",
+                },
+            )
 
     def test_summary_is_bounded_and_external_absolute_ref_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -353,10 +435,80 @@ class LedgerV2Tests(unittest.TestCase):
                 outcome="failed",
                 stage="assembly",
             )
-            self.assertIsNone(terminal)
+            self.assertEqual(terminal["summary"]["outcome"], "failed")
             rows = ledger.read_event_rows("s1")
             self.assertEqual(rows[-2]["workflow_step_id"], "step-001-assembly")
             self.assertIsNone(rows[-1]["workflow_step_id"])
+
+    def test_session_terminal_is_a_same_outcome_singleton(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+
+            first = ledger.record_session_terminal(
+                "s1",
+                outcome="completed",
+                stage="done",
+                error=None,
+            )
+            replay = ledger.record_session_terminal(
+                "s1",
+                outcome="completed",
+                stage="assembly_review",
+                error="later diagnostics must not replace the first fact",
+            )
+
+            self.assertEqual(replay, first)
+            terminal_rows = [
+                row
+                for row in ledger.read_event_rows("s1")
+                if row["event_type"] == "session_terminal"
+            ]
+            self.assertEqual(terminal_rows, [first])
+            self.assertEqual(first["idempotency_key"], "session:s1:terminal")
+
+    def test_session_terminal_rejects_a_conflicting_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.record_session_terminal("s1", outcome="completed", stage="done")
+
+            with self.assertRaisesRegex(LedgerConflictError, "terminal"):
+                ledger.record_session_terminal(
+                    "s1",
+                    outcome="failed",
+                    stage="assembly",
+                    error="renderer failed",
+                )
+
+            terminal_rows = [
+                row
+                for row in ledger.read_event_rows("s1")
+                if row["event_type"] == "session_terminal"
+            ]
+            self.assertEqual(len(terminal_rows), 1)
+            self.assertEqual(terminal_rows[0]["summary"]["outcome"], "completed")
+
+    def test_generic_session_terminal_write_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+
+            with self.assertRaisesRegex(ValueError, "record_session_terminal"):
+                ledger.record_event(
+                    "s1",
+                    "session_terminal",
+                    {"outcome": "completed"},
+                    subject_id="s1",
+                )
+
+    def test_session_terminal_rejects_unsupported_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+
+            with self.assertRaisesRegex(ValueError, "completed.*failed"):
+                ledger.record_session_terminal("s1", outcome="cancelled")
 
     def test_automatic_review_failure_replays_without_conflict(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -374,9 +526,7 @@ class LedgerV2Tests(unittest.TestCase):
 
             _record_automatic_review_failure(**kwargs)
             _record_automatic_review_failure(**kwargs)
-            _record_automatic_review_failure(
-                **{**kwargs, "elapsed_seconds": 31.0}
-            )
+            _record_automatic_review_failure(**{**kwargs, "elapsed_seconds": 31.0})
 
             events = [
                 event

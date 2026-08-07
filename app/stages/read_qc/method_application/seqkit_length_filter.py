@@ -42,7 +42,10 @@ from app.stages.read_qc.method_application.support import (
     update_read_qc_output,
 )
 from app.stages.read_qc.state import ReadQCSubstepJson
-from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.artifacts import (
+    publish_or_recover_work_artifact,
+    record_registered_artifacts,
+)
 from app.storage.ledger import Ledger
 
 LIFECYCLE = MethodExecutionLifecycle(
@@ -339,10 +342,12 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
     ledger = Ledger(data_dir)
     payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=payloads)
-    for artifact in payloads:
-        ledger.record_artifact_registered(
-            attempt.session_id, artifact, attempt_id=attempt.attempt_id
-        )
+    record_registered_artifacts(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        payloads,
+        attempt_id=attempt.attempt_id,
+    )
     substeps = dict(output.get("substeps") or {})
     previous = substeps.get("length_filter")
     length_filter_step: ReadQCSubstepJson = (

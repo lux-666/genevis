@@ -148,7 +148,8 @@ class ReviewRecommenderTests(unittest.TestCase):
             self.assertTrue(decision.rationale_artifact_ref)
             paths = SessionPaths.from_run_dir(run_dir)
             self.assertEqual(persisted.workflow_step_id, "step-002-assembly_review")
-            artifact_path = paths.resolve_ref(decision.rationale_artifact_ref)
+            assert decision.rationale_artifact_ref is not None
+            artifact_path = paths.resolve_ref(decision.rationale_artifact_ref.path_ref)
             self.assertEqual(
                 artifact_path.parent,
                 paths.workflow_step_artifact_path(

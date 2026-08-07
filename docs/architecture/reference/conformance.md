@@ -66,6 +66,12 @@ labels every file under `reports/` as a derived report that can be regenerated.
 The cleanup manifest is dry-run-only today, but that blanket classification is
 not safe input for a future apply path.
 
+This is report-regeneration debt only. Projection exception isolation is
+implemented: `ProjectionBoundary` converts ordinary report/projection failures
+into bounded warnings and they do not alter lifecycle, review status,
+checkpoint, or authoritative-terminal facts. It is therefore not an open
+conformance gap.
+
 - Current evidence: `app/reports/review_report.py` versus
   `app/reports/trace_writer.py`, plus the report helpers in
   `app/stages/assembly_review/nodes.py`, `_reclaimable_candidates` in

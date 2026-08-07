@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from app.control.lifecycle import resume_review_state
+from app.control.lifecycle import normalize_resume_review_request
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (
     load_execution_evidence,
@@ -24,7 +24,13 @@ from app.execution.evidence import (
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.integrity import sha256_file
+from app.review.application import (
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
+from app.review.gates import get_review_gate
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
@@ -211,6 +217,25 @@ def _activate_step(state: dict, index: int) -> None:
     state["workflow_step_index"] = index
     state["entered_workflow_step_index"] = index
     state["current_stage"] = state["workflow_steps"][index]["stage"]
+
+
+def _apply_review_application(
+    state: dict,
+    request: ResumeReviewRequest,
+) -> dict:
+    """Run the durable approval pipeline and return its pure state projection."""
+
+    canonical = normalize_resume_review_request(state, request)
+    intent = persist_review_intent(state, canonical, source="test")
+    gate = get_review_gate(canonical.stage, canonical.gate_id)
+    prepared = gate.load_prepare_application()(state, intent.intent)
+    application_ref = persist_review_application(
+        state,
+        intent=intent,
+        prepared=prepared,
+    )
+    application = load_verified_review_application(state["data_dir"], application_ref)
+    return dict(gate.load_apply_application()(state, application))
 
 
 def _ref_path(state: dict, ref: dict | str) -> Path:
@@ -1240,7 +1265,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             "active_interrupt": interrupt,
             "stage_outputs": recommendation_update["stage_outputs"],
         }
-        update = resume_review_state(
+        update = _apply_review_application(
             blocked,
             ResumeReviewRequest(
                 session_id=state["session_id"],

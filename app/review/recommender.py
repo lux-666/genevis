@@ -125,7 +125,7 @@ def recommend_review_decision(
         "review_request_id": review_request_id,
         "review_request_hash": request_hash,
         "decided_by": "llm_provisional",
-        "rationale_artifact_ref": artifact_ref.path_ref,
+        "rationale_artifact_ref": artifact_ref.model_dump(mode="json"),
     }
     try:
         return ResumeReviewRequest.model_validate(completed)

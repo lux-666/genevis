@@ -2,73 +2,64 @@
 
 ## Status
 
-Direction approved by the user on 2026-08-07. The user selected the complete
-design and added one governing constraint: reuse existing durable components
-where they fit, but replace an unsuitable interface completely rather than
-leaving compatibility aliases, fallback dispatch, or parallel old/new paths.
+Implemented on 2026-08-07. Functional, static, and changed-file formatting
+verification is complete. The repository-wide `ruff format --check .` command
+still reports 29 pre-existing, untouched files; they are intentionally left as
+baseline formatting debt rather than folded into this change. The implementation
+uses the selected complete design: reuse suitable durable components while
+keeping a single typed review lifecycle and a single terminal authority.
 
-Independent specification review passed on the third review round. The document
-is awaiting the user's final written-spec review before implementation.
+## Resolved Boundary
 
-## Problem
-
-The current review resume path and the current presentation path each cross an
-ownership boundary in the wrong order.
-
-Review resume currently executes a gate-specific applier before updating the
-LangGraph checkpoint:
+Review uses one recoverable typed transaction:
 
 ```text
 validate blocked checkpoint
-  -> gate applier writes decision.json
-  -> gate applier records review_decision
-  -> gate applier may publish additional durable biological effects
-  -> graph.update_state(...)
+  -> persist immutable intent
+  -> prepare gate-owned durable effects
+  -> persist immutable application
+  -> prove checkpoint application
+  -> record review_applied
 ```
 
-If `graph.update_state()` fails or has an ambiguous outcome, immutable review
-facts can say that a request was decided while the checkpoint remains
-`blocked_human`. Existing inspection, Ledger validation, reports, and traces
-mostly treat `review_decision` as proof that the request is closed. The same
-decision is often accidentally replayable because the artifact and Ledger
-writers are idempotent, but there is no explicit same-decision recovery
-protocol and no durable marker proving that the checkpoint applied the
+The application record is the durable marker for completed preparation, and
+the checkpoint proves the same application was applied. A failed or ambiguous
+checkpoint update is reread and reconciled before any applied fact is recorded,
+so recovery resumes the committed intent rather than accepting a replacement
 decision.
 
-The parent controller also performs non-authoritative presentation work inside
-the graph node. It records `session_terminal:completed` and then calls an
-unprotected progress renderer. A renderer exception can escape `graph.invoke`,
-be normalized as a workflow failure, and append `session_terminal:failed` for
-the same session. Operator-report failures can similarly turn a blocked state
-into a failed state or obscure the original failure.
+The parent controller runs report and progress callbacks through
+`ProjectionBoundary`. Ordinary callback failures become bounded warnings and
+cannot alter the returned workflow state or terminal outcome. Authoritative
+terminal finalization proves the terminal checkpoint before recording the
+singleton Ledger fact; best-effort compaction and presentation follow it.
 
-These are not two unrelated exception checks. They are ownership defects:
+The implemented ownership boundaries are:
 
 - review is a recoverable domain transaction;
 - progress and reports are best-effort projections with no lifecycle control;
 - a session terminal outcome is a singleton authoritative fact.
 
-## Goals
+## Implemented Guarantees
 
-- Make every registered review gate recoverable across the immutable-artifact,
+- Every registered review gate is recoverable across the immutable-artifact,
   Ledger, and SQLite-checkpoint boundary.
-- Commit the submitted decision before any gate-specific durable preparation,
-  then require replay of that exact committed decision.
-- Separate gate-specific durable preparation from pure checkpoint application.
-- Make checkpoint application explicitly provable through an application ref
-  and a `review_applied` Ledger event.
-- Serialize every graph-mutating run/resume operation through the existing
-  per-session frozen-execution lock and revalidate the checkpoint immediately
+- The submitted decision is committed before gate-specific durable preparation,
+  and recovery replays that exact committed decision.
+- Gate-specific durable preparation is separate from pure checkpoint application.
+- Checkpoint application is provable through an application ref and a
+  `review_applied` Ledger event.
+- Every graph-mutating run/resume operation is serialized through the existing
+  per-session frozen-execution lock and revalidates the checkpoint immediately
   before applying an application.
-- Give lifecycle inspection, Ledger checks, operator reports, and traces one
+- Lifecycle inspection, Ledger checks, operator reports, and traces use one
   shared review-status projector.
-- Isolate progress, operator-report, and final-report exceptions from workflow
-  state and terminal outcome.
-- Enforce at most one semantic terminal result per session at the Ledger write
-  boundary.
-- Convert all eight registered gates in one implementation. The finished tree
-  must have no legacy `decision_applier` or effectful timeout-applier path.
-- Reuse existing idempotent artifact publication, artifact-index registration,
+- Progress, operator-report, and final-report exceptions are isolated from
+  workflow state and terminal outcome.
+- The Ledger write boundary enforces at most one semantic terminal result per
+  session.
+- All eight registered gates use one typed intent/application lifecycle.
+- The implementation reuses idempotent artifact publication, artifact-index registration,
   Ledger locking/idempotency, checkpoint compaction, report writers, and
   gate-specific evidence validators.
 
@@ -239,8 +230,7 @@ blocked checkpoint state plus the typed application and computes a compact
 Ledger append, report generation, subprocess execution, LLM call, or wall-clock
 read.
 
-`normalize_timeout_request` replaces the current effectful timeout-applier
-interface. It may verify immutable request evidence and derive the canonical
+`normalize_timeout_request` verifies immutable request evidence and derives the canonical
 automatic request, but it performs no writes. The resulting request is
 persisted in `intent.json` and follows the same preparation and application
 path as a human decision.
@@ -249,14 +239,9 @@ Each declaration also registers its exact `effect_kind` and effect-model
 decoder. `apply_application` receives a decoder-validated typed model, never an
 unchecked mapping loaded from JSON.
 
-The old fields and functions are removed, not deprecated:
-
-- `ReviewGateDeclaration.decision_applier` and `.timeout_applier`;
-- `load_decision_applier()`, `load_timeout_applier()`,
-  `apply_review_gate_decision()`, and `apply_review_gate_timeout()`;
-- the effectful `resume_review_state()` dispatch path;
-- direct gate entry points named `apply_*_resume_decision` or equivalent;
-- compatibility aliases or registry fallback to the old callables.
+The registry exposes one closed contract: typed intent metadata validation,
+an effect kind and effect model, durable preparation, verified pure
+application, and an optional write-free timeout-request normalizer.
 
 ### Coordinator ownership
 
@@ -375,8 +360,8 @@ or leave the session blocked with an explicit recovery action, but it must not
 prompt for a different decision.
 
 `ResumeTransactionError` therefore reports the named phase plus the projected
-review status. Callers do not infer safety from a broad phase such as
-`decision_apply`; they ask whether the request is still `awaiting_decision`.
+review status. Callers decide recovery from that status, including whether the
+request is still `awaiting_decision`.
 
 ## Registered Gate Migration
 
@@ -512,7 +497,7 @@ failure preserves the original workflow error.
 occurrence facts such as stage entered/completed/failed. This removes the
 current Ledger-before-checkpoint terminal window.
 
-`finalize_terminal_state()` is replaced by one authoritative terminal finalizer
+`finalize_authoritative_terminal()` is the authoritative terminal finalizer
 used by initial execution and every resume path. It performs this order:
 
 ```text
@@ -697,8 +682,9 @@ payload and pure application result.
 
 - no stage imports/calls `Ledger.record_review_decision` from a pure application
   function;
-- no `ReviewGateDeclaration.decision_applier`/`timeout_applier` or legacy
-  dispatch helper remains;
+- registry-wide contract checks cover the typed intent validator, effect model,
+  durable prepare hook, verified pure apply hook, and optional timeout
+  normalizer for every gate;
 - no report writer or terminal writer is called from `app/graph/builder.py`;
 - existing artifact integrity, checkpoint compaction, review occurrence,
   parameter recommendation, and report watermark tests remain green;

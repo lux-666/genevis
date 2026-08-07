@@ -14,11 +14,14 @@ import logging
 import math
 import os
 import shutil
+from collections.abc import Mapping
+from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.control.lifecycle import ResumeValidationError
 from app.control.workflow_plan import (
@@ -34,6 +37,13 @@ from app.reference.ncbi_metazoa import (
     build_related_species_statistics_pack as _build_related_species_statistics_pack,
 )
 from app.reference.ncbi_metazoa import species_name_from_metadata
+from app.review.application import (
+    ForegroundReviewMetadataV1,
+    PreparedReviewApplication,
+    ReviewIntentV1,
+    RunRelativeFileRef,
+    VerifiedReviewApplication,
+)
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -42,6 +52,7 @@ from app.review.persistence import (
     persist_review_request,
 )
 from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_DRAFT_ASSEMBLY,
     ASSEMBLY_REVIEW_ACTION,
@@ -105,7 +116,10 @@ from app.stages.resource_resolution import resolve_stage_resource, update_resour
 from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
 from app.storage.artifacts import (
     PublishedArtifact,
+    artifact_ref_for_path,
     publish_artifact_record,
+    record_registered_artifacts,
+    recover_published_artifact,
     register_artifact_records,
 )
 from app.storage.assembly_candidates import (
@@ -507,6 +521,7 @@ def build_related_species_statistics_and_notebook(
             )
             if all_figures_exist:
                 # Full skip: re-register artifacts for ledger consistency, then return
+                assert isinstance(existing_stats_ref, str)
                 data_dir = absolute_data_dir(state)
                 session_id = state["session_id"]
 
@@ -531,6 +546,17 @@ def build_related_species_statistics_and_notebook(
                 ]
                 if figure_artifacts:
                     register_artifact_records(data_dir, session_id, figure_artifacts)
+                statistics_artifact_ref = artifact_ref_for_path(
+                    data_dir,
+                    session_id,
+                    existing_stats_ref,
+                    expected_type=ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
+                )
+                record_registered_artifacts(
+                    data_dir,
+                    session_id,
+                    [statistics_artifact_ref, notebook_artifact, *figure_artifacts],
+                )
 
                 return {}
 
@@ -555,6 +581,7 @@ def build_related_species_statistics_and_notebook(
     )
 
     figure_paths: dict[str, str] = {}
+    figure_refs: list[ArtifactRef] = []
     for logical_name, abs_path in figure_sources.items():
         source = Path(abs_path)
         artifact = ArtifactMeta.from_file(
@@ -571,6 +598,7 @@ def build_related_species_statistics_and_notebook(
             destination=figures_dir / source.name,
         )
         figure_paths[logical_name] = str(published.path)
+        figure_refs.append(published.ref)
 
     out_dir = stage_artifacts_dir(state, "assembly_review")
     statistics_pack_relpath = "related_species_statistics_pack.json"
@@ -601,12 +629,26 @@ def build_related_species_statistics_and_notebook(
         artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
         metadata={"session_id": session_id, "figure_count": len(figure_paths)},
     )
-    notebook_path = publish_artifact_record(
+    published_notebook = publish_artifact_record(
         data_dir,
         session_id,
         notebook_artifact,
         destination=notebook_path,
-    ).path
+    )
+    notebook_path = published_notebook.path
+    if not isinstance(statistics_ref, str):
+        raise ValueError("assembly review statistics pack has no artifact path")
+    statistics_artifact_ref = artifact_ref_for_path(
+        data_dir,
+        session_id,
+        statistics_ref,
+        expected_type=ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
+    )
+    record_registered_artifacts(
+        data_dir,
+        session_id,
+        [statistics_artifact_ref, *figure_refs, published_notebook.ref],
+    )
 
     return update_assembly_review_output(
         state,
@@ -865,259 +907,286 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
     return blocked_update
 
 
-def commit_assembly_review(state: TopLevelState) -> StateUpdate:
-    """Commit the assembly review decision and advance routing."""
-    ar_out = assembly_review_output(state)
+class AssemblyReviewIntentMetadataV1(ForegroundReviewMetadataV1):
+    """Strict decision-owned metadata accepted by Assembly Review."""
 
-    decision = ar_out.get("decision", "stop_human_review")
-    selected_candidate_id = ar_out.get("selected_candidate_id")
-    rejected_candidates = ar_out.get("rejected_candidates", [])
-    final_assembly_ref = ar_out.get("final_assembly_ref")
-    action_type = ar_out.get("action_type", "pass")
-    action_execution_mode = ar_out.get("action_execution_mode", "none")
-    method_name = ar_out.get("action_method_name")
-    evidence_refs = list(ar_out.get("evidence_refs") or [])
-    evidence_notes = list(ar_out.get("evidence_notes") or [])
+    action_output_ref: RunRelativeFileRef | None = None
+    evidence_refs: tuple[RunRelativeFileRef, ...] = Field(default=(), max_length=1_000)
+    evidence_notes: tuple[str, ...] = Field(default=(), max_length=1_000)
+    human_approved_action: Literal[True] | None = None
+    approval: Literal["human"] | None = None
+    method_name: str | None = None
+    provenance_ref: RunRelativeFileRef | None = None
+    short_read_evidence_refs: tuple[RunRelativeFileRef, ...] = Field(
+        default=(), max_length=1_000
+    )
+    short_read_evidence_notes: tuple[str, ...] = Field(default=(), max_length=1_000)
+    available_signals: tuple[str, ...] = Field(default=(), max_length=1_000)
+    missing_or_pending_signals: tuple[str, ...] = Field(default=(), max_length=1_000)
 
-    selected_candidate = None
-    selected_verified = None
-    current_verified_candidate = None
-    current_primary_output_ref = None
-    if selected_candidate_id:
-        selected_candidate = next(
-            (
-                candidate
-                for candidate in ar_out.get("candidates") or []
-                if candidate.get("candidate_id") == selected_candidate_id
-            ),
-            None,
+
+class AssemblyReviewEffectV1(BaseModel):
+    """The bounded, durable Assembly Review projection trusted by checkpoint apply."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    decision: Literal[
+        "accept",
+        "pass",
+        "purge",
+        "polish",
+        "continue_low_confidence",
+        "stop_human_review",
+    ]
+    review_request_id: str = Field(min_length=1)
+    review_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_request_ref: ArtifactRef
+    rejected_candidates: tuple[str, ...] = ()
+    selected_candidate_id: str | None = None
+    pre_action_assembly_ref: RunRelativeFileRef | None = None
+    final_assembly_ref: RunRelativeFileRef | None = None
+    output_assembly_ref: RunRelativeFileRef | None = None
+    action_type: Literal["pass", "pass_low_confidence", "purge", "polish"] | None = None
+    action_execution_mode: Literal["none", "external"] | None = None
+    action_method_name: str | None = None
+    evidence_refs: tuple[RunRelativeFileRef, ...] = ()
+    evidence_notes: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+    decided_by: Literal["human", "llm_provisional", "auto_rule"] = "human"
+    rationale_artifact_ref: ArtifactRef | None = None
+    decision_ref: ArtifactRef
+    action_ref: ArtifactRef | None = None
+    candidate_bundle_ref: ArtifactRef | None = None
+    primary_output_ref: ArtifactRef | None = None
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> "AssemblyReviewEffectV1":
+        if self.rejected_candidates != tuple(sorted(set(self.rejected_candidates))):
+            raise ValueError(
+                "assembly_review rejected_candidates must be sorted and unique"
+            )
+        if self.decision == "stop_human_review":
+            stop_values = (
+                self.selected_candidate_id,
+                self.pre_action_assembly_ref,
+                self.final_assembly_ref,
+                self.output_assembly_ref,
+                self.action_type,
+                self.action_execution_mode,
+                self.action_ref,
+                self.candidate_bundle_ref,
+                self.primary_output_ref,
+            )
+            if any(value is not None for value in stop_values):
+                raise ValueError("stop_human_review effect cannot select an assembly")
+            return self
+        selected_values = (
+            self.selected_candidate_id,
+            self.pre_action_assembly_ref,
+            self.final_assembly_ref,
+            self.output_assembly_ref,
+            self.action_type,
+            self.action_execution_mode,
+            self.action_ref,
+            self.candidate_bundle_ref,
+            self.primary_output_ref,
         )
-        if selected_candidate is None:
-            raise ResumeValidationError(
-                "assembly_review selected candidate is absent from its cursor"
-            )
-        selected_verified = _verified_review_candidate(state, selected_candidate)
-        current_verified_candidate = selected_verified
-        selected_path = str(selected_verified.primary_output_path)
-        checkpoint_pre_action = ar_out.get("pre_action_assembly_ref")
-        if checkpoint_pre_action and checkpoint_pre_action != selected_path:
-            raise ResumeValidationError(
-                "assembly_review pre-action path does not match selected candidate"
-            )
-        if not final_assembly_ref:
-            raise ResumeValidationError(
-                "assembly_review selected decision has no final assembly path"
-            )
-        if Path(final_assembly_ref).resolve(strict=False) == (
-            selected_verified.primary_output_path.resolve(strict=False)
-        ):
-            output_assembly_ref = selected_path
-            current_primary_output_ref = selected_verified.primary_output_ref
-        else:
-            published_action = _publish_review_action_output(
-                state,
-                selected_verified,
-                final_assembly_ref,
-                action_type=action_type,
-                review_request_id=str(ar_out.get("review_request_id") or ""),
-            )
-            current_verified_candidate = publish_derived_assembly_candidate(
-                absolute_data_dir(state),
-                state["session_id"],
-                workflow_step_id=current_workflow_step_id(
-                    state,
-                    expected_stage="assembly_review",
-                ),
-                source_candidate=selected_verified,
-                primary_output_ref=published_action.ref,
-                stage="assembly_review",
-                method_name=f"assembly_review.{action_type}",
-                action_identity=str(ar_out.get("review_request_id") or ""),
-            )
-            output_assembly_ref = str(current_verified_candidate.primary_output_path)
-            final_assembly_ref = output_assembly_ref
-            current_primary_output_ref = current_verified_candidate.primary_output_ref
-        pre_action_ref = selected_path
-    else:
-        if final_assembly_ref is None:
-            raise ValueError("assembly_review has no final assembly ref")
-        output_assembly_ref = final_assembly_ref
-        pre_action_ref = ar_out.get("pre_action_assembly_ref") or final_assembly_ref
-    trace = append_route_trace(state, "assembly_review_stage")
-    decided_by = ar_out.get("decided_by", "human")
-    rationale_artifact_ref = ar_out.get("rationale_artifact_ref")
+        if any(value is None for value in selected_values):
+            raise ValueError("selected assembly effect is missing durable provenance")
+        return self
+
+
+ASSEMBLY_REVIEW_EFFECT_KIND = "assembly_review.review_application.v1"
+
+
+def prepare_assembly_review_application(
+    state: TopLevelState, intent: ReviewIntentV1
+) -> PreparedReviewApplication:
+    """Finish all durable Assembly Review work before checkpoint projection.
+
+    This is intentionally the only Assembly Review decision path that touches
+    artifacts or candidate bundles.  It is recover-first: stable destinations
+    are recovered before external action output is read or republished.
+    """
+
+    if intent.stage != "assembly_review" or intent.gate_id != "assembly_review":
+        raise ResumeValidationError("assembly review application has the wrong gate")
+    _require_assembly_review_intent_binding(state, intent)
+    request = validate_assembly_review_intent_request(
+        state,
+        intent.request,
+        load_review_request(
+            state["data_dir"], intent.request_ref, session_id=state["session_id"]
+        ),
+    )
+    if request.decision == "stop_human_review":
+        return _prepare_stopped_assembly_review_application(state, intent, request)
+
+    allowed = {"accept", "pass", "purge", "polish", "continue_low_confidence"}
+    if request.decision not in allowed:
+        raise ResumeValidationError(
+            f"unsupported assembly_review decision: {request.decision}"
+        )
+    if not request.candidate_id:
+        raise ResumeValidationError("assembly_review resume requires candidate_id")
+    selected_decision = cast(
+        Literal["accept", "pass", "purge", "polish", "continue_low_confidence"],
+        request.decision,
+    )
+
+    ar_out = assembly_review_output(state)
+    candidate = next(
+        (
+            candidate
+            for candidate in ar_out.get("candidates") or []
+            if candidate.get("candidate_id") == request.candidate_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise ResumeValidationError(
+            f"unknown assembly_review candidate_id: {request.candidate_id}"
+        )
+    selected = _verified_review_candidate(state, candidate)
+    paths = session_paths(state)
+    pre_action_path = str(selected.primary_output_path)
+    action_payload = _prepare_assembly_review_action_payload(
+        state,
+        request,
+        pre_action_path,
+    )
+    action_type = cast(
+        Literal["pass", "pass_low_confidence", "purge", "polish"],
+        action_payload["action_type"],
+    )
+    action_execution_mode = cast(
+        Literal["none", "external"], action_payload["action_execution_mode"]
+    )
+
+    output_path = pre_action_path
+    output_candidate = selected
+    if action_execution_mode == "external":
+        published_action = _publish_review_action_output(
+            state,
+            selected,
+            str(action_payload["final_assembly_ref"]),
+            action_type=action_type,
+            review_request_id=intent.review_request_id,
+        )
+        output_candidate = _recover_or_publish_derived_review_candidate(
+            state,
+            selected,
+            primary_output_ref=published_action.ref,
+            action_type=action_type,
+            review_request_id=intent.review_request_id,
+        )
+        output_path = str(output_candidate.primary_output_path)
+
+    pre_action_ref = RunRelativeFileRef(paths.to_ref(pre_action_path))
+    final_assembly_ref = RunRelativeFileRef(paths.to_ref(output_path))
+    evidence_refs = tuple(
+        RunRelativeFileRef.model_validate(value)
+        for value in action_payload.get("evidence_refs") or []
+    )
+    rationale_ref = request.rationale_artifact_ref
     action_metadata = {
         "action_type": action_type,
         "action_execution_mode": action_execution_mode,
-        "pre_action_assembly_ref": pre_action_ref,
-        "post_action_assembly_ref": final_assembly_ref,
-        "output_assembly_ref": output_assembly_ref,
-        "method_name": method_name,
-        "evidence_refs": evidence_refs,
-        "evidence_notes": evidence_notes,
-        "decided_by": decided_by,
-        "rationale_artifact_ref": rationale_artifact_ref,
-        "primary_output_ref": (
-            current_primary_output_ref.model_dump(mode="json")
-            if current_primary_output_ref is not None
-            else None
+        "pre_action_primary_output_ref": selected.primary_output_ref.model_dump(
+            mode="json"
+        ),
+        "post_action_primary_output_ref": (
+            output_candidate.primary_output_ref.model_dump(mode="json")
+        ),
+        "output_primary_ref": output_candidate.primary_output_ref.model_dump(
+            mode="json"
+        ),
+        "method_name": action_payload.get("action_method_name"),
+        "evidence_refs": [reference.path_ref for reference in evidence_refs],
+        "evidence_notes": list(action_payload.get("evidence_notes") or []),
+        "decided_by": request.decided_by,
+        "rationale_artifact_ref": (
+            rationale_ref.model_dump(mode="json") if rationale_ref is not None else None
         ),
     }
-
-    data_dir = state.get("data_dir", "data")
-    ledger = Ledger(data_dir)
-    rejected_candidate_ids = (
-        rejected_candidates
-        if isinstance(rejected_candidates, list)
-        else list(rejected_candidates)
-    )
-    decision_artifact = ReviewDecisionArtifact(
-        session_id=state["session_id"],
-        stage="assembly_review",
-        decision=decision,
-        candidate_id=selected_candidate_id,
-        rejected_candidates=rejected_candidate_ids,
-        final_assembly_ref=final_assembly_ref,
-        notes=ar_out.get("notes", []),
-        metadata=action_metadata,
-    )
-    review_request_id, review_request_hash, review_request_ref = (
-        _assembly_review_binding(state, output=ar_out)
-    )
-    decision_ref = persist_review_decision(
-        data_dir,
-        session_id=state["session_id"],
-        review_request_id=review_request_id,
-        stage="assembly_review",
-        gate_id="assembly_review",
-        decision=decision_artifact,
-        request_hash=review_request_hash,
-        request_ref=review_request_ref,
-        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
-        artifact_type="assembly_review.decision",
-    )
-    ledger.record_review_decision(
-        state["session_id"],
-        "assembly_review",
-        decision=decision,
-        candidate_id=selected_candidate_id,
-        rejected_candidates=rejected_candidate_ids,
-        notes=ar_out.get("notes", []),
-        artifact_ref=decision_ref.model_dump(mode="json"),
-        metadata=action_metadata,
-        decided_by=decided_by,
-        rationale_artifact_ref=rationale_artifact_ref,
-        review_request_id=review_request_id,
-    )
-    action_ref = None
-    if (
-        selected_candidate_id
-        and pre_action_ref
-        and final_assembly_ref
-        and output_assembly_ref
-        and decision in {"accept", "pass", "purge", "polish", "continue_low_confidence"}
-    ):
-        action_artifact = AssemblyReviewActionArtifact(
+    decision_ref = _persist_assembly_review_decision(
+        state,
+        intent,
+        ReviewDecisionArtifact(
             session_id=state["session_id"],
-            decision=decision,
+            stage="assembly_review",
+            decision=selected_decision,
+            candidate_id=request.candidate_id,
+            rejected_candidates=request.rejected_candidates,
+            final_assembly_ref=final_assembly_ref.path_ref,
+            notes=request.notes,
+            metadata=action_metadata,
+        ),
+    )
+    action_ref = _persist_assembly_review_action(
+        state,
+        AssemblyReviewActionArtifact(
+            session_id=state["session_id"],
+            decision=selected_decision,
             action_type=action_type,
-            candidate_id=selected_candidate_id,
-            pre_action_assembly_ref=pre_action_ref,
-            post_action_assembly_ref=final_assembly_ref,
-            output_assembly_ref=output_assembly_ref,
+            candidate_id=request.candidate_id,
+            pre_action_assembly_ref=pre_action_ref.path_ref,
+            post_action_assembly_ref=final_assembly_ref.path_ref,
+            output_assembly_ref=final_assembly_ref.path_ref,
             action_execution_mode=action_execution_mode,
-            method_name=method_name,
-            evidence_refs=evidence_refs,
-            evidence_notes=evidence_notes,
-            notes=ar_out.get("notes", []),
+            method_name=cast(str | None, action_payload.get("action_method_name")),
+            evidence_refs=[reference.path_ref for reference in evidence_refs],
+            evidence_notes=list(action_payload.get("evidence_notes") or []),
+            notes=request.notes,
             metadata={
                 "review_decision_artifact_ref": decision_ref.model_dump(mode="json")
             },
-        )
-        action_ref = _write_json_artifact(
-            state,
-            "assembly_review_action.json",
-            action_artifact.model_dump(mode="json"),
-            artifact_type=ASSEMBLY_REVIEW_ACTION,
-        )
-
-    update: StateUpdate = {
-        **advance_workflow_step(state, "assembly_review"),
-        "route_trace": trace,
-    }
-
-    if selected_candidate_id:
-        committed_out: dict[str, object] = {
-            **ar_out,
-            "status": "completed",
-            "decision": decision,
-            "selected_candidate_id": selected_candidate_id,
-            "rejected_candidates": rejected_candidates,
-            "final_assembly_ref": final_assembly_ref,
-            "pre_action_assembly_ref": pre_action_ref,
-            "action_type": action_type,
-            "action_execution_mode": action_execution_mode,
-            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-            "assembly_review_action_artifact_ref": action_ref,
-            "decided_by": decided_by,
-            "rationale_artifact_ref": rationale_artifact_ref,
-        }
-        if action_type == "purge":
-            committed_out["purged_assembly"] = final_assembly_ref
-        if action_type == "polish":
-            committed_out["polished_assembly"] = final_assembly_ref
-        if method_name:
-            committed_out["action_method_name"] = method_name
-        review_update = update_assembly_review_output(state, committed_out)
-        update["stage_outputs"] = review_update["stage_outputs"]
-        if output_assembly_ref:
-            if (
-                selected_candidate is None
-                or selected_verified is None
-                or current_verified_candidate is None
-                or current_primary_output_ref is None
-            ):
-                raise ResumeValidationError(
-                    "assembly_review output is missing typed candidate provenance"
-                )
-            update["resource_refs"] = update_resource_ref(
-                state,
-                "assembly",
-                [str(output_assembly_ref)],
-                "assembly_review",
-                {
-                    "selected_candidate_id": selected_candidate_id,
-                    "decision": decision,
-                    "action_type": action_type,
-                    "candidate_bundle_ref": current_verified_candidate.ref.model_dump(
-                        mode="json"
-                    ),
-                    "primary_output_ref": current_primary_output_ref.model_dump(
-                        mode="json"
-                    ),
-                },
-            )
-
-    return update
-
-
-def apply_assembly_review_resume_decision(
-    state: TopLevelState, request: ResumeReviewRequest
-) -> StateUpdate:
-    """Apply a validated assembly review decision to a blocked state."""
-
-    if request.stage != "assembly_review":
-        raise ResumeValidationError(
-            "assembly review resume requires stage assembly_review"
-        )
-    ar_out = assembly_review_output(state)
-    review_request_id, review_request_hash, review_request_ref = (
-        _assembly_review_binding(state, request=request, output=ar_out)
+        ),
     )
-    candidates = ar_out.get("candidates") or []
-    candidates_by_id = {
-        candidate.get("candidate_id"): candidate for candidate in candidates
-    }
+    effect = AssemblyReviewEffectV1(
+        decision=selected_decision,
+        review_request_id=intent.review_request_id,
+        review_request_hash=intent.request_hash,
+        review_request_ref=intent.request_ref,
+        rejected_candidates=tuple(request.rejected_candidates),
+        selected_candidate_id=request.candidate_id,
+        pre_action_assembly_ref=pre_action_ref,
+        final_assembly_ref=final_assembly_ref,
+        output_assembly_ref=final_assembly_ref,
+        action_type=action_type,
+        action_execution_mode=action_execution_mode,
+        action_method_name=cast(str | None, action_payload.get("action_method_name")),
+        evidence_refs=evidence_refs,
+        evidence_notes=tuple(action_payload.get("evidence_notes") or []),
+        notes=tuple(request.notes),
+        decided_by=request.decided_by,
+        rationale_artifact_ref=rationale_ref,
+        decision_ref=decision_ref,
+        action_ref=action_ref,
+        candidate_bundle_ref=output_candidate.ref,
+        primary_output_ref=output_candidate.primary_output_ref,
+    )
+    return PreparedReviewApplication(
+        effect_kind=ASSEMBLY_REVIEW_EFFECT_KIND,
+        effect=effect,
+        decision_ref=decision_ref,
+        required_refs=_canonical_artifact_refs(
+            action_ref,
+            output_candidate.ref,
+            output_candidate.primary_output_ref,
+            *(() if rationale_ref is None else (rationale_ref,)),
+        ),
+    )
+
+
+def validate_assembly_review_intent_request(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    request_record: Mapping[str, Any],
+) -> ResumeReviewRequest:
+    """Validate and canonicalize one Assembly Review intent request."""
+
     allowed = {
         "accept",
         "pass",
@@ -1130,61 +1199,245 @@ def apply_assembly_review_resume_decision(
         raise ResumeValidationError(
             f"unsupported assembly_review decision: {request.decision}"
         )
-
     if request.decision == "stop_human_review":
-        return _stop_assembly_review(state, request)
-
+        metadata = dict(request.metadata)
+        for field_name in (
+            "action_output_ref",
+            "evidence_refs",
+            "evidence_notes",
+            "human_approved_action",
+            "approval",
+            "method_name",
+            "provenance_ref",
+            "short_read_evidence_refs",
+            "short_read_evidence_notes",
+        ):
+            metadata.pop(field_name, None)
+        return request.model_copy(
+            update={
+                "candidate_id": None,
+                "candidate_ids": [],
+                "rejected_candidates": [],
+                "method_name": None,
+                "metadata": metadata,
+            }
+        )
+    payload = request_record.get("payload")
+    immutable_candidate_ids = _candidate_ids_from_review_request_payload(payload)
+    state_candidates = [
+        candidate
+        for candidate in assembly_review_output(state).get("candidates") or []
+        if isinstance(candidate, dict)
+        and isinstance(candidate.get("candidate_id"), str)
+    ]
+    state_candidate_ids = {candidate["candidate_id"] for candidate in state_candidates}
     if not request.candidate_id:
         raise ResumeValidationError("assembly_review resume requires candidate_id")
-    if request.candidate_id not in candidates_by_id:
+    if request.candidate_id not in immutable_candidate_ids:
         raise ResumeValidationError(
             f"unknown assembly_review candidate_id: {request.candidate_id}"
         )
-
-    candidate_final_ref = _candidate_primary_output_path(
-        state,
-        candidates_by_id[request.candidate_id],
+    if request.candidate_id not in state_candidate_ids:
+        raise ResumeValidationError(
+            "assembly_review selected candidate is no longer available"
+        )
+    rejected_candidates = tuple(sorted(set(request.rejected_candidates)))
+    unknown_rejected = sorted(
+        set(rejected_candidates).difference(immutable_candidate_ids)
     )
-    action_payload = _assembly_review_action_payload(request, candidate_final_ref)
-
-    review_payload: dict[str, object] = {
-        **ar_out,
-        "decision": request.decision,
-        "selected_candidate_id": request.candidate_id,
-        "rejected_candidates": request.rejected_candidates,
-        "final_assembly_ref": action_payload["final_assembly_ref"],
-        "pre_action_assembly_ref": action_payload["pre_action_assembly_ref"],
-        "action_type": action_payload["action_type"],
-        "action_execution_mode": action_payload["action_execution_mode"],
-        "action_method_name": action_payload.get("action_method_name"),
-        "evidence_refs": action_payload.get("evidence_refs", []),
-        "evidence_notes": action_payload.get("evidence_notes", []),
-        "notes": request.notes,
-        "decided_by": request.decided_by,
-        "rationale_artifact_ref": request.rationale_artifact_ref,
-        "review_request_id": review_request_id,
-        "review_request_hash": review_request_hash,
-        "review_request_artifact_ref": review_request_ref.model_dump(mode="json"),
-    }
-    if action_payload["action_type"] == "purge":
-        review_payload["purged_assembly"] = action_payload["final_assembly_ref"]
-    if action_payload["action_type"] == "polish":
-        review_payload["polished_assembly"] = action_payload["final_assembly_ref"]
-    review_update = update_assembly_review_output(state, review_payload)
-    updated_state = state.copy()
-    updated_state.update(
-        {
-            "stage_outputs": review_update["stage_outputs"],
-            "active_interrupt": None,
-            "supervision_state": "running_stage",
+    if unknown_rejected:
+        raise ResumeValidationError(
+            "unknown assembly_review rejected_candidates: "
+            f"{', '.join(unknown_rejected)}"
+        )
+    if request.candidate_id in rejected_candidates:
+        raise ResumeValidationError(
+            "assembly_review selected candidate cannot be rejected"
+        )
+    selected_candidate = next(
+        candidate
+        for candidate in state_candidates
+        if candidate["candidate_id"] == request.candidate_id
+    )
+    selected = _verified_review_candidate(state, selected_candidate)
+    metadata = dict(request.metadata)
+    if metadata.pop("approval", None) == "human":
+        metadata["human_approved_action"] = True
+    canonical = request.model_copy(
+        update={
+            "rejected_candidates": list(rejected_candidates),
+            "metadata": metadata,
         }
     )
-    commit_update = commit_assembly_review(updated_state)
-    return {**commit_update, "active_interrupt": None}
+    _prepare_assembly_review_action_payload(
+        state,
+        canonical,
+        str(selected.primary_output_path),
+    )
+    return canonical
 
 
-def _assembly_review_action_payload(
-    request: ResumeReviewRequest, candidate_final_ref: str | None
+def _candidate_ids_from_review_request_payload(payload: Any) -> set[str]:
+    if not isinstance(payload, Mapping):
+        raise ResumeValidationError("review request payload is invalid")
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        raise ResumeValidationError("review request candidate collection is invalid")
+    return {
+        cast(str, candidate.get("candidate_id"))
+        for candidate in candidates
+        if isinstance(candidate, Mapping)
+        and isinstance(candidate.get("candidate_id"), str)
+    }
+
+
+def _canonical_artifact_refs(*refs: ArtifactRef) -> tuple[ArtifactRef, ...]:
+    by_key = {_artifact_ref_key(ref): ref for ref in refs}
+    return tuple(by_key[key] for key in sorted(by_key))
+
+
+def _artifact_ref_key(ref: ArtifactRef) -> tuple[str, str, str, int, str]:
+    return (
+        ref.artifact_id,
+        ref.path_ref,
+        ref.sha256,
+        ref.size_bytes,
+        ref.artifact_type,
+    )
+
+
+def apply_assembly_review_application(
+    state: TopLevelState, application: VerifiedReviewApplication
+) -> StateUpdate:
+    """Purely project a verified Assembly Review effect into checkpoint state."""
+
+    if application.application.effect_kind != ASSEMBLY_REVIEW_EFFECT_KIND:
+        raise ResumeValidationError(
+            "assembly_review application has the wrong effect kind"
+        )
+    if not isinstance(application.effect, AssemblyReviewEffectV1):
+        raise ResumeValidationError(
+            "assembly_review application has the wrong effect model"
+        )
+    effect = application.effect
+    if (
+        application.application.stage != "assembly_review"
+        or application.application.gate_id != "assembly_review"
+    ):
+        raise ResumeValidationError("assembly_review application has the wrong gate")
+
+    if effect.decision == "stop_human_review":
+        review_update = update_assembly_review_output(
+            state,
+            {
+                **assembly_review_output(state),
+                "status": "failed_terminal",
+                "decision": effect.decision,
+                "review_request_id": effect.review_request_id,
+                "review_request_hash": effect.review_request_hash,
+                "review_request_artifact_ref": effect.review_request_ref.model_dump(
+                    mode="json"
+                ),
+                "review_decision_artifact_ref": effect.decision_ref.model_dump(
+                    mode="json"
+                ),
+                "notes": list(effect.notes),
+                "decided_by": effect.decided_by,
+                "rationale_artifact_ref": (
+                    effect.rationale_artifact_ref.path_ref
+                    if effect.rationale_artifact_ref is not None
+                    else None
+                ),
+            },
+        )
+        return {
+            "current_stage": "assembly_review",
+            "supervision_state": "failed_terminal",
+            "active_interrupt": None,
+            **review_update,
+            "last_error": "assembly_review stopped by human review decision",
+        }
+
+    if (
+        effect.action_ref is None
+        or effect.candidate_bundle_ref is None
+        or effect.primary_output_ref is None
+    ):
+        raise ResumeValidationError(
+            "assembly_review selected effect is missing durable provenance"
+        )
+    if (
+        effect.output_assembly_ref is None
+        or effect.final_assembly_ref is None
+        or effect.pre_action_assembly_ref is None
+    ):
+        raise ResumeValidationError(
+            "assembly_review selected effect is missing run-relative file refs"
+        )
+    paths = session_paths(state)
+    output_path = str(paths.resolve_ref(effect.output_assembly_ref.path_ref))
+    final_path = str(paths.resolve_ref(effect.final_assembly_ref.path_ref))
+    pre_action_path = str(paths.resolve_ref(effect.pre_action_assembly_ref.path_ref))
+    review_payload: dict[str, object] = {
+        **assembly_review_output(state),
+        "status": "completed",
+        "decision": effect.decision,
+        "selected_candidate_id": effect.selected_candidate_id,
+        "rejected_candidates": list(effect.rejected_candidates),
+        "final_assembly_ref": final_path,
+        "pre_action_assembly_ref": pre_action_path,
+        "action_type": effect.action_type,
+        "action_execution_mode": effect.action_execution_mode,
+        "action_method_name": effect.action_method_name,
+        "evidence_refs": [reference.path_ref for reference in effect.evidence_refs],
+        "evidence_notes": list(effect.evidence_notes),
+        "notes": list(effect.notes),
+        "decided_by": effect.decided_by,
+        "rationale_artifact_ref": (
+            effect.rationale_artifact_ref.path_ref
+            if effect.rationale_artifact_ref is not None
+            else None
+        ),
+        "review_request_id": effect.review_request_id,
+        "review_request_hash": effect.review_request_hash,
+        "review_request_artifact_ref": effect.review_request_ref.model_dump(
+            mode="json"
+        ),
+        "review_decision_artifact_ref": effect.decision_ref.model_dump(mode="json"),
+        "assembly_review_action_artifact_ref": effect.action_ref.path_ref,
+    }
+    if effect.action_type == "purge":
+        review_payload["purged_assembly"] = final_path
+    if effect.action_type == "polish":
+        review_payload["polished_assembly"] = final_path
+    review_update = update_assembly_review_output(state, review_payload)
+    return {
+        **advance_workflow_step(state, "assembly_review"),
+        "active_interrupt": None,
+        "route_trace": append_route_trace(state, "assembly_review_stage"),
+        "stage_outputs": review_update["stage_outputs"],
+        "resource_refs": update_resource_ref(
+            state,
+            "assembly",
+            [output_path],
+            "assembly_review",
+            {
+                "selected_candidate_id": effect.selected_candidate_id,
+                "decision": effect.decision,
+                "action_type": effect.action_type,
+                "candidate_bundle_ref": effect.candidate_bundle_ref.model_dump(
+                    mode="json"
+                ),
+                "primary_output_ref": effect.primary_output_ref.model_dump(mode="json"),
+            },
+        ),
+    }
+
+
+def _prepare_assembly_review_action_payload(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    candidate_final_ref: str | None,
 ) -> dict[str, Any]:
     if request.decision in {"accept", "pass", "continue_low_confidence"}:
         if not candidate_final_ref:
@@ -1201,7 +1454,12 @@ def _assembly_review_action_payload(
             "pre_action_assembly_ref": candidate_final_ref,
             "action_type": action_type,
             "action_execution_mode": "none",
-            "evidence_refs": list(request.metadata.get("evidence_refs") or []),
+            "evidence_refs": [
+                _require_existing_review_file_ref(
+                    state, value, "evidence_refs"
+                ).path_ref
+                for value in request.metadata.get("evidence_refs") or []
+            ],
             "evidence_notes": list(request.metadata.get("evidence_notes") or []),
         }
 
@@ -1210,45 +1468,46 @@ def _assembly_review_action_payload(
             "assembly_review transform action requires selected candidate "
             "primary output"
         )
-    metadata_output_ref = request.metadata.get("action_output_ref")
-    action_output_ref = metadata_output_ref
-    if not action_output_ref:
+    action_output_value = request.metadata.get("action_output_ref")
+    if not action_output_value:
         raise ResumeValidationError(
             f"assembly_review {request.decision} requires action_output_ref"
         )
-    if action_output_ref == candidate_final_ref:
+    action_output_ref = _require_existing_review_file_ref(
+        state, action_output_value, "action_output_ref"
+    )
+    resolved_action_output = session_paths(state).resolve_ref(
+        action_output_ref.path_ref
+    )
+    resolved_candidate = resolve_run_ref(state, candidate_final_ref)
+    if resolved_action_output == resolved_candidate:
         raise ResumeValidationError(
             f"assembly_review {request.decision} output must differ from "
             "pre-action assembly"
-        )
-    if not Path(str(action_output_ref)).exists():
-        raise ResumeValidationError(
-            f"assembly_review {request.decision} action output ref must exist"
         )
     # Trust boundary: human_approved_action is user-asserted, not system-verified.
     # This documents that a human performed and approved an external action.
     # Additional validation (output exists, differs from input, has evidence)
     # reduces risk.
-    if not (
-        request.metadata.get("human_approved_action") is True
-        or request.metadata.get("approval") == "human"
-    ):
+    if request.metadata.get("human_approved_action") is not True:
         raise ResumeValidationError(
             f"assembly_review {request.decision} requires human-approved action "
             "metadata"
         )
-    evidence_refs = list(request.metadata.get("evidence_refs") or [])
+    evidence_refs = [
+        _require_existing_review_file_ref(state, value, "evidence_refs").path_ref
+        for value in request.metadata.get("evidence_refs") or []
+    ]
     evidence_notes = list(request.metadata.get("evidence_notes") or [])
     if not evidence_refs and not evidence_notes:
         raise ResumeValidationError(
             f"assembly_review {request.decision} requires action evidence metadata"
         )
-    method_name = request.method_name or request.metadata.get("method_name")
-    if (
-        not method_name
-        and not request.metadata.get("provenance_ref")
-        and not request.metadata.get("provenance")
-    ):
+    method_name = request.method_name
+    provenance_ref = request.metadata.get("provenance_ref")
+    if provenance_ref is not None:
+        _require_existing_review_file_ref(state, provenance_ref, "provenance_ref")
+    if not method_name and provenance_ref is None:
         raise ResumeValidationError(
             f"assembly_review {request.decision} requires method or provenance metadata"
         )
@@ -1256,15 +1515,21 @@ def _assembly_review_action_payload(
         "nextpolish_shortread",
         "pilon_shortread",
     }:
-        if not request.metadata.get(
-            "short_read_evidence_refs"
-        ) and not request.metadata.get("short_read_evidence_notes"):
+        short_read_evidence_refs = [
+            _require_existing_review_file_ref(
+                state, value, "short_read_evidence_refs"
+            ).path_ref
+            for value in request.metadata.get("short_read_evidence_refs") or []
+        ]
+        if not short_read_evidence_refs and not request.metadata.get(
+            "short_read_evidence_notes"
+        ):
             raise ResumeValidationError(
                 "short-read polishing requires explicit short-read evidence"
             )
     return {
-        "final_assembly_ref": str(action_output_ref),
-        "pre_action_assembly_ref": candidate_final_ref,
+        "final_assembly_ref": action_output_ref.path_ref,
+        "pre_action_assembly_ref": str(resolved_candidate),
         "action_type": request.decision,
         "action_execution_mode": "external",
         "action_method_name": method_name,
@@ -1273,119 +1538,164 @@ def _assembly_review_action_payload(
     }
 
 
-def _stop_assembly_review(
-    state: TopLevelState, request: ResumeReviewRequest
-) -> StateUpdate:
-    ar_out = assembly_review_output(state)
-    data_dir = state.get("data_dir", "data")
-    ledger = Ledger(data_dir)
-    decision_artifact = ReviewDecisionArtifact(
-        session_id=state["session_id"],
-        stage="assembly_review",
-        decision="stop_human_review",
-        candidate_id=request.candidate_id,
-        rejected_candidates=request.rejected_candidates,
-        final_assembly_ref=None,
-        notes=request.notes,
-        metadata=request.metadata,
-    )
-    review_request_id, review_request_hash, review_request_ref = (
-        _assembly_review_binding(state, request=request, output=ar_out)
-    )
-    decision_ref = persist_review_decision(
-        data_dir,
-        session_id=state["session_id"],
-        review_request_id=review_request_id,
-        stage="assembly_review",
-        gate_id="assembly_review",
-        decision=decision_artifact,
-        request_hash=review_request_hash,
-        request_ref=review_request_ref,
-        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
-        artifact_type="assembly_review.decision",
-    )
-    ledger.record_review_decision(
-        state["session_id"],
-        "assembly_review",
-        decision="stop_human_review",
-        candidate_id=request.candidate_id,
-        rejected_candidates=request.rejected_candidates,
-        notes=request.notes,
-        artifact_ref=decision_ref.model_dump(mode="json"),
-        metadata=request.metadata,
-        decided_by=request.decided_by,
-        rationale_artifact_ref=request.rationale_artifact_ref,
-        review_request_id=review_request_id,
-    )
-    review_update = update_assembly_review_output(
-        state,
-        {
-            **ar_out,
-            "status": "failed_terminal",
-            "decision": "stop_human_review",
-            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-            "notes": request.notes,
-            "decided_by": request.decided_by,
-            "rationale_artifact_ref": request.rationale_artifact_ref,
-        },
-    )
-    return {
-        "current_stage": "assembly_review",
-        "supervision_state": "failed_terminal",
-        "active_interrupt": None,
-        **review_update,
-        "last_error": "assembly_review stopped by human review decision",
-    }
-
-
-def _assembly_review_binding(
+def _require_existing_review_file_ref(
     state: TopLevelState,
-    *,
-    request: ResumeReviewRequest | None = None,
-    output: AssemblyReviewCursor | None = None,
-) -> tuple[str, str, ArtifactRef]:
-    """Load and verify the immutable request bound to an assembly-review decision."""
+    value: object,
+    field_name: str,
+) -> RunRelativeFileRef:
+    """Return an existing, normalized run-local file reference or fail closed."""
 
-    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
-    review_output = output or assembly_review_output(state)
-    review_request_id = (
-        (request.review_request_id if request is not None else None)
-        or active_interrupt.get("review_request_id")
-        or review_output.get("review_request_id")
-    )
-    review_request_hash = (
-        (request.review_request_hash if request is not None else None)
-        or active_interrupt.get("request_hash")
-        or review_output.get("review_request_hash")
-    )
-    request_ref_value = active_interrupt.get("request_ref") or review_output.get(
-        "review_request_artifact_ref"
-    )
-    if not review_request_id or not review_request_hash or request_ref_value is None:
-        raise ResumeValidationError(
-            "assembly_review decision is missing review request binding"
-        )
     try:
-        request_ref = ArtifactRef.model_validate(request_ref_value)
-        request_record = load_review_request(
-            state.get("data_dir", "data"), request_ref, session_id=state["session_id"]
-        )
-    except (ReviewPersistenceError, ValueError, TypeError) as exc:
+        reference = RunRelativeFileRef.model_validate(value)
+        path = session_paths(state).resolve_ref(reference.path_ref)
+    except (TypeError, ValueError) as exc:
         raise ResumeValidationError(
-            "assembly_review review request is missing or changed"
+            f"assembly_review {field_name} must be a run-relative file ref"
         ) from exc
-    workflow_step_id = active_interrupt.get(
-        "workflow_step_id"
-    ) or current_workflow_step_id(state, expected_stage="assembly_review")
-    if (
-        request_ref.sha256 != str(review_request_hash)
-        or request_record.get("review_request_id") != str(review_request_id)
-        or request_record.get("stage") != "assembly_review"
-        or request_record.get("gate_id") != "assembly_review"
-        or request_record.get("workflow_step_id") != workflow_step_id
-    ):
-        raise ResumeValidationError("assembly_review review request binding mismatch")
-    return str(review_request_id), str(review_request_hash), request_ref
+    if not path.is_file():
+        raise ResumeValidationError(
+            f"assembly_review {field_name} does not reference a materialized file"
+        )
+    return reference
+
+
+def _prepare_stopped_assembly_review_application(
+    state: TopLevelState,
+    intent: ReviewIntentV1,
+    request: ResumeReviewRequest,
+) -> PreparedReviewApplication:
+    """Persist the terminal decision; apply owns its checkpoint projection."""
+
+    decision_ref = _persist_assembly_review_decision(
+        state,
+        intent,
+        ReviewDecisionArtifact(
+            session_id=state["session_id"],
+            stage="assembly_review",
+            decision="stop_human_review",
+            candidate_id=request.candidate_id,
+            rejected_candidates=request.rejected_candidates,
+            final_assembly_ref=None,
+            notes=request.notes,
+            metadata={
+                **request.metadata,
+                "rationale_artifact_ref": (
+                    request.rationale_artifact_ref.model_dump(mode="json")
+                    if request.rationale_artifact_ref is not None
+                    else None
+                ),
+            },
+        ),
+    )
+    return PreparedReviewApplication(
+        effect_kind=ASSEMBLY_REVIEW_EFFECT_KIND,
+        effect=AssemblyReviewEffectV1(
+            decision="stop_human_review",
+            review_request_id=intent.review_request_id,
+            review_request_hash=intent.request_hash,
+            review_request_ref=intent.request_ref,
+            rejected_candidates=tuple(request.rejected_candidates),
+            notes=tuple(request.notes),
+            decided_by=request.decided_by,
+            rationale_artifact_ref=request.rationale_artifact_ref,
+            decision_ref=decision_ref,
+        ),
+        decision_ref=decision_ref,
+        required_refs=_canonical_artifact_refs(
+            decision_ref,
+            *(
+                ()
+                if request.rationale_artifact_ref is None
+                else (request.rationale_artifact_ref,)
+            ),
+        ),
+    )
+
+
+def _require_assembly_review_intent_binding(
+    state: TopLevelState, intent: ReviewIntentV1
+) -> None:
+    """Require the persisted intent to target this blocked checkpoint occurrence."""
+
+    if intent.session_id != state["session_id"]:
+        raise ResumeValidationError("assembly_review intent session does not match")
+    if state.get("supervision_state") != "blocked_human":
+        raise ResumeValidationError(
+            "assembly_review application requires blocked_human"
+        )
+    interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
+    expected = {
+        "stage": "assembly_review",
+        "gate_id": "assembly_review",
+        "workflow_step_id": intent.workflow_step_id,
+        "review_request_id": intent.review_request_id,
+        "request_hash": intent.request_hash,
+    }
+    for field, value in expected.items():
+        if interrupt.get(field) != value:
+            raise ResumeValidationError(
+                f"assembly_review active_interrupt {field} does not match intent"
+            )
+    try:
+        interrupt_ref = ArtifactRef.model_validate(interrupt.get("request_ref"))
+    except (TypeError, ValueError) as exc:
+        raise ResumeValidationError(
+            "assembly_review active_interrupt has no valid request_ref"
+        ) from exc
+    if interrupt_ref != intent.request_ref:
+        raise ResumeValidationError(
+            "assembly_review active_interrupt request_ref does not match intent"
+        )
+    current_step_id = current_workflow_step_id(state, expected_stage="assembly_review")
+    if current_step_id != intent.workflow_step_id:
+        raise ResumeValidationError(
+            "assembly_review current workflow step does not match intent"
+        )
+
+
+def _persist_assembly_review_decision(
+    state: TopLevelState,
+    intent: ReviewIntentV1,
+    decision: ReviewDecisionArtifact,
+) -> ArtifactRef:
+    """Persist or recover the immutable decision record, without a Ledger event."""
+
+    try:
+        return persist_review_decision(
+            absolute_data_dir(state),
+            session_id=state["session_id"],
+            review_request_id=intent.review_request_id,
+            stage="assembly_review",
+            gate_id="assembly_review",
+            decision=decision,
+            request_hash=intent.request_hash,
+            request_ref=intent.request_ref,
+            method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
+            artifact_type="assembly_review.decision",
+        )
+    except (OSError, ValueError, ReviewPersistenceError) as exc:
+        raise ResumeValidationError(
+            "assembly_review decision could not be persisted"
+        ) from exc
+
+
+def _persist_assembly_review_action(
+    state: TopLevelState, action: AssemblyReviewActionArtifact
+) -> ArtifactRef:
+    """Persist or recover the action evidence and return its typed ref."""
+
+    action_path = _write_json_artifact(
+        state,
+        "assembly_review_action.json",
+        action.model_dump(mode="json"),
+        artifact_type=ASSEMBLY_REVIEW_ACTION,
+    )
+    return artifact_ref_for_path(
+        absolute_data_dir(state),
+        state["session_id"],
+        action_path,
+        expected_type=ASSEMBLY_REVIEW_ACTION,
+    )
 
 
 def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
@@ -1966,13 +2276,6 @@ def _publish_review_action_output(
 ) -> PublishedArtifact:
     """Publish one externally approved transformed assembly before handoff."""
 
-    source_path = Path(source).expanduser().resolve(strict=False)
-    if not source_path.is_file():
-        raise ResumeValidationError(
-            "assembly_review action output is not a materialized file"
-        )
-    if source_path.stat().st_size <= 0:
-        raise ResumeValidationError("assembly_review action output is empty")
     safe_request_id = "".join(
         character if character.isalnum() or character in {"-", "_"} else "_"
         for character in review_request_id
@@ -1990,6 +2293,31 @@ def _publish_review_action_output(
         )
         / filename
     )
+    metadata = {
+        "candidate_id": selected.bundle.candidate_id,
+        "candidate_bundle_ref": selected.ref.model_dump(mode="json"),
+        "dependency_refs": [selected.primary_output_ref.model_dump(mode="json")],
+        "review_request_id": review_request_id,
+    }
+    recovered = recover_published_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        destination,
+        stage="assembly_review",
+        method_name=f"assembly_review.{action_type}",
+        artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+        metadata=metadata,
+    )
+    if recovered is not None:
+        return recovered
+
+    source_path = resolve_run_ref(state, source)
+    if not source_path.is_file():
+        raise ResumeValidationError(
+            "assembly_review action output is not a materialized file"
+        )
+    if source_path.stat().st_size <= 0:
+        raise ResumeValidationError("assembly_review action output is empty")
     temporary = stage_work_dir(
         state,
         "assembly_review",
@@ -2003,12 +2331,7 @@ def _publish_review_action_output(
         stage="assembly_review",
         method_name=f"assembly_review.{action_type}",
         artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
-        metadata={
-            "candidate_id": selected.bundle.candidate_id,
-            "candidate_bundle_ref": selected.ref.model_dump(mode="json"),
-            "dependency_refs": [selected.primary_output_ref.model_dump(mode="json")],
-            "review_request_id": review_request_id,
-        },
+        metadata=metadata,
     )
     try:
         return publish_artifact_record(
@@ -2019,6 +2342,68 @@ def _publish_review_action_output(
         )
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _recover_or_publish_derived_review_candidate(
+    state: TopLevelState,
+    selected: VerifiedExecutedCandidate,
+    *,
+    primary_output_ref: ArtifactRef,
+    action_type: str,
+    review_request_id: str,
+) -> VerifiedExecutedCandidate:
+    """Recover a completed derived candidate before creating its deterministic chain."""
+
+    method_name = f"assembly_review.{action_type}"
+    identity_payload = json.dumps(
+        [selected.ref.artifact_id, "assembly_review", method_name, review_request_id],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    identity_digest = sha256(identity_payload.encode("utf-8")).hexdigest()
+    safe_method = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in method_name
+    ).strip("_")
+    executed_path = stage_artifacts_dir(
+        state,
+        "assembly_review",
+        "derived_candidates",
+        f"{safe_method[:64]}-{identity_digest[:16]}",
+        "candidate.executed.json",
+    )
+    if executed_path.exists():
+        recovered_ref = artifact_ref_for_path(
+            absolute_data_dir(state),
+            state["session_id"],
+            executed_path,
+            expected_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        )
+        recovered = load_executed_candidate_bundle(
+            absolute_data_dir(state),
+            state["session_id"],
+            recovered_ref,
+            expected_method_name=method_name,
+        )
+        if recovered.primary_output_ref != primary_output_ref:
+            raise ResumeValidationError(
+                "assembly_review recovered derived candidate output does not match "
+                "action"
+            )
+        return recovered
+    return publish_derived_assembly_candidate(
+        absolute_data_dir(state),
+        state["session_id"],
+        workflow_step_id=current_workflow_step_id(
+            state,
+            expected_stage="assembly_review",
+        ),
+        source_candidate=selected,
+        primary_output_ref=primary_output_ref,
+        stage="assembly_review",
+        method_name=method_name,
+        action_identity=review_request_id,
+    )
 
 
 def _candidate_primary_output_path(

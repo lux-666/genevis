@@ -6,9 +6,18 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import JsonValue as PydanticJsonValue
+
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
 from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.review.application import (
+    PreparedReviewApplication,
+    ReviewIntentV1,
+    RunRelativeFileRef,
+    VerifiedReviewApplication,
+)
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -20,9 +29,10 @@ from app.schemas.artifacts import (
     HIC_SCAFFOLDED_ASSEMBLY,
     ArtifactRef,
     HiCScaffoldDecisionArtifact,
+    ParameterAttempt,
 )
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
-from app.stages.base import absolute_data_dir, append_route_trace
+from app.stages.base import absolute_data_dir, append_route_trace, session_paths
 from app.stages.hic_scaffolding.method_application.support import (
     hic_output as _hic_output,
 )
@@ -46,6 +56,89 @@ from app.storage.ledger import Ledger
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
+
+
+class HiCAssemblyResourceEffectV1(BaseModel):
+    """One prepared assembly-resource replacement for a Hi-C review outcome."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: RunRelativeFileRef
+    metadata: dict[str, PydanticJsonValue] = Field(default_factory=dict)
+
+
+class HiCReviewRetryRequestEffectV1(BaseModel):
+    """Ref-only cursor for a sealed AutoHiC review retry."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    origin: Literal["autohic_review"]
+    previous_attempt_id: int = Field(ge=0)
+    previous_attempt_seal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    failure_ref: ArtifactRef
+
+
+class HiCReviewRetryEffectV1(BaseModel):
+    """Prepared domain projection after sealing reviewer feedback."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal[
+        "retry_parameters_after_review_failure",
+        "review_parameter_retries_exhausted",
+        "failed",
+    ]
+    reason: str | None = None
+    failure_kind: str | None = None
+    parameter_attempts: tuple[ParameterAttempt, ...] = Field(max_length=256)
+    proposed_parameter_attempt_id: int | None = Field(default=None, ge=0)
+    parameter_retry_request: HiCReviewRetryRequestEffectV1 | None = None
+
+    @model_validator(mode="after")
+    def validate_retry_projection(self) -> "HiCReviewRetryEffectV1":
+        if self.status == "retry_parameters_after_review_failure":
+            if self.parameter_retry_request is None:
+                raise ValueError("AutoHiC review retry requires a retry cursor")
+        elif self.parameter_retry_request is not None:
+            raise ValueError(
+                "terminal AutoHiC retry effect must not retain a retry cursor"
+            )
+        return self
+
+
+class HiCScaffoldingReviewEffectV1(BaseModel):
+    """Typed durable effect for the ``hic_scaffolding`` adoption gate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    decision: Literal[
+        "accept_candidate",
+        "keep_prior_assembly",
+        "request_parameter_retry",
+        "stop_human_review",
+    ]
+    decision_ref: ArtifactRef
+    pre_hic_assembly_ref: RunRelativeFileRef
+    output_assembly_ref: RunRelativeFileRef
+    hic_read_refs: tuple[str, ...] = Field(default=(), max_length=10_000)
+    notes: tuple[str, ...] = Field(default=(), max_length=1_000)
+    decided_by: Literal["human", "llm_provisional", "auto_rule"]
+    rationale_artifact_ref: ArtifactRef | None = None
+    assembly_resource: HiCAssemblyResourceEffectV1 | None = None
+    retry: HiCReviewRetryEffectV1 | None = None
+
+    @model_validator(mode="after")
+    def validate_effect_branches(self) -> "HiCScaffoldingReviewEffectV1":
+        if self.decision == "request_parameter_retry":
+            if self.retry is None or self.assembly_resource is not None:
+                raise ValueError("AutoHiC retry effect has invalid branch data")
+        elif self.decision == "stop_human_review":
+            if self.retry is not None or self.assembly_resource is not None:
+                raise ValueError("AutoHiC stop effect has invalid branch data")
+        elif self.retry is not None or self.assembly_resource is None:
+            raise ValueError("AutoHiC adoption effect requires an assembly resource")
+        return self
 
 
 def enter_hic_scaffolding(state: TopLevelState) -> StateUpdate:
@@ -250,107 +343,51 @@ def block_hic_requirements(state: TopLevelState) -> StateUpdate:
     }
 
 
-def apply_hic_scaffolding_resume_decision(
+def prepare_hic_scaffolding_review_application(
     state: TopLevelState,
-    request: ResumeReviewRequest,
-) -> StateUpdate:
-    """Apply the final human adoption decision for one completed AutoHiC run."""
+    intent: ReviewIntentV1,
+) -> PreparedReviewApplication:
+    """Durably prepare one AutoHiC adoption decision before checkpoint apply."""
 
-    if request.stage != "hic_scaffolding" or request.gate_id != "hic_scaffolding":
-        raise ResumeValidationError(
-            "AutoHiC adoption review requires hic_scaffolding/hic_scaffolding"
-        )
+    _validate_hic_scaffolding_review_intent(state, intent)
+    (
+        review_request_id,
+        review_request_hash,
+        review_request_ref,
+        request_record,
+    ) = _hic_scaffolding_review_binding(state, intent)
+    request = validate_hic_scaffolding_review_intent_request(
+        state, intent.request, request_record
+    )
     hic_out = _hic_output(state)
-    allowed = {
-        "accept_candidate",
-        "keep_prior_assembly",
-        "request_parameter_retry",
-        "stop_human_review",
-    }
-    if request.decision not in allowed:
-        raise ResumeValidationError(
-            f"unsupported AutoHiC adoption decision: {request.decision}"
-        )
-    if request.method_name and request.method_name != AUTOHIC_METHOD:
-        raise ResumeValidationError(f"AutoHiC adoption method must be {AUTOHIC_METHOD}")
-
     candidate = dict((hic_out.get("method_candidates") or {}).get(AUTOHIC_METHOD) or {})
-    pre_hic_assembly_ref = hic_out.get("pre_hic_assembly_ref")
-    if not pre_hic_assembly_ref:
-        raise ResumeValidationError("AutoHiC adoption requires pre_hic_assembly_ref")
+    pre_hic_assembly_path = hic_out.get("pre_hic_assembly_ref")
     if request.decision == "accept_candidate":
-        if candidate.get("status") != "executed" or not candidate.get("scaffold_fasta"):
-            raise ResumeValidationError(
-                "accept_candidate requires a completed AutoHiC chromosome assembly"
-            )
-        final_assembly = str(candidate["scaffold_fasta"])
+        final_assembly_path = str(candidate["scaffold_fasta"])
     else:
-        final_assembly = str(pre_hic_assembly_ref)
-
-    active_interrupt: Mapping[str, Any] = (
-        state.get("active_interrupt") or hic_out.get("active_interrupt") or {}
-    )
-    review_request_id = request.review_request_id or active_interrupt.get(
-        "review_request_id"
-    )
-    review_request_hash = request.review_request_hash or active_interrupt.get(
-        "request_hash"
-    )
-    if not review_request_id or not review_request_hash:
-        raise ResumeValidationError(
-            "AutoHiC adoption decision is missing request binding"
-        )
+        final_assembly_path = str(pre_hic_assembly_path)
     try:
-        review_request_ref = ArtifactRef.model_validate(
-            active_interrupt.get("request_ref")
-            or hic_out.get("review_request_artifact_ref")
+        paths = session_paths(state)
+        pre_hic_assembly_ref = RunRelativeFileRef(
+            paths.to_ref(str(pre_hic_assembly_path))
         )
-        review_request_record = load_review_request(
-            absolute_data_dir(state),
-            review_request_ref,
-            session_id=state["session_id"],
-        )
-    except (OSError, ValueError, ReviewPersistenceError) as exc:
+        output_assembly_ref = RunRelativeFileRef(paths.to_ref(final_assembly_path))
+    except ValueError as exc:
         raise ResumeValidationError(
-            "AutoHiC adoption review request is missing or changed"
+            "AutoHiC review effect paths must be inside the run directory"
         ) from exc
-    if (
-        review_request_ref.sha256 != str(review_request_hash)
-        or review_request_record.get("review_request_id") != str(review_request_id)
-        or review_request_record.get("stage") != "hic_scaffolding"
-        or review_request_record.get("gate_id") != "hic_scaffolding"
-        or review_request_record.get("workflow_step_id")
-        != (
-            active_interrupt.get("workflow_step_id")
-            or current_workflow_step_id(state, expected_stage="hic_scaffolding")
-        )
-    ):
-        raise ResumeValidationError("AutoHiC adoption review request binding mismatch")
 
     adoption_resource_metadata: dict[str, Any] | None = None
     if request.decision == "accept_candidate":
-        if request.decided_by != "human":
-            raise ResumeValidationError(
-                "AutoHiC candidate adoption requires a human review decision"
-            )
         try:
             current_assembly = resolve_stage_resource(
                 state,
                 resource_spec=assembly_resource_spec(),
             )
-            if (
-                not current_assembly.found
-                or current_assembly.path is None
-                or Path(current_assembly.path).resolve(strict=False)
-                != Path(str(pre_hic_assembly_ref)).resolve(strict=False)
-            ):
-                raise ValueError(
-                    "current assembly no longer matches pre_hic_assembly_ref"
-                )
             primary_output_ref = artifact_ref_for_path(
                 absolute_data_dir(state),
                 state["session_id"],
-                final_assembly,
+                final_assembly_path,
                 expected_type=HIC_SCAFFOLDED_ASSEMBLY,
             )
         except (OSError, TypeError, ValueError) as exc:
@@ -359,7 +396,7 @@ def apply_hic_scaffolding_resume_decision(
             ) from exc
         adoption_resource_metadata = {
             "decision": request.decision,
-            "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
+            "pre_hic_assembly_ref": pre_hic_assembly_ref.path_ref,
             "primary_output_ref": primary_output_ref.model_dump(mode="json"),
         }
         if current_assembly.metadata.get("candidate_bundle_ref") is not None:
@@ -373,6 +410,15 @@ def apply_hic_scaffolding_resume_decision(
 
     decision_metadata = {
         **dict(request.metadata),
+        **(
+            {
+                "rationale_artifact_ref": request.rationale_artifact_ref.model_dump(
+                    mode="json"
+                )
+            }
+            if request.rationale_artifact_ref is not None
+            else {}
+        ),
         "review_evidence": {
             key: candidate.get(key)
             for key in (
@@ -399,8 +445,8 @@ def apply_hic_scaffolding_resume_decision(
         session_id=state["session_id"],
         decision=decision,
         method_name=AUTOHIC_METHOD,
-        pre_hic_assembly_ref=str(pre_hic_assembly_ref),
-        output_assembly_ref=final_assembly,
+        pre_hic_assembly_ref=pre_hic_assembly_ref.path_ref,
+        output_assembly_ref=output_assembly_ref.path_ref,
         hic_read_refs=list(hic_out.get("hic_read_refs") or []),
         notes=list(request.notes),
         metadata=decision_metadata,
@@ -486,85 +532,30 @@ def apply_hic_scaffolding_resume_decision(
                 ),
             }
         )
-    Ledger(absolute_data_dir(state)).record_review_decision(
-        state["session_id"],
-        "hic_scaffolding",
-        gate_id="hic_scaffolding",
-        decision=request.decision,
-        notes=list(request.notes),
-        method_name=AUTOHIC_METHOD,
-        artifact_ref=decision_ref.path_ref,
-        metadata=decision_metadata,
-        decided_by=request.decided_by,
-        rationale_artifact_ref=request.rationale_artifact_ref,
-        review_request_id=str(review_request_id),
-    )
-
     if request.decision == "request_parameter_retry":
         retry_update = prepare_autohic_review_retry(state, decision_ref)
         outputs = dict(retry_update.get("stage_outputs") or {})
         retry_out = HIC_SCAFFOLDING_CURSOR_ADAPTER.validate_python(
             outputs.get("hic_scaffolding") or {}
         )
-        stage_update = _update_hic_output(
-            state,
-            {
-                **retry_out,
-                "active_interrupt": None,
-                "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-            },
+        effect = HiCScaffoldingReviewEffectV1(
+            decision="request_parameter_retry",
+            decision_ref=decision_ref,
+            pre_hic_assembly_ref=pre_hic_assembly_ref,
+            output_assembly_ref=output_assembly_ref,
+            hic_read_refs=tuple(str(ref) for ref in hic_out.get("hic_read_refs") or []),
+            notes=tuple(request.notes),
+            decided_by=request.decided_by,
+            rationale_artifact_ref=request.rationale_artifact_ref,
+            retry=_hic_review_retry_effect(retry_out),
         )
-        retry_exhausted = (
-            retry_out.get("status") == "review_parameter_retries_exhausted"
+        return PreparedReviewApplication(
+            effect_kind="hic_scaffolding.review_application.v1",
+            effect=effect,
+            decision_ref=decision_ref,
         )
-        result: StateUpdate = {
-            "current_stage": "hic_scaffolding",
-            "supervision_state": (
-                "failed_terminal" if retry_exhausted else "running_stage"
-            ),
-            "active_interrupt": None,
-            **stage_update,
-        }
-        if retry_exhausted:
-            result["last_error"] = retry_out.get(
-                "reason",
-                "AutoHiC review retry budget exhausted",
-            )
-        return result
 
-    stage_update = _update_hic_output(
-        state,
-        {
-            "status": (
-                "failed_terminal"
-                if request.decision == "stop_human_review"
-                else "completed"
-            ),
-            "decision": request.decision,
-            "selected_method_name": AUTOHIC_METHOD,
-            "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
-            "output_assembly_ref": final_assembly,
-            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-            "notes": list(request.notes),
-            "decided_by": request.decided_by,
-            "rationale_artifact_ref": request.rationale_artifact_ref,
-            "active_interrupt": None,
-        },
-    )
-    if request.decision == "stop_human_review":
-        return {
-            "current_stage": "hic_scaffolding",
-            "supervision_state": "failed_terminal",
-            "active_interrupt": None,
-            **stage_update,
-            "last_error": "hic_scaffolding stopped by human review decision",
-        }
-    update: StateUpdate = {
-        **advance_workflow_step(state, "hic_scaffolding"),
-        "active_interrupt": None,
-        **stage_update,
-        "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
-    }
+    resource: HiCAssemblyResourceEffectV1 | None = None
     if request.decision == "keep_prior_assembly":
         try:
             current_assembly = resolve_stage_resource(
@@ -582,9 +573,9 @@ def apply_hic_scaffolding_resume_decision(
             if (
                 current_assembly.path is None
                 or Path(current_assembly.path).resolve(strict=False)
-                != Path(str(pre_hic_assembly_ref)).resolve(strict=False)
+                != Path(str(pre_hic_assembly_path)).resolve(strict=False)
                 or source_candidate.primary_output_path.resolve(strict=False)
-                != Path(str(pre_hic_assembly_ref)).resolve(strict=False)
+                != Path(str(pre_hic_assembly_path)).resolve(strict=False)
             ):
                 raise AssemblyCandidateBundleError(
                     "current candidate primary output does not match the "
@@ -599,33 +590,348 @@ def apply_hic_scaffolding_resume_decision(
             raise ResumeValidationError(
                 f"AutoHiC kept candidate provenance is invalid: {exc}"
             ) from exc
-        update["resource_refs"] = update_resource_ref(
-            state,
-            "assembly",
-            [str(pre_hic_assembly_ref)],
-            "hic_scaffolding",
-            {
+        resource = HiCAssemblyResourceEffectV1(
+            path=pre_hic_assembly_ref,
+            metadata={
                 **dict(current_assembly.metadata),
                 "decision": request.decision,
-                "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
+                "pre_hic_assembly_ref": pre_hic_assembly_ref.path_ref,
                 "candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
                 "primary_output_ref": (
                     source_candidate.primary_output_ref.model_dump(mode="json")
                 ),
             },
         )
-        return update
+    elif request.decision == "accept_candidate":
+        if adoption_resource_metadata is None:
+            raise ResumeValidationError("AutoHiC adoption metadata is unavailable")
+        resource = HiCAssemblyResourceEffectV1(
+            path=output_assembly_ref,
+            metadata=adoption_resource_metadata,
+        )
 
-    if adoption_resource_metadata is None:
-        raise ResumeValidationError("AutoHiC adoption metadata is unavailable")
-    update["resource_refs"] = update_resource_ref(
-        state,
-        "assembly",
-        [final_assembly],
-        "hic_scaffolding",
-        adoption_resource_metadata,
+    effect = HiCScaffoldingReviewEffectV1(
+        decision=decision,
+        decision_ref=decision_ref,
+        pre_hic_assembly_ref=pre_hic_assembly_ref,
+        output_assembly_ref=output_assembly_ref,
+        hic_read_refs=tuple(str(ref) for ref in hic_out.get("hic_read_refs") or []),
+        notes=tuple(request.notes),
+        decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
+        assembly_resource=resource,
     )
-    return update
+    return PreparedReviewApplication(
+        effect_kind="hic_scaffolding.review_application.v1",
+        effect=effect,
+        decision_ref=decision_ref,
+    )
+
+
+def apply_hic_scaffolding_review_application(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> StateUpdate:
+    """Purely project a verified AutoHiC adoption application into state."""
+
+    effect = application.effect
+    if not isinstance(effect, HiCScaffoldingReviewEffectV1):
+        raise TypeError("AutoHiC review application has an unexpected effect")
+    if application.application.effect_kind != "hic_scaffolding.review_application.v1":
+        raise ResumeValidationError("AutoHiC review application has an unexpected kind")
+    if application.application.decision_ref != effect.decision_ref:
+        raise ResumeValidationError(
+            "AutoHiC review effect decision_ref does not match its envelope"
+        )
+    _validate_hic_scaffolding_application_state(state, application)
+
+    if effect.decision == "request_parameter_retry":
+        if effect.retry is None:
+            raise ResumeValidationError(
+                "AutoHiC retry application is missing retry data"
+            )
+        retry_payload: dict[str, object] = {
+            "status": effect.retry.status,
+            "parameter_attempts": [
+                attempt.model_dump(mode="json")
+                for attempt in effect.retry.parameter_attempts
+            ],
+            "proposed_parameter_attempt_id": effect.retry.proposed_parameter_attempt_id,
+            "parameter_retry_request": (
+                effect.retry.parameter_retry_request.model_dump(mode="json")
+                if effect.retry.parameter_retry_request is not None
+                else None
+            ),
+            "review_decision_artifact_ref": effect.decision_ref.model_dump(mode="json"),
+            "active_interrupt": None,
+        }
+        if effect.retry.reason is not None:
+            retry_payload["reason"] = effect.retry.reason
+        if effect.retry.failure_kind is not None:
+            retry_payload["failure_kind"] = effect.retry.failure_kind
+        stage_update = _update_hic_output(state, retry_payload)
+        retry_exhausted = effect.retry.status == "review_parameter_retries_exhausted"
+        result: StateUpdate = {
+            "current_stage": "hic_scaffolding",
+            "supervision_state": (
+                "failed_terminal" if retry_exhausted else "running_stage"
+            ),
+            "active_interrupt": None,
+            **stage_update,
+        }
+        if retry_exhausted:
+            result["last_error"] = effect.retry.reason or (
+                "AutoHiC review retry budget exhausted"
+            )
+        return result
+
+    pre_hic_assembly_path = _rehydrate_hic_effect_path(
+        state, effect.pre_hic_assembly_ref
+    )
+    output_assembly_path = _rehydrate_hic_effect_path(state, effect.output_assembly_ref)
+    stage_update = _update_hic_output(
+        state,
+        {
+            "status": (
+                "failed_terminal"
+                if effect.decision == "stop_human_review"
+                else "completed"
+            ),
+            "decision": effect.decision,
+            "selected_method_name": AUTOHIC_METHOD,
+            "pre_hic_assembly_ref": pre_hic_assembly_path,
+            "output_assembly_ref": output_assembly_path,
+            "review_decision_artifact_ref": effect.decision_ref.model_dump(mode="json"),
+            "notes": list(effect.notes),
+            "decided_by": effect.decided_by,
+            "rationale_artifact_ref": (
+                effect.rationale_artifact_ref.path_ref
+                if effect.rationale_artifact_ref is not None
+                else None
+            ),
+            "active_interrupt": None,
+        },
+    )
+    if effect.decision == "stop_human_review":
+        return {
+            "current_stage": "hic_scaffolding",
+            "supervision_state": "failed_terminal",
+            "active_interrupt": None,
+            **stage_update,
+            "last_error": "hic_scaffolding stopped by human review decision",
+        }
+    if effect.assembly_resource is None:
+        raise ResumeValidationError("AutoHiC adoption application has no resource")
+    resource_path = _rehydrate_hic_effect_path(state, effect.assembly_resource.path)
+    resource_metadata = dict(effect.assembly_resource.metadata)
+    resource_metadata["pre_hic_assembly_ref"] = effect.pre_hic_assembly_ref.path_ref
+    return {
+        **advance_workflow_step(state, "hic_scaffolding"),
+        "active_interrupt": None,
+        **stage_update,
+        "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
+        "resource_refs": update_resource_ref(
+            state,
+            "assembly",
+            [resource_path],
+            "hic_scaffolding",
+            resource_metadata,
+        ),
+    }
+
+
+def _rehydrate_hic_effect_path(state: TopLevelState, value: RunRelativeFileRef) -> str:
+    """Restore a portable application path to the runtime-path contract."""
+
+    path = session_paths(state).resolve_ref(value.path_ref)
+    if not path.is_file():
+        raise ResumeValidationError("AutoHiC review effect file is missing")
+    return str(path)
+
+
+def _validate_hic_scaffolding_review_intent(
+    state: TopLevelState,
+    intent: ReviewIntentV1,
+) -> None:
+    if intent.session_id != state["session_id"]:
+        raise ResumeValidationError("AutoHiC adoption intent session_id mismatch")
+    if intent.workflow_step_id != current_workflow_step_id(
+        state, expected_stage="hic_scaffolding"
+    ):
+        raise ResumeValidationError("AutoHiC adoption intent workflow_step_id mismatch")
+
+
+def validate_hic_scaffolding_review_intent_request(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    request_record: Mapping[str, Any],
+) -> ResumeReviewRequest:
+    """Validate an AutoHiC review decision before its intent is persisted."""
+
+    if request.session_id != state["session_id"]:
+        raise ResumeValidationError("AutoHiC adoption request session_id mismatch")
+    if request.stage != "hic_scaffolding" or request.gate_id != "hic_scaffolding":
+        raise ResumeValidationError(
+            "AutoHiC adoption review requires hic_scaffolding/hic_scaffolding"
+        )
+    workflow_step_id = current_workflow_step_id(state, expected_stage="hic_scaffolding")
+    active_interrupt = state.get("active_interrupt")
+    if not isinstance(active_interrupt, Mapping):
+        raise ResumeValidationError(
+            "AutoHiC adoption review requires an active_interrupt"
+        )
+    try:
+        request_ref = ArtifactRef.model_validate(active_interrupt.get("request_ref"))
+    except (TypeError, ValueError) as exc:
+        raise ResumeValidationError(
+            "AutoHiC adoption active_interrupt has no valid request_ref"
+        ) from exc
+    if (
+        request.review_request_id != active_interrupt.get("review_request_id")
+        or request.review_request_hash != active_interrupt.get("request_hash")
+        or request.review_request_hash != request_ref.sha256
+        or active_interrupt.get("workflow_step_id") != workflow_step_id
+        or request_record.get("review_request_id") != request.review_request_id
+        or request_record.get("stage") != "hic_scaffolding"
+        or request_record.get("gate_id") != "hic_scaffolding"
+        or request_record.get("workflow_step_id") != workflow_step_id
+    ):
+        raise ResumeValidationError("AutoHiC adoption review request binding mismatch")
+    if request.decision not in {
+        "accept_candidate",
+        "keep_prior_assembly",
+        "request_parameter_retry",
+        "stop_human_review",
+    }:
+        raise ResumeValidationError(
+            f"unsupported AutoHiC adoption decision: {request.decision}"
+        )
+    if request.method_name and request.method_name != AUTOHIC_METHOD:
+        raise ResumeValidationError(f"AutoHiC adoption method must be {AUTOHIC_METHOD}")
+    hic_out = _hic_output(state)
+    pre_hic_assembly_ref = hic_out.get("pre_hic_assembly_ref")
+    if not pre_hic_assembly_ref:
+        raise ResumeValidationError("AutoHiC adoption requires pre_hic_assembly_ref")
+    if request.decision != "accept_candidate":
+        return request
+    if request.decided_by != "human":
+        raise ResumeValidationError(
+            "AutoHiC candidate adoption requires a human review decision"
+        )
+
+    candidate = dict((hic_out.get("method_candidates") or {}).get(AUTOHIC_METHOD) or {})
+    if candidate.get("status") != "executed" or not candidate.get("scaffold_fasta"):
+        raise ResumeValidationError(
+            "accept_candidate requires a completed AutoHiC chromosome assembly"
+        )
+    try:
+        current_assembly = resolve_stage_resource(
+            state,
+            resource_spec=assembly_resource_spec(),
+        )
+        if (
+            not current_assembly.found
+            or current_assembly.path is None
+            or Path(current_assembly.path).resolve(strict=False)
+            != Path(str(pre_hic_assembly_ref)).resolve(strict=False)
+        ):
+            raise ValueError("current assembly no longer matches pre_hic_assembly_ref")
+        artifact_ref_for_path(
+            absolute_data_dir(state),
+            state["session_id"],
+            str(candidate["scaffold_fasta"]),
+            expected_type=HIC_SCAFFOLDED_ASSEMBLY,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ResumeValidationError(
+            f"AutoHiC adopted assembly provenance is invalid: {exc}"
+        ) from exc
+    return request
+
+
+def _validate_hic_scaffolding_application_state(
+    state: TopLevelState,
+    application: VerifiedReviewApplication,
+) -> None:
+    identity = application.application
+    if identity.session_id != state["session_id"]:
+        raise ResumeValidationError("AutoHiC application session_id mismatch")
+    if identity.stage != "hic_scaffolding" or identity.gate_id != "hic_scaffolding":
+        raise ResumeValidationError("AutoHiC application has an unexpected gate")
+    if identity.workflow_step_id != current_workflow_step_id(
+        state, expected_stage="hic_scaffolding"
+    ):
+        raise ResumeValidationError("AutoHiC application workflow_step_id mismatch")
+
+
+def _hic_scaffolding_review_binding(
+    state: TopLevelState,
+    intent: ReviewIntentV1,
+) -> tuple[str, str, ArtifactRef, dict[str, Any]]:
+    hic_out = _hic_output(state)
+    active_interrupt: Mapping[str, Any] = (
+        state.get("active_interrupt") or hic_out.get("active_interrupt") or {}
+    )
+    request_ref_value = active_interrupt.get("request_ref") or hic_out.get(
+        "review_request_artifact_ref"
+    )
+    try:
+        request_ref = ArtifactRef.model_validate(request_ref_value)
+        request_record = load_review_request(
+            absolute_data_dir(state), request_ref, session_id=state["session_id"]
+        )
+    except (OSError, ValueError, ReviewPersistenceError) as exc:
+        raise ResumeValidationError(
+            "AutoHiC adoption review request is missing or changed"
+        ) from exc
+    if (
+        request_ref.sha256 != intent.request_hash
+        or request_record.get("review_request_id") != intent.review_request_id
+        or request_record.get("stage") != "hic_scaffolding"
+        or request_record.get("gate_id") != "hic_scaffolding"
+        or request_record.get("workflow_step_id") != intent.workflow_step_id
+        or active_interrupt.get("workflow_step_id") != intent.workflow_step_id
+    ):
+        raise ResumeValidationError("AutoHiC adoption review request binding mismatch")
+    return intent.review_request_id, intent.request_hash, request_ref, request_record
+
+
+def _hic_review_retry_effect(
+    retry_out: Mapping[str, Any],
+) -> HiCReviewRetryEffectV1:
+    attempts = retry_out.get("parameter_attempts") or []
+    if not isinstance(attempts, list):
+        raise ResumeValidationError("AutoHiC retry produced invalid parameter attempts")
+    status = retry_out.get("status")
+    allowed_statuses = {
+        "retry_parameters_after_review_failure",
+        "review_parameter_retries_exhausted",
+        "failed",
+    }
+    if status not in allowed_statuses:
+        raise ResumeValidationError("AutoHiC retry produced an unsupported status")
+    retry_request = retry_out.get("parameter_retry_request")
+    return HiCReviewRetryEffectV1(
+        status=cast(
+            Literal[
+                "retry_parameters_after_review_failure",
+                "review_parameter_retries_exhausted",
+                "failed",
+            ],
+            status,
+        ),
+        reason=retry_out.get("reason"),
+        failure_kind=retry_out.get("failure_kind"),
+        parameter_attempts=tuple(
+            ParameterAttempt.model_validate(attempt) for attempt in attempts
+        ),
+        proposed_parameter_attempt_id=retry_out.get("proposed_parameter_attempt_id"),
+        parameter_retry_request=(
+            HiCReviewRetryRequestEffectV1.model_validate(retry_request)
+            if retry_request is not None
+            else None
+        ),
+    )
 
 
 def fail_hic_scaffolding(state: TopLevelState) -> StateUpdate:

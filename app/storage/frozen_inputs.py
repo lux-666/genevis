@@ -227,10 +227,7 @@ def canonicalize_input_declarations(
         for warning in report["warnings"]
         if not _is_manifest_unknown_platform_warning(str(warning))
     ]
-    inferred = [
-        AssetEntryInference.model_validate(item)
-        for item in report["inferred"]
-    ]
+    inferred = [AssetEntryInference.model_validate(item) for item in report["inferred"]]
 
     manifest_owners: dict[str, tuple[int, int, str]] = {}
     declarations: dict[str, dict[str, Any]] = {}
@@ -299,9 +296,12 @@ def canonicalize_input_declarations(
         )
 
     seen_by_field: set[tuple[str, str]] = set()
-    for declared_path, declared_platform, declaration_field, source_group in (
-        run_declarations
-    ):
+    for (
+        declared_path,
+        declared_platform,
+        declaration_field,
+        source_group,
+    ) in run_declarations:
         path = Path(declared_path).expanduser()
         if not path.is_absolute():
             errors.append(
@@ -363,8 +363,7 @@ def canonicalize_input_declarations(
         )
         synthetic_report = validate_manifest(synthetic_manifest)
         errors.extend(
-            f"{declaration_field}: {error}"
-            for error in synthetic_report["errors"]
+            f"{declaration_field}: {error}" for error in synthetic_report["errors"]
         )
         warnings.extend(
             f"{declaration_field}: {warning}"
@@ -398,10 +397,7 @@ def canonicalize_input_declarations(
             for declaration in declarations.values()
             if declaration["manifest_entry_ordinal"] == entry_ordinal
         ]
-        platforms = {
-            str(declaration["platform"])
-            for declaration in entry_declarations
-        }
+        platforms = {str(declaration["platform"]) for declaration in entry_declarations}
         if len(platforms) > 1:
             errors.append(
                 f"{asset.asset_type}: one manifest entry resolves to conflicting "
@@ -409,9 +405,7 @@ def canonicalize_input_declarations(
                 "entries"
             )
         if asset.asset_type == "raw_long_reads" and "unknown" in platforms:
-            warnings.append(
-                f"{asset.asset_type}: platform unknown for {asset.paths}"
-            )
+            warnings.append(f"{asset.asset_type}: platform unknown for {asset.paths}")
 
     declaration_groups = {
         (
@@ -466,9 +460,7 @@ def canonicalize_input_declarations(
                 metadata=dict(item["metadata"]),
                 manifest_entry_ordinal=item["manifest_entry_ordinal"],
                 path_ordinal=item["path_ordinal"],
-                platform_resolution_source=str(
-                    item["platform_resolution_source"]
-                ),
+                platform_resolution_source=str(item["platform_resolution_source"]),
                 sources=tuple(item["sources"]),
             )
             for item in declarations.values()
@@ -749,8 +741,34 @@ def has_frozen_input_contract(paths: SessionPaths) -> bool:
     )
 
 
+@dataclass
+class FrozenExecutionLease:
+    """In-memory proof that one session's execution lock is currently held."""
+
+    session_id: str
+    run_dir: Path
+    active: bool = False
+
+    def __post_init__(self) -> None:
+        self.run_dir = self.run_dir.expanduser().resolve(strict=False)
+
+    def require_active(self, paths: SessionPaths) -> None:
+        """Fail unless this live lease belongs to ``paths``."""
+
+        if not self.active:
+            raise ValueError("frozen execution lease is inactive")
+        if (
+            self.session_id != paths.session_id
+            or self.run_dir != paths.run_dir.expanduser().resolve(strict=False)
+        ):
+            raise ValueError(
+                "frozen execution lease does not match the requested "
+                "session/run directory"
+            )
+
+
 @contextmanager
-def frozen_execution_lock(paths: SessionPaths) -> Iterator[None]:
+def frozen_execution_lock(paths: SessionPaths) -> Iterator[FrozenExecutionLease]:
     """Own one complete frozen execution attempt or fail immediately."""
 
     paths.control_dir.mkdir(parents=True, exist_ok=True)
@@ -761,9 +779,15 @@ def frozen_execution_lock(paths: SessionPaths) -> Iterator[None]:
             raise FrozenExecutionActiveError(
                 f"session {paths.session_id} is already executing"
             ) from exc
+        lease = FrozenExecutionLease(
+            session_id=paths.session_id,
+            run_dir=paths.run_dir,
+            active=True,
+        )
         try:
-            yield
+            yield lease
         finally:
+            lease.active = False
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
@@ -1006,8 +1030,7 @@ def _validate_assembly_input_contract(
                     "but no read_type could be inferred"
                 )
             raise FrozenInputValidationError(
-                message
-                + "; set assembly.assembly_route, shared_parameters.read_type, "
+                message + "; set assembly.assembly_route, shared_parameters.read_type, "
                 "or shared_parameters.platform"
             )
         if not is_method_read_type_compatible(method, read_type):
@@ -1050,9 +1073,7 @@ def _validate_assembly_input_contract(
         for declaration in read_declarations
         if declaration.platform == "ont"
     }
-    paired_entries = [
-        asset for asset in manifest.assets if asset.paired_reads
-    ]
+    paired_entries = [asset for asset in manifest.assets if asset.paired_reads]
     if method == "hifiasm" and local_assembly:
         if not hifi_paths:
             raise FrozenInputValidationError(
@@ -1084,10 +1105,7 @@ def _validate_assembly_input_contract(
             asset
             for asset in paired_entries
             if selected
-            in {
-                str(Path(path).resolve(strict=False))
-                for path in asset.paths
-            }
+            in {str(Path(path).resolve(strict=False)) for path in asset.paths}
         ]
         if len(matching_entries) != 1:
             raise FrozenInputValidationError(

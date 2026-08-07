@@ -48,6 +48,7 @@ from app.stages.resource_resolution import resolve_stage_resource, update_resour
 from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
 from app.storage.artifacts import (
     publish_artifact_record,
+    record_registered_artifacts,
     register_artifact_records,
 )
 from app.storage.assembly_candidates import (
@@ -587,8 +588,12 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
     ledger = Ledger(data_dir)
     attempt_id = attempt.attempt_id
     ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
-    for artifact in artifact_payloads:
-        ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt_id)
+    record_registered_artifacts(
+        data_dir,
+        session_id,
+        artifact_payloads,
+        attempt_id=attempt_id,
+    )
 
     stage_update = _update_output(
         state,

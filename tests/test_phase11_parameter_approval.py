@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError, resume_review_state
+from app.control.lifecycle import ResumeValidationError
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
@@ -29,6 +29,7 @@ from app.stages.assembly.parameters.workflow import (
     recommend_assembly_parameters,
 )
 from tests.test_parameter_persistence_v2 import (
+    _apply_review_application,
     _blocked_state,
     _decision_request,
     _Model,
@@ -100,21 +101,22 @@ class ParameterApprovalGateV3Tests(unittest.TestCase):
                 update={"gate_id": None}
             )
             with self.assertRaises(ResumeValidationError):
-                resume_review_state(blocked, missing_gate)
+                _apply_review_application(blocked, missing_gate)
 
             stale_hash = _decision_request(blocked, "approve_parameters")
             stale_hash.metadata["recommendation_hash"] = "0" * 64
             with self.assertRaises(ResumeValidationError):
-                resume_review_state(blocked, stale_hash)
+                _apply_review_application(blocked, stale_hash)
 
     def test_resolved_request_cannot_be_approved_twice(self):
         with tempfile.TemporaryDirectory() as tmp:
             blocked = self._blocked(Path(tmp))
             request = _decision_request(blocked, "approve_parameters")
-            approved = resume_review_state(blocked, request)
+            update, _application = _apply_review_application(blocked, request)
+            approved = {**blocked, **update, "stage_outputs": update["stage_outputs"]}
 
             with self.assertRaises(ResumeValidationError):
-                resume_review_state(approved, request)
+                _apply_review_application(approved, request)
 
     def test_pre_v3_attempt_chain_fails_closed_without_escaping(self):
         with tempfile.TemporaryDirectory() as tmp:

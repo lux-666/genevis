@@ -1,4 +1,4 @@
-"""Control-layer resume transaction contract tests."""
+"""Control-layer durable review-application transaction contract tests."""
 
 from __future__ import annotations
 
@@ -6,51 +6,41 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError
 from app.control.resume_transaction import (
     ResumeTransactionError,
     execute_resume_transaction,
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_request
+from app.schemas.artifacts import ArtifactRef
 from app.schemas.state import initial_state
+from app.storage.frozen_inputs import FrozenExecutionLease
 from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
 
-_ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
+_INVENTORY_WORKFLOW_STEPS = [
     {
         "step_id": "step-000-inventory",
         "stage": "inventory",
         "allow_local_execution": False,
-    },
-    {
-        "step_id": "step-001-assembly",
-        "stage": "assembly",
-        "allow_local_execution": True,
-    },
-    {
-        "step_id": "step-002-assembly_review",
-        "stage": "assembly_review",
-        "allow_local_execution": True,
-        "review_target": {
-            "resource_type": "assembly",
-            "producer_step_id": "step-001-assembly",
-        },
-    },
-    {
-        "step_id": "step-003-hic_scaffolding",
-        "stage": "hic_scaffolding",
-        "allow_local_execution": True,
-    },
+    }
 ]
 
 
 class _Graph:
-    def __init__(self, state: dict, *, update_result=None) -> None:
+    """Checkpoint double that makes persistence, rather than return values, decisive."""
+
+    def __init__(
+        self,
+        state: dict,
+        *,
+        update_result: object = None,
+        persist_update: bool = True,
+    ) -> None:
         self.state = state
         self.update_result = update_result
+        self.persist_update = persist_update
         self.updates: list[dict] = []
         self.invocations = 0
 
@@ -59,18 +49,14 @@ class _Graph:
 
     def update_state(self, _config, update):
         self.updates.append(update)
+        if self.persist_update:
+            self.state = {**self.state, **update}
         return self.update_result
 
     def invoke(self, _state, *, config):
+        del config
         self.invocations += 1
-        return {
-            **self.state,
-            "workflow_step_index": 3,
-            "entered_workflow_step_index": 2,
-            "current_stage": "hic_scaffolding",
-            "supervision_state": "running_stage",
-            "route_trace": ["assembly_review_stage"],
-        }
+        return self.state
 
 
 class ResumeTransactionTests(unittest.TestCase):
@@ -81,55 +67,61 @@ class ResumeTransactionTests(unittest.TestCase):
             session_id="s1",
             input_manifest_ref="control/manifest.yaml",
             data_dir=str(run_dir),
-            workflow_steps=_ASSEMBLY_REVIEW_WORKFLOW_STEPS,
+            workflow_steps=_INVENTORY_WORKFLOW_STEPS,
             stage_plan_ref="control/run_config.json",
-            stage_seeds={"assembly_review": {"status": "pending"}},
+            stage_seeds={"inventory": {"status": "pending"}},
         )
         state.update(
             {
-                "workflow_step_index": 2,
-                "entered_workflow_step_index": 2,
-                "current_stage": "assembly_review",
+                "workflow_step_index": 0,
+                "entered_workflow_step_index": 0,
+                "current_stage": "inventory",
                 "supervision_state": "blocked_human",
-                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "stage_outputs": {
+                    "inventory": {
+                        "status": "blocked_human",
+                        "review_policy": {"max_blocked_seconds": 300},
+                    }
+                },
             }
         )
         persisted = persist_review_request(
             state,
-            stage="assembly_review",
-            gate_id="assembly_review",
-            reason="assembly_review_human_decision_required",
+            stage="inventory",
+            gate_id="inventory_review",
+            reason="inventory_human_decision_required",
             payload=ReviewPayload(
-                stage="assembly_review",
-                gate_id="assembly_review",
-                reason="assembly_review_human_decision_required",
-                candidates=[{"candidate_id": "flye"}],
-                decisions_allowed=["accept", "stop_human_review"],
+                stage="inventory",
+                gate_id="inventory_review",
+                reason="inventory_human_decision_required",
+                decisions_allowed=["continue", "stop_human_review"],
             ),
         )
         state["active_interrupt"] = persisted.compact_interrupt(
-            stage="assembly_review",
-            gate_id="assembly_review",
-            reason="assembly_review_human_decision_required",
+            stage="inventory",
+            gate_id="inventory_review",
+            reason="inventory_human_decision_required",
         )
         request = ResumeReviewRequest(
             session_id="s1",
-            stage="assembly_review",
-            gate_id="assembly_review",
+            stage="inventory",
+            gate_id="inventory_review",
             review_request_id=persisted.review_request_id,
             review_request_hash=persisted.request_hash,
-            decision="accept",
-            candidate_id="flye",
-            metadata={"review_request_ref": persisted.request_ref.path_ref},
+            decision="stop_human_review",
         )
-        return run_dir, state, request
+        lease = FrozenExecutionLease(session_id="s1", run_dir=run_dir, active=True)
+        return run_dir, state, request, lease
 
     @staticmethod
-    def _auto_request(request: ResumeReviewRequest) -> ResumeReviewRequest:
+    def _auto_request(
+        request: ResumeReviewRequest,
+        rationale_artifact_ref: ArtifactRef,
+    ) -> ResumeReviewRequest:
         return request.model_copy(
             update={
                 "decided_by": "auto_rule",
-                "rationale_artifact_ref": request.metadata["review_request_ref"],
+                "rationale_artifact_ref": rationale_artifact_ref,
                 "metadata": {
                     "source": "foreground_countdown",
                     "configured_seconds": 300,
@@ -138,187 +130,186 @@ class ResumeTransactionTests(unittest.TestCase):
             }
         )
 
-    def test_success_owns_update_invoke_and_standard_events(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_dir, state, request = self._setup(tmpdir)
-            graph = _Graph(state)
-            verified_inputs = object()
-            with (
-                patch("app.control.resume_transaction.validate_resume_review_state"),
-                patch(
-                    "app.control.resume_transaction.resume_review_state",
-                    return_value={"supervision_state": "running_stage"},
-                ) as resume,
-            ):
-                result = execute_resume_transaction(
-                    graph=graph,
-                    config={"configurable": {"thread_id": "s1"}},
-                    session_id="s1",
-                    data_dir=run_dir,
-                    request=request,
-                    source="test",
-                    checkpointer="sqlite",
-                    verified_inputs=verified_inputs,
-                )
+    @staticmethod
+    def _events(run_dir: Path, event_type: str) -> list[dict]:
+        return [
+            event
+            for event in Ledger(run_dir).read_events("s1")
+            if event["event_type"] == event_type
+        ]
 
-            self.assertEqual(result.state["current_stage"], "hic_scaffolding")
-            self.assertIs(
-                resume.call_args.kwargs["verified_inputs"],
-                verified_inputs,
+    def _execute(self, *, graph, run_dir, request, lease, source="test", **kwargs):
+        return execute_resume_transaction(
+            graph=graph,
+            config={"configurable": {"thread_id": "s1"}},
+            session_id="s1",
+            data_dir=run_dir,
+            request=request,
+            source=source,
+            checkpointer="sqlite",
+            lease=lease,
+            **kwargs,
+        )
+
+    def test_success_persists_intent_application_checkpoint_proof_and_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir, state, request, lease = self._setup(tmpdir)
+            graph = _Graph(state, update_result={"checkpoint_id": "cp-2"})
+
+            result = self._execute(
+                graph=graph,
+                run_dir=run_dir,
+                request=request,
+                lease=lease,
             )
+
+            self.assertEqual(result.state["supervision_state"], "failed_terminal")
+            self.assertEqual(result.state["current_stage"], "inventory")
+            self.assertEqual(result.review_status, "applied")
             self.assertEqual(len(graph.updates), 1)
             self.assertEqual(graph.invocations, 1)
-            events = Ledger(run_dir).read_events("s1")
-            started = [
-                event for event in events if event["event_type"] == "resume_started"
-            ]
-            completed = [
-                event for event in events if event["event_type"] == "resume_completed"
-            ]
-            self.assertEqual(len(started), 1)
-            self.assertEqual(len(completed), 1)
-            self.assertEqual(started[0]["source"], "test")
-            self.assertEqual(started[0]["checkpointer"], "sqlite")
-            self.assertEqual(started[0]["decision"]["stage"], "assembly_review")
-            self.assertEqual(started[0]["workflow_step_id"], "step-002-assembly_review")
-            self.assertEqual(
-                completed[0]["workflow_step_id"], "step-002-assembly_review"
-            )
-            self.assertEqual(completed[0]["current_stage"], "hic_scaffolding")
+            self.assertIsNotNone(result.intent_artifact_path)
+            self.assertIsNotNone(result.application_artifact_path)
+            self.assertIsNotNone(result.decision_artifact_path)
+            assert result.intent_artifact_path is not None
+            assert result.application_artifact_path is not None
+            assert result.decision_artifact_path is not None
+            self.assertEqual(result.intent_artifact_path.name, "intent.json")
+            self.assertEqual(result.application_artifact_path.name, "application.json")
+            self.assertEqual(result.decision_artifact_path.name, "decision.json")
+            self.assertTrue(result.application_artifact_path.is_file())
 
-    def test_validation_failure_records_one_failed_phase_without_checkpoint_write(self):
+            events = Ledger(run_dir).read_events("s1")
+            ordered = [
+                event["event_type"]
+                for event in events
+                if event["event_type"]
+                in {
+                    "resume_started",
+                    "review_decision",
+                    "review_applied",
+                    "resume_completed",
+                }
+            ]
+            self.assertEqual(
+                ordered,
+                [
+                    "resume_started",
+                    "review_decision",
+                    "review_applied",
+                    "resume_completed",
+                ],
+            )
+            decision = self._events(run_dir, "review_decision")
+            applied = self._events(run_dir, "review_applied")
+            completed = self._events(run_dir, "resume_completed")
+            self.assertEqual(decision[0]["decision"], "stop_human_review")
+            self.assertEqual(decision[0]["source"], "test")
+            self.assertEqual(
+                applied[0]["application_id"], decision[0]["application_id"]
+            )
+            self.assertEqual(completed[0]["review_status"], "applied")
+
+    def test_validation_failure_records_failed_phase_before_any_application_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            run_dir, state, request = self._setup(tmpdir)
+            run_dir, state, request, lease = self._setup(tmpdir)
             graph = _Graph(state)
-            with (
-                patch(
-                    "app.control.resume_transaction.validate_resume_review_state",
-                    side_effect=ResumeValidationError("stale request"),
-                ),
-                self.assertRaisesRegex(ResumeTransactionError, "stale request"),
-            ):
-                execute_resume_transaction(
+            stale_request = request.model_copy(update={"review_request_hash": "0" * 64})
+
+            with self.assertRaisesRegex(ResumeTransactionError, "request_hash") as ctx:
+                self._execute(
                     graph=graph,
-                    config={"configurable": {"thread_id": "s1"}},
-                    session_id="s1",
-                    data_dir=run_dir,
-                    request=request,
-                    source="test",
-                    checkpointer="sqlite",
+                    run_dir=run_dir,
+                    request=stale_request,
+                    lease=lease,
                 )
 
+            self.assertEqual(ctx.exception.phase, "validation")
             self.assertEqual(graph.updates, [])
             self.assertEqual(graph.invocations, 0)
-            failed = [
-                event
-                for event in Ledger(run_dir).read_events("s1")
-                if event["event_type"] == "resume_failed"
-            ]
+            self.assertEqual(len(self._events(run_dir, "review_decision")), 0)
+            self.assertEqual(len(self._events(run_dir, "review_applied")), 0)
+            failed = self._events(run_dir, "resume_failed")
             self.assertEqual(len(failed), 1)
             self.assertEqual(failed[0]["phase"], "validation")
 
     def test_auto_rule_requires_foreground_countdown_transaction_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            run_dir, state, human_request = self._setup(tmpdir)
-            request = self._auto_request(human_request)
+            run_dir, state, human_request, lease = self._setup(tmpdir)
             graph = _Graph(state)
-            with (
-                patch(
-                    "app.control.resume_transaction.validate_resume_review_state"
-                ) as validate,
-                patch("app.control.resume_transaction.resume_review_state") as resume,
-                self.assertRaisesRegex(
-                    ResumeTransactionError,
-                    "auto_rule.*foreground_countdown",
-                ),
-            ):
-                execute_resume_transaction(
+            interrupt = state["active_interrupt"]
+            assert interrupt is not None
+            rationale_ref = ArtifactRef.model_validate(interrupt["request_ref"])
+
+            with self.assertRaisesRegex(
+                ResumeTransactionError,
+                "auto_rule decisions are only valid in the foreground countdown path",
+            ) as ctx:
+                self._execute(
                     graph=graph,
-                    config={"configurable": {"thread_id": "s1"}},
-                    session_id="s1",
-                    data_dir=run_dir,
-                    request=request,
+                    run_dir=run_dir,
+                    request=self._auto_request(human_request, rationale_ref),
+                    lease=lease,
                     source="review",
-                    checkpointer="sqlite",
-                    blocked_timeout_seconds=300,
                 )
 
-            validate.assert_not_called()
-            resume.assert_not_called()
+            self.assertEqual(ctx.exception.phase, "validation")
             self.assertEqual(graph.updates, [])
             self.assertEqual(graph.invocations, 0)
-            failed = [
-                event
-                for event in Ledger(run_dir).read_events("s1")
-                if event["event_type"] == "resume_failed"
-            ]
-            self.assertEqual(len(failed), 1)
-            self.assertEqual(failed[0]["phase"], "validation")
-
-    def test_auto_rule_accepts_foreground_countdown_transaction_source(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_dir, state, human_request = self._setup(tmpdir)
-            request = self._auto_request(human_request)
-            graph = _Graph(state)
-            with (
-                patch(
-                    "app.control.resume_transaction.validate_resume_review_state"
-                ) as validate,
-                patch(
-                    "app.control.resume_transaction.resume_review_state",
-                    return_value={"supervision_state": "running_stage"},
-                ) as resume,
-            ):
-                execute_resume_transaction(
-                    graph=graph,
-                    config={"configurable": {"thread_id": "s1"}},
-                    session_id="s1",
-                    data_dir=run_dir,
-                    request=request,
-                    source="foreground_countdown",
-                    checkpointer="sqlite",
-                    blocked_timeout_seconds=300,
-                )
-
-            validate.assert_called_once_with(state, request)
-            resume.assert_called_once_with(
-                state,
-                request,
-                blocked_timeout_seconds=300,
-                decision_source="foreground_countdown",
+            self.assertEqual(len(self._events(run_dir, "review_decision")), 0)
+            self.assertEqual(
+                self._events(run_dir, "resume_failed")[0]["phase"],
+                "validation",
             )
-            self.assertEqual(len(graph.updates), 1)
-            self.assertEqual(graph.invocations, 1)
 
-    def test_false_update_result_is_audited_and_never_invoked(self):
+    def test_false_update_result_without_checkpoint_proof_is_not_invoked(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            run_dir, state, request = self._setup(tmpdir)
-            graph = _Graph(state, update_result=False)
-            with (
-                patch("app.control.resume_transaction.validate_resume_review_state"),
-                patch(
-                    "app.control.resume_transaction.resume_review_state",
-                    return_value={"supervision_state": "running_stage"},
-                ),
-                self.assertRaisesRegex(ResumeTransactionError, "returned False"),
-            ):
-                execute_resume_transaction(
+            run_dir, state, request, lease = self._setup(tmpdir)
+            graph = _Graph(state, update_result=False, persist_update=False)
+
+            with self.assertRaisesRegex(
+                ResumeTransactionError, "returned False"
+            ) as ctx:
+                self._execute(
                     graph=graph,
-                    config={"configurable": {"thread_id": "s1"}},
-                    session_id="s1",
-                    data_dir=run_dir,
+                    run_dir=run_dir,
                     request=request,
-                    source="test",
-                    checkpointer="sqlite",
+                    lease=lease,
                 )
 
+            self.assertEqual(ctx.exception.phase, "checkpoint_apply")
             self.assertEqual(graph.invocations, 0)
-            failed = [
-                event
-                for event in Ledger(run_dir).read_events("s1")
-                if event["event_type"] == "resume_failed"
-            ]
-            self.assertEqual(failed[0]["phase"], "update_state")
+            self.assertEqual(len(self._events(run_dir, "review_decision")), 1)
+            self.assertEqual(len(self._events(run_dir, "review_applied")), 0)
+            self.assertEqual(
+                self._events(run_dir, "resume_failed")[0]["phase"],
+                "checkpoint_apply",
+            )
+
+    def test_ambiguous_update_result_without_checkpoint_proof_is_not_invoked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir, state, request, lease = self._setup(tmpdir)
+            graph = _Graph(state, update_result=None, persist_update=False)
+
+            with self.assertRaisesRegex(
+                ResumeTransactionError,
+                "checkpoint does not carry the prepared application ref",
+            ) as ctx:
+                self._execute(
+                    graph=graph,
+                    run_dir=run_dir,
+                    request=request,
+                    lease=lease,
+                )
+
+            self.assertEqual(ctx.exception.phase, "checkpoint_apply")
+            self.assertEqual(graph.invocations, 0)
+            self.assertEqual(len(self._events(run_dir, "review_decision")), 1)
+            self.assertEqual(len(self._events(run_dir, "review_applied")), 0)
+            self.assertEqual(
+                self._events(run_dir, "resume_failed")[0]["phase"],
+                "checkpoint_apply",
+            )
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import unittest
 
 from langgraph.graph import StateGraph
 
-from app.control.lifecycle import inspect_session
+from app.control.lifecycle import inspect_session, normalize_resume_review_request
 from app.graph.checkpoint_compaction import (
     TerminalCheckpointCompactionError,
     compact_terminal_checkpoint,
@@ -13,6 +13,15 @@ from app.graph.checkpoint_compaction import (
 from app.graph.checkpointer import get_checkpointer
 from app.integrity import sha256_file
 from app.reports.trace_writer import build_session_trace
+from app.review.application import (
+    ReviewApplicationIdentity,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
+from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.gates import get_review_gate
+from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState, initial_state
@@ -327,22 +336,6 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                     "failure.json",
                     '{"error": "assembler failed"}\n',
                 ),
-                (
-                    "assembly_review.request",
-                    "step-003-assembly_review",
-                    "assembly_review",
-                    "review",
-                    "request.json",
-                    '{"review_request_id": "review_001"}\n',
-                ),
-                (
-                    "assembly_review.decision",
-                    "step-003-assembly_review",
-                    "assembly_review",
-                    "review",
-                    "decision.json",
-                    '{"decision": "accept"}\n',
-                ),
             )
             metas = []
             for artifact_type, step_id, stage, method, name, body in artifact_specs:
@@ -350,11 +343,6 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(body, encoding="utf-8")
                 metadata = {"workflow_step_id": step_id}
-                if artifact_type in {
-                    "assembly_review.request",
-                    "assembly_review.decision",
-                }:
-                    metadata["review_request_id"] = "review_001"
                 metas.append(
                     ArtifactMeta.from_file(
                         path,
@@ -374,8 +362,6 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             }
             inventory_ref = refs["inventory.asset_registry"]
             failure_ref = refs["assembly.failure"]
-            request_ref = refs["assembly_review.request"]
-            decision_ref = refs["assembly_review.decision"]
 
             ledger = Ledger(paths.run_dir)
             ledger.create_session(paths.session_id, paths.to_ref(paths.manifest_path))
@@ -407,21 +393,70 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 reason="not_requested",
                 idempotency_key="stage-skipped:genome_survey",
             )
+            review_state = self._state(
+                paths, "genome_survey", "assembly", "assembly_review"
+            )
+            review_state.update(
+                {
+                    "current_stage": "assembly_review",
+                    "workflow_step_index": 3,
+                    "entered_workflow_step_index": 3,
+                    "supervision_state": "blocked_human",
+                    "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                }
+            )
+            persisted = persist_review_request(
+                review_state,
+                stage="assembly_review",
+                gate_id="assembly_review",
+                reason="operator_required",
+                payload=ReviewPayload(
+                    stage="assembly_review",
+                    gate_id="assembly_review",
+                    reason="operator_required",
+                    decisions_allowed=["stop_human_review"],
+                ),
+            )
+            review_state["active_interrupt"] = persisted.compact_interrupt(
+                stage="assembly_review",
+                gate_id="assembly_review",
+                reason="operator_required",
+            )
             ledger.record_review_requested(
                 paths.session_id,
                 "assembly_review",
                 reason="operator_required",
-                review_request_artifact_ref=request_ref,
-                review_request_id="review_001",
+                review_request_artifact_ref=persisted.request_ref,
+                review_request_id=persisted.review_request_id,
             )
+            request = ResumeReviewRequest(
+                session_id=paths.session_id,
+                stage="assembly_review",
+                gate_id="assembly_review",
+                review_request_id=persisted.review_request_id,
+                review_request_hash=persisted.request_hash,
+                decision="stop_human_review",
+            )
+            canonical = normalize_resume_review_request(review_state, request)
+            intent = persist_review_intent(review_state, canonical, source="test")
+            gate = get_review_gate("assembly_review", "assembly_review")
+            prepared = gate.load_prepare_application()(review_state, intent.intent)
+            application_ref = persist_review_application(
+                review_state,
+                intent=intent,
+                prepared=prepared,
+            )
+            application = load_verified_review_application(
+                paths.run_dir, application_ref
+            )
+            identity = ReviewApplicationIdentity.from_intent(intent.intent)
             ledger.record_review_decision(
                 paths.session_id,
-                "assembly_review",
-                decision="accept",
-                decided_by="human",
-                artifact_ref=decision_ref,
-                review_request_id="review_001",
+                application_ref=application.ref,
+                expected_identity=identity,
             )
+            request_ref = persisted.request_ref
+            decision_ref = application.application.decision_ref
             ledger.record_stage_entered(
                 paths.session_id,
                 "assembly",
@@ -570,8 +605,11 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             )
             self.assertEqual(skipped["status"], "skipped")
             self.assertEqual(skipped["lifecycle"]["skip_reason"], "not_requested")
-            self.assertEqual(trace["decisions"][0]["review_request_id"], "review_001")
-            self.assertEqual(trace["decisions"][0]["decision"], "accept")
+            self.assertEqual(
+                trace["decisions"][0]["review_request_id"],
+                persisted.review_request_id,
+            )
+            self.assertEqual(trace["decisions"][0]["decision"], "stop_human_review")
             self.assertEqual(
                 trace["decisions"][0]["decision_artifact_ref"],
                 decision_ref.path_ref,

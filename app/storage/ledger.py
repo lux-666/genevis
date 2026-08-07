@@ -12,13 +12,16 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Mapping
 from uuid import uuid4
 
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.artifacts import read_artifact_records
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
+
+if TYPE_CHECKING:
+    from app.review.application import ReviewApplicationIdentity
 
 LEDGER_SCHEMA_VERSION = 2
 SUMMARY_MAX_BYTES = 12 * 1024
@@ -64,6 +67,7 @@ _OCCURRENCE_EVENT_TYPES = frozenset(
         "attempt_failed",
         "review_requested",
         "review_decision",
+        "review_applied",
         "stage_entered",
         "stage_skipped",
         "stage_completed",
@@ -287,7 +291,7 @@ class Ledger:
         review_request_id: str | None = None,
     ) -> None:
         """Record a request by ID; full signals/candidates remain in its artifact."""
-        request_ref = self._path_ref(
+        request_ref = self._indexed_named_artifact_ref(
             "review_request_artifact_ref", review_request_artifact_ref
         )
         request_record = self._indexed_artifact_record(request_ref)
@@ -322,62 +326,128 @@ class Ledger:
     def record_review_decision(
         self,
         session_id: str,
-        stage: str,
         *,
-        decision: str,
-        gate_id: str | None = None,
-        candidate_id: str | None = None,
-        rejected_candidates: list[str] | None = None,
-        notes: list[str] | None = None,
-        method_name: str | None = None,
-        artifact_ref: Any = None,
-        metadata: dict[str, Any] | None = None,
-        decided_by: str = "human",
-        rationale_artifact_ref: Any = None,
-        review_request_id: str | None = None,
-    ) -> None:
-        """Record a bounded decision bound to its indexed request occurrence."""
-        if artifact_ref is None:
-            raise DataLayoutError("review decision requires its decision artifact ref")
-        decision_ref = self._path_ref("artifact_ref", artifact_ref)
-        decision_record = self._indexed_artifact_record(decision_ref)
-        workflow_step_id = _require_workflow_step_id(
-            decision_record.get("workflow_step_id")
+        application_ref: Any,
+        expected_identity: "ReviewApplicationIdentity",
+    ) -> dict[str, Any]:
+        """Record the committed decision from one verified application marker."""
+
+        from app.review.application import (
+            load_verified_review_application,
+            load_verified_review_intent,
         )
-        if decision_record.get("stage") != stage:
-            raise DataLayoutError("review decision stage does not match its artifact")
-        indexed_request_id = _require_review_request_id(decision_record)
-        if review_request_id is not None and review_request_id != indexed_request_id:
-            raise DataLayoutError(
-                "review decision request ID does not match its artifact"
-            )
-        request_id = indexed_request_id
-        refs: list[dict[str, Any]] = [decision_ref]
-        if rationale_artifact_ref:
+
+        self.paths.require_session_id(session_id)
+        if expected_identity.session_id != session_id:
+            raise ValueError("review application identity does not match session_id")
+        verified = load_verified_review_application(
+            self.paths.run_dir,
+            application_ref,
+            expected_identity=expected_identity,
+        )
+        application = verified.application
+        intent = load_verified_review_intent(
+            self.paths.run_dir,
+            application.intent_ref,
+            expected_identity=expected_identity,
+        )
+        request = intent.request
+        refs: list[dict[str, Any]] = [
+            {
+                **application.decision_ref.model_dump(mode="json"),
+                "role": "artifact_ref",
+            },
+            {
+                **application.intent_ref.model_dump(mode="json"),
+                "role": "intent_ref",
+            },
+            {
+                **verified.ref.model_dump(mode="json"),
+                "role": "application_ref",
+            },
+            *(
+                {
+                    **required_ref.model_dump(mode="json"),
+                    "role": "application_required_ref",
+                }
+                for required_ref in application.required_refs
+            ),
+        ]
+        if request.rationale_artifact_ref:
             refs.append(
-                self._path_ref("rationale_artifact_ref", rationale_artifact_ref)
+                self._path_ref(
+                    "rationale_artifact_ref",
+                    request.rationale_artifact_ref,
+                )
             )
         payload = {
-            "review_request_id": request_id,
-            "gate_id": gate_id,
-            "decision": decision,
-            "candidate_id": candidate_id,
-            "rejected_candidates": rejected_candidates or [],
-            "rejected_candidate_count": len(rejected_candidates or []),
-            "note_count": len(notes or []),
-            "method_name": method_name,
-            "decided_by": decided_by,
-            "metadata": metadata or {},
+            "review_request_id": application.review_request_id,
+            "request_hash": application.request_hash,
+            "gate_id": application.gate_id,
+            "decision": request.decision,
+            "candidate_id": request.candidate_id,
+            "rejected_candidates": request.rejected_candidates,
+            "rejected_candidate_count": len(request.rejected_candidates),
+            "note_count": len(request.notes),
+            "method_name": request.method_name,
+            "decided_by": request.decided_by,
+            "application_id": application.application_id,
+            "effect_kind": application.effect_kind,
+            "source": intent.source,
         }
-        self.record_event(
+        return self.record_event(
             session_id,
             "review_decision",
             payload,
-            stage=stage,
-            workflow_step_id=workflow_step_id,
-            subject_id=request_id,
+            stage=application.stage,
+            workflow_step_id=application.workflow_step_id,
+            subject_id=application.review_request_id,
             refs=refs,
-            idempotency_key=f"review:{request_id}:decision",
+            idempotency_key=f"review:{application.review_request_id}:decision",
+        )
+
+    def record_review_applied(
+        self,
+        session_id: str,
+        *,
+        application_ref: Any,
+        expected_identity: "ReviewApplicationIdentity",
+    ) -> dict[str, Any]:
+        """Record checkpoint application only from a fully verified marker."""
+
+        from app.review.application import load_verified_review_application
+
+        self.paths.require_session_id(session_id)
+        if expected_identity.session_id != session_id:
+            raise ValueError("review application identity does not match session_id")
+        verified = load_verified_review_application(
+            self.paths.run_dir,
+            application_ref,
+            expected_identity=expected_identity,
+        )
+        application = verified.application
+        return self.record_event(
+            session_id,
+            "review_applied",
+            {
+                "review_request_id": application.review_request_id,
+                "request_hash": application.request_hash,
+                "gate_id": application.gate_id,
+                "application_id": application.application_id,
+            },
+            stage=application.stage,
+            workflow_step_id=application.workflow_step_id,
+            subject_id=application.review_request_id,
+            refs=[
+                {
+                    **verified.ref.model_dump(mode="json"),
+                    "role": "application_ref",
+                }
+            ],
+            idempotency_key=(
+                f"review:{application.review_request_id}:"
+                f"applied:{application.application_id}"
+            ),
         )
 
     def record_stage_entered(
@@ -465,22 +535,83 @@ class Ledger:
         self,
         session_id: str,
         *,
-        outcome: str,
+        outcome: Literal["completed", "failed"],
         stage: str | None = None,
         error: str | None = None,
         refs: Iterable[Any] | None = None,
-        idempotency_key: str | None = None,
-    ) -> None:
-        self.record_event(
+    ) -> dict[str, Any]:
+        """Append the single irreversible terminal fact for this session.
+
+        A terminal's first durable outcome is canonical. Replays with that
+        outcome return its exact row, while a conflicting outcome or legacy
+        duplicate terminal history fails closed.
+        """
+        self.paths.require_session_id(session_id)
+        if outcome not in {"completed", "failed"}:
+            raise ValueError("terminal outcome must be one of: completed, failed")
+
+        semantic = self._event_semantic(
             session_id,
             "session_terminal",
             {"outcome": outcome, "error": error},
             stage=stage,
             subject_id=session_id,
             refs=refs,
-            idempotency_key=idempotency_key
-            or f"session:{session_id}:terminal:{outcome}",
         )
+        key = f"session:{session_id}:terminal"
+        ensure_run_layout(self.paths)
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.events_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                rows = self._rows_from_locked_handle(handle)
+                terminals = [
+                    row for row in rows if row["event_type"] == "session_terminal"
+                ]
+                if len(terminals) > 1:
+                    raise LedgerConflictError(
+                        "ledger integrity conflict: multiple session_terminal events"
+                    )
+                if terminals:
+                    canonical = terminals[0]
+                    if canonical["summary"].get("outcome") == outcome:
+                        return canonical
+                    raise LedgerConflictError(
+                        "session terminal outcome conflicts with the canonical terminal"
+                    )
+                return self._append_new_row_locked(handle, rows, semantic, key)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def read_canonical_terminal(self, session_id: str) -> dict[str, Any] | None:
+        """Return the first terminal row plus any immutable-history diagnostic.
+
+        ``None`` means no terminal exists. Duplicate same-outcome rows are
+        ``duplicate_session_terminal``; different outcomes are
+        ``conflicting_session_terminal``. Neither replaces the first row.
+        """
+        terminals = [
+            row
+            for row in self.read_event_rows(session_id)
+            if row["event_type"] == "session_terminal"
+        ]
+        if not terminals:
+            return None
+
+        terminal_integrity: dict[str, Any] | None = None
+        if len(terminals) > 1:
+            outcomes = [row["summary"].get("outcome") for row in terminals]
+            terminal_integrity = {
+                "kind": (
+                    "duplicate_session_terminal"
+                    if all(outcome == outcomes[0] for outcome in outcomes[1:])
+                    else "conflicting_session_terminal"
+                ),
+                "terminal_count": len(terminals),
+                "duplicate_rows": terminals[1:],
+            }
+        return {"canonical": terminals[0], "terminal_integrity": terminal_integrity}
 
     def read_session(self, session_id: str) -> dict[str, Any] | None:
         """Project session metadata from ``session_created``."""
@@ -547,44 +678,24 @@ class Ledger:
         self.paths.require_session_id(session_id)
         if not event_type or not isinstance(event_type, str):
             raise ValueError("event_type must be a non-empty string")
-        ensure_run_layout(self.paths)
-
-        raw = dict(payload or {})
-        reserved = sorted(set(raw) & _RESERVED_PAYLOAD_KEYS)
-        if reserved:
+        if event_type == "session_terminal":
             raise ValueError(
-                "ledger payload cannot override envelope fields: " + ", ".join(reserved)
+                "session_terminal must be recorded with record_session_terminal"
             )
-        stage = stage or _optional_text(raw.pop("stage", None))
-        if workflow_step_id is None:
-            workflow_step_id = _optional_text(raw.pop("workflow_step_id", None))
-        else:
-            raw.pop("workflow_step_id", None)
-        if event_type in _OCCURRENCE_EVENT_TYPES or (
-            stage is not None and event_type != "session_terminal"
-        ):
-            workflow_step_id = _require_workflow_step_id(workflow_step_id)
-        elif workflow_step_id is not None:
-            workflow_step_id = _require_workflow_step_id(workflow_step_id)
-        subject_id = subject_id or _subject_from_payload(raw)
-        explicit_refs = list(refs or [])
-        payload_refs, summary_input = self._split_payload(raw)
-        normalized_refs = self._normalize_refs([*explicit_refs, *payload_refs])
-        summary = _bounded_summary(summary_input)
-        semantic = {
-            "schema_version": LEDGER_SCHEMA_VERSION,
-            "session_id": session_id,
-            "event_type": event_type,
-            "stage": stage,
-            "workflow_step_id": workflow_step_id,
-            "subject_id": subject_id,
-            "refs": normalized_refs,
-            "summary": summary,
-        }
+        semantic = self._event_semantic(
+            session_id,
+            event_type,
+            payload,
+            stage=stage,
+            workflow_step_id=workflow_step_id,
+            subject_id=subject_id,
+            refs=refs,
+        )
         key = idempotency_key or _default_idempotency_key(semantic)
         if len(key) > 256:
             key = f"idem_{_sha256_text(key)}"
 
+        ensure_run_layout(self.paths)
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         with self.events_path.open("a+", encoding="utf-8") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -601,28 +712,7 @@ class Ledger:
                         )
                     return existing
 
-                sequence = int(rows[-1]["sequence"]) + 1 if rows else 1
-                row = {
-                    "schema_version": LEDGER_SCHEMA_VERSION,
-                    "sequence": sequence,
-                    "event_id": f"evt_{sequence:08d}_{uuid4().hex[:12]}",
-                    "idempotency_key": key,
-                    "session_id": session_id,
-                    "timestamp": _now(),
-                    "event_type": event_type,
-                    "stage": stage,
-                    "workflow_step_id": workflow_step_id,
-                    "subject_id": subject_id,
-                    "refs": normalized_refs,
-                    "summary": summary,
-                }
-                handle.seek(0, os.SEEK_END)
-                handle.write(
-                    json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-                return row
+                return self._append_new_row_locked(handle, rows, semantic, key)
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
@@ -684,6 +774,77 @@ class Ledger:
             rows.append(row)
         return rows
 
+    def _event_semantic(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None,
+        *,
+        stage: str | None = None,
+        workflow_step_id: str | None = None,
+        subject_id: str | None = None,
+        refs: Iterable[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Normalize the immutable body shared by generic and terminal writes."""
+        raw = dict(payload or {})
+        reserved = sorted(set(raw) & _RESERVED_PAYLOAD_KEYS)
+        if reserved:
+            raise ValueError(
+                "ledger payload cannot override envelope fields: " + ", ".join(reserved)
+            )
+        stage = stage or _optional_text(raw.pop("stage", None))
+        if workflow_step_id is None:
+            workflow_step_id = _optional_text(raw.pop("workflow_step_id", None))
+        else:
+            raw.pop("workflow_step_id", None)
+        if event_type in _OCCURRENCE_EVENT_TYPES or (
+            stage is not None and event_type != "session_terminal"
+        ):
+            workflow_step_id = _require_workflow_step_id(workflow_step_id)
+        elif workflow_step_id is not None:
+            workflow_step_id = _require_workflow_step_id(workflow_step_id)
+        subject_id = subject_id or _subject_from_payload(raw)
+        payload_refs, summary_input = self._split_payload(raw)
+        return {
+            "schema_version": LEDGER_SCHEMA_VERSION,
+            "session_id": session_id,
+            "event_type": event_type,
+            "stage": stage,
+            "workflow_step_id": workflow_step_id,
+            "subject_id": subject_id,
+            "refs": self._normalize_refs([*(refs or []), *payload_refs]),
+            "summary": _bounded_summary(summary_input),
+        }
+
+    def _append_new_row_locked(
+        self,
+        handle: Any,
+        rows: list[dict[str, Any]],
+        semantic: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Append one prepared body while the caller holds ``LOCK_EX``."""
+        sequence = int(rows[-1]["sequence"]) + 1 if rows else 1
+        row = {
+            "schema_version": LEDGER_SCHEMA_VERSION,
+            "sequence": sequence,
+            "event_id": f"evt_{sequence:08d}_{uuid4().hex[:12]}",
+            "idempotency_key": idempotency_key,
+            "session_id": semantic["session_id"],
+            "timestamp": _now(),
+            "event_type": semantic["event_type"],
+            "stage": semantic["stage"],
+            "workflow_step_id": semantic["workflow_step_id"],
+            "subject_id": semantic["subject_id"],
+            "refs": semantic["refs"],
+            "summary": semantic["summary"],
+        }
+        handle.seek(0, os.SEEK_END)
+        handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        return row
+
     def _validate_row(self, row: Any, line_number: int) -> None:
         required = {
             "schema_version",
@@ -726,15 +887,9 @@ class Ledger:
                 f"invalid workflow_step_id in ledger row at line {line_number}"
             )
         if (
-            (
-                row["event_type"] in _OCCURRENCE_EVENT_TYPES
-                or (
-                    row["stage"] is not None
-                    and row["event_type"] != "session_terminal"
-                )
-            )
-            and not isinstance(workflow_step_id, str)
-        ):
+            row["event_type"] in _OCCURRENCE_EVENT_TYPES
+            or (row["stage"] is not None and row["event_type"] != "session_terminal")
+        ) and not isinstance(workflow_step_id, str):
             raise LedgerFormatError(
                 f"occurrence event lacks workflow_step_id at line {line_number}"
             )
@@ -926,6 +1081,13 @@ class Ledger:
             return normalized
         return {"role": role, "path_ref": self._normalize_path_ref(value)}
 
+    def _indexed_named_artifact_ref(self, role: str, value: Any) -> dict[str, Any]:
+        """Return one canonical index-backed ref with its semantic role."""
+
+        named_ref = self._path_ref(role, value)
+        artifact_ref = self._indexed_artifact_ref({**named_ref, "role": "artifact"})
+        return {**artifact_ref, "role": role}
+
     def _normalize_path_ref(self, value: str | Path) -> str:
         path = Path(value)
         if path.is_absolute():
@@ -966,27 +1128,6 @@ class Ledger:
             )
         return record
 
-    def _latest_open_review_request_id(
-        self, stage: str, workflow_step_id: str
-    ) -> str | None:
-        events = self.read_events(self.paths.session_id)
-        decided = {
-            str(event.get("review_request_id") or event.get("subject_id"))
-            for event in events
-            if event.get("event_type") == "review_decision"
-        }
-        for event in reversed(events):
-            if (
-                event.get("event_type") != "review_requested"
-                or event.get("stage") != stage
-                or event.get("workflow_step_id") != workflow_step_id
-            ):
-                continue
-            request_id = str(event.get("review_request_id") or event.get("subject_id"))
-            if request_id not in decided:
-                return request_id
-        return None
-
     @staticmethod
     def _project_row(row: dict[str, Any]) -> dict[str, Any]:
         projected = dict(row)
@@ -995,7 +1136,7 @@ class Ledger:
             event_type = row.get("event_type")
             if str(event_type).startswith("attempt_"):
                 projected.setdefault("attempt_id", row["subject_id"])
-            if event_type in {"review_requested", "review_decision"}:
+            if event_type in {"review_requested", "review_decision", "review_applied"}:
                 projected.setdefault("review_request_id", row["subject_id"])
         for ref in row.get("refs") or []:
             if not isinstance(ref, dict):

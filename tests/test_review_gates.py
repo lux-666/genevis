@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+
+from pydantic import BaseModel, ConfigDict
 
 from app.control.lifecycle import (
     ResumeValidationError,
@@ -13,9 +17,15 @@ from app.control.lifecycle import (
     build_resume_decision_template,
     foreground_automatic_decision_label,
     inspect_session,
-    resume_review_state,
+    normalize_resume_review_request,
 )
 from app.entrypoints.review_interactive import prompt_generic_gate_decision
+from app.review.application import (
+    PreparedReviewApplication,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import (
     ReviewGateDeclaration,
@@ -27,30 +37,99 @@ from app.review.gates import (
 from app.review.persistence import (
     ReviewPersistenceError,
     load_review_request,
+    persist_review_decision,
     persist_review_request,
 )
+from app.schemas.artifacts import ArtifactRef
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
-def _apply_unit_gate_decision(state: dict, request: ResumeReviewRequest) -> dict:
+def _artifact_ref(path_ref: str, *, artifact_type: str) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_id=f"test-{artifact_type}",
+        path_ref=path_ref,
+        sha256="a" * 64,
+        size_bytes=1,
+        artifact_type=artifact_type,
+    )
+
+
+class _UnitReviewEffect(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision: str
+    candidate_id: str | None = None
+
+
+def _prepare_unit_gate_application(state: dict, intent) -> PreparedReviewApplication:
+    request = intent.request
+    decision_ref = persist_review_decision(
+        state["data_dir"],
+        session_id=state["session_id"],
+        review_request_id=intent.review_request_id,
+        stage="inventory",
+        gate_id="unit_review_gate",
+        decision=request,
+        request_hash=intent.request_hash,
+        request_ref=intent.request_ref,
+    )
+    return PreparedReviewApplication(
+        effect_kind="tests.unit_review_gate.v1",
+        effect=_UnitReviewEffect(
+            decision=request.decision,
+            candidate_id=request.candidate_id,
+        ),
+        decision_ref=decision_ref,
+    )
+
+
+def _validate_unit_gate_intent_request(
+    state: dict[str, Any],
+    request: ResumeReviewRequest,
+    request_record: Mapping[str, Any],
+) -> ResumeReviewRequest:
+    del state, request_record
+    return request
+
+
+def _apply_unit_gate_application(state: dict, application) -> dict:
+    effect = application.effect
+    assert isinstance(effect, _UnitReviewEffect)
     outputs = dict(state.get("stage_outputs") or {})
-    outputs[request.stage] = {
-        **dict(outputs.get(request.stage) or {}),
+    outputs["inventory"] = {
+        **dict(outputs.get("inventory") or {}),
         "status": "completed",
-        "decision": request.decision,
-        "candidate_id": request.candidate_id,
-        "decided_by": request.decided_by,
+        "decision": effect.decision,
+        "candidate_id": effect.candidate_id,
     }
     return {
-        **state,
         "stage_outputs": outputs,
         "active_interrupt": None,
         "supervision_state": "running_stage",
         "current_stage": "done",
+        "workflow_step_index": 1,
+        "entered_workflow_step_index": 0,
     }
+
+
+def _apply_review_application(state: dict, request: ResumeReviewRequest) -> dict:
+    canonical = normalize_resume_review_request(state, request)
+    intent = persist_review_intent(state, canonical, source="test")
+    gate = get_review_gate(canonical.stage, canonical.gate_id)
+    prepared = gate.load_prepare_application()(state, intent.intent)
+    application_ref = persist_review_application(
+        state,
+        intent=intent,
+        prepared=prepared,
+    )
+    application = load_verified_review_application(
+        state["data_dir"],
+        application_ref,
+    )
+    return dict(gate.load_apply_application()(state, application))
 
 
 try:
@@ -59,9 +138,17 @@ try:
             stage="inventory",
             gate_id="unit_review_gate",
             decisions_allowed=("accept", "defer", "stop_human_review"),
-            decision_applier="tests.test_review_gates:_apply_unit_gate_decision",
+            intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+            validate_intent_request=(
+                "tests.test_review_gates:_validate_unit_gate_intent_request"
+            ),
+            effect_kind="tests.unit_review_gate.v1",
+            effect_model="tests.test_review_gates:_UnitReviewEffect",
+            prepare_application=(
+                "tests.test_review_gates:_prepare_unit_gate_application"
+            ),
+            apply_application="tests.test_review_gates:_apply_unit_gate_application",
             template_preferred_decision="accept",
-            required_resume_fields=("candidate_id",),
         )
     )
 except ValueError:
@@ -100,7 +187,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
             [gate.gate_id for gate in planned[5:]],
         )
 
-    def test_registered_gate_dispatches_resume_applier(self):
+    def test_registered_gate_applies_verified_prepared_application(self):
         state = _blocked_unit_state()
         interrupt = state["active_interrupt"]
         assert interrupt is not None
@@ -114,7 +201,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
             candidate_id="candidate-a",
         )
 
-        update = resume_review_state(state, request)
+        update = _apply_review_application(state, request)
 
         self.assertIsNone(update["active_interrupt"])
         self.assertEqual(update["current_stage"], "done")
@@ -136,24 +223,13 @@ class ReviewGateRegistryTests(unittest.TestCase):
             candidate_id="candidate-a",
         )
 
-        update = resume_review_state(state, request)
+        update = _apply_review_application(state, request)
 
         self.assertEqual(update["stage_outputs"]["inventory"]["decision"], "defer")
 
     def test_unknown_gate_is_rejected_by_registry_not_schema(self):
-        state = _blocked_unit_state(stage="genome_survey", decisions_allowed=["accept"])
-        interrupt = state["active_interrupt"]
-        assert interrupt is not None
-        request = ResumeReviewRequest(
-            session_id="s1",
-            stage="genome_survey",
-            review_request_id=interrupt["review_request_id"],
-            review_request_hash=interrupt["request_hash"],
-            decision="accept",
-        )
-
-        with self.assertRaisesRegex(ResumeValidationError, "Unsupported resume stage"):
-            resume_review_state(state, request)
+        with self.assertRaisesRegex(KeyError, "review gate is not registered"):
+            get_review_gate("genome_survey", "unknown_review_gate")
 
     def test_review_request_envelope_is_the_only_owner_of_gate_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,7 +323,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
             self.assertEqual(template["gate_id"], "unit_review_gate")
             self.assertEqual(template["decision"], "accept")
             self.assertEqual(template["candidate_id"], "candidate-a")
-            self.assertIn("candidate_id", summary["next_action"]["required_fields"])
+            self.assertNotIn("candidate_id", summary["next_action"]["required_fields"])
 
     def test_parameter_approval_gates_default_templates_to_approval(self):
         for stage in ("assembly", "hic_scaffolding", "t2t"):
@@ -365,6 +441,10 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     )
 
     def test_route_selection_builds_foreground_auto_request_from_its_resolver(self):
+        request_ref = _artifact_ref(
+            "artifacts/steps/step-001-assembly/assembly/reviews/request-1/request.json",
+            artifact_type="review.request.v2",
+        )
         summary = {
             "session_id": "s1",
             "decision_requirements": {
@@ -377,13 +457,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     "artifacts/steps/step-001-assembly/assembly/reviews/"
                     "request-1/request.json"
                 ),
-                "request_ref": {
-                    "path_ref": (
-                        "artifacts/steps/step-001-assembly/assembly/reviews/"
-                        "request-1/request.json"
-                    ),
-                    "sha256": "a" * 64,
-                },
+                "request_ref": request_ref.model_dump(mode="json"),
                 "max_blocked_seconds": 0,
                 "recommended_route": "hifi",
                 "recommended_assembly_selection": {
@@ -404,6 +478,16 @@ class ReviewGateRegistryTests(unittest.TestCase):
         self.assertEqual(request.decided_by, "auto_rule")
 
     def test_assembly_review_expiry_uses_llm_provisional_recommendation(self):
+        request_ref = _artifact_ref(
+            "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
+            "request-1/request.json",
+            artifact_type="review.request.v2",
+        )
+        recommendation_ref = _artifact_ref(
+            "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
+            "request-1/recommendation.json",
+            artifact_type="review.recommendation.v1",
+        )
         summary = {
             "session_id": "s1",
             "decision_requirements": {
@@ -416,13 +500,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
                     "request-1/request.json"
                 ),
-                "request_ref": {
-                    "path_ref": (
-                        "artifacts/steps/step-002-assembly_review/assembly_review/"
-                        "reviews/request-1/request.json"
-                    ),
-                    "sha256": "a" * 64,
-                },
+                "request_ref": request_ref.model_dump(mode="json"),
                 "max_blocked_seconds": 0,
                 "auto_decidable": True,
             },
@@ -436,10 +514,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
             review_request_id="request-1",
             review_request_hash="a" * 64,
             decided_by="llm_provisional",
-            rationale_artifact_ref=(
-                "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
-                "request-1/recommendation.json"
-            ),
+            rationale_artifact_ref=recommendation_ref,
         )
 
         with patch(
@@ -457,13 +532,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
             session_id="s1",
             stage="assembly_review",
             review_request_id="request-1",
-            request_ref={
-                "path_ref": (
-                    "artifacts/steps/step-002-assembly_review/assembly_review/"
-                    "reviews/request-1/request.json"
-                ),
-                "sha256": "a" * 64,
-            },
+            request_ref=request_ref.model_dump(mode="json"),
             request_hash="a" * 64,
             data_dir="/tmp/run",
         )
@@ -471,10 +540,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
         self.assertEqual(request.candidate_id, "candidate-a")
         self.assertEqual(
             request.rationale_artifact_ref,
-            (
-                "artifacts/steps/step-002-assembly_review/assembly_review/reviews/"
-                "request-1/recommendation.json"
-            ),
+            recommendation_ref,
         )
         self.assertEqual(request.metadata["source"], "foreground_countdown")
 

@@ -9,8 +9,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError, resume_review_state
+from app.control.lifecycle import ResumeValidationError, normalize_resume_review_request
 from app.knowledge.packs import load_knowledge_pack
+from app.review.application import (
+    ReviewApplicationIdentity,
+    load_verified_review_application,
+    persist_review_application,
+    persist_review_intent,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
@@ -26,7 +32,6 @@ from app.schemas.artifacts import (
 from app.schemas.run_config import DEFAULT_REVIEW_MAX_BLOCKED_SECONDS
 from app.schemas.state import initial_state
 from app.stages.assembly.nodes import (
-    apply_route_decision,
     block_assembly_for_human,
     infer_input_profile,
     resolve_extended_inputs,
@@ -36,6 +41,24 @@ from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
+
+
+def _apply_route_review(state: dict, request: ResumeReviewRequest) -> dict:
+    canonical = normalize_resume_review_request(state, request)
+    intent = persist_review_intent(state, canonical, source="test")
+    gate = get_review_gate(canonical.stage, canonical.gate_id)
+    prepared = gate.load_prepare_application()(state, intent.intent)
+    application_ref = persist_review_application(
+        state,
+        intent=intent,
+        prepared=prepared,
+    )
+    application = load_verified_review_application(
+        state["data_dir"],
+        application_ref,
+        expected_identity=ReviewApplicationIdentity.from_intent(intent.intent),
+    )
+    return dict(gate.load_apply_application()(state, application))
 
 
 class Phase8SchemaTests(unittest.TestCase):
@@ -625,7 +648,7 @@ class InputProfilerTests(unittest.TestCase):
             state = self._blocked_route_state(state, self._route_assembly())
             request = self._request(state, "select_ont")
 
-            result = apply_route_decision(state, request)
+            result = _apply_route_review(state, request)
 
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "route_selected")
@@ -644,7 +667,7 @@ class InputProfilerTests(unittest.TestCase):
             state = self._blocked_route_state(state, self._route_assembly())
             request = self._request(state, "select_cyclone")
 
-            result = resume_review_state(state, request)
+            result = _apply_route_review(state, request)
 
             self.assertEqual(
                 result["stage_outputs"]["assembly"]["selected_route"], "cyclone"
@@ -695,7 +718,7 @@ class InputProfilerTests(unittest.TestCase):
                     state = self._blocked_route_state(state, self._route_assembly())
                     request = self._request(state, case["decision"])
 
-                    result = apply_route_decision(state, request)
+                    result = _apply_route_review(state, request)
                     assembly = result["stage_outputs"]["assembly"]
 
                     self.assertEqual(assembly["selected_route"], case["selected_route"])
@@ -776,7 +799,7 @@ class InputProfilerTests(unittest.TestCase):
                 metadata={"read_type": "pacbio_hifi"},
             )
 
-            result = apply_route_decision(state, request)
+            result = _apply_route_review(state, request)
             assembly = result["stage_outputs"]["assembly"]
 
             self.assertEqual(assembly["selected_route"], "hifi")
@@ -803,7 +826,7 @@ class InputProfilerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ResumeValidationError, "maps to route 'hifi'.*metadata.read_type"
             ):
-                apply_route_decision(state, request)
+                _apply_route_review(state, request)
 
     def test_route_decision_rejects_unknown_method_name_as_resume_validation_error(
         self,
@@ -820,4 +843,4 @@ class InputProfilerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ResumeValidationError, "unknown assembly method"
             ):
-                apply_route_decision(state, request)
+                _apply_route_review(state, request)

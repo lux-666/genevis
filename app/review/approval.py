@@ -13,7 +13,9 @@ nodes share one implementation.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import current_workflow_step_id
@@ -23,11 +25,15 @@ from app.review.persistence import (
     load_review_request,
     persist_review_decision,
 )
-from app.schemas.artifacts import ArtifactRef, ParameterRecommendationCursor
+from app.schemas.artifacts import (
+    ArtifactRef,
+    ParameterAttempt,
+    ParameterAttemptTask,
+    ParameterRecommendationCursor,
+)
 from app.schemas.parameter_recommendation import ParameterRecommendationManifestV3
-from app.schemas.state import StateUpdate, TopLevelState
+from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir
-from app.storage.ledger import Ledger
 
 # The four bindings that every parameter_approval request must carry.
 PARAMETER_APPROVAL_BINDINGS: tuple[str, ...] = (
@@ -36,6 +42,149 @@ PARAMETER_APPROVAL_BINDINGS: tuple[str, ...] = (
     "previous_attempt_id",
     "recommendation_hash",
 )
+
+
+ParameterApprovalDecision = Literal["approve_parameters", "reject_parameters"]
+
+
+class ParameterApprovalAutomaticResolutionV1(BaseModel):
+    """Validated audit facts for one expired foreground countdown."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: Literal["foreground_countdown"]
+    configured_seconds: int = Field(ge=0)
+    elapsed_seconds: float = Field(ge=0)
+    outcome: Literal["approve_persisted_recommendation"]
+
+    @field_validator("configured_seconds", mode="before")
+    @classmethod
+    def reject_boolean_countdown_seconds(cls, value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("configured_seconds must be an integer")
+        return value
+
+    @field_validator("elapsed_seconds", mode="before")
+    @classmethod
+    def reject_boolean_elapsed_seconds(cls, value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("elapsed_seconds must be numeric")
+        return value
+
+    @model_validator(mode="after")
+    def validate_elapsed_seconds(self) -> "ParameterApprovalAutomaticResolutionV1":
+        if self.elapsed_seconds < self.configured_seconds:
+            raise ValueError("elapsed_seconds must not precede configured_seconds")
+        return self
+
+
+class ParameterApprovalMetadataV1(BaseModel):
+    """Strict request metadata accepted by every parameter approval gate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt_id: int = Field(ge=0)
+    task: ParameterAttemptTask
+    previous_attempt_id: int | None = Field(default=None, ge=0)
+    recommendation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: Literal["foreground_countdown"] | None = None
+    configured_seconds: int | None = Field(default=None, ge=0)
+    elapsed_seconds: float | None = Field(default=None, ge=0)
+    automatic_resolution: ParameterApprovalAutomaticResolutionV1 | None = None
+
+    @field_validator(
+        "attempt_id", "previous_attempt_id", "configured_seconds", mode="before"
+    )
+    @classmethod
+    def reject_boolean_integer_fields(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("parameter approval integer metadata must be an integer")
+        return value
+
+    @field_validator("elapsed_seconds", mode="before")
+    @classmethod
+    def reject_boolean_elapsed_field(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("elapsed_seconds must be numeric")
+        return value
+
+    @model_validator(mode="after")
+    def validate_countdown_metadata(self) -> "ParameterApprovalMetadataV1":
+        countdown_values = (
+            self.source,
+            self.configured_seconds,
+            self.elapsed_seconds,
+        )
+        if any(value is not None for value in countdown_values) and not all(
+            value is not None for value in countdown_values
+        ):
+            raise ValueError("foreground countdown metadata is incomplete")
+        if (
+            self.configured_seconds is not None
+            and self.elapsed_seconds is not None
+            and self.elapsed_seconds < self.configured_seconds
+        ):
+            raise ValueError("elapsed_seconds must not precede configured_seconds")
+        if self.automatic_resolution is not None:
+            if (
+                self.source != self.automatic_resolution.source
+                or self.configured_seconds
+                != self.automatic_resolution.configured_seconds
+                or self.elapsed_seconds != self.automatic_resolution.elapsed_seconds
+            ):
+                raise ValueError(
+                    "automatic_resolution must match foreground countdown metadata"
+                )
+        return self
+
+
+class ParameterApprovalEffectV1(BaseModel):
+    """Typed, replay-safe result of preparing a parameter-approval decision.
+
+    The effect carries every artifact identity and compact cursor needed by a
+    stage's pure checkpoint projection.  It deliberately never embeds a
+    ``StateUpdate``: each stage owns its own state-shape projection.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    decision: ParameterApprovalDecision
+    decision_ref: ArtifactRef
+    manifest_ref: ArtifactRef
+    cursor: ParameterRecommendationCursor
+    approved_attempt: ParameterAttempt | None = None
+    rejection_reason: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_projection_inputs(self) -> "ParameterApprovalEffectV1":
+        if self.cursor.status != "pending_approval":
+            raise ValueError("parameter approval effect cursor must be pending")
+        if self.cursor.manifest_ref != self.manifest_ref:
+            raise ValueError("parameter approval effect cursor manifest mismatch")
+        if self.decision == "reject_parameters":
+            if self.approved_attempt is not None:
+                raise ValueError("rejected parameter effect cannot contain an attempt")
+            return self
+        attempt = self.approved_attempt
+        if attempt is None:
+            raise ValueError("approved parameter effect requires an attempt")
+        if (
+            attempt.attempt_id != self.cursor.recommendation_id
+            or attempt.method_id != self.cursor.method_id
+            or attempt.task != self.cursor.task
+            or attempt.previous_attempt_id != self.cursor.previous_attempt_id
+            or attempt.previous_attempt_seal_hash
+            != self.cursor.previous_attempt_seal_hash
+            or attempt.recommendation_manifest_ref != self.manifest_ref
+            or attempt.approval_decision_ref != self.decision_ref
+        ):
+            raise ValueError("approved parameter effect attempt does not match cursor")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +292,18 @@ def ensure_decision_allowed(
         )
 
 
+def parameter_approval_decision(
+    request: ResumeReviewRequest,
+) -> ParameterApprovalDecision:
+    """Validate and narrow one shared parameter-approval decision."""
+
+    if request.decision == "approve_parameters":
+        return "approve_parameters"
+    if request.decision == "reject_parameters":
+        return "reject_parameters"
+    raise ResumeValidationError("unsupported parameter approval decision")
+
+
 # ---------------------------------------------------------------------------
 # New: parameter_approval-specific helpers
 # ---------------------------------------------------------------------------
@@ -151,7 +312,7 @@ def ensure_decision_allowed(
 def validate_parameter_approval_bindings(
     interrupt: Mapping[str, Any],
     request: ResumeReviewRequest,
-) -> None:
+) -> ParameterApprovalMetadataV1:
     """Check that all four required bindings are present and not stale,
     and that the request's review_request_id and review_request_hash match
     the interrupt.
@@ -168,14 +329,14 @@ def validate_parameter_approval_bindings(
     request_hash = interrupt.get("request_hash")
     if request.review_request_hash != request_hash:
         raise ResumeValidationError("parameter approval decision request hash is stale")
-    missing = [k for k in PARAMETER_APPROVAL_BINDINGS if k not in request.metadata]
-    if missing:
-        raise ResumeValidationError(
-            f"parameter approval metadata missing bindings: {missing}"
-        )
+    try:
+        metadata = ParameterApprovalMetadataV1.model_validate(request.metadata)
+    except Exception as exc:
+        raise ResumeValidationError("parameter approval metadata is invalid") from exc
     for key in PARAMETER_APPROVAL_BINDINGS:
-        if request.metadata.get(key) != interrupt.get(key):
+        if getattr(metadata, key) != interrupt.get(key):
             raise ResumeValidationError(f"stale parameter approval binding: {key}")
+    return metadata
 
 
 def validate_parameter_recommendation_manifest(
@@ -200,17 +361,12 @@ def validate_parameter_recommendation_manifest(
         )
 
 
-def apply_parameter_approval_timeout(
+def normalize_parameter_approval_timeout_request(
     state: TopLevelState,
     request: ResumeReviewRequest,
     timeout: dict[str, Any],
-) -> StateUpdate:
-    """Approve only the bound parameter recommendation after foreground expiry.
-
-    The existing stage decision applier remains the sole owner of parameter
-    evidence, attempt-chain, and persistence validation.  This resolver only
-    narrows the automatic decision and supplies compact countdown audit facts.
-    """
+) -> ResumeReviewRequest:
+    """Return the bound automatic request without dispatching or persisting it."""
 
     if request.gate_id != "parameter_approval":
         raise ResumeValidationError(
@@ -225,16 +381,18 @@ def apply_parameter_approval_timeout(
             "automatic parameter approval requires decided_by=auto_rule"
         )
 
-    configured_seconds = request.metadata.get("configured_seconds")
-    elapsed_seconds = request.metadata.get("elapsed_seconds")
+    try:
+        metadata = ParameterApprovalMetadataV1.model_validate(request.metadata)
+    except Exception as exc:
+        raise ResumeValidationError(
+            "automatic parameter approval metadata is invalid"
+        ) from exc
+    configured_seconds = metadata.configured_seconds
+    elapsed_seconds = metadata.elapsed_seconds
     if (
-        request.metadata.get("source") != "foreground_countdown"
-        or not isinstance(configured_seconds, int)
-        or isinstance(configured_seconds, bool)
-        or configured_seconds < 0
-        or not isinstance(elapsed_seconds, (int, float))
-        or isinstance(elapsed_seconds, bool)
-        or elapsed_seconds < configured_seconds
+        metadata.source != "foreground_countdown"
+        or configured_seconds is None
+        or elapsed_seconds is None
         or timeout.get("configured_seconds") != configured_seconds
         or timeout.get("expired") is not True
     ):
@@ -260,11 +418,13 @@ def apply_parameter_approval_timeout(
             },
         }
     )
-
-    # Import lazily to avoid a registry/approval import cycle at module load.
-    from app.review.gates import apply_review_gate_decision
-
-    return apply_review_gate_decision(state, timeout_request)
+    try:
+        ParameterApprovalMetadataV1.model_validate(timeout_request.metadata)
+    except Exception as exc:
+        raise ResumeValidationError(
+            "automatic parameter approval metadata is invalid"
+        ) from exc
+    return timeout_request
 
 
 def _parameter_approval_audit_metadata(
@@ -272,23 +432,25 @@ def _parameter_approval_audit_metadata(
 ) -> dict[str, Any]:
     """Keep decision-ledger metadata bounded to bindings and auto facts."""
 
-    metadata = {key: request.metadata[key] for key in PARAMETER_APPROVAL_BINDINGS}
-    automatic_resolution = request.metadata.get("automatic_resolution")
+    try:
+        request_metadata = ParameterApprovalMetadataV1.model_validate(request.metadata)
+    except Exception as exc:
+        raise ResumeValidationError("parameter approval metadata is invalid") from exc
+    metadata = {
+        key: getattr(request_metadata, key) for key in PARAMETER_APPROVAL_BINDINGS
+    }
+    automatic_resolution = request_metadata.automatic_resolution
     if request.decided_by == "auto_rule":
-        if not isinstance(automatic_resolution, dict):
+        if automatic_resolution is None:
             raise ResumeValidationError(
                 "automatic parameter approval has no countdown audit metadata"
             )
         metadata.update(
             {
-                "automatic_source": automatic_resolution.get("source"),
-                "automatic_configured_seconds": automatic_resolution.get(
-                    "configured_seconds"
-                ),
-                "automatic_elapsed_seconds": automatic_resolution.get(
-                    "elapsed_seconds"
-                ),
-                "automatic_outcome": automatic_resolution.get("outcome"),
+                "automatic_source": automatic_resolution.source,
+                "automatic_configured_seconds": automatic_resolution.configured_seconds,
+                "automatic_elapsed_seconds": automatic_resolution.elapsed_seconds,
+                "automatic_outcome": automatic_resolution.outcome,
             }
         )
     return metadata
@@ -318,7 +480,7 @@ def persist_parameter_approval_decision(
     method_name: str,
     artifact_type: str,
 ) -> ArtifactRef:
-    """Write the immutable approval decision and append a ledger row.
+    """Write or recover the immutable approval decision artifact.
 
     Returns the published :class:`~app.schemas.artifacts.ArtifactRef`.
     Raises :exc:`~app.control.lifecycle.ResumeValidationError` on persistence
@@ -355,7 +517,11 @@ def persist_parameter_approval_decision(
                 "bindings": {
                     key: audit_metadata[key] for key in PARAMETER_APPROVAL_BINDINGS
                 },
-                "rationale_artifact_ref": request.rationale_artifact_ref,
+                "rationale_artifact_ref": (
+                    request.rationale_artifact_ref.model_dump(mode="json")
+                    if request.rationale_artifact_ref is not None
+                    else None
+                ),
                 **(
                     {"automatic_resolution": automatic_resolution}
                     if automatic_resolution is not None
@@ -375,16 +541,4 @@ def persist_parameter_approval_decision(
             f"{stage} parameter approval decision could not be persisted"
         ) from exc
 
-    Ledger(absolute_data_dir(state)).record_review_decision(
-        state["session_id"],
-        stage,
-        gate_id="parameter_approval",
-        decision=request.decision,
-        notes=list(request.notes),
-        artifact_ref=decision_ref.path_ref,
-        metadata=audit_metadata,
-        decided_by=request.decided_by,
-        rationale_artifact_ref=request.rationale_artifact_ref,
-        review_request_id=request_id,
-    )
     return decision_ref

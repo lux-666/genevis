@@ -427,6 +427,8 @@ def validate_state_field(name: str, value: object) -> None:
         validate_resource_refs(cast(Mapping[str, object] | None, value))
     elif name == "active_interrupt":
         _validate_active_interrupt(value)
+    elif name == "review_application_ref":
+        _validate_review_application_ref(value)
     elif name == "last_error":
         _validate_last_error(value)
     elif name == "review_notes":
@@ -508,6 +510,17 @@ def _validate_active_interrupt(value: object) -> None:
             "active_interrupt exceeds hard limit "
             f"{ACTIVE_INTERRUPT_MAX_BYTES} bytes: {serialized_bytes}"
         )
+
+
+def _validate_review_application_ref(value: object) -> None:
+    if value is None:
+        return
+    from app.schemas.artifacts import ArtifactRef
+
+    try:
+        ArtifactRef.model_validate(value)
+    except Exception as exc:
+        raise ValueError("review_application_ref must be a valid ArtifactRef") from exc
 
 
 def _validate_last_error(last_error: object) -> None:
@@ -603,6 +616,7 @@ class TopLevelState(TypedDict, total=False):
 
     # Human-review or pause metadata. Keep payloads short and ref-heavy.
     active_interrupt: NotRequired[ActiveInterrupt | None]
+    review_application_ref: NotRequired[dict[str, Any] | None]
 
     # Cross-method request parameters collected once by planning.
     shared_parameters: NotRequired[SharedParameters | dict[str, Any] | None]
@@ -644,6 +658,7 @@ class StateUpdate(TypedDict, total=False):
     stage_plan_ref: str
     stage_seeds: StageOutputs
     active_interrupt: ActiveInterrupt | None
+    review_application_ref: dict[str, Any] | None
     shared_parameters: SharedParameters | dict[str, Any] | None
     last_error: str | None
     review_notes: list[str]
@@ -688,6 +703,7 @@ def initial_state(
         stage_plan_ref=stage_plan_ref,
         stage_seeds=validate_stage_outputs(stage_seeds),
         active_interrupt=None,
+        review_application_ref=None,
         shared_parameters=None,
         last_error=None,
         review_notes=[],
