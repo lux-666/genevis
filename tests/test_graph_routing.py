@@ -133,6 +133,77 @@ class GraphRoutingTests(unittest.TestCase):
             self.assertEqual(len(terminals), 1)
             self.assertEqual(terminals[0]["summary"]["outcome"], "completed")
 
+    def test_attached_progress_observes_ledger_after_each_controller_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "attached-progress")
+            reads = run_dir / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = run_dir / "control" / "manifest.yaml"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "session_id": "attached-progress",
+                        "assets": [
+                            {
+                                "asset_type": "raw_long_reads",
+                                "paths": [str(reads)],
+                                "platform": "ont",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = RunConfig.model_validate({"requested_stages": []})
+            paths, verified_inputs = _freeze_verified_inputs(
+                run_dir,
+                manifest,
+                config,
+            )
+            input_manifest_ref = paths.to_ref(paths.input_manifest_path)
+            ledger = Ledger(run_dir)
+            ledger.create_session("attached-progress", input_manifest_ref)
+            state = initial_state(
+                session_id="attached-progress",
+                input_manifest_ref=input_manifest_ref,
+                data_dir=str(run_dir),
+                workflow_steps=workflow_steps_from_run_config(
+                    verified_inputs.run_config
+                ),
+            )
+            observations: list[tuple[int, str, list[str]]] = []
+
+            def observe_progress(routed_state: dict[str, object]) -> None:
+                observations.append(
+                    (
+                        int(routed_state["workflow_step_index"]),
+                        str(routed_state["supervision_state"]),
+                        [
+                            row["event_type"]
+                            for row in ledger.read_event_rows("attached-progress")
+                        ],
+                    )
+                )
+
+            result = build_graph(
+                backend="memory",
+                data_dir=str(run_dir),
+                verified_inputs=verified_inputs,
+                on_controller_transition=observe_progress,
+            ).invoke(
+                state,
+                config={"configurable": {"thread_id": "attached-progress"}},
+            )
+
+            self.assertEqual(result["supervision_state"], "completed")
+            self.assertEqual(len(observations), 2)
+            self.assertEqual(observations[0][0:2], (0, "idle"))
+            self.assertIn("stage_entered", observations[0][2])
+            self.assertNotIn("stage_completed", observations[0][2])
+            self.assertEqual(observations[1][0:2], (1, "completed"))
+            self.assertIn("stage_completed", observations[1][2])
+            self.assertIn("session_terminal", observations[1][2])
+
     def test_graph_runs_two_occurrences_of_the_same_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "repeat-read-qc")

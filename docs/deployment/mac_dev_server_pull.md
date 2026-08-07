@@ -79,9 +79,10 @@ process execution for that occurrence. `requested_stages: null` is rejected, whi
 Assembly/T2T Review boundaries are rejected rather than repaired or auto-filled;
 see [Runtime orchestration](../architecture/topics/runtime-orchestration.md).
 The command then freezes that exact stage scope and dependency snapshot before
-SQLite execution. Add `--non-interactive` for automation; a
-human gate persists
-`blocked_human` and directs the operator to `inspect`, `review`, and `resume`.
+SQLite execution. A new run must be launched with real stdin and stdout TTYs;
+the public boundary rejects noninteractive automation before freeze. If an
+attached process later stops at a human gate, the durable `blocked_human`
+checkpoint remains recoverable through `inspect`, `review`, and `resume`.
 `gene-agent tui --data-dir data/server_run/out` remains an optional
 conversational intake/planning alternative using the same frozen executor. The
 server owns all real paths and generated output.

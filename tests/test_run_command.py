@@ -32,6 +32,10 @@ def _capture_call(function, *args, **kwargs):
     return result, stdout.getvalue(), stderr.getvalue()
 
 
+def _leave_blocked(_graph, _config, result, *_args, **_kwargs):
+    return result
+
+
 def _prepared_inputs(
     *,
     session_id: str = "manifest-session",
@@ -64,7 +68,6 @@ class RunParserTests(unittest.TestCase):
                 "run.json",
                 "--data-dir",
                 "data",
-                "--non-interactive",
             ]
         )
 
@@ -75,7 +78,6 @@ class RunParserTests(unittest.TestCase):
                 "manifest": "manifest.yaml",
                 "run_config": "run.json",
                 "data_dir": "data",
-                "non_interactive": True,
             },
         )
 
@@ -97,13 +99,13 @@ class RunParserTests(unittest.TestCase):
             "--manifest",
             "--run-config",
             "--data-dir",
-            "--non-interactive",
         ):
             self.assertIn(option, help_text)
         for forbidden in (
             "--session-id",
             "--checkpointer",
             "--local-exec",
+            "--non-interactive",
         ):
             self.assertNotIn(forbidden, help_text)
 
@@ -131,6 +133,7 @@ class RunParserTests(unittest.TestCase):
             ["--session-id", "cli-owned"],
             ["--checkpointer", "memory"],
             ["--local-exec", "assembly"],
+            ["--non-interactive"],
         ):
             with self.subTest(extra=extra):
                 with self.assertRaises(SystemExit) as caught:
@@ -146,6 +149,87 @@ class RunParserTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 2)
 
 
+class InspectTextTests(unittest.TestCase):
+    def test_print_inspect_text_includes_current_progress_and_execution(self):
+        summary = {
+            "session_id": "s1",
+            "supervision_state": "running",
+            "checkpoint_persistence": "sqlite",
+            "durable_resume_available": True,
+            "current_workflow_step_id": "step-002-read_qc",
+            "current_stage": "read_qc",
+            "artifact_count": 0,
+            "decisions_by_origin": {},
+            "workflow_progress": {
+                "plan_source": "frozen_run_config",
+                "total_steps": 3,
+                "completed_steps": 1,
+                "skipped_steps": 1,
+                "failed_steps": 0,
+                "blocked_steps": 0,
+                "unfinished_steps": 1,
+            },
+            "execution": {
+                "frozen_inputs_status": "verified",
+                "durable_progress": "checkpoint",
+                "execution_lock_held": True,
+            },
+            "next_action": {"kind": "unknown", "summary": "No action."},
+        }
+
+        _result, stdout, stderr = _capture_call(
+            run_entry._print_inspect_text, summary, {}
+        )
+
+        self.assertEqual(stderr, "")
+        self.assertIn("current_workflow_step_id: step-002-read_qc", stdout)
+        self.assertIn("current_stage: read_qc", stdout)
+        self.assertIn(
+            "workflow_progress: finished=2/3 completed=1 skipped=1 failed=0 "
+            "blocked=0 unfinished=1 source=frozen_run_config",
+            stdout,
+        )
+        self.assertIn(
+            "execution: frozen_inputs=verified durable_progress=checkpoint "
+            "lock_held=true",
+            stdout,
+        )
+
+
+class AttachedProgressTests(unittest.TestCase):
+    def test_renderer_uses_frozen_occurrence_cursor_without_persisting_projection(self):
+        state = {
+            "workflow_steps": [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-read_qc",
+                    "stage": "read_qc",
+                    "allow_local_execution": False,
+                },
+            ],
+            "workflow_step_index": 1,
+            "current_stage": "read_qc",
+            "supervision_state": "running_stage",
+            "skip_reasons": {"step-000-inventory": "no registered inputs"},
+        }
+
+        _result, stdout, stderr = _capture_call(
+            run_entry._render_attached_progress,
+            state,
+        )
+
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            stdout,
+            "progress: finished=1/2 completed=0 skipped=1 "
+            "current=step-001-read_qc stage=read_qc state=running\n",
+        )
+
+
 class RunHandlerTests(unittest.TestCase):
     def test_manifest_identity_owns_paths_and_sqlite_dispatch(self):
         prepared = _prepared_inputs(requested_stages=["assembly"])
@@ -154,7 +238,6 @@ class RunHandlerTests(unittest.TestCase):
                 manifest="source/manifest.yaml",
                 run_config="source/run.json",
                 data_dir=tmp,
-                non_interactive=False,
             )
             with (
                 patch(
@@ -194,45 +277,21 @@ class RunHandlerTests(unittest.TestCase):
             interactive_gate=True,
         )
 
-    def test_noninteractive_flag_maps_to_false(self):
+    def test_non_tty_run_fails_before_freeze_or_execute(self):
         prepared = _prepared_inputs(requested_stages=["read_qc"])
         with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
             args = argparse.Namespace(
                 manifest="manifest.yaml",
                 run_config="run.json",
-                data_dir=tmp,
-                non_interactive=True,
+                data_dir=str(data_dir),
             )
             with (
                 patch(
                     "app.storage.frozen_inputs.prepare_session_inputs",
                     return_value=prepared,
                 ),
-                patch("app.storage.frozen_inputs.freeze_session_inputs"),
-                patch(
-                    "app.entrypoints.run.execute_frozen_session", return_value=0
-                ) as execute,
-            ):
-                code = run_entry._run(args)
-
-        self.assertEqual(code, 0)
-        self.assertFalse(execute.call_args.kwargs["interactive_gate"])
-
-    def test_non_tty_run_does_not_start_foreground_review(self):
-        prepared = _prepared_inputs(requested_stages=["read_qc"])
-        with tempfile.TemporaryDirectory() as tmp:
-            args = argparse.Namespace(
-                manifest="manifest.yaml",
-                run_config="run.json",
-                data_dir=tmp,
-                non_interactive=False,
-            )
-            with (
-                patch(
-                    "app.storage.frozen_inputs.prepare_session_inputs",
-                    return_value=prepared,
-                ),
-                patch("app.storage.frozen_inputs.freeze_session_inputs"),
+                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
                 patch(
                     "app.entrypoints.run._foreground_review_available",
                     return_value=False,
@@ -241,10 +300,14 @@ class RunHandlerTests(unittest.TestCase):
                     "app.entrypoints.run.execute_frozen_session", return_value=0
                 ) as execute,
             ):
-                code = run_entry._run(args)
+                code, stdout, stderr = _capture_call(run_entry._run, args)
 
-        self.assertEqual(code, 0)
-        self.assertFalse(execute.call_args.kwargs["interactive_gate"])
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("real stdin/stdout TTY", stderr)
+        self.assertFalse(data_dir.exists())
+        freeze.assert_not_called()
+        execute.assert_not_called()
 
     def test_null_requested_stages_fails_before_freeze_or_execute(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -309,6 +372,10 @@ class RunHandlerTests(unittest.TestCase):
                         return_value=prepared,
                     ),
                     patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                    patch(
+                        "app.entrypoints.run._foreground_review_available",
+                        return_value=True,
+                    ),
                     patch(
                         "app.entrypoints.run.execute_frozen_session", return_value=0
                     ) as execute,
@@ -430,19 +497,28 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            code, stdout, stderr = _capture_call(
-                run_entry.main,
-                [
-                    "run",
-                    "--manifest",
-                    str(manifest),
-                    "--run-config",
-                    str(run_config),
-                    "--data-dir",
-                    str(root / "data"),
-                    "--non-interactive",
-                ],
-            )
+            with (
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
+                patch(
+                    "app.entrypoints.run._interactive_gate_loop",
+                    side_effect=_leave_blocked,
+                ),
+            ):
+                code, stdout, stderr = _capture_call(
+                    run_entry.main,
+                    [
+                        "run",
+                        "--manifest",
+                        str(manifest),
+                        "--run-config",
+                        str(run_config),
+                        "--data-dir",
+                        str(root / "data"),
+                    ],
+                )
 
             self.assertEqual(code, 0, stderr)
             self.assertEqual(stderr, "")
@@ -459,7 +535,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             self.assertEqual(len(registered), 1)
             self.assertEqual(registered[0]["workflow_step_id"], "step-000-inventory")
 
-    def test_noninteractive_run_persists_and_reopens_blocked_checkpoint(self):
+    def test_interactive_run_persists_and_reopens_blocked_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "public-run-sqlite-gate"
@@ -493,19 +569,28 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             )
             data_dir = root / "data"
 
-            code, stdout, stderr = _capture_call(
-                run_entry.main,
-                [
-                    "run",
-                    "--manifest",
-                    str(manifest),
-                    "--run-config",
-                    str(run_config),
-                    "--data-dir",
-                    str(data_dir),
-                    "--non-interactive",
-                ],
-            )
+            with (
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
+                patch(
+                    "app.entrypoints.run._interactive_gate_loop",
+                    side_effect=_leave_blocked,
+                ),
+            ):
+                code, stdout, stderr = _capture_call(
+                    run_entry.main,
+                    [
+                        "run",
+                        "--manifest",
+                        str(manifest),
+                        "--run-config",
+                        str(run_config),
+                        "--data-dir",
+                        str(data_dir),
+                    ],
+                )
 
             self.assertEqual(code, 0, stderr)
             self.assertEqual(stderr, "")
@@ -791,6 +876,7 @@ class FrozenHelperTests(unittest.TestCase):
             backend="sqlite",
             data_dir=str(paths.run_dir),
             verified_inputs=bundle,
+            on_controller_transition=None,
         )
         graph.invoke.assert_called_once_with(
             seeded_state,
@@ -872,7 +958,7 @@ class FrozenHelperTests(unittest.TestCase):
                     "app.entrypoints.run.initial_state",
                     return_value={"stage_outputs": {}},
                 ),
-                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch("app.entrypoints.run.build_graph", return_value=graph) as build,
                 patch(
                     "app.entrypoints.run._interactive_gate_loop",
                     side_effect=ResumeTransactionError(
@@ -902,6 +988,10 @@ class FrozenHelperTests(unittest.TestCase):
         self.assertIs(
             gate_loop.call_args.kwargs["verified_inputs"],
             bundle,
+        )
+        self.assertIs(
+            build.call_args.kwargs["on_controller_transition"],
+            run_entry._render_attached_progress,
         )
         finalize.assert_not_called()
 

@@ -140,7 +140,7 @@ the parent router and makes each stage independently testable.
 真实/操作员运行从确定性的结构化输入边界开始：
 
 ```text
-gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interactive]
+gene-agent run --manifest PATH --run-config PATH --data-dir PATH
 ```
 
 `manifest` 是唯一的 `session_id` 所有者；`data-dir` 是布局根目录，运行输出固定在
@@ -165,10 +165,10 @@ gene-agent run \
   --data-dir /absolute/path/to/data
 ```
 
-默认运行只在 stdin/stdout 都连接真实 TTY 时于人工 gate 与操作员交互。自动化使用
-`--non-interactive`；管道、CI 或关闭 stdin 的运行即使没有该参数也按非交互处理。若
-到达 gate，运行会持久化 `blocked_human`，输出 `inspect`、`review` 和 `resume` 的继续
-命令，而不是伪造批准或继续执行。
+新的结构化运行要求 stdin/stdout 都连接真实 TTY；校验失败会在 freeze 前退出，不会
+发布 frozen inputs。公共 `run` 不提供非交互新运行分支。到达 gate 后，当前终端负责
+倒计时、人工决定和继续执行；若进程中断，durable `blocked_human` checkpoint 仍可通过
+`inspect`、`review` 和 `resume` 恢复。
 
 `gene-agent tui` 是可选的对话式 intake/规划入口：它收集样本事实、生成可编辑 Plan
 Draft，并在确认后进入同一冻结和执行边界。未回答 stage selection 是 `None`；明确选择
@@ -327,11 +327,12 @@ stage 的两个 occurrence 可以分别授权或拒绝本地执行。对象的 s
 触发该 gate 已有且仍满足资格的自动 resolver；正整数则给出按 Enter 可接管的倒计时，
 并在到期时触发同一 resolver。timer 本身不提供决定，也不会从 registry 默认项伪造
 批准。当前 Assembly Review 保留原有的 evidence eligibility + LLM recommendation
-链，assembly route selection 保留原有的推荐路线 timeout applier；没有既有自动
-resolver 的 gate 仍直接进入人工处理。resolver 无资格、失败或校验不通过时保持
-`blocked_human`。倒计时只存在于原始 `gene-agent run` 仍在前台且可交互时：按 Enter
-会取消倒计时并打开人工决策提示；
-Ctrl-C、EOF、进程退出、无 TTY 或 `--non-interactive` 都只留下 durable
+链，assembly route selection 保留原有的推荐路线 timeout applier；Assembly、AutoHiC
+和 T2T 的 parameter approval 共用一个 resolver，只能接受 immutable request 绑定的
+当前持久化推荐。没有 resolver 的 gate 仍直接进入人工处理。自动 transaction 失败时，
+只有同一个 blocked request 仍可验证，当前终端才回落人工提示；身份或完整性漂移会
+fail closed。倒计时只存在于由 `run` 或 TUI 启动的原始 attached executor 中：按 Enter
+会取消倒计时并打开人工决策提示；Ctrl-C、EOF 或进程退出只留下 durable
 `blocked_human` checkpoint。之后必须用 `review` 或带 decision file 的 `resume` 人工
 处理；重新执行同一 frozen session 也只显示这些人工恢复命令，不调用 blocked graph、
 不按旧的 `blocked_at` 或已流逝的时间自动采纳，也没有 daemon/background wake。公共
@@ -399,6 +400,20 @@ gene-agent inspect \
   --session-id <SESSION> \
   --data-dir /absolute/path/to/data
 ```
+
+外部同时启动多个 contig 时，每个 contig 仍是一份 manifest、RunConfig 和唯一
+`session_id`，分别调用同一个 `run`。聚合方只轮询各 session 的只读 JSON：
+
+```bash
+gene-agent inspect \
+  --session-id <SESSION> \
+  --data-dir /absolute/path/to/data \
+  --json
+```
+
+`inspect_schema_version: 1` 提供 occurrence 级 `workflow_progress` 和 `execution`；
+它们直接来自 verified frozen plan、Ledger、checkpoint 与本机 execution lock，不会
+写回批次状态或进度投影。`inspect --trace` 会生成 report，不能作为轮询协议。
 
 Review and resume a blocked human gate:
 

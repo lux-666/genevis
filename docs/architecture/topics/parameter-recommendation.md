@@ -1,7 +1,7 @@
 # Parameter Recommendation
 
-> **Status:** implemented for Assembly, AutoHiC, and T2T using schema-3 roots;
-> timeout-controlled parameter approval is an accepted planned change
+> **Status:** implemented for Assembly, AutoHiC, and T2T using schema-3 roots
+> and timeout-controlled approval.
 >
 > **Read when:** changing model-visible parameter inputs, approval behavior,
 > retries, or the handoff from a recommendation to an executable attempt.
@@ -43,7 +43,7 @@ authoritative run facts + selected method
   -> exact persisted model messages
   -> raw response + parse record + sparse recommendation
   -> schema-3 recommendation manifest
-  -> mandatory human approval
+  -> immutable parameter approval gate
   -> schema-3 ParameterAttempt
   -> method-attempt freeze and execution
 ```
@@ -55,12 +55,9 @@ raw-response, parsed-recommendation, and parse-result leaves retain their own
 declared versions. The strict loader verifies those mixed leaf versions and
 rejects a pre-v3 root or mixed identity.
 
-## Accepted timeout-controlled approval
+## Timeout-controlled approval
 
-> **Status:** planned.
-
-The accepted flow replaces the current mandatory-human-only transition without
-weakening the recommendation evidence boundary:
+The implemented flow keeps the recommendation evidence boundary intact:
 
 ```text
 persisted sparse recommendation + verified schema-3 manifest
@@ -100,7 +97,7 @@ metadata stay in durable audit evidence rather than model messages.
 The accepted model response is an attempt-local sparse mapping plus an
 optional explanation. An empty mapping is valid. Parsing checks the response
 shape, not biological quality or whether a value is a sensible catalog value.
-Every shape-valid mapping goes to a human unchanged.
+Every shape-valid mapping goes to the immutable approval gate unchanged.
 
 After approval, parameter resolution keeps three sources distinguishable:
 executor-owned values, canonical provided or measured facts, and the approved
@@ -129,9 +126,8 @@ evidence only: the application does not score it, derive a delta, or merge
 omitted keys from the preceding mapping. The implemented T2T threshold request
 is initial-only; this page does not imply a T2T parameter-retry route.
 
-There is no implemented automatic fallback recommendation, parameter-patch
-semantics, silent default synthesis at the model boundary, or parameter
-auto-approval today. Model failure becomes `response_invalid`; human rejection
-creates no execution attempt. The accepted timeout-controlled approval above
-is limited to approving the exact persisted recommendation and remains
-conformance debt until the shared gate resolver and tests land.
+There is no automatic fallback recommendation, parameter-patch semantics, or
+silent default synthesis at the model boundary. Model failure becomes
+`response_invalid`; human rejection creates no execution attempt. Timeout
+approval is limited to the exact persisted recommendation and delegates all
+stage-specific validation to the existing decision applier.

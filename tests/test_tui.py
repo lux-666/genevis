@@ -419,6 +419,51 @@ class TuiWorkflowTests(unittest.TestCase):
             ):
                 self.assertEqual(parent_hashes[path.name], sha256_file(path))
 
+    def test_confirmed_plan_without_tty_stays_editable_and_does_not_freeze(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            draft = create_tui_session_draft(
+                session_id="s1",
+                data_dir=str(data_dir),
+                request_text="inventory only",
+                intent=deterministic_workflow_intent("inventory only"),
+            ).model_copy(update={"lifecycle": "ready_to_confirm"})
+            save_tui_session_draft(draft)
+            plan = AskPlanState(
+                session_id="s1",
+                data_dir=str(data_dir),
+                entry_request={},
+                manifest_ref=str(SessionPaths(data_dir, "s1").manifest_draft_path),
+                selected_stage_occurrences=[],
+                selected_methods={},
+                confirmed=True,
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=False,
+                ),
+                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                patch("app.entrypoints.run.execute_frozen_session") as execute,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = _freeze_and_execute(draft, plan)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("real stdin/stdout TTY", stderr.getvalue())
+            freeze.assert_not_called()
+            execute.assert_not_called()
+            self.assertFalse(SessionPaths(data_dir, "s1").frozen_inputs_path.exists())
+            self.assertEqual(
+                load_tui_session_draft(data_dir, "s1").lifecycle,
+                "ready_to_confirm",
+            )
+
     def test_confirmed_plan_freezes_then_calls_internal_executor(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -465,6 +510,10 @@ class TuiWorkflowTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {"GENE_AGENT_ENVS_CONFIG": str(envs)},
+                ),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
                 ),
                 patch(
                     "app.entrypoints.run.execute_frozen_session",
@@ -523,6 +572,10 @@ class TuiWorkflowTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {"GENE_AGENT_ENVS_CONFIG": str(missing_config)},
+                ),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
                 ),
                 patch("app.entrypoints.run.execute_frozen_session") as execute,
                 contextlib.redirect_stderr(stderr),

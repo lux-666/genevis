@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from app.control.lifecycle import resume_review_state
+from app.control.errors import ResumeValidationError
+from app.control.lifecycle import (
+    build_foreground_auto_resume_request,
+    inspect_state,
+    resume_review_state,
+)
 from app.integrity import sha256_file
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_COMMAND,
     ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
@@ -33,6 +40,7 @@ from app.stages.assembly.parameters.storage import (
 )
 from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
 from app.storage.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
     load_approved_parameter_chain_v3,
@@ -351,6 +359,130 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
         {},
         {"execution": 0, "review": 0},
     )
+
+
+def test_foreground_countdown_auto_approves_bound_parameters_with_audit(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        return_value=_Model(_response(purge_level=1)),
+    ):
+        update = recommend_assembly_parameters(state)
+    blocked = _blocked_state(state, update)
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    blocked["active_interrupt"]["blocked_at"] = (
+        now - timedelta(seconds=300)
+    ).isoformat()
+    summary = inspect_state(blocked)
+    request = build_foreground_auto_resume_request(
+        summary,
+        configured_seconds=300,
+        elapsed_seconds=300.0,
+    )
+
+    assert request.decision == "approve_parameters"
+    assert request.decided_by == "auto_rule"
+    assert request.metadata["attempt_id"] == blocked["active_interrupt"]["attempt_id"]
+    assert (
+        request.metadata["recommendation_hash"]
+        == blocked["active_interrupt"]["recommendation_hash"]
+    )
+
+    approved = resume_review_state(
+        blocked,
+        request,
+        blocked_timeout_seconds=300,
+        decision_source="foreground_countdown",
+        now=now,
+    )
+    attempt = ParameterAttempt.model_validate(
+        approved["stage_outputs"]["assembly"]["parameter_attempts"][0]
+    )
+    decision_path = Path(blocked["data_dir"]) / attempt.approval_decision_ref.path_ref
+    decision_record = json.loads(decision_path.read_text(encoding="utf-8"))
+    decision = decision_record["decision"]
+
+    assert (
+        attempt.approval_decision_ref.artifact_type
+        == ASSEMBLY_PARAMETER_APPROVAL_DECISION
+    )
+    assert decision["decided_by"] == "auto_rule"
+    assert (
+        decision["rationale_artifact_ref"]
+        == blocked["active_interrupt"]["request_ref"]["path_ref"]
+    )
+    assert decision["automatic_resolution"] == {
+        "source": "foreground_countdown",
+        "configured_seconds": 300,
+        "elapsed_seconds": 300.0,
+        "outcome": "approve_persisted_recommendation",
+    }
+    assert decision["bindings"] == {
+        key: blocked["active_interrupt"][key]
+        for key in (
+            "attempt_id",
+            "task",
+            "previous_attempt_id",
+            "recommendation_hash",
+        )
+    }
+
+    decisions = [
+        event
+        for event in Ledger(blocked["data_dir"]).read_events("s1")
+        if event["event_type"] == "review_decision"
+    ]
+    assert len(decisions) == 1
+    assert decisions[0]["decided_by"] == "auto_rule"
+    assert (
+        decisions[0]["rationale_artifact_ref"]
+        == blocked["active_interrupt"]["request_ref"]["path_ref"]
+    )
+    assert decisions[0]["metadata"] == {
+        "attempt_id": blocked["active_interrupt"]["attempt_id"],
+        "task": blocked["active_interrupt"]["task"],
+        "recommendation_hash": blocked["active_interrupt"]["recommendation_hash"],
+        "automatic_source": "foreground_countdown",
+        "automatic_configured_seconds": 300,
+        "automatic_elapsed_seconds": 300.0,
+        "automatic_outcome": "approve_persisted_recommendation",
+    }
+
+
+def test_parameter_countdown_reject_decision_fails_closed(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        return_value=_Model(_response(purge_level=1)),
+    ):
+        update = recommend_assembly_parameters(state)
+    blocked = _blocked_state(state, update)
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    blocked["active_interrupt"]["blocked_at"] = (
+        now - timedelta(seconds=300)
+    ).isoformat()
+    request = build_foreground_auto_resume_request(
+        inspect_state(blocked),
+        configured_seconds=300,
+        elapsed_seconds=300.0,
+    ).model_copy(update={"decision": "reject_parameters"})
+
+    with pytest.raises(
+        ResumeValidationError,
+        match="automatic parameter approval can only approve",
+    ):
+        resume_review_state(
+            blocked,
+            request,
+            blocked_timeout_seconds=300,
+            decision_source="foreground_countdown",
+            now=now,
+        )
+
+    assert blocked["supervision_state"] == "blocked_human"
+    assert blocked["active_interrupt"] is not None
 
 
 def test_parameter_chains_reject_an_earlier_same_stage_occurrence(

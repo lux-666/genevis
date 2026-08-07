@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -43,6 +44,7 @@ def build_graph(
     backend: CheckpointerBackend = DEFAULT_CHECKPOINTER_BACKEND,
     data_dir: str = "data",
     verified_inputs: "FrozenInputBundle | None" = None,
+    on_controller_transition: Callable[[TopLevelState], None] | None = None,
 ) -> CompiledStateGraph[
     TopLevelState,
     None,
@@ -186,6 +188,8 @@ def build_graph(
                 session_id,
                 {**state, "checkpoint_persistence": backend},
             )
+        if on_controller_transition is not None:
+            on_controller_transition(cast(TopLevelState, routed_state))
         return route_update
 
     graph.add_node("route_controller", operator_route_controller)

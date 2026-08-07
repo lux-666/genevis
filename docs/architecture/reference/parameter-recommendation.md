@@ -1,7 +1,6 @@
 # Parameter Recommendation Contract
 
-> **Status:** implemented evidence contract, with accepted planned timeout
-> approval semantics.
+> **Status:** implemented evidence and timeout-approval contract.
 > **Read when:** exact model DTO, schema-3 persistence, sparse response,
 > approval, or retry semantics matter.  
 > **Comes from:** [Parameter recommendation](../topics/parameter-recommendation.md).  
@@ -102,7 +101,7 @@ the declared JSON shape. A claiming operator sees the exact parsed mapping.
 The gate's frozen `max_blocked_seconds` controls only the default decision for
 that persisted mapping. `-1` requires manual approve/reject, `0` immediately
 approves it, and a positive value allows Enter to claim manual review before
-expiry approves it. The timeout path must submit `approve_parameters` for the
+expiry approves it. The timeout path submits `approve_parameters` for the
 same request and recommendation hash, then delegate to the existing stage
 decision applier. It may not edit the mapping, call the recommender, select a
 fallback, or bypass request, occurrence, manifest, predecessor, or attempt-chain
@@ -248,6 +247,10 @@ Tests must prove that:
 - manual and timeout approval are hash-bound to the immutable recommendation;
 - timeout approval accepts only the current persisted mapping and preserves
   the existing stage-specific validation boundary;
+- timeout decisions record their request rationale plus configured and elapsed
+  foreground-countdown audit facts;
+- a failed automatic transaction returns to manual review only while the same
+  immutable blocked request still verifies;
 - approved parameters, unchanged, are the L2 input to command construction;
 - empty sparse mappings still reach approval;
 - retry mappings are never merged with predecessors;

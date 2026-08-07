@@ -140,10 +140,11 @@ not reorder the occurrence sequence by registry order. Pre-freeze validation
 does reject an unclosed mandatory Assembly/T2T Review boundary and never fills
 or repairs the sequence; see
 [Runtime orchestration](../architecture/topics/runtime-orchestration.md).
-Use `--non-interactive` for automation: a human gate persists `blocked_human`
-and prints `inspect`, `review`, and `resume` continuation commands. The TUI is
-an optional conversational intake/planning alternative that uses the same
-frozen executor.
+New runs require real stdin and stdout TTYs and reject noninteractive automation
+before freeze. If an attached process later stops at a human gate, the durable
+`blocked_human` checkpoint remains recoverable through `inspect`, `review`, and
+`resume`. The TUI is an optional conversational intake/planning alternative
+that uses the same frozen executor.
 
 ## Active Sessions During Code Upgrades
 

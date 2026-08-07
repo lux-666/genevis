@@ -773,7 +773,10 @@ def _copy_planner_fields_to_draft(draft: Any, plan: Any, *, lifecycle: str) -> A
 
 def _freeze_and_execute(draft: Any, plan: Any) -> int:
     from app.entrypoints.ask_planner import build_run_config_payload
-    from app.entrypoints.run import execute_frozen_session
+    from app.entrypoints.run import (
+        _foreground_review_available,
+        execute_frozen_session,
+    )
     from app.entrypoints.tui_intake import (
         materialize_manifest_draft,
         save_tui_session_draft,
@@ -781,6 +784,14 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
     from app.execution.dependency_snapshot import DependencySnapshotError
     from app.storage.frozen_inputs import FrozenInputError, freeze_session_inputs
     from app.storage.paths import SessionPaths
+
+    if not _foreground_review_available():
+        print(
+            "error: starting a confirmed TUI run requires a real stdin/stdout "
+            "TTY before inputs can be frozen",
+            file=sys.stderr,
+        )
+        return 1
 
     paths = SessionPaths(draft.data_dir, draft.session_id)
     try:

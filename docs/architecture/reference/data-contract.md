@@ -47,7 +47,7 @@ Biological and stage contracts remain governed by their current specifications.
 5. “Planner” in current parameter code means a stage parameter recommender. It
    does not mean method selection or parent-graph planning.
 6. Public deterministic runs use `gene-agent run --manifest PATH --run-config
-   PATH --data-dir PATH [--non-interactive]`. The manifest solely owns the
+   PATH --data-dir PATH`. The manifest solely owns the
    session identity; `data-dir` owns layout placement at
    `runs/<session_id>/`. The run config must explicitly contain a
    `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
@@ -460,11 +460,6 @@ review policy live in the request artifact and are loaded through its verified
 ref. Resume validates request identity, request hash, decision schema, and any
 bound recommendation/attempt hash before applying the decision.
 
-> **Accepted planned behavior:** the foreground TTY and parameter-approval
-> timeout rules below are not fully implemented. Current differences and their
-> closure conditions are recorded in
-> [Architecture conformance](conformance.md).
-
 `payload.max_blocked_seconds` is the effective frozen RunConfig review-policy
 value: the default is `300`, and a per-stage override is valid only for a stage
 registered in the review registry. It records foreground behavior, not a
@@ -540,9 +535,6 @@ Requirements:
 The full ordered route, explicit stage-local skip reasons, review lifecycle, and
 terminal outcome must be reconstructible without checkpoint or reports.
 
-> **Accepted planned behavior:** interactive progress consumption is not yet
-> complete; see [Architecture conformance](conformance.md).
-
 Runtime progress has no durable projection of its own. An attached terminal
 consumes the verified frozen workflow plan and current graph control state at
 the parent-controller boundary. Detached inspection directly joins the
@@ -550,6 +542,25 @@ verified frozen plan, Ledger occurrence events, checkpoint summary, and the
 existing execution lock. Counts and percentages are ephemeral presentation
 arithmetic and must not be persisted as artifacts, reports, Ledger events,
 checkpoint fields, progress tables, or batch state.
+
+Machine-readable detached inspection publishes `inspect_schema_version: 1`.
+Its `workflow_progress` object uses only a verified frozen RunConfig for the
+ordered denominator and occurrence-qualified `stage_completed`,
+`stage_skipped`, and `stage_failed` Ledger events for terminal counts. Repeated
+stage names remain separate by `workflow_step_id`; failed and blocked steps are
+reported separately and are not counted as finished. If frozen inputs are
+missing or invalid, `plan_source` is `unavailable` and all plan-derived fields
+are `null` rather than inferred from registry order or observed events.
+Detached inspection also withholds the current occurrence, `active_interrupt`,
+`decision_requirements`, and any actionable review `next_action` until the
+frozen workflow inputs verify; raw Ledger events remain visible for diagnosis
+but cannot authorize a resume.
+
+The adjacent `execution` object reports `frozen_inputs_status`, read-only
+durable progress as `fresh`, `checkpoint`, `partial`, or `unavailable`, and the
+local advisory execution-lock observation as `true`, `false`, or `null` when
+unknown. The lock does not prove remote liveness or scheduler state, and
+inspection must not create the control directory or lock file.
 
 ## 14. Checkpoint
 

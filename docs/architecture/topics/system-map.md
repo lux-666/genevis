@@ -95,15 +95,17 @@ placeholders; an occurrence of either fails closed. Exact rules belong to
 [Stage contracts](../reference/stage-contracts.md).
 
 Real/operator new runs enter through `gene-agent run --manifest PATH --run-config
-PATH --data-dir PATH [--non-interactive]`. The manifest solely owns
+PATH --data-dir PATH`. The manifest solely owns
 `session_id`; `data-dir` is the layout root, so outputs live under
 `<data-dir>/runs/<session_id>/`. The command preflights both documents, freezes
-them with the exact requested occurrence sequence and dependency closure, and executes
-with SQLite. Its run config must explicitly contain a `requested_stages` JSON
+them only while stdin and stdout are attached to real TTYs, then executes the
+exact requested occurrence sequence and dependency closure with SQLite. Its
+run config must explicitly contain a `requested_stages` JSON
 list of `{stage, allow_local_execution}` objects; the boolean is local-process
 authorization for that particular occurrence. `requested_stages: null` is
-rejected while `[]` is a valid empty biological-stage plan. `gene-agent tui` remains an
-optional conversational intake and planning path into that same freeze/executor.
+rejected while `[]` is a valid empty biological-stage plan. `gene-agent tui`
+remains an optional conversational intake and planning path into that same
+freeze/executor.
 Other public commands inspect,
 audit, review, resume, or bootstrap. Production method execution is a local
 subprocess on the CLI host; running on a server means starting the same CLI in

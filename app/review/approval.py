@@ -25,7 +25,7 @@ from app.review.persistence import (
 )
 from app.schemas.artifacts import ArtifactRef, ParameterRecommendationCursor
 from app.schemas.parameter_recommendation import ParameterRecommendationManifestV3
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir
 from app.storage.ledger import Ledger
 
@@ -200,6 +200,113 @@ def validate_parameter_recommendation_manifest(
         )
 
 
+def apply_parameter_approval_timeout(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    timeout: dict[str, Any],
+) -> StateUpdate:
+    """Approve only the bound parameter recommendation after foreground expiry.
+
+    The existing stage decision applier remains the sole owner of parameter
+    evidence, attempt-chain, and persistence validation.  This resolver only
+    narrows the automatic decision and supplies compact countdown audit facts.
+    """
+
+    if request.gate_id != "parameter_approval":
+        raise ResumeValidationError(
+            "automatic parameter approval requires gate_id=parameter_approval"
+        )
+    if request.decision != "approve_parameters":
+        raise ResumeValidationError(
+            "automatic parameter approval can only approve persisted recommendations"
+        )
+    if request.decided_by != "auto_rule":
+        raise ResumeValidationError(
+            "automatic parameter approval requires decided_by=auto_rule"
+        )
+
+    configured_seconds = request.metadata.get("configured_seconds")
+    elapsed_seconds = request.metadata.get("elapsed_seconds")
+    if (
+        request.metadata.get("source") != "foreground_countdown"
+        or not isinstance(configured_seconds, int)
+        or isinstance(configured_seconds, bool)
+        or configured_seconds < 0
+        or not isinstance(elapsed_seconds, (int, float))
+        or isinstance(elapsed_seconds, bool)
+        or elapsed_seconds < configured_seconds
+        or timeout.get("configured_seconds") != configured_seconds
+        or timeout.get("expired") is not True
+    ):
+        raise ResumeValidationError(
+            "automatic parameter approval is not bound to the foreground countdown"
+        )
+
+    automatic_resolution = {
+        "source": "foreground_countdown",
+        "configured_seconds": configured_seconds,
+        "elapsed_seconds": elapsed_seconds,
+        "outcome": "approve_persisted_recommendation",
+    }
+    timeout_request = request.model_copy(
+        update={
+            "notes": [
+                *request.notes,
+                "foreground countdown expired; approved persisted parameters",
+            ],
+            "metadata": {
+                **request.metadata,
+                "automatic_resolution": automatic_resolution,
+            },
+        }
+    )
+
+    # Import lazily to avoid a registry/approval import cycle at module load.
+    from app.review.gates import apply_review_gate_decision
+
+    return apply_review_gate_decision(state, timeout_request)
+
+
+def _parameter_approval_audit_metadata(
+    request: ResumeReviewRequest,
+) -> dict[str, Any]:
+    """Keep decision-ledger metadata bounded to bindings and auto facts."""
+
+    metadata = {key: request.metadata[key] for key in PARAMETER_APPROVAL_BINDINGS}
+    automatic_resolution = request.metadata.get("automatic_resolution")
+    if request.decided_by == "auto_rule":
+        if not isinstance(automatic_resolution, dict):
+            raise ResumeValidationError(
+                "automatic parameter approval has no countdown audit metadata"
+            )
+        metadata.update(
+            {
+                "automatic_source": automatic_resolution.get("source"),
+                "automatic_configured_seconds": automatic_resolution.get(
+                    "configured_seconds"
+                ),
+                "automatic_elapsed_seconds": automatic_resolution.get(
+                    "elapsed_seconds"
+                ),
+                "automatic_outcome": automatic_resolution.get("outcome"),
+            }
+        )
+    return metadata
+
+
+def _automatic_resolution_from_audit_metadata(
+    audit_metadata: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if "automatic_source" not in audit_metadata:
+        return None
+    return {
+        "source": audit_metadata["automatic_source"],
+        "configured_seconds": audit_metadata["automatic_configured_seconds"],
+        "elapsed_seconds": audit_metadata["automatic_elapsed_seconds"],
+        "outcome": audit_metadata["automatic_outcome"],
+    }
+
+
 def persist_parameter_approval_decision(
     state: TopLevelState,
     *,
@@ -218,6 +325,8 @@ def persist_parameter_approval_decision(
     failure.
     """
 
+    audit_metadata = _parameter_approval_audit_metadata(request)
+    automatic_resolution = _automatic_resolution_from_audit_metadata(audit_metadata)
     try:
         workflow_step_id = current_workflow_step_id(state, expected_stage=stage)
         request_record = load_review_request(
@@ -244,8 +353,14 @@ def persist_parameter_approval_decision(
                 "decided_by": request.decided_by,
                 "notes": list(request.notes),
                 "bindings": {
-                    key: request.metadata[key] for key in PARAMETER_APPROVAL_BINDINGS
+                    key: audit_metadata[key] for key in PARAMETER_APPROVAL_BINDINGS
                 },
+                "rationale_artifact_ref": request.rationale_artifact_ref,
+                **(
+                    {"automatic_resolution": automatic_resolution}
+                    if automatic_resolution is not None
+                    else {}
+                ),
                 "request_hash": request_ref.sha256,
                 "validated_recommendation_manifest_ref": manifest_ref.model_dump(
                     mode="json"
@@ -267,8 +382,9 @@ def persist_parameter_approval_decision(
         decision=request.decision,
         notes=list(request.notes),
         artifact_ref=decision_ref.path_ref,
-        metadata={key: request.metadata[key] for key in PARAMETER_APPROVAL_BINDINGS},
+        metadata=audit_metadata,
         decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
         review_request_id=request_id,
     )
     return decision_ref

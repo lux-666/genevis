@@ -14,6 +14,7 @@ from app.reports.trace_writer import (
     STAGE_STATUS_BLOCKED_HUMAN,
     STAGE_STATUS_EXECUTED,
     STAGE_STATUS_FAILED,
+    STAGE_STATUS_NO_EVIDENCE,
     STAGE_STATUS_PLANNED_ONLY,
     STAGE_STATUS_SKIPPED,
     _workflow_steps_for_trace,
@@ -48,19 +49,34 @@ def _run(
     paths = SessionPaths(tmp, session_id)
     ensure_run_layout(paths)
     if create:
-        paths.manifest_path.write_text("session_id: s1\n", encoding="utf-8")
-        paths.run_config_path.write_text(
-            json.dumps(
-                {
-                    "requested_stages": [
-                        {"stage": stage, "allow_local_execution": False}
-                        for stage in requested_stages
-                    ]
-                }
-            ),
-            encoding="utf-8",
+        reads = paths.run_dir / "fixture_reads.fastq"
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        freeze_session_inputs(
+            paths,
+            manifest_draft={
+                "session_id": session_id,
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(reads.resolve())],
+                        "platform": "ont",
+                        "format": "fastq",
+                    }
+                ],
+            },
+            run_config_draft={
+                "requested_stages": [
+                    {"stage": stage, "allow_local_execution": False}
+                    for stage in requested_stages
+                ]
+            },
+            selected_methods={},
+            probe_environments=False,
         )
-        Ledger(paths.run_dir).create_session(session_id, str(paths.manifest_path))
+        Ledger(paths.run_dir).create_session(
+            session_id,
+            paths.to_ref(paths.input_manifest_path),
+        )
     return paths
 
 
@@ -194,7 +210,7 @@ def _workflow_state(paths: SessionPaths, *, workflow_step_index: int) -> dict:
             producer_step_id = step["step_id"]
     state = initial_state(
         session_id=paths.session_id,
-        input_manifest_ref=paths.to_ref(paths.manifest_path),
+        input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(paths.run_dir),
         workflow_steps=steps,
         stage_plan_ref=paths.to_ref(paths.run_config_path),
@@ -333,8 +349,9 @@ class SessionSummaryBuildTests(unittest.TestCase):
             trace = build_session_trace(paths.run_dir, "s1")
 
             self.assertEqual(_stage(trace, "read_qc")["status"], STAGE_STATUS_EXECUTED)
-            self.assertFalse(
-                any(stage["stage"] == "inventory" for stage in trace["stages"])
+            self.assertEqual(
+                _stage(trace, "inventory")["status"],
+                STAGE_STATUS_NO_EVIDENCE,
             )
             self.assertEqual(trace["decisions"][0]["review_request_id"], "review_001")
             self.assertEqual(trace["decisions_by_origin"]["human"], 1)

@@ -26,6 +26,7 @@ from app.entrypoints.review_interactive import (
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactRef
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
@@ -77,6 +78,18 @@ def _review_occurrence_state(
         ],
         "workflow_step_index": 1,
     }
+
+
+def _verified_inputs_for_review(stage: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        run_config=RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {"stage": stage, "allow_local_execution": False}
+                ]
+            }
+        )
+    )
 
 
 def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
@@ -693,13 +706,13 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with (
                 patch(
                     "app.storage.frozen_inputs.validate_frozen_inputs",
-                    return_value=SimpleNamespace(),
+                    return_value=_verified_inputs_for_review("assembly_review"),
                 ) as validate,
                 patch("builtins.input", side_effect=lambda _: next(inputs)),
             ):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            validate.assert_called_once()
+            self.assertGreaterEqual(validate.call_count, 1)
             decision_dir = Path(data_dir) / "work" / "steps"
             decisions = list(decision_dir.glob("*/*/reviews/*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)
@@ -715,13 +728,13 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with (
                 patch(
                     "app.storage.frozen_inputs.validate_frozen_inputs",
-                    return_value=SimpleNamespace(),
+                    return_value=_verified_inputs_for_review("hic_scaffolding"),
                 ) as validate,
                 patch("builtins.input", side_effect=lambda _: next(inputs)),
             ):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            validate.assert_called_once()
+            self.assertGreaterEqual(validate.call_count, 1)
             decision_dir = Path(data_dir) / "work" / "steps"
             decisions = list(decision_dir.glob("*/*/reviews/*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)

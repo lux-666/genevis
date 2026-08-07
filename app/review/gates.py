@@ -254,7 +254,9 @@ register_review_gate(
         decision_applier=(
             "app.stages.assembly.parameters.workflow:apply_parameter_approval_decision"
         ),
+        timeout_applier="app.review.approval:apply_parameter_approval_timeout",
         prompt_adapter="generic",
+        template_preferred_decision="approve_parameters",
         proposal_kind="parameter_recommendation",
         proposal_label="Assembly parameter proposal",
         parameter_recommendation_status="implemented",
@@ -333,10 +335,12 @@ register_review_gate(
             "app.stages.hic_scaffolding.parameters.workflow:"
             "apply_autohic_parameter_approval_decision"
         ),
+        timeout_applier="app.review.approval:apply_parameter_approval_timeout",
         interrupt_context_builder=(
             "app.review.interrupt_context:hic_scaffolding_interrupt_context"
         ),
         prompt_adapter="generic",
+        template_preferred_decision="approve_parameters",
         proposal_kind="parameter_recommendation",
         proposal_label="AutoHiC restriction-enzyme proposal",
         parameter_recommendation_status="implemented",
@@ -376,7 +380,9 @@ register_review_gate(
         decision_applier=(
             "app.stages.t2t.parameters.workflow:apply_t2t_parameter_approval_decision"
         ),
+        timeout_applier="app.review.approval:apply_parameter_approval_timeout",
         prompt_adapter="generic",
+        template_preferred_decision="approve_parameters",
         proposal_kind="parameter_recommendation",
         proposal_label="T2T threshold proposal",
         parameter_recommendation_status="implemented",

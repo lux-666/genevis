@@ -46,8 +46,8 @@ belong to the [run-data contract](../reference/data-contract.md).
 
 ## Progress is direct consumption, not another store
 
-The accepted interactive execution design introduces no durable progress
-projection. While a process is attached, the terminal consumes the verified
+Interactive execution introduces no durable progress projection. While a
+process is attached, the terminal consumes the verified
 frozen workflow plan and current compact graph control state directly at the
 parent-controller boundary. After detachment, `inspect` consumes the verified
 frozen plan, Ledger occurrence events, checkpoint summary, and the existing

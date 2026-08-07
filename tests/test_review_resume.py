@@ -34,6 +34,8 @@ from app.schemas.artifacts import (
 )
 from app.schemas.resource_ref import ResourceRef
 from app.storage.artifacts import publish_artifact_record
+from app.storage.frozen_inputs import freeze_session_inputs, frozen_execution_lock
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -893,7 +895,7 @@ class ReviewResumeTests(unittest.TestCase):
 
         self.assertIsNone(summary["decision_requirements"])
 
-    def test_inspect_session_uses_latest_review_event_order(self):
+    def test_inspect_session_rejects_review_occurrence_outside_frozen_plan(self):
         state = _assembly_blocked_state()
         from app.storage.ledger import Ledger
 
@@ -926,8 +928,16 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(
             summary["latest_unresolved_review_request"]["stage"], "hic_scaffolding"
         )
+        self.assertIsNone(summary["decision_requirements"])
+        self.assertIsNone(summary["active_interrupt"])
+        self.assertIsNone(summary["current_stage"])
+        self.assertIsNone(summary["current_workflow_step_id"])
+        self.assertIn(
+            "does not match the verified frozen workflow occurrence",
+            summary["review_request_verification_error"],
+        )
 
-    def test_inspect_session_keeps_repeated_stage_occurrences_distinct(self):
+    def test_inspect_session_keeps_unverified_occurrences_only_in_route_trace(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = v2_run_dir(Path(tmp) / "data", "s1")
             from app.storage.ledger import Ledger
@@ -949,8 +959,8 @@ class ReviewResumeTests(unittest.TestCase):
 
             summary = inspect_session("s1", data_dir)
 
-        self.assertEqual(summary["current_stage"], "assembly")
-        self.assertEqual(summary["current_workflow_step_id"], "step-003-assembly")
+        self.assertIsNone(summary["current_stage"])
+        self.assertIsNone(summary["current_workflow_step_id"])
         self.assertEqual(
             summary["route_trace"],
             [
@@ -958,6 +968,197 @@ class ReviewResumeTests(unittest.TestCase):
                 "step-003-assembly:route_controller",
             ],
         )
+
+    def test_inspect_session_projects_verified_frozen_plan_progress_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "inspect-progress"
+            reads = root / "reads.fastq"
+            reads.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        f"session_id: {session_id}",
+                        "assets:",
+                        "  - asset_type: raw_long_reads",
+                        f"    paths: [{reads}]",
+                        "    platform: ont",
+                        "    format: fastq",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            run_config = root / "run_config.json"
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [
+                            {"stage": "read_qc", "allow_local_execution": False},
+                            {"stage": "read_qc", "allow_local_execution": False},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paths = SessionPaths(root / "data", session_id)
+            freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                selected_methods={},
+            )
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session(session_id, "control/input_manifest.yaml")
+            ledger.record_stage_completed(
+                session_id,
+                "inventory",
+                workflow_step_id="step-000-inventory",
+            )
+            ledger.record_stage_skipped(
+                session_id,
+                "read_qc",
+                workflow_step_id="step-001-read_qc",
+                reason="operator_declined",
+            )
+            ledger.record_stage_completed(
+                session_id,
+                "assembly",
+                workflow_step_id="step-002-read_qc",
+            )
+            ledger.record_stage_entered(
+                session_id,
+                "read_qc",
+                workflow_step_id="step-002-read_qc",
+            )
+            ledger.record_stage_failed(
+                session_id,
+                "read_qc",
+                workflow_step_id="step-002-read_qc",
+                error="stage failed",
+            )
+            ledger.record_stage_entered(
+                session_id,
+                "assembly",
+                workflow_step_id="step-002-read_qc",
+                idempotency_key="mismatched-stage-entered:step-002-read_qc",
+            )
+
+            self.assertFalse(paths.execution_lock_path.exists())
+            summary = inspect_session(session_id, paths.run_dir)
+
+            self.assertEqual(summary["inspect_schema_version"], 1)
+            self.assertEqual(
+                summary["workflow_progress"],
+                {
+                    "plan_source": "frozen_run_config",
+                    "total_steps": 3,
+                    "completed_steps": 1,
+                    "skipped_steps": 1,
+                    "failed_steps": 1,
+                    "blocked_steps": 0,
+                    "unfinished_steps": 1,
+                    "current_workflow_step_id": None,
+                    "current_stage": None,
+                },
+            )
+            self.assertIsNone(summary["current_workflow_step_id"])
+            self.assertIsNone(summary["current_stage"])
+            self.assertEqual(
+                summary["execution"],
+                {
+                    "frozen_inputs_status": "verified",
+                    "durable_progress": "partial",
+                    "execution_lock_held": False,
+                },
+            )
+            self.assertFalse(paths.execution_lock_path.exists())
+            with frozen_execution_lock(paths):
+                locked_summary = inspect_session(session_id, paths.run_dir)
+            self.assertTrue(locked_summary["execution"]["execution_lock_held"])
+
+    def test_inspect_session_withholds_review_authority_when_freeze_is_invalid(self):
+        state = _assembly_blocked_state()
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        paths.run_config_path.write_text("{}\n", encoding="utf-8")
+
+        summary = inspect_session(state["session_id"], state["data_dir"])
+
+        self.assertEqual(summary["supervision_state"], "blocked_human")
+        self.assertIsNone(summary["decision_requirements"])
+        self.assertIsNone(summary["active_interrupt"])
+        self.assertIsNone(summary["current_stage"])
+        self.assertIsNone(summary["current_workflow_step_id"])
+        self.assertEqual(summary["next_action"]["kind"], "unknown")
+        self.assertIn(
+            "cannot be authorized without verified frozen workflow inputs",
+            summary["review_request_verification_error"],
+        )
+
+    def test_inspect_session_marks_invalid_frozen_inputs_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "inspect-invalid-frozen-inputs"
+            reads = root / "reads.fastq"
+            reads.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: {session_id}\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths: [{reads}]\n"
+                "    platform: ont\n"
+                "    format: fastq\n",
+                encoding="utf-8",
+            )
+            run_config = root / "run_config.json"
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [
+                            {"stage": "read_qc", "allow_local_execution": False}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paths = SessionPaths(root / "data", session_id)
+            freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                selected_methods={},
+            )
+            Ledger(paths.run_dir).create_session(
+                session_id, "control/input_manifest.yaml"
+            )
+            paths.run_config_path.write_text("{}\n", encoding="utf-8")
+
+            summary = inspect_session(session_id, paths.run_dir)
+
+            self.assertEqual(
+                summary["workflow_progress"],
+                {
+                    "plan_source": "unavailable",
+                    "total_steps": None,
+                    "completed_steps": None,
+                    "skipped_steps": None,
+                    "failed_steps": None,
+                    "blocked_steps": None,
+                    "unfinished_steps": None,
+                    "current_workflow_step_id": None,
+                    "current_stage": None,
+                },
+            )
+            self.assertEqual(
+                summary["execution"],
+                {
+                    "frozen_inputs_status": "invalid_or_missing",
+                    "durable_progress": "unavailable",
+                    "execution_lock_held": False,
+                },
+            )
 
     def test_inspect_session_does_not_treat_operator_report_as_lifecycle_truth(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1250,6 +1451,37 @@ def _publish_assembly_candidate(
     }
 
 
+def _freeze_review_test_inputs(
+    paths: SessionPaths,
+    requested_stages: list[str],
+) -> None:
+    reads = paths.run_dir / "fixture_reads.fastq"
+    reads.parent.mkdir(parents=True, exist_ok=True)
+    reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    freeze_session_inputs(
+        paths,
+        manifest_draft={
+            "session_id": paths.session_id,
+            "assets": [
+                {
+                    "asset_type": "raw_long_reads",
+                    "paths": [str(reads.resolve())],
+                    "platform": "ont",
+                    "format": "fastq",
+                }
+            ],
+        },
+        run_config_draft={
+            "requested_stages": [
+                {"stage": stage, "allow_local_execution": False}
+                for stage in requested_stages
+            ]
+        },
+        selected_methods={},
+        probe_environments=False,
+    )
+
+
 def _assembly_blocked_state(
     *,
     decisions_allowed: list[str] | None = None,
@@ -1335,6 +1567,10 @@ def _assembly_blocked_state(
         "skip_reasons": {},
     }
     state.update(_frozen_workflow("assembly_review", "hic_scaffolding"))
+    _freeze_review_test_inputs(
+        paths,
+        [step["stage"] for step in state["workflow_steps"][1:]],
+    )
     persisted = persist_review_request(
         state,
         stage="assembly_review",
@@ -1519,6 +1755,10 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
         "skip_reasons": {},
     }
     state.update(_frozen_workflow("hic_scaffolding", "gapcloser"))
+    _freeze_review_test_inputs(
+        paths,
+        [step["stage"] for step in state["workflow_steps"][1:]],
+    )
     payload = {
         "stage": "hic_scaffolding",
         "gate_id": "hic_scaffolding",

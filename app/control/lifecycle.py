@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from langchain_core.runnables import RunnableConfig
 
 from app.control import errors as control_errors
-from app.control.workflow_plan import current_workflow_step_id
+from app.control.workflow_plan import (
+    current_workflow_step_id,
+    workflow_steps_from_run_config,
+)
 from app.review.approval import ensure_decision_allowed, load_verified_interrupt_request
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
@@ -267,8 +270,40 @@ def inspect_session(
     latest_blocked_report = (
         latest_operator_report if supervision_state == "blocked_human" else None
     )
+    workflow_progress, execution = _inspect_execution_read_model(
+        paths,
+        events,
+        supervision_state=supervision_state,
+        latest_unresolved_review_request=latest_unresolved_review_request,
+        current_workflow_step_id=current_workflow_step_id,
+        current_stage=current_stage,
+    )
+    if workflow_progress["plan_source"] == "frozen_run_config":
+        current_workflow_step_id = workflow_progress["current_workflow_step_id"]
+        current_stage = workflow_progress["current_stage"]
+        if (
+            supervision_state == "blocked_human"
+            and workflow_progress["blocked_steps"] != 1
+        ):
+            decision_requirements = None
+            active_interrupt = None
+            decision_requirements_error = decision_requirements_error or (
+                "blocked review request does not match the verified frozen "
+                "workflow occurrence"
+            )
+    else:
+        current_workflow_step_id = None
+        current_stage = None
+        if latest_unresolved_review_request is not None:
+            decision_requirements = None
+            active_interrupt = None
+            decision_requirements_error = decision_requirements_error or (
+                "blocked review request cannot be authorized without verified "
+                "frozen workflow inputs"
+            )
 
     summary: dict[str, Any] = {
+        "inspect_schema_version": 1,
         "session_id": session_id,
         "session": session,
         "current_stage": current_stage,
@@ -300,6 +335,8 @@ def inspect_session(
         "latest_relevant_artifacts": _latest_relevant_artifacts(artifacts),
         "decision_requirements": decision_requirements,
         "artifact_count": len(artifacts),
+        "workflow_progress": workflow_progress,
+        "execution": execution,
     }
     if decision_requirements_error:
         summary["review_request_verification_error"] = decision_requirements_error
@@ -906,6 +943,117 @@ def _latest_stage_projection(events: list[dict[str, Any]]) -> dict[str, str] | N
                 "workflow_step_id": str(workflow_step_id),
             }
     return None
+
+
+def _inspect_execution_read_model(
+    paths: SessionPaths,
+    events: list[dict[str, Any]],
+    *,
+    supervision_state: str,
+    latest_unresolved_review_request: dict[str, Any] | None,
+    current_workflow_step_id: str | None,
+    current_stage: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Project verified-plan progress plus per-session execution evidence.
+
+    The frozen RunConfig is the sole denominator authority.  If it cannot be
+    verified, inspection reports all plan-derived values as unavailable rather
+    than reconstructing a plan from Ledger events or the stage registry.
+    """
+
+    from app.storage.frozen_inputs import (
+        frozen_execution_lock_held,
+        frozen_execution_progress,
+        validate_frozen_inputs,
+    )
+
+    try:
+        lock_held: bool | None = frozen_execution_lock_held(paths)
+    except OSError:
+        lock_held = None
+
+    unavailable_progress = {
+        "plan_source": "unavailable",
+        "total_steps": None,
+        "completed_steps": None,
+        "skipped_steps": None,
+        "failed_steps": None,
+        "blocked_steps": None,
+        "unfinished_steps": None,
+        "current_workflow_step_id": None,
+        "current_stage": None,
+    }
+    try:
+        bundle = validate_frozen_inputs(paths)
+        steps = workflow_steps_from_run_config(bundle.run_config)
+    except (OSError, ValueError):
+        return unavailable_progress, {
+            "frozen_inputs_status": "invalid_or_missing",
+            "durable_progress": "unavailable",
+            "execution_lock_held": lock_held,
+        }
+
+    try:
+        durable_progress: str = frozen_execution_progress(paths)
+    except (OSError, ValueError):
+        durable_progress = "unavailable"
+
+    step_by_id = {step["step_id"]: step for step in steps}
+    terminal_by_step: dict[str, str] = {}
+    for event in events:
+        step_id = event.get("workflow_step_id")
+        event_type = event.get("event_type")
+        step = step_by_id.get(str(step_id))
+        if step is None or event.get("stage") != step["stage"]:
+            continue
+        if event_type in {"stage_completed", "stage_skipped", "stage_failed"}:
+            terminal_by_step[str(step_id)] = str(event_type)
+
+    completed_steps = sum(
+        event_type == "stage_completed" for event_type in terminal_by_step.values()
+    )
+    skipped_steps = sum(
+        event_type == "stage_skipped" for event_type in terminal_by_step.values()
+    )
+    failed_steps = sum(
+        event_type == "stage_failed" for event_type in terminal_by_step.values()
+    )
+    blocked_step_id: str | None = None
+    if supervision_state == "blocked_human" and latest_unresolved_review_request:
+        candidate_step_id = str(
+            latest_unresolved_review_request.get("workflow_step_id") or ""
+        )
+        candidate_step = step_by_id.get(candidate_step_id)
+        if (
+            candidate_step is not None
+            and latest_unresolved_review_request.get("stage") == candidate_step["stage"]
+        ):
+            blocked_step_id = candidate_step_id
+    active_step = step_by_id.get(current_workflow_step_id or "")
+    active_step_matches = (
+        active_step is not None and active_step["stage"] == current_stage
+    )
+    total_steps = len(steps)
+    return (
+        {
+            "plan_source": "frozen_run_config",
+            "total_steps": total_steps,
+            "completed_steps": completed_steps,
+            "skipped_steps": skipped_steps,
+            "failed_steps": failed_steps,
+            "blocked_steps": int(blocked_step_id is not None),
+            "unfinished_steps": total_steps - completed_steps - skipped_steps,
+            "current_workflow_step_id": (
+                current_workflow_step_id if active_step_matches else None
+            ),
+            "current_stage": current_stage if active_step_matches else None,
+        },
+        {
+            "frozen_inputs_status": "verified",
+            "durable_progress": durable_progress,
+            "execution_lock_held": lock_held,
+        },
+    )
 
 
 def _durable_route_trace(events: list[dict[str, Any]]) -> list[str]:

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.control.lifecycle import inspect_session
 from app.graph.builder import build_graph
@@ -1220,7 +1221,11 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
                 "--run-config",
                 str(run_config),
             ]
-            rc = run_main(argv)
+            with patch(
+                "app.entrypoints.run._foreground_review_available",
+                return_value=True,
+            ):
+                rc = run_main(argv)
             self.assertEqual(rc, 0)
 
             artifact_dir = SessionPaths(tmpdir, session_id).workflow_step_artifacts_dir(

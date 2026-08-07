@@ -43,7 +43,13 @@ from app.schemas.run_config import (
     infer_assembly_method,
 )
 from app.schemas.shared_parameters import SharedParameters
-from app.schemas.state import StageOutputs, initial_state, validate_stage_outputs
+from app.schemas.state import (
+    StageOutputs,
+    TopLevelState,
+    initial_state,
+    validate_stage_outputs,
+    validate_workflow_steps,
+)
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
 
@@ -284,13 +290,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Workflow data-layout root; outputs land below <root>/runs/<session_id>",
     )
-    run_parser.add_argument(
-        "--non-interactive",
-        action="store_true",
-        default=False,
-        help="Persist a human gate and exit instead of prompting",
-    )
-
     inspect_parser = subparsers.add_parser(
         "inspect", help="Inspect a workflow session from durable records"
     )
@@ -465,6 +464,37 @@ def _foreground_review_available() -> bool:
         return False
 
 
+def _render_attached_progress(state: TopLevelState) -> None:
+    """Render ephemeral occurrence progress from the frozen graph cursor."""
+
+    steps = validate_workflow_steps(state.get("workflow_steps"))
+    index = state.get("workflow_step_index")
+    if type(index) is not int or not 0 <= index <= len(steps):
+        raise ValueError("workflow_step_index is outside the frozen workflow plan")
+
+    skipped_ids = set((state.get("skip_reasons") or {}).keys())
+    skipped = sum(1 for step in steps[:index] if step["step_id"] in skipped_ids)
+    completed = index - skipped
+    current = steps[index] if index < len(steps) else None
+    current_step_id = current["step_id"] if current is not None else "-"
+    current_stage = (
+        current["stage"]
+        if current is not None
+        else str(state.get("current_stage") or "done")
+    )
+    supervision = state.get("supervision_state")
+    progress_state = {
+        "blocked_human": "blocked",
+        "failed_terminal": "failed",
+        "completed": "completed",
+    }.get(str(supervision), "running")
+    print(
+        f"progress: finished={index}/{len(steps)} completed={completed} "
+        f"skipped={skipped} current={current_step_id} stage={current_stage} "
+        f"state={progress_state}"
+    )
+
+
 def _run(args: argparse.Namespace) -> int:
     """Preflight, freeze, and execute one deterministic structured run."""
 
@@ -482,9 +512,15 @@ def _run(args: argparse.Namespace) -> int:
             manifest_draft=args.manifest,
             run_config_draft=args.run_config,
         )
-
         data_dir = _resolve_data_dir(args.data_dir)
         paths = SessionPaths(data_dir, prepared.manifest.session_id)
+        if not _foreground_review_available():
+            print(
+                "error: run requires a real stdin/stdout TTY before inputs "
+                "can be frozen",
+                file=sys.stderr,
+            )
+            return 1
         freeze_session_inputs(
             paths,
             prepared_inputs=prepared,
@@ -499,9 +535,7 @@ def _run(args: argparse.Namespace) -> int:
             paths.session_id,
             paths.data_root,
             checkpointer="sqlite",
-            interactive_gate=(
-                not args.non_interactive and _foreground_review_available()
-            ),
+            interactive_gate=True,
         )
     except Exception as exc:
         print(f"error: run execution failed: {exc}", file=sys.stderr)
@@ -616,6 +650,9 @@ def _execute_verified_frozen_session(
         backend=backend,
         data_dir=run_dir,
         verified_inputs=bundle,
+        on_controller_transition=(
+            _render_attached_progress if interactive_gate else None
+        ),
     )
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     resumed_from_blocked_checkpoint = False
@@ -723,14 +760,14 @@ def _execute_verified_frozen_session(
                     "resume_note: existing blocked checkpoint remains blocked; "
                     "the foreground countdown is not restored across processes"
                 )
-                _print_noninteractive_gate_guidance(paths)
+                _print_blocked_gate_guidance(paths)
             elif interactive_gate:
                 print(
                     "resume_note: use `gene-agent review` or `gene-agent resume` "
                     "to continue"
                 )
             else:
-                _print_noninteractive_gate_guidance(paths)
+                _print_blocked_gate_guidance(paths)
         else:
             print(
                 "resume_note: durable cross-process resume requires "
@@ -769,7 +806,7 @@ def _execute_verified_frozen_session(
     return 0
 
 
-def _print_noninteractive_gate_guidance(paths: SessionPaths) -> None:
+def _print_blocked_gate_guidance(paths: SessionPaths) -> None:
     """Print shell-copyable continuation commands for one durable human gate."""
 
     session_id = paths.session_id
@@ -841,6 +878,54 @@ def _record_automatic_review_failure(
         workflow_step_id=workflow_step_id,
         subject_id=gate_id,
     )
+
+
+def _same_verified_blocked_review(
+    original: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    """Return whether two inspect summaries name the same verified human gate."""
+
+    if (
+        current.get("supervision_state") != "blocked_human"
+        or current.get("error")
+        or current.get("review_request_verification_error")
+        or current.get("session_id") != original.get("session_id")
+    ):
+        return False
+
+    original_requirements = original.get("decision_requirements") or {}
+    current_requirements = current.get("decision_requirements") or {}
+    for key in (
+        "stage",
+        "gate_id",
+        "review_request_id",
+        "request_hash",
+        "review_request_artifact_ref",
+    ):
+        value = original_requirements.get(key)
+        if not value or current_requirements.get(key) != value:
+            return False
+
+    original_step_id = original.get("current_workflow_step_id")
+    if (
+        original_step_id is not None
+        and current.get("current_workflow_step_id") != original_step_id
+    ):
+        return False
+
+    original_interrupt = original.get("active_interrupt") or {}
+    current_interrupt = current.get("active_interrupt") or {}
+    for key in (
+        "workflow_step_id",
+        "review_request_id",
+        "request_hash",
+        "request_ref",
+    ):
+        value = original_interrupt.get(key)
+        if value is not None and current_interrupt.get(key) != value:
+            return False
+    return True
 
 
 def _interactive_gate_loop(
@@ -992,13 +1077,24 @@ def _interactive_gate_loop(
                         )
                         print(
                             f"error: automatic review failed: {exc}; "
-                            "continuing with manual review",
+                            "checking whether manual review can continue",
                             file=sys.stderr,
                         )
+                        fallback_summary = load_blocked_gate_summary(
+                            session_id, data_dir
+                        )
+                        if not _same_verified_blocked_review(summary, fallback_summary):
+                            print(
+                                "error: automatic review fallback refused because "
+                                "the blocked gate is no longer the same verified "
+                                "request",
+                                file=sys.stderr,
+                            )
+                            break
                         gate_result = collect_gate_decision(
                             session_id,
                             data_dir,
-                            summary=summary,
+                            summary=fallback_summary,
                             render_brief=False,
                         )
                         if gate_result is not None:
@@ -1031,11 +1127,75 @@ def _interactive_gate_loop(
                 verified_inputs=verified_inputs,
             )
         except ResumeTransactionError as exc:
-            print(
-                f"error: resume {exc.phase} failed: {exc}",
-                file=sys.stderr,
-            )
-            break
+            if source == "foreground_countdown":
+                interrupt = summary.get("active_interrupt") or {}
+                workflow_step_id = str(
+                    interrupt.get("workflow_step_id")
+                    or summary.get("current_workflow_step_id")
+                    or ""
+                )
+                countdown = (event_context or {}).get("foreground_countdown") or {}
+                elapsed_seconds = float(
+                    countdown.get("elapsed_seconds") or wait_seconds
+                )
+                _record_automatic_review_failure(
+                    data_dir=data_dir,
+                    session_id=session_id,
+                    stage=stage,
+                    workflow_step_id=workflow_step_id,
+                    gate_id=gate_id,
+                    error=exc,
+                    configured_seconds=wait_seconds,
+                    elapsed_seconds=elapsed_seconds,
+                )
+                print(
+                    f"error: automatic review transaction failed: {exc}; "
+                    "checking whether manual review can continue",
+                    file=sys.stderr,
+                )
+                fallback_summary = load_blocked_gate_summary(session_id, data_dir)
+                if not _same_verified_blocked_review(summary, fallback_summary):
+                    print(
+                        "error: automatic review fallback refused because the "
+                        "blocked gate is no longer the same verified request",
+                        file=sys.stderr,
+                    )
+                    break
+                gate_result = collect_gate_decision(
+                    session_id,
+                    data_dir,
+                    summary=fallback_summary,
+                    render_brief=False,
+                )
+                if gate_result is None:
+                    print("review skipped; session remains blocked")
+                    break
+                manual_request, _raw_decision = gate_result
+                try:
+                    transaction = execute_resume_transaction(
+                        graph=graph,
+                        config=config,
+                        session_id=session_id,
+                        data_dir=data_dir,
+                        request=manual_request,
+                        source="interactive_gate",
+                        checkpointer="sqlite",
+                        blocked_timeout_seconds=None,
+                        event_context=None,
+                        verified_inputs=verified_inputs,
+                    )
+                except ResumeTransactionError as manual_exc:
+                    print(
+                        f"error: resume {manual_exc.phase} failed: {manual_exc}",
+                        file=sys.stderr,
+                    )
+                    break
+            else:
+                print(
+                    f"error: resume {exc.phase} failed: {exc}",
+                    file=sys.stderr,
+                )
+                break
 
         result = transaction.state
         if transaction.decision_artifact_path is not None:
@@ -1161,6 +1321,36 @@ def _print_inspect_text(
     print(
         f"durable_resume_available: {str(summary['durable_resume_available']).lower()}"
     )
+    print(f"current_workflow_step_id: {summary.get('current_workflow_step_id')}")
+    print(f"current_stage: {summary.get('current_stage')}")
+    workflow_progress = summary.get("workflow_progress") or {}
+    if workflow_progress:
+        completed = workflow_progress.get("completed_steps")
+        skipped = workflow_progress.get("skipped_steps")
+        finished = (
+            completed + skipped
+            if isinstance(completed, int) and isinstance(skipped, int)
+            else None
+        )
+        print(
+            "workflow_progress: "
+            f"finished={finished}/{workflow_progress.get('total_steps')} "
+            f"completed={completed} skipped={skipped} "
+            f"failed={workflow_progress.get('failed_steps')} "
+            f"blocked={workflow_progress.get('blocked_steps')} "
+            f"unfinished={workflow_progress.get('unfinished_steps')} "
+            f"source={workflow_progress.get('plan_source')}"
+        )
+    execution = summary.get("execution") or {}
+    if execution:
+        lock_held = execution.get("execution_lock_held")
+        lock_text = str(lock_held).lower() if lock_held is not None else "unknown"
+        print(
+            "execution: "
+            f"frozen_inputs={execution.get('frozen_inputs_status')} "
+            f"durable_progress={execution.get('durable_progress')} "
+            f"lock_held={lock_text}"
+        )
     print(f"artifact_count: {summary.get('artifact_count', 0)}")
     print(f"decisions_by_origin: {summary.get('decisions_by_origin', {})}")
     if summary.get("latest_review_request"):

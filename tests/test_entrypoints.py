@@ -36,6 +36,7 @@ from app.schemas.artifacts import ArtifactRef
 from app.schemas.run_config import AssemblyRunConfig, RunConfig
 from app.schemas.state import initial_state
 from app.storage.artifacts import read_artifact_records
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
 from tests.data_v2 import v2_run_dir
@@ -97,6 +98,29 @@ def _write_assembly_review_request(
 ) -> tuple[Path, PersistedReviewRequest]:
     run_dir = v2_run_dir(data_root, session_id)
     paths = SessionPaths.from_run_dir(run_dir)
+    reads = run_dir / "fixture_reads.fastq"
+    reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    freeze_session_inputs(
+        paths,
+        manifest_draft={
+            "session_id": session_id,
+            "assets": [
+                {
+                    "asset_type": "raw_long_reads",
+                    "paths": [str(reads.resolve())],
+                    "platform": "ont",
+                    "format": "fastq",
+                }
+            ],
+        },
+        run_config_draft={
+            "requested_stages": [
+                {"stage": "assembly_review", "allow_local_execution": False}
+            ]
+        },
+        selected_methods={},
+        probe_environments=False,
+    )
     payload = ReviewPayload(
         stage="assembly_review",
         gate_id="assembly_review",

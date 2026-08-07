@@ -18,6 +18,7 @@ from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState, initial_state
 from app.storage.artifacts import register_artifact_records
 from app.storage.audit import verify_checkpoint_free_artifact_retention
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
 
@@ -278,7 +279,36 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "s1")
             ensure_run_layout(paths)
-            paths.manifest_path.write_text("session_id: s1\n", encoding="utf-8")
+            reads = paths.run_dir / "fixture_reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            paths.manifest_path.write_text(
+                "session_id: s1\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths: [{reads}]\n"
+                "    platform: ont\n"
+                "    format: fastq\n",
+                encoding="utf-8",
+            )
+            freeze_session_inputs(
+                paths,
+                manifest_draft=paths.manifest_path,
+                run_config_draft={
+                    "requested_stages": [
+                        {
+                            "stage": "genome_survey",
+                            "allow_local_execution": False,
+                        },
+                        {"stage": "assembly", "allow_local_execution": False},
+                        {
+                            "stage": "assembly_review",
+                            "allow_local_execution": False,
+                        },
+                    ]
+                },
+                selected_methods={},
+                probe_environments=False,
+            )
 
             artifact_specs = (
                 (

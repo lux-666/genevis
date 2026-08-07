@@ -770,13 +770,18 @@ def frozen_execution_lock(paths: SessionPaths) -> Iterator[None]:
 def frozen_execution_lock_held(paths: SessionPaths) -> bool:
     """Return whether another open file description owns execution."""
 
-    paths.control_dir.mkdir(parents=True, exist_ok=True)
-    with paths.execution_lock_path.open("a+b") as handle:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    lock_path = paths.execution_lock_path
+    if not lock_path.exists():
+        return False
+    try:
+        with lock_path.open("rb") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+    except FileNotFoundError:
         return False
 
 

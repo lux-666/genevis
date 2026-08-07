@@ -1,7 +1,6 @@
 # Review and Resume
 
-> **Status:** implemented, with accepted planned parameter-approval timeout
-> behavior recorded below.
+> **Status:** implemented.
 > **Read when:** changing a human gate, decision persistence, approval binding,
 > resume validation, or post-review routing.  
 > **Comes from:** a stage-owned immutable review request and compact blocked
@@ -36,6 +35,12 @@ artifacts live below `artifacts/steps/<workflow_step_id>/<stage>/reviews/`.
 Resume rejects a request whose occurrence does not match the active frozen
 workflow step.
 
+Detached inspection follows the same authority boundary. If frozen workflow
+inputs are missing, invalid, or disagree with the request's stage/occurrence,
+it may expose the raw Ledger request for diagnosis but must suppress the
+current occurrence, active interrupt, decision requirements, and actionable
+review next step. An unverified Ledger projection cannot authorize resume.
+
 The review registry centralizes gate declarations, allowed decisions,
 occurrence validation, dispatch, and timing metadata. The external resume DTO
 is one strict `ResumeReviewRequest` with a string decision field. Stage
@@ -52,8 +57,8 @@ configuration may override it per registry-backed review stage through
 invalid. The effective value is copied into the immutable request so the gate
 can be verified without consulting mutable current configuration.
 
-The values have exactly these meanings during the original foreground,
-interactive `gene-agent run`:
+The values have exactly these meanings during the original attached executor,
+whether produced by structured `run` files or a confirmed TUI draft:
 
 - `-1`: wait indefinitely for an operator decision.
 - `0`: immediately trigger that gate's existing automatic resolver, if eligible.
@@ -62,23 +67,23 @@ interactive `gene-agent run`:
 
 The timer never supplies a decision. Assembly Review retains its existing
 evidence eligibility and bound LLM recommendation artifact; assembly route
-selection retains its recommendation timeout applier. A gate with no existing
-automatic resolver, an ineligible resolver, or a failed resolver remains
-`blocked_human` and keeps the manual path. Enter claims the gate, cancels the
+selection retains its recommendation timeout applier. Assembly, AutoHiC, and
+T2T parameter approval share a resolver that accepts only the recommendation
+bound to the immutable request. A gate with no eligible resolver remains
+manual. A failed automatic transaction returns to manual review in the same
+terminal only while the same verified `blocked_human` request remains; any
+identity or integrity drift fails closed. Enter claims the gate, cancels the
 timer, and opens the normal manual prompts.
-The timer is not a durable scheduler: Ctrl-C, EOF, process exit, missing
-stdin/stdout TTY capability, and `--non-interactive` leave the request and
-`blocked_human` checkpoint intact. There is no daemon or background wake-up.
+The timer is not a durable scheduler: Ctrl-C, EOF, or process exit leaves the
+request and `blocked_human` checkpoint intact. Missing TTY capability prevents
+a new run from freezing in the first place. There is no daemon or background wake-up.
 Re-running the same frozen session detects the already-blocked checkpoint,
 does not invoke it, and prints manual recovery commands. A later `review` or
 `resume` is always a manual recovery action; it never reconstructs or expires
 a countdown from the prior `blocked_at` time. Strict/auto review modes and a
 public resume timeout override are not part of the interface.
 
-## Accepted parameter-approval timeout behavior
-
-> **Status:** planned. Assembly, AutoHiC, and T2T parameter-approval gates do
-> not yet register the shared timeout resolver described here.
+## Parameter-approval timeout behavior
 
 The countdown begins only after a parameter recommendation has been parsed,
 verified, persisted beneath its schema-3 manifest, and bound into an immutable
@@ -95,7 +100,7 @@ For every registered parameter-approval gate:
   approve/reject prompt when claimed, and approves the same recommendation at
   expiry.
 
-One shared timeout applier must enforce `decision=approve_parameters` and
+One shared timeout applier enforces `decision=approve_parameters` and
 `decided_by=auto_rule`, enrich the audit metadata, and then delegate to the
 stage's existing parameter decision applier. Assembly, AutoHiC, and T2T retain
 their current request, recommendation-manifest, attempt-chain, predecessor,
@@ -125,9 +130,9 @@ decision file) and never turns a durable block into an automatic approval.
 A countdown-triggered automatic decision is accepted only when the resume
 transaction's trusted source and hash-bound countdown metadata identify the
 active `foreground_countdown`. The decision origin and rationale still come
-from the gate's resolver (`llm_provisional` for Assembly Review or `auto_rule`
-for the route timeout); a manual `review` or `resume` source cannot impersonate
-the route timeout even if a decision file claims otherwise.
+from the gate's resolver (`llm_provisional` or `auto_rule`); a manual `review`
+or `resume` source cannot impersonate an automatic timeout even if a decision
+file claims otherwise.
 
 The resume flow is:
 

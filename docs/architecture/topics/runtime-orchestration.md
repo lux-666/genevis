@@ -1,7 +1,6 @@
 # Runtime Orchestration
 
-> **Status:** implemented, with an accepted planned interactive convergence
-> recorded below.
+> **Status:** implemented.
 > **Read when:** tracing CLI dispatch, frozen-session startup, parent routing,
 > stage selection, or terminal behavior.  
 > **Comes from:** a structured public run or [TUI and planning](tui-and-planning.md), then a validated whole-run frozen contract.
@@ -20,7 +19,7 @@ The installed `gene-agent` command dispatches to `app.entrypoints.run:main`.
 Real/operator new work uses exactly:
 
 ```text
-gene-agent run --manifest PATH --run-config PATH --data-dir PATH [--non-interactive]
+gene-agent run --manifest PATH --run-config PATH --data-dir PATH
 ```
 
 All three paths are required. The manifest solely owns `session_id`; the CLI
@@ -58,10 +57,11 @@ validation and asset registration consume this already verified in-memory
 manifest, RunConfig, canonical declarations, and run-owned paths; they do not
 reopen an unchecked control file. The bundle is closure context, not a graph
 channel or checkpoint payload. A new process validates again before building
-its graph. The public run always uses SQLite. Foreground review additionally
-requires stdin and stdout to be real TTYs. With `--non-interactive` or without
-that TTY capability, a human gate persists `blocked_human` and prints
-`inspect`, `review`, and `resume` continuations instead of prompting.
+its graph. The public run always uses SQLite. Every new structured run and
+confirmed TUI draft requires stdin and stdout to be real TTYs before freeze;
+missing capability fails without publishing frozen inputs. An already-frozen
+blocked checkpoint remains recoverable through `inspect`, `review`, and
+`resume`, but it is not a second non-interactive new-run path.
 
 The frozen RunConfig review policy defaults to
 `review_policy.max_blocked_seconds: 300` and permits per-stage overrides only
@@ -70,21 +70,22 @@ immediately triggers the gate's existing automatic resolver when it is eligible;
 a positive value starts an Enter-claim countdown that triggers the same resolver
 at expiry. The timer never chooses from registry defaults. Assembly Review keeps
 its evidence-qualified LLM recommender, assembly route selection keeps its
-recommendation timeout applier, and gates without an existing resolver remain
-manual. Resolver failure leaves the checkpoint blocked for manual review.
+recommendation timeout applier, and Assembly, AutoHiC, and T2T parameter
+approval share one resolver that accepts only the persisted recommendation
+bound to the immutable request. Gates without a resolver remain manual. If an
+automatic transaction fails while that same request is still a verified
+`blocked_human` checkpoint, the attached terminal falls back to manual review;
+identity or integrity drift fails closed.
 This mechanism exists only while the originating run is foreground and
 interactive. Enter cancels it and opens manual prompts. Ctrl-C, EOF, process
-exit, missing TTY capability, or `--non-interactive` preserve a durable human
-block; there is no daemon/background timer. Starting the frozen session again
+exit preserve a durable human block; there is no daemon/background timer.
+Starting the frozen session again
 does not invoke an already-blocked checkpoint or restore its timer. Subsequent
 `review` and `resume` commands are manual and must not infer a deadline from the
 original block time. The public interfaces have no strict/auto review mode or
 resume-timeout override.
 
-## Accepted interactive execution convergence
-
-> **Status:** planned. The current `--non-interactive` behavior and missing
-> parameter-approval timeout resolvers are recorded as conformance debt.
+## Unified interactive execution
 
 The accepted new-run boundary has two different pre-freeze producers but only
 one post-freeze execution path:
@@ -103,7 +104,7 @@ checks, describes, edits, and confirms a mutable draft before creating the same
 frozen contract.
 
 Every new run requires stdin and stdout attached to a real TTY, checked before
-freeze. The accepted public new-run contract has no non-interactive execution
+freeze. The public new-run contract has no non-interactive execution
 branch. `review` and `resume` remain recovery tools after an interrupted durable
 session; they are not a second normal execution lifecycle.
 

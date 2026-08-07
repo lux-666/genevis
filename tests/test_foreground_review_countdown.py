@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.control.errors import ResumeValidationError
+from app.control.resume_transaction import ResumeTransactionError
 from app.entrypoints.review_interactive import wait_for_gate_claim
 from app.entrypoints.run import _interactive_gate_loop
 from app.review.base import ResumeReviewRequest
+from app.review.gates import get_review_gate
 
 
 def _summary(wait_seconds: int) -> dict:
@@ -77,6 +79,21 @@ def _human_request(
         review_request_hash="a" * 64,
         decision="select_hifi" if stage == "assembly" else "continue",
     )
+
+
+def test_parameter_approval_gates_share_the_foreground_timeout_resolver():
+    resolver_paths = {
+        get_review_gate(stage, "parameter_approval").timeout_applier
+        for stage in ("assembly", "hic_scaffolding", "t2t")
+    }
+
+    assert resolver_paths == {"app.review.approval:apply_parameter_approval_timeout"}
+    for stage in ("assembly", "hic_scaffolding", "t2t"):
+        gate = get_review_gate(stage, "parameter_approval")
+        assert gate.template_preferred_decision == "approve_parameters"
+        assert (
+            gate.load_timeout_applier().__name__ == "apply_parameter_approval_timeout"
+        )
 
 
 class GateClaimWaitTests(unittest.TestCase):
@@ -157,15 +174,19 @@ class ForegroundGateLoopTests(unittest.TestCase):
         claim: str | None = None,
         collected: tuple[ResumeReviewRequest, dict] | None = None,
         summary: dict | None = None,
+        summary_sequence: list[dict] | None = None,
+        execute_side_effect: list[object] | None = None,
         verified_inputs: object | None = None,
     ) -> tuple[dict, Mock, Mock, Mock]:
         summary = summary or _summary(wait_seconds)
+        completed_transaction = SimpleNamespace(
+            state={"supervision_state": "completed", "current_stage": "done"},
+            decision_artifact_path=None,
+            annotation_intake_artifact_ref=None,
+        )
         execute = Mock(
-            return_value=SimpleNamespace(
-                state={"supervision_state": "completed", "current_stage": "done"},
-                decision_artifact_path=None,
-                annotation_intake_artifact_ref=None,
-            )
+            return_value=completed_transaction,
+            side_effect=execute_side_effect,
         )
         collect = Mock(return_value=collected)
         waiter = Mock(return_value=claim)
@@ -178,6 +199,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
             patch(
                 "app.entrypoints.review_interactive.load_blocked_gate_summary",
                 return_value=summary,
+                side_effect=summary_sequence,
             ),
             patch(
                 "app.entrypoints.review_interactive.collect_gate_decision",
@@ -241,6 +263,78 @@ class ForegroundGateLoopTests(unittest.TestCase):
         waiter.assert_not_called()
         collect.assert_called_once()
         execute.assert_not_called()
+
+    def test_auto_builder_failure_does_not_prompt_after_integrity_drift(self):
+        original = _route_summary(0)
+        invalid = {
+            **original,
+            "review_request_verification_error": "request hash mismatch",
+        }
+        with patch(
+            "app.control.lifecycle.build_foreground_auto_resume_request",
+            side_effect=ResumeValidationError("missing binding"),
+        ):
+            final, execute, collect, waiter = self._run_loop(
+                0,
+                summary=original,
+                summary_sequence=[original, invalid],
+            )
+
+        self.assertEqual(final["supervision_state"], "blocked_human")
+        waiter.assert_not_called()
+        collect.assert_not_called()
+        execute.assert_not_called()
+
+    def test_auto_transaction_failure_falls_back_to_manual_on_same_verified_gate(self):
+        human = _human_request(stage="assembly", gate_id="route_selection")
+        completed = SimpleNamespace(
+            state={"supervision_state": "completed", "current_stage": "done"},
+            decision_artifact_path=None,
+        )
+        final, execute, collect, waiter = self._run_loop(
+            0,
+            summary=_route_summary(0),
+            collected=(human, human.model_dump(mode="json")),
+            execute_side_effect=[
+                ResumeTransactionError("decision_apply", "resolver failed"),
+                completed,
+            ],
+        )
+
+        self.assertEqual(final["supervision_state"], "completed")
+        waiter.assert_not_called()
+        collect.assert_called_once()
+        self.assertFalse(collect.call_args.kwargs["render_brief"])
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(
+            execute.call_args_list[0].kwargs["source"],
+            "foreground_countdown",
+        )
+        self.assertEqual(
+            execute.call_args_list[1].kwargs["source"],
+            "interactive_gate",
+        )
+        self.assertIsNone(execute.call_args_list[1].kwargs["blocked_timeout_seconds"])
+
+    def test_auto_transaction_failure_does_not_prompt_after_integrity_drift(self):
+        original = _route_summary(0)
+        invalid = {
+            **original,
+            "review_request_verification_error": "request hash mismatch",
+        }
+        final, execute, collect, waiter = self._run_loop(
+            0,
+            summary=original,
+            summary_sequence=[original, invalid],
+            execute_side_effect=[
+                ResumeTransactionError("validation", "request changed")
+            ],
+        )
+
+        self.assertEqual(final["supervision_state"], "blocked_human")
+        waiter.assert_not_called()
+        collect.assert_not_called()
+        execute.assert_called_once()
 
     def test_enter_claims_timer_and_uses_human_prompt(self):
         human = _human_request(stage="assembly", gate_id="route_selection")

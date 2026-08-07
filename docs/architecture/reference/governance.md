@@ -192,16 +192,11 @@ Use human gates for decisions with biological or irreversible consequences:
 
 Do not interrupt for ordinary local validation or deterministic file collection.
 
-> **Accepted planned policy:** the single attached new-run boundary and
-> parameter-approval timeout resolver below are not fully implemented. Their
-> current gaps are owned by
-> [Architecture conformance](conformance.md).
-
 The review wait is an operator-interface policy, not a scheduler. Keep the
 frozen RunConfig default at `review_policy.max_blocked_seconds: 300`; accept
 per-stage overrides only for registry-backed review stages. Every new run must
 verify a real stdin/stdout TTY before freeze and then remain attached to the
-single interactive executor. The accepted public new-run contract has no
+single interactive executor. The public new-run contract has no
 non-interactive branch.
 
 `-1` waits indefinitely, `0` immediately triggers the registered eligible

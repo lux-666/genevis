@@ -29,7 +29,9 @@ from app.review.persistence import (
     load_review_request,
     persist_review_request,
 )
+from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -333,10 +335,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
         }
         manual_gates = (
             ("inventory", "inventory_review"),
-            ("assembly", "parameter_approval"),
-            ("hic_scaffolding", "parameter_approval"),
             ("hic_scaffolding", "hic_scaffolding"),
-            ("t2t", "parameter_approval"),
             ("t2t", "t2t_review"),
         )
         for stage, gate_id in manual_gates:
@@ -565,6 +564,25 @@ def _blocked_unit_state(
 def _blocked_unit_session(tmp: str) -> tuple[str, str]:
     session_id = "s1"
     data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+    reads = data_dir / "fixture_reads.fastq"
+    reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    freeze_session_inputs(
+        SessionPaths.from_run_dir(data_dir),
+        manifest_draft={
+            "session_id": session_id,
+            "assets": [
+                {
+                    "asset_type": "raw_long_reads",
+                    "paths": [str(reads.resolve())],
+                    "platform": "ont",
+                    "format": "fastq",
+                }
+            ],
+        },
+        run_config_draft={"requested_stages": []},
+        selected_methods={},
+        probe_environments=False,
+    )
     state = _review_state(data_dir, stage="inventory")
     payload = ReviewPayload(
         stage="inventory",

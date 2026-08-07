@@ -1,8 +1,7 @@
 # TUI and Planning
 
 > **Status:** implemented for raw HiFi/ONT and paired Hi-C intake; broader
-> midstage intake and the accepted post-freeze interactive convergence are
-> planned separately.
+> midstage intake is planned separately.
 > **Read when:** changing conversational intake, Plan Draft behavior,
 > whole-run freeze, or draft recovery.  
 > **Comes from:** operator goal text, confirmed sample facts, descriptor-derived
@@ -34,7 +33,7 @@ session through the appropriate recovery path.
 
 For real/operator runs with already prepared files, use the deterministic
 boundary instead: `gene-agent run --manifest PATH --run-config PATH --data-dir
-PATH [--non-interactive]`. Its file-authored run config must explicitly contain
+PATH`. Its file-authored run config must explicitly contain
 one `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
 Its literal order and repeated occurrences are preserved; the boolean is the
 local-process authorization for that occurrence.
@@ -119,14 +118,14 @@ Whole-run freeze does not generate every future method command. Each selected
 stage later creates the narrower method-attempt freeze described in
 [Method execution](execution.md).
 
-## Accepted post-freeze convergence
-
-> **Status:** planned.
+## Post-freeze convergence
 
 The mutable TUI lifecycle ends at the whole-run freeze. Once the operator has
 confirmed the Plan Draft, the TUI must not retain a TUI-specific executor,
 review loop, countdown policy, or progress model. It calls the same
-`execute_frozen_session` boundary as a structured run.
+`execute_frozen_session` boundary as a structured run. The confirmed draft
+must still have real stdin and stdout TTYs immediately before freeze; otherwise
+it remains editable and no frozen contract is published.
 
 A structured `gene-agent run` does not reconstruct its complete manifest and
 RunConfig as a `TuiSessionDraft`. The supplied files are already the settled
