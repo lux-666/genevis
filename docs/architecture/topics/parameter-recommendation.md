@@ -1,6 +1,7 @@
 # Parameter Recommendation
 
-> **Status:** implemented for Assembly, AutoHiC, and T2T using schema-3 roots
+> **Status:** implemented for Assembly, AutoHiC, and T2T using schema-3 roots;
+> timeout-controlled parameter approval is an accepted planned change
 >
 > **Read when:** changing model-visible parameter inputs, approval behavior,
 > retries, or the handoff from a recommendation to an executable attempt.
@@ -8,7 +9,8 @@
 > **Comes from:** stage-owned method selection, canonical upstream facts,
 > [data and storage](data-and-storage.md), and immutable predecessor evidence.
 >
-> **Feeds into:** mandatory human approval, [method execution](execution.md),
+> **Feeds into:** a hash-bound parameter approval gate,
+> [method execution](execution.md),
 > stage-specific collection, and paths such as [AutoHiC](autohic.md).
 >
 > **Contract dependencies:** [parameter recommendation](../reference/parameter-recommendation.md),
@@ -52,6 +54,28 @@ input, basis, manifest, cursor, and approved attempt are the v3 boundary, while
 raw-response, parsed-recommendation, and parse-result leaves retain their own
 declared versions. The strict loader verifies those mixed leaf versions and
 rejects a pre-v3 root or mixed identity.
+
+## Accepted timeout-controlled approval
+
+> **Status:** planned.
+
+The accepted flow replaces the current mandatory-human-only transition without
+weakening the recommendation evidence boundary:
+
+```text
+persisted sparse recommendation + verified schema-3 manifest
+  -> immutable parameter_approval request
+  -> -1: manual approve/reject
+  ->  0: immediately approve this exact recommendation
+  -> >0: Enter claims manual review; expiry approves this exact recommendation
+  -> approved ParameterAttempt
+```
+
+The timer starts after persistence and request binding. It never calls the
+recommender, edits the mapping, merges defaults, or selects a different
+proposal. The operator sees the same exact mapping when claiming the gate, and
+the automatic path approves it unchanged through the existing stage decision
+applier.
 
 ## Shared lifecycle, stage-specific biology
 
@@ -106,7 +130,8 @@ omitted keys from the preceding mapping. The implemented T2T threshold request
 is initial-only; this page does not imply a T2T parameter-retry route.
 
 There is no implemented automatic fallback recommendation, parameter-patch
-semantics, silent default synthesis at the model boundary, or auto-approval.
-Model failure becomes `response_invalid`; human rejection creates no execution
-attempt. Any future behavior of that kind is planned work until both the
-owning contract and code change.
+semantics, silent default synthesis at the model boundary, or parameter
+auto-approval today. Model failure becomes `response_invalid`; human rejection
+creates no execution attempt. The accepted timeout-controlled approval above
+is limited to approving the exact persisted recommendation and remains
+conformance debt until the shared gate resolver and tests land.

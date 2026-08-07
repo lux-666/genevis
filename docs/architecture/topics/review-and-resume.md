@@ -1,6 +1,7 @@
 # Review and Resume
 
-> **Status:** implemented.  
+> **Status:** implemented, with accepted planned parameter-approval timeout
+> behavior recorded below.
 > **Read when:** changing a human gate, decision persistence, approval binding,
 > resume validation, or post-review routing.  
 > **Comes from:** a stage-owned immutable review request and compact blocked
@@ -73,6 +74,41 @@ does not invoke it, and prints manual recovery commands. A later `review` or
 `resume` is always a manual recovery action; it never reconstructs or expires
 a countdown from the prior `blocked_at` time. Strict/auto review modes and a
 public resume timeout override are not part of the interface.
+
+## Accepted parameter-approval timeout behavior
+
+> **Status:** planned. Assembly, AutoHiC, and T2T parameter-approval gates do
+> not yet register the shared timeout resolver described here.
+
+The countdown begins only after a parameter recommendation has been parsed,
+verified, persisted beneath its schema-3 manifest, and bound into an immutable
+`parameter_approval` review request. It controls the default approval of that
+one exact recommendation; it does not control recommendation generation,
+modify parameters, request another recommendation, or choose registry defaults.
+
+For every registered parameter-approval gate:
+
+- `-1` never approves automatically and waits for a manual approve/reject
+  decision;
+- `0` immediately approves the exact persisted recommendation;
+- a positive value displays an Enter-claim countdown, opens the manual
+  approve/reject prompt when claimed, and approves the same recommendation at
+  expiry.
+
+One shared timeout applier must enforce `decision=approve_parameters` and
+`decided_by=auto_rule`, enrich the audit metadata, and then delegate to the
+stage's existing parameter decision applier. Assembly, AutoHiC, and T2T retain
+their current request, recommendation-manifest, attempt-chain, predecessor,
+and workflow-occurrence validation; timeout handling must not duplicate those
+stage rules.
+
+The automatic decision binds the immutable review request and recommendation
+hash and records the foreground-countdown source plus configured and elapsed
+seconds. A claimed gate remains a human decision. If automatic construction or
+application fails and the durable checkpoint still verifies as
+`blocked_human`, the same foreground terminal returns to manual review. Broken
+request, evidence, checkpoint, or occurrence integrity fails closed instead of
+fabricating approval.
 
 ## Resume validation
 

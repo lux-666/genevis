@@ -16,6 +16,49 @@ the owning reference specifications.
 
 ## Open gaps
 
+### New-run execution has not yet converged on one interactive boundary
+
+The accepted runtime contract requires both structured files and a confirmed
+TUI draft to join at `execute_frozen_session`, with a real TTY verified before
+freeze and no public non-interactive new-run branch. The current structured
+`run` still accepts `--non-interactive`, allows a missing TTY to freeze and
+execute without the foreground review loop, and does not render stage progress
+directly from the frozen plan and graph transitions.
+
+- Current evidence: `_run`, `_foreground_review_available`,
+  `execute_frozen_session`, and `_interactive_gate_loop` in
+  `app/entrypoints/run.py`, plus `_freeze_and_execute` in
+  `app/entrypoints/tui.py`.
+- Contract owners: [Runtime orchestration](../topics/runtime-orchestration.md),
+  [TUI and planning](../topics/tui-and-planning.md), and
+  [Run data](data-contract.md).
+- Closure condition: reject a missing TTY before freeze, remove the public
+  non-interactive new-run path, retain direct structured-run freeze without a
+  Plan Draft prompt, and make both producers use one attached executor that
+  renders progress without publishing another progress store.
+
+### Parameter approval has no countdown resolver
+
+The accepted parameter contract applies the frozen review timeout only after a
+schema-3 recommendation and immutable approval request exist. Expiry approves
+that exact recommendation through the existing stage decision applier. The
+current Assembly, AutoHiC, and T2T `parameter_approval` declarations have no
+`timeout_applier`, so they remain mandatory-human gates regardless of a zero or
+positive timeout.
+
+- Current evidence: the three `parameter_approval` declarations in
+  `app/review/gates.py`, the stage workflows under
+  `app/stages/*/parameters/workflow.py`, and foreground timeout dispatch in
+  `app/control/lifecycle.py`.
+- Contract owners: [Review and resume](../topics/review-and-resume.md),
+  [Parameter recommendation](parameter-recommendation.md), and
+  [Governance](governance.md).
+- Closure condition: register one shared parameter timeout applier for all
+  three gates, bind automatic approval to the immutable request and
+  recommendation evidence, preserve stage-specific validation, record the
+  automatic decision audit, and return verified resolver failures to manual
+  review in the same attached terminal.
+
 ### Repository quality gates are targets, not a current success claim
 
 The repository intends these commands to be merge gates:

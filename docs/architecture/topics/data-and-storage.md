@@ -44,6 +44,21 @@ outside its owner for routing or display, but the projection does not become a
 second authority. Exact placement, reference, size, retention, and crash rules
 belong to the [run-data contract](../reference/data-contract.md).
 
+## Progress is direct consumption, not another store
+
+The accepted interactive execution design introduces no durable progress
+projection. While a process is attached, the terminal consumes the verified
+frozen workflow plan and current compact graph control state directly at the
+parent-controller boundary. After detachment, `inspect` consumes the verified
+frozen plan, Ledger occurrence events, checkpoint summary, and the existing
+execution lock directly.
+
+Counts such as `finished=2/5` are presentation-time arithmetic. They are not
+written to an artifact, report, Ledger event, checkpoint field, progress table,
+or batch record. A multi-session caller may calculate an aggregate from several
+read-only inspections, but that aggregate remains outside every run and never
+becomes workflow truth.
+
 ## Cross-stage handoff
 
 `TopLevelState.resource_refs` is the only table for passing file resources

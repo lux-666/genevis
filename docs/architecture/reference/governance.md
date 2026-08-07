@@ -192,19 +192,33 @@ Use human gates for decisions with biological or irreversible consequences:
 
 Do not interrupt for ordinary local validation or deterministic file collection.
 
+> **Accepted planned policy:** the single attached new-run boundary and
+> parameter-approval timeout resolver below are not fully implemented. Their
+> current gaps are owned by
+> [Architecture conformance](conformance.md).
+
 The review wait is an operator-interface policy, not a scheduler. Keep the
 frozen RunConfig default at `review_policy.max_blocked_seconds: 300`; accept
-per-stage overrides only for registry-backed review stages. `-1` waits
-indefinitely, `0` immediately triggers an existing eligible automatic resolver,
-and a positive value provides an Enter-claim countdown only to the foreground
-interactive run before triggering that same resolver. The timer must never
-invent a decision from registry defaults. Preserve each resolver's immutable
-request bindings, evidence eligibility, decision origin, and rationale artifact;
-if no resolver exists or validation fails, retain the human block. Do not add
-daemon/background wake-ups, deadline
-reconstruction on later resume, strict/auto review modes, or a public resume
-timeout override. Any interruption or non-interactive run must retain the
-durable manual-review checkpoint.
+per-stage overrides only for registry-backed review stages. Every new run must
+verify a real stdin/stdout TTY before freeze and then remain attached to the
+single interactive executor. The accepted public new-run contract has no
+non-interactive branch.
+
+`-1` waits indefinitely, `0` immediately triggers the registered eligible
+resolver, and a positive value provides an Enter-claim countdown before
+triggering that resolver at expiry. The timer starts only after the immutable
+review request exists. It must never invent a decision from registry defaults.
+For `parameter_approval`, the registered resolver may only approve the exact
+persisted recommendation bound by that request, and it must delegate all
+stage-specific validation and effects to the existing decision applier.
+
+Preserve each resolver's immutable request bindings, evidence eligibility,
+decision origin, rationale artifact, and countdown audit metadata. Resolver
+failure returns to manual review when the durable block still verifies; broken
+integrity remains blocked and fails closed. Do not add daemon/background
+wake-ups, deadline reconstruction on later resume, strict/auto review modes, or
+a public resume timeout override. Process interruption retains the durable
+manual-review checkpoint, and later `review` or `resume` remains manual.
 
 ## Documentation Standard
 

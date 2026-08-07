@@ -460,25 +460,36 @@ review policy live in the request artifact and are loaded through its verified
 ref. Resume validates request identity, request hash, decision schema, and any
 bound recommendation/attempt hash before applying the decision.
 
+> **Accepted planned behavior:** the foreground TTY and parameter-approval
+> timeout rules below are not fully implemented. Current differences and their
+> closure conditions are recorded in
+> [Architecture conformance](conformance.md).
+
 `payload.max_blocked_seconds` is the effective frozen RunConfig review-policy
 value: the default is `300`, and a per-stage override is valid only for a stage
 registered in the review registry. It records foreground behavior, not a
-durable deadline. `-1` means indefinitely wait; `0` immediately triggers the
-gate's existing automatic resolver if eligible; and a positive value means an
-Enter-claim countdown that triggers the same resolver at expiry, only while the
-original run remains foreground with stdin/stdout attached to real TTYs. The
-timer does not carry a default decision. Existing resolver eligibility,
-immutable request bindings, and rationale artifacts remain authoritative;
-otherwise the checkpoint remains blocked for manual review. On Ctrl-C, EOF, process
-exit, missing TTY capability, or non-interactive execution, the checkpoint
-remains `blocked_human`; no background/daemon timer is persisted or started.
-Re-executing the same frozen session does not invoke an already-blocked
-checkpoint or restore the timer. Later manual review/resume must not infer
-elapsed time from `blocked_at` and has no public timeout override or strict/auto
-mode. A countdown-triggered automatic decision additionally requires the
-internal resume transaction source and bound countdown metadata to identify the
-current `foreground_countdown`; its decision origin remains resolver-owned
-(`llm_provisional` or `auto_rule`), and request metadata cannot authorize itself.
+durable deadline. Every new run verifies stdin/stdout TTY capability before
+freeze and enters the same attached executor. `-1` means indefinitely wait;
+`0` immediately triggers the gate's registered eligible resolver; and a
+positive value means an Enter-claim countdown that triggers the same resolver
+at expiry.
+
+The timer starts only after the immutable request exists. For
+`parameter_approval`, timeout resolution means approving the exact persisted
+recommendation bound by the request; it does not generate, edit, merge, or
+replace parameter values. Resolver eligibility, immutable request and
+recommendation bindings, rationale artifacts, and stage-specific appliers
+remain authoritative. A countdown-triggered automatic decision additionally
+requires the internal resume transaction source and bound countdown metadata to
+identify the current `foreground_countdown`; its decision origin remains
+resolver-owned (`llm_provisional` or `auto_rule`), and request metadata cannot
+authorize itself.
+
+Ctrl-C, EOF, or process exit leaves the checkpoint `blocked_human`; no
+background/daemon timer is persisted or started. Re-executing the same frozen
+session does not invoke an already-blocked checkpoint or restore the timer.
+Later manual review/resume must not infer elapsed time from `blocked_at` and has
+no public timeout override or strict/auto mode.
 
 The review registry is the sole declaration and dispatch point for gate IDs,
 allowed decisions, occurrence validation, and timing metadata. It does not own
@@ -528,6 +539,17 @@ Requirements:
 
 The full ordered route, explicit stage-local skip reasons, review lifecycle, and
 terminal outcome must be reconstructible without checkpoint or reports.
+
+> **Accepted planned behavior:** interactive progress consumption is not yet
+> complete; see [Architecture conformance](conformance.md).
+
+Runtime progress has no durable projection of its own. An attached terminal
+consumes the verified frozen workflow plan and current graph control state at
+the parent-controller boundary. Detached inspection directly joins the
+verified frozen plan, Ledger occurrence events, checkpoint summary, and the
+existing execution lock. Counts and percentages are ephemeral presentation
+arithmetic and must not be persisted as artifacts, reports, Ledger events,
+checkpoint fields, progress tables, or batch state.
 
 ## 14. Checkpoint
 

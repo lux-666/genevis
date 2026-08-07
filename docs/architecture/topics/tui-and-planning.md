@@ -1,7 +1,8 @@
 # TUI and Planning
 
 > **Status:** implemented for raw HiFi/ONT and paired Hi-C intake; broader
-> midstage intake is planned separately.  
+> midstage intake and the accepted post-freeze interactive convergence are
+> planned separately.
 > **Read when:** changing conversational intake, Plan Draft behavior,
 > whole-run freeze, or draft recovery.  
 > **Comes from:** operator goal text, confirmed sample facts, descriptor-derived
@@ -117,3 +118,19 @@ executor resolves from the snapshot rather than later edits to
 Whole-run freeze does not generate every future method command. Each selected
 stage later creates the narrower method-attempt freeze described in
 [Method execution](execution.md).
+
+## Accepted post-freeze convergence
+
+> **Status:** planned.
+
+The mutable TUI lifecycle ends at the whole-run freeze. Once the operator has
+confirmed the Plan Draft, the TUI must not retain a TUI-specific executor,
+review loop, countdown policy, or progress model. It calls the same
+`execute_frozen_session` boundary as a structured run.
+
+A structured `gene-agent run` does not reconstruct its complete manifest and
+RunConfig as a `TuiSessionDraft`. The supplied files are already the settled
+draft: validation failure stops before freeze, while success freezes their
+canonical meaning and immediately enters the shared interactive executor. This
+preserves fields that the conversational intake model does not represent and
+keeps Plan Draft editing solely on the TUI-authored path.

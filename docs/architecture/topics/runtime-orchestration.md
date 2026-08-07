@@ -1,6 +1,7 @@
 # Runtime Orchestration
 
-> **Status:** implemented.  
+> **Status:** implemented, with an accepted planned interactive convergence
+> recorded below.
 > **Read when:** tracing CLI dispatch, frozen-session startup, parent routing,
 > stage selection, or terminal behavior.  
 > **Comes from:** a structured public run or [TUI and planning](tui-and-planning.md), then a validated whole-run frozen contract.
@@ -79,6 +80,53 @@ does not invoke an already-blocked checkpoint or restore its timer. Subsequent
 `review` and `resume` commands are manual and must not infer a deadline from the
 original block time. The public interfaces have no strict/auto review mode or
 resume-timeout override.
+
+## Accepted interactive execution convergence
+
+> **Status:** planned. The current `--non-interactive` behavior and missing
+> parameter-approval timeout resolvers are recorded as conformance debt.
+
+The accepted new-run boundary has two different pre-freeze producers but only
+one post-freeze execution path:
+
+```text
+structured run files -> validate -> freeze --+
+                                             +-> execute_frozen_session
+TUI intake -> Plan Draft -> confirm -> freeze-+
+```
+
+`gene-agent run` treats its manifest and RunConfig as the already-settled
+draft. It does not enter the TUI Plan Draft editor or ask for a second
+confirmation. Invalid files fail before freeze; valid files freeze and proceed
+directly to execution. The TUI remains the path that repeatedly gathers,
+checks, describes, edits, and confirms a mutable draft before creating the same
+frozen contract.
+
+Every new run requires stdin and stdout attached to a real TTY, checked before
+freeze. The accepted public new-run contract has no non-interactive execution
+branch. `review` and `resume` remain recovery tools after an interrupted durable
+session; they are not a second normal execution lifecycle.
+
+Several contigs or projects remain several independent runs. An external caller
+creates one manifest and RunConfig per unit, assigns a collision-free
+`session_id`, allocates one terminal per process, and invokes the same command
+N times. The product does not add a batch scheduler, cross-session checkpoint,
+or durable aggregate-progress owner; a caller may combine read-only inspection
+results outside the runs.
+
+After freeze, both producers call the existing `execute_frozen_session`
+boundary. That boundary owns one terminal experience for stage progress,
+review briefs, Enter-claim countdowns, manual decisions, automatic timeout
+decisions, and terminal summaries. Entry points must not implement parallel
+gate or progress loops.
+
+Attached progress is rendered directly from the verified frozen workflow plan
+and the current graph control state at the existing parent-controller
+transition. A corresponding Ledger occurrence event is committed before its
+durable transition is presented. Detached inspection reads the verified frozen
+workflow plan, Ledger occurrence events, checkpoint summary, and execution lock
+on demand. Neither path publishes a progress artifact, progress table,
+background watcher, event bus, or second progress authority.
 
 ## Parent graph
 

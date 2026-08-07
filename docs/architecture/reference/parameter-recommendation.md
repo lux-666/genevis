@@ -1,6 +1,7 @@
 # Parameter Recommendation Contract
 
-> **Status:** implemented.  
+> **Status:** implemented evidence contract, with accepted planned timeout
+> approval semantics.
 > **Read when:** exact model DTO, schema-3 persistence, sparse response,
 > approval, or retry semantics matter.  
 > **Comes from:** [Parameter recommendation](../topics/parameter-recommendation.md).  
@@ -14,8 +15,9 @@
 ## Definition
 
 A parameter recommender runs after method selection. It asks an LLM for the
-parameters to present to a human reviewer. It does not select the method, route
-the parent graph, approve its own answer, or synthesize a fallback answer.
+parameters to bind into a reviewable approval request. It does not select the
+method, route the parent graph, approve its own answer, or synthesize a fallback
+answer.
 
 Assembly, Hi-C, and T2T share lifecycle and persistence concepts, but they do
 not share one universal biological DTO.
@@ -86,16 +88,25 @@ selected method + allowlisted producer outputs/run facts
   -> raw response persisted
   -> response-shape parser
   -> exact sparse parameters persisted
-  -> mandatory human approval
+  -> immutable hash-bound parameter approval gate
   -> approved parameters handed to freeze/command construction
 ```
 
 The mapping is attempt-local, may be empty, and contains only parameters that
 the model recommends setting explicitly. There is no absent-key list,
 recommendation patch merge, agent default, catalog-value validator, hard-rule
-validator, or automatic biological approval between parsing and human review.
-Unknown names and unusual values are preserved if they satisfy the declared
-JSON shape. The human sees the exact parsed mapping.
+validator, or automatic biological approval between parsing and the immutable
+approval gate. Unknown names and unusual values are preserved if they satisfy
+the declared JSON shape. A claiming operator sees the exact parsed mapping.
+
+The gate's frozen `max_blocked_seconds` controls only the default decision for
+that persisted mapping. `-1` requires manual approve/reject, `0` immediately
+approves it, and a positive value allows Enter to claim manual review before
+expiry approves it. The timeout path must submit `approve_parameters` for the
+same request and recommendation hash, then delegate to the existing stage
+decision applier. It may not edit the mapping, call the recommender, select a
+fallback, or bypass request, occurrence, manifest, predecessor, or attempt-chain
+validation.
 
 Execution is a separate boundary. After approval, command construction may
 still reject a parameter that cannot be represented safely by the selected
@@ -161,7 +172,8 @@ Every initial and retry response has the same shape:
 
 `parameters: {}` is valid. The model never returns an approval decision, retry
 disposition, stop instruction, expert-review route, absent-key list, or mapping
-patch. Human review and operator-owned retry policy control those transitions.
+patch. The hash-bound approval gate and operator-owned retry policy control
+those transitions.
 
 These are exact contracts. Aliases such as `params`, `recommended_params`,
 `parameter_patch`, direct top-level parameter keys, and rich per-parameter
@@ -199,8 +211,8 @@ names, and mixed identities fail closed. The response, parse, recommendation,
 and T2T motif-manifest leaves retain their own declared schema versions; the
 hard cutover applies to the recommendation snapshot/manifest root and the
 approved attempt boundary. Checkpoint state contains bounded cursors and refs,
-not the request/response bodies. No execution attempt is added before human
-approval.
+not the request/response bodies. No execution attempt is added before the
+approval gate resolves.
 
 After approval, the compact `ParameterAttempt` is the only relation owner for
 the approved parameters, constructed command, frozen runner input, execution,
@@ -228,11 +240,14 @@ Tests must prove that:
 - session identity and storage locators do not reach model messages;
 - persisted messages equal the messages passed to the model;
 - only the declared response shape is accepted;
-- unknown parameter names and values survive parsing and reach human review;
+- unknown parameter names and values survive parsing and reach the approval
+  gate unchanged;
 - aliases, patches, rich wrappers, and undeclared top-level fields fail;
 - schema-3 snapshots/manifests reject pre-v3 ref names and mixed identities;
 - model failure produces `response_invalid` and never fabricates defaults;
-- human approval is hash-bound to the immutable recommendation;
+- manual and timeout approval are hash-bound to the immutable recommendation;
+- timeout approval accepts only the current persisted mapping and preserves
+  the existing stage-specific validation boundary;
 - approved parameters, unchanged, are the L2 input to command construction;
 - empty sparse mappings still reach approval;
 - retry mappings are never merged with predecessors;
