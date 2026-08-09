@@ -182,12 +182,12 @@ class ArtifactRef(BaseModel):
 
 
 def canonical_artifact_refs(refs: Iterable[ArtifactRef]) -> tuple[ArtifactRef, ...]:
-    """Return unique refs in immutable wire canonical order.
+    """Return unique refs in canonical order for set-like wire collections.
 
-    The wire identity and ordering fields are, in model-field order:
+    For unordered collections, the identity and ordering fields are:
     ``artifact_id``, ``path_ref``, ``sha256``, ``size_bytes``, and
-    ``artifact_type``. Every serialized collection of immutable ArtifactRefs
-    must use this order.
+    ``artifact_type``. Schemas in which reference order has domain meaning must
+    preserve that order instead of using this helper.
     """
 
     by_identity = {
