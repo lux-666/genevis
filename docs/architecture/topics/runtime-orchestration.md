@@ -165,8 +165,9 @@ literal RunConfig. The controller does not inspect FASTQ contents, choose an
 assembler, build a command, or interpret biological metrics.
 
 The controller wrapper is thin but not pure. It writes only occurrence-scoped
-stage-entered, stage-completed, and stage-failed Ledger facts plus the scalar
-progress projection input. It does not write `session_terminal` or generate
+stage-entered, explicit stage-skipped, stage-completed, and stage-failed Ledger
+facts plus the scalar progress projection input. It does not write
+`session_terminal` or generate
 operator reports at blocked or failed boundaries. A stage-local skip, when a
 stage contract explicitly creates one, remains distinct from the parent: the
 parent never synthesizes skip events for absent occurrences. Any architecture

@@ -27,6 +27,7 @@ from app.config import default_data_root
 from app.control.lifecycle import (
     TerminalFinalizationError,
     finalize_authoritative_terminal,
+    reconcile_canonical_terminal_checkpoint,
 )
 from app.control.projections import (
     ProgressProjectionInput,
@@ -695,31 +696,24 @@ def _execute_verified_frozen_session(
             if callable(get_state):
                 checkpoint = get_state(config)
                 checkpoint_values = getattr(checkpoint, "values", None)
-                if isinstance(checkpoint_values, dict) and (
+                terminal_read = Ledger(run_dir).read_canonical_terminal(session_id)
+                if terminal_read is not None:
+                    if not isinstance(checkpoint_values, dict):
+                        raise TerminalFinalizationError(
+                            "canonical Ledger terminal has no resumable checkpoint"
+                        )
+                    checkpoint_state = validate_top_level_state(checkpoint_values)
+                    reconcile_canonical_terminal_checkpoint(
+                        checkpoint_state,
+                        terminal_read["canonical"],
+                        session_id=session_id,
+                    )
+                    result = checkpoint_state
+                elif isinstance(checkpoint_values, dict) and (
                     checkpoint_values.get("session_id") == session_id
                 ):
                     checkpoint_supervision = checkpoint_values.get("supervision_state")
-                    terminal_read = Ledger(run_dir).read_canonical_terminal(session_id)
-                    if terminal_read is not None:
-                        terminal_outcome = (
-                            terminal_read["canonical"].get("summary") or {}
-                        ).get("outcome")
-                        terminal_outcome_key = (
-                            terminal_outcome
-                            if isinstance(terminal_outcome, str)
-                            else ""
-                        )
-                        expected_supervision = {
-                            "completed": "completed",
-                            "failed": "failed_terminal",
-                        }.get(terminal_outcome_key)
-                        if checkpoint_supervision != expected_supervision:
-                            raise RuntimeError(
-                                "canonical Ledger terminal conflicts with the "
-                                "resumable checkpoint"
-                            )
-                        result = validate_top_level_state(checkpoint_values)
-                    elif checkpoint_supervision in {
+                    if checkpoint_supervision in {
                         "blocked_human",
                         "completed",
                         "failed_terminal",

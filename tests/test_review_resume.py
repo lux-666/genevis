@@ -41,6 +41,7 @@ from app.schemas.artifacts import (
     AssemblyCandidateBundle,
 )
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.state import TopLevelState, initial_state
 from app.storage.artifacts import publish_artifact_record
 from app.storage.frozen_inputs import freeze_session_inputs, frozen_execution_lock
 from app.storage.ledger import Ledger
@@ -87,13 +88,34 @@ def _apply_review_application(
         application_ref=application.ref,
         expected_identity=identity,
     )
+    update = dict(gate.load_apply_application()(state, application))
     if record_applied:
+        checkpoint_state = initial_state(
+            session_id=state["session_id"],
+            input_manifest_ref=state.get("input_manifest_ref")
+            or "control/manifest.yaml",
+            data_dir=state["data_dir"],
+            workflow_steps=state["workflow_steps"],
+            stage_plan_ref=state.get("stage_plan_ref") or "control/run_config.json",
+        )
+        checkpoint_state.update(
+            {
+                key: copy.deepcopy(state[key])
+                for key in TopLevelState.__annotations__
+                if key in state and state[key] is not None
+            }
+        )
+        checkpoint_state.update(update)
+        checkpoint_state["review_application_ref"] = application.ref.model_dump(
+            mode="json"
+        )
         ledger.record_review_applied(
             state["session_id"],
             application_ref=application.ref,
             expected_identity=identity,
+            checkpoint_state=checkpoint_state,
         )
-    return dict(gate.load_apply_application()(state, application))
+    return update
 
 
 class ReviewResumeTests(unittest.TestCase):

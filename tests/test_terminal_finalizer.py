@@ -132,3 +132,28 @@ def test_terminal_checkpoint_mismatch_writes_no_ledger_terminal(tmp_path) -> Non
         row["event_type"] == "session_terminal"
         for row in Ledger(run_dir).read_event_rows("s1")
     )
+
+
+def test_existing_canonical_terminal_stage_must_match_checkpoint(tmp_path) -> None:
+    run_dir = v2_run_dir(tmp_path / "data", "s1")
+    ledger = Ledger(run_dir)
+    ledger.create_session("s1", "control/manifest.yaml")
+    canonical = ledger.record_session_terminal(
+        "s1",
+        outcome="completed",
+        stage="assembly",
+    )
+    state = _completed_state(run_dir)
+    graph = _TerminalGraph(state)
+
+    with pytest.raises(TerminalFinalizationError, match="stage conflicts"):
+        finalize_authoritative_terminal(
+            graph,
+            {"configurable": {"thread_id": "s1"}},
+            state,
+            "s1",
+            run_dir,
+            "memory",
+        )
+
+    assert ledger.read_canonical_terminal("s1")["canonical"] == canonical

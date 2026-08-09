@@ -22,6 +22,7 @@ from app.review.application import (
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import get_review_gate
 from app.review.persistence import persist_review_request
+from app.schemas.state import initial_state
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
 
@@ -85,37 +86,46 @@ def _request(
 
 
 def _review_state(paths: SessionPaths, stage: str, **updates: object) -> dict:
-    return {
-        "session_id": paths.session_id,
-        "data_dir": str(paths.run_dir),
-        "current_stage": stage,
-        "workflow_steps": [
-            {
-                "step_id": "step-000-inventory",
-                "stage": "inventory",
-                "allow_local_execution": False,
-            },
-            {
-                "step_id": f"step-001-{stage}",
-                "stage": stage,
-                "allow_local_execution": False,
-                **(
-                    {
-                        "review_target": {
-                            "resource_type": "assembly",
-                            "producer_step_id": "step-000-inventory",
-                        }
+    workflow_steps = [
+        {
+            "step_id": "step-000-inventory",
+            "stage": "inventory",
+            "allow_local_execution": False,
+        },
+        {
+            "step_id": f"step-001-{stage}",
+            "stage": stage,
+            "allow_local_execution": False,
+            **(
+                {
+                    "review_target": {
+                        "resource_type": "assembly",
+                        "producer_step_id": "step-000-inventory",
                     }
-                    if stage == "assembly_review"
-                    else {}
-                ),
-            },
-        ],
-        "workflow_step_index": 1,
-        "supervision_state": "blocked_human",
-        "stage_outputs": {},
-        **updates,
-    }
+                }
+                if stage == "assembly_review"
+                else {}
+            ),
+        },
+    ]
+    state = initial_state(
+        session_id=paths.session_id,
+        input_manifest_ref=paths.to_ref(paths.manifest_path),
+        data_dir=str(paths.run_dir),
+        workflow_steps=workflow_steps,
+        stage_plan_ref="control/run_config.json",
+    )
+    state.update(
+        {
+            "current_stage": stage,
+            "workflow_step_index": 1,
+            "entered_workflow_step_index": 1,
+            "supervision_state": "blocked_human",
+            "stage_outputs": {},
+            **updates,
+        }
+    )
+    return state
 
 
 def _review_occurrence(
@@ -189,10 +199,16 @@ def _review_occurrence(
         expected_identity=identity,
     )
     if applied:
+        checkpoint_state = {
+            **state,
+            **dict(gate.load_apply_application()(state, application)),
+            "review_application_ref": application.ref.model_dump(mode="json"),
+        }
         ledger.record_review_applied(
             paths.session_id,
             application_ref=application.ref,
             expected_identity=identity,
+            checkpoint_state=checkpoint_state,
         )
     return persisted, application
 

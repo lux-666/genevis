@@ -40,7 +40,7 @@ from app.schemas.state import (
     validate_top_level_state,
 )
 from app.storage.artifacts import read_artifact_records
-from app.storage.ledger import Ledger
+from app.storage.ledger import Ledger, LedgerConflictError
 from app.storage.paths import SessionPaths
 
 ResumeValidationError = control_errors.ResumeValidationError
@@ -58,6 +58,50 @@ class TerminalFinalizationResult:
     state: TopLevelState
     terminal_event: dict[str, Any]
     compaction_warning: str | None = None
+
+
+def reconcile_canonical_terminal_checkpoint(
+    checkpoint_state: Mapping[str, Any],
+    terminal_event: Mapping[str, Any],
+    *,
+    session_id: str,
+) -> None:
+    """Require one canonical terminal to describe the exact terminal checkpoint."""
+
+    if checkpoint_state.get("session_id") != session_id:
+        raise TerminalFinalizationError(
+            "terminal checkpoint session_id conflicts with the requested session"
+        )
+    if terminal_event.get("session_id") != session_id:
+        raise TerminalFinalizationError(
+            "canonical Ledger terminal session_id conflicts with the checkpoint"
+        )
+    summary = terminal_event.get("summary")
+    outcome = summary.get("outcome") if isinstance(summary, Mapping) else None
+    outcome_key = outcome if isinstance(outcome, str) else ""
+    expected_supervision = {
+        "completed": "completed",
+        "failed": "failed_terminal",
+    }.get(outcome_key)
+    if expected_supervision is None:
+        raise TerminalFinalizationError(
+            f"canonical Ledger terminal has unsupported outcome: {outcome!r}"
+        )
+    if checkpoint_state.get("supervision_state") != expected_supervision:
+        raise TerminalFinalizationError(
+            "canonical Ledger terminal outcome conflicts with the checkpoint"
+        )
+    if checkpoint_state.get("active_interrupt") is not None:
+        raise TerminalFinalizationError(
+            "terminal checkpoint still carries an active review interrupt"
+        )
+    terminal_stage = terminal_event.get("stage")
+    if not isinstance(terminal_stage, str) or not terminal_stage:
+        raise TerminalFinalizationError("canonical Ledger terminal has no valid stage")
+    if checkpoint_state.get("current_stage") != terminal_stage:
+        raise TerminalFinalizationError(
+            "canonical Ledger terminal stage conflicts with the checkpoint"
+        )
 
 
 def finalize_authoritative_terminal(
@@ -157,12 +201,27 @@ def finalize_authoritative_terminal(
         checkpoint_state,
         role_prefix=f"terminal.{outcome}",
     )
-    terminal_event = ledger.record_session_terminal(
-        session_id,
-        outcome=outcome,
-        stage=checkpoint_state.get("current_stage"),
-        error=(checkpoint_state.get("last_error") if outcome == "failed" else None),
-        refs=refs,
+    terminal_read = ledger.read_canonical_terminal(session_id)
+    if terminal_read is not None:
+        reconcile_canonical_terminal_checkpoint(
+            checkpoint_state,
+            terminal_read["canonical"],
+            session_id=session_id,
+        )
+    try:
+        terminal_event = ledger.record_session_terminal(
+            session_id,
+            outcome=outcome,
+            stage=checkpoint_state.get("current_stage"),
+            error=(checkpoint_state.get("last_error") if outcome == "failed" else None),
+            refs=refs,
+        )
+    except LedgerConflictError as exc:
+        raise TerminalFinalizationError(str(exc)) from exc
+    reconcile_canonical_terminal_checkpoint(
+        checkpoint_state,
+        terminal_event,
+        session_id=session_id,
     )
 
     saver = getattr(graph, "checkpointer", None)
@@ -285,6 +344,12 @@ def inspect_session(
         if occurrence.integrity_error is None
         and occurrence.decision_sequence is not None
     }
+    verified_applied_sequences = {
+        occurrence.applied_sequence
+        for occurrence in authoritative_occurrences
+        if occurrence.integrity_error is None
+        and occurrence.applied_sequence is not None
+    }
     authoritative_review_decisions = [
         event
         for event in authoritative_events
@@ -294,8 +359,15 @@ def inspect_session(
     trusted_review_events = [
         event
         for event in authoritative_events
-        if event.get("event_type") != "review_decision"
-        or int(event.get("sequence") or 0) in verified_decision_sequences
+        if event.get("event_type") not in {"review_decision", "review_applied"}
+        or (
+            event.get("event_type") == "review_decision"
+            and int(event.get("sequence") or 0) in verified_decision_sequences
+        )
+        or (
+            event.get("event_type") == "review_applied"
+            and int(event.get("sequence") or 0) in verified_applied_sequences
+        )
     ]
     latest_review_projection = (
         authoritative_occurrences[-1] if authoritative_occurrences else None

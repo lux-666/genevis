@@ -562,6 +562,7 @@ def _review_events_by_workflow_step(
                 "integrity_error",
                 "request_sequence",
                 "decision_sequence",
+                "applied_sequence",
                 "application_ref",
                 "application_id",
             )
@@ -586,6 +587,8 @@ def _review_events_by_workflow_step(
             if entry.get("integrity_error") is not None or event.get(
                 "application_id"
             ) != entry.get("application_id"):
+                continue
+            if _event_sequence(event) != entry.get("applied_sequence"):
                 continue
             entry["applied_at"] = event.get("timestamp")
             entry["application_id"] = event.get("application_id")

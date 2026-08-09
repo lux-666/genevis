@@ -1079,6 +1079,73 @@ class FrozenHelperTests(unittest.TestCase):
         self.assertIn("countdown is not restored across processes", stdout)
         self.assertIn("review_command: gene-agent review", stdout)
 
+    def test_existing_terminal_checkpoint_uses_canonical_stage_reconciliation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "frozen-session")
+            bundle = SimpleNamespace(
+                paths=paths,
+                run_config=RunConfig(requested_stages=[]),
+            )
+            terminal_state = build_initial_state(
+                session_id="frozen-session",
+                input_manifest_ref="control/input_manifest.yaml",
+                data_dir=str(paths.run_dir),
+            )
+            terminal_state.update(
+                {
+                    "supervision_state": "completed",
+                    "active_interrupt": None,
+                }
+            )
+            canonical = {
+                "session_id": "frozen-session",
+                "stage": "assembly",
+                "summary": {"outcome": "completed"},
+            }
+            graph = Mock()
+            graph.get_state.return_value = SimpleNamespace(values=terminal_state)
+            reconcile_target = run_entry.reconcile_canonical_terminal_checkpoint
+            with (
+                patch("app.entrypoints.run.Ledger") as ledger,
+                patch(
+                    "app.entrypoints.run.initial_state",
+                    side_effect=build_initial_state,
+                ),
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.reconcile_canonical_terminal_checkpoint",
+                    wraps=reconcile_target,
+                ) as reconcile,
+                patch(
+                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    side_effect=run_entry.TerminalFinalizationError(
+                        "canonical Ledger terminal stage conflicts with the checkpoint"
+                    ),
+                ),
+            ):
+                ledger.return_value.read_canonical_terminal.return_value = {
+                    "canonical": canonical,
+                    "terminal_integrity": None,
+                }
+                code, stdout, stderr = _capture_call(
+                    run_entry._execute_verified_frozen_session,
+                    bundle,
+                    checkpointer="sqlite",
+                    resume_checkpoint=True,
+                    interactive_gate=False,
+                    lease=_active_lease(paths),
+                )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("stage conflicts with the checkpoint", stderr)
+        reconcile.assert_called_once_with(
+            terminal_state,
+            canonical,
+            session_id="frozen-session",
+        )
+        graph.invoke.assert_not_called()
+
     def test_graph_exception_persists_normalized_terminal_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "frozen-session")

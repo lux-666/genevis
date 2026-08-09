@@ -313,10 +313,16 @@ def _review_occurrence(
             expected_identity=identity,
         )
     if applied:
+        checkpoint_state = {
+            **state,
+            **dict(gate.load_apply_application()(state, application)),
+            "review_application_ref": application.ref.model_dump(mode="json"),
+        }
         ledger.record_review_applied(
             paths.session_id,
             application_ref=application.ref,
             expected_identity=identity,
+            checkpoint_state=checkpoint_state,
         )
     return persisted, application
 
@@ -965,7 +971,7 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 reason="operator_required",
             )
             ledger = Ledger(paths.run_dir)
-            ledger.record_event(
+            ledger._record_event(
                 "s1",
                 "review_decision",
                 {
@@ -979,7 +985,7 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 subject_id=persisted.review_request_id,
                 idempotency_key="test:wrong-review-hash",
             )
-            ledger.record_event(
+            ledger._record_event(
                 "s1",
                 "review_applied",
                 {
@@ -1062,7 +1068,7 @@ class SessionSummaryBuildTests(unittest.TestCase):
                     },
                 ]
                 mutate(payload, refs, application)
-                Ledger(paths.run_dir).record_event(
+                Ledger(paths.run_dir)._record_event(
                     paths.session_id,
                     "review_decision",
                     payload,

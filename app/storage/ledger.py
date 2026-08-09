@@ -78,6 +78,11 @@ _OCCURRENCE_EVENT_TYPES = frozenset(
         "automatic_review_failed",
     }
 )
+_TYPED_REVIEW_EVENT_WRITERS = {
+    "review_requested": "record_review_requested",
+    "review_decision": "record_review_decision",
+    "review_applied": "record_review_applied",
+}
 
 
 class LedgerFormatError(ValueError):
@@ -312,7 +317,7 @@ class Ledger:
         }
         if auto_decidable is not None:
             payload["auto_decidable"] = auto_decidable
-        self.record_event(
+        self._record_event(
             session_id,
             "review_requested",
             payload,
@@ -395,7 +400,7 @@ class Ledger:
             "effect_kind": application.effect_kind,
             "source": intent.source,
         }
-        return self.record_event(
+        return self._record_event(
             session_id,
             "review_decision",
             payload,
@@ -412,10 +417,17 @@ class Ledger:
         *,
         application_ref: Any,
         expected_identity: "ReviewApplicationIdentity",
+        checkpoint_state: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Record checkpoint application only from a fully verified marker."""
+        """Record application only after independently verifying checkpoint proof."""
 
-        from app.review.application import load_verified_review_application
+        from app.review.application import (
+            ReviewApplicationIntegrityError,
+            load_verified_review_application,
+        )
+        from app.review.status import project_review_status
+        from app.schemas.artifacts import ArtifactRef
+        from app.schemas.state import validate_top_level_state
 
         self.paths.require_session_id(session_id)
         if expected_identity.session_id != session_id:
@@ -426,7 +438,64 @@ class Ledger:
             expected_identity=expected_identity,
         )
         application = verified.application
-        return self.record_event(
+        try:
+            checkpoint = validate_top_level_state(dict(checkpoint_state))
+        except Exception as exc:
+            raise ReviewApplicationIntegrityError(
+                f"review_applied checkpoint proof is invalid: {exc}"
+            ) from exc
+        if checkpoint.get("session_id") != session_id:
+            raise ReviewApplicationIntegrityError(
+                "review_applied checkpoint session_id does not match application"
+            )
+        try:
+            checkpoint_paths = SessionPaths.from_run_dir(checkpoint.get("data_dir", ""))
+        except Exception as exc:
+            raise ReviewApplicationIntegrityError(
+                f"review_applied checkpoint data_dir is invalid: {exc}"
+            ) from exc
+        if checkpoint_paths.run_dir != self.paths.run_dir:
+            raise ReviewApplicationIntegrityError(
+                "review_applied checkpoint data_dir does not match Ledger run"
+            )
+        raw_checkpoint_ref = checkpoint.get("review_application_ref")
+        try:
+            checkpoint_ref = ArtifactRef.model_validate(raw_checkpoint_ref)
+        except Exception as exc:
+            raise ReviewApplicationIntegrityError(
+                f"review_applied checkpoint has no valid application ref: {exc}"
+            ) from exc
+        if checkpoint_ref != verified.ref:
+            raise ReviewApplicationIntegrityError(
+                "review_applied checkpoint application ref does not match application"
+            )
+        interrupt = checkpoint.get("active_interrupt")
+        if checkpoint.get("supervision_state") == "blocked_human" or (
+            isinstance(interrupt, Mapping)
+            and interrupt.get("review_request_id") == application.review_request_id
+        ):
+            raise ReviewApplicationIntegrityError(
+                "review_applied checkpoint has not progressed beyond the review gate"
+            )
+
+        projection = project_review_status(checkpoint, identity=expected_identity)
+        if projection.integrity_error is not None:
+            raise ReviewApplicationIntegrityError(
+                "review_applied checkpoint status is not healthy: "
+                f"{projection.integrity_error}"
+            )
+        if (
+            projection.status != "applied"
+            or projection.resolution_basis != "checkpoint"
+            or projection.application_ref != verified.ref
+            or projection.decision_sequence is None
+        ):
+            raise ReviewApplicationIntegrityError(
+                "review_applied requires a verified decision and checkpoint "
+                "application proof"
+            )
+
+        return self._record_event(
             session_id,
             "review_applied",
             {
@@ -675,6 +744,33 @@ class Ledger:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Append one idempotent, bounded v2 event and return its exact row."""
+        writer = _TYPED_REVIEW_EVENT_WRITERS.get(event_type)
+        if writer is not None:
+            raise ValueError(f"{event_type} must be recorded with {writer}")
+        return self._record_event(
+            session_id,
+            event_type,
+            payload,
+            stage=stage,
+            workflow_step_id=workflow_step_id,
+            subject_id=subject_id,
+            refs=refs,
+            idempotency_key=idempotency_key,
+        )
+
+    def _record_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        stage: str | None = None,
+        workflow_step_id: str | None = None,
+        subject_id: str | None = None,
+        refs: Iterable[Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Internal append primitive used after a typed writer has verified facts."""
         self.paths.require_session_id(session_id)
         if not event_type or not isinstance(event_type, str):
             raise ValueError("event_type must be a non-empty string")

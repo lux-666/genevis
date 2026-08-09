@@ -502,6 +502,20 @@ class LedgerV2Tests(unittest.TestCase):
                     subject_id="s1",
                 )
 
+    def test_generic_review_lifecycle_writes_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+
+            for event_type, writer in (
+                ("review_requested", "record_review_requested"),
+                ("review_decision", "record_review_decision"),
+                ("review_applied", "record_review_applied"),
+            ):
+                with self.subTest(event_type=event_type):
+                    with self.assertRaisesRegex(ValueError, writer):
+                        ledger.record_event("s1", event_type, {})
+
     def test_session_terminal_rejects_unsupported_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)

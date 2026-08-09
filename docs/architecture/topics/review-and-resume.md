@@ -26,9 +26,11 @@ A human gate is a four-state durable protocol:
 3. `application_prepared`: the gate has prepared and published a typed review
    application artifact, including its verified decision artifact and required
    refs;
-4. `applied`: a checkpoint re-read proves that same verified application ref
-   was projected, `record_review_applied` is durably recorded, and the graph
-   may continue.
+4. `applied`: a verified decision exists and either a checkpoint re-read proves
+   that same verified application ref was projected or a proof-bound
+   `review_applied` event records that completed checkpoint transition. When
+   checkpoint proof exists but the event is missing, recovery backfills
+   `review_applied` before the graph continues.
 
 The prompt shown to a person is a projection of the request, not the recovery
 authority. A checkpoint must not embed a full request, intent, decision, or

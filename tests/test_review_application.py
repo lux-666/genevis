@@ -101,6 +101,17 @@ def _blocked_inventory(tmp_path: Path):
     return run_dir, state, persisted_request, request
 
 
+def _checkpoint_with_application(
+    state: dict[str, Any], application_ref: ArtifactRef
+) -> dict[str, Any]:
+    return {
+        **state,
+        "supervision_state": "running",
+        "active_interrupt": None,
+        "review_application_ref": application_ref.model_dump(mode="json"),
+    }
+
+
 def _fake_gate(
     effect_kind: str = "inventory.review_application.v1",
     effect_model: type[BaseModel] = _InventoryContinueEffectV1,
@@ -655,16 +666,63 @@ def test_review_applied_event_is_typed_verified_and_idempotent(
     )
     identity = ReviewApplicationIdentity.from_intent(persisted_intent.intent)
     ledger = Ledger(run_dir)
+    checkpoint_state = _checkpoint_with_application(state, application_ref)
+
+    with pytest.raises(
+        ReviewApplicationIntegrityError,
+        match="verified review_decision",
+    ):
+        ledger.record_review_applied(
+            "s1",
+            application_ref=application_ref,
+            expected_identity=identity,
+            checkpoint_state=checkpoint_state,
+        )
+    assert not any(
+        event["event_type"] == "review_applied" for event in ledger.read_events("s1")
+    )
+
+    ledger.record_review_decision(
+        "s1",
+        application_ref=application_ref,
+        expected_identity=identity,
+    )
+    with pytest.raises(
+        ReviewApplicationIntegrityError,
+        match="valid application ref",
+    ):
+        ledger.record_review_applied(
+            "s1",
+            application_ref=application_ref,
+            expected_identity=identity,
+            checkpoint_state=state,
+        )
+    blocked_checkpoint = {
+        **state,
+        "review_application_ref": application_ref.model_dump(mode="json"),
+    }
+    with pytest.raises(
+        ReviewApplicationIntegrityError,
+        match="has not progressed beyond the review gate",
+    ):
+        ledger.record_review_applied(
+            "s1",
+            application_ref=application_ref,
+            expected_identity=identity,
+            checkpoint_state=blocked_checkpoint,
+        )
 
     first = ledger.record_review_applied(
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
+        checkpoint_state=checkpoint_state,
     )
     replay = ledger.record_review_applied(
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
+        checkpoint_state=checkpoint_state,
     )
 
     assert replay == first
@@ -735,22 +793,100 @@ def test_review_status_projects_all_four_durable_states(
     assert decided.status == "application_prepared"
     assert decided.decision_sequence == decision_event["sequence"]
 
-    checkpoint_applied = dict(state)
-    checkpoint_applied["review_application_ref"] = application_ref.model_dump(
-        mode="json"
-    )
+    checkpoint_applied = _checkpoint_with_application(state, application_ref)
     applied = project_review_status(checkpoint_applied, identity=identity)
     assert applied.status == "applied"
+    assert applied.applied_sequence is None
 
-    Ledger(run_dir).record_review_applied(
+    applied_event = Ledger(run_dir).record_review_applied(
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
+        checkpoint_state=checkpoint_applied,
     )
     event_applied = project_review_status(state, identity=identity)
     assert event_applied.status == "applied"
     assert event_applied.integrity_error is None
     assert event_applied.decision_sequence == decision_event["sequence"]
+    assert event_applied.applied_sequence == applied_event["sequence"]
+
+
+def test_review_applied_without_verified_decision_is_integrity_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, state, persisted_request, request = _blocked_inventory(tmp_path)
+    persisted_intent = persist_review_intent(state, request, source="review")
+    decision_ref = persist_review_decision(
+        run_dir,
+        session_id="s1",
+        review_request_id=persisted_request.review_request_id,
+        stage="inventory",
+        gate_id="inventory_review",
+        decision=request,
+        request_hash=persisted_request.request_hash,
+        request_ref=persisted_request.request_ref,
+    )
+    monkeypatch.setattr(
+        "app.review.application.get_review_gate",
+        lambda _stage, _gate_id: _fake_gate(),
+    )
+    application_ref = persist_review_application(
+        state,
+        intent=persisted_intent,
+        prepared=PreparedReviewApplication(
+            effect_kind="inventory.review_application.v1",
+            effect=_InventoryContinueEffectV1(decision="continue"),
+            decision_ref=decision_ref,
+        ),
+    )
+    identity = ReviewApplicationIdentity.from_intent(persisted_intent.intent)
+    application = load_verified_review_application(run_dir, application_ref)
+    ledger = Ledger(run_dir)
+    ledger.create_session("s1", "control/manifest.yaml")
+    ledger.record_review_requested(
+        "s1",
+        "inventory",
+        reason="inventory_review_required",
+        review_request_artifact_ref=persisted_request.request_ref,
+        review_request_id=persisted_request.review_request_id,
+    )
+
+    # Corrupt-row injection deliberately bypasses the public typed writer.
+    ledger._record_event(
+        "s1",
+        "review_applied",
+        {
+            "review_request_id": identity.review_request_id,
+            "request_hash": identity.request_hash,
+            "gate_id": identity.gate_id,
+            "application_id": application.application.application_id,
+        },
+        stage=identity.stage,
+        workflow_step_id=identity.workflow_step_id,
+        subject_id=identity.review_request_id,
+        refs=[
+            {
+                **application.ref.model_dump(mode="json"),
+                "role": "application_ref",
+            }
+        ],
+        idempotency_key="test:corrupt-review-applied-without-decision",
+    )
+
+    status = project_review_status(state, identity=identity)
+
+    assert status.status == "application_prepared"
+    assert status.decision_sequence is None
+    assert "without a verified review_decision" in str(status.integrity_error)
+
+    from app.control.lifecycle import inspect_session
+
+    summary = inspect_session("s1", run_dir)
+    occurrence = summary["review_occurrences"][0]
+    assert occurrence["status"] == "application_prepared"
+    assert occurrence["integrity_error"] is not None
+    assert summary["latest_review_lifecycle_event"]["event_type"] == "review_requested"
 
 
 @pytest.mark.parametrize(
@@ -832,7 +968,7 @@ def test_review_status_rejects_decision_not_bound_to_verified_application(
             "candidate_id": "wrong_candidate",
             "method_name": "wrong_method",
         }[case]
-    Ledger(run_dir).record_event(
+    Ledger(run_dir)._record_event(
         "s1",
         "review_decision",
         payload,
@@ -887,7 +1023,7 @@ def test_review_status_rejects_multiple_fully_bound_decision_events(
         application_ref=application_ref,
         expected_identity=identity,
     )
-    ledger.record_event(
+    ledger._record_event(
         "s1",
         "review_decision",
         first["summary"],
@@ -918,7 +1054,7 @@ def test_legacy_decision_requires_verified_later_progression(tmp_path: Path) -> 
         review_request_artifact_ref=persisted_request.request_ref,
         review_request_id=persisted_request.review_request_id,
     )
-    ledger.record_event(
+    ledger._record_event(
         "s1",
         "review_decision",
         {
@@ -968,7 +1104,7 @@ def test_review_status_rejects_partial_identity_hash_mismatch(tmp_path: Path) ->
         review_request_artifact_ref=persisted_request.request_ref,
         review_request_id=persisted_request.review_request_id,
     )
-    ledger.record_event(
+    ledger._record_event(
         "s1",
         "review_decision",
         {
@@ -1149,7 +1285,7 @@ def test_historical_progression_uses_exact_frozen_occurrence(tmp_path: Path) -> 
         review_request_artifact_ref=persisted_request.request_ref,
         review_request_id=persisted_request.review_request_id,
     )
-    ledger.record_event(
+    ledger._record_event(
         "s1",
         "review_decision",
         {"review_request_id": persisted_request.review_request_id},

@@ -311,6 +311,53 @@ class ResumeTransactionTests(unittest.TestCase):
                 "checkpoint_apply",
             )
 
+    def test_terminal_preflight_rejects_canonical_stage_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = v2_run_dir(Path(tmpdir) / "data", "s1")
+            ledger = Ledger(run_dir)
+            ledger.create_session("s1", "control/manifest.yaml")
+            ledger.record_session_terminal(
+                "s1",
+                outcome="completed",
+                stage="inventory",
+            )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(run_dir),
+                workflow_steps=_INVENTORY_WORKFLOW_STEPS,
+                stage_plan_ref="control/run_config.json",
+            )
+            state.update(
+                {
+                    "workflow_step_index": 1,
+                    "entered_workflow_step_index": 0,
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "active_interrupt": None,
+                }
+            )
+            graph = _Graph(state)
+            lease = FrozenExecutionLease(
+                session_id="s1",
+                run_dir=run_dir,
+                active=True,
+            )
+
+            with self.assertRaisesRegex(
+                ResumeTransactionError,
+                "stage conflicts with the checkpoint",
+            ) as ctx:
+                self._execute(
+                    graph=graph,
+                    run_dir=run_dir,
+                    request=None,
+                    lease=lease,
+                )
+
+            self.assertEqual(ctx.exception.phase, "terminal_preflight")
+            self.assertEqual(graph.invocations, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

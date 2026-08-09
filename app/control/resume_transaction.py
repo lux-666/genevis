@@ -12,6 +12,7 @@ from app.control.lifecycle import (
     TerminalFinalizationError,
     finalize_authoritative_terminal,
     normalize_resume_review_request,
+    reconcile_canonical_terminal_checkpoint,
 )
 from app.control.projections import (
     ProjectionBoundary,
@@ -281,9 +282,10 @@ def execute_resume_transaction(
 
         phase = "checkpoint_apply"
         checkpoint_state = _read_checkpoint(graph, config, session_id)
-        if _checkpoint_has_application(checkpoint_state, verified_application.ref):
-            _require_application_checkpoint_progressed(checkpoint_state, identity)
-        else:
+        if not _checkpoint_has_application(
+            checkpoint_state,
+            verified_application.ref,
+        ):
             _require_same_blocked_occurrence(checkpoint_state, identity)
             update = dict(
                 gate.load_apply_application()(checkpoint_state, verified_application)
@@ -319,27 +321,13 @@ def execute_resume_transaction(
                     intent_ref=intent_ref,
                     application_ref=application_ref,
                 )
-            _require_application_checkpoint_progressed(checkpoint_state, identity)
 
         phase = "checkpoint_verify"
-        checkpoint_application_ref = checkpoint_state.get("review_application_ref")
-        if checkpoint_application_ref is None:
-            raise ResumeTransactionError(
-                "checkpoint_verify",
-                "checkpoint application proof disappeared before verification",
-                review_status="application_prepared",
-                intent_ref=intent_ref,
-                application_ref=application_ref,
-            )
-        load_verified_review_application(
-            paths.run_dir,
-            checkpoint_application_ref,
-            expected_identity=identity,
-        )
         ledger.record_review_applied(
             session_id,
             application_ref=verified_application.ref,
             expected_identity=identity,
+            checkpoint_state=checkpoint_state,
         )
         status_projection = _healthy_status(checkpoint_state, identity)
         status = status_projection.status
@@ -528,7 +516,14 @@ def _terminal_preflight(
     checkpoint_terminal = supervision in {"completed", "failed_terminal"}
     if terminal_read is not None:
         canonical = terminal_read["canonical"]
-        _require_matching_terminal_checkpoint(state, canonical)
+        try:
+            reconcile_canonical_terminal_checkpoint(
+                state,
+                canonical,
+                session_id=session_id,
+            )
+        except TerminalFinalizationError as exc:
+            raise ResumeTransactionError("terminal_preflight", str(exc)) from exc
         integrity = terminal_read.get("terminal_integrity")
         if integrity is not None:
             return _TerminalPreflight(
@@ -576,40 +571,6 @@ def _terminal_preflight(
         state=finalized.state,
         compaction_warning=finalized.compaction_warning,
     )
-
-
-def _require_matching_terminal_checkpoint(
-    state: TopLevelState,
-    terminal_event: Mapping[str, Any],
-) -> None:
-    summary = terminal_event.get("summary")
-    outcome = summary.get("outcome") if isinstance(summary, Mapping) else None
-    outcome_key = outcome if isinstance(outcome, str) else ""
-    expected_supervision = {
-        "completed": "completed",
-        "failed": "failed_terminal",
-    }.get(outcome_key)
-    if expected_supervision is None:
-        raise ResumeTransactionError(
-            "terminal_preflight",
-            f"canonical terminal has unsupported outcome: {outcome!r}",
-        )
-    if state.get("supervision_state") != expected_supervision:
-        raise ResumeTransactionError(
-            "terminal_preflight",
-            "canonical Ledger terminal conflicts with the current checkpoint",
-        )
-    if state.get("active_interrupt") is not None:
-        raise ResumeTransactionError(
-            "terminal_preflight",
-            "terminal checkpoint still carries an active review interrupt",
-        )
-    terminal_stage = terminal_event.get("stage")
-    if terminal_stage is not None and state.get("current_stage") != terminal_stage:
-        raise ResumeTransactionError(
-            "terminal_preflight",
-            "canonical Ledger terminal stage conflicts with the checkpoint",
-        )
 
 
 def _identity_from_checkpoint(
@@ -715,23 +676,6 @@ def _checkpoint_has_application(
             review_status="application_prepared",
             application_ref=expected,
         ) from exc
-
-
-def _require_application_checkpoint_progressed(
-    state: TopLevelState,
-    identity: ReviewApplicationIdentity,
-) -> None:
-    interrupt = state.get("active_interrupt")
-    if state.get("supervision_state") == "blocked_human" or (
-        isinstance(interrupt, Mapping)
-        and interrupt.get("review_request_id") == identity.review_request_id
-    ):
-        raise ResumeTransactionError(
-            "checkpoint_verify",
-            "checkpoint carries the application ref but remains at the same "
-            "blocked gate",
-            review_status="application_prepared",
-        )
 
 
 def _record_resume_failed(

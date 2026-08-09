@@ -59,6 +59,7 @@ class ReviewStatusProjection(BaseModel):
     request_event: dict[str, Any] | None = None
     request_sequence: int | None = None
     decision_sequence: int | None = None
+    applied_sequence: int | None = None
     progression_sequence: int | None = None
     resolution_basis: ReviewResolutionBasis = "none"
     integrity_error: str | None = None
@@ -90,6 +91,7 @@ class ReviewStatusProjection(BaseModel):
             "requires_recovery": self.requires_recovery,
             "request_sequence": self.request_sequence,
             "decision_sequence": self.decision_sequence,
+            "applied_sequence": self.applied_sequence,
             "progression_sequence": self.progression_sequence,
             "resolution_basis": self.resolution_basis,
             "integrity_error": self.integrity_error,
@@ -562,6 +564,25 @@ def _project_identity_status(
             request_sequence=request_sequence,
             resolution_basis="review_applied",
         )
+    if decision_sequence is None and (
+        checkpoint_ref == application_ref
+        or bool(matching_applied)
+        or progression_sequence is not None
+    ):
+        return _error(
+            "application_prepared",
+            identity,
+            "review application has closing proof without a verified review_decision",
+            intent_ref=intent_ref,
+            application_ref=application_ref,
+            application_id=application_id,
+            request_event=request_event,
+            request_sequence=request_sequence,
+            progression_sequence=progression_sequence,
+        )
+    applied_sequence = (
+        _event_sequence(matching_applied[0]) if matching_applied else None
+    )
     if checkpoint_ref == application_ref:
         return ReviewStatusProjection(
             status="applied",
@@ -572,6 +593,7 @@ def _project_identity_status(
             request_event=request_event,
             request_sequence=request_sequence,
             decision_sequence=decision_sequence,
+            applied_sequence=applied_sequence,
             resolution_basis="checkpoint",
         )
     if matching_applied:
@@ -584,7 +606,8 @@ def _project_identity_status(
             request_event=request_event,
             request_sequence=request_sequence,
             decision_sequence=decision_sequence,
-            progression_sequence=_event_sequence(matching_applied[0]),
+            applied_sequence=applied_sequence,
+            progression_sequence=applied_sequence,
             resolution_basis="review_applied",
         )
     if progression_sequence is not None:
