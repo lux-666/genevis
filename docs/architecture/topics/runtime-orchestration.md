@@ -164,9 +164,10 @@ and the T2T template repeats it after `t2t`. Neither helper rewrites a
 literal RunConfig. The controller does not inspect FASTQ contents, choose an
 assembler, build a command, or interpret biological metrics.
 
-The controller wrapper is thin but not pure. It records stage-entered,
-stage-completed, stage-failed, and session-terminal Ledger events, and writes
-an operator report at blocked or failed boundaries. A stage-local skip, when a
+The controller wrapper is thin but not pure. It writes only occurrence-scoped
+stage-entered, stage-completed, and stage-failed Ledger facts plus the scalar
+progress projection input. It does not write `session_terminal` or generate
+operator reports at blocked or failed boundaries. A stage-local skip, when a
 stage contract explicitly creates one, remains distinct from the parent: the
 parent never synthesizes skip events for absent occurrences. Any architecture
 description claiming that the parent graph has no side effects is incorrect.
@@ -211,12 +212,13 @@ an immutable request. `failed_terminal` stops the run and records bounded error
 evidence. A successful route reaches `done` and terminal completion.
 
 Only completed or failed sessions are eligible for authoritative terminal
-finalization. The finalizer proves the terminal checkpoint, writes/reuses one
-canonical Ledger terminal singleton, then attempts checkpoint compaction.
-Compaction preserves the latest terminal checkpoint and does not delete
-immutable artifacts; a compaction failure is an operational warning, not a
-different lifecycle outcome. Report and workflow-state projections run through
-`ProjectionBoundary` as best-effort presentation work: ordinary projection
-exceptions become bounded warnings and cannot contaminate lifecycle, review
-status, checkpoint, or terminal authority. The remaining debt is report
-regeneration coverage, not projection-exception handling.
+finalization. After proving the terminal checkpoint, the authoritative finalizer
+writes or reuses the one canonical `session_terminal` Ledger singleton, then
+attempts checkpoint compaction. Compaction preserves the latest terminal
+checkpoint and does not delete immutable artifacts; a compaction failure is an
+operational warning, not a different lifecycle outcome. `ProjectionBoundary`
+generates reports and workflow-state projections as best-effort presentation
+work: ordinary projection exceptions become bounded warnings and cannot
+contaminate lifecycle, review status, checkpoint, or terminal authority. The
+remaining debt is report regeneration coverage, not projection-exception
+handling.

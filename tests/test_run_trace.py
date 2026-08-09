@@ -247,6 +247,7 @@ def _review_occurrence(
     decision: str | None = None,
     applied: bool = False,
     rationale_artifact_ref=None,
+    record_decision: bool = True,
 ):
     """Persist one exact Assembly Review occurrence through the v4 lifecycle."""
 
@@ -305,11 +306,12 @@ def _review_occurrence(
     )
     application = load_verified_review_application(paths.run_dir, application_ref)
     identity = ReviewApplicationIdentity.from_intent(intent.intent)
-    ledger.record_review_decision(
-        paths.session_id,
-        application_ref=application.ref,
-        expected_identity=identity,
-    )
+    if record_decision:
+        ledger.record_review_decision(
+            paths.session_id,
+            application_ref=application.ref,
+            expected_identity=identity,
+        )
     if applied:
         ledger.record_review_applied(
             paths.session_id,
@@ -999,6 +1001,92 @@ class SessionSummaryBuildTests(unittest.TestCase):
             self.assertNotIn("applied_at", review)
             self.assertEqual(review["status"], "awaiting_decision")
             self.assertIn("review_bindings", {gap["field"] for gap in trace["gaps"]})
+
+    def test_raw_decision_mismatch_is_excluded_from_trace_and_lifecycle(self):
+        def wrong_application_id(payload, _refs, _application):
+            payload["application_id"] = "wrong-application"
+
+        def wrong_application_ref(_payload, refs, application):
+            refs[2] = {
+                **application.application.decision_ref.model_dump(mode="json"),
+                "role": "application_ref",
+            }
+
+        def wrong_gate_id(payload, _refs, _application):
+            payload["gate_id"] = "wrong_gate"
+
+        def wrong_decision(payload, _refs, _application):
+            payload["decision"] = "continue"
+
+        for name, mutate in (
+            ("application_id", wrong_application_id),
+            ("application_ref", wrong_application_ref),
+            ("gate_id", wrong_gate_id),
+            ("decision", wrong_decision),
+        ):
+            with self.subTest(field=name), tempfile.TemporaryDirectory() as tmp:
+                paths = _run(tmp)
+                persisted, application = _review_occurrence(
+                    paths,
+                    reason="operator_required",
+                    decision="stop_human_review",
+                    record_decision=False,
+                )
+                assert application is not None
+                envelope = application.application
+                payload = {
+                    "review_request_id": persisted.review_request_id,
+                    "request_hash": persisted.request_hash,
+                    "gate_id": envelope.gate_id,
+                    "decision": "stop_human_review",
+                    "decided_by": "human",
+                    "application_id": envelope.application_id,
+                    "effect_kind": envelope.effect_kind,
+                    "source": "test",
+                    "rejected_candidates": [],
+                    "rejected_candidate_count": 0,
+                    "note_count": 0,
+                }
+                refs = [
+                    {
+                        **envelope.decision_ref.model_dump(mode="json"),
+                        "role": "artifact_ref",
+                    },
+                    {
+                        **envelope.intent_ref.model_dump(mode="json"),
+                        "role": "intent_ref",
+                    },
+                    {
+                        **application.ref.model_dump(mode="json"),
+                        "role": "application_ref",
+                    },
+                ]
+                mutate(payload, refs, application)
+                Ledger(paths.run_dir).record_event(
+                    paths.session_id,
+                    "review_decision",
+                    payload,
+                    stage="assembly_review",
+                    workflow_step_id=_step_id("assembly_review"),
+                    subject_id=persisted.review_request_id,
+                    refs=refs,
+                    idempotency_key=f"test:raw-decision-mismatch:{name}",
+                )
+
+                summary = inspect_session(paths.session_id, paths.run_dir)
+                occurrence = summary["review_occurrences"][0]
+                self.assertIsNotNone(occurrence["integrity_error"])
+                self.assertIsNone(summary["latest_review_decision"])
+                self.assertEqual(summary["review_decisions"], [])
+
+                trace = build_session_trace(paths.run_dir, paths.session_id)
+                self.assertEqual(trace["decisions"], [])
+                review = _stage(trace, "assembly_review")["reviews"][0]
+                self.assertNotIn("decision", review)
+                self.assertIn(
+                    "review_bindings",
+                    {gap["field"] for gap in trace["gaps"]},
+                )
 
     def test_blocked_request_is_loaded_from_immutable_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

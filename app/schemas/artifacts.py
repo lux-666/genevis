@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 
 from pydantic import (
     BaseModel,
@@ -179,6 +179,28 @@ class ArtifactRef(BaseModel):
             size_bytes=artifact.file_size_bytes,
             artifact_type=artifact.artifact_type,
         )
+
+
+def canonical_artifact_refs(refs: Iterable[ArtifactRef]) -> tuple[ArtifactRef, ...]:
+    """Return unique refs in immutable wire canonical order.
+
+    The wire identity and ordering fields are, in model-field order:
+    ``artifact_id``, ``path_ref``, ``sha256``, ``size_bytes``, and
+    ``artifact_type``. Every serialized collection of immutable ArtifactRefs
+    must use this order.
+    """
+
+    by_identity = {
+        (
+            ref.artifact_id,
+            ref.path_ref,
+            ref.sha256,
+            ref.size_bytes,
+            ref.artifact_type,
+        ): ref
+        for ref in refs
+    }
+    return tuple(by_identity[identity] for identity in sorted(by_identity))
 
 
 class ArtifactRefJson(TypedDict):

@@ -13,6 +13,8 @@ from app.review.application import (
     REVIEW_INTENT_ARTIFACT_TYPE,
     ReviewApplicationIdentity,
     ReviewApplicationIntegrityError,
+    ReviewIntentV1,
+    VerifiedReviewApplication,
     load_verified_review_application,
     load_verified_review_intent,
 )
@@ -56,6 +58,7 @@ class ReviewStatusProjection(BaseModel):
     application_id: str | None = None
     request_event: dict[str, Any] | None = None
     request_sequence: int | None = None
+    decision_sequence: int | None = None
     progression_sequence: int | None = None
     resolution_basis: ReviewResolutionBasis = "none"
     integrity_error: str | None = None
@@ -86,6 +89,7 @@ class ReviewStatusProjection(BaseModel):
             "accepts_new_decision": self.accepts_new_decision,
             "requires_recovery": self.requires_recovery,
             "request_sequence": self.request_sequence,
+            "decision_sequence": self.decision_sequence,
             "progression_sequence": self.progression_sequence,
             "resolution_basis": self.resolution_basis,
             "integrity_error": self.integrity_error,
@@ -405,7 +409,7 @@ def _project_identity_status(
         )
 
     try:
-        load_verified_review_intent(
+        verified_intent = load_verified_review_intent(
             paths.run_dir,
             intent_ref,
             expected_identity=identity,
@@ -493,6 +497,26 @@ def _project_identity_status(
         )
 
     application_id = verified.application.application_id
+    decision_sequence, decision_diagnostic = _verified_decision_sequence(
+        matching_decisions,
+        application=verified,
+        intent=verified_intent,
+    )
+    if decision_diagnostic is not None:
+        return _error(
+            "applied" if progression_sequence is not None else "application_prepared",
+            identity,
+            decision_diagnostic,
+            intent_ref=intent_ref,
+            application_ref=application_ref,
+            application_id=application_id,
+            request_event=request_event,
+            request_sequence=request_sequence,
+            progression_sequence=progression_sequence,
+            resolution_basis=(
+                "historical_progression" if progression_sequence is not None else "none"
+            ),
+        )
     checkpoint_ref: ArtifactRef | None = None
     if checkpoint_application_ref is not None:
         try:
@@ -513,7 +537,7 @@ def _project_identity_status(
         event
         for event in applied_events
         if event.get("application_id") == application_id
-        and _event_has_ref(event, application_ref)
+        and _event_has_role_ref(event, "application_ref", application_ref)
     ]
     if applied_events and len(matching_applied) != len(applied_events):
         return _error(
@@ -547,6 +571,7 @@ def _project_identity_status(
             application_id=application_id,
             request_event=request_event,
             request_sequence=request_sequence,
+            decision_sequence=decision_sequence,
             resolution_basis="checkpoint",
         )
     if matching_applied:
@@ -558,6 +583,7 @@ def _project_identity_status(
             application_id=application_id,
             request_event=request_event,
             request_sequence=request_sequence,
+            decision_sequence=decision_sequence,
             progression_sequence=_event_sequence(matching_applied[0]),
             resolution_basis="review_applied",
         )
@@ -570,6 +596,7 @@ def _project_identity_status(
             application_id=application_id,
             request_event=request_event,
             request_sequence=request_sequence,
+            decision_sequence=decision_sequence,
             progression_sequence=progression_sequence,
             resolution_basis="historical_progression",
         )
@@ -581,6 +608,7 @@ def _project_identity_status(
         application_id=application_id,
         request_event=request_event,
         request_sequence=request_sequence,
+        decision_sequence=decision_sequence,
     )
 
 
@@ -671,6 +699,75 @@ def _matching_events(
         and event.get("request_hash") == identity.request_hash
         and (after_sequence is None or (_event_sequence(event) or 0) > after_sequence)
     ]
+
+
+def _verified_decision_sequence(
+    events: list[dict[str, Any]],
+    *,
+    application: VerifiedReviewApplication,
+    intent: ReviewIntentV1,
+) -> tuple[int | None, str | None]:
+    """Bind at most one decision event to verified application and intent truth."""
+
+    if not events:
+        return None, None
+    if len(events) != 1:
+        return None, "multiple review_decision events exist for one application"
+
+    event = events[0]
+    sequence = _event_sequence(event)
+    if sequence is None:
+        return None, "review_decision has no valid Ledger sequence"
+
+    request = intent.request
+    envelope = application.application
+    expected_fields = {
+        "application_id": envelope.application_id,
+        "gate_id": envelope.gate_id,
+        "effect_kind": envelope.effect_kind,
+        "decision": request.decision,
+        "candidate_id": request.candidate_id,
+        "method_name": request.method_name,
+        "decided_by": request.decided_by,
+        "source": intent.source,
+        "rejected_candidates": request.rejected_candidates,
+        "rejected_candidate_count": len(request.rejected_candidates),
+        "note_count": len(request.notes),
+    }
+    for field, expected_value in expected_fields.items():
+        if event.get(field) != expected_value:
+            return (
+                None,
+                f"review_decision {field} does not match the verified application "
+                "and intent",
+            )
+
+    expected_refs = {
+        "artifact_ref": envelope.decision_ref,
+        "intent_ref": envelope.intent_ref,
+        "application_ref": application.ref,
+    }
+    for role, expected_ref in expected_refs.items():
+        if not _event_has_role_ref(event, role, expected_ref):
+            return (
+                None,
+                f"review_decision {role} does not match the verified application",
+            )
+
+    rationale_ref = request.rationale_artifact_ref
+    if rationale_ref is None:
+        if _event_has_role(event, "rationale_artifact_ref"):
+            return None, "review_decision has an unexpected rationale_artifact_ref"
+    elif not _event_has_role_ref(
+        event,
+        "rationale_artifact_ref",
+        rationale_ref,
+    ):
+        return (
+            None,
+            "review_decision rationale_artifact_ref does not match immutable intent",
+        )
+    return sequence, None
 
 
 def _review_event_identity_diagnostic(
@@ -865,14 +962,31 @@ def _record_path(
     )
 
 
-def _event_has_ref(event: dict[str, Any], expected: ArtifactRef) -> bool:
-    expected_fields = expected.model_dump(mode="json")
-    expected_fields.pop("schema_version", None)
+def _event_has_role(event: Mapping[str, Any], role: str) -> bool:
     return any(
-        isinstance(ref, dict)
-        and all(ref.get(key) == value for key, value in expected_fields.items())
+        isinstance(ref, Mapping) and ref.get("role") == role
         for ref in event.get("refs") or []
     )
+
+
+def _event_has_role_ref(
+    event: Mapping[str, Any],
+    role: str,
+    expected: ArtifactRef,
+) -> bool:
+    matches = [
+        ref
+        for ref in event.get("refs") or []
+        if isinstance(ref, Mapping) and ref.get("role") == role
+    ]
+    if len(matches) != 1:
+        return False
+    payload = dict(matches[0])
+    payload.pop("role", None)
+    try:
+        return ArtifactRef.model_validate(payload) == expected
+    except Exception:
+        return False
 
 
 def _event_sequence(event: Mapping[str, Any] | None) -> int | None:

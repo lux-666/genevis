@@ -31,7 +31,7 @@ from app.review.persistence import (
     portable_review_value,
     publish_review_json_record,
 )
-from app.schemas.artifacts import ArtifactRef
+from app.schemas.artifacts import ArtifactRef, canonical_artifact_refs
 from app.schemas.state import DomainStage, TopLevelState
 from app.storage.artifacts import read_artifact_records, resolve_artifact_ref
 from app.storage.paths import DataLayoutError, SessionPaths
@@ -194,7 +194,7 @@ class ReviewApplicationV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_application_id(self) -> "ReviewApplicationV1":
-        if self.required_refs != _canonical_artifact_refs(self.required_refs):
+        if self.required_refs != canonical_artifact_refs(self.required_refs):
             raise ValueError("application required_refs must be sorted and unique")
         payload = self.model_dump(mode="json", exclude={"application_id"})
         if self.application_id != review_application_id(payload):
@@ -468,7 +468,7 @@ def persist_review_application(
         )
     effect_payload = decoded_effect.model_dump(mode="json")
     _verify_decision_ref(paths, prepared.decision_ref, intent.intent)
-    required_refs = _canonical_artifact_refs(
+    required_refs = canonical_artifact_refs(
         (
             *prepared.required_refs,
             *_typed_artifact_refs(decoded_effect),
@@ -647,13 +647,12 @@ def load_verified_review_application(
             "registered review effect decoder must return a Pydantic model"
         )
     _verify_typed_references(paths, effect, "review application effect")
-    typed_refs = _canonical_artifact_refs(_typed_artifact_refs(effect))
-    dynamic_metadata_refs = _canonical_artifact_refs(
+    typed_refs = canonical_artifact_refs(_typed_artifact_refs(effect))
+    dynamic_metadata_refs = canonical_artifact_refs(
         _dynamic_metadata_artifact_refs(effect, "review application effect")
     )
-    required_ref_keys = {_artifact_ref_key(item) for item in application.required_refs}
     missing_typed_refs = [
-        ref for ref in typed_refs if _artifact_ref_key(ref) not in required_ref_keys
+        ref for ref in typed_refs if ref not in application.required_refs
     ]
     if missing_typed_refs:
         raise ReviewApplicationIntegrityError(
@@ -661,9 +660,7 @@ def load_verified_review_application(
             + ", ".join(ref.path_ref for ref in missing_typed_refs)
         )
     missing_dynamic_metadata_refs = [
-        ref
-        for ref in dynamic_metadata_refs
-        if _artifact_ref_key(ref) not in required_ref_keys
+        ref for ref in dynamic_metadata_refs if ref not in application.required_refs
     ]
     if missing_dynamic_metadata_refs:
         raise ReviewApplicationIntegrityError(
@@ -822,23 +819,6 @@ def _verify_typed_references(
             raise ReviewApplicationIntegrityError(
                 f"{label} run-relative ref is missing: {ref.path_ref}"
             )
-
-
-def _artifact_ref_key(ref: ArtifactRef) -> tuple[str, str, str, int, str]:
-    return (
-        ref.path_ref,
-        ref.sha256,
-        ref.artifact_id,
-        ref.size_bytes,
-        ref.artifact_type,
-    )
-
-
-def _canonical_artifact_refs(
-    refs: tuple[ArtifactRef, ...] | list[ArtifactRef] | Any,
-) -> tuple[ArtifactRef, ...]:
-    by_key = {_artifact_ref_key(ref): ref for ref in refs}
-    return tuple(by_key[key] for key in sorted(by_key))
 
 
 def _require_effect_bindings(

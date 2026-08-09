@@ -539,10 +539,11 @@ terminal outcome must be reconstructible without checkpoint or reports.
 Runtime progress has no durable projection of its own. An attached terminal
 consumes the verified frozen workflow plan and current graph control state at
 the parent-controller boundary. Detached inspection directly joins the
-verified frozen plan, Ledger occurrence events, checkpoint summary, and the
-existing execution lock. Counts and percentages are ephemeral presentation
-arithmetic and must not be persisted as artifacts, reports, Ledger events,
-checkpoint fields, progress tables, or batch state.
+verified frozen plan, Ledger occurrence events, SQLite checkpoint availability
+and progress-marker state, and the existing execution-lock observation. Counts
+and percentages are ephemeral presentation arithmetic and must not be persisted
+as artifacts, reports, Ledger events, checkpoint fields, progress tables, or
+batch state.
 
 Machine-readable detached inspection publishes `inspect_schema_version: 1`.
 Its `workflow_progress` object uses only a verified frozen RunConfig for the

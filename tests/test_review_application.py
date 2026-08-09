@@ -724,6 +724,16 @@ def test_review_status_projects_all_four_durable_states(
     prepared = project_review_status(state, identity=identity)
     assert prepared.status == "application_prepared"
     assert prepared.application_ref == application_ref
+    assert prepared.decision_sequence is None
+
+    decision_event = Ledger(run_dir).record_review_decision(
+        "s1",
+        application_ref=application_ref,
+        expected_identity=identity,
+    )
+    decided = project_review_status(state, identity=identity)
+    assert decided.status == "application_prepared"
+    assert decided.decision_sequence == decision_event["sequence"]
 
     checkpoint_applied = dict(state)
     checkpoint_applied["review_application_ref"] = application_ref.model_dump(
@@ -740,6 +750,159 @@ def test_review_status_projects_all_four_durable_states(
     event_applied = project_review_status(state, identity=identity)
     assert event_applied.status == "applied"
     assert event_applied.integrity_error is None
+    assert event_applied.decision_sequence == decision_event["sequence"]
+
+
+@pytest.mark.parametrize(
+    ("case", "error_field"),
+    [
+        ("application_id", "application_id"),
+        ("application_ref", "application_ref"),
+        ("gate_id", "gate_id"),
+        ("decision", "decision"),
+        ("decided_by", "decided_by"),
+        ("candidate_id", "candidate_id"),
+        ("method_name", "method_name"),
+    ],
+)
+def test_review_status_rejects_decision_not_bound_to_verified_application(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    error_field: str,
+) -> None:
+    run_dir, state, persisted_request, request = _blocked_inventory(tmp_path)
+    persisted_intent = persist_review_intent(state, request, source="review")
+    decision_ref = persist_review_decision(
+        run_dir,
+        session_id="s1",
+        review_request_id=persisted_request.review_request_id,
+        stage="inventory",
+        gate_id="inventory_review",
+        decision=request,
+        request_hash=persisted_request.request_hash,
+        request_ref=persisted_request.request_ref,
+    )
+    monkeypatch.setattr(
+        "app.review.application.get_review_gate",
+        lambda _stage, _gate_id: _fake_gate(),
+    )
+    application_ref = persist_review_application(
+        state,
+        intent=persisted_intent,
+        prepared=PreparedReviewApplication(
+            effect_kind="inventory.review_application.v1",
+            effect=_InventoryContinueEffectV1(decision="continue"),
+            decision_ref=decision_ref,
+        ),
+    )
+    verified = load_verified_review_application(run_dir, application_ref)
+    application = verified.application
+    payload = {
+        "review_request_id": application.review_request_id,
+        "request_hash": application.request_hash,
+        "gate_id": application.gate_id,
+        "decision": request.decision,
+        "candidate_id": request.candidate_id,
+        "rejected_candidates": request.rejected_candidates,
+        "rejected_candidate_count": len(request.rejected_candidates),
+        "note_count": len(request.notes),
+        "method_name": request.method_name,
+        "decided_by": request.decided_by,
+        "application_id": application.application_id,
+        "effect_kind": application.effect_kind,
+        "source": persisted_intent.intent.source,
+    }
+    refs = [
+        {**application.decision_ref.model_dump(mode="json"), "role": "artifact_ref"},
+        {**application.intent_ref.model_dump(mode="json"), "role": "intent_ref"},
+        {**verified.ref.model_dump(mode="json"), "role": "application_ref"},
+    ]
+    if case == "application_ref":
+        refs[-1] = {
+            **application.decision_ref.model_dump(mode="json"),
+            "role": "application_ref",
+        }
+    else:
+        payload[case] = {
+            "application_id": "review_app_000000000000000000000000",
+            "gate_id": "wrong_gate",
+            "decision": "stop_human_review",
+            "decided_by": "auto_rule",
+            "candidate_id": "wrong_candidate",
+            "method_name": "wrong_method",
+        }[case]
+    Ledger(run_dir).record_event(
+        "s1",
+        "review_decision",
+        payload,
+        stage=application.stage,
+        workflow_step_id=application.workflow_step_id,
+        subject_id=application.review_request_id,
+        refs=refs,
+        idempotency_key=f"test:malformed-review-decision:{case}",
+    )
+    identity = ReviewApplicationIdentity.from_intent(persisted_intent.intent)
+
+    status = project_review_status(state, identity=identity)
+
+    assert status.status == "application_prepared"
+    assert error_field in str(status.integrity_error)
+    assert status.decision_sequence is None
+
+
+def test_review_status_rejects_multiple_fully_bound_decision_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, state, persisted_request, request = _blocked_inventory(tmp_path)
+    persisted_intent = persist_review_intent(state, request, source="review")
+    decision_ref = persist_review_decision(
+        run_dir,
+        session_id="s1",
+        review_request_id=persisted_request.review_request_id,
+        stage="inventory",
+        gate_id="inventory_review",
+        decision=request,
+        request_hash=persisted_request.request_hash,
+        request_ref=persisted_request.request_ref,
+    )
+    monkeypatch.setattr(
+        "app.review.application.get_review_gate",
+        lambda _stage, _gate_id: _fake_gate(),
+    )
+    application_ref = persist_review_application(
+        state,
+        intent=persisted_intent,
+        prepared=PreparedReviewApplication(
+            effect_kind="inventory.review_application.v1",
+            effect=_InventoryContinueEffectV1(decision="continue"),
+            decision_ref=decision_ref,
+        ),
+    )
+    identity = ReviewApplicationIdentity.from_intent(persisted_intent.intent)
+    ledger = Ledger(run_dir)
+    first = ledger.record_review_decision(
+        "s1",
+        application_ref=application_ref,
+        expected_identity=identity,
+    )
+    ledger.record_event(
+        "s1",
+        "review_decision",
+        first["summary"],
+        stage=first["stage"],
+        workflow_step_id=first["workflow_step_id"],
+        subject_id=first["subject_id"],
+        refs=first["refs"],
+        idempotency_key="test:duplicate-fully-bound-review-decision",
+    )
+
+    status = project_review_status(state, identity=identity)
+
+    assert status.status == "application_prepared"
+    assert "multiple review_decision" in str(status.integrity_error)
+    assert status.decision_sequence is None
 
 
 def test_legacy_decision_requires_verified_later_progression(tmp_path: Path) -> None:
@@ -791,6 +954,7 @@ def test_legacy_decision_requires_verified_later_progression(tmp_path: Path) -> 
     progressed = project_review_status(state, identity=identity)
     assert progressed.status == "applied"
     assert progressed.resolution_basis == "historical_progression"
+    assert progressed.decision_sequence is None
 
 
 def test_review_status_rejects_partial_identity_hash_mismatch(tmp_path: Path) -> None:
@@ -1019,3 +1183,4 @@ def test_historical_progression_uses_exact_frozen_occurrence(tmp_path: Path) -> 
     exact_later_occurrence = project_review_status(state, identity=identity)
     assert exact_later_occurrence.status == "applied"
     assert exact_later_occurrence.resolution_basis == "historical_progression"
+    assert exact_later_occurrence.decision_sequence is None

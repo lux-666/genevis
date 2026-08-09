@@ -67,6 +67,7 @@ from app.schemas.artifacts import (
     AssemblyEvalSignal,
     AssemblyReviewActionArtifact,
     ReviewDecisionArtifact,
+    canonical_artifact_refs,
 )
 from app.schemas.plan import AssemblyReviewPlan
 from app.schemas.resource_ref import ResourceRef
@@ -1171,11 +1172,13 @@ def prepare_assembly_review_application(
         effect_kind=ASSEMBLY_REVIEW_EFFECT_KIND,
         effect=effect,
         decision_ref=decision_ref,
-        required_refs=_canonical_artifact_refs(
-            action_ref,
-            output_candidate.ref,
-            output_candidate.primary_output_ref,
-            *(() if rationale_ref is None else (rationale_ref,)),
+        required_refs=canonical_artifact_refs(
+            (
+                action_ref,
+                output_candidate.ref,
+                output_candidate.primary_output_ref,
+                *(() if rationale_ref is None else (rationale_ref,)),
+            )
         ),
     )
 
@@ -1289,21 +1292,6 @@ def _candidate_ids_from_review_request_payload(payload: Any) -> set[str]:
         if isinstance(candidate, Mapping)
         and isinstance(candidate.get("candidate_id"), str)
     }
-
-
-def _canonical_artifact_refs(*refs: ArtifactRef) -> tuple[ArtifactRef, ...]:
-    by_key = {_artifact_ref_key(ref): ref for ref in refs}
-    return tuple(by_key[key] for key in sorted(by_key))
-
-
-def _artifact_ref_key(ref: ArtifactRef) -> tuple[str, str, str, int, str]:
-    return (
-        ref.artifact_id,
-        ref.path_ref,
-        ref.sha256,
-        ref.size_bytes,
-        ref.artifact_type,
-    )
 
 
 def apply_assembly_review_application(
@@ -1601,13 +1589,15 @@ def _prepare_stopped_assembly_review_application(
             decision_ref=decision_ref,
         ),
         decision_ref=decision_ref,
-        required_refs=_canonical_artifact_refs(
-            decision_ref,
-            *(
-                ()
-                if request.rationale_artifact_ref is None
-                else (request.rationale_artifact_ref,)
-            ),
+        required_refs=canonical_artifact_refs(
+            (
+                decision_ref,
+                *(
+                    ()
+                    if request.rationale_artifact_ref is None
+                    else (request.rationale_artifact_ref,)
+                ),
+            )
         ),
     )
 

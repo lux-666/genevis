@@ -79,11 +79,22 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
         summary.get("review_occurrences") or [],
         canonical_terminal,
     )
+    verified_decision_sequences = {
+        occurrence.get("decision_sequence")
+        for occurrence in review_occurrences
+        if occurrence.get("integrity_error") is None
+        and type(occurrence.get("decision_sequence")) is int
+    }
 
-    decisions = [
+    raw_decisions = [
         event
         for event in authoritative_events
         if event.get("event_type") == "review_decision"
+    ]
+    decisions = [
+        event
+        for event in raw_decisions
+        if _event_sequence(event) in verified_decision_sequences
     ]
     stages = _build_stage_records(
         paths,
@@ -95,6 +106,7 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
     gaps = _build_gaps(
         session,
         authoritative_events,
+        raw_decisions,
         decisions,
         review_occurrences,
         summary,
@@ -549,6 +561,9 @@ def _review_events_by_workflow_step(
                 "resolution_basis",
                 "integrity_error",
                 "request_sequence",
+                "decision_sequence",
+                "application_ref",
+                "application_id",
             )
             if occurrence.get(key_name) is not None
         }
@@ -568,8 +583,14 @@ def _review_events_by_workflow_step(
         if entry is None:
             continue
         if event.get("event_type") == "review_applied":
+            if entry.get("integrity_error") is not None or event.get(
+                "application_id"
+            ) != entry.get("application_id"):
+                continue
             entry["applied_at"] = event.get("timestamp")
             entry["application_id"] = event.get("application_id")
+            continue
+        if _event_sequence(event) != entry.get("decision_sequence"):
             continue
         entry["decided_at"] = event.get("timestamp")
         entry["decision"] = event.get("decision")
@@ -843,7 +864,8 @@ def _final_or_current_stage(
 def _build_gaps(
     session: dict[str, Any] | None,
     events: list[dict[str, Any]],
-    decisions: list[dict[str, Any]],
+    raw_decisions: list[dict[str, Any]],
+    verified_decisions: list[dict[str, Any]],
     review_occurrences: list[dict[str, Any]],
     summary: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -883,7 +905,7 @@ def _build_gaps(
     }
     orphan_decisions = [
         decision
-        for decision in decisions
+        for decision in raw_decisions
         if (
             str(decision.get("workflow_step_id") or ""),
             str(decision.get("review_request_id") or decision.get("subject_id") or ""),
@@ -891,15 +913,34 @@ def _build_gaps(
         )
         not in request_occurrences
     ]
+    verified_sequences = {
+        sequence
+        for decision in verified_decisions
+        if (sequence := _event_sequence(decision)) is not None
+    }
+    unverified_bound_decisions = [
+        decision
+        for decision in raw_decisions
+        if decision not in orphan_decisions
+        and _event_sequence(decision) not in verified_sequences
+    ]
+    binding_details: list[str] = []
     if orphan_decisions:
+        binding_details.append(
+            f"{len(orphan_decisions)} review decision event(s) have no matching "
+            "workflow occurrence, request ID, and request hash"
+        )
+    if unverified_bound_decisions:
+        binding_details.append(
+            f"{len(unverified_bound_decisions)} review decision event(s) failed "
+            "immutable intent/application binding"
+        )
+    if binding_details:
         gaps.append(
             {
                 "field": "review_bindings",
                 "kind": GAP_UNAVAILABLE,
-                "detail": (
-                    f"{len(orphan_decisions)} review decision event(s) have no "
-                    "matching workflow occurrence, request ID, and request hash."
-                ),
+                "detail": "; ".join(binding_details) + ".",
             }
         )
     review_errors = [

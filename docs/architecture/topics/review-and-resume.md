@@ -26,8 +26,9 @@ A human gate is a four-state durable protocol:
 3. `application_prepared`: the gate has prepared and published a typed review
    application artifact, including its verified decision artifact and required
    refs;
-4. `applied`: the checkpoint proves that same verified application ref was
-   projected and the graph may continue.
+4. `applied`: a checkpoint re-read proves that same verified application ref
+   was projected, `record_review_applied` is durably recorded, and the graph
+   may continue.
 
 The prompt shown to a person is a projection of the request, not the recovery
 authority. A checkpoint must not embed a full request, intent, decision, or
@@ -167,7 +168,9 @@ acquire the active FrozenExecutionLease
   -> gate prepare creates typed decision/evidence effect
   -> persist and verify immutable application
   -> verified gate apply returns a pure compact state update
-  -> graph.update_state(...) and prove application in the checkpoint
+  -> graph.update_state(...)
+  -> re-read the checkpoint and prove application in the checkpoint
+  -> record_review_applied
   -> graph.invoke(None, ...)
   -> finalize the authoritative terminal singleton when reached
   -> record resume completion or failure

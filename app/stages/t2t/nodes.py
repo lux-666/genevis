@@ -64,6 +64,7 @@ from app.schemas.artifacts import (
     ArtifactRefJson,
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
+    canonical_artifact_refs,
 )
 from app.schemas.execution import InputDependency
 from app.schemas.resource_ref import ResourceRef
@@ -1275,7 +1276,7 @@ class T2TReviewEffectV1(BaseModel):
             sorted(set(self.selected_candidate_ids))
         ):
             raise ValueError("t2t selected_candidate_ids must be sorted and unique")
-        if self.artifact_refs != _canonical_artifact_refs(*self.artifact_refs):
+        if self.artifact_refs != canonical_artifact_refs(self.artifact_refs):
             raise ValueError("t2t artifact_refs must be sorted and unique")
         if self.decision == "stop_pipeline":
             terminal_values = (
@@ -1476,11 +1477,13 @@ def prepare_t2t_review_application(
         effect_kind=T2T_REVIEW_EFFECT_KIND,
         effect=effect,
         decision_ref=decision_ref,
-        required_refs=_canonical_artifact_refs(
-            decision_ref,
-            *effect.artifact_refs,
-            output_candidate.ref,
-            output_primary_ref,
+        required_refs=canonical_artifact_refs(
+            (
+                decision_ref,
+                *effect.artifact_refs,
+                output_candidate.ref,
+                output_primary_ref,
+            )
         ),
     )
 
@@ -1707,21 +1710,6 @@ def _selectable_t2t_candidate_ids(state: TopLevelState) -> set[str]:
         for row in candidate_rows
         if row.get("candidate_id") and row.get("decision") in allowed
     }
-
-
-def _canonical_artifact_refs(*refs: ArtifactRef) -> tuple[ArtifactRef, ...]:
-    by_key = {_artifact_ref_key(ref): ref for ref in refs}
-    return tuple(by_key[key] for key in sorted(by_key))
-
-
-def _artifact_ref_key(ref: ArtifactRef) -> tuple[str, str, str, int, str]:
-    return (
-        ref.artifact_id,
-        ref.path_ref,
-        ref.sha256,
-        ref.size_bytes,
-        ref.artifact_type,
-    )
 
 
 def _require_t2t_review_intent_binding(
@@ -2061,8 +2049,8 @@ def _t2t_review_effect_from_finalized_output(
     report_ref = ref("t2t_finishing_report_ref", T2T_FINISHING_REPORT, required=True)
     bundle_ref = ref("bundle_ref", "t2t.bundle", required=True)
     assert summary_ref is not None and report_ref is not None and bundle_ref is not None
-    artifact_refs = _canonical_artifact_refs(
-        *(
+    artifact_refs = canonical_artifact_refs(
+        (
             ref_value
             for ref_value in (
                 patched_assembly_ref,

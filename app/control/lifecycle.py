@@ -279,6 +279,24 @@ def inspect_session(
         if terminal_sequence == 0
         or int(occurrence.request_sequence or 0) <= terminal_sequence
     ]
+    verified_decision_sequences = {
+        occurrence.decision_sequence
+        for occurrence in authoritative_occurrences
+        if occurrence.integrity_error is None
+        and occurrence.decision_sequence is not None
+    }
+    authoritative_review_decisions = [
+        event
+        for event in authoritative_events
+        if event.get("event_type") == "review_decision"
+        and int(event.get("sequence") or 0) in verified_decision_sequences
+    ]
+    trusted_review_events = [
+        event
+        for event in authoritative_events
+        if event.get("event_type") != "review_decision"
+        or int(event.get("sequence") or 0) in verified_decision_sequences
+    ]
     latest_review_projection = (
         authoritative_occurrences[-1] if authoritative_occurrences else None
     )
@@ -289,14 +307,19 @@ def inspect_session(
         and latest_review_projection.request_event is not None
         else None
     )
-    latest_review_decision = _latest_event(authoritative_events, "review_decision")
+    latest_review_decision = _latest_event(
+        authoritative_review_decisions,
+        "review_decision",
+    )
     latest_env_preflight_block = _latest_event(
         authoritative_events, "env_preflight_blocked"
     )
     latest_terminal = review_history.canonical_terminal
-    review_decisions = decision_records(authoritative_events)
+    review_decisions = decision_records(authoritative_review_decisions)
     decisions_by_origin = counts_by_origin(review_decisions)
-    latest_review_lifecycle_event = _latest_review_lifecycle_event(authoritative_events)
+    latest_review_lifecycle_event = _latest_review_lifecycle_event(
+        trusted_review_events
+    )
     latest_unresolved_review_request = (
         dict(latest_active_review.request_event)
         if latest_active_review is not None
