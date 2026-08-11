@@ -5,11 +5,44 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.schemas.run_config import RunConfig, load_run_config
+from app.schemas.run_config import RunConfig as _ProductionRunConfig
+from app.schemas.run_config import load_run_config
+
+
+def _busco_config(
+    lineage_path: str = "/data/busco/embryophyta_odb10",
+) -> dict[str, object]:
+    return {
+        "lineage_path": lineage_path,
+        "lineage_name": "embryophyta_odb10",
+        "lineage_version": "odb10",
+        "lineage_source": "test_fixture",
+        "threads": 4,
+    }
+
+
+class RunConfig:
+    """Test fixture adapter that makes unrelated Review configs explicit."""
+
+    @staticmethod
+    def model_validate(payload: dict[str, object]) -> _ProductionRunConfig:
+        normalized = deepcopy(payload)
+        requests = normalized.get("requested_stages") or []
+        review_requested = any(
+            isinstance(request, dict) and request.get("stage") == "assembly_review"
+            for request in requests
+        )
+        review = normalized.get("assembly_review")
+        if review_requested or isinstance(review, dict):
+            review_block = dict(review) if isinstance(review, dict) else {}
+            review_block.setdefault("busco", _busco_config())
+            normalized["assembly_review"] = review_block
+        return _ProductionRunConfig.model_validate(normalized)
 
 
 def _stage_requests(
@@ -784,6 +817,31 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(cfg.assembly_review.busco.lineage_name, "embryophyta_odb10")
         self.assertEqual(cfg.assembly_review.busco.threads, 16)
 
+    def test_requested_assembly_review_requires_busco_config(self):
+        with self.assertRaises(ValidationError) as ctx:
+            _ProductionRunConfig.model_validate(
+                {"requested_stages": _stage_requests("assembly_review")}
+            )
+
+        self.assertIn("assembly_review.busco", str(ctx.exception))
+
+    def test_busco_requires_all_lineage_identity_fields(self):
+        for missing in (
+            "lineage_path",
+            "lineage_name",
+            "lineage_version",
+            "lineage_source",
+        ):
+            busco = _busco_config()
+            del busco[missing]
+            with self.subTest(missing=missing), self.assertRaises(ValidationError):
+                _ProductionRunConfig.model_validate(
+                    {
+                        "requested_stages": _stage_requests("assembly_review"),
+                        "assembly_review": {"busco": busco},
+                    }
+                )
+
     def test_assembly_review_busco_unknown_field_rejected(self):
         with self.assertRaises(ValidationError):
             RunConfig.model_validate(
@@ -964,6 +1022,7 @@ class RunConfigLoaderTests(unittest.TestCase):
                                 "threads": 4,
                             }
                         },
+                        "assembly_review": {"busco": _busco_config()},
                     }
                 ),
                 encoding="utf-8",

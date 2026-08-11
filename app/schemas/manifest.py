@@ -38,12 +38,15 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
 
 
 class InputAssetSpec(BaseModel):
-    """One file or directory declared by the user in the input manifest."""
+    """One or more regular files declared by the user in the input manifest."""
 
     model_config = ConfigDict(extra="forbid")
 
     asset_type: AssetType
-    paths: list[str] = Field(default_factory=list)
+    paths: list[str] = Field(
+        default_factory=list,
+        description="Regular file paths; directories and special files are rejected.",
+    )
     sample_id: str | None = None
     platform: Platform = "unknown"
     layout: Layout = "unknown"
@@ -104,7 +107,6 @@ class InputManifest(BaseModel):
     sample_id: str | None = None
     assets: list[InputAssetSpec] = Field(default_factory=list)
     user_metadata: dict[str, Any] = Field(default_factory=dict)
-    target_assembly_level: Literal["contig", "scaffold", "chromosome"] = "contig"
     genome_size_estimate: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
@@ -155,6 +157,7 @@ class AssetPathInference(BaseModel):
     declared_path: str
     canonical_path: str
     exists: bool
+    is_regular_file: bool
     size_bytes: int | None = Field(default=None, ge=0)
     compression: Compression
     format: Format
@@ -270,6 +273,8 @@ def _infer_asset_properties(
     paths = [Path(p).expanduser() for p in spec.paths]
     path_facts: list[AssetPathInference] = []
     for path_ordinal, path in enumerate(paths):
+        exists = path.exists()
+        is_regular_file = path.is_file()
         platform = _detect_platform(path, spec.platform, spec.metadata)
         if spec.platform != "unknown":
             platform_source: PlatformResolutionSource = "manifest"
@@ -282,8 +287,9 @@ def _infer_asset_properties(
                 path_ordinal=path_ordinal,
                 declared_path=spec.paths[path_ordinal],
                 canonical_path=str(path.resolve(strict=False)),
-                exists=path.exists(),
-                size_bytes=path.stat().st_size if path.exists() else None,
+                exists=exists,
+                is_regular_file=is_regular_file,
+                size_bytes=path.stat().st_size if is_regular_file else None,
                 compression=_detect_compression(path),
                 format=_detect_format(path),
                 platform=platform,
@@ -329,6 +335,16 @@ def validate_manifest(
         missing = [fact.declared_path for fact in entry.path_facts if not fact.exists]
         if require_existing_files and missing:
             errors.append(f"{spec.asset_type}: missing files {missing}")
+        non_regular = [
+            fact.declared_path
+            for fact in entry.path_facts
+            if fact.exists and not fact.is_regular_file
+        ]
+        if non_regular:
+            errors.append(
+                f"{spec.asset_type}: manifest assets must be regular files: "
+                f"{non_regular}"
+            )
 
         unknown_formats = [
             fact.declared_path

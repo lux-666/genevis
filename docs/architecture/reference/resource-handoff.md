@@ -85,8 +85,10 @@ fourth cross-stage resource source.
 The resolver does not scan `stage_outputs`. The calling stage owns the decision
 to fail, skip, or use an explicitly allowed fallback when a resource is absent;
 the resolver itself remains a non-throwing query for absence. Environment and
-method preflight occur when a method attempt is frozen; there is no separate
-stage-planning preflight authority.
+method preflight still occurs when a method attempt is frozen. In addition, the
+confirmed-run boundary performs a read-only readiness probe over the canonical
+effective local-method closure before the whole-run freeze; this is a machine
+readiness check, not a second stage-resource planning authority.
 
 When inventory contains clean and raw assets for one logical resource,
 `ResourceSpec.asset_type_priority_groups` determines the preferred type. Once a

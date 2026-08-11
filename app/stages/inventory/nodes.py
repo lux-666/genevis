@@ -486,7 +486,6 @@ def validate_inputs(
             ),
             "entry_mode": _entry_mode(manifest),
             "genome_size_estimate": manifest.genome_size_estimate,
-            "target_assembly_level": manifest.target_assembly_level,
         },
     )
     if canonical_shared is not None:

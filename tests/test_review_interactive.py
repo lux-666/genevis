@@ -34,6 +34,7 @@ from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.storage.frozen_inputs import FrozenExecutionLease
 from app.storage.ledger import Ledger
+from tests.busco_fixture import assembly_review_config
 from tests.data_v2 import v2_run_dir
 
 
@@ -86,10 +87,15 @@ def _review_occurrence_state(
 
 
 def _verified_inputs_for_review(stage: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        run_config=RunConfig.model_validate(
-            {"requested_stages": [{"stage": stage, "allow_local_execution": False}]}
+    payload: dict[str, object] = {
+        "requested_stages": [{"stage": stage, "allow_local_execution": False}]
+    }
+    if stage == "assembly_review":
+        payload["assembly_review"] = assembly_review_config(
+            "/data/busco/embryophyta_odb10"
         )
+    return SimpleNamespace(
+        run_config=RunConfig.model_validate(payload)
     )
 
 

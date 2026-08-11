@@ -13,8 +13,10 @@ method catalog.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from copy import deepcopy
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
@@ -60,6 +62,22 @@ ReadQCLengthFilterMethod = Literal[
 T2TReadPlatform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi"]
 
 DEFAULT_REVIEW_MAX_BLOCKED_SECONDS = 300
+
+_BUSCO_DATASET_CONFIG_KEYS = frozenset(
+    {
+        "name",
+        "domain",
+        "creation_date",
+        "number_of_BUSCOs",
+        "number_of_species",
+    }
+)
+_BUSCO_LINEAGE_CONTRACTS: dict[str, dict[str, bool]] = {
+    "odb10": {"requires_lengths_cutoff": True},
+    "odb12": {"requires_lengths_cutoff": False},
+    "odb12.2": {"requires_lengths_cutoff": True},
+}
+_BUSCO_VERSION_RE = re.compile(r"_(odb\d+(?:\.\d+)?)$")
 
 _RUN_CONFIG_PATH_FIELDS = (
     ("assembly", "hifi_reads_ref"),
@@ -485,7 +503,7 @@ class AssemblyReviewRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     quast: QuastRunParameters | None = None
-    busco: BuscoRunParameters | None = None
+    busco: BuscoRunParameters
     related_species_reference_dir: str | None = None
 
 
@@ -571,6 +589,17 @@ class RunConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _require_busco_for_assembly_review(self) -> "RunConfig":
+        if "assembly_review" in self.requested_stage_names() and (
+            self.assembly_review is None or self.assembly_review.busco is None
+        ):
+            raise ValueError(
+                "run_config: every requested assembly_review requires "
+                "assembly_review.busco"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _require_local_execution_for_approved_filter(self) -> "RunConfig":
         if (
             self.read_qc
@@ -596,6 +625,279 @@ class RunConfig(BaseModel):
             request.stage == stage and request.allow_local_execution
             for request in self.requested_stages
         )
+
+
+def validate_assembly_review_execution_plan(run_config: RunConfig) -> None:
+    """Validate the offline BUSCO lineage contract before inputs are frozen."""
+
+    if "assembly_review" not in run_config.requested_stage_names():
+        return
+    review = run_config.assembly_review
+    if review is None:
+        raise ValueError(
+            "run_config: every requested assembly_review requires "
+            "assembly_review.busco"
+        )
+    lineage_path = Path(review.busco.lineage_path)
+    if not lineage_path.exists():
+        raise ValueError(
+            "assembly_review.busco.lineage_path does not exist: "
+            f"{lineage_path}"
+        )
+    if not lineage_path.is_dir():
+        raise ValueError(
+            "assembly_review.busco.lineage_path must be a directory: "
+            f"{lineage_path}"
+        )
+    _validate_busco_lineage(lineage_path, review.busco)
+
+
+def _require_nonempty_regular_file(path: Path, *, label: str) -> None:
+    try:
+        valid = path.is_file() and path.stat().st_size > 0
+    except OSError as exc:
+        raise ValueError(
+            f"assembly_review.busco.lineage {label} cannot be inspected: "
+            f"{path}: {exc}"
+        ) from exc
+    if not valid:
+        raise ValueError(
+            f"assembly_review.busco.lineage {label} must be a non-empty "
+            f"regular file: {path}"
+        )
+
+
+def _parse_busco_dataset_config(path: Path) -> dict[str, str]:
+    _require_nonempty_regular_file(path, label="dataset.cfg")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(
+            "assembly_review.busco.lineage dataset.cfg cannot be parsed as UTF-8: "
+            f"{path}: {exc}"
+        ) from exc
+
+    config: dict[str, str] = {}
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not separator or not key or not value:
+            raise ValueError(
+                "assembly_review.busco.lineage dataset.cfg contains an invalid "
+                f"entry at line {line_number}: {path}"
+            )
+        if key in config:
+            raise ValueError(
+                "assembly_review.busco.lineage dataset.cfg contains duplicate "
+                f"key {key!r}: {path}"
+            )
+        config[key] = value
+
+    missing = sorted(_BUSCO_DATASET_CONFIG_KEYS.difference(config))
+    if missing:
+        raise ValueError(
+            "assembly_review.busco.lineage dataset.cfg is missing required keys: "
+            + ", ".join(missing)
+        )
+    for key in ("number_of_BUSCOs", "number_of_species"):
+        try:
+            count = int(config[key])
+        except ValueError as exc:
+            raise ValueError(
+                "assembly_review.busco.lineage dataset.cfg "
+                f"{key} must be a positive integer"
+            ) from exc
+        if count <= 0:
+            raise ValueError(
+                "assembly_review.busco.lineage dataset.cfg "
+                f"{key} must be a positive integer"
+            )
+    try:
+        date.fromisoformat(config["creation_date"])
+    except ValueError as exc:
+        raise ValueError(
+            "assembly_review.busco.lineage dataset.cfg creation_date must be "
+            "an ISO date"
+        ) from exc
+    return config
+
+
+def _busco_profile_identity(path: Path) -> str:
+    _require_nonempty_regular_file(path, label="HMM profile")
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(8192).decode("ascii", errors="replace")
+            handle.seek(max(0, path.stat().st_size - 64))
+            tail = handle.read()
+    except OSError as exc:
+        raise ValueError(
+            f"assembly_review.busco.lineage HMM profile cannot be read: {path}: {exc}"
+        ) from exc
+
+    lines = [line.strip() for line in head.splitlines()]
+    if not lines or not lines[0].startswith("HMMER3/"):
+        raise ValueError(
+            "assembly_review.busco.lineage HMM profile is missing a HMMER3 "
+            f"header: {path}"
+        )
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2 and parts[0] in {"NAME", "LENG", "ALPH"}:
+            fields[parts[0]] = parts[1].split()[0]
+    if fields.get("NAME") != path.stem:
+        raise ValueError(
+            "assembly_review.busco.lineage HMM profile NAME must match its "
+            f"filename: {path}"
+        )
+    try:
+        length = int(fields.get("LENG", ""))
+    except ValueError as exc:
+        raise ValueError(
+            f"assembly_review.busco.lineage HMM profile LENG is invalid: {path}"
+        ) from exc
+    if length <= 0 or fields.get("ALPH") != "amino":
+        raise ValueError(
+            "assembly_review.busco.lineage HMM profile must declare a positive "
+            f"LENG and ALPH amino: {path}"
+        )
+    if not any(line.startswith("HMM ") for line in lines) or not tail.rstrip().endswith(
+        b"//"
+    ):
+        raise ValueError(
+            "assembly_review.busco.lineage HMM profile is structurally "
+            f"incomplete: {path}"
+        )
+    return path.stem
+
+
+def _parse_busco_scores_cutoff(path: Path) -> set[str]:
+    _require_nonempty_regular_file(path, label="scores_cutoff")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(
+            "assembly_review.busco.lineage scores_cutoff cannot be parsed: "
+            f"{path}: {exc}"
+        ) from exc
+
+    identities: set[str] = set()
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            raise ValueError(
+                "assembly_review.busco.lineage scores_cutoff contains an invalid "
+                f"entry at line {line_number}: {path}"
+            )
+        identity = fields[0]
+        try:
+            float(fields[1])
+        except ValueError as exc:
+            raise ValueError(
+                "assembly_review.busco.lineage scores_cutoff contains a non-numeric "
+                f"score at line {line_number}: {path}"
+            ) from exc
+        if identity in identities:
+            raise ValueError(
+                "assembly_review.busco.lineage scores_cutoff contains duplicate "
+                f"profile {identity!r}: {path}"
+            )
+        identities.add(identity)
+    if not identities:
+        raise ValueError(
+            "assembly_review.busco.lineage scores_cutoff contains no profiles: "
+            f"{path}"
+        )
+    return identities
+
+
+def _validate_busco_lineage(
+    lineage_path: Path,
+    parameters: BuscoRunParameters,
+) -> None:
+    config = _parse_busco_dataset_config(lineage_path / "dataset.cfg")
+    lineage_name = config["name"]
+    if lineage_path.name != lineage_name or parameters.lineage_name != lineage_name:
+        raise ValueError(
+            "assembly_review.busco lineage identity mismatch: path basename, "
+            "dataset.cfg name, and lineage_name must be identical"
+        )
+
+    version_match = _BUSCO_VERSION_RE.search(lineage_name)
+    if version_match is None:
+        raise ValueError(
+            "assembly_review.busco lineage name must end in a supported "
+            "OrthoDB version such as _odb10 or _odb12.2"
+        )
+    lineage_version = version_match.group(1)
+    contract = _BUSCO_LINEAGE_CONTRACTS.get(lineage_version)
+    if contract is None:
+        raise ValueError(
+            "assembly_review.busco lineage version is unsupported by this "
+            f"validator: {lineage_version}"
+        )
+    if parameters.lineage_version != lineage_version:
+        raise ValueError(
+            "assembly_review.busco lineage_version must match the version "
+            f"derived from lineage identity: expected {lineage_version}"
+        )
+
+    hmms_path = lineage_path / "hmms"
+    if not hmms_path.is_dir():
+        raise ValueError(
+            "assembly_review.busco.lineage hmms must be a directory: "
+            f"{hmms_path}"
+        )
+    profile_ids = {_busco_profile_identity(path) for path in hmms_path.glob("*.hmm")}
+    expected_count = int(config["number_of_BUSCOs"])
+    if len(profile_ids) != expected_count:
+        raise ValueError(
+            "assembly_review.busco.lineage HMM profile count does not match "
+            f"dataset.cfg number_of_BUSCOs: expected {expected_count}, "
+            f"found {len(profile_ids)}"
+        )
+
+    score_ids = _parse_busco_scores_cutoff(lineage_path / "scores_cutoff")
+    if score_ids != profile_ids:
+        raise ValueError(
+            "assembly_review.busco.lineage scores_cutoff profiles must exactly "
+            "match hmms/*.hmm"
+        )
+    if contract["requires_lengths_cutoff"]:
+        _require_nonempty_regular_file(
+            lineage_path / "lengths_cutoff",
+            label=f"{lineage_version} lengths_cutoff",
+        )
+
+    ancestral = lineage_path / "ancestral"
+    refseq = lineage_path / "refseq_db.faa.gz"
+    if config["domain"].casefold() == "eukaryota":
+        _require_nonempty_regular_file(ancestral, label="eukaryota ancestral")
+        _require_nonempty_regular_file(refseq, label="eukaryota refseq_db.faa.gz")
+    else:
+        reference_inputs = (ancestral, refseq)
+        try:
+            reference_ready = any(
+                path.is_file() and path.stat().st_size > 0
+                for path in reference_inputs
+            )
+        except OSError as exc:
+            raise ValueError(
+                "assembly_review.busco.lineage reference data cannot be inspected: "
+                f"{exc}"
+            ) from exc
+        if not reference_ready:
+            raise ValueError(
+                "assembly_review.busco.lineage requires non-empty ancestral or "
+                "refseq_db.faa.gz reference data"
+            )
 
 
 def canonicalize_run_config_paths(

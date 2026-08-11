@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.entrypoints.tui import (
@@ -30,6 +31,7 @@ from app.entrypoints.tui_intake import (
 )
 from app.integrity import sha256_file
 from app.schemas.ask_plan import AskPlanState, PlanStageOccurrence
+from app.schemas.run_config import RunConfig
 from app.schemas.shared_parameters import SharedParameters
 from app.storage.frozen_inputs import (
     FrozenExecutionActiveError,
@@ -37,6 +39,7 @@ from app.storage.frozen_inputs import (
     frozen_execution_lock,
 )
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import ensure_busco_lineage
 
 
 class TuiWorkflowTests(unittest.TestCase):
@@ -527,6 +530,9 @@ class TuiWorkflowTests(unittest.TestCase):
                     "app.entrypoints.run.execute_frozen_session",
                     return_value=0,
                 ) as execute,
+                patch(
+                    "app.execution.run_readiness.preflight_run_readiness"
+                ) as readiness,
             ):
                 code = _freeze_and_execute(draft, plan)
 
@@ -542,10 +548,102 @@ class TuiWorkflowTests(unittest.TestCase):
                 checkpointer="sqlite",
                 interactive_gate=True,
             )
+            readiness.assert_called_once()
             self.assertEqual(
                 load_tui_session_draft(data_dir, "s1").lifecycle,
                 "terminal",
             )
+
+    def test_review_readiness_and_freeze_share_canonical_fixed_closure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            lineage = ensure_busco_lineage(root)
+            draft = create_tui_session_draft(
+                session_id="s1",
+                data_dir=str(data_dir),
+                request_text="review",
+                intent=deterministic_workflow_intent("review"),
+            ).model_copy(update={"lifecycle": "ready_to_confirm"})
+            save_tui_session_draft(draft)
+            busco = {
+                "lineage_path": str(lineage),
+                "lineage_name": "embryophyta_odb10",
+                "lineage_version": "odb10",
+                "lineage_source": "test_fixture",
+                "threads": 4,
+            }
+            plan = AskPlanState(
+                session_id="s1",
+                data_dir=str(data_dir),
+                entry_request={},
+                manifest_ref=str(SessionPaths(data_dir, "s1").manifest_draft_path),
+                selected_stage_occurrences=[
+                    PlanStageOccurrence(
+                        stage="assembly_review",
+                        allow_local_execution=True,
+                    )
+                ],
+                selected_methods={
+                    "assembly_review": ["assembly_review.eval.quast"]
+                },
+                method_parameters={
+                    "assembly_review.eval.quast": {"threads": 4},
+                    "assembly_review.eval.busco": busco,
+                },
+                confirmed=True,
+            )
+            run_config = RunConfig.model_validate(
+                {
+                    "requested_stages": [
+                        {
+                            "stage": "assembly_review",
+                            "allow_local_execution": True,
+                        }
+                    ],
+                    "assembly_review": {
+                        "quast": {"threads": 4},
+                        "busco": busco,
+                    },
+                }
+            )
+            prepared = SimpleNamespace(
+                manifest=SimpleNamespace(session_id="s1"),
+                run_config=run_config,
+            )
+
+            with (
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
+                patch(
+                    "app.storage.frozen_inputs.prepare_session_inputs",
+                    return_value=prepared,
+                ),
+                patch(
+                    "app.execution.run_readiness.preflight_run_readiness"
+                ) as readiness,
+                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                patch(
+                    "app.entrypoints.run.execute_frozen_session",
+                    return_value=0,
+                ),
+            ):
+                code = _freeze_and_execute(draft, plan)
+
+            self.assertEqual(code, 0)
+            effective = {
+                "assembly_review": (
+                    "assembly_review.eval.quast",
+                    "assembly_review.eval.busco",
+                )
+            }
+            readiness.assert_called_once_with(
+                run_config,
+                effective_methods=effective,
+            )
+            self.assertEqual(freeze.call_args.kwargs["selected_methods"], effective)
 
     def test_freeze_failure_points_to_bootstrap_without_running(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,6 +703,7 @@ class TuiWorkflowTests(unittest.TestCase):
         return envs
 
     def _frozen_parent(self, data_dir: Path, reads: Path, envs: Path):
+        lineage = ensure_busco_lineage(data_dir.parent)
         parent = create_tui_session_draft(
             session_id="parent",
             data_dir=str(data_dir),
@@ -625,7 +724,16 @@ class TuiWorkflowTests(unittest.TestCase):
                     "requested_stages": [
                         {"stage": "assembly", "allow_local_execution": False},
                         {"stage": "assembly_review", "allow_local_execution": False},
-                    ]
+                    ],
+                    "assembly_review": {
+                        "busco": {
+                            "lineage_path": str(lineage),
+                            "lineage_name": "embryophyta_odb10",
+                            "lineage_version": "odb10",
+                            "lineage_source": "test_fixture",
+                            "threads": 4,
+                        }
+                    },
                 },
             )
         return parent

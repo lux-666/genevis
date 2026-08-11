@@ -60,7 +60,7 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
     "genome_survey": "choose_many",
     "assembly": "choose_many",
     "assembly_dedup": "pipeline",
-    "assembly_review": "choose_many",
+    "assembly_review": "pipeline",
     "hic_scaffolding": "pipeline",
     "t2t": "choose_many",
 }
@@ -77,11 +77,16 @@ READ_QC_DEFAULT_METHODS = [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP]
 
 def _build_assembly_review_config(plan: AskPlanState) -> dict[str, Any]:
     ar_config: dict[str, Any] = {}
+    selected = {
+        method
+        for stage, method in _iter_selected_methods(plan)
+        if stage == "assembly_review"
+    }
     for descriptor in _executable_methods_for_stage("assembly_review"):
         method_name = descriptor["method_name"]
-        params = (plan.method_parameters or {}).get(method_name)
-        if not params:
+        if method_name not in selected:
             continue
+        params = (plan.method_parameters or {}).get(method_name) or {}
         config_key = method_name.rsplit(".", 1)[-1]
         required = descriptor.get("required_parameters") or []
         defaults = descriptor.get("parameter_defaults") or {}
@@ -120,7 +125,10 @@ def _auto_fill_pipeline_methods(
     """Auto-fill methods for pipeline stages (all executable methods run)."""
     result: dict[str, str | list[str]] = {}
     for occurrence in occurrences:
-        if not occurrence.allow_local_execution:
+        if (
+            not occurrence.allow_local_execution
+            and occurrence.stage != "assembly_review"
+        ):
             continue
         stage = occurrence.stage
         if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
@@ -212,8 +220,6 @@ def _draft_default_methods_for_stage(
         ]
     if stage == "assembly":
         return _draft_assembly_method(plan)
-    if stage == "assembly_review":
-        return ["assembly_review.eval.quast"]
     if stage == "t2t":
         return "t2t.alignment.minimap2"
     executable = [
@@ -353,10 +359,9 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
         survey_config = _build_genome_survey_config(plan)
         if survey_config:
             payload["genome_survey"] = survey_config
-    if "assembly_review" in local_stages:
+    if "assembly_review" in requested_stages:
         ar_config = _build_assembly_review_config(plan)
-        if ar_config:
-            payload["assembly_review"] = ar_config
+        payload["assembly_review"] = ar_config
     if "hic_scaffolding" in local_stages:
         hic_config = _build_hic_scaffolding_config(plan)
         payload["hic_scaffolding"] = hic_config or {}
@@ -1053,17 +1058,28 @@ def _needs_method_selection(plan: AskPlanState) -> bool:
 
 
 def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
-    """Yield locally enabled ``(stage, method_name)`` pairs, flattening lists."""
+    """Yield selected local methods plus the mandatory Review pipeline."""
 
     locally_enabled = set(_locally_enabled_stage_names(plan))
+    review_requested = "assembly_review" in (plan.selected_stage_names or [])
+    yielded: set[tuple[str, str]] = set()
     for stage, methods in (plan.selected_methods or {}).items():
-        if stage not in locally_enabled:
+        if stage not in locally_enabled and not (
+            stage == "assembly_review" and review_requested
+        ):
             continue
-        if isinstance(methods, list):
-            for m in methods:
-                yield stage, m
-        else:
-            yield stage, methods
+        values = methods if isinstance(methods, list) else [methods]
+        for method in values:
+            item = (stage, method)
+            if item not in yielded:
+                yielded.add(item)
+                yield item
+    if review_requested:
+        for descriptor in _executable_methods_for_stage("assembly_review"):
+            item = ("assembly_review", descriptor["method_name"])
+            if item not in yielded:
+                yielded.add(item)
+                yield item
 
 
 def _validate_selected_methods(
@@ -1104,6 +1120,16 @@ def _validate_selected_methods(
                     "genome_survey.kmer_count.jellyfish and "
                     "genome_survey.model.genomescope2"
                 )
+        if stage == "assembly_review":
+            required = {
+                "assembly_review.eval.quast",
+                "assembly_review.eval.busco",
+            }
+            if set(method_list) != required:
+                raise ValueError(
+                    "assembly_review uses the fixed QUAST and BUSCO pipeline; "
+                    "BUSCO cannot be removed"
+                )
 
 
 def _normalize_selected_methods(
@@ -1118,6 +1144,11 @@ def _normalize_selected_methods(
             READ_QC_FILTER_SKIP,
         )
         normalized["read_qc"] = [READ_QC_STATS_METHOD, filter_method]
+    if "assembly_review" in normalized:
+        normalized["assembly_review"] = [
+            "assembly_review.eval.quast",
+            "assembly_review.eval.busco",
+        ]
     return normalized
 
 
@@ -1340,11 +1371,11 @@ def _infer_parameter_defaults(
         provided = (plan.method_parameters or {}).get(method, {})
         lineage_path = provided.get("lineage_path") or inferred.get("lineage_path")
         if lineage_path:
-            if not Path(lineage_path).exists():
+            if not Path(lineage_path).is_dir():
                 warnings.append(
                     "assembly_review.eval.busco: lineage_path "
-                    f"'{lineage_path}' does not exist; "
-                    "BUSCO will be skipped at runtime"
+                    f"'{lineage_path}' is not an existing directory; "
+                    "the run cannot be frozen"
                 )
             lp = Path(lineage_path)
             name = lp.name
@@ -1361,7 +1392,7 @@ def _infer_parameter_defaults(
 def _extract_busco_version(lineage_name: str) -> str:
     import re
 
-    m = re.search(r"(odb\d+)", lineage_name)
+    m = re.search(r"(odb\d+(?:\.\d+)?)$", lineage_name)
     return m.group(1) if m else ""
 
 

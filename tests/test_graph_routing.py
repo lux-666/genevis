@@ -21,6 +21,7 @@ from app.storage.frozen_inputs import (
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import assembly_review_config
 from tests.data_v2 import v2_run_dir
 
 
@@ -52,7 +53,10 @@ class GraphRoutingTests(unittest.TestCase):
                 "requested_stages": [
                     {"stage": "t2t", "allow_local_execution": False},
                     {"stage": "assembly_review", "allow_local_execution": True},
-                ]
+                ],
+                "assembly_review": assembly_review_config(
+                    "/data/busco/embryophyta_odb10"
+                ),
             }
         )
         state = initial_state(

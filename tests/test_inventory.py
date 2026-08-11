@@ -32,6 +32,7 @@ from app.storage.frozen_inputs import (
     validate_frozen_inputs,
 )
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import assembly_review_config, ensure_busco_lineage
 from tests.data_v2 import v2_run_dir
 
 
@@ -86,8 +87,11 @@ class InventoryStageTests(unittest.TestCase):
         }
         if shared_parameters is not None:
             run_config_payload["shared_parameters"] = shared_parameters
-        run_config = RunConfig.model_validate(run_config_payload)
         paths = SessionPaths.from_run_dir(manifest_path.parents[1])
+        if next_stage == "assembly_review":
+            lineage = ensure_busco_lineage(paths.run_dir)
+            run_config_payload["assembly_review"] = assembly_review_config(lineage)
+        run_config = RunConfig.model_validate(run_config_payload)
         envs = paths.control_dir / "test_envs.yaml"
         envs.write_text(
             "default:\n  fallback_env: test-env\npackages: {}\n",
@@ -423,7 +427,6 @@ class InventoryStageTests(unittest.TestCase):
             fa.write_text(">ctg1\nACGTACGT\n")
             manifest = {
                 "session_id": "s4",
-                "target_assembly_level": "chromosome",
                 "assets": [
                     {"asset_type": "assembly_fasta_registered", "paths": [str(fa)]},
                 ],
@@ -431,10 +434,6 @@ class InventoryStageTests(unittest.TestCase):
             path = self._build_manifest_file(tmpdir, manifest)
             _, result = self._invoke_inventory("s4", path)
             self.assertEqual(result["current_stage"], "assembly_review")
-            self.assertEqual(
-                result["stage_outputs"]["inventory"]["target_assembly_level"],
-                "chromosome",
-            )
             registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(
                 registry["assets"][0]["asset_type"], "assembly_fasta_registered"

@@ -33,6 +33,14 @@ def test_descriptor_registry_loading_is_cwd_independent(tmp_path, monkeypatch) -
         "cutoffs_strategy": "calcuts_auto",
         "get_seqs_exclude_haplotigs": True,
     }
+    busco = registry.packages["busco"]
+    assert busco.version_constraint == ">=5.4"
+    assert busco.conditional_version_constraints == {
+        "lineage_version=odb12": ">=5.8",
+        "lineage_version=odb12.2": ">=6.1",
+    }
+    assert "--offline" in busco.entry_patterns[0]
+    assert "--auto-lineage" not in busco.entry_patterns[0]
     assert registry.root_dir.name == "descriptors"
 
 

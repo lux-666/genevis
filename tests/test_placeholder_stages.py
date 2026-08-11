@@ -28,7 +28,11 @@ from app.stages.gapcloser.state import (
     update_gapcloser_stage_output,
 )
 from app.storage.ledger import Ledger
-from app.workflow import MANUAL_ONLY_STAGES, stages_through
+from app.workflow import (
+    MANUAL_ONLY_STAGES,
+    recommended_workflow_template,
+    stages_through,
+)
 from tests.data_v2 import v2_run_dir
 
 
@@ -194,3 +198,10 @@ def test_contig_only_route_does_not_enter_placeholders() -> None:
         "assembly",
     ]
     assert all(stage not in stages_through("assembly") for stage in MANUAL_ONLY_STAGES)
+    assert recommended_workflow_template("assembly") == [
+        "read_qc",
+        "genome_survey",
+        "assembly",
+        "assembly_dedup",
+        "assembly_review",
+    ]

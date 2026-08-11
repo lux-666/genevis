@@ -879,6 +879,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 draft_assembly_fasta=str(draft),
             )
             fake_bin = self._fake_quast_bin(tmpdir)
+            self._fake_busco_bin(tmpdir)
+            lineage = Path(tmpdir) / "embryophyta_odb10"
+            lineage.mkdir()
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["current_stage"] = "assembly_review"
             state["stage_outputs"]["assembly"] = {
@@ -890,6 +893,13 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
+                "busco_parameters": {
+                    "lineage_path": str(lineage),
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "odb10",
+                    "lineage_source": "test_fixture",
+                    "threads": 1,
+                },
             }
 
             result = build_stage().invoke(state)
@@ -950,8 +960,10 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 Path(ar_out["assembly_review_packet_ref"]).read_text(encoding="utf-8")
             )
             self.assertEqual(report_data["candidates"][0]["metrics"]["quast"]["n50"], 8)
-            self.assertEqual(
-                report_data["candidates"][0]["signals"]["missing"], ["busco"]
+            self.assertEqual(report_data["candidates"][0]["signals"]["missing"], [])
+            self.assertIn(
+                "busco",
+                report_data["candidates"][0]["signals"]["available"],
             )
             paths = SessionPaths.from_run_dir(result["data_dir"])
             self.assertEqual(
@@ -995,6 +1007,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 draft_assembly_fasta=str(draft),
             )
             fake_bin = self._fake_quast_bin(tmpdir)
+            self._fake_busco_bin(tmpdir)
+            lineage = Path(tmpdir) / "embryophyta_odb10"
+            lineage.mkdir()
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {
                 "status": "draft_ready",
@@ -1005,6 +1020,13 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
+                "busco_parameters": {
+                    "lineage_path": str(lineage),
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "odb10",
+                    "lineage_source": "test_fixture",
+                    "threads": 1,
+                },
             }
 
             result = build_stage().invoke(state)
@@ -1142,7 +1164,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("assembly_review.busco_short_summary", artifact_types)
             self.assertIn("assembly_review.busco_summary", artifact_types)
 
-    def test_local_busco_missing_lineage_marks_signal_missing(self):
+    def test_local_busco_missing_lineage_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"
             draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -1168,15 +1190,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            ar_out = result["stage_outputs"]["assembly_review"]
-            busco_signal = next(
-                signal
-                for signal in ar_out["signals"]
-                if signal["signal_name"] == "busco"
-            )
-            self.assertEqual(busco_signal["status"], "missing")
-            self.assertIn("busco_lineage_not_supplied", busco_signal["notes"])
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("busco_lineage_not_supplied", result["last_error"])
 
     def test_local_busco_failure_marks_signal_failed_and_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1242,6 +1257,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 draft_assembly_fasta=str(draft),
             )
             fake_bin = self._fake_quast_bin(tmpdir, fail=True)
+            self._fake_busco_bin(tmpdir)
+            lineage = Path(tmpdir) / "embryophyta_odb10"
+            lineage.mkdir()
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {
                 "status": "draft_ready",
@@ -1251,6 +1269,13 @@ class AssemblyReviewStageTests(unittest.TestCase):
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "busco_parameters": {
+                    "lineage_path": str(lineage),
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "odb10",
+                    "lineage_source": "test_fixture",
+                    "threads": 1,
+                },
             }
 
             result = build_stage().invoke(state)
@@ -1286,14 +1311,14 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     event["artifact_type"] == "command.stdout"
                     for event in artifact_events
                 ),
-                1,
+                2,
             )
             self.assertEqual(
                 sum(
                     event["artifact_type"] == "command.stderr"
                     for event in artifact_events
                 ),
-                1,
+                2,
             )
 
     def test_local_quast_missing_draft_marks_signal_missing_without_attempt(self):

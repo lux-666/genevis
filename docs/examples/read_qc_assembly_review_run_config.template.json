@@ -2,6 +2,7 @@
   "requested_stages": [
     {"stage": "read_qc", "allow_local_execution": true},
     {"stage": "assembly", "allow_local_execution": true},
+    {"stage": "assembly_dedup", "allow_local_execution": true},
     {"stage": "assembly_review", "allow_local_execution": true}
   ],
   "review_policy": {
@@ -20,6 +21,18 @@
     "assembly_route": "cyclone",
     "flye_parameters": {
       "threads": 4
+    }
+  },
+  "assembly_review": {
+    "quast": {
+      "threads": 8
+    },
+    "busco": {
+      "lineage_path": "/absolute/path/to/busco_downloads/lineages/insecta_odb10",
+      "lineage_name": "insecta_odb10",
+      "lineage_version": "odb10",
+      "lineage_source": "local",
+      "threads": 8
     }
   }
 }

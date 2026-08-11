@@ -6,7 +6,6 @@
 # valid when every reached stage can satisfy its own input contract.
 session_id: existing-assembly-review-YYYYMMDD-a
 sample_id: existing_assembly_sample
-target_assembly_level: contig
 assets:
   - asset_type: assembly_fasta_registered
     paths:

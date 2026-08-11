@@ -177,8 +177,11 @@ ConfigMapping = dict[str, Any]
 def _load_raw(config_path: Path) -> ConfigMapping:
     if not config_path.exists():
         raise FileNotFoundError(f"env config missing: {config_path}")
-    with config_path.open("r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            raw = yaml.safe_load(handle) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"env config YAML is invalid: {config_path}: {exc}") from exc
     return _validated_raw(raw, source=config_path)
 
 

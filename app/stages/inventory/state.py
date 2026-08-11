@@ -37,7 +37,6 @@ class InventoryStageCursor(TypedDict, total=False):
     asset_count: int
     entry_mode: Literal["raw_inputs", "existing_assembly"]
     genome_size_estimate: int | None
-    target_assembly_level: Literal["contig", "scaffold", "chromosome"]
     registered_assets: list[str]
     review_policy: dict[str, int]
     review_request_artifact_ref: ArtifactRefJson

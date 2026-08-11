@@ -358,6 +358,41 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertNotIn("methods:", rendered)
         self.assertIn("fixed AutoHiC pipeline", rendered)
 
+    def test_review_draft_hides_and_rejects_busco_cancellation(self):
+        plan = _base_plan(
+            stage_names=["assembly_review"],
+            selected_methods={
+                "assembly_review": [
+                    "assembly_review.eval.quast",
+                    "assembly_review.eval.busco",
+                ]
+            },
+            method_parameters={
+                "assembly_review.eval.quast": {"threads": 4},
+                "assembly_review.eval.busco": {
+                    "lineage_path": "/data/busco/embryophyta_odb10",
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "odb10",
+                    "lineage_source": "test_fixture",
+                    "threads": 4,
+                },
+            },
+        )
+        with (
+            patch("builtins.input", side_effect=["m", "b"]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            patch(
+                "app.entrypoints.ask_interactive._edit_stage_methods"
+            ) as edit_methods,
+        ):
+            updated = _edit_draft_stage(plan, 0)
+
+        self.assertEqual(updated, plan)
+        edit_methods.assert_not_called()
+        rendered = stdout.getvalue()
+        self.assertNotIn("m      change method", rendered)
+        self.assertIn("fixed QUAST and BUSCO pipeline", rendered)
+
     def test_parameter_prompt_accepts_platform_default(self):
         req = AskClarificationRequest(
             status="clarification_required",
@@ -524,6 +559,21 @@ class DerivedDefaultsTests(unittest.TestCase):
             defaults["assembly_review.eval.busco"]["lineage_name"], "custom_lineage"
         )
         self.assertNotIn("lineage_version", defaults["assembly_review.eval.busco"])
+
+    def test_busco_lineage_path_derives_dotted_odb_version(self):
+        defaults: dict = {}
+
+        _update_derived_defaults(
+            "assembly_review.eval.busco",
+            "lineage_path",
+            "/db/eukaryota_odb12.2",
+            defaults,
+        )
+
+        self.assertEqual(
+            defaults["assembly_review.eval.busco"]["lineage_version"],
+            "odb12.2",
+        )
 
     def test_busco_does_not_overwrite_existing_defaults(self):
         defaults: dict = {"assembly_review.eval.busco": {"lineage_name": "manual_name"}}

@@ -48,7 +48,13 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 _MAX_INVALID_PROMPT_ATTEMPTS = 3
-_FIXED_METHOD_STAGES = {"hic_scaffolding"}
+_FIXED_METHOD_STAGES = {"assembly_review", "hic_scaffolding"}
+
+
+def _fixed_pipeline_description(stage: str) -> str:
+    if stage == "assembly_review":
+        return "the fixed QUAST and BUSCO pipeline"
+    return "the fixed AutoHiC pipeline"
 
 
 class _UserAbort(Exception):
@@ -140,7 +146,7 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
             _, stage = action.split(":", 1)
             if stage in _FIXED_METHOD_STAGES:
                 print(
-                    f"{stage} uses the fixed AutoHiC pipeline; "
+                    f"{stage} uses {_fixed_pipeline_description(stage)}; "
                     "there is no method choice."
                 )
                 continue
@@ -321,7 +327,7 @@ def _draft_stage_status(
         return "included without local execution"
     selected = _selected_methods_for_stage(plan, stage)
     if stage in _FIXED_METHOD_STAGES:
-        return "will run fixed AutoHiC pipeline"
+        return f"will run {_fixed_pipeline_description(stage)}"
     if stage in _STAGES_NEEDING_METHOD_SELECTION and not selected:
         return "method needed before locking"
     if selected:
@@ -593,7 +599,7 @@ def _edit_draft_stage(plan: AskPlanState, occurrence_index: int) -> AskPlanState
         if raw in ("m", "method", "methods"):
             if stage in _FIXED_METHOD_STAGES:
                 print(
-                    f"{stage} uses the fixed AutoHiC pipeline; "
+                    f"{stage} uses {_fixed_pipeline_description(stage)}; "
                     "there is no method choice."
                 )
                 continue
@@ -672,7 +678,10 @@ def _edit_occurrence_local_execution(
 
 def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
     if stage in _FIXED_METHOD_STAGES:
-        print(f"\n{stage} uses the fixed AutoHiC pipeline; there is no method choice.")
+        print(
+            f"\n{stage} uses {_fixed_pipeline_description(stage)}; "
+            "there is no method choice."
+        )
         return plan
     methods = _executable_methods_for_stage(stage)
     if not methods:
@@ -800,6 +809,12 @@ def _refresh_draft_defaults(plan: AskPlanState) -> AskPlanState:
 
 def _selected_methods_for_stage(plan: AskPlanState, stage: str) -> list[str]:
     selected = (plan.selected_methods or {}).get(stage)
+    if (
+        not selected
+        and stage == "assembly_review"
+        and stage in (plan.selected_stage_names or [])
+    ):
+        selected = _default_methods_for_stage(stage)
     if not selected:
         return []
     return selected if isinstance(selected, list) else [selected]
@@ -1705,7 +1720,7 @@ def _update_derived_defaults(
         name = _Path(str(value)).name
         bucket = defaults.setdefault(method_key, {})
         bucket.setdefault("lineage_name", name)
-        m = re.search(r"(odb\d+)", name)
+        m = re.search(r"(odb\d+(?:\.\d+)?)$", name)
         if m:
             bucket.setdefault("lineage_version", m.group(1))
         bucket.setdefault("lineage_source", "local")

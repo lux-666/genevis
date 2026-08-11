@@ -23,6 +23,7 @@ from app.stages.t2t.parameters.execution import (
 from app.storage.artifacts import resolve_artifact_ref
 from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import assembly_review_config
 from tests.data_v2 import v2_run_dir
 
 
@@ -212,6 +213,9 @@ class MultiplatformLongReadTests(unittest.TestCase):
                         {"path": "/reads/hifi.fastq", "platform": "pacbio_hifi"},
                     ]
                 },
+                "assembly_review": assembly_review_config(
+                    "/data/busco/embryophyta_odb10"
+                ),
             }
         )
 
@@ -235,6 +239,9 @@ class MultiplatformLongReadTests(unittest.TestCase):
                             }
                         ]
                     },
+                    "assembly_review": assembly_review_config(
+                        "/data/busco/embryophyta_odb10"
+                    ),
                 }
             )
 

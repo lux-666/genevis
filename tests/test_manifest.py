@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,7 +45,6 @@ class ManifestSchemaTests(unittest.TestCase):
                     paths=["reads/R1.fq.gz", "reads/R2.fq.gz"],
                 ),
             ],
-            target_assembly_level="chromosome",
             genome_size_estimate=450_000_000,
         )
         self.assertEqual(len(manifest.assets), 2)
@@ -159,6 +159,32 @@ class FileInferenceTests(unittest.TestCase):
 
 
 class ManifestValidationTests(unittest.TestCase):
+    def test_validate_rejects_directory_and_fifo_manifest_assets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            directory = root / "reads.fastq"
+            directory.mkdir()
+            fifo = root / "stream.fastq"
+            os.mkfifo(fifo)
+            for path in (directory, fifo):
+                with self.subTest(path=path):
+                    manifest = InputManifest(
+                        session_id="special-file",
+                        assets=[
+                            InputAssetSpec(
+                                asset_type="raw_long_reads", paths=[str(path)]
+                            )
+                        ],
+                    )
+                    report = validate_manifest(manifest)
+                    self.assertFalse(report["valid"])
+                    self.assertTrue(
+                        any(
+                            "must be regular files" in error
+                            for error in report["errors"]
+                        )
+                    )
+
     def test_validate_missing_files(self):
         manifest = InputManifest(
             session_id="test-missing",
@@ -240,7 +266,6 @@ class ManifestValidationTests(unittest.TestCase):
                     asset_type="hic_alignment_bam", paths=["hic.bam"], format="bam"
                 ),
             ],
-            target_assembly_level="chromosome",
         )
         report = validate_manifest(manifest, require_existing_files=False)
         self.assertTrue(report["valid"])

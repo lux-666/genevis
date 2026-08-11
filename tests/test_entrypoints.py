@@ -45,6 +45,11 @@ from app.storage.artifacts import read_artifact_records
 from app.storage.frozen_inputs import FrozenExecutionLease, freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
+from tests.busco_fixture import (
+    assembly_review_config,
+    busco_parameters,
+    ensure_busco_lineage,
+)
 from tests.data_v2 import v2_run_dir
 
 
@@ -123,6 +128,7 @@ def _write_assembly_review_request(
     paths = SessionPaths.from_run_dir(run_dir)
     reads = run_dir / "fixture_reads.fastq"
     reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    lineage = ensure_busco_lineage(run_dir)
     freeze_session_inputs(
         paths,
         manifest_draft={
@@ -139,7 +145,8 @@ def _write_assembly_review_request(
         run_config_draft={
             "requested_stages": [
                 {"stage": "assembly_review", "allow_local_execution": False}
-            ]
+            ],
+            "assembly_review": assembly_review_config(lineage),
         },
         selected_methods={},
         probe_environments=False,
@@ -709,6 +716,9 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                 "assembly": {"flye_parameters": {"threads": 4}},
                 "assembly_review": {
                     "quast": {"threads": 2},
+                    "busco": busco_parameters(
+                        "/data/busco/embryophyta_odb10"
+                    ),
                     "related_species_reference_dir": "/ref/ncbi_metazoa",
                 },
             }
@@ -756,6 +766,9 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     "assembly_method": "hifiasm_ont",
                     "hifiasm_ont_parameters": {"threads": 4},
                 },
+                "assembly_review": assembly_review_config(
+                    "/data/busco/embryophyta_odb10"
+                ),
             }
         )
 
@@ -782,6 +795,9 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     "assembly_method": "hifiasm_ont",
                     "hifiasm_ont_parameters": {"threads": 4},
                 },
+                "assembly_review": assembly_review_config(
+                    "/data/busco/embryophyta_odb10"
+                ),
             }
         )
         with tempfile.TemporaryDirectory() as tmp:

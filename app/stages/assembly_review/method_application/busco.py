@@ -90,15 +90,12 @@ def freeze_busco_attempts(state: TopLevelState) -> StateUpdate:
     candidates = output.get("candidates", [])
     signals = output.get("signals", [])
     if error:
-        signals = mark_missing_signals(
-            signals,
-            candidates,
-            signal_name="busco",
-            method_name=BUSCO_METHOD,
-            reason=error,
-        )
-        return rewrite_eval_bundle(
-            state, {**output, "signals": signals}, status="evaluating"
+        return update_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": f"BUSCO configuration is invalid: {error}",
+            },
         )
     try:
         materialized = [
@@ -364,6 +361,8 @@ def busco_parameters(output: AssemblyReviewCursor) -> tuple[dict[str, Any], str 
     lineage_path = Path(str(params["lineage_path"])).expanduser()
     if not lineage_path.exists():
         return {}, "busco_lineage_path_missing"
+    if not lineage_path.is_dir():
+        return {}, "busco_lineage_path_not_directory"
     threads = params.get("threads", 1)
     if threads <= 0:
         return {}, "assembly_review.busco_parameters.threads must be a positive integer"

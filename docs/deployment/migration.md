@@ -49,7 +49,7 @@ by the methods you intend to execute.
 |---|---|
 | Read QC | `seqkit` |
 | Genome Survey | `jellyfish`, `genomescope2` |
-| Assembly | `flye`, `hifiasm`, `nextDenovo` |
+| Assembly | the selected one of `flye`, `hifiasm`, `nextDenovo` |
 | Assembly Dedup | `minimap2`, `samtools`, `pbcstat`, `calcuts`, `split_fa`, `gzip`, `purge_dups`, `get_seqs` |
 | Assembly Review | `quast.py`, `busco` |
 | T2T | `minimap2` |
@@ -79,11 +79,15 @@ conda run -n gene_agent gene-agent bootstrap --apply
 Bootstrap validates current configuration, conforms packages that opt in, and
 checks their declared canary paths. It performs no downloads.
 
-## Optional LLM Configuration
+## Conditional LLM Configuration
 
-TUI parameter recommendation and model-assisted review read credentials from
-exported `GENE_AGENT_LLM_*` variables or the project-root `.env` file.
-`inspect` and storage audit do not require an LLM.
+Assembly parameter recommendation requires a configured, reachable LLM; explicit
+Flye/route/thread settings do not replace the biological parameter recommendation.
+Hi-C scaffolding and T2T parameter recommendation also use the mandatory LLM
+profile. Before freeze, `run`/TUI performs an authenticated endpoint probe for
+workflows that contain one of those stages. Pure existing-assembly review-only
+runs, `inspect`, storage audit, and other workflows without an LLM stage do not
+require LLM configuration.
 
 Example `.env`:
 
@@ -130,7 +134,10 @@ gene-agent run \
 
 The manifest owns `session_id`; output is written to
 `<data-dir>/runs/<session_id>/`. The command validates and canonicalizes both
-files before freezing them and their dependency snapshot. It requires one
+files, verifies the selected locally executable method closure and any mandatory
+LLM endpoint, and only then freezes them and their dependency snapshot. The
+readiness check is read-only and does not create a run session on failure. It
+does not probe unselected assemblers. The run config requires one
 `requested_stages` list of `{stage, allow_local_execution}` objects in the run
 config; the boolean authorizes local process execution only for that occurrence.
 `requested_stages: null` is rejected, while `[]` is valid. Inventory registers

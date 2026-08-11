@@ -42,6 +42,7 @@ from app.storage.artifacts import (
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
+from tests.busco_fixture import assembly_review_config, ensure_busco_lineage
 
 _DEFAULT_REQUESTED_STAGES = (
     "read_qc",
@@ -63,6 +64,15 @@ def _run(
     if create:
         reads = paths.run_dir / "fixture_reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        run_config: dict[str, object] = {
+            "requested_stages": [
+                {"stage": stage, "allow_local_execution": False}
+                for stage in requested_stages
+            ]
+        }
+        if "assembly_review" in requested_stages:
+            lineage = ensure_busco_lineage(paths.run_dir)
+            run_config["assembly_review"] = assembly_review_config(lineage)
         freeze_session_inputs(
             paths,
             manifest_draft={
@@ -76,12 +86,7 @@ def _run(
                     }
                 ],
             },
-            run_config_draft={
-                "requested_stages": [
-                    {"stage": stage, "allow_local_execution": False}
-                    for stage in requested_stages
-                ]
-            },
+            run_config_draft=run_config,
             selected_methods={},
             probe_environments=False,
         )

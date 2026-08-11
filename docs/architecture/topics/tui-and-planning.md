@@ -109,10 +109,13 @@ documents. An identical repeated freeze is idempotent. A changed request,
 partial freeze, corrupt hash, or existing execution evidence without a valid
 checkpoint fails closed instead of silently rebuilding inputs.
 
-The dependency snapshot captures the selected machine closure but deliberately
-does not run Conda probes. Bootstrap owns readiness probing. After freeze, the
-executor resolves from the snapshot rather than later edits to
-`config/envs.yaml`.
+After final confirmation and the TTY check, the TUI computes one canonical
+effective local-method closure. A read-only readiness pass probes exactly that
+closure plus any mandatory LLM endpoint. Only after every probe succeeds does
+the freeze store the same closure in the dependency snapshot; no session is
+created on readiness failure. Bootstrap remains the broader machine-level
+diagnostic for all configured methods. After freeze, the executor resolves from
+the snapshot rather than later edits to `config/envs.yaml`.
 
 Whole-run freeze does not generate every future method command. Each selected
 stage later creates the narrower method-attempt freeze described in

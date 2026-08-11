@@ -376,7 +376,9 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
 
 
 def _planner_state_from_tui_draft(draft: Any) -> Any:
+    from app.entrypoints.tui_intake import no_hic_contig_stage_scope
     from app.schemas.ask_plan import AskPlanState
+    from app.schemas.tui_intake import NoHiCFact
     from app.storage.paths import SessionPaths
 
     has_hifi = draft.intake.hifi_reads is not None
@@ -384,6 +386,12 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
     platform: str | None = "pacbio_hifi" if has_hifi and not has_ont else "ont"
     if has_hifi and has_ont:
         platform = None
+
+    degraded = (
+        isinstance(draft.intake.hic_reads, NoHiCFact)
+        and draft.degradation_decision is not None
+        and draft.degradation_decision.confirmed
+    )
 
     method_parameters = (
         {
@@ -401,8 +409,16 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
             method_parameters[method_id] = {
                 **method_parameters.get(method_id, {}),
                 "use_ultralong_ont": draft.intent.use_ultralong_ont,
-                "use_hic_phasing": draft.intent.use_hic_phasing,
+                "use_hic_phasing": (
+                    False if degraded else draft.intent.use_hic_phasing
+                ),
             }
+
+    requested_stages = list(draft.intent.requested_stages)
+    if degraded:
+        # New confirmations persist this projection in WorkflowIntent. Keep it
+        # here as a compatibility boundary for older durable drafts.
+        requested_stages = no_hic_contig_stage_scope(requested_stages)
 
     entry_request: dict[str, Any] = {
         "command": "run",
@@ -410,14 +426,18 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         "data_dir": draft.data_dir,
         "platform": platform,
         "target_species": draft.intent.target_species,
-        "requested_stages": list(draft.intent.requested_stages),
+        "requested_stages": requested_stages,
         "source_paths": [],
         "intent_parse_source": "llm_plan_draft",
         "intake_goal": {
-            "target_assembly_level": draft.intent.target_assembly_level,
+            "target_assembly_level": (
+                "contig" if degraded else draft.intent.target_assembly_level
+            ),
             "requested_assembly_method": draft.intent.requested_assembly_method,
             "use_ultralong_ont": draft.intent.use_ultralong_ont,
-            "use_hic_phasing": draft.intent.use_hic_phasing,
+            "use_hic_phasing": (
+                False if degraded else draft.intent.use_hic_phasing
+            ),
         },
     }
     return AskPlanState(
@@ -781,7 +801,16 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
         save_tui_session_draft,
     )
     from app.execution.dependency_snapshot import DependencySnapshotError
-    from app.storage.frozen_inputs import FrozenInputError, freeze_session_inputs
+    from app.execution.run_readiness import (
+        RunReadinessError,
+        effective_method_closure,
+        preflight_run_readiness,
+    )
+    from app.storage.frozen_inputs import (
+        FrozenInputError,
+        freeze_session_inputs,
+        prepare_session_inputs,
+    )
     from app.storage.paths import SessionPaths
 
     if not _foreground_review_available():
@@ -794,13 +823,31 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
 
     paths = SessionPaths(draft.data_dir, draft.session_id)
     try:
-        freeze_session_inputs(
-            paths,
+        prepared = prepare_session_inputs(
             manifest_draft=materialize_manifest_draft(draft),
             run_config_draft=build_run_config_payload(plan),
-            parent_session_id=draft.parent_session_id,
+        )
+        effective_methods = effective_method_closure(
+            prepared.run_config,
             selected_methods=plan.selected_methods or {},
         )
+        preflight_run_readiness(
+            prepared.run_config,
+            effective_methods=effective_methods,
+        )
+        freeze_session_inputs(
+            paths,
+            prepared_inputs=prepared,
+            parent_session_id=draft.parent_session_id,
+            selected_methods=effective_methods,
+        )
+    except RunReadinessError as exc:
+        print(f"error: 本次运行启动前预检失败：{exc}", file=sys.stderr)
+        print(
+            "本次选定的方法或 LLM 尚未就绪；请修正配置，必要时先运行 bootstrap。",
+            file=sys.stderr,
+        )
+        return 1
     except DependencySnapshotError as exc:
         print(f"error: 无法冻结本次运行输入：{exc}", file=sys.stderr)
         print(

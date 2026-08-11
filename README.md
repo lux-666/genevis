@@ -41,9 +41,10 @@ inventory
 This is the unique stage registry/display order, not an automatic planning
 template or runtime successor table. It includes the manual-only `gapcloser`
 and `base_polish` placeholders. Runtime order comes only from the literal
-frozen `requested_stages` occurrence list. The automatic Assembly template
-appends `assembly_review`; the T2T template omits the placeholders and repeats
-that same Review component after `t2t`:
+frozen `requested_stages` occurrence list. The recommended Assembly template
+appends `assembly_dedup` and then `assembly_review`; the T2T template omits the
+placeholders, includes that same Dedup-before-Review segment, and repeats Review
+after `t2t`:
 
 ```text
 read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
@@ -55,6 +56,9 @@ it does not dynamically discover stage plugins or insert successor stages.
 Before freeze, sequence validation rejects a plan that leaves an Assembly or T2T
 boundary without its required `assembly_review`; it never inserts one. A later
 assembly-refining occurrence may become the exact handoff that Review closes.
+These are recommended-template defaults, not a fixed RunConfig sequence: callers
+may still provide any literal occurrence list that satisfies the independent
+sequence contracts.
 The owner contracts are [runtime orchestration](docs/architecture/topics/runtime-orchestration.md)
 and [stage contracts](docs/architecture/reference/stage-contracts.md).
 
@@ -234,7 +238,22 @@ TUI 最终会把选择落到 run config：
     {"stage": "assembly", "allow_local_execution": true},
     {"stage": "assembly_dedup", "allow_local_execution": true},
     {"stage": "assembly_review", "allow_local_execution": true}
-  ]
+  ],
+  "assembly": {
+    "assembly_method": "flye",
+    "assembly_route": "ont",
+    "flye_parameters": {"threads": 16}
+  },
+  "assembly_review": {
+    "quast": {"threads": 8},
+    "busco": {
+      "lineage_path": "/absolute/path/to/busco_downloads/lineages/insecta_odb10",
+      "lineage_name": "insecta_odb10",
+      "lineage_version": "odb10",
+      "lineage_source": "operator_offline_cache",
+      "threads": 8
+    }
+  }
 }
 ```
 
@@ -301,7 +320,7 @@ review：
       "threads": 8
     },
     "busco": {
-      "lineage_path": "/absolute/path/to/busco/lineage",
+      "lineage_path": "/absolute/path/to/busco_downloads/lineages/insecta_odb10",
       "lineage_name": "insecta_odb10",
       "lineage_version": "odb10",
       "lineage_source": "local",
@@ -317,9 +336,12 @@ review：
 
 `allow_local_execution` 是 occurrence 级本地执行授权边界：只有为 `true` 的
 requested-stage 对象才可启动本地工具，`assembly_dedup` 也遵守同一规则。同名
-stage 的两个 occurrence 可以分别授权或拒绝本地执行。对象的 stage 仍可被
-请求而其布尔值为 `false`；此时它不得运行本地命令，并由该 stage 的运行契约决定
-如何验证输入和处理该 occurrence。
+stage 的两个 occurrence 可以分别授权或拒绝本地执行。`false` 只是否决当前
+occurrence 启动本地进程，不能用来绕过 workflow sequence、必填 stage config 或
+冻结前输入校验；例如任一 `assembly_review` occurrence 都必须提供完整 BUSCO lineage
+配置。lineage 会按声明的 odb10/odb12/odb12.2 合同检查 `dataset.cfg` identity 和计数、
+HMM profiles、`scores_cutoff`、版本所需的 `lengths_cutoff` 以及 reference data。
+重复 Read QC 的 `[false, true]` 仍按各 occurrence 独立执行授权。
 
 `review_policy.max_blocked_seconds` 的默认值是 `300`。可在
 `review_policy.stages.<stage>.max_blocked_seconds` 为已注册的 review stage 覆盖；
@@ -345,7 +367,7 @@ fail closed。倒计时只存在于由 `run` 或 TUI 启动的原始 attached ex
 ### 3. Stage selection and gates
 
 即使 `requested_stages` 里包含某个 stage，stage 内部仍会根据 manifest、
-artifact registry、目标级别和已有产物决定执行、跳过或阻塞。
+artifact registry 和已有产物决定执行、跳过或阻塞。
 
 几个实际例子：
 
@@ -364,12 +386,12 @@ artifact registry、目标级别和已有产物决定执行、跳过或阻塞。
 - **human gates**：`assembly_review`、`hic_scaffolding`、`t2t` 等阶段会在需要
   人工判断时进入 `blocked_human`，并写 review request artifact。
 
-manifest 中的目标级别会影响 stage 内部决策：
+`RunConfig.requested_stages` 是编译后 occurrence list 的唯一执行权威；manifest
+只声明输入资产和样本事实，不携带全局 assembly 目标：
 
 ```yaml
 session_id: demo-session
 sample_id: demo
-target_assembly_level: chromosome
 genome_size_estimate: 500000000
 assets:
   - asset_type: raw_long_reads

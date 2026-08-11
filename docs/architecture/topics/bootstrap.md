@@ -88,7 +88,11 @@ from that snapshot, not from later bootstrap edits. Each executable method then
 creates its narrower method-attempt freeze from the approved inputs and frozen
 dependency selection.
 
-The TUI freeze intentionally avoids Conda probes; bootstrap is where the
-operator asks for those probes. A first-run preview with no persisted config
-cannot probe a configuration that has not been written yet; the first
-`--apply` performs validation and preflight immediately after writing it.
+Bootstrap probes the complete configured machine catalog. Separately, after a
+run's final confirmation and TTY check, both structured run and TUI perform a
+read-only readiness probe for only the canonical effective method closure (and
+the mandatory LLM endpoint when the chosen workflow reaches one). The exact
+same closure is then frozen into the dependency snapshot. A failed run-specific
+probe creates no session. A first-run bootstrap preview with no persisted config
+cannot probe a configuration that has not been written yet; the first `--apply`
+performs validation and preflight immediately after writing it.

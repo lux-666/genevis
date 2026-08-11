@@ -11,13 +11,31 @@ from app.control.workflow_plan import (
     workflow_steps_from_run_config,
 )
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.schemas.run_config import RunConfig
+from app.schemas.run_config import RunConfig as _ProductionRunConfig
 from app.schemas.state import (
     freeze_workflow_steps,
     initial_state,
     validate_workflow_steps,
 )
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import assembly_review_config
+
+
+class RunConfig:
+    """Fixture adapter for workflow tests unrelated to BUSCO configuration."""
+
+    @staticmethod
+    def model_validate(payload: dict[str, object]) -> _ProductionRunConfig:
+        normalized = dict(payload)
+        requests = normalized.get("requested_stages") or []
+        if any(
+            isinstance(request, dict) and request.get("stage") == "assembly_review"
+            for request in requests
+        ):
+            normalized["assembly_review"] = assembly_review_config(
+                "/data/busco/embryophyta_odb10"
+            )
+        return _ProductionRunConfig.model_validate(normalized)
 
 
 def _apply(state: dict, update: dict) -> None:

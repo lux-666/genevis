@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ from app.schemas.state import initial_state as build_initial_state
 from app.storage.frozen_inputs import FrozenExecutionLease
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import ensure_busco_lineage
 
 
 def _capture_call(function, *args, **kwargs):
@@ -37,6 +39,16 @@ def _capture_call(function, *args, **kwargs):
     ):
         result = function(*args, **kwargs)
     return result, stdout.getvalue(), stderr.getvalue()
+
+
+def _busco_config(lineage_path: str) -> dict[str, object]:
+    return {
+        "lineage_path": lineage_path,
+        "lineage_name": "embryophyta_odb10",
+        "lineage_version": "odb10",
+        "lineage_source": "test_fixture",
+        "threads": 4,
+    }
 
 
 def _leave_blocked(_graph, _config, result, *_args, **_kwargs):
@@ -84,6 +96,7 @@ def _prepared_inputs(
     *,
     session_id: str = "manifest-session",
     requested_stages: list[str] | None = None,
+    local_stages: tuple[str, ...] = (),
 ):
     stages = list(requested_stages or [])
     if (
@@ -91,13 +104,22 @@ def _prepared_inputs(
         and stages[-1] != "assembly_review"
     ):
         stages.append("assembly_review")
+    payload: dict[str, object] = {
+        "requested_stages": [
+            {
+                "stage": stage,
+                "allow_local_execution": stage in local_stages,
+            }
+            for stage in stages
+        ],
+    }
+    if "assembly_review" in stages:
+        payload["assembly_review"] = {
+            "busco": _busco_config("/data/busco/embryophyta_odb10")
+        }
     return SimpleNamespace(
         manifest=SimpleNamespace(session_id=session_id),
-        run_config=RunConfig(
-            requested_stages=[
-                {"stage": stage, "allow_local_execution": False} for stage in stages
-            ],
-        ),
+        run_config=RunConfig.model_validate(payload),
     )
 
 
@@ -296,6 +318,9 @@ class RunHandlerTests(unittest.TestCase):
                     "app.entrypoints.run._foreground_review_available",
                     return_value=True,
                 ),
+                patch(
+                    "app.execution.run_readiness.preflight_run_readiness"
+                ) as readiness,
             ):
                 code = run_entry._run(args)
 
@@ -320,6 +345,51 @@ class RunHandlerTests(unittest.TestCase):
             checkpointer="sqlite",
             interactive_gate=True,
         )
+        readiness.assert_called_once_with(
+            prepared.run_config,
+            effective_methods={},
+        )
+
+    def test_structured_run_reuses_canonical_closure_for_readiness_and_freeze(self):
+        prepared = _prepared_inputs(
+            requested_stages=["read_qc"],
+            local_stages=("read_qc",),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                manifest="source/manifest.yaml",
+                run_config="source/run.json",
+                data_dir=tmp,
+            )
+            with (
+                patch(
+                    "app.storage.frozen_inputs.prepare_session_inputs",
+                    return_value=prepared,
+                ),
+                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                patch(
+                    "app.entrypoints.run.execute_frozen_session",
+                    return_value=0,
+                ),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
+                patch(
+                    "app.execution.run_readiness.preflight_run_readiness"
+                ) as readiness,
+            ):
+                code = run_entry._run(args)
+
+        self.assertEqual(code, 0)
+        effective = {
+            "read_qc": ("read_qc.long_read_stats.seqkit_stats",),
+        }
+        readiness.assert_called_once_with(
+            prepared.run_config,
+            effective_methods=effective,
+        )
+        self.assertEqual(freeze.call_args.kwargs["selected_methods"], effective)
 
     def test_non_tty_run_fails_before_freeze_or_execute(self):
         prepared = _prepared_inputs(requested_stages=["read_qc"])
@@ -423,6 +493,9 @@ class RunHandlerTests(unittest.TestCase):
                     patch(
                         "app.entrypoints.run.execute_frozen_session", return_value=0
                     ) as execute,
+                    patch(
+                        "app.execution.run_readiness.preflight_run_readiness"
+                    ),
                 ):
                     code, stdout, stderr = _capture_call(run_entry._run, args)
 
@@ -458,6 +531,107 @@ class RunHandlerTests(unittest.TestCase):
         )
         freeze.assert_not_called()
         execute.assert_not_called()
+
+    def test_readiness_failure_does_not_freeze_or_create_session(self):
+        prepared = _prepared_inputs(requested_stages=["read_qc"])
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            args = argparse.Namespace(
+                manifest="manifest.yaml",
+                run_config="run.json",
+                data_dir=str(data_dir),
+            )
+            with (
+                patch(
+                    "app.storage.frozen_inputs.prepare_session_inputs",
+                    return_value=prepared,
+                ),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
+                patch(
+                    "app.execution.run_readiness.preflight_run_readiness",
+                    side_effect=ValueError("seqkit missing"),
+                ),
+                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                patch("app.entrypoints.run.execute_frozen_session") as execute,
+            ):
+                code, _stdout, stderr = _capture_call(run_entry._run, args)
+
+            self.assertEqual(code, 1)
+            self.assertIn("seqkit missing", stderr)
+            self.assertFalse(data_dir.exists())
+            freeze.assert_not_called()
+            execute.assert_not_called()
+
+    def test_inventory_only_missing_dependency_config_creates_no_session(self):
+        prepared = _prepared_inputs(requested_stages=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            args = argparse.Namespace(
+                manifest="manifest.yaml",
+                run_config="run.json",
+                data_dir=str(data_dir),
+            )
+            with (
+                patch(
+                    "app.storage.frozen_inputs.prepare_session_inputs",
+                    return_value=prepared,
+                ),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
+                patch.dict(
+                    os.environ,
+                    {"GENE_AGENT_ENVS_CONFIG": str(root / "missing-envs.yaml")},
+                ),
+                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                patch("app.entrypoints.run.execute_frozen_session") as execute,
+            ):
+                code, _stdout, stderr = _capture_call(run_entry._run, args)
+
+            self.assertEqual(code, 1)
+            self.assertIn("dependency configuration is not ready", stderr)
+            self.assertFalse(data_dir.exists())
+            freeze.assert_not_called()
+            execute.assert_not_called()
+
+    def test_inventory_only_malformed_dependency_yaml_returns_preflight_error(self):
+        prepared = _prepared_inputs(requested_stages=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            envs = root / "envs.yaml"
+            envs.write_text("default: [unterminated\n", encoding="utf-8")
+            args = argparse.Namespace(
+                manifest="manifest.yaml",
+                run_config="run.json",
+                data_dir=str(data_dir),
+            )
+            with (
+                patch(
+                    "app.storage.frozen_inputs.prepare_session_inputs",
+                    return_value=prepared,
+                ),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
+                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}),
+                patch("app.storage.frozen_inputs.freeze_session_inputs") as freeze,
+                patch("app.entrypoints.run.execute_frozen_session") as execute,
+            ):
+                code, _stdout, stderr = _capture_call(run_entry._run, args)
+
+            self.assertEqual(code, 1)
+            self.assertIn("dependency configuration is not ready", stderr)
+            self.assertIn("env config YAML is invalid", stderr)
+            self.assertFalse(data_dir.exists())
+            freeze.assert_not_called()
+            execute.assert_not_called()
 
     def test_noncanonical_manifest_session_id_fails_before_freeze(self):
         prepared = _prepared_inputs(
@@ -519,6 +693,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             proteins = root / "reference_proteins.fa"
             assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
             proteins.write_text(">p1\nMKT\n", encoding="utf-8")
+            lineage = ensure_busco_lineage(root)
             manifest = root / "manifest.yaml"
             manifest.write_text(
                 f"session_id: {session_id}\n"
@@ -536,6 +711,9 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
+                        "assembly_review": {
+                            "busco": _busco_config(str(lineage))
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -585,6 +763,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             session_id = "public-run-sqlite-gate"
             assembly = root / "existing_assembly.fa"
             assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            lineage = ensure_busco_lineage(root)
 
             manifest = root / "manifest.yaml"
             manifest.write_text(
@@ -607,6 +786,9 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
+                        "assembly_review": {
+                            "busco": _busco_config(str(lineage))
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -782,6 +964,11 @@ class FrozenHelperTests(unittest.TestCase):
                             },
                         ],
                         "t2t": {"mode": "manual_review"},
+                        "assembly_review": {
+                            "busco": _busco_config(
+                                "/data/busco/embryophyta_odb10"
+                            )
+                        },
                         "review_policy": {
                             "max_blocked_seconds": 300,
                             "stages": {
@@ -857,6 +1044,10 @@ class FrozenHelperTests(unittest.TestCase):
             invoked_state["stage_seeds"],
             {
                 "assembly_review": {
+                    "busco_parameters": {
+                        **_busco_config("/data/busco/embryophyta_odb10"),
+                        "mode": "genome",
+                    },
                     "review_policy": {"max_blocked_seconds": 300},
                 },
                 "t2t": {
@@ -1155,7 +1346,12 @@ class FrozenHelperTests(unittest.TestCase):
                     requested_stages=[
                         {"stage": "assembly", "allow_local_execution": False},
                         {"stage": "assembly_review", "allow_local_execution": False},
-                    ]
+                    ],
+                    assembly_review={
+                        "busco": _busco_config(
+                            "/data/busco/embryophyta_odb10"
+                        )
+                    },
                 ),
             )
             graph = Mock()

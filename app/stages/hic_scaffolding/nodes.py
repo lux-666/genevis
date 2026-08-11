@@ -181,7 +181,6 @@ def resolve_hic_inputs(state: TopLevelState) -> StateUpdate:
             for asset in hic_assets
             if asset.get("metadata")
         ],
-        "target_assembly_level": _target_assembly_level(state),
         "assembly_source": source,
         "method_name": AUTOHIC_METHOD,
     }
@@ -956,11 +955,6 @@ def _fail_update(
         state,
         {"status": "failed", "failure_kind": failure_kind, "reason": reason},
     )
-
-
-def _target_assembly_level(state: TopLevelState) -> str:
-    inventory_out = (state.get("stage_outputs") or {}).get("inventory") or {}
-    return str(inventory_out.get("target_assembly_level") or "contig")
 
 
 def _hic_assets(state: TopLevelState) -> list[dict[str, Any]]:

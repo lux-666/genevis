@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 
 from app.entrypoints.ask_planner import _build_assembly_execution_config
-from app.entrypoints.tui import _planner_state_from_tui_draft
+from app.entrypoints.tui import (
+    _apply_llm_plan_draft,
+    _planner_state_from_tui_draft,
+)
 from app.entrypoints.tui_intake import (
     TuiDraftConflictError,
     apply_asset_answer,
@@ -28,6 +31,7 @@ from app.schemas.ask_plan import PlanStageOccurrence
 from app.schemas.manifest import InputAssetSpec, PairedReadSpec
 from app.schemas.run_config import RunConfig
 from app.schemas.tui_intake import HiCPairedReadsFact, HiCReadPair, HifiReadsFact
+from tests.busco_fixture import assembly_review_config
 
 
 class TuiIntakeTests(unittest.TestCase):
@@ -82,6 +86,7 @@ class TuiIntakeTests(unittest.TestCase):
                         "read_qc",
                         "genome_survey",
                         "assembly",
+                        "assembly_dedup",
                         "assembly_review",
                     ],
                 )
@@ -90,7 +95,10 @@ class TuiIntakeTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": stage, "allow_local_execution": False}
                             for stage in intent.requested_stages
-                        ]
+                        ],
+                        "assembly_review": assembly_review_config(
+                            "/data/busco/embryophyta_odb10"
+                        ),
                     }
                 )
 
@@ -680,10 +688,39 @@ class TuiIntakeTests(unittest.TestCase):
             self.assertFalse(no_hic.degradation_decision)
             confirmed = confirm_no_hic_degradation(no_hic, confirmed=True)
             self.assertIsNone(next_intake_clarification(confirmed))
+            self.assertEqual(confirmed.intent.target_assembly_level, "contig")
+            self.assertFalse(confirmed.intent.use_hic_phasing)
+            self.assertNotIn("hic_reads", confirmed.intake.requirements)
+            self.assertEqual(
+                confirmed.intent.requested_stages,
+                [
+                    "read_qc",
+                    "genome_survey",
+                    "assembly",
+                    "assembly_dedup",
+                    "assembly_review",
+                ],
+            )
+            planner_state = _planner_state_from_tui_draft(confirmed)
+            requested_scope = planner_state.entry_request["requested_stages"]
+            self.assertEqual(requested_scope, confirmed.intent.requested_stages)
+            planned = _apply_llm_plan_draft(
+                planner_state,
+                {
+                    "selected_stage_occurrences": [
+                        {"stage": stage, "allow_local_execution": False}
+                        for stage in requested_scope
+                    ],
+                    "selected_methods": {},
+                },
+            )
+            self.assertEqual(planned.selected_stage_names, requested_scope)
             manifest = materialize_manifest_draft(confirmed)
             self.assertEqual(manifest.user_metadata["hic_status"], "not_provided")
             self.assertTrue(manifest.user_metadata["hic_degradation_confirmed"])
-            self.assertEqual(manifest.target_assembly_level, "contig")
+            self.assertNotIn(
+                "target_assembly_level", manifest.model_dump(mode="json")
+            )
 
     def test_rerun_child_revalidates_assets_and_resets_planning(self):
         with tempfile.TemporaryDirectory() as tmp:

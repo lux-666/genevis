@@ -41,8 +41,11 @@ resume from rebuilding a command from later code, catalogs, configuration, or
 environment state. A retry therefore creates a new method attempt; it does not
 modify either the session control snapshot or an earlier frozen attempt.
 
-The TUI freeze captures dependency identity but deliberately does not turn
-intake into a Conda readiness probe. Machine readiness belongs to
+Final confirmation does not freeze immediately. After the TTY check, a
+read-only run-specific readiness pass probes the canonical effective local
+method closure and any mandatory LLM endpoint. The same closure is then used by
+the whole-run dependency snapshot, and a failure creates no session. Broader
+machine-catalog readiness remains the responsibility of
 [bootstrap](bootstrap.md); execution still verifies the frozen dependency
 selection at the boundary where it is used.
 

@@ -159,10 +159,12 @@ target.
 
 `app.workflow.STAGE_ORDER` is a registration/default-planning/display aid. It
 is not runtime order or a successor table. `recommended_workflow_template` is
-a separate planning helper: the Assembly template appends `assembly_review`,
-and the T2T template repeats it after `t2t`. Neither helper rewrites a
-literal RunConfig. The controller does not inspect FASTQ contents, choose an
-assembler, build a command, or interpret biological metrics.
+a separate planning helper: the Assembly template appends `assembly_dedup`
+followed by `assembly_review`, and the T2T template includes that same segment
+before scaffolding and repeats Review after `t2t`. These are recommendation
+defaults, not RunConfig requirements; neither helper rewrites a literal
+RunConfig. The controller does not inspect FASTQ contents, choose an assembler,
+build a command, or interpret biological metrics.
 
 The controller wrapper is thin but not pure. It writes only occurrence-scoped
 stage-entered, explicit stage-skipped, stage-completed, and stage-failed Ledger

@@ -277,8 +277,6 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         tmpdir: str,
         assembly: Path,
         reads: list[Path],
-        *,
-        target_level: str = "chromosome",
     ) -> dict:
         registry = self._registry_for_inputs(
             tmpdir,
@@ -330,7 +328,6 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             },
         ).to_dict()
         state["stage_outputs"] = {
-            "inventory": {"target_assembly_level": target_level},
             "assembly_review": {
                 "status": "completed",
                 "final_assembly_ref": str(source_candidate.primary_output_path),
@@ -631,15 +628,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertNotIn("mode", hic)
             self.assertNotIn("skip_record_ref", hic)
 
-    def test_target_level_does_not_create_a_stage_local_skip(self):
+    def test_hic_stage_does_not_require_a_global_target_level(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, _, _ = self._inputs(tmpdir)
-            state = self._configured_state(
-                tmpdir,
-                assembly,
-                reads,
-                target_level="contig",
-            )
+            state = self._configured_state(tmpdir, assembly, reads)
             result = self._run_to_parameter_gate(state)
 
             self.assertEqual(result["supervision_state"], "blocked_human")

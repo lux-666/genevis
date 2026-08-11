@@ -1,12 +1,17 @@
 package_name: busco
 version_constraint: ">=5.4"
+conditional_version_constraints:
+  lineage_version=odb12: ">=5.8"
+  lineage_version=odb12.2: ">=6.1"
 language: python
 install_channel: conda
 entry_patterns:
-  - "busco -i {assembly} -m genome -o {out_dir} --auto-lineage"
+  - "busco -i {assembly} -l {lineage_path} -o {out_dir} -m genome --offline"
 help_summary: "Benchmarking Universal Single-Copy Orthologs for assembly completeness."
 known_pitfalls:
   - "Lineage dataset must be downloaded or cached before first run."
+  - "odb12 lineage datasets require BUSCO 5.8 or newer."
+  - "odb12.2 lineage datasets require BUSCO 6.1 or newer."
   - "Completeness and duplication thresholds require human approval."
 resource_defaults:
   cpu_cores: 16

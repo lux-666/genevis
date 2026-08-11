@@ -106,6 +106,9 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
         )
     metadata = resolution.metadata
     asset_ids = list(metadata.get("asset_ids") or [])
+    if not asset_ids:
+        asset_ids = list(metadata.get("source_asset_ids") or [])
+    artifact_refs = list(metadata.get("artifact_refs") or [])
     runtime_assets = [
         asset
         for asset in (metadata.get("assets") or [])
@@ -114,11 +117,21 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
     platforms = [
         str(asset.get("platform") or "unknown")
         for asset in runtime_assets
-    ] or [str(value) for value in metadata.get("platforms") or []]
+    ] or [
+        str(value)
+        for value in (
+            metadata.get("member_platforms") or metadata.get("platforms") or []
+        )
+    ]
     formats = [
         str(asset.get("format") or "unknown")
         for asset in runtime_assets
-    ] or [str(value) for value in metadata.get("formats") or []]
+    ] or [
+        str(value)
+        for value in (
+            metadata.get("member_formats") or metadata.get("formats") or []
+        )
+    ]
     unique_platforms = list(dict.fromkeys(platforms))
     unique_formats = list(dict.fromkeys(formats))
     return _update_read_qc_output(
@@ -127,6 +140,7 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
             "status": "resolved",
             "input_asset_ref": asset_ids[0] if asset_ids else None,
             "input_asset_refs": asset_ids,
+            "input_artifact_refs": artifact_refs,
             "input_member_platforms": platforms,
             "input_member_formats": formats,
             "raw_long_reads_path": str(paths[0]),
@@ -196,6 +210,18 @@ def plan_length_filter(state: TopLevelState) -> StateUpdate:
             "length_filter_skipped",
             method_name=LENGTH_FILTER_SKIP,
         )
+    if output.get("execution_mode") != "local":
+        return _length_filter_status_update(
+            state,
+            {
+                "status": "skipped",
+                "method_name": method_name,
+                "skip_reason": "local_execution_not_enabled",
+                "thresholds": thresholds,
+            },
+            "length_filter_skipped",
+            method_name=method_name,
+        )
     if method_name != LENGTH_FILTER_METHOD_NAME:
         return _length_filter_status_update(
             state,
@@ -244,9 +270,11 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
         "final_read_set",
         "filtered_long_reads_ref",
         "filtered_long_reads_refs",
+        "filtered_long_reads_artifact_refs",
         "format",
         "input_asset_ref",
         "input_asset_refs",
+        "input_artifact_refs",
         "input_member_formats",
         "input_member_platforms",
         "length_filter_decision",
@@ -300,6 +328,8 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
             "formats": list(
                 dict.fromkeys(output.get("input_member_formats") or [])
             ),
+            "member_platforms": list(output.get("input_member_platforms") or []),
+            "member_formats": list(output.get("input_member_formats") or []),
             "member_count": len(read_paths),
             "filtered": filtered,
         }
@@ -309,6 +339,9 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
                     "filtered read-QC output requires read_set_manifest_ref"
                 )
             metadata["read_set_manifest_ref"] = output["read_set_manifest_ref"]
+            metadata["artifact_refs"] = list(
+                output.get("filtered_long_reads_artifact_refs") or []
+            )
             metadata["source_asset_ids"] = list(
                 output.get("input_asset_refs") or []
             )

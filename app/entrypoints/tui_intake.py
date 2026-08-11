@@ -361,6 +361,15 @@ def required_roles_for_intent(intent: WorkflowIntent) -> list[IntakeRole]:
     return list(dict.fromkeys(roles))
 
 
+def no_hic_contig_stage_scope(stages: Sequence[str]) -> list[str]:
+    """Truncate chromosome/T2T work at its first Hi-C-dependent boundary."""
+
+    for index, stage in enumerate(stages):
+        if stage in {"hic_scaffolding", "t2t"}:
+            return list(stages[:index])
+    return list(stages)
+
+
 def create_tui_session_draft(
     *,
     session_id: str,
@@ -410,14 +419,17 @@ def next_intake_clarification(draft: TuiSessionDraft) -> IntakeClarification | N
             ),
         )
 
-    # A confirmed no-Hi-C degradation effectively removes hic_scaffolding and t2t
-    # from the required scope without modifying the durable intent stages.
+    # New confirmations persist this scope. Keep the projection for older drafts.
     degraded = (
         isinstance(draft.intake.hic_reads, NoHiCFact)
         and draft.degradation_decision is not None
         and draft.degradation_decision.confirmed
     )
-    effective_stages = stages - {"hic_scaffolding", "t2t"} if degraded else stages
+    effective_stages = (
+        set(no_hic_contig_stage_scope(draft.intent.requested_stages))
+        if degraded
+        else stages
+    )
 
     needs_hic = "hic_reads" in requirements
     needs_species = "t2t" in effective_stages
@@ -479,14 +491,34 @@ def _build_t2t_batch_question(draft: TuiSessionDraft) -> str:
 def confirm_no_hic_degradation(
     draft: TuiSessionDraft, *, confirmed: bool
 ) -> TuiSessionDraft:
-    """Record the explicit operator decision required after ``NoHiCFact``."""
+    """Persist the explicit contig-scope decision required after ``NoHiCFact``."""
 
     if not isinstance(draft.intake.hic_reads, NoHiCFact):
         raise ValueError(
             "no Hi-C degradation can only be confirmed after a no_hic fact"
         )
+    if not confirmed:
+        return draft.model_copy(
+            update={"degradation_decision": DegradationDecision(confirmed=False)}
+        )
+    intent = draft.intent.model_copy(
+        update={
+            "requested_stages": no_hic_contig_stage_scope(
+                draft.intent.requested_stages
+            ),
+            "target_assembly_level": "contig",
+            "use_hic_phasing": False,
+        }
+    )
+    intake = draft.intake.model_copy(
+        update={"requirements": required_roles_for_intent(intent)}
+    )
     return draft.model_copy(
-        update={"degradation_decision": DegradationDecision(confirmed=confirmed)}
+        update={
+            "intent": intent,
+            "intake": intake,
+            "degradation_decision": DegradationDecision(confirmed=True),
+        }
     )
 
 
@@ -1134,11 +1166,6 @@ def materialize_manifest_draft(draft: TuiSessionDraft) -> InputManifest:
         metadata["hic_status"] = "not_provided"
         if draft.degradation_decision and draft.degradation_decision.confirmed:
             metadata["hic_degradation_confirmed"] = True
-    degraded_without_hic = (
-        isinstance(draft.intake.hic_reads, NoHiCFact)
-        and draft.degradation_decision is not None
-        and draft.degradation_decision.confirmed
-    )
     genome_size_estimate = (
         draft.shared_parameters.estimated_genome_size
         if draft.shared_parameters is not None
@@ -1149,9 +1176,6 @@ def materialize_manifest_draft(draft: TuiSessionDraft) -> InputManifest:
         sample_id=draft.intent.sample_id,
         assets=assets,
         user_metadata=metadata,
-        target_assembly_level=(
-            "contig" if degraded_without_hic else draft.intent.target_assembly_level
-        ),
         genome_size_estimate=genome_size_estimate,
     )
 

@@ -23,7 +23,7 @@ from app.stages.read_qc.method_application.seqkit_length_filter import (
     build_seqkit_length_filter_graph,
 )
 from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
-from app.storage.artifacts import publish_artifact_record
+from app.storage.artifacts import publish_artifact_record, read_artifact_records
 from app.storage.audit import audit_run_storage
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
@@ -70,7 +70,6 @@ def _write_phase4_smoke_fixture(root: Path) -> tuple[Path, Path]:
     manifest.write_text(
         "session_id: phase4-readqc-smoke\n"
         "sample_id: phase4_smoke\n"
-        "target_assembly_level: contig\n"
         "assets:\n"
         "  - asset_type: raw_long_reads\n"
         "    paths:\n"
@@ -410,6 +409,139 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         self.assertAlmostEqual(summary["q20_percent"], ((90 * 1000) + (10 * 90)) / 1090)
         self.assertAlmostEqual(summary["q30_percent"], ((80 * 1000) + (5 * 90)) / 1090)
         self.assertAlmostEqual(summary["avg_qual"], ((30 * 1000) + (12 * 90)) / 1090)
+
+    def test_fasta_seqkit_quality_metrics_are_not_applicable(self):
+        from app.domains.parameter_recommendation.facts import build_canonical_facts
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_path = Path(tmpdir) / "fasta_stats.tsv"
+            stats_path.write_text(
+                "file\tformat\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len"
+                "\tN50\tQ20(%)\tQ30(%)\tAvgQual\n"
+                "reads.fasta\tFASTA\t1\t100\t100\t100\t100\t100\t0\t0\t0\n",
+                encoding="utf-8",
+            )
+            summary = parse_seqkit_summary(stats_path)
+
+        self.assertIsNone(summary["q20_percent"])
+        self.assertIsNone(summary["q30_percent"])
+        self.assertIsNone(summary["avg_qual"])
+        facts = build_canonical_facts(
+            shared_parameters=None,
+            read_qc_output={"summary": summary},
+            genome_survey_result=None,
+        )
+        self.assertIsNone(facts.reads.q20_fraction)
+        self.assertIsNone(facts.reads.mean_quality)
+
+    def _run_repeated_read_qc(
+        self, tmpdir: str, *, local_consents: list[bool]
+    ) -> dict:
+        fq = Path(tmpdir) / "reads.fastq"
+        fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        registry = self._write_registry(
+            tmpdir,
+            assets=[
+                {
+                    "asset_id": "s1:raw_long_reads:reads.fastq",
+                    "asset_type": "raw_long_reads",
+                    "path": str(fq),
+                    "platform": "ont",
+                    "format": "fastq",
+                }
+            ],
+        )
+        fake_bin = self._fake_seqkit_bin(tmpdir)
+        steps = [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+            },
+            *[
+                {
+                    "step_id": f"step-{index:03d}-read_qc",
+                    "stage": "read_qc",
+                    "allow_local_execution": consent,
+                }
+                for index, consent in enumerate(local_consents, start=1)
+            ],
+        ]
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
+            workflow_steps=steps,
+            stage_seeds={
+                "read_qc": {
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
+                    "length_filter_request": {
+                        "approved": True,
+                        "method_name": "read_qc.length_filter.seqkit_seq",
+                        "thresholds": {"min_len": 1000},
+                    },
+                }
+            },
+        )
+        state["current_stage"] = "read_qc"
+        state["workflow_step_index"] = 1
+        state["entered_workflow_step_index"] = 0
+        state["asset_registry_ref"] = self._publish_registry_ref(
+            state["data_dir"], "s1", registry
+        )
+        Ledger(state["data_dir"]).create_session("s1", "control/manifest.yaml")
+        return build_graph(backend="memory", data_dir=state["data_dir"]).invoke(
+            state,
+            config={"configurable": {"thread_id": "s1"}},
+        )
+
+    def test_repeated_read_qc_false_true_applies_filter_only_to_local_occurrence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._run_repeated_read_qc(
+                tmpdir, local_consents=[False, True]
+            )
+
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            first_script = paths.workflow_step_work_path(
+                "step-001-read_qc", "read_qc", "length_filter/run_length_filter.sh"
+            )
+            second_script = paths.workflow_step_work_path(
+                "step-002-read_qc", "read_qc", "length_filter/run_length_filter.sh"
+            )
+            self.assertEqual(result["supervision_state"], "completed")
+            self.assertFalse(first_script.exists())
+            self.assertTrue(second_script.is_file())
+
+    def test_repeated_read_qc_true_true_freezes_second_inputs_as_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._run_repeated_read_qc(
+                tmpdir, local_consents=[True, True]
+            )
+
+            self.assertEqual(result["supervision_state"], "completed")
+            frozen_attempts = [
+                json.loads(
+                    (Path(result["data_dir"]) / record["path_ref"]).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                for record in read_artifact_records(result["data_dir"], "s1")
+                if record["artifact_type"] == "read_qc.frozen_attempt"
+                and "step-002-read_qc" in record["path_ref"]
+            ]
+            dependencies = [
+                dependency
+                for payload in frozen_attempts
+                if payload.get("record_type") == "frozen_attempt"
+                for dependency in payload["attempt"]["input_dependencies"]
+            ]
+            self.assertTrue(dependencies)
+            self.assertEqual(
+                {dependency["kind"] for dependency in dependencies}, {"artifact"}
+            )
 
     def test_without_filter_thresholds_skips_filter_and_writes_raw_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:

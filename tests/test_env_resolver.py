@@ -187,6 +187,14 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 EnvResolver(Path(tmp) / "missing.yaml")
 
+    def test_malformed_yaml_is_normalized_to_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "envs.yaml"
+            config.write_text("default: [unterminated\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "env config YAML is invalid"):
+                EnvResolver(config)
+
 
 class EnvPreflightTests(unittest.TestCase):
     def _spec(self) -> EnvSpec:

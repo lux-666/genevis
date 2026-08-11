@@ -20,6 +20,7 @@ from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.inventory.nodes import validate_inputs
 from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import assembly_review_config
 
 
 def _state():
@@ -136,6 +137,9 @@ def test_preflight_rejects_flye_when_no_stage_can_produce_genome_size():
                 "assembly_route": "ont",
                 "flye_parameters": {"threads": 4},
             },
+            "assembly_review": assembly_review_config(
+                "/data/busco/embryophyta_odb10"
+            ),
         }
     )
 
@@ -159,6 +163,9 @@ def test_preflight_allows_flye_to_wait_for_an_earlier_executable_survey():
                 "assembly_route": "ont",
                 "flye_parameters": {"threads": 4},
             },
+            "assembly_review": assembly_review_config(
+                "/data/busco/embryophyta_odb10"
+            ),
         }
     )
 
@@ -177,6 +184,9 @@ def test_preflight_allows_manifest_genome_size_without_survey():
                 "assembly_route": "ont",
                 "flye_parameters": {"threads": 4},
             },
+            "assembly_review": assembly_review_config(
+                "/data/busco/embryophyta_odb10"
+            ),
         }
     )
 

@@ -550,10 +550,20 @@ def _run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        from app.execution.run_readiness import (
+            effective_method_closure,
+            preflight_run_readiness,
+        )
+
+        effective_methods = effective_method_closure(prepared.run_config)
+        preflight_run_readiness(
+            prepared.run_config,
+            effective_methods=effective_methods,
+        )
         freeze_session_inputs(
             paths,
             prepared_inputs=prepared,
-            selected_methods={},
+            selected_methods=effective_methods,
         )
     except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
         print(f"error: run preflight failed: {exc}", file=sys.stderr)

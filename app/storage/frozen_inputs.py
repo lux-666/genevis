@@ -39,6 +39,7 @@ from app.schemas.manifest import (
 from app.schemas.run_config import (
     RunConfig,
     canonicalize_run_config_paths,
+    validate_assembly_review_execution_plan,
     validate_genome_size_execution_plan,
 )
 from app.storage.paths import SessionPaths, ensure_run_layout
@@ -523,6 +524,7 @@ def prepare_session_inputs(
             run_config,
             declarations.read_declarations,
         )
+        validate_assembly_review_execution_plan(run_config)
         validate_genome_size_execution_plan(run_config, manifest)
     except FrozenInputValidationError:
         raise

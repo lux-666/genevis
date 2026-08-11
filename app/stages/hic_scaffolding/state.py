@@ -128,7 +128,6 @@ class HiCScaffoldingCursor(TypedDict, total=False):
     hic_read_refs: list[str]
     hic_read_paths: list[str]
     hic_library_metadata: list[JsonObject]
-    target_assembly_level: str
     assembly_source: str
     species_name: str
 

@@ -60,6 +60,7 @@ from app.storage.assembly_candidates import (
 from app.storage.asset_registry import load_asset_registry
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import assembly_review_config
 from tests.data_v2 import v2_run_dir
 
 
@@ -84,6 +85,9 @@ class T2TDescriptorTests(unittest.TestCase):
                     {"stage": "assembly_review", "allow_local_execution": False},
                 ],
                 "t2t": {},
+                "assembly_review": assembly_review_config(
+                    "/data/busco/embryophyta_odb10"
+                ),
             }
         )
         self.assertIsNone(config.t2t.mode)
@@ -102,6 +106,9 @@ class T2TDescriptorTests(unittest.TestCase):
                         },
                     ],
                     "t2t": {"telomere_motif": "TTAGGG"},
+                    "assembly_review": assembly_review_config(
+                        "/data/busco/embryophyta_odb10"
+                    ),
                 }
             )
 
@@ -117,6 +124,9 @@ class T2TDescriptorTests(unittest.TestCase):
                         },
                     ],
                     "t2t": {"thresholds": {"min_mapq": 30}},
+                    "assembly_review": assembly_review_config(
+                        "/data/busco/embryophyta_odb10"
+                    ),
                 }
             )
 

@@ -34,6 +34,7 @@ from app.storage.frozen_inputs import (
     validate_frozen_inputs,
 )
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
+from tests.busco_fixture import busco_parameters, ensure_busco_lineage
 
 
 def _stage_requests(
@@ -60,6 +61,42 @@ def _stage_requests(
 
 def _local_stage_requests(*stages: str) -> list[dict[str, object]]:
     return _stage_requests(*stages, local=stages)
+
+
+def _with_busco(root: Path, payload: dict[str, object]) -> dict[str, object]:
+    requests = payload.get("requested_stages") or []
+    if not any(
+        isinstance(request, dict) and request.get("stage") == "assembly_review"
+        for request in requests
+    ):
+        return payload
+    lineage = ensure_busco_lineage(root)
+    return {
+        **payload,
+        "assembly_review": {
+            "busco": {
+                "lineage_path": str(lineage),
+                "lineage_name": "embryophyta_odb10",
+                "lineage_version": "odb10",
+                "lineage_source": "test_fixture",
+                "threads": 4,
+            }
+        },
+    }
+
+
+def _review_run_config(
+    lineage: Path,
+    **busco_overrides: object,
+) -> dict[str, object]:
+    return {
+        "requested_stages": [
+            {"stage": "assembly_review", "allow_local_execution": False}
+        ],
+        "assembly_review": {
+            "busco": {**busco_parameters(lineage), **busco_overrides}
+        },
+    }
 
 
 def _finalized_terminal(*args, **_kwargs) -> TerminalFinalizationResult:
@@ -315,6 +352,240 @@ class FrozenInputTests(unittest.TestCase):
             self.assertEqual(bundle.manifest, prepared.manifest)
             self.assertEqual(bundle.run_config, prepared.run_config)
 
+    def test_requested_review_without_busco_creates_no_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, _ = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [
+                            {
+                                "stage": "assembly_review",
+                                "allow_local_execution": False,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "assembly_review.busco",
+            ):
+                prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+
+            self.assertFalse(paths.data_root.exists())
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_busco_lineage_must_be_existing_directory_before_freeze(self) -> None:
+        for kind in ("missing", "file"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths, manifest, run_config, _ = self._fixture(root)
+                lineage = root / "invalid_lineage"
+                if kind == "file":
+                    lineage.write_text("not a directory\n", encoding="utf-8")
+                run_config.write_text(
+                    json.dumps(
+                        {
+                            "requested_stages": [
+                                {
+                                    "stage": "assembly_review",
+                                    "allow_local_execution": False,
+                                }
+                            ],
+                            "assembly_review": {
+                                "busco": {
+                                    "lineage_path": str(lineage),
+                                    "lineage_name": "embryophyta_odb10",
+                                    "lineage_version": "odb10",
+                                    "lineage_source": "test_fixture",
+                                    "threads": 4,
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    FrozenInputValidationError,
+                    "does not exist" if kind == "missing" else "must be a directory",
+                ):
+                    prepare_session_inputs(
+                        manifest_draft=manifest,
+                        run_config_draft=run_config,
+                    )
+
+                self.assertFalse(paths.data_root.exists())
+                self.assertFalse(paths.run_dir.exists())
+
+    def test_busco_lineage_rejects_empty_or_malformed_dataset_before_freeze(
+        self,
+    ) -> None:
+        for kind in (
+            "empty_lineage",
+            "empty_dataset_config",
+            "whitespace_dataset_config",
+            "config_directory",
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths, manifest, run_config, _ = self._fixture(root)
+                lineage = root / "invalid_lineage"
+                lineage.mkdir()
+                dataset_config = lineage / "dataset.cfg"
+                if kind == "empty_dataset_config":
+                    dataset_config.write_text("", encoding="utf-8")
+                elif kind == "whitespace_dataset_config":
+                    dataset_config.write_text("  \n\t\n", encoding="utf-8")
+                elif kind == "config_directory":
+                    dataset_config.mkdir()
+                run_config.write_text(
+                    json.dumps(
+                        {
+                            "requested_stages": [
+                                {
+                                    "stage": "assembly_review",
+                                    "allow_local_execution": False,
+                                }
+                            ],
+                            "assembly_review": {
+                                "busco": {
+                                    "lineage_path": str(lineage),
+                                    "lineage_name": "embryophyta_odb10",
+                                    "lineage_version": "odb10",
+                                    "lineage_source": "test_fixture",
+                                    "threads": 4,
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    FrozenInputValidationError,
+                    (
+                        "dataset.cfg is missing required keys"
+                        if kind == "whitespace_dataset_config"
+                        else "dataset.cfg must be a non-empty regular file"
+                    ),
+                ):
+                    prepare_session_inputs(
+                        manifest_draft=manifest,
+                        run_config_draft=run_config,
+                    )
+
+                self.assertFalse(paths.data_root.exists())
+                self.assertFalse(paths.run_dir.exists())
+
+    def test_busco_lineage_rejects_incomplete_dataset_body_before_freeze(
+        self,
+    ) -> None:
+        cases = {
+            "missing_config_key": "dataset.cfg is missing required keys",
+            "missing_scores": "scores_cutoff must be a non-empty regular file",
+            "missing_profile": "HMM profile count does not match",
+            "malformed_profile": "HMM profile is missing a HMMER3 header",
+            "invalid_score": "scores_cutoff contains a non-numeric score",
+            "score_profile_mismatch": "profiles must exactly match",
+            "missing_lengths": "odb10 lengths_cutoff must be a non-empty",
+            "missing_ancestral": "eukaryota ancestral must be a non-empty",
+            "missing_refseq": "eukaryota refseq_db.faa.gz must be a non-empty",
+            "declared_identity_mismatch": "lineage identity mismatch",
+            "declared_version_mismatch": "lineage_version must match",
+        }
+        for kind, expected in cases.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths, manifest, run_config, _ = self._fixture(root)
+                lineage = ensure_busco_lineage(root)
+                overrides: dict[str, object] = {}
+                if kind == "missing_config_key":
+                    dataset_config = lineage / "dataset.cfg"
+                    dataset_config.write_text(
+                        dataset_config.read_text(encoding="utf-8").replace(
+                            "domain=eukaryota\n", ""
+                        ),
+                        encoding="utf-8",
+                    )
+                elif kind == "missing_scores":
+                    (lineage / "scores_cutoff").unlink()
+                elif kind == "missing_profile":
+                    next((lineage / "hmms").glob("*.hmm")).unlink()
+                elif kind == "malformed_profile":
+                    next((lineage / "hmms").glob("*.hmm")).write_text(
+                        "not an HMM profile\n",
+                        encoding="utf-8",
+                    )
+                elif kind == "invalid_score":
+                    profile_id = next((lineage / "hmms").glob("*.hmm")).stem
+                    (lineage / "scores_cutoff").write_text(
+                        f"{profile_id} not-a-number\n",
+                        encoding="utf-8",
+                    )
+                elif kind == "score_profile_mismatch":
+                    (lineage / "scores_cutoff").write_text(
+                        "different_profile 42.0\n",
+                        encoding="utf-8",
+                    )
+                elif kind == "missing_lengths":
+                    (lineage / "lengths_cutoff").unlink()
+                elif kind == "missing_ancestral":
+                    (lineage / "ancestral").unlink()
+                elif kind == "missing_refseq":
+                    (lineage / "refseq_db.faa.gz").unlink()
+                elif kind == "declared_identity_mismatch":
+                    overrides["lineage_name"] = "insecta_odb10"
+                elif kind == "declared_version_mismatch":
+                    overrides["lineage_version"] = "odb12"
+                run_config.write_text(
+                    json.dumps(_review_run_config(lineage, **overrides)),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(FrozenInputValidationError, expected):
+                    prepare_session_inputs(
+                        manifest_draft=manifest,
+                        run_config_draft=run_config,
+                    )
+
+                self.assertFalse(paths.data_root.exists())
+                self.assertFalse(paths.run_dir.exists())
+
+    def test_busco_lineage_contract_is_versioned_for_supported_datasets(self) -> None:
+        for lineage_name, expects_lengths in (
+            ("embryophyta_odb10", True),
+            ("embryophyta_odb12", False),
+            ("embryophyta_odb12.2", True),
+        ):
+            with self.subTest(lineage_name=lineage_name), tempfile.TemporaryDirectory(
+            ) as tmp:
+                root = Path(tmp)
+                _paths, manifest, run_config, _ = self._fixture(root)
+                lineage = ensure_busco_lineage(root, lineage_name=lineage_name)
+                self.assertEqual((lineage / "lengths_cutoff").exists(), expects_lengths)
+                run_config.write_text(
+                    json.dumps(_review_run_config(lineage)),
+                    encoding="utf-8",
+                )
+
+                prepared = prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+
+                self.assertEqual(
+                    prepared.run_config.assembly_review.busco.lineage_name,
+                    lineage_name,
+                )
+
     def test_prepared_freeze_revalidates_mutation_before_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, _ = self._fixture(Path(tmp))
@@ -403,14 +674,14 @@ class FrozenInputTests(unittest.TestCase):
             paths, manifest, run_config, _ = self._fixture(root)
             run_config.write_text(
                 json.dumps(
-                    {
+                    _with_busco(root, {
                         "requested_stages": _local_stage_requests("assembly"),
                         "assembly": {
                             "assembly_method": "flye",
                             "flye_parameters": {},
                             "assembly_route": "ont",
                         },
-                    }
+                    })
                 )
                 + "\n",
                 encoding="utf-8",
@@ -431,13 +702,13 @@ class FrozenInputTests(unittest.TestCase):
             paths, manifest, run_config, _ = self._fixture(root)
             run_config.write_text(
                 json.dumps(
-                    {
+                    _with_busco(root, {
                         "requested_stages": _local_stage_requests("assembly"),
                         "assembly": {
                             "assembly_method": "hifiasm_ont",
                             "hifiasm_ont_parameters": {"threads": 4},
                         },
-                    }
+                    })
                 )
                 + "\n",
                 encoding="utf-8",
@@ -468,10 +739,10 @@ class FrozenInputTests(unittest.TestCase):
             )
             run_config.write_text(
                 json.dumps(
-                    {
+                    _with_busco(root, {
                         "requested_stages": _local_stage_requests("assembly"),
                         "assembly": {"flye_parameters": {}},
-                    }
+                    })
                 )
                 + "\n",
                 encoding="utf-8",
@@ -508,11 +779,11 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 run_config.write_text(
                     json.dumps(
-                        {
+                        _with_busco(root, {
                             "requested_stages": _local_stage_requests("assembly"),
                             "shared_parameters": {"read_type": "ont_raw"},
                             "assembly": {f"{method}_parameters": {}},
-                        }
+                        })
                     )
                     + "\n",
                     encoding="utf-8",
@@ -548,11 +819,11 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 run_config.write_text(
                     json.dumps(
-                        {
+                        _with_busco(root, {
                             "requested_stages": _local_stage_requests("assembly"),
                             "shared_parameters": {"read_type": "ont_raw"},
                             "assembly": {f"{method}_parameters": {}},
-                        }
+                        })
                     )
                     + "\n",
                     encoding="utf-8",
@@ -598,11 +869,11 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 run_config.write_text(
                     json.dumps(
-                        {
+                        _with_busco(root, {
                             "requested_stages": _local_stage_requests("assembly"),
                             "shared_parameters": {"read_type": read_type},
                             "assembly": {"flye_parameters": {}},
-                        }
+                        })
                     )
                     + "\n",
                     encoding="utf-8",
@@ -632,11 +903,11 @@ class FrozenInputTests(unittest.TestCase):
             )
             run_config.write_text(
                 json.dumps(
-                    {
+                    _with_busco(root, {
                         "requested_stages": _local_stage_requests("assembly"),
                         "shared_parameters": {"read_type": "ont_raw"},
                         "assembly": {"hifiasm_parameters": {}},
-                    }
+                    })
                 )
                 + "\n",
                 encoding="utf-8",
@@ -662,11 +933,11 @@ class FrozenInputTests(unittest.TestCase):
             paths, manifest, run_config, envs = self._fixture(root)
             run_config.write_text(
                 json.dumps(
-                    {
+                    _with_busco(root, {
                         "requested_stages": _stage_requests(
                             "assembly", "read_qc", "assembly"
                         )
-                    }
+                    })
                 )
                 + "\n",
                 encoding="utf-8",
@@ -858,7 +1129,12 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
             run_config.write_text(
-                json.dumps({"requested_stages": _stage_requests("assembly")}),
+                json.dumps(
+                    _with_busco(
+                        Path(tmp),
+                        {"requested_stages": _stage_requests("assembly")},
+                    )
+                ),
                 encoding="utf-8",
             )
             envs.write_text(
@@ -889,7 +1165,12 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
             run_config.write_text(
-                json.dumps({"requested_stages": _stage_requests("assembly")}),
+                json.dumps(
+                    _with_busco(
+                        Path(tmp),
+                        {"requested_stages": _stage_requests("assembly")},
+                    )
+                ),
                 encoding="utf-8",
             )
 
@@ -946,7 +1227,12 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths, manifest, run_config, envs = self._fixture(Path(tmp))
             run_config.write_text(
-                json.dumps({"requested_stages": _stage_requests("assembly")}),
+                json.dumps(
+                    _with_busco(
+                        Path(tmp),
+                        {"requested_stages": _stage_requests("assembly")},
+                    )
+                ),
                 encoding="utf-8",
             )
             freeze_session_inputs(

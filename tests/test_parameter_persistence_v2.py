@@ -145,7 +145,12 @@ def _response(**overrides: int) -> dict:
     }
 
 
-def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
+def _state(
+    tmp_path: Path,
+    *,
+    genome_size: int = 1_000_000_000,
+    read_qc_summary: dict | None = None,
+) -> dict:
     paths = SessionPaths(tmp_path, "s1")
     ensure_run_layout(paths)
     state = initial_state(
@@ -188,7 +193,10 @@ def _state(tmp_path: Path, *, genome_size: int = 1_000_000_000) -> dict:
         "organism": "Example species",
         "target_level": "draft",
     }
-    read_qc_summary = {"n50": 30_000, "total_bases": 42_000_000_000}
+    read_qc_summary = read_qc_summary or {
+        "n50": 30_000,
+        "total_bases": 42_000_000_000,
+    }
     genome_survey_result = {
         "estimates": {"genome_size": genome_size, "heterozygosity": 0.01},
         "estimate_sources": {"genome_size": "survey"},
@@ -354,6 +362,30 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
         "assembly.parameter_approval.request",
     }.issubset(types)
     assert all("s1" not in Path(record["path_ref"]).parts[1:] for record in records)
+
+
+def test_fasta_quality_none_reaches_real_parameter_model_boundary(
+    tmp_path: Path,
+) -> None:
+    state = _state(
+        tmp_path,
+        read_qc_summary={
+            "n50": 30_000,
+            "total_bases": 42_000_000_000,
+            "q20_percent": None,
+            "q30_percent": None,
+            "avg_qual": None,
+        },
+    )
+    model = _Model(_response(purge_level=1))
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        return_value=model,
+    ):
+        update = recommend_assembly_parameters(state)
+
+    assert model.messages is not None
+    assert update["stage_outputs"]["assembly"]["status"] == "blocked_human"
 
 
 def test_approval_creates_compact_attempt_but_rejection_does_not(

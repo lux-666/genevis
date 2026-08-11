@@ -38,6 +38,16 @@ def _base_plan(**overrides) -> AskPlanState:
             PlanStageOccurrence(stage=stage, allow_local_execution=True)
             for stage in stages
         ]
+    occurrences = overrides.get("selected_stage_occurrences") or []
+    if overrides.get("confirmed") and any(
+        occurrence.stage == "assembly_review" for occurrence in occurrences
+    ):
+        method_parameters = dict(overrides.get("method_parameters") or {})
+        method_parameters.setdefault(
+            "assembly_review.eval.busco",
+            _busco_method_parameters(),
+        )
+        overrides["method_parameters"] = method_parameters
     base = dict(
         session_id="s1",
         data_dir="data",
@@ -50,6 +60,18 @@ def _base_plan(**overrides) -> AskPlanState:
 
 def _read_qc_default_methods() -> list[str]:
     return [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP]
+
+
+def _busco_method_parameters(
+    lineage_path: str = "/data/busco/embryophyta_odb10",
+) -> dict[str, object]:
+    return {
+        "lineage_path": lineage_path,
+        "lineage_name": "embryophyta_odb10",
+        "lineage_version": "odb10",
+        "lineage_source": "test_fixture",
+        "threads": 8,
+    }
 
 
 def _requested_stage_names(payload: dict) -> list[str]:
@@ -377,8 +399,17 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
 
             draft = build_initial_plan_draft(plan)
+            method_parameters = dict(draft.method_parameters or {})
+            method_parameters["assembly_review.eval.busco"] = (
+                _busco_method_parameters()
+            )
             payload = build_run_config_payload(
-                draft.model_copy(update={"confirmed": True})
+                draft.model_copy(
+                    update={
+                        "method_parameters": method_parameters,
+                        "confirmed": True,
+                    }
+                )
             )
 
             self.assertEqual(
@@ -449,7 +480,10 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             self.assertEqual(
                 draft.selected_methods["assembly_review"],
-                ["assembly_review.eval.quast"],
+                [
+                    "assembly_review.eval.quast",
+                    "assembly_review.eval.busco",
+                ],
             )
             self.assertEqual(draft.shared_parameters.platform, "ont")
             self.assertEqual(draft.shared_parameters.read_type, "ont_raw")
@@ -549,13 +583,26 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
             stage_names=["assembly_review"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        method_names = {
-            m["method_name"]
-            for m in result.choices["methods_by_stage"]["assembly_review"]
-        }
-        self.assertIn("assembly_review.eval.quast", method_names)
-        self.assertIn("assembly_review.eval.busco", method_names)
-        self.assertNotIn("assembly_review.check.merqury", method_names)
+        self.assertEqual(result.kind, "parameter_values")
+        self.assertIn(
+            "assembly_review.eval.busco.lineage_path",
+            result.required_fields,
+        )
+        self.assertNotIn("methods_by_stage", result.choices)
+
+    def test_assembly_review_rejects_removing_busco(self):
+        plan = _base_plan(stage_names=["assembly_review"])
+
+        with self.assertRaisesRegex(ValueError, "BUSCO cannot be removed"):
+            merge_clarification_response(
+                plan,
+                AskClarificationResponse(
+                    kind="method_selection",
+                    selected_methods={
+                        "assembly_review": ["assembly_review.eval.quast"]
+                    },
+                ),
+            )
 
     def test_assembly_dedup_is_default_auto_without_method_or_parameter_questions(self):
         plan = _base_plan(
@@ -1532,20 +1579,21 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
 
 class AskPlannerBuscoFlowTests(unittest.TestCase):
-    def test_busco_appears_as_executable_in_method_choices(self):
+    def test_review_pipeline_is_fixed_before_parameter_collection(self):
         plan = _base_plan(
             stage_names=["assembly_review"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        ar_methods = {
-            m["method_name"]: m
-            for m in result.choices["methods_by_stage"]["assembly_review"]
-        }
-        self.assertIn("assembly_review.eval.busco", ar_methods)
-        self.assertIn("assembly_review.eval.quast", ar_methods)
-        self.assertNotIn("execution_support", ar_methods["assembly_review.eval.busco"])
-        self.assertNotIn("execution_support", ar_methods["assembly_review.eval.quast"])
+        self.assertEqual(result.kind, "parameter_values")
+        self.assertNotIn("methods_by_stage", result.choices)
+        self.assertIn(
+            "assembly_review.eval.quast.threads",
+            result.required_fields,
+        )
+        self.assertIn(
+            "assembly_review.eval.busco.lineage_path",
+            result.required_fields,
+        )
 
     def test_busco_parameter_clarification_asks_for_all_fields(self):
         plan = _base_plan(
@@ -1624,6 +1672,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
                 "assembly_review": ["assembly_review.eval.busco"],
             },
             method_parameters={
+                "assembly_review.eval.quast": {"threads": 4},
                 "assembly_review.eval.busco": {
                     "lineage_path": "/nonexistent/busco/lineage",
                     "lineage_name": "test_odb10",
@@ -1637,7 +1686,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
         self.assertEqual(result.kind, "confirm")
         self.assertIn("warnings", result.summary)
         self.assertTrue(
-            any("does not exist" in w for w in result.summary["warnings"]),
+            any("not an existing directory" in w for w in result.summary["warnings"]),
         )
 
     def test_busco_defaults_derived_from_lineage_path(self):
@@ -1698,6 +1747,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
     def test_extract_busco_version_variants(self):
         self.assertEqual(_extract_busco_version("insecta_odb10"), "odb10")
         self.assertEqual(_extract_busco_version("vertebrata_odb11"), "odb11")
+        self.assertEqual(_extract_busco_version("eukaryota_odb12.2"), "odb12.2")
         self.assertEqual(_extract_busco_version("no_version_here"), "")
 
 

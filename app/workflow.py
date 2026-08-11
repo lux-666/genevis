@@ -173,6 +173,8 @@ def recommended_workflow_template(endpoint: str) -> list[DomainStage]:
     """
 
     template = stages_through(endpoint)
+    if endpoint == "assembly":
+        template.append("assembly_dedup")
     if endpoint in {"assembly", "t2t"}:
         template.append("assembly_review")
     return template

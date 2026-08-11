@@ -126,12 +126,12 @@ def capture_dependency_snapshot(
     supplies the confirmed scope; unconfigured names correctly use the frozen
     default instead of creating a synthetic override.
 
-    Package filesystem outcomes are recorded for audit.  Conda environment
-    probes are opt-in via ``probe_environments``; the TUI freeze path must not
-    unexpectedly execute conda commands or turn sample intake into a machine
-    readiness check.  A non-``ok`` result never causes a fallback to live
-    configuration; the frozen executor repeats its normal probe against the
-    stored specification.
+    Package filesystem outcomes are recorded for audit. Conda environment
+    probes inside snapshot capture remain opt-in via ``probe_environments``;
+    confirmed-run callers perform their read-only readiness pass before this
+    function and pass the same canonical method scope here. A non-``ok`` result
+    never causes a fallback to live configuration; the frozen executor repeats
+    its normal probe against the stored specification.
     """
 
     source = Path(config_path or active_config_path()).expanduser().resolve(

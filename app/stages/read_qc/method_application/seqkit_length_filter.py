@@ -8,7 +8,6 @@ from pathlib import Path
 
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.input_integrity import asset_input_dependencies
 from app.execution.lifecycle import (
     CompiledMethodGraph,
     MethodExecutionLifecycle,
@@ -37,6 +36,7 @@ from app.stages.read_qc.method_application.support import (
     fail_update,
     filtered_long_reads_path,
     parse_seqkit_summary,
+    read_input_dependencies,
     read_paths_from_output,
     read_qc_output,
     update_read_qc_output,
@@ -113,15 +113,8 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
-    asset_ids = list(output.get("input_asset_refs") or [])
-    if len(asset_ids) != len(input_paths):
-        return fail_update(
-            state,
-            f"SeqKit filter external_deps cardinality mismatch: "
-            f"{len(asset_ids)} asset_ids vs {len(input_paths)} paths",
-        )
     try:
-        input_dependencies = asset_input_dependencies(state, asset_ids, input_paths)
+        input_dependencies = read_input_dependencies(state, output, input_paths)
     except ValueError as exc:
         return fail_update(state, f"SeqKit filter input dependency error: {exc}")
     attempt = build_frozen_attempt(
@@ -372,6 +365,9 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
             "status": "length_filter_executed",
             "filtered_long_reads_ref": str(paths[0]),
             "filtered_long_reads_refs": [str(path) for path in paths],
+            "filtered_long_reads_artifact_refs": [
+                published.ref.model_dump(mode="json") for published in published_reads
+            ],
             "read_set_manifest_ref": published_read_set.ref.model_dump(mode="json"),
             "post_filter_stats_artifact_ref": str(stats_path),
             "post_filter_summary_artifact_ref": str(summary_path),

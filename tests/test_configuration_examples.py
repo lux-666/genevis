@@ -50,7 +50,7 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                 "real_data_manifest.template.yaml",
                 "read_qc_assembly_review_run_config.template.json",
                 True,
-                ["read_qc", "assembly", "assembly_review"],
+                ["read_qc", "assembly", "assembly_dedup", "assembly_review"],
             ),
             (
                 "existing_assembly_manifest.template.yaml",

@@ -8,7 +8,6 @@ from pathlib import Path
 
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.input_integrity import asset_input_dependencies
 from app.execution.lifecycle import (
     CompiledMethodGraph,
     MethodExecutionLifecycle,
@@ -28,6 +27,7 @@ from app.stages.read_qc.constants import METHOD_NAME
 from app.stages.read_qc.method_application.support import (
     fail_update,
     parse_seqkit_summary,
+    read_input_dependencies,
     read_paths_from_output,
     read_qc_output,
     update_read_qc_output,
@@ -76,11 +76,7 @@ def freeze_seqkit_attempt(state: TopLevelState) -> StateUpdate:
     working_dir.mkdir(parents=True, exist_ok=True)
     input_paths = read_paths_from_output(output)
     try:
-        input_dependencies = asset_input_dependencies(
-            state,
-            list(output.get("input_asset_refs") or []),
-            input_paths,
-        )
+        input_dependencies = read_input_dependencies(state, output, input_paths)
     except ValueError as exc:
         return fail_update(state, f"SeqKit stats input dependency error: {exc}")
     stats_path = working_dir / "seqkit_stats.tsv"
