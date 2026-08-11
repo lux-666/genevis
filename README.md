@@ -42,28 +42,26 @@ This is the unique stage registry/display order, not an automatic planning
 template or runtime successor table. It includes the manual-only `gapcloser`
 and `base_polish` placeholders. Runtime order comes only from the literal
 frozen `requested_stages` occurrence list. The recommended Assembly template
-appends `assembly_dedup` and then `assembly_review`; the T2T template omits the
-placeholders, includes that same Dedup-before-Review segment, and repeats Review
-after `t2t`:
+appends `assembly_dedup` and then `assembly_review`; the complete-genome
+recommendation includes the full intended handoff sequence:
 
 ```text
 read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
--> hic_scaffolding -> t2t -> assembly_review
+-> hic_scaffolding -> gapcloser -> t2t -> base_polish -> assembly_review
 ```
 
 The parent graph is composable but statically registered in `app/graph/builder.py`;
 it does not dynamically discover stage plugins or insert successor stages.
-Before freeze, sequence validation rejects a plan that leaves an Assembly or T2T
-boundary without its required `assembly_review`; it never inserts one. A later
-assembly-refining occurrence may become the exact handoff that Review closes.
-These are recommended-template defaults, not a fixed RunConfig sequence: callers
-may still provide any literal occurrence list that satisfies the independent
-sequence contracts.
+`assembly_review` is an optional reusable stage: freeze binds each explicit
+Review to the nearest earlier assembly handoff but never inserts a missing
+Review or rejects a sequence merely because Review is absent. These are editable
+planning recommendations, not a fixed RunConfig sequence; a caller may bypass
+planning and provide the exact literal occurrence list it wants to execute.
 The owner contracts are [runtime orchestration](docs/architecture/topics/runtime-orchestration.md)
 and [stage contracts](docs/architecture/reference/stage-contracts.md).
 
 `gapcloser` 和 `base_polish` 当前只是父图中已注册的 manual-only
-placeholder：自动规划不会加入它们；显式请求会以
+placeholder：完整流程推荐会列出它们并关闭本地执行授权；显式运行到达时会以
 `blocked_not_implemented` fail closed，不会伪装成已经执行。
 
 核心原则是保持 top-level state 很小：graph state 只保存 session、当前阶段、

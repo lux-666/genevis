@@ -58,6 +58,10 @@ rationale, and coordination procedure into one linear ranking:
 - Git history retains superseded implementation and design records; the working
   tree keeps current contracts, accepted planned nodes, explicit conformance
   debt, and operational documentation.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` are legacy,
+  non-authoritative process material scheduled for removal. Do not add new
+  design there or cite it as a contract owner; migrate any surviving rule into
+  the appropriate `docs/architecture/` topic or reference owner.
 
 ## Change Control
 

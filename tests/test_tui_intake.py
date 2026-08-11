@@ -54,7 +54,7 @@ class TuiIntakeTests(unittest.TestCase):
         self.assertIsNone(draft.intake.ont_reads)
         self.assertEqual(next_intake_clarification(draft).role, "ont_reads")
 
-    def test_t2t_goal_recommends_distinct_post_t2t_assembly_review(self):
+    def test_t2t_goal_recommends_complete_chain_and_finish_review(self):
         intent = deterministic_workflow_intent("为该样本做 T2T 组装")
 
         self.assertEqual(
@@ -66,12 +66,14 @@ class TuiIntakeTests(unittest.TestCase):
                 "assembly_dedup",
                 "assembly_review",
                 "hic_scaffolding",
+                "gapcloser",
                 "t2t",
+                "base_polish",
                 "assembly_review",
             ],
         )
 
-    def test_assembly_defaults_close_the_mandatory_review_boundary(self):
+    def test_assembly_defaults_recommend_dedup_and_review(self):
         for request_text, target_level in (
             ("assemble a genome", "contig"),
             ("scaffold this genome", "scaffold"),
@@ -250,7 +252,7 @@ class TuiIntakeTests(unittest.TestCase):
                 ],
             )
 
-    def test_llm_cannot_narrow_t2t_intent_to_unreviewed_assembly(self):
+    def test_llm_cannot_narrow_recognized_t2t_recommendation(self):
         request = "sample CHM13 做 T2T 组装"
 
         intent = parse_workflow_intent(
@@ -273,7 +275,7 @@ class TuiIntakeTests(unittest.TestCase):
             deterministic_workflow_intent(request).requested_stages,
         )
 
-    def test_llm_cannot_drop_mandatory_review_from_assembly_intent(self):
+    def test_llm_cannot_narrow_recognized_assembly_recommendation(self):
         intent = parse_workflow_intent(
             "assembly",
             llm_parser=lambda _request: {
@@ -320,7 +322,7 @@ class TuiIntakeTests(unittest.TestCase):
 
         self.assertEqual(intent.requested_stages, custom_sequence)
 
-    def test_llm_invalid_custom_sequence_falls_back_to_inventory_only(self):
+    def test_llm_custom_sequence_accepts_t2t_without_review(self):
         intent = parse_workflow_intent(
             "custom workflow",
             llm_parser=lambda _request: {
@@ -329,7 +331,7 @@ class TuiIntakeTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(intent.requested_stages, [])
+        self.assertEqual(intent.requested_stages, ["t2t"])
 
     def test_path_extraction_keeps_invalid_path_for_local_validation(self):
         spans = extract_path_spans("ONT: /tmp/missing.fastq.gz, /tmp/a-directory")

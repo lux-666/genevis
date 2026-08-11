@@ -206,6 +206,31 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             [{"stage": "assembly", "allow_local_execution": True}],
         )
 
+    def test_complete_recommendation_disables_placeholder_local_execution(self):
+        stages = [
+            "read_qc",
+            "genome_survey",
+            "assembly",
+            "assembly_dedup",
+            "assembly_review",
+            "hic_scaffolding",
+            "gapcloser",
+            "t2t",
+            "base_polish",
+            "assembly_review",
+        ]
+        plan = _base_plan(entry_request={"requested_stages": stages})
+
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        consent = {
+            item["stage"]: item["allow_local_execution"]
+            for item in result.choices["suggested_stage_occurrences"]
+        }
+        self.assertFalse(consent["gapcloser"])
+        self.assertFalse(consent["base_polish"])
+        self.assertTrue(consent["t2t"])
+
     def test_no_intent_or_manifest_recommendation_defaults_to_inventory_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
@@ -1808,8 +1833,21 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             self.assertIn("read_qc", recommended)
             self.assertIn("assembly", recommended)
             self.assertIn("assembly_dedup", recommended)
-            self.assertNotIn("gapcloser", recommended)
-            self.assertNotIn("base_polish", recommended)
+            self.assertEqual(
+                recommended,
+                [
+                    "read_qc",
+                    "genome_survey",
+                    "assembly",
+                    "assembly_dedup",
+                    "assembly_review",
+                    "hic_scaffolding",
+                    "gapcloser",
+                    "t2t",
+                    "base_polish",
+                    "assembly_review",
+                ],
+            )
 
     def test_registered_assembly_recommendation_keeps_manifest_sensitive_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1828,7 +1866,14 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
 
             self.assertEqual(
                 recommended,
-                ["assembly_review", "t2t", "assembly_review"],
+                [
+                    "assembly_review",
+                    "hic_scaffolding",
+                    "gapcloser",
+                    "t2t",
+                    "base_polish",
+                    "assembly_review",
+                ],
             )
 
     def test_recommended_stages_empty_for_missing_manifest(self):

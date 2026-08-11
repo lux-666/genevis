@@ -64,6 +64,25 @@ planner receives the confirmed manifest view and a method catalog derived from
 the descriptor registry. It produces the editable Plan Draft: stages, methods,
 planning-time parameters, and attention items.
 
+Assembly Review is a recommendation, not a completion rule. The default
+Assembly recommendation may append `assembly_dedup -> assembly_review`. The
+canonical complete-genome/T2T recommendation is:
+
+```text
+read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
+        -> hic_scaffolding -> gapcloser -> t2t -> base_polish
+        -> assembly_review
+```
+
+The final Review is a second occurrence of the reusable stage. With the current
+Base Polish placeholder, freeze binds that otherwise unreachable Review to T2T,
+the nearest implemented assembly-handoff producer. Once Base Polish implements
+and publishes its own central assembly handoff, the same nearest-producer rule
+will bind the following Review to Base Polish. The operator may remove, move, or
+repeat Review or other stages in the editable occurrence list. An intent or
+confirmed RunConfig containing T2T without a later Review remains valid;
+recommendation does not become validation policy.
+
 `selected_stage_occurrences` is the one editable draft sequence. Every strict
 `{stage, allow_local_execution}` object is an ordered occurrence, so duplicate
 stages may independently grant or withhold local-process authorization. The

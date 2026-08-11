@@ -153,8 +153,20 @@ def test_placeholder_stages_are_manual_only_but_requestable() -> None:
         "t2t",
     ]
     intent = deterministic_workflow_intent("对这个样本做 T2T 组装")
-    assert "gapcloser" not in intent.requested_stages
-    assert "base_polish" not in intent.requested_stages
+    expected = [
+        "read_qc",
+        "genome_survey",
+        "assembly",
+        "assembly_dedup",
+        "assembly_review",
+        "hic_scaffolding",
+        "gapcloser",
+        "t2t",
+        "base_polish",
+        "assembly_review",
+    ]
+    assert recommended_workflow_template("t2t") == expected
+    assert intent.requested_stages == expected
 
     parsed = RunConfig(
         requested_stages=[
@@ -173,7 +185,9 @@ def test_placeholder_stages_are_manual_only_but_requestable() -> None:
         )
 
 
-def test_manifest_recommendation_omits_manual_only_placeholders(tmp_path) -> None:
+def test_manifest_recommendation_includes_complete_placeholder_positions(
+    tmp_path,
+) -> None:
     reads = tmp_path / "reads.fq"
     reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
     manifest = tmp_path / "manifest.yaml"
@@ -187,8 +201,13 @@ def test_manifest_recommendation_omits_manual_only_placeholders(tmp_path) -> Non
 
     recommended = _recommended_stages_from_manifest(str(manifest))
     assert "t2t" in recommended
-    assert "gapcloser" not in recommended
-    assert "base_polish" not in recommended
+    assert recommended[-5:] == [
+        "hic_scaffolding",
+        "gapcloser",
+        "t2t",
+        "base_polish",
+        "assembly_review",
+    ]
 
 
 def test_contig_only_route_does_not_enter_placeholders() -> None:

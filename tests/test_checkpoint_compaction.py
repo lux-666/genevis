@@ -52,11 +52,6 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
     @staticmethod
     def _workflow_steps(*requested_stages: str) -> list[dict[str, object]]:
         stages = ["inventory", *requested_stages]
-        if (
-            any(stage in {"assembly", "t2t"} for stage in requested_stages)
-            and stages[-1] != "assembly_review"
-        ):
-            stages.append("assembly_review")
         steps = [
             {
                 "step_id": f"step-{index:03d}-{stage}",

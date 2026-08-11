@@ -31,7 +31,7 @@ from app.schemas.run_config import (
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.warnings import PlanWarning as PlanWarning
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
-from app.workflow import STAGE_ORDER
+from app.workflow import MANUAL_ONLY_STAGES, STAGE_ORDER
 
 from .planner_catalog import (
     build_planner_method_catalog as build_planner_method_catalog,
@@ -175,7 +175,7 @@ def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
             selected_stage_occurrences=[
                 PlanStageOccurrence(
                     stage=cast(RequestableStage, stage),
-                    allow_local_execution=True,
+                    allow_local_execution=stage not in MANUAL_ONLY_STAGES,
                 )
                 for stage in target
             ],
@@ -463,7 +463,7 @@ def _stage_selection_request(
     suggested = [
         PlanStageOccurrence(
             stage=cast(RequestableStage, stage),
-            allow_local_execution=True,
+            allow_local_execution=stage not in MANUAL_ONLY_STAGES,
         )
         for stage in suggested_stages
     ]
@@ -969,22 +969,32 @@ def _all_selectable_stages() -> list[str]:
 
 
 def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
-    from app.workflow import stages_through
+    from app.workflow import recommended_workflow_template
 
     manifest = _load_manifest(manifest_ref)
     if manifest is None:
         return []
     asset_types = {asset.asset_type for asset in manifest.assets}
-    recommended: list[str] = []
     if "raw_long_reads" in asset_types:
-        recommended.extend(stages_through("assembly_review"))
+        return list(recommended_workflow_template("t2t"))
     if "assembly_fasta_registered" in asset_types:
-        recommended.append("assembly_review")
+        return [
+            "assembly_review",
+            "hic_scaffolding",
+            "gapcloser",
+            "t2t",
+            "base_polish",
+            "assembly_review",
+        ]
     if "hic_reads_registered" in asset_types:
-        recommended.append("hic_scaffolding")
-    if "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types:
-        return [*dict.fromkeys(recommended), "t2t", "assembly_review"]
-    return list(dict.fromkeys(recommended))
+        return [
+            "hic_scaffolding",
+            "gapcloser",
+            "t2t",
+            "base_polish",
+            "assembly_review",
+        ]
+    return []
 
 
 def _suggested_stages(plan: AskPlanState, available: list[str]) -> list[str]:
@@ -1058,7 +1068,7 @@ def _needs_method_selection(plan: AskPlanState) -> bool:
 
 
 def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
-    """Yield selected local methods plus the mandatory Review pipeline."""
+    """Yield selected local methods plus any explicitly selected Review pipeline."""
 
     locally_enabled = set(_locally_enabled_stage_names(plan))
     review_requested = "assembly_review" in (plan.selected_stage_names or [])

@@ -41,22 +41,9 @@ def _stage_requests(
     *stages: str,
     local: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
-    requests: list[dict[str, object]] = []
-    review_open = False
-    for stage in stages:
-        if stage in {"assembly", "t2t"} and review_open:
-            requests.append(
-                {"stage": "assembly_review", "allow_local_execution": False}
-            )
-            review_open = False
-        requests.append({"stage": stage, "allow_local_execution": stage in local})
-        if stage in {"assembly", "t2t"}:
-            review_open = True
-        elif stage == "assembly_review":
-            review_open = False
-    if review_open:
-        requests.append({"stage": "assembly_review", "allow_local_execution": False})
-    return requests
+    return [
+        {"stage": stage, "allow_local_execution": stage in local} for stage in stages
+    ]
 
 
 def _local_stage_requests(*stages: str) -> list[dict[str, object]]:
@@ -963,13 +950,7 @@ class FrozenInputTests(unittest.TestCase):
             )
             self.assertEqual(
                 bundle.run_config.requested_stage_names(),
-                [
-                    "assembly",
-                    "read_qc",
-                    "assembly_review",
-                    "assembly",
-                    "assembly_review",
-                ],
+                ["assembly", "read_qc", "assembly"],
             )
             self.assertEqual(
                 set(snapshot.stage_environments),

@@ -296,26 +296,15 @@ def parse_workflow_intent(
         parsed = _coerce_workflow_intent(llm_parser(request_text))
     except Exception:
         return fallback
-    # A recognized deterministic scope is a hard ceiling.  The model may make
-    # that scope more literal (including a custom order or repeated stages),
-    # but it may not expand it or drop a mandatory Assembly/T2T Review boundary.
-    # When the local recognizer found no stages, accept the model's exact
-    # sequence only when it satisfies the same boundary invariant.
-    fallback_scope = set(fallback.requested_stages)
+    # A recognized deterministic goal owns the editable recommendation scope;
+    # the model may contribute intake facts but must not silently narrow or
+    # expand that recommendation. With no locally recognized scope, accept the
+    # model's exact typed occurrence sequence for a custom workflow.
     parsed_sequence = list(parsed.requested_stages)
-    if parsed_sequence and (
-        not fallback.requested_stages or set(parsed_sequence).issubset(fallback_scope)
-    ):
-        from app.workflow import analyze_review_sequence
-
-        try:
-            analyze_review_sequence(parsed_sequence)
-        except ValueError:
-            requested_stages = list(fallback.requested_stages)
-        else:
-            requested_stages = parsed_sequence
-    else:
+    if fallback.requested_stages:
         requested_stages = list(fallback.requested_stages)
+    else:
+        requested_stages = parsed_sequence
     deterministic_scope_recognized = bool(fallback.requested_stages)
     return WorkflowIntent(
         goal_text=fallback.goal_text,

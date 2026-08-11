@@ -45,6 +45,11 @@ For installation and server execution, read
 | `user_guide/` | Current operator-facing feature guides |
 | `examples/` | Schema-valid manifest and run-config templates, including literal-order repeated-stage occurrences |
 
+`superpowers/specs/` and `superpowers/plans/` are legacy, non-authoritative
+process material scheduled for removal. Do not add or maintain design there.
+Move any still-valid contract into its single owning topic or reference page
+under `architecture/`; Git history retains obsolete rationale and plans.
+
 ## Status and update rule
 
 Architecture pages use `implemented`, `planned`, and `conformance-debt`

@@ -61,12 +61,11 @@ Biological and stage contracts remain governed by their current specifications.
    `workflow_steps`, beginning with implicit `step-000-inventory` followed by
    position-derived IDs such as `step-001-t2t`. Runtime cannot append, reorder,
    or replace that sequence.
-7. Before the projection is frozen, `analyze_review_sequence` rejects a plan
-   that does not close an Assembly or T2T boundary with `assembly_review`; it
-   never synthesizes a Review occurrence. Each frozen Review step carries
+7. Review placement remains literal RunConfig data: Assembly and T2T do not
+   create mandatory Review occurrences, and freeze never synthesizes one. Each
+   explicitly requested Review step carries
    `review_target = {resource_type: "assembly", producer_step_id: "..."}` for
-   the exact earlier assembly-handoff occurrence it must consume. A refining
-   handoff reached before closure may become that target.
+   the exact nearest earlier assembly-handoff occurrence it must consume.
 
 ## 3. Replay Terminology
 

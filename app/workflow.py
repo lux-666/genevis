@@ -47,87 +47,24 @@ TERMINAL_FAILURE_STATUSES: frozenset[ExecutionFailureStatus] = frozenset(
 )
 
 
-def _workflow_step_id(index: int, stage: str) -> str:
-    """Return the deterministic ID used by a frozen workflow occurrence."""
-
-    return f"step-{index:03d}-{stage}"
-
-
 def analyze_review_sequence(stages: Sequence[str]) -> dict[int, int]:
-    """Validate mandatory Review boundaries and bind each Review occurrence.
+    """Bind each explicit Review to the nearest assembly-handoff occurrence.
 
     ``stages`` excludes the implicit Inventory occurrence.  Returned keys and
     values are frozen workflow-step indexes, where Inventory is index zero.
-    The function is deliberately independent of RunConfig and checkpoint
-    shapes so those boundaries cannot drift.
+    Review placement remains literal RunConfig data: this function never
+    inserts Review and never rejects a sequence merely because Review is absent.
     """
 
     latest_producer_index = 0
-    pending_review_producer: tuple[int, str] | None = None
     review_bindings: dict[int, int] = {}
 
     for index, stage in enumerate(stages, start=1):
-        # The current manual-only stages are deterministic terminal placeholders,
-        # so placing either before a required Review makes that Review unreachable.
-        if stage in MANUAL_ONLY_STAGES and pending_review_producer is not None:
-            producer_index, producer_stage = pending_review_producer
-            raise ValueError(
-                "workflow requires assembly_review after "
-                f"{_workflow_step_id(producer_index, producer_stage)!r} "
-                f"before {stage}"
-            )
-
-        if stage == "t2t":
-            if pending_review_producer is not None:
-                producer_index, producer_stage = pending_review_producer
-                raise ValueError(
-                    "workflow requires assembly_review after "
-                    f"{_workflow_step_id(producer_index, producer_stage)!r} "
-                    "before t2t"
-                )
-            latest_producer_index = index
-            pending_review_producer = (index, stage)
-            continue
-
         if stage == "assembly_review":
             review_bindings[index] = latest_producer_index
-            if pending_review_producer is not None:
-                producer_index, producer_stage = pending_review_producer
-                if latest_producer_index != producer_index:
-                    raise ValueError(
-                        "workflow requires assembly_review bound to "
-                        f"{_workflow_step_id(producer_index, producer_stage)!r}"
-                    )
-                pending_review_producer = None
-            latest_producer_index = index
-            continue
-
-        if stage == "assembly":
-            if pending_review_producer is not None:
-                producer_index, producer_stage = pending_review_producer
-                raise ValueError(
-                    "workflow requires assembly_review after "
-                    f"{_workflow_step_id(producer_index, producer_stage)!r} "
-                    "before assembly"
-                )
-            latest_producer_index = index
-            pending_review_producer = (index, stage)
-            continue
 
         if stage in ASSEMBLY_HANDOFF_PRODUCER_STAGES:
             latest_producer_index = index
-            if (
-                pending_review_producer is not None
-                and pending_review_producer[1] == "assembly"
-            ):
-                pending_review_producer = (index, stage)
-
-    if pending_review_producer is not None:
-        producer_index, producer_stage = pending_review_producer
-        raise ValueError(
-            "workflow requires assembly_review after "
-            f"{_workflow_step_id(producer_index, producer_stage)!r} before termination"
-        )
 
     return review_bindings
 
@@ -172,9 +109,16 @@ def recommended_workflow_template(endpoint: str) -> list[DomainStage]:
     continues to preserve the operator-provided literal occurrence list.
     """
 
+    if endpoint == "t2t":
+        return [
+            *stages_through("hic_scaffolding"),
+            "gapcloser",
+            "t2t",
+            "base_polish",
+            "assembly_review",
+        ]
+
     template = stages_through(endpoint)
     if endpoint == "assembly":
-        template.append("assembly_dedup")
-    if endpoint in {"assembly", "t2t"}:
-        template.append("assembly_review")
+        template.extend(("assembly_dedup", "assembly_review"))
     return template

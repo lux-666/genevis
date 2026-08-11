@@ -99,11 +99,6 @@ def _prepared_inputs(
     local_stages: tuple[str, ...] = (),
 ):
     stages = list(requested_stages or [])
-    if (
-        any(stage in {"assembly", "t2t"} for stage in stages)
-        and stages[-1] != "assembly_review"
-    ):
-        stages.append("assembly_review")
     payload: dict[str, object] = {
         "requested_stages": [
             {

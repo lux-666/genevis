@@ -143,9 +143,11 @@ config; the boolean authorizes local process execution only for that occurrence.
 `requested_stages: null` is rejected, while `[]` is valid. Inventory registers
 an `assembly_fasta_registered` input as the central assembly resource;
 `assembly_review` is the recommended review-only entry, but the executor does
-not reorder the occurrence sequence by registry order. Pre-freeze validation
-does reject an unclosed mandatory Assembly/T2T Review boundary and never fills
-or repairs the sequence; see
+not reorder the occurrence sequence by registry order. `assembly_review` is
+optional and reusable: pre-freeze analysis binds an explicitly requested Review
+to its nearest earlier assembly handoff, but never inserts a Review or rejects
+an otherwise valid literal sequence because Review is absent. A caller may run
+an authored RunConfig directly without using the planner; see
 [Runtime orchestration](../architecture/topics/runtime-orchestration.md).
 New runs require real stdin and stdout TTYs and reject noninteractive automation
 before freeze. If an attached process later stops at a human gate, the durable

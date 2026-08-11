@@ -1,6 +1,7 @@
 # Stage Contract Reference
 
-> **Status:** implemented.  
+> **Status:** implemented for current stage-local contracts; the accepted
+> GapCloser and Base Polish handoffs remain planned placeholder capabilities.
 > **Read when:** exact biological stage inputs, outputs, methods, or review
 > triggers matter.  
 > **Comes from:** [Runtime orchestration](../topics/runtime-orchestration.md).  
@@ -36,13 +37,28 @@ The frozen occurrence sequence decides which stage subgraphs are reached.  It
 does not prove that their biological inputs exist: every reached stage resolves
 and validates its own logical resources before it plans or runs a method.
 
-Before that sequence is frozen, validation requires `assembly_review` to close
-each Assembly or T2T boundary before the next Assembly, T2T, manual-only
-boundary, or termination. It rejects invalid plans instead of inserting Review.
-When an assembly-refining handoff occurs before closure, Review binds that
-handoff as its subject. Every `assembly_review` occurrence therefore carries an
-exact `review_target` with `resource_type: "assembly"` and an earlier
-`producer_step_id`.
+Review is an optional, reusable stage occurrence. Assembly-producing and
+refining stages do not create a mandatory Review boundary. When
+`assembly_review` is explicitly present, it carries an exact `review_target`
+with `resource_type: "assembly"` and the nearest earlier handoff producer's
+`producer_step_id`; freeze never inserts a missing Review. Thus
+`assembly -> hic_scaffolding -> assembly_review` reviews the Hi-C delivery,
+while `t2t` may terminate or continue to Base Polishing without Review.
+
+The canonical complete-genome recommendation is:
+
+```text
+read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
+        -> hic_scaffolding -> gapcloser -> t2t -> base_polish
+        -> assembly_review -> done
+```
+
+This recommendation fixes the intended biological handoff order without making
+the entire list mandatory. Its first Review evaluates the retained assembly
+after Dedup. Its final Review reserves the position that will evaluate the
+polished assembly once Base Polish implements its handoff; today that Review is
+unreachable and its frozen target remains T2T. `done` is an implicit parent
+terminal, not a requestable stage.
 
 Unregistered future tools are not stage candidates. Adding one requires its
 descriptor, executable adapter, routing, run-config contract, and tests in the
@@ -185,9 +201,10 @@ existing assembly through the same central `assembly` `ResourceRef` used by
 upstream-produced assemblies. When an Assembly Review occurrence is reached,
 the stage validates the assembly and the candidate/evidence required by its
 current operation; it must not bypass the resource contract with a bare
-`fasta_path`. The same contract is reusable after Assembly, Dedup, a changed
-accepted Hi-C assembly, a changed accepted T2T patch, or a previous Review
-action. Before it loads candidates, it verifies that the central assembly
+`fasta_path`. The same contract is reusable after any occurrence that owns the
+central assembly handoff, including Assembly, Dedup, Hi-C, T2T, or a previous
+Review action, whether or not the selected bytes changed. Before it loads
+candidates, it verifies that the central assembly
 `ResourceRef.source_stage` and `.workflow_step_id` match its frozen
 `review_target`; a stage name alone cannot satisfy the handoff. A repeated
 occurrence starts with a fresh copy of the same immutable stage-scoped seed,
@@ -257,12 +274,22 @@ not create a review gate, and does not cause automatic retry or rollback.
 Intended purpose: fill structural sequence gaps in an assembly when an operator
 places this placeholder occurrence in the frozen workflow.
 
+Accepted placement and handoff design:
+
+- the complete recommendation places `gapcloser` after `hic_scaffolding` and
+  before `t2t`;
+- the implemented stage will require the current central `assembly`;
+- successful adoption will publish an occurrence-owned assembly candidate and
+  replace the central `assembly` handoff consumed by T2T or a later Review.
+
 Current contract:
 
 - `gapcloser` is wired into the parent graph but has no registered method,
   descriptor, local-execution configuration, artifact contract, or resource
   handoff;
-- automatic prefix expansion and manifest-derived recommendations omit it;
+- the complete-genome and manifest-derived recommendations include its intended
+  position with local execution disabled, while generic prefix expansion omits
+  it;
 - a frozen occurrence writes only a strict `blocked_not_implemented` cursor and
   terminates through the existing failed boundary;
 - an absent occurrence has no runtime behavior. `None` is only an unfinished
@@ -330,12 +357,24 @@ Intended purpose: correct base substitutions and small indels in the assembly
 available when an operator places this placeholder occurrence in the frozen
 workflow.
 
+Accepted placement and handoff design:
+
+- the complete recommendation places `base_polish` after `t2t`;
+- the implemented stage will require the current central `assembly` plus the
+  polishing evidence required by its selected method;
+- successful adoption will publish an occurrence-owned polished assembly as the
+  central handoff;
+- the following finish `assembly_review` occurrence will bind to that exact Base
+  Polish producer step.
+
 Current contract:
 
 - `base_polish` is wired into the parent graph but has no registered method,
   descriptor, local-execution configuration, artifact contract, or resource
   handoff;
-- automatic stage recommendations omit it;
+- the complete-genome and manifest-derived recommendations include its intended
+  position with local execution disabled, while generic prefix expansion omits
+  it;
 - a frozen occurrence writes only a strict `blocked_not_implemented` cursor and
   terminates through the existing failed boundary;
 - an absent occurrence has no runtime behavior. `None` is only an unfinished

@@ -18,6 +18,7 @@ from app.schemas.state import (
     validate_workflow_steps,
 )
 from app.storage.paths import SessionPaths
+from app.workflow import recommended_workflow_template
 from tests.busco_fixture import assembly_review_config
 
 
@@ -194,7 +195,9 @@ def test_review_target_binds_the_nearest_assembly_handoff_occurrence() -> None:
                 {"stage": "assembly_dedup", "allow_local_execution": False},
                 {"stage": "assembly_review", "allow_local_execution": False},
                 {"stage": "hic_scaffolding", "allow_local_execution": False},
+                {"stage": "gapcloser", "allow_local_execution": False},
                 {"stage": "t2t", "allow_local_execution": False},
+                {"stage": "base_polish", "allow_local_execution": False},
                 {"stage": "assembly_review", "allow_local_execution": False},
             ]
         }
@@ -206,9 +209,32 @@ def test_review_target_binds_the_nearest_assembly_handoff_occurrence() -> None:
         "resource_type": "assembly",
         "producer_step_id": "step-002-assembly_dedup",
     }
-    assert steps[6]["review_target"] == {
+    assert steps[8]["review_target"] == {
         "resource_type": "assembly",
-        "producer_step_id": "step-005-t2t",
+        "producer_step_id": "step-006-t2t",
+    }
+
+
+def test_complete_recommendation_freezes_literally_with_optional_review() -> None:
+    stages = recommended_workflow_template("t2t")
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {
+                    "stage": stage,
+                    "allow_local_execution": False,
+                }
+                for stage in stages
+            ]
+        }
+    )
+
+    steps = workflow_steps_from_run_config(config)
+
+    assert [step["stage"] for step in steps] == ["inventory", *stages]
+    assert steps[-1]["review_target"] == {
+        "resource_type": "assembly",
+        "producer_step_id": "step-008-t2t",
     }
 
 
@@ -246,7 +272,7 @@ def test_workflow_step_validation_rejects_bad_review_targets() -> None:
         validate_workflow_steps(forged)
 
 
-def test_workflow_step_validation_rejects_terminal_placeholder_before_review() -> None:
+def test_workflow_step_validation_accepts_placeholder_before_optional_review() -> None:
     steps = [
         {
             "step_id": "step-000-inventory",
@@ -274,8 +300,7 @@ def test_workflow_step_validation_rejects_terminal_placeholder_before_review() -
         },
     ]
 
-    with pytest.raises(ValueError, match="before base_polish"):
-        validate_workflow_steps(steps)
+    assert validate_workflow_steps(steps) == steps
 
 
 def test_prebound_attempt_still_receives_canonical_occurrence_namespace() -> None:

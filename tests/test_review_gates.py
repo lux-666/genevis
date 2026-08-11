@@ -683,8 +683,6 @@ def _review_state(run_dir: Path, *, stage: str) -> dict:
     """Minimal frozen occurrence state for review persistence tests."""
 
     stages = ["inventory"] if stage == "inventory" else ["inventory", stage]
-    if stage in {"assembly", "t2t"}:
-        stages.append("assembly_review")
     step_index = stages.index(stage)
     return {
         "session_id": "s1",

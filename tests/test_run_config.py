@@ -71,8 +71,8 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("requested_stages", str(ctx.exception))
 
-    def test_mandatory_assembly_reviews_are_sequence_validated(self):
-        invalid_sequences = (
+    def test_review_placement_is_literal_and_optional(self):
+        valid_sequences = (
             ("assembly",),
             ("assembly", "assembly", "assembly_review"),
             ("assembly", "t2t", "assembly_review"),
@@ -83,9 +83,12 @@ class RunConfigSchemaTests(unittest.TestCase):
             ("assembly", "assembly_review", "t2t"),
         )
 
-        for stages in invalid_sequences:
-            with self.subTest(stages=stages), self.assertRaises(ValidationError):
-                RunConfig.model_validate({"requested_stages": _stage_requests(*stages)})
+        for stages in valid_sequences:
+            with self.subTest(stages=stages):
+                config = RunConfig.model_validate(
+                    {"requested_stages": _stage_requests(*stages)}
+                )
+                self.assertEqual(config.requested_stage_names(), list(stages))
 
     def test_standalone_review_and_t2t_then_review_are_valid(self):
         for stages in (("assembly_review",), ("t2t", "assembly_review")):

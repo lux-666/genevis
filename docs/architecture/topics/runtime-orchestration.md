@@ -37,12 +37,13 @@ sequence plus its conservative dependency closure.
 It publishes `input_manifest.yaml`, `run_config.json`, and
 `dependency_manifest.json` before publishing `frozen_inputs.json` last.
 
-RunConfig validation calls `analyze_review_sequence` before freeze. It rejects a
-plan that leaves an Assembly or T2T boundary without the required
-`assembly_review` closure; it never inserts, reorders, or otherwise repairs a
-Review occurrence. The closure is required before the next Assembly, T2T,
-manual-only boundary, or termination. An assembly-refining occurrence reached
-while that boundary remains open can become the exact handoff Review closes.
+RunConfig owns the literal occurrence sequence. The absence of
+`assembly_review` after Assembly, Hi-C Scaffolding, T2T, or another assembly
+handoff producer is not a sequence error, and validation never inserts,
+reorders, or repairs Review occurrences. When Review is explicitly present,
+workflow projection binds it to the nearest earlier occurrence that owns the
+central `assembly` handoff. Structural validation and runtime candidate loading
+then verify that exact producer identity.
 
 `gene-agent tui` is an optional conversational intake/planning boundary that
 uses the same frozen publication and executor. Other public subcommands are
@@ -158,13 +159,49 @@ central assembly `ResourceRef.source_stage` and `.workflow_step_id` against that
 target.
 
 `app.workflow.STAGE_ORDER` is a registration/default-planning/display aid. It
-is not runtime order or a successor table. `recommended_workflow_template` is
-a separate planning helper: the Assembly template appends `assembly_dedup`
-followed by `assembly_review`, and the T2T template includes that same segment
-before scaffolding and repeats Review after `t2t`. These are recommendation
-defaults, not RunConfig requirements; neither helper rewrites a literal
-RunConfig. The controller does not inspect FASTQ contents, choose an assembler,
-build a command, or interpret biological metrics.
+is not runtime order or a successor table. The canonical complete-genome
+recommendation is the following occurrence sequence:
+
+```text
+read_qc
+-> genome_survey
+-> assembly
+-> assembly_dedup
+-> assembly_review
+-> hic_scaffolding
+-> gapcloser
+-> t2t
+-> base_polish
+-> assembly_review
+-> done
+```
+
+The first Review evaluates the latest pre-scaffolding assembly handoff. The
+second occurrence reserves the finish-Review position after Base Polish. It
+will evaluate the Base Polish handoff once that stage implements and publishes
+one; with the current placeholder implementation, freeze binds this otherwise
+unreachable Review to T2T, the nearest actual handoff producer.
+`done` is the implicit parent terminal and is not written into RunConfig.
+Assembly-only planning may recommend the prefix through the first Review. The
+complete recommendation is editable planning guidance, not a RunConfig
+requirement: an operator may omit, move, or repeat stages before freeze, and no
+helper may rewrite the confirmed literal sequence. The controller does not
+inspect FASTQ contents, choose an assembler, build a command, or interpret
+biological metrics.
+
+Review placement follows delivery provenance rather than a named pipeline slot.
+For example, `assembly -> hic_scaffolding -> assembly_review` intentionally
+binds Review to the Hi-C occurrence, while `t2t -> assembly_review` binds it to
+T2T. In the canonical complete recommendation, the final Review currently also
+binds to T2T because Base Polish is not an assembly-handoff producer and runtime
+terminates at its `blocked_not_implemented` boundary before reaching Review.
+The intended future contract is that an implemented Base Polish occurrence
+publishes its own central assembly handoff, at which point the unchanged
+nearest-producer algorithm binds the following Review to Base Polish. Both
+`t2t` and `t2t -> base_polish` remain valid operator-authored sequence shapes
+without a later Review; the latter fails because Base Polish is unimplemented,
+not because Review is missing. The same rule applies when Gap Closing gains its
+central assembly handoff.
 
 The controller wrapper is thin but not pure. It writes only occurrence-scoped
 stage-entered, explicit stage-skipped, stage-completed, and stage-failed Ledger
@@ -185,12 +222,13 @@ stages.
 
 The parent registers ten domain stages explicitly in `app/graph/builder.py`; the
 subgraphs are composable but there is no dynamic plugin registry. `gapcloser` and
-`base_polish` are
-manual-only placeholders: automatic recommendations omit them, while a frozen
-occurrence of either terminates with `blocked_not_implemented`. An absent stage
-has no runtime occurrence and is not skipped. `None` is only an unfinished
-planner/TUI draft state; it is never executable semantics and public
-`gene-agent run` rejects JSON `null` before freeze.
+`base_polish` are manual-only placeholders. The canonical complete-genome and
+manifest-derived recommendations include their intended positions with local
+execution disabled; generic prefix expansion omits them. A frozen occurrence of
+either terminates with `blocked_not_implemented`. An absent stage has no runtime
+occurrence and is not skipped. `None` is only an unfinished planner/TUI draft
+state; it is never executable semantics and public `gene-agent run` rejects JSON
+`null` before freeze.
 
 `workflow_steps` is the frozen runtime projection of the operator plan. Resume
 restores and applies only the decision bound to the interrupted occurrence; it
