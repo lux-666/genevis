@@ -50,7 +50,7 @@ by the methods you intend to execute.
 | Read QC | `seqkit` |
 | Genome Survey | `jellyfish`, `genomescope2` |
 | Assembly | the selected one of `flye`, `hifiasm`, `nextDenovo` |
-| Assembly Dedup | `minimap2`, `samtools`, `pbcstat`, `calcuts`, `split_fa`, `gzip`, `purge_dups`, `get_seqs` |
+| Assembly Dedup | `minimap2`, `pbcstat`, `calcuts`, `split_fa`, `gzip`, `purge_dups`, `get_seqs` |
 | Assembly Review | `quast.py`, `busco` |
 | T2T | `minimap2` |
 

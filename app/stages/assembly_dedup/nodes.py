@@ -196,7 +196,6 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     script_path = work_dir / "run_purge_dups.sh"
-    read_bam = artifact_dir / "reads_to_raw_assembly.bam"
     read_paf = artifact_dir / "reads_to_raw_assembly.paf.gz"
     split_assembly = artifact_dir / "raw_assembly.split.fasta"
     base_cov = artifact_dir / "PB.base.cov"
@@ -206,67 +205,40 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     dups_bed = artifact_dir / "dups.bed"
     get_seqs_prefix = work_dir / "purged_assembly"
     get_seqs_primary = Path(f"{get_seqs_prefix}.purged.fa")
-    member_bams = [
-        work_dir / f"primary_member_{index:03d}.bam"
-        for index in range(len(selected_members))
-    ]
     member_pafs = [
         work_dir / f"primary_member_{index:03d}.paf.gz"
         for index in range(len(selected_members))
     ]
     mapping_presets = [_minimap2_preset(member.platform) for member in selected_members]
     mapping_commands: list[str] = []
-    for member, preset, member_bam, member_paf in zip(
+    for member, preset, member_paf in zip(
         selected_members,
         mapping_presets,
-        member_bams,
         member_pafs,
         strict=True,
     ):
-        mapping_commands.extend(
-            [
-                (
-                    f"minimap2 -t 8 -ax {shlex.quote(preset)} "
-                    f"{shlex.quote(str(input_assembly_ref))} "
-                    f"{shlex.quote(member.path)} "
-                    f"| samtools sort -@ 8 -o {shlex.quote(str(member_bam))}"
-                ),
-                (
-                    f"minimap2 -t 8 -x {shlex.quote(preset)} "
-                    f"{shlex.quote(str(input_assembly_ref))} "
-                    f"{shlex.quote(member.path)} "
-                    f"| gzip -c > {shlex.quote(str(member_paf))}"
-                ),
-            ]
+        mapping_commands.append(
+            f"minimap2 -t 8 -x {shlex.quote(preset)} "
+            f"{shlex.quote(str(input_assembly_ref))} "
+            f"{shlex.quote(member.path)} "
+            f"| gzip -c > {shlex.quote(str(member_paf))}"
         )
     if len(selected_members) == 1:
-        mapping_commands.extend(
-            [
-                shell_publish_file(member_bams[0], read_bam),
-                shell_publish_file(member_pafs[0], read_paf),
-            ]
-        )
+        mapping_commands.append(shell_publish_file(member_pafs[0], read_paf))
     else:
-        merged_bam = work_dir / "reads_to_raw_assembly.merged.bam"
         merged_paf = work_dir / "reads_to_raw_assembly.merged.paf.gz"
         mapping_commands.extend(
             [
-                (
-                    f"samtools merge -f -@ 8 {shlex.quote(str(merged_bam))} "
-                    + " ".join(shlex.quote(str(path)) for path in member_bams)
-                ),
                 (
                     "cat "
                     + " ".join(shlex.quote(str(path)) for path in member_pafs)
                     + f" > {shlex.quote(str(merged_paf))}"
                 ),
-                shell_publish_file(merged_bam, read_bam),
                 shell_publish_file(merged_paf, read_paf),
             ]
         )
     script_path.write_text(
         "set -euo pipefail\n" + "\n".join(mapping_commands) + "\n"
-        f"samtools index {shlex.quote(str(read_bam))}\n"
         f"cd {shlex.quote(str(artifact_dir))}\n"
         f"pbcstat {shlex.quote(str(read_paf))}\n"
         "test -s PB.base.cov && test -s PB.stat\n"
@@ -321,7 +293,6 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         script_path=script_path,
         working_dir=work_dir,
         expected_outputs=[
-            read_bam,
             read_paf,
             split_assembly,
             base_cov,

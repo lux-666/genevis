@@ -22,6 +22,26 @@ from app.schemas.descriptors import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize(
+    "relative_path", ["config/envs.yaml", "config/envs.yaml.example"]
+)
+def test_purge_dups_default_tools_exclude_bam_diagnostics(relative_path: str) -> None:
+    with (PROJECT_ROOT / relative_path).open("r", encoding="utf-8") as handle:
+        document = yaml.safe_load(handle)
+
+    tools = document["methods"]["assembly_dedup.purge_dups"]["required_tools"]
+    assert tools == [
+        "minimap2",
+        "pbcstat",
+        "calcuts",
+        "split_fa",
+        "gzip",
+        "purge_dups",
+        "get_seqs",
+    ]
+    assert "samtools" not in tools
+
+
 def test_descriptor_registry_loading_is_cwd_independent(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 

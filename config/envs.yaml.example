@@ -123,7 +123,6 @@ methods:
     conda_env: your_tool_env
     required_tools:
       - minimap2
-      - samtools
       - pbcstat
       - calcuts
       - split_fa

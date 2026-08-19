@@ -346,24 +346,6 @@ class AssemblyDedupStageTests(unittest.TestCase):
             minimap2 = bin_dir / "minimap2"
             minimap2.write_text("#!/bin/sh\nprintf 'alignment\\n'\n", encoding="utf-8")
             minimap2.chmod(0o755)
-            samtools = bin_dir / "samtools"
-            samtools.write_text(
-                "#!/bin/sh\n"
-                'if [ "$1" = sort ]; then\n'
-                "  shift\n"
-                "  out=''\n"
-                '  while [ "$#" -gt 0 ]; do\n'
-                '    if [ "$1" = -o ]; then shift; out="$1"; fi\n'
-                "    shift\n"
-                "  done\n"
-                "  /bin/cat > /dev/null\n"
-                '  : > "$out"\n'
-                "  exit 0\n"
-                "fi\n"
-                'if [ "$1" = index ]; then : > "$2.bai"; fi\n',
-                encoding="utf-8",
-            )
-            samtools.chmod(0o755)
             pbcstat = bin_dir / "pbcstat"
             pbcstat.write_text(
                 "#!/bin/sh\n"
@@ -449,9 +431,18 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertTrue(
                 any(ref.endswith("dups.bed") for ref in dedup["artifact_refs"])
             )
-            event_types = [
-                event["event_type"] for event in Ledger(run_dir).read_events("s1")
-            ]
+            self.assertFalse(any(".bam" in ref for ref in dedup["artifact_refs"]))
+            paths = SessionPaths.from_run_dir(state["data_dir"])
+            script = paths.workflow_step_work_path(
+                "step-002-assembly_dedup",
+                "assembly_dedup",
+                "run_purge_dups.sh",
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("samtools", script)
+            self.assertNotIn(".bam", script)
+            self.assertEqual(script.count("-x map-ont"), 1)
+            events = Ledger(run_dir).read_events("s1")
+            event_types = [event["event_type"] for event in events]
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
 
