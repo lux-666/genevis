@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import bz2
 import gzip
+import lzma
 import os
 import tempfile
 import unittest
@@ -54,6 +56,11 @@ class ManifestSchemaTests(unittest.TestCase):
     def test_invalid_asset_type_rejected(self):
         with self.assertRaises(ValueError):
             InputAssetSpec(asset_type="invalid_type", paths=["x.fq"])
+
+    def test_non_paired_asset_requires_non_empty_paths(self):
+        for paths in ([], [""], ["   "]):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                InputAssetSpec(asset_type="raw_long_reads", paths=paths)
 
     def test_genome_size_estimate_must_be_positive(self):
         for value in (0, -1):
@@ -216,6 +223,174 @@ class ManifestValidationTests(unittest.TestCase):
             self.assertEqual(inferred["path_facts"][0]["declared_path"], str(fq))
             self.assertEqual(inferred["path_facts"][0]["format"], "fastq")
             self.assertEqual(inferred["path_facts"][0]["compression"], "none")
+
+    def test_validate_rejects_zero_byte_sequence_and_assembly_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for asset_type, filename in (
+                ("raw_long_reads", "reads.fastq"),
+                ("assembly_fasta_registered", "assembly.fasta"),
+            ):
+                path = root / filename
+                path.touch()
+                with self.subTest(asset_type=asset_type):
+                    report = validate_manifest(
+                        InputManifest(
+                            session_id=f"empty-{asset_type}",
+                            assets=[
+                                InputAssetSpec(
+                                    asset_type=asset_type,
+                                    paths=[str(path)],
+                                )
+                            ],
+                        )
+                    )
+                    self.assertFalse(report["valid"])
+                    self.assertTrue(
+                        any(
+                            "sequence/assembly inputs must not be empty" in error
+                            for error in report["errors"]
+                        )
+                    )
+
+    def test_validate_rejects_logically_empty_and_corrupt_compressed_inputs(self):
+        codecs = (
+            ("gzip", ".fastq.gz", gzip.compress),
+            ("bzip2", ".fastq.bz2", bz2.compress),
+            ("xz", ".fastq.xz", lzma.compress),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for name, suffix, compress in codecs:
+                for kind, contents, expected in (
+                    ("empty", compress(b""), "logically empty"),
+                    ("corrupt", b"not-a-compressed-stream", "unreadable"),
+                ):
+                    with self.subTest(codec=name, kind=kind):
+                        path = root / f"{name}-{kind}{suffix}"
+                        path.write_bytes(contents)
+                        report = validate_manifest(
+                            InputManifest(
+                                session_id=f"{name}-{kind}",
+                                assets=[
+                                    InputAssetSpec(
+                                        asset_type="raw_long_reads",
+                                        paths=[str(path)],
+                                    )
+                                ],
+                            )
+                        )
+                        self.assertFalse(report["valid"])
+                        self.assertTrue(
+                            any(expected in error for error in report["errors"]),
+                            report["errors"],
+                        )
+
+    def test_validate_accepts_non_empty_compressed_inputs(self):
+        codecs = (
+            (".fastq.gz", gzip.compress),
+            (".fastq.bz2", bz2.compress),
+            (".fastq.xz", lzma.compress),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for suffix, compress in codecs:
+                with self.subTest(suffix=suffix):
+                    path = root / f"reads{suffix}"
+                    path.write_bytes(compress(b"@r\nACGT\n+\n!!!!\n"))
+                    report = validate_manifest(
+                        InputManifest(
+                            session_id=suffix,
+                            assets=[
+                                InputAssetSpec(
+                                    asset_type="raw_long_reads", paths=[str(path)]
+                                )
+                            ],
+                        )
+                    )
+                    self.assertTrue(report["valid"], report["errors"])
+
+    def test_declared_compression_controls_logical_content_probe_without_suffix(self):
+        codecs = (
+            ("gzip", gzip.compress),
+            ("bzip2", bz2.compress),
+            ("xz", lzma.compress),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for compression, compress in codecs:
+                with self.subTest(compression=compression, contents="nonempty"):
+                    path = root / f"{compression}-declared.fastq"
+                    path.write_bytes(compress(b"@r\nACGT\n+\n!!!!\n"))
+                    report = validate_manifest(
+                        InputManifest(
+                            session_id=f"declared-{compression}",
+                            assets=[
+                                InputAssetSpec(
+                                    asset_type="raw_long_reads",
+                                    paths=[str(path)],
+                                    compression=compression,
+                                )
+                            ],
+                        )
+                    )
+                    self.assertTrue(report["valid"], report["errors"])
+                    self.assertEqual(
+                        report["inferred"][0]["path_facts"][0]["compression"],
+                        compression,
+                    )
+
+                for kind, contents, expected in (
+                    ("empty", compress(b""), "logically empty"),
+                    ("corrupt", b"not-a-compressed-stream", "unreadable"),
+                ):
+                    with self.subTest(
+                        compression=compression,
+                        contents=kind,
+                    ):
+                        path = root / f"{compression}-{kind}.fastq"
+                        path.write_bytes(contents)
+                        report = validate_manifest(
+                            InputManifest(
+                                session_id=f"declared-{compression}-{kind}",
+                                assets=[
+                                    InputAssetSpec(
+                                        asset_type="raw_long_reads",
+                                        paths=[str(path)],
+                                        compression=compression,
+                                    )
+                                ],
+                            )
+                        )
+                        self.assertFalse(report["valid"])
+                        self.assertTrue(
+                            any(expected in error for error in report["errors"]),
+                            report["errors"],
+                        )
+
+    def test_declared_compression_rejects_conflicting_compression_suffix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "reads.fastq.gz"
+            path.write_bytes(gzip.compress(b"@r\nACGT\n+\n!!!!\n"))
+            report = validate_manifest(
+                InputManifest(
+                    session_id="conflicting-compression",
+                    assets=[
+                        InputAssetSpec(
+                            asset_type="raw_long_reads",
+                            paths=[str(path)],
+                            compression="bzip2",
+                        )
+                    ],
+                )
+            )
+        self.assertFalse(report["valid"])
+        self.assertTrue(
+            any(
+                "declared compression conflicts" in error for error in report["errors"]
+            ),
+            report["errors"],
+        )
 
     def test_validate_warns_unknown_format(self):
         with tempfile.TemporaryDirectory() as tmpdir:

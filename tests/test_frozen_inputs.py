@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import json
 import sqlite3
@@ -111,6 +112,64 @@ class _FrozenExecutionGraph:
 
 
 class FrozenInputTests(unittest.TestCase):
+    def test_zero_byte_sequence_input_is_rejected_before_run_layout_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "empty.fastq"
+            reads.touch()
+            paths = SessionPaths(root / "data", "empty-input")
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "sequence/assembly inputs must not be empty",
+            ):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft={
+                        "session_id": "empty-input",
+                        "assets": [
+                            {
+                                "asset_type": "raw_long_reads",
+                                "paths": [str(reads.resolve())],
+                                "platform": "ont",
+                            }
+                        ],
+                    },
+                    run_config_draft={"requested_stages": []},
+                )
+
+            self.assertFalse(paths.run_dir.exists())
+
+    def test_logically_empty_compressed_input_is_rejected_before_layout_creation(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "empty.fastq.gz"
+            reads.write_bytes(gzip.compress(b""))
+            paths = SessionPaths(root / "data", "empty-compressed-input")
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "logically empty",
+            ):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft={
+                        "session_id": "empty-compressed-input",
+                        "assets": [
+                            {
+                                "asset_type": "raw_long_reads",
+                                "paths": [str(reads.resolve())],
+                                "platform": "ont",
+                            }
+                        ],
+                    },
+                    run_config_draft={"requested_stages": []},
+                )
+
+            self.assertFalse(paths.run_dir.exists())
+
     def test_inventory_uses_verified_bundle_after_control_file_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1170,8 +1229,8 @@ class FrozenInputTests(unittest.TestCase):
             paths, manifest, run_config, envs = self._fixture(root)
             hic_dir = root / "hic"
             hic_dir.mkdir()
-            (hic_dir / "R1.fastq.gz").write_text("R1\n", encoding="utf-8")
-            (hic_dir / "R2.fastq.gz").write_text("R2\n", encoding="utf-8")
+            (hic_dir / "R1.fastq.gz").write_bytes(gzip.compress(b"R1\n"))
+            (hic_dir / "R2.fastq.gz").write_bytes(gzip.compress(b"R2\n"))
             manifest.write_text(
                 manifest.read_text(encoding="utf-8")
                 + "  - asset_type: hic_reads_registered\n"

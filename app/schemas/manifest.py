@@ -7,6 +7,9 @@ assets without transforming the files.
 
 from __future__ import annotations
 
+import bz2
+import gzip
+import lzma
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -17,9 +20,7 @@ from app.schemas.assets import AssetType
 
 Platform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi", "illumina", "unknown"]
 Layout = Literal["single", "paired", "unknown"]
-Format = Literal[
-    "fastq", "fasta", "bam", "cram", "hic", "assembly", "unknown"
-]
+Format = Literal["fastq", "fasta", "bam", "cram", "hic", "assembly", "unknown"]
 Compression = Literal["gzip", "bzip2", "xz", "none", "unknown"]
 
 _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
@@ -35,6 +36,10 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "assembly_fasta_registered",
     "reference_proteins",
 }
+
+_NON_EMPTY_INPUT_ASSET_TYPES: frozenset[AssetType] = frozenset(
+    _ACCEPTED_MANIFEST_ASSET_TYPES
+)
 
 
 class InputAssetSpec(BaseModel):
@@ -80,6 +85,10 @@ class InputAssetSpec(BaseModel):
             if self.layout not in {"unknown", "paired"}:
                 raise ValueError("paired_reads requires layout='paired'")
             self.layout = "paired"
+        elif not self.paths:
+            raise ValueError("non-paired manifest assets require at least one path")
+        if any(not path.strip() for path in self.paths):
+            raise ValueError("manifest asset paths must not be empty")
         return self
 
 
@@ -130,9 +139,7 @@ class InputManifest(BaseModel):
         seen: dict[str, tuple[int, int]] = {}
         for entry_ordinal, asset in enumerate(self.assets):
             for path_ordinal, declared in enumerate(asset.paths):
-                canonical = str(
-                    Path(declared).expanduser().resolve(strict=False)
-                )
+                canonical = str(Path(declared).expanduser().resolve(strict=False))
                 previous = seen.get(canonical)
                 if previous is not None:
                     raise ValueError(
@@ -185,6 +192,26 @@ def _detect_compression(path: Path) -> Compression:
     if ".xz" in suffixes:
         return "xz"
     return "none"
+
+
+def _resolve_compression(path: Path, declared: Compression) -> Compression:
+    """Resolve compression with the manifest declaration taking precedence.
+
+    An explicit declaration is needed for valid compressed inputs whose names
+    have no compression suffix.  A suffix is therefore only a contradiction
+    when it positively identifies a *different* codec; an absent suffix is not
+    evidence for ``none``.
+    """
+
+    suffix_compression = _detect_compression(path)
+    if declared == "unknown":
+        return suffix_compression
+    if suffix_compression != "none" and suffix_compression != declared:
+        raise ValueError(
+            "declared compression conflicts with filename suffix: "
+            f"declared {declared!r}, suffix implies {suffix_compression!r}"
+        )
+    return declared
 
 
 def _detect_format(path: Path) -> Format:
@@ -290,7 +317,7 @@ def _infer_asset_properties(
                 exists=exists,
                 is_regular_file=is_regular_file,
                 size_bytes=path.stat().st_size if is_regular_file else None,
-                compression=_detect_compression(path),
+                compression=_resolve_compression(path, spec.compression),
                 format=_detect_format(path),
                 platform=platform,
                 platform_resolution_source=platform_source,
@@ -304,6 +331,41 @@ def _infer_asset_properties(
         ),
         path_facts=path_facts,
     )
+
+
+def _logical_non_empty_error(fact: AssetPathInference) -> str | None:
+    """Return a validation error when a regular input has no readable content.
+
+    Compressed files may have a positive container size while representing an
+    empty stream (or while being corrupt).  Probe exactly one decompressed
+    byte here, before freezing any control inputs; this deliberately does not
+    parse or otherwise consume the declared biological file.
+    """
+
+    path = Path(fact.canonical_path)
+    if fact.compression == "none":
+        return (
+            "sequence/assembly inputs must not be empty"
+            if fact.size_bytes == 0
+            else None
+        )
+    try:
+        if fact.compression == "gzip":
+            with gzip.open(path, "rb") as handle:
+                non_empty = bool(handle.read(1))
+        elif fact.compression == "bzip2":
+            with bz2.open(path, "rb") as handle:
+                non_empty = bool(handle.read(1))
+        elif fact.compression == "xz":
+            with lzma.open(path, "rb") as handle:
+                non_empty = bool(handle.read(1))
+        else:
+            return None
+    except (OSError, EOFError, lzma.LZMAError) as exc:
+        return f"compressed input is unreadable ({exc.__class__.__name__})"
+    if non_empty:
+        return None
+    return "sequence/assembly inputs must not be logically empty"
 
 
 def validate_manifest(
@@ -326,10 +388,14 @@ def validate_manifest(
 
     entry_inferences: list[AssetEntryInference] = []
     for entry_ordinal, spec in enumerate(manifest.assets):
-        entry = _infer_asset_properties(
-            spec,
-            manifest_entry_ordinal=entry_ordinal,
-        )
+        try:
+            entry = _infer_asset_properties(
+                spec,
+                manifest_entry_ordinal=entry_ordinal,
+            )
+        except ValueError as exc:
+            errors.append(f"{spec.asset_type}: {exc}")
+            continue
         entry_inferences.append(entry)
         inferred.append(entry.model_dump(mode="json"))
         missing = [fact.declared_path for fact in entry.path_facts if not fact.exists]
@@ -346,6 +412,23 @@ def validate_manifest(
                 f"{non_regular}"
             )
 
+        if spec.asset_type in _NON_EMPTY_INPUT_ASSET_TYPES:
+            non_empty_errors = {
+                fact.declared_path: _logical_non_empty_error(fact)
+                for fact in entry.path_facts
+                if fact.exists and fact.is_regular_file
+            }
+            invalid_inputs = {
+                path: reason
+                for path, reason in non_empty_errors.items()
+                if reason is not None
+            }
+            if invalid_inputs:
+                errors.append(
+                    f"{spec.asset_type}: invalid sequence/assembly inputs: "
+                    f"{invalid_inputs}"
+                )
+
         unknown_formats = [
             fact.declared_path
             for fact in entry.path_facts
@@ -356,9 +439,8 @@ def validate_manifest(
                 f"{spec.asset_type}: could not infer format from {unknown_formats}"
             )
 
-        if (
-            spec.asset_type == "raw_long_reads"
-            and any(fact.platform == "unknown" for fact in entry.path_facts)
+        if spec.asset_type == "raw_long_reads" and any(
+            fact.platform == "unknown" for fact in entry.path_facts
         ):
             warnings.append(f"{spec.asset_type}: platform unknown for {spec.paths}")
 
