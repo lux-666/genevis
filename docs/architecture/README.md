@@ -69,12 +69,12 @@ Read these only when a task needs the exact contract.
 
 | Contract owner | Owns |
 |---|---|
-| [`reference/data-contract.md`](reference/data-contract.md) | Run ownership, durable fact placement, checkpoint bounds, artifact refs, ledger/report authority, retention, and crash rules |
-| [`reference/execution-lifecycle.md`](reference/execution-lifecycle.md) | Freeze/run/collect graph, attempt owners, recovery routing, and stage-adapter boundary |
+| [`reference/data-contract.md`](reference/data-contract.md) | Run ownership, lifecycle-fact identity/uniqueness, shared progress reduction, checkpoint bounds, artifact refs, ledger/report authority, retention, and crash rules |
+| [`reference/execution-lifecycle.md`](reference/execution-lifecycle.md) | Freeze/run/collect graph, attempt owners/terminals, method disposition, recovery routing, and stage-adapter boundary |
 | [`reference/execution-evidence.md`](reference/execution-evidence.md) | Runtime result versus durable process evidence and log refs |
-| [`reference/resource-handoff.md`](reference/resource-handoff.md) | Logical cross-stage resources, resolver priority, and FOFN boundary |
+| [`reference/resource-handoff.md`](reference/resource-handoff.md) | Current logical resources, immutable assembly delivery, resolver priority, Read QC lineage, and FOFN boundary |
 | [`reference/parameter-recommendation.md`](reference/parameter-recommendation.md) | Exact model DTO, schema-3 evidence, sparse response, approval, and retry semantics |
-| [`reference/stage-contracts.md`](reference/stage-contracts.md) | Biological stage inputs, outputs, registered method roles, and review triggers |
+| [`reference/stage-contracts.md`](reference/stage-contracts.md) | Biological stage inputs/outputs, stage outcomes versus method dispositions, registered method roles, QC facts, and review triggers |
 | [`reference/descriptors.md`](reference/descriptors.md) | Package and method capability metadata |
 | [`reference/governance.md`](reference/governance.md) | Source-of-truth, change-control, and quality-gate policy |
 | [`reference/conformance.md`](reference/conformance.md) | Explicit gaps between accepted design and the current working tree |

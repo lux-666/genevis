@@ -1,6 +1,7 @@
 # Runtime Orchestration
 
-> **Status:** implemented.
+> **Status:** accepted; remaining cross-cutting gaps are listed in
+> [Architecture conformance](../reference/conformance.md).
 > **Read when:** tracing CLI dispatch, frozen-session startup, parent routing,
 > stage selection, or terminal behavior.  
 > **Comes from:** a structured public run or [TUI and planning](tui-and-planning.md), then a validated whole-run frozen contract.
@@ -11,7 +12,8 @@
 > [resource handoff](../reference/resource-handoff.md).  
 > **Code evidence:** `app/entrypoints/run.py`, `app/workflow.py`,
 > `app/graph/builder.py`, `app/graph/routing.py`,
-> `app/control/lifecycle.py`, and `app/graph/checkpoint_compaction.py`.
+> `app/control/occurrence_settlement.py`, `app/control/lifecycle.py`, and
+> `app/graph/checkpoint_compaction.py`.
 
 ## Public entry boundary
 
@@ -36,6 +38,14 @@ occurrence's process execution. `requested_stages` must not be `null`;
 sequence plus its conservative dependency closure.
 It publishes `input_manifest.yaml`, `run_config.json`, and
 `dependency_manifest.json` before publishing `frozen_inputs.json` last.
+
+The accepted pre-freeze boundary requires manifest validation, before creating
+or publishing that frozen transaction, to prove every declared biological
+member is a regular file with non-empty
+logical content. Supported compressed members must yield at least one
+decompressed byte and malformed compression fails. Container byte size alone is
+not sufficient. The exact intake invariant is owned by the
+[run-data contract](../reference/data-contract.md#49-declared-input-content-is-logically-non-empty).
 
 RunConfig owns the literal occurrence sequence. The absence of
 `assembly_review` after Assembly, Hi-C Scaffolding, T2T, or another assembly
@@ -125,14 +135,16 @@ review briefs, Enter-claim countdowns, manual decisions, automatic timeout
 decisions, and terminal summaries. Entry points must not implement parallel
 gate or progress loops.
 
-Attached progress is rendered from the scalar-only `progress_projection_input`
-derived at the parent-controller transition. A corresponding Ledger occurrence
-event is committed before its durable transition is presented. Detached
-inspection reads the verified frozen workflow plan, Ledger occurrence events,
-SQLite checkpoint availability, and the execution progress marker/lock on
-demand; checkpoint contents do not independently define status. Neither path
-publishes a progress artifact, progress table, background watcher, event bus,
-or second progress authority.
+Attached and detached progress call the same occurrence reducer defined by the
+[run-data contract](../reference/data-contract.md#410-one-workflow-progress-reducer).
+It consumes the verified frozen plan, canonical occurrence/session terminals,
+and a verified active gate. The attached controller invokes it only after the
+corresponding Ledger terminal and delivery events have committed. Detached
+inspection derives the same facts on demand; SQLite checkpoint availability and
+the execution progress marker/lock are adjacent operational signals only.
+Neither surface infers completion from the workflow cursor, last Ledger row, or
+`route_trace`, and neither publishes a progress artifact, progress table,
+background watcher, event bus, or second progress authority.
 
 ## Parent graph
 
@@ -203,14 +215,22 @@ without a later Review; the latter fails because Base Polish is unimplemented,
 not because Review is missing. The same rule applies when Gap Closing gains its
 central assembly handoff.
 
-The controller wrapper is thin but not pure. It writes only occurrence-scoped
-stage-entered, explicit stage-skipped, stage-completed, and stage-failed Ledger
-facts plus the scalar progress projection input. It does not write
-`session_terminal` or generate
-operator reports at blocked or failed boundaries. A stage-local skip, when a
-stage contract explicitly creates one, remains distinct from the parent: the
-parent never synthesizes skip events for absent occurrences. Any architecture
-description claiming that the parent graph has no side effects is incorrect.
+The controller wrapper is thin but not pure. Every settling stage path returns
+an explicit `workflow_step_outcome` for its active occurrence. A
+`blocked_human` path returns no occurrence outcome and keeps that occurrence
+active. The parent invokes the shared
+occurrence-settlement boundary, which validates that handoff against the frozen
+plan; neither path derives an outcome from cursor movement, a stage-local
+status, or a route marker. For completion the boundary first records any
+immutable assembly delivery and then exactly one `stage_completed`; for a
+defined skip or failure it records exactly one `stage_skipped` or
+`stage_failed`. Terminal recovery invokes the same boundary before writing a
+session terminal. The parent also owns `stage_entered` and invokes the shared
+progress reducer after settlement. It does not write `session_terminal` or
+generate operator reports at blocked or failed boundaries. A stage-local skip
+remains distinct from an absent occurrence: the parent never synthesizes skip
+events for omitted stages. Any architecture description claiming that the
+parent graph has no side effects is incorrect.
 
 ## Stage boundary
 
@@ -230,14 +250,15 @@ occurrence and is not skipped. `None` is only an unfinished planner/TUI draft
 state; it is never executable semantics and public `gene-agent run` rejects JSON
 `null` before freeze.
 
-`workflow_steps` is the frozen runtime projection of the operator plan. Resume
-restores and applies only the decision bound to the interrupted occurrence; it
-does not rewrite the remaining sequence or edit the frozen run config.
+`workflow_steps` is the frozen runtime projection of the operator plan. Each
+occurrence carries its canonical `selected_method_names` roster from the frozen
+RunConfig. Resume restores and applies only the decision bound to the
+interrupted occurrence; it does not rewrite the remaining sequence, method
+roster, or frozen run config.
 
 `stage_seeds` are immutable stage-scoped RunConfig projections. Every repeated
-occurrence starts from a fresh copy of the same stage seed; there is no
-occurrence-specific method-configuration seed and no reuse of a prior
-occurrence's completed cursor.
+occurrence starts from a fresh copy of the same stage seed and its own copied
+method roster; it never reuses a prior occurrence's completed cursor.
 
 When the manifest declares `assembly_fasta_registered`, Inventory registers it
 as the central assembly resource. `assembly_review` is the recommended first
@@ -254,8 +275,13 @@ evidence. A successful route reaches `done` and terminal completion.
 
 Only completed or failed sessions are eligible for authoritative terminal
 finalization. After proving the terminal checkpoint, the authoritative finalizer
-writes or reuses the one canonical `session_terminal` Ledger singleton, then
-attempts checkpoint compaction. Compaction preserves the latest terminal
+writes or reuses the one canonical `session_terminal` Ledger singleton. A failed
+terminal records `failure_scope=occurrence` only after proving a contiguous
+settled prefix ending in one matching failed occurrence and no later terminal,
+or `failure_scope=controller_boundary` when the preceding occurrence is fully
+settled and the next occurrence was never entered; it never fabricates a
+`stage_failed` for the latter. The finalizer then attempts checkpoint
+compaction. Compaction preserves the latest terminal
 checkpoint and does not delete immutable artifacts; a compaction failure is an
 operational warning, not a different lifecycle outcome. `ProjectionBoundary`
 generates reports and workflow-state projections as best-effort presentation

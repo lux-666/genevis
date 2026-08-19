@@ -1,9 +1,31 @@
 {
   "requested_stages": [
-    {"stage": "t2t", "allow_local_execution": false},
-    {"stage": "assembly_review", "allow_local_execution": true},
-    {"stage": "t2t", "allow_local_execution": true},
-    {"stage": "assembly_review", "allow_local_execution": true}
+    {
+      "stage": "t2t",
+      "allow_local_execution": false,
+      "selected_method_names": ["t2t.alignment.minimap2"]
+    },
+    {
+      "stage": "assembly_review",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "assembly_review.eval.quast",
+        "assembly_review.eval.busco"
+      ]
+    },
+    {
+      "stage": "t2t",
+      "allow_local_execution": true,
+      "selected_method_names": ["t2t.alignment.minimap2"]
+    },
+    {
+      "stage": "assembly_review",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "assembly_review.eval.quast",
+        "assembly_review.eval.busco"
+      ]
+    }
   ],
   "review_policy": {
     "max_blocked_seconds": 300,

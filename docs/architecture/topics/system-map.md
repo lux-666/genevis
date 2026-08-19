@@ -12,8 +12,9 @@
 > [run data](../reference/data-contract.md), and
 > [architecture governance](../reference/governance.md).  
 > **Code evidence:** `app/entrypoints/run.py`, `app/workflow.py`,
-> `app/graph/builder.py`, `app/schemas/state.py`, `app/execution/lifecycle.py`,
-> and `app/storage/paths.py`.
+> `app/graph/builder.py`, `app/control/occurrence_settlement.py`,
+> `app/schemas/state.py`, `app/execution/lifecycle.py`, and
+> `app/storage/paths.py`.
 
 ## What the system is
 
@@ -28,20 +29,24 @@ optional mutable TUI draft -----/
   -> stage selects and prepares a method
   -> one method attempt is frozen, run, and collected
   -> evidence is published
+  -> stage returns an explicit occurrence outcome and any delivery claim
+  -> shared settlement persists delivery/terminal facts
   -> review either advances, retries, blocks, or terminates
 ```
 
 The parent LangGraph is deliberately thin, but it is not side-effect free. Its
-controller routes by compact state and also records stage/session Ledger events
-and terminal reports. Biological method choice and output interpretation stay
-inside stage subgraphs. Process invocation stays inside the shared execution
-kernel.
+controller routes by compact state, records `stage_entered`, and invokes the
+same occurrence-settlement boundary used by terminal recovery. The
+executor-owned authoritative finalizer records the run-level `session_terminal`
+and projects terminal reports. Biological method choice and output
+interpretation stay inside stage subgraphs. Process invocation stays inside the
+shared execution kernel.
 
 ## Three graph scales
 
 | Scale | Owner | Responsibility |
 |---|---|---|
-| Parent graph | `app/graph/` and `app/workflow.py` | Dispatch the active frozen occurrence, advance its cursor, and enforce terminal boundaries |
+| Parent graph | `app/graph/` and `app/workflow.py` | Dispatch the active frozen occurrence, invoke shared settlement for its explicit outcome, and enforce terminal boundaries |
 | Stage subgraph | `app/stages/<stage>/` | Resolve inputs, choose/prepare methods, collect outputs, review, and commit logical resources where applicable |
 | Method lifecycle | `app/execution/` plus a stage adapter | Persist one exact attempt, run at most one pending process per transition, publish evidence, and return to stage collection |
 
@@ -54,7 +59,7 @@ as a parameterized AutoHiC attempt.
 | Module | Owns |
 |---|---|
 | `app/entrypoints/` | Public structured `run` CLI, optional mutable TUI/planning UI, shared whole-run freeze handoff, lease-scoped inspect/review/resume surfaces, and best-effort terminal presentation |
-| `app/workflow.py` and `app/graph/` | Stage registration/default planning, frozen-occurrence routing, checkpointer construction, and parent lifecycle event boundary |
+| `app/workflow.py` and `app/graph/` | Stage registration/default planning, frozen-occurrence routing, checkpointer construction, and controller invocation of the lifecycle boundary |
 | `app/domains/` | Stage-neutral biological rules and shared typed input interpretation without workflow side effects |
 | `app/stages/` | Compiled biological subgraphs, method routing, command preparation, collection, review, and resource commit |
 | `app/llm/` | Strict model-facing DTO rendering, invocation, and response-shape parsing; not approval, routing, or persistence ownership |
@@ -62,7 +67,7 @@ as a parameterized AutoHiC attempt.
 | `app/execution/` | Attempt freeze/run/collect kernel, Runner boundary, environment selection, and durable process evidence |
 | `app/storage/` | Run layout, immutable publication/index, Ledger, frozen inputs, and durable evidence records |
 | `app/review/` | Gate declarations, allowed decisions, occurrence validation, timeout-request normalization, immutable request/intent/application handling, and registered typed prepare/apply dispatch |
-| `app/control/` | Shared review-status projection, lease-checked resume transaction coordination, inspect, authoritative terminal finalization, and lifecycle recovery |
+| `app/control/` | Shared occurrence settlement and progress/review projections, lease-checked resume transaction coordination, inspect, authoritative terminal finalization, and lifecycle recovery |
 | `app/reports/` | Best-effort operator-status and session-trace projections without control authority; only the session summary currently has a durable-record-only regeneration path |
 
 These modules connect through typed contracts and refs. Their directory order
@@ -75,7 +80,9 @@ The checkpoint is a recovery cursor, not a database of the workflow. Current
 logical files move through `resource_refs`; original input identity stays in
 the asset registry; immutable bodies and produced files live in artifacts; the
 artifact index proves identity and bytes; the Ledger records causal events and
-the canonical terminal singleton; the shared review-status projection governs
+the occurrence/method/attempt and canonical session terminal singletons;
+assembly delivery history is an occurrence-bound Ledger fact rather than a
+mutable resource label; the shared review-status projection governs
 whether a decision may be supplied or an existing intent must be recovered;
 reports are regenerable views where supported. Follow
 [Data and storage](data-and-storage.md) when deciding where a new fact belongs.

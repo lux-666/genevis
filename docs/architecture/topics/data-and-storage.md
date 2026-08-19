@@ -1,6 +1,6 @@
 # Data and Storage
 
-> **Status:** implemented, with explicit conformance debt noted below
+> **Status:** accepted, with explicit conformance debt noted below
 >
 > **Read when:** deciding where a fact belongs, following a file between
 > stages, or debugging publication, resume, audit, and reporting.
@@ -20,7 +20,8 @@
 > **Code evidence:** `app/schemas/state.py`, `app/schemas/resource_ref.py`,
 > `app/schemas/assets.py`, `app/storage/asset_registry.py`,
 > `app/storage/artifacts.py`, `app/storage/ledger.py`,
-> `app/graph/checkpointer.py`, `app/graph/checkpoint_compaction.py`,
+> `app/control/occurrence_settlement.py`, `app/graph/checkpointer.py`,
+> `app/graph/checkpoint_compaction.py`,
 > `app/reports/review_report.py`, and `app/reports/trace_writer.py`.
 
 ## One run, several owners
@@ -31,12 +32,12 @@ interchangeable copies of one database.
 
 | Layer | Authoritative for | Not authoritative for |
 |---|---|---|
-| `resource_refs` | The current logical cross-stage file handoff, such as the adopted `assembly` or current `long_reads` | Input-member provenance, file integrity records, execution history, or large evidence bodies |
+| `resource_refs` | The current logical cross-stage routing projection, such as the adopted `assembly` or current `long_reads` | Historical proof that a named occurrence delivered it, input-member provenance, execution history, or large evidence bodies |
 | Asset registry | Identity, declaration provenance, platform/format, path, and verification facts for inventory-registered external input members | Which derived output is currently adopted by later stages |
 | Immutable artifacts | Exact evidence and produced file bytes for recommendations, reviews, commands, executions, and biological outputs | Causal ordering by themselves |
 | Artifact index | Run-local artifact location, type, hash, size, producer identity, and compact dependency metadata | Business status, review decisions, model reasoning, or workflow routing |
-| Ledger | Idempotent causal events, shared review-status facts, and the one canonical terminal singleton, with refs to evidence | Evidence bodies, asset registries, result tables, or the latest resume cursor |
-| Checkpoint | The latest bounded control frontier and compact refs needed to continue | Audit history, durable business truth, reports, logs, commands, or model payloads |
+| Ledger | Idempotent causal events; occurrence/method/attempt terminal singletons; immutable assembly-delivery facts; shared review status; and the one canonical session terminal, with refs to evidence | Evidence bodies, asset registries, result tables, or the latest resume cursor |
+| Checkpoint | The latest bounded control frontier, latest `workflow_step_outcome` settlement handoff, and compact refs needed to continue | Audit history, durable terminal/delivery truth, reports, logs, commands, or model payloads |
 | Reports | Operator/read-model projections; session summaries are regenerable from durable records, while current-status and Assembly Review gaps are tracked below | Workflow control, artifact identity, causal events, review status, or resume |
 
 This ownership split is the core rule. A small immutable projection may appear
@@ -46,15 +47,21 @@ belong to the [run-data contract](../reference/data-contract.md).
 
 ## Progress is direct consumption, not another store
 
-Interactive execution introduces no durable progress projection. While a
-process is attached, the terminal consumes the scalar-only
-`progress_projection_input` derived from the verified frozen workflow plan and
-current compact graph control state at the parent-controller boundary. After
-detachment, `inspect` consumes the verified frozen plan, Ledger occurrence
-events, SQLite checkpoint availability, and the execution progress marker/lock
-directly; checkpoint contents do not independently define status authority.
+Interactive execution introduces no durable progress projection. Attached and
+detached surfaces call the same pure reducer over the verified frozen plan,
+canonical occurrence/session terminals, and a verified active gate. The parent
+commits delivery and terminal events before attached rendering. Detached
+inspection reconstructs those same reducer inputs; SQLite checkpoint
+availability and the execution marker/lock remain adjacent operational state.
+Neither surface derives completion or current occurrence from cursor advance,
+the last stage-bearing Ledger row, or `route_trace`.
 
-Counts such as `finished=2/5` are presentation-time arithmetic. They are not
+Legacy terminal conflicts use conservative precedence with explicit integrity
+diagnostics and a degraded-authority marker. They are never silently resolved
+by last-event overwrite. Counts such as `finished=2/5` remain presentation-time
+arithmetic and are not written to a durable progress store.
+
+Those counts are not
 written to an artifact, report, Ledger event, checkpoint field, progress table,
 or batch record. A multi-session caller may calculate an aggregate from several
 read-only inspections, but that aggregate remains outside every run and never
@@ -75,6 +82,15 @@ without rewriting the original input provenance. The exact resolver priority,
 logical resource set, and FOFN boundary live in the
 [resource-handoff contract](../reference/resource-handoff.md).
 
+For assembly, the replaced current table is paired with an immutable
+occurrence-bound `resource_delivered` Ledger fact. That fact binds the producer
+occurrence to the exact executed-candidate and primary-output refs, including a
+pass-through occurrence that reuses older bytes. A downstream Review requires
+the completed producer terminal, delivery fact, and current projection to
+agree. Read QC likewise retains exact source-member/read-set lineage in its
+current handoff; the detailed payload rules remain owned by the resource and
+stage contracts.
+
 The asset registry itself is an immutable artifact. Checkpoint state carries
 only its verified `ArtifactRef`; consumers load the document, resolve ordered
 member IDs, and recheck member paths, sizes, and ready checksums. A
@@ -89,10 +105,16 @@ A normal durable transition moves in one direction:
 work file or in-memory record
   -> immutable run artifact
   -> idempotent artifact-index registration
-  -> semantic ledger event
+  -> method/review semantic ledger event
   -> compact checkpoint update
   -> optional report projection
 ```
+
+Occurrence completion adds a shared settlement suffix, used by the controller
+and terminal recovery: validate the explicit `workflow_step_outcome`,
+append/replay each assembly `resource_delivered` fact, append/replay the one
+stage terminal, then render attached progress. A delivery without its completed
+terminal is a recoverable crash prefix, not a consumable handoff.
 
 The artifact index makes an `ArtifactRef` locatable and integrity-checkable.
 The ledger makes the transition causally reconstructible. The checkpoint tells

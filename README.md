@@ -231,11 +231,40 @@ TUI 最终会把选择落到 run config：
 ```json
 {
   "requested_stages": [
-    {"stage": "read_qc", "allow_local_execution": true},
-    {"stage": "genome_survey", "allow_local_execution": true},
-    {"stage": "assembly", "allow_local_execution": true},
-    {"stage": "assembly_dedup", "allow_local_execution": true},
-    {"stage": "assembly_review", "allow_local_execution": true}
+    {
+      "stage": "read_qc",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "read_qc.long_read_stats.seqkit_stats",
+        "read_qc.length_filter.seqkit_seq"
+      ]
+    },
+    {
+      "stage": "genome_survey",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "genome_survey.kmer_count.jellyfish",
+        "genome_survey.model.genomescope2"
+      ]
+    },
+    {
+      "stage": "assembly",
+      "allow_local_execution": true,
+      "selected_method_names": ["assembly.candidate.flye"]
+    },
+    {
+      "stage": "assembly_dedup",
+      "allow_local_execution": true,
+      "selected_method_names": ["assembly_dedup.purge_dups"]
+    },
+    {
+      "stage": "assembly_review",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "assembly_review.eval.quast",
+        "assembly_review.eval.busco"
+      ]
+    }
   ],
   "assembly": {
     "assembly_method": "flye",
@@ -272,11 +301,40 @@ review：
 ```json
 {
   "requested_stages": [
-    {"stage": "read_qc", "allow_local_execution": true},
-    {"stage": "genome_survey", "allow_local_execution": true},
-    {"stage": "assembly", "allow_local_execution": true},
-    {"stage": "assembly_dedup", "allow_local_execution": true},
-    {"stage": "assembly_review", "allow_local_execution": true}
+    {
+      "stage": "read_qc",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "read_qc.long_read_stats.seqkit_stats",
+        "read_qc.length_filter.seqkit_seq"
+      ]
+    },
+    {
+      "stage": "genome_survey",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "genome_survey.kmer_count.jellyfish",
+        "genome_survey.model.genomescope2"
+      ]
+    },
+    {
+      "stage": "assembly",
+      "allow_local_execution": true,
+      "selected_method_names": ["assembly.candidate.flye"]
+    },
+    {
+      "stage": "assembly_dedup",
+      "allow_local_execution": true,
+      "selected_method_names": ["assembly_dedup.purge_dups"]
+    },
+    {
+      "stage": "assembly_review",
+      "allow_local_execution": true,
+      "selected_method_names": [
+        "assembly_review.eval.quast",
+        "assembly_review.eval.busco"
+      ]
+    }
   ],
   "review_policy": {
     "max_blocked_seconds": 300,

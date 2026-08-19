@@ -45,10 +45,10 @@ For installation and server execution, read
 | `user_guide/` | Current operator-facing feature guides |
 | `examples/` | Schema-valid manifest and run-config templates, including literal-order repeated-stage occurrences |
 
-`superpowers/specs/` and `superpowers/plans/` are legacy, non-authoritative
-process material scheduled for removal. Do not add or maintain design there.
-Move any still-valid contract into its single owning topic or reference page
-under `architecture/`; Git history retains obsolete rationale and plans.
+Legacy `superpowers/specs/` and `superpowers/plans/` process material has been
+removed from the working tree. Do not recreate or maintain design there. Every
+still-valid contract belongs in its single owning topic or reference page under
+`architecture/`; Git history retains obsolete rationale and plans.
 
 ## Status and update rule
 

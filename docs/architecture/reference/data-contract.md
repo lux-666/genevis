@@ -1,7 +1,7 @@
 # Run Data Contract
 
-> **Status:** implemented; see [Architecture conformance](conformance.md) for
-> explicit gaps.  
+> **Status:** accepted; current lifecycle/evidence gaps are listed in
+> [Architecture conformance](conformance.md).
 > **Read when:** exact fact ownership, run paths, checkpoint budgets, crash
 > behavior, replay, or retention matters.  
 > **Comes from:** [Data and storage](../topics/data-and-storage.md).  
@@ -165,6 +165,59 @@ carries `stage`. `session_terminal` is the explicit diagnostic exception: it
 may retain a stage label without attributing the run-level outcome to one
 occurrence.
 
+Lifecycle facts belong to three separate identity domains and must never be
+inferred from one another:
+
+- a **workflow occurrence outcome** is exactly one of `stage_completed`,
+  `stage_skipped`, or `stage_failed`, keyed by the frozen
+  `(workflow_step_id, stage)` binding;
+- a **method disposition** is exactly one of `not_started`, `skipped`,
+  `completed`, or `failed`, keyed by
+  `(workflow_step_id, stage, method_name)`; `skipped` and `failed` require a
+  reason, while `not_started` asserts that no attempt began;
+- an **attempt terminal** is exactly one of `attempt_succeeded` or
+  `attempt_failed`, keyed by its immutable `attempt_id` and bound stage,
+  method, and workflow occurrence.
+
+The frozen occurrence also owns an ordered `selected_method_names` roster. It
+is immutable intent, not another lifecycle outcome: registry membership and a
+displayed candidate list do not select a method, while later input,
+authorization, or environment checks may make a rostered method `not_started`
+or `skipped`. The roster is resolved into each requested occurrence before the
+RunConfig is frozen, copied into `WorkflowStep`, and is therefore stable across
+repeated-stage recovery. A runtime decision that would change method identity
+requires a new workflow occurrence; retries remain attempts of the same
+rostered method.
+
+These domains are orthogonal. A stage may complete after a method is skipped
+when it still delivers its stage contract, may fail before a method starts,
+and may complete without a process when it delivers provided or reviewed
+evidence. Conversely, process success does not prove that biological
+collection, resource delivery, or the stage contract succeeded.
+
+Method disposition is not derived from attempt or occurrence terminals. A
+selected method can own zero attempts, and a retrying method can own several;
+the occurrence terminal records delivery rather than method choice. Freeze,
+run, collect, and the shared no-attempt adapter therefore expose typed durable
+cursor/evidence to a registered outcome policy only at a final method boundary.
+Shared method settlement validates the resulting `MethodOutcome` against the
+active occurrence roster and is the sole disposition writer. Stage modules
+must not call that Ledger writer directly or infer an outcome from private
+cursor text. Before any occurrence terminal is appended, the shared settlement
+boundary requires exact set equality between its frozen roster and its durable
+method dispositions. Missing and extra methods both fail closed; an open human
+gate or retry may remain temporarily uncovered because it is not an occurrence
+terminal.
+
+The stage-to-parent `workflow_step_outcome` object is a compact checkpoint
+handoff, not durable truth. It contains the exact occurrence identity,
+`completed | skipped | failed`, a required reason for skipped/failed outcomes,
+and any completed assembly-delivery claim. Completed/skipped outcomes advance
+exactly one frozen position; failed outcomes do not advance. The shared
+controller/recovery settlement boundary validates this object against the
+active frozen occurrence and persists the Ledger facts. Cursor movement, a
+stage-local `status`, and `route_trace` are never substitutes for this handoff.
+
 ### 4.6 Reports are projections
 
 Reports are generated from authoritative artifacts and ledger events. Workflow
@@ -181,6 +234,63 @@ ownership model.
 
 “Keep state compact” must be enforced by schemas and tests. Comments and naming
 an object `compact` are not sufficient.
+
+### 4.9 Declared input content is logically non-empty
+
+Every declared biological input member is validated before whole-run freeze as
+a regular file with non-empty logical content. For uncompressed inputs this is
+a positive file size. For gzip, bzip2, and xz inputs the validator must open the
+declared compression stream and observe at least one decompressed byte;
+container headers/trailers do not count. A truncated or unreadable compressed
+stream is invalid. This is a lightweight content-boundary check, not a complete
+FASTQ/FASTA/BAM semantic parser; stage adapters still own format-specific
+validation.
+
+This intake invariant applies to user-declared inputs. A run-owned filtering
+attempt may validly produce a zero-read result and a zero-valued aggregate
+statistics record. Such a method result is auditable, but it cannot be
+published as a usable downstream read resource; the owning stage settles
+according to its stage contract.
+
+### 4.10 One workflow-progress reducer
+
+Attached and detached progress use one pure occurrence reducer. Its authority
+inputs are:
+
+1. the verified frozen ordered `workflow_steps` plan;
+2. canonical occurrence terminal events;
+3. the canonical session terminal, including its failure scope when failed; and
+4. a verified active human gate, if present.
+
+The reducer counts occurrences by exact `workflow_step_id`, treats repeated
+stage names independently, and selects the first non-terminal plan occurrence
+as current only while the run is non-terminal. A completed or failed session
+has no current occurrence. A blocked gate may identify the current occurrence
+only when its stage and step match that first non-terminal plan position.
+`stage_entered`, Ledger tail order, checkpoint cursor movement, and
+`route_trace` are diagnostic inputs only and cannot choose current or increase
+a terminal count.
+
+A failed canonical `session_terminal` carries exactly one
+`failure_scope: occurrence | controller_boundary`. `occurrence` requires a
+contiguous `stage_completed | stage_skipped` prefix followed by exactly one
+matching `stage_failed`, with no terminal after that failed occurrence.
+`controller_boundary` requires no `stage_failed` and a complete contiguous
+prefix containing only `stage_completed | stage_skipped`; the authoritative
+finalizer may write that scope only after proving from the terminal checkpoint
+that the preceding occurrence settled and the next occurrence was never
+entered. A legacy or malformed failed terminal without a supported scope is
+degraded rather than guessed.
+
+The presentation value `finished` is always `completed + skipped`. Renderers do
+not reinterpret a current index, a missing current occurrence, or a terminal
+cursor as a count.
+
+New writes cannot create duplicate or conflicting occurrence terminals. If an
+immutable pre-invariant Ledger already contains them, the reducer selects the
+conservative precedence `failed > skipped > completed`, reports explicit
+integrity diagnostics, marks the projection degraded, and withholds an
+authoritative current occurrence when plan-prefix integrity cannot be proven.
 
 ## 5. Fact Ownership
 
@@ -205,7 +315,12 @@ an object `compact` are not sufficient.
 | Frozen runner input | immutable frozen-attempt record | Ref and attempt status |
 | Executed script/command identity | frozen-attempt record plus retained `work/` script | Attempt ref and status |
 | Execution result | immutable execution record | Ref, terminal status, return code |
+| Selected method disposition | occurrence-bound Ledger fact, with immutable evidence refs where applicable | Stage cursor projection and report status |
+| Workflow occurrence terminal outcome | one occurrence-terminal Ledger singleton | Latest compact `workflow_step_outcome` handoff and report projection |
+| Attempt terminal outcome | one attempt-terminal Ledger singleton | Execution cursor projection and report status |
 | stdout/stderr and tool outputs | immutable artifacts | Refs and compact counts |
+| Assembly delivery by one occurrence | occurrence-bound `resource_delivered` Ledger fact referencing the exact executed-candidate bundle and primary output | Current `resource_refs["assembly"]` routing projection |
+| Whole-read-set QC measurements | immutable aggregate-statistics artifact computed from the exact ordered read members | Summary artifact and compact stage projection |
 | Lifecycle ordering | ledger | Last event sequence in read models |
 | Artifact location and integrity metadata | artifact index | `ArtifactRef` |
 | Latest resume frontier | checkpoint | Never promoted to business truth |
@@ -428,6 +543,33 @@ simple one-shot method does not need a ceremonial
 Basenames are implementation details; schemas, artifact types, hashes, and refs
 form the contract.
 
+An attempt terminal describes only that frozen invocation. The Ledger append
+boundary, while holding the same exclusive lock used for sequence allocation,
+permits at most one of `attempt_succeeded` and `attempt_failed` for an immutable
+attempt ID. Exact semantic replay returns the existing row. A different
+terminal type, stage/method/occurrence binding, summary, or ref set is a
+`LedgerConflictError`, even when a caller supplies another idempotency key.
+
+Method disposition is a separate occurrence fact. It covers selected methods
+that never own an attempt as well as methods that do:
+
+| Disposition | Meaning | Attempt relation |
+|---|---|---|
+| `not_started` | Preconditions failed before execution was eligible | no attempt-start or terminal event |
+| `skipped` | The stage deliberately did not invoke a selected executable method | no attempt-start or terminal event; reason required |
+| `completed` | Required method work and collection completed | at least one matching successful attempt when executable; a selected planner-only pass-through completes without an attempt |
+| `failed` | Started method work or collection failed | matching failed attempt when one was frozen; reason required |
+
+One method disposition cannot settle a workflow occurrence by itself. The
+stage contract decides whether the occurrence still delivered, explicitly
+skipped, or failed.
+
+`MethodOutcome` is an internal settlement value, not another checkpoint
+authority. The shared lifecycle/no-attempt node derives it through an explicit
+registered policy from already durable typed cursor/evidence and settles it
+before parent routing continues. A retryable attempt failure emits only an
+attempt fact until policy chooses a final method outcome.
+
 ## 12. Review Contract
 
 Every human gate creates an immutable request under:
@@ -521,28 +663,71 @@ Requirements:
 - `summary` contains only bounded query fields.
 - Review events bind by workflow-step ID and review request ID, never only by
   stage name.
+- Each frozen occurrence has at most one terminal event among
+  `stage_completed`, `stage_skipped`, and `stage_failed`. The append boundary
+  keys uniqueness by workflow-step ID and validates the stage binding. Exact
+  semantic replay returns the existing row; another outcome or changed
+  summary/refs conflicts regardless of idempotency key. The same append lock
+  also proves that the occurrence's durable disposition names equal its frozen
+  `selected_method_names` roster before allowing any terminal.
+- Each immutable attempt has at most one terminal event among
+  `attempt_succeeded` and `attempt_failed`, under the same append-lock rule.
+- `method_disposition_recorded` is occurrence-bound and keyed by method name.
+  It records only `not_started | skipped | completed | failed`, a bounded
+  reason when required, and refs to its authoritative evidence.
+- `resource_delivered` is occurrence-bound. For the current v1 assembly
+  delivery contract it names `resource_type="assembly"`, records
+  `delivery_mode="materialized" | "reused"`, and carries exact
+  `candidate_bundle_ref` and `primary_output_ref` roles. It is written before
+  that occurrence's `stage_completed` event.
 - `env_preflight_blocked`, `candidate_comparison_generated`,
   `registered_assembly_candidate_bound`, and `automatic_review_failed` are
   stage-runtime facts and require the exact producing occurrence. Their
   idempotency identities include that occurrence, so two same-stage failures
   cannot collapse into one event.
-- Route facts use `stage_entered`, `stage_completed`, and `session_terminal`.
+- Route facts use `stage_entered`, the three occurrence terminal events, and
+  `session_terminal`.
   A `stage_skipped` event is valid only for an explicit stage-local decision;
   absent frozen occurrences never produce one.
+- A failed `session_terminal` records `failure_scope=occurrence` only with the
+  matching failed occurrence, or `failure_scope=controller_boundary` only after
+  the finalizer proves a fully settled prefix and an unentered next occurrence.
+  Completed terminals have no failure scope.
 - Artifact metadata is not copied into ledger events. Attempt or review events
   carry only the artifact refs required to explain the causal transition.
 
-The full ordered route, explicit stage-local skip reasons, review lifecycle, and
-terminal outcome must be reconstructible without checkpoint or reports.
+Every append path, including session terminals, enforces two independent
+invariants while holding the same exclusive append lock. It first validates the
+event domain's natural-key uniqueness and remembers an exact domain replay
+without returning. It then validates that the supplied idempotency key owns at
+most one semantic fact and that any existing owner has the same normalized
+semantic body. Only after both checks succeed may it return an exact domain/key
+replay; otherwise it appends one new row. A natural-key replay never hides reuse
+of that call's idempotency key by another fact.
 
-Runtime progress has no durable projection of its own. An attached terminal
-consumes the verified frozen workflow plan and current graph control state at
-the parent-controller boundary. Detached inspection directly joins the
-verified frozen plan, Ledger occurrence events, SQLite checkpoint availability
-and progress-marker state, and the existing execution-lock observation. Counts
-and percentages are ephemeral presentation arithmetic and must not be persisted
-as artifacts, reports, Ledger events, checkpoint fields, progress tables, or
-batch state.
+The full ordered route, explicit method dispositions and stage-local skip
+reasons, immutable assembly deliveries, review lifecycle, and terminal outcome
+must be reconstructible without checkpoint or reports.
+
+Runtime progress has no durable projection of its own. Both an attached
+terminal and detached inspection call the reducer defined in section 4.10.
+Before attached rendering, the parent has already committed the corresponding
+delivery and occurrence-terminal Ledger events through shared settlement;
+controller state may supply a candidate active gate but cannot supply terminal
+counts. Detached inspection derives the same inputs from verified frozen
+control data, Ledger/review facts, and the canonical session terminal. SQLite
+availability, progress-marker state, and the execution-lock observation remain
+adjacent operational signals, not
+workflow-status authority. Counts and percentages are ephemeral presentation
+arithmetic and must not be persisted as artifacts, reports, Ledger events,
+checkpoint fields, progress tables, or batch state.
+
+Both attached and detached text renderers print `finished` directly from
+`completed_steps + skipped_steps`. A renderer warns about degraded history only
+when `projection_authority == "degraded_stage_terminal_projection"`; the
+non-empty string `"authoritative"` is not a warning condition. When current is
+withheld, the renderer prints an unknown marker rather than inventing `done` or
+turning a cursor position into progress.
 
 Machine-readable detached inspection publishes `inspect_schema_version: 1`.
 Its `workflow_progress` object uses only a verified frozen RunConfig for the
@@ -557,6 +742,12 @@ Detached inspection also withholds the current occurrence, `active_interrupt`,
 frozen workflow inputs verify; raw Ledger events remain visible for diagnosis
 but cannot authorize a resume.
 
+Legacy duplicate/conflicting stage or attempt terminals are never resolved by
+"last event wins". Their conservative read model emits integrity diagnostics;
+workflow progress is marked degraded, and method failure lists contain only the
+canonical attempt projection so one method cannot be reported as both succeeded
+and failed.
+
 The adjacent `execution` object reports `frozen_inputs_status`, read-only
 durable progress as `fresh`, `checkpoint`, `partial`, or `unavailable`, and the
 local advisory execution-lock observation as `true`, `false`, or `null` when
@@ -570,6 +761,9 @@ Checkpoint state may contain:
 - session and thread IDs;
 - immutable `workflow_steps`, active occurrence index, current stage, and
   supervision state;
+- the latest compact `workflow_step_outcome` handoff awaiting or reflecting
+  shared occurrence settlement; it is replaceable recovery state, not terminal
+  authority;
 - immutable stage-scoped seeds; each repeated occurrence receives a fresh copy
   of its stage seed rather than an occurrence-specific method configuration;
 - current stage status cursor;
@@ -582,6 +776,32 @@ Checkpoint state may contain:
 - bounded stage-owned review projections needed for routing or display, such as
   Assembly Review candidate, signal, and metric summaries;
 - a bounded diagnostic route tail.
+
+The compact settlement handoff has this shape:
+
+```json
+{
+  "workflow_step_id": "step-004-assembly_dedup",
+  "stage": "assembly_dedup",
+  "outcome": "completed",
+  "reason": null,
+  "deliveries": [
+    {
+      "resource_type": "assembly",
+      "delivery_mode": "reused",
+      "candidate_bundle_ref": {"schema_version": 2, "artifact_id": "..."},
+      "primary_output_ref": {"schema_version": 2, "artifact_id": "..."}
+    }
+  ]
+}
+```
+
+`reason` is absent for ordinary completion and required for `skipped` or
+`failed`. `deliveries` is absent unless the occurrence completed, contains at
+most one v1 assembly delivery, and uses complete `ArtifactRef` objects. The
+parent rejects an outcome for any occurrence other than the active or
+just-settled frozen step. This object may be replaced by the next occurrence's
+handoff after its Ledger terminal exists.
 
 Checkpoint state must not contain:
 
@@ -680,7 +900,7 @@ storage API.
 
 ## 17. Durable Write and Crash Protocol
 
-For one logical transition:
+For one evidence publication:
 
 1. Serialize and validate new evidence entirely in memory.
 2. Write a temporary file inside the destination directory.
@@ -688,6 +908,26 @@ For one logical transition:
 4. Append its artifact-index row idempotently.
 5. Append the semantic ledger event idempotently.
 6. Return the compact state update for checkpointing.
+
+Occurrence settlement uses one stricter shared order. The parent controller and
+terminal recovery both invoke the same settlement boundary:
+
+1. The stage publishes and indexes every immutable result required by its
+   contract.
+2. The stage returns a validated `workflow_step_outcome`; it does not write its
+   own occurrence terminal.
+3. The settlement boundary validates the outcome against the active frozen
+   occurrence and, for an assembly delivery, checks that the current
+   `ResourceRef` projection names the same candidate bundle and primary output.
+4. The boundary appends or exactly replays each `resource_delivered` fact.
+5. The boundary appends or exactly replays the one occurrence terminal fact.
+6. Only after those Ledger facts exist may attached progress render the
+   transition or the next occurrence be presented as current.
+
+A crash after `resource_delivered` but before `stage_completed` leaves an
+unfinished occurrence with a recoverable delivery prefix. Replay must verify
+the exact delivery and append the missing terminal; it must not create another
+delivery or infer completion from the advanced checkpoint cursor.
 
 Crash rules:
 
@@ -701,6 +941,9 @@ Crash rules:
   idempotently.
 - Repeating it with different bytes fails closed.
 - Checkpoint must never be the only owner of a completed fact.
+- A delivery without its following completed occurrence is not consumable by a
+  downstream Review, even when the mutable current `ResourceRef` already points
+  at the delivered bytes.
 
 ## 18. Secrets and Sensitive Data
 

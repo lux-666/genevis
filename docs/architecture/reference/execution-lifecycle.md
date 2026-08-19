@@ -1,6 +1,6 @@
 # Method Execution Lifecycle Contract
 
-> **Status:** implemented.  
+> **Status:** accepted and implemented.
 > **Read when:** exact freeze/run/collect routing, attempt ownership, recovery,
 > or failure policy matters.  
 > **Comes from:** [Execution](../topics/execution.md).  
@@ -9,7 +9,8 @@
 > [Execution evidence](execution-evidence.md),
 > [Parameter recommendation](parameter-recommendation.md).  
 > **Code evidence:** `app/execution/lifecycle.py`,
-> `app/execution/attempt_owners.py`.
+> `app/execution/method_outcomes.py`,
+> `app/execution/attempt_owners.py`, `app/control/occurrence_settlement.py`.
 
 ## Scope
 
@@ -26,20 +27,43 @@ those contracts without replacing them.
 
 ## Canonical Flow
 
-Every executable method uses the same three execution boundaries:
+Every executable method uses the same execution and settlement boundaries:
 
 ```text
-method selection
+frozen occurrence method roster
   -> optional stage-owned recommendation and approval
   -> freeze
   -> run
   -> collect
+  -> settle method outcome
   -> stage-owned review and commit
 ```
 
-`freeze -> run -> collect` is implemented by
+`freeze -> run -> collect -> settle` is implemented by
 `app.execution.lifecycle.build_method_graph`. Parameter recommendation is an
 optional preparation capability, not a second execution track.
+
+This lifecycle produces a typed **method outcome** for shared settlement and,
+when a Runner starts, an **attempt terminal**. Settlement persists the outcome
+as the method's one durable **method disposition**. Neither fact is a
+workflow-occurrence outcome. Only the parent settlement boundary records
+`stage_completed | stage_skipped | stage_failed` after the stage returns an
+explicit `workflow_step_outcome` and every delivery claim verifies. The exact
+orthogonal fact domains are owned by
+[`data-contract.md`](data-contract.md#45-ledger-is-a-causal-event-stream).
+
+Method disposition is not a duplicate attempt summary. An occurrence may select
+a planner-only method or deliberately skip local execution and therefore own no
+attempt; a retrying method may own several attempt terminals but only one final
+disposition. The occurrence outcome answers whether the stage delivered, not
+what happened to each selected method.
+
+Selection itself is already frozen in the occurrence's
+`selected_method_names`. Runtime planning resolves applicability and parameters;
+it must not silently add a registry method, treat a displayed candidate as
+selected, or replace the roster after recovery. This distinction makes
+`not_started` meaningful and lets shared occurrence settlement prove that no
+selected method disappeared merely because a stage cursor was overwritten.
 
 One `run` transition advances at most one frozen attempt. If an ordered direct
 batch still has pending cursors, the method graph keeps the frozen stage status,
@@ -54,9 +78,12 @@ boundary:
 - every other status enters the stage-owned freeze callback.
 
 After freeze and each run transition, a frozen status loops to the next pending
-attempt, the ran status enters collect, and any other status exits the method
-subgraph. Parent-stage routing owns subsequent failure, review, retry, and commit
-decisions.
+attempt and the ran status enters collect. Every exit passes through the shared
+settlement node. A pure, lifecycle-specific outcome policy reads only the typed
+durable cursor/evidence produced by the preceding boundary and returns either a
+validated final `MethodOutcome` or no outcome while a retry/review continuation
+remains. It never guesses from an unregistered status string. Parent-stage
+routing owns subsequent failure, review, retry, and commit decisions.
 
 ## Lifecycle Specification
 
@@ -127,7 +154,40 @@ A method adapter owns two callbacks:
   register them, record domain ledger facts, and return the next stage delta.
 
 Adapters do not invoke a Runner, publish command logs, persist canonical
-execution evidence, or create stage-local lifecycle factories.
+execution evidence, create stage-local lifecycle factories, or write method
+dispositions directly. Freeze, run, collect, and the shared no-attempt planning
+adapter leave a validated typed cursor/evidence boundary from which the
+registered outcome policy returns a `MethodOutcome`. That outcome binds the
+exact workflow occurrence, stage, canonical method name, disposition, bounded
+reason, and immutable evidence refs. It is an internal settlement value, not a
+new `TopLevelState` or `workflow_step_outcome` field.
+
+The shared method-settlement node is the sole disposition writer:
+
+- a final pre-attempt prerequisite failure returns `not_started`;
+- a selected executable method deliberately not invoked returns `skipped`;
+- a selected planner-only pass-through returns `completed` after its no-process
+  contract is applied;
+- successful collection of all required work returns `completed`;
+- an execution or collection failure returns `failed` only after the method's
+  retry/review policy has no continuing path.
+
+Individual failed attempts during a permitted retry remain attempt facts and do
+not prematurely settle the method. Ordered batches settle only after the whole
+method collection boundary decides its final result. Exact replay returns the
+existing disposition; a different result conflicts. Planner/no-attempt paths
+use the same settlement node immediately after their explicit decision; stage
+modules supply only a pure outcome policy and never call the Ledger writer.
+Before writing, shared settlement rejects any method outside the frozen roster.
+Before a stage terminal, shared occurrence settlement requires every rostered
+method, and no other method, to have exactly one durable disposition. Human
+blocking and retry continuation do not run this terminal coverage check.
+
+The successful collect adapter also supplies the evidence required for
+`attempt_succeeded`; the run or collection failure boundary supplies
+`attempt_failed` evidence only when an attempt actually existed. Attempt facts
+remain causally before the final method disposition. Parent settlement alone
+owns the occurrence terminal.
 
 ## Run Boundary
 
@@ -192,7 +252,18 @@ delta. Malformed typed cursors or evidence bodies may raise an ordinary
 are not converted into normal workflow outcomes.
 
 Collect adapters decide which biological outputs are required or optional and
-own attempt-succeeded facts after successful materialization.
+own attempt-succeeded facts after successful materialization. An expected
+collection failure may record `attempt_failed` if the attempt has not already
+terminated and returns a failed stage cursor. It must not write `stage_failed`;
+the parent consumes the stage's explicit failed `workflow_step_outcome`.
+
+The Ledger append boundary permits exactly one of `attempt_succeeded` and
+`attempt_failed` per immutable attempt ID under its exclusive append lock.
+Checking for an earlier success in application code is only an optimization;
+it is not the invariant. Exact replay returns the existing terminal, while a
+different outcome, identity binding, summary, or ref set conflicts. Legacy
+conflicting rows are conservatively projected as failed with an integrity
+diagnostic, never by last-event overwrite.
 
 ## Conformance
 
@@ -216,6 +287,11 @@ these guarantees do not imply that every stage-local path projection is an
 7. ordered batches checkpoint after each attempt and retain a completed prefix;
 8. production code has no method-specific duplicate cursor key, wrapper
    artifact, or stage-local lifecycle implementation.
+9. method disposition, attempt terminal, and workflow-occurrence outcome remain
+   distinct facts; no cursor status, attempt result, route marker, or cursor
+   advance synthesizes another domain's terminal.
+10. the frozen occurrence roster and durable disposition set are equal before
+    any occurrence terminal is appended.
 
 Parameterized retries use a new attempt ID and an attempt-specific work/output
 directory. A completed predecessor remains immutable; a later attempt cannot

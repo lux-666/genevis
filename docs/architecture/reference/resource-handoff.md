@@ -1,6 +1,7 @@
 # Resource Handoff Contract
 
-> **Status:** implemented.  
+> **Status:** accepted; remaining cross-cutting gaps are listed in
+> [Architecture conformance](conformance.md).
 > **Read when:** a stage publishes or consumes a materialized biological file.  
 > **Comes from:** [Data and storage](../topics/data-and-storage.md) and stage
 > commit boundaries.  
@@ -8,7 +9,8 @@
 > **Related contracts:** [Stage contracts](stage-contracts.md),
 > [Run data](data-contract.md).  
 > **Code evidence:** `app/stages/resource_specs.py`,
-> `app/stages/resource_resolution.py`, `app/schemas/resource_ref.py`.
+> `app/stages/resource_resolution.py`, `app/schemas/resource_ref.py`,
+> `app/control/occurrence_settlement.py`.
 
 This specification owns cross-stage file handoff. Biological inputs, outputs,
 and review triggers remain in [`stage-contracts.md`](stage-contracts.md);
@@ -129,6 +131,64 @@ Candidate bundles, review decisions, execution evidence, reports, and metrics
 remain artifacts. They may be referenced from resource metadata but do not form
 a second cross-stage file table.
 
+## Immutable assembly delivery
+
+`resource_refs["assembly"]` is a replaceable current-routing projection. Its
+`source_stage` and `workflow_step_id` labels are necessary for dispatch, but
+they are not historical proof that the named occurrence delivered the
+candidate relation. Assembly delivery history is owned by one immutable,
+occurrence-bound `resource_delivered` Ledger fact written by the shared
+settlement boundary before that occurrence's `stage_completed` terminal.
+
+The current v1 delivery schema is deliberately assembly-specific:
+
+```json
+{
+  "event_type": "resource_delivered",
+  "stage": "assembly_dedup",
+  "workflow_step_id": "step-004-assembly_dedup",
+  "subject_id": "step-004-assembly_dedup:assembly",
+  "summary": {
+    "resource_type": "assembly",
+    "delivery_mode": "reused"
+  },
+  "refs": [
+    {"role": "candidate_bundle_ref", "artifact_id": "..."},
+    {"role": "primary_output_ref", "artifact_id": "..."}
+  ]
+}
+```
+
+`delivery_mode="materialized"` means the occurrence created a new executed
+candidate relation. `delivery_mode="reused"` means it deliberately delivered
+an older verified candidate unchanged. Reuse is not absence of a delivery:
+Dedup pass-through, retained Hi-C/T2T results, and an unchanged Review decision
+each own a new delivery fact that points to the older candidate and primary
+output. The physical producer recorded in those artifact-index rows may
+therefore precede the delivery occurrence.
+
+One completed occurrence may deliver `assembly` at most once. Exact replay of
+the same event is idempotent; changing its stage/step binding, delivery mode,
+candidate ref, or primary ref is a Ledger conflict. A completed occurrence that
+claims an assembly handoff must have both this fact and a current
+`ResourceRef` whose paths and metadata project the same primary output and
+candidate. A delivery event without the matching completed occurrence is an
+incomplete crash prefix and is not consumable.
+
+Assembly Review validates all of the following before candidate loading:
+
+1. its frozen `review_target.producer_step_id` names the expected earlier
+   producer occurrence;
+2. that occurrence has the canonical `stage_completed` terminal;
+3. exactly one matching `resource_delivered` fact exists for `assembly`;
+4. the current `ResourceRef` stage/step labels, candidate ref, primary ref, and
+   path equal that immutable delivery; and
+5. the executed candidate bundle and its embedded primary output verify.
+
+Relabeling a central `ResourceRef` can no longer make an unrelated historical
+candidate satisfy Review. There is no pre-release fallback that infers a
+delivery fact from a mutable checkpoint or upgrades an old session.
+
 ## Current assembly candidate lineage
 
 Every central `assembly` resource that represents an executed candidate,
@@ -148,6 +208,27 @@ those producers and has no Hi-C- or T2T-specific fallback path. An unchanged
 Hi-C/T2T decision preserves the current paths and candidate relation while
 republishing the central ResourceRef under the active producer occurrence, so
 a later Review can verify the exact delivery handoff.
+
+## Read QC handoff lineage
+
+The accepted Read QC lineage never creates a second read-resource protocol.
+An unfiltered completion republishes or retains `long_reads` with the exact ordered asset IDs,
+asset-registry ref, member platforms/formats, and paths that were measured. A
+successful length filter publishes one immutable read-set manifest that maps
+each derived member to its source asset ID, source input ref, filter method, and
+approved parameters. The central `long_reads` `ResourceRef` then contains the
+ordered filtered paths plus that manifest ref and source-member identities.
+
+Once Read QC publishes a central `long_reads` ref, downstream resolution must
+not fall back to an older raw asset set. A filter that retains zero reads still
+publishes its method evidence and zero-valued aggregate statistics, but it does
+not replace the central resource with empty files; the Read QC occurrence fails
+its delivery contract with `no_reads_retained`.
+
+FOFNs, per-file statistics, and summary reports are artifacts or adapter-local
+files. They are not peer handoff mechanisms. Exact measurement provenance is
+owned by the Read QC section of
+[`stage-contracts.md`](stage-contracts.md).
 
 ## Sequencing-member identity
 

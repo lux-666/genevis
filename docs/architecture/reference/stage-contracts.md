@@ -1,7 +1,7 @@
 # Stage Contract Reference
 
-> **Status:** implemented for current stage-local contracts; the accepted
-> GapCloser and Base Polish handoffs remain planned placeholder capabilities.
+> **Status:** accepted and implemented for current stages. GapCloser and Base
+> Polish remain planned placeholder capabilities.
 > **Read when:** exact biological stage inputs, outputs, methods, or review
 > triggers matter.  
 > **Comes from:** [Runtime orchestration](../topics/runtime-orchestration.md).  
@@ -27,11 +27,26 @@ enter -> validate_inputs -> plan_methods -> method_subgraph
 ```
 
 - validation reads compact state and verified refs only;
-- planning selects only methods registered for that stage;
+- the frozen occurrence roster contains only methods registered for that stage;
+- planning resolves applicability and parameters without rewriting that roster;
 - method execution uses the shared freeze/run/collect lifecycle;
 - collection publishes artifacts and compact evidence refs;
 - review may open a human gate;
-- commit updates the central logical resource table and advances routing.
+- commit publishes the central logical-resource projection where applicable
+  and returns the occurrence handoff to the parent; it does not advance the
+  frozen workflow by implication.
+
+Only when an occurrence settles does its stage return an explicit
+`workflow_step_outcome` bound to the active frozen occurrence. `completed`
+means the stage delivered its contract; `skipped` is permitted only for a
+stage-specific no-delivery path defined below; `failed` means the contract was
+not delivered. A subgraph stop is not necessarily settlement: `blocked_human`
+is a recoverable pause on the still-active occurrence and returns no occurrence
+outcome. A method disposition, attempt result, private cursor status, or route
+marker never implies an occurrence outcome. The shared occurrence-settlement
+boundary, invoked by both the parent controller and terminal recovery, validates
+the explicit handoff, proves exact coverage of the frozen method roster,
+records any immutable delivery, and writes the single occurrence terminal.
 
 The frozen occurrence sequence decides which stage subgraphs are reached.  It
 does not prove that their biological inputs exist: every reached stage resolves
@@ -73,8 +88,11 @@ Inputs:
 - manifest files and directories;
 - optional sample, platform, assembly-level, and genome-size metadata.
 
-Current behavior:
+Accepted behavior:
 
+- receives a frozen manifest whose declared biological members have already
+  passed the regular-file and logical/decompressed non-empty checks owned by
+  the [run-data contract](data-contract.md#49-declared-input-content-is-logically-non-empty);
 - validates and records supplied assets;
 - publishes the asset registry;
 - initializes `long_reads`, `short_reads`, `hic_reads`, and `assembly` logical
@@ -114,6 +132,35 @@ A generated FOFN is an internal artifact; downstream stages consume the
 canonical path list. Missing or unusable inputs and execution failures terminate
 the stage rather than opening a Read QC review gate.
 
+The accepted Read QC fact package is closed and recomputable:
+
+- the selected ordered read members are frozen as input dependencies before
+  execution; registry members retain asset IDs plus the registry ref, while
+  run-owned members retain complete `ArtifactRef` values;
+- per-file SeqKit statistics are diagnostic and retain those exact ordered
+  source identities;
+- every run, including a one-file run, publishes one immutable
+  whole-read-set aggregate artifact computed directly from the original read
+  stream, not by merging or weighting rounded per-file rows;
+- the aggregate owns read count, total bases, minimum, maximum, arithmetic
+  mean length, whole-set N50, Q20-base percentage, Q30-base percentage, and
+  average quality. FASTA quality fields are explicitly not applicable rather
+  than zero. A FASTQ row with zero sequences and zero bases has canonical
+  `Q20=0.0`, `Q30=0.0`, and `AvgQual=0.0`, whether that SeqKit version renders
+  those cells as zero or empty. The SeqKit parser applies this rule identically
+  to per-file and whole-set rows before invariant comparison;
+- the aggregate depends directly on the frozen read members. It must not claim
+  that per-file statistics are its source. A summary that contains only
+  aggregate metrics depends on the aggregate; if it embeds per-file
+  diagnostics it lists both refs;
+- a filtered read resource publishes an immutable read-set manifest relating
+  every derived member to its source asset/ref and approved filter parameters.
+
+An approved filter that retains no reads may complete its executable method and
+publish a zero-valued aggregate. The Read QC occurrence nevertheless fails with
+`no_reads_retained` and does not replace `long_reads` with empty files. This is
+distinct from a declared empty input, which is rejected before freeze.
+
 ## 3. Genome Survey
 
 Purpose: estimate genome size and related k-mer metrics.
@@ -141,6 +188,14 @@ estimate exists when assembly requires one, the workflow fails with
 families. Jellyfish publishes typed k-mer `ArtifactRef` objects, which
 GenomeScope2 consumes it without a path-string conversion.
 
+Outcome rules are explicit. With usable reads and local execution enabled, both
+methods must complete before the stage completes. With usable reads but local
+execution disabled, an explicit operator genome size may produce a completed
+`provided_only` result while both methods are `skipped`; without that supplied
+value the stage fails. With no usable reads and an explicit size, the stage uses
+its defined `stage_skipped` path. A durable `GenomeSurveyResult.status` must
+agree with the occurrence outcome and is never left `planned` after settlement.
+
 ## 4. Assembly
 
 Purpose: build an auditable assembly candidate from long reads.
@@ -167,6 +222,11 @@ omitted values or route around approval through model output.
 
 Missing required parameters, incompatible read types, execution failure, and
 missing expected outputs are explicit failures rather than planning success.
+Local execution disabled is not successful Assembly planning: unless the
+active occurrence can deliver an already materialized, contract-valid candidate
+through a separately defined reuse path, Assembly fails with no delivery and
+its selected method is `skipped`. A planned candidate bundle alone never
+supports `stage_completed`.
 
 ## 5. Assembly Dedup
 
@@ -187,6 +247,21 @@ purged-sequence evidence. It preserves the raw candidate so Assembly Review can
 compare or retain it. Missing materialized inputs are represented explicitly;
 the stage does not synthesize a successful purge.
 
+The authoritative outcome table is:
+
+| Input candidate | Local purge_dups | Occurrence outcome | Stage delivery | `purge_dups` disposition | Assembly delivery |
+|---|---|---|---|---|---|
+| materialized | succeeds | `completed` | `executed` | `completed` | `materialized`, new purged candidate |
+| materialized | not authorized | `completed` | `pass_through` | `skipped` with `local_execution_not_enabled` | `reused`, original candidate |
+| absent or non-materialized | not applicable | `failed` | none | `not_started` with `no_materialized_assembly` | none |
+| materialized | starts but fails or collection fails | `failed` | none | `failed` with cause | none |
+
+Pass-through is deliberately not `stage_skipped`: the Dedup occurrence delivers
+a verified assembly relation, even though the method does not run. Conversely,
+missing input is not a failed purge attempt because no attempt started. The
+checkpoint's `purge_dups_status` is only a projection of the occurrence-bound
+method-disposition fact.
+
 ## 6. Assembly Review
 
 Purpose: evaluate assembly candidates and adopt the assembly used downstream.
@@ -204,9 +279,11 @@ current operation; it must not bypass the resource contract with a bare
 `fasta_path`. The same contract is reusable after any occurrence that owns the
 central assembly handoff, including Assembly, Dedup, Hi-C, T2T, or a previous
 Review action, whether or not the selected bytes changed. Before it loads
-candidates, it verifies that the central assembly
-`ResourceRef.source_stage` and `.workflow_step_id` match its frozen
-`review_target`; a stage name alone cannot satisfy the handoff. A repeated
+candidates, it verifies the producer's canonical completed terminal and unique
+immutable `resource_delivered` fact, then requires the central `ResourceRef`
+candidate, primary output, path, source stage, and step to match that fact and
+its frozen `review_target`. Mutable source labels or a stage name alone cannot
+satisfy the handoff. A repeated
 occurrence starts with a fresh copy of the same immutable stage-scoped seed,
 not occurrence-specific method configuration, and remains separate by
 step-scoped artifacts, attempts, review records, and Ledger facts.
@@ -240,14 +317,19 @@ Registered method:
 - `hic_scaffolding.candidate.autohic`.
 
 This stage runs only when its frozen workflow occurrence is reached. Missing
-assembly, paired Hi-C reads, or runtime configuration then produces a terminal
-`blocked_missing_requirements` outcome. AutoHiC owns the Juicer/3D-DNA and
-model-assisted correction pipeline. Its adjustable L2 surface includes the
-restriction enzyme, edit rounds, correction switches, and error thresholds.
-Every shape-valid sparse recommendation requires parameter approval; successful
-execution then opens an adoption gate. The operator may adopt the chromosome
-assembly, retain the previous assembly, or request a fresh parameter attempt.
-Execution-failure retries require explicit operator policy and retry budget.
+assembly, paired Hi-C reads, or runtime configuration sets the private Hi-C
+cursor to `blocked_missing_requirements`, but the explicit occurrence outcome is
+`failed`; parent settlement therefore reaches `failed_terminal` without an
+`active_interrupt`. The cursor label is diagnostic and is not a resumable or
+terminal outcome. AutoHiC owns the Juicer/3D-DNA and model-assisted correction
+pipeline. Its adjustable L2 surface includes the restriction enzyme, edit
+rounds, correction switches, and error thresholds. Every shape-valid sparse
+recommendation requires parameter approval; successful execution then opens an
+adoption gate. Those immutable parameter-approval and adoption gates, and only
+those gates, may pause the active occurrence as `blocked_human`. The operator
+may adopt the chromosome assembly, retain the previous assembly, or request a
+fresh parameter attempt. Execution-failure retries require explicit operator
+policy and retry budget.
 
 An accepted scaffolding adoption verifies the current assembly candidate and
 the adopted primary artifact, then publishes a derived executed candidate in

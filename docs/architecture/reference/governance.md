@@ -9,8 +9,8 @@
 > **Feeds into:** every architecture and implementation change.  
 > **Related contracts:** [Descriptors](descriptors.md),
 > [Run data](data-contract.md), [Stage contracts](stage-contracts.md).  
-> **Code evidence:** `CLAUDE.md`, `pyproject.toml`, and the tests relevant to the
-> changed boundary.
+> **Code evidence:** `pyproject.toml`, the implementation modules named by each
+> contract, and the tests relevant to the changed boundary.
 
 This document describes how a coordinating agent should steer Gene Agent work.
 The coordinator is not expected to write every method implementation. The main
@@ -21,7 +21,7 @@ handoff clarity.
 
 The coordinator owns these responsibilities:
 
-- Keep `CLAUDE.md` as the engineering behavior source.
+- Apply direct user instructions and the repository instructions in `AGENTS.md`.
 - Keep architecture documents current before large implementation work.
 - Split large work into testable slices with explicit exit criteria.
 - Make sure state, ledger, artifact, runner, review, and descriptor boundaries
@@ -52,25 +52,29 @@ rationale, and coordination procedure into one linear ranking:
 - Code and tests are the evidence for what is implemented now. They do not
   silently amend an accepted design; a mismatch is recorded as conformance
   debt.
-- `CLAUDE.md` and this document govern engineering/coordination procedure.
+- Repository instructions in `AGENTS.md` govern repository-local engineering
+  procedure. They are not architecture contract owners and cannot silently
+  amend accepted product behavior.
 - Git history retains superseded biological rationale; it is not a runtime
   storage or software-state fact.
 - Git history retains superseded implementation and design records; the working
   tree keeps current contracts, accepted planned nodes, explicit conformance
   debt, and operational documentation.
-- `docs/superpowers/specs/` and `docs/superpowers/plans/` are legacy,
-  non-authoritative process material scheduled for removal. Do not add new
-  design there or cite it as a contract owner; migrate any surviving rule into
-  the appropriate `docs/architecture/` topic or reference owner.
+- Legacy `docs/superpowers/specs/` and `docs/superpowers/plans/` process
+  material has been removed from the working tree. Do not recreate or cite
+  those paths as contract owners; Git history retains obsolete rationale, and
+  every surviving rule belongs in its `docs/architecture/` owner.
 
 ## Change Control
 
 For each non-trivial change:
 
-1. State the assumption and success criteria.
-2. Add or update a focused test before behavior code when applicable.
-3. Keep edits scoped to the approved task.
-4. Update the relevant document in the same change.
+1. Identify the single architecture owner, assumptions, and success criteria.
+2. For design-affecting work, update and settle that owner before behavior code;
+   when the user requires design confirmation, implementation starts only after
+   that confirmation.
+3. Add or update a focused test before behavior code when applicable.
+4. Keep edits scoped to the approved task.
 5. Run focused verification for the affected boundary and the full regression
    suite when behavior changes.
 
@@ -103,6 +107,7 @@ green and enforced, record that difference in
 - session and thread IDs
 - current stage
 - immutable `workflow_steps` plus the active occurrence index
+- the latest compact, replaceable `workflow_step_outcome` settlement handoff
 - input manifest reference
 - asset registry reference
 - stage plan reference
@@ -126,6 +131,9 @@ Ledger stores business execution facts:
 - error summary
 - immutable artifact refs needed to prove a transition
 - review event
+- one terminal per workflow occurrence and per immutable attempt
+- occurrence-bound method dispositions
+- immutable assembly-delivery facts referencing exact candidate/output artifacts
 
 Ledger is append-oriented. Do not treat it as a mutable cache.
 
