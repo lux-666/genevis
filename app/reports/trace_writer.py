@@ -13,7 +13,11 @@ from app.reports.review_report import _pending_review_requests
 from app.review.records import counts_by_origin
 from app.storage.artifacts import read_artifact_records
 from app.storage.frozen_inputs import validate_frozen_inputs
-from app.storage.ledger import Ledger
+from app.storage.ledger import (
+    Ledger,
+    project_attempt_terminal_events,
+    project_stage_terminal_events,
+)
 from app.storage.paths import SessionPaths
 
 # Stable stage-status vocabulary. Keep this small and durable; the trace
@@ -52,6 +56,7 @@ _ARTIFACT_PROVING_EVENT_TYPES = frozenset(
         "review_decision",
         "review_applied",
         "registered_assembly_candidate_bound",
+        "resource_delivered",
         "stage_completed",
     }
 )
@@ -112,6 +117,12 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
         summary,
     )
     route = _route_records(authoritative_events)
+    # Attempt outcomes, method dispositions, and failure rows are all business
+    # facts.  They must share the session-terminal boundary: a retry appended
+    # after ``session_terminal`` is diagnostic history, not a new method result.
+    _canonical_attempts, attempt_terminal_integrity = project_attempt_terminal_events(
+        authoritative_events
+    )
     observed_path = [
         record["stage"] for record in route if record["event_type"] == "stage_entered"
     ]
@@ -151,6 +162,8 @@ def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
             post_terminal_events,
             summary.get("terminal_integrity"),
         ),
+        "stage_terminal_integrity": summary.get("stage_terminal_integrity") or [],
+        "attempt_terminal_integrity": attempt_terminal_integrity,
         "artifact_count": len(artifacts),
         "gaps": gaps,
     }
@@ -347,7 +360,7 @@ def _build_stage_records(
     artifacts_by_step = _artifact_refs_by_workflow_step(artifacts)
     candidate_methods_by_step = _candidate_methods_by_workflow_step(artifacts)
     reviews_by_step = _review_events_by_workflow_step(events, review_occurrences)
-    lifecycle_by_step = _stage_lifecycle_by_workflow_step(events)
+    lifecycle_by_occurrence = _stage_lifecycle_by_workflow_step(events)
     blocked_step_id = _blocked_workflow_step_id(summary, events)
     failed_step_id = _failed_workflow_step_id(events, summary)
 
@@ -359,7 +372,7 @@ def _build_stage_records(
         stage_artifacts = artifacts_by_step.get(step_id, [])
         reviews = reviews_by_step.get(step_id, [])
         candidate_methods = candidate_methods_by_step.get(step_id, [])
-        lifecycle = lifecycle_by_step.get(step_id)
+        lifecycle = lifecycle_by_occurrence.get((step_id, stage))
         status = _stage_status(
             step_id,
             methods=methods,
@@ -436,6 +449,19 @@ def _workflow_steps_for_trace(
 def _methods_by_workflow_step(
     events: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
+    """Project attempt outcome and method disposition without conflating them.
+
+    An occurrence-level delivery can succeed when its selected method was
+    deliberately not run (for example Assembly Dedup pass-through).  Attempt
+    terminals therefore remain attempt facts, while
+    ``method_disposition_recorded`` is attached as an orthogonal immutable
+    method fact.  The Ledger rejects conflicting typed writes; this projector
+    additionally remains deterministic for legacy/corrupt duplicate rows by
+    selecting the earliest sequenced disposition rather than letting the last
+    row overwrite the result.
+    """
+
+    canonical_terminals, _diagnostics = project_attempt_terminal_events(events)
     attempts: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for event in events:
@@ -462,22 +488,127 @@ def _methods_by_workflow_step(
             attempts[attempt_id] = record
             order.append(attempt_id)
         if event_type == "attempt_started":
-            record["started_at"] = event.get("timestamp")
-        elif event_type == "attempt_succeeded":
+            # A duplicate legacy start must not overwrite the first immutable
+            # attempt observation merely because it was appended later.
+            if record["started_at"] is None:
+                record["started_at"] = event.get("timestamp")
+
+    # Canonical terminal selection is centralized in the Ledger projector.  Do
+    # not mutate the outcome while scanning raw rows; that used to make the
+    # final event in the file decide the reported method result.
+    for attempt_id in order:
+        record = attempts[attempt_id]
+        terminal = canonical_terminals.get(attempt_id)
+        if terminal is None:
+            continue
+        if terminal.get("event_type") == "attempt_succeeded":
             record["outcome"] = "succeeded"
-            record["finished_at"] = event.get("timestamp")
-        elif event_type == "attempt_failed":
+            record["finished_at"] = terminal.get("timestamp")
+        elif terminal.get("event_type") == "attempt_failed":
             record["outcome"] = "failed"
-            record["finished_at"] = event.get("timestamp")
-            record["error"] = _first_error_line(event.get("error"))
-            record["return_code"] = event.get("return_code")
+            record["finished_at"] = terminal.get("timestamp")
+            record["error"] = _first_error_line(terminal.get("error"))
+            record["return_code"] = terminal.get("return_code")
+
+    dispositions: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") != "method_disposition_recorded":
+            continue
+        step_id = event.get("workflow_step_id")
+        stage = event.get("stage")
+        method_name = event.get("method_name")
+        if (
+            not isinstance(step_id, str)
+            or not step_id
+            or not isinstance(stage, str)
+            or not stage
+            or not isinstance(method_name, str)
+            or not method_name
+        ):
+            continue
+        key = (step_id, stage, method_name)
+        # Ledger sequence is the immutable causal order.  Preserve the first
+        # observed row for legacy duplicate/conflict tolerance.
+        if key not in dispositions:
+            dispositions[key] = event
+
+    attempts_by_method: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for attempt_id in order:
+        record = attempts[attempt_id]
+        step_id = record.get("workflow_step_id")
+        stage = record.get("stage")
+        method_name = record.get("method_name")
+        if (
+            isinstance(step_id, str)
+            and step_id
+            and isinstance(stage, str)
+            and stage
+            and isinstance(method_name, str)
+            and method_name
+        ):
+            attempts_by_method.setdefault((step_id, stage, method_name), []).append(
+                record
+            )
+
+    disposition_only_records: list[tuple[int, dict[str, Any]]] = []
+    for key, disposition_event in dispositions.items():
+        disposition = disposition_event.get("disposition")
+        if not isinstance(disposition, str) or not disposition:
+            continue
+        disposition_fields = {
+            "disposition": disposition,
+            "disposition_reason": disposition_event.get("reason"),
+            "disposition_recorded_at": disposition_event.get("timestamp"),
+        }
+        records = attempts_by_method.get(key)
+        if records:
+            for record in records:
+                record.update(disposition_fields)
+            continue
+        step_id, stage, method_name = key
+        disposition_only_records.append(
+            (
+                _event_sequence(disposition_event) or 0,
+                {
+                    "attempt_id": None,
+                    "workflow_step_id": step_id,
+                    "stage": stage,
+                    "method_name": method_name,
+                    # No attempt occurred.  Keep that fact distinct from a
+                    # skipped/completed disposition rather than fabricating an
+                    # attempt outcome.
+                    "outcome": "not_started",
+                    "started_at": None,
+                    "finished_at": None,
+                    "error": None,
+                    "return_code": None,
+                    **disposition_fields,
+                },
+            )
+        )
+
     by_step: dict[str, list[dict[str, Any]]] = {}
     for attempt_id in order:
         record = attempts[attempt_id]
         step_id = record.get("workflow_step_id")
         if isinstance(step_id, str) and step_id:
             by_step.setdefault(step_id, []).append(record)
+    for _sequence, record in sorted(disposition_only_records, key=lambda item: item[0]):
+        by_step.setdefault(record["workflow_step_id"], []).append(record)
     return by_step
+
+
+def _is_canonical_attempt_terminal(
+    event: dict[str, Any],
+    canonical_terminals: dict[str, dict[str, Any]],
+) -> bool:
+    """Match terminals by immutable event ID, never event-order overwrite."""
+
+    attempt_id = event.get("attempt_id") or event.get("subject_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        return False
+    canonical = canonical_terminals.get(attempt_id)
+    return canonical is not None and canonical.get("event_id") == event.get("event_id")
 
 
 def _artifact_refs_by_workflow_step(
@@ -613,27 +744,33 @@ def _review_events_by_workflow_step(
 
 def _stage_lifecycle_by_workflow_step(
     events: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    by_step: dict[str, dict[str, Any]] = {}
+) -> dict[tuple[str, str], dict[str, Any]]:
+    by_occurrence: dict[tuple[str, str], dict[str, Any]] = {}
     for event in events:
-        if event.get("event_type") not in {
-            "stage_entered",
-            "stage_skipped",
-            "stage_completed",
-        }:
+        if event.get("event_type") != "stage_entered":
             continue
         step_id = event.get("workflow_step_id")
-        if not isinstance(step_id, str) or not step_id:
+        stage = event.get("stage")
+        if not isinstance(step_id, str) or not step_id or not isinstance(stage, str):
             continue
-        entry = by_step.setdefault(step_id, {})
-        if event["event_type"] == "stage_entered":
-            entry["entered_at"] = event.get("timestamp")
-        elif event["event_type"] == "stage_skipped":
+        by_occurrence.setdefault((step_id, stage), {})["entered_at"] = event.get(
+            "timestamp"
+        )
+
+    terminals, _diagnostics = project_stage_terminal_events(events)
+    for occurrence, event in terminals.items():
+        entry = by_occurrence.setdefault(occurrence, {})
+        event_type = event.get("event_type")
+        entry["terminal_event_type"] = event_type
+        if event_type == "stage_failed":
+            entry["failed_at"] = event.get("timestamp")
+            entry["error"] = event.get("error")
+        elif event_type == "stage_skipped":
             entry["skipped_at"] = event.get("timestamp")
             entry["skip_reason"] = event.get("reason")
-        else:
+        elif event_type == "stage_completed":
             entry["completed_at"] = event.get("timestamp")
-    return by_step
+    return by_occurrence
 
 
 def _stage_status(
@@ -651,12 +788,14 @@ def _stage_status(
         return STAGE_STATUS_FAILED
     if workflow_step_id == blocked_step_id:
         return STAGE_STATUS_BLOCKED_HUMAN
+    if lifecycle and lifecycle.get("terminal_event_type") == "stage_failed":
+        return STAGE_STATUS_FAILED
+    if lifecycle and lifecycle.get("terminal_event_type") == "stage_skipped":
+        return STAGE_STATUS_SKIPPED
     if any(method["outcome"] == "succeeded" for method in methods):
         return STAGE_STATUS_EXECUTED
     if any(method["outcome"] == "failed" for method in methods):
         return STAGE_STATUS_FAILED
-    if lifecycle and lifecycle.get("skipped_at"):
-        return STAGE_STATUS_SKIPPED
     if lifecycle and lifecycle.get("completed_at"):
         return STAGE_STATUS_COMPLETED
     if any(review.get("status") == "applied" for review in reviews):
@@ -708,7 +847,7 @@ def _stage_timing(
     if applied:
         timing["review_applied_at"] = max(applied)
     if lifecycle:
-        for key in ("entered_at", "skipped_at", "completed_at"):
+        for key in ("entered_at", "failed_at", "skipped_at", "completed_at"):
             if lifecycle.get(key):
                 timing[key] = lifecycle[key]
     return timing
@@ -756,8 +895,17 @@ def _open_first_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any
 
 def _failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
+    canonical_attempts, _diagnostics = project_attempt_terminal_events(events)
+    canonical_failures = {
+        event.get("event_id")
+        for event in canonical_attempts.values()
+        if event.get("event_type") == "attempt_failed"
+    }
     for event in events:
-        if event.get("event_type") == "attempt_failed":
+        if (
+            event.get("event_type") == "attempt_failed"
+            and event.get("event_id") in canonical_failures
+        ):
             failures.append(
                 {
                     "workflow_step_id": event.get("workflow_step_id"),
@@ -853,6 +1001,9 @@ def _failed_workflow_step_id(
 def _final_or_current_stage(
     stages: list[dict[str, Any]], summary: dict[str, Any]
 ) -> dict[str, Any]:
+    terminal = summary.get("latest_terminal_event") or {}
+    if terminal.get("stage"):
+        return {"stage": terminal["stage"], "source": "ledger"}
     if summary.get("current_stage"):
         return {"stage": summary["current_stage"], "source": "ledger"}
     last_active = None
@@ -1051,6 +1202,42 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
     )
     lines.append("")
 
+    stage_terminal_integrity = trace.get("stage_terminal_integrity") or []
+    if stage_terminal_integrity:
+        lines.append("## Stage Terminal Integrity Warning")
+        lines.append("")
+        lines.append(
+            "> **Progress is a degraded projection, not authoritative.** "
+            "One or more workflow occurrences have conflicting terminal "
+            "history."
+        )
+        for diagnostic in stage_terminal_integrity:
+            lines.append(
+                "- "
+                f"{diagnostic.get('workflow_step_id')} / {diagnostic.get('stage')}: "
+                f"{diagnostic.get('kind')} "
+                f"(selected={diagnostic.get('selected_event_type')}, "
+                f"count={diagnostic.get('terminal_count')})"
+            )
+        lines.append("")
+
+    attempt_terminal_integrity = trace.get("attempt_terminal_integrity") or []
+    if attempt_terminal_integrity:
+        lines.append("## Attempt Terminal Integrity Warning")
+        lines.append("")
+        lines.append(
+            "> **Method outcomes are a conservative projection.** "
+            "Conflicting attempt history is projected as failed."
+        )
+        for diagnostic in attempt_terminal_integrity:
+            lines.append(
+                "- "
+                f"{diagnostic.get('attempt_id')}: {diagnostic.get('kind')} "
+                f"(selected={diagnostic.get('selected_event_type')}, "
+                f"count={diagnostic.get('terminal_count')})"
+            )
+        lines.append("")
+
     lines.append("## Stages")
     lines.append("")
     for stage in trace.get("stages", []):
@@ -1072,6 +1259,10 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
             )
             if method.get("error"):
                 line += f" — {method['error']}"
+            if method.get("disposition"):
+                line += f" [disposition={method['disposition']}]"
+            if method.get("disposition_reason"):
+                line += f" — {method['disposition_reason']}"
             lines.append(line)
         for candidate in stage.get("candidate_methods", []):
             enabled = candidate.get("execution_enabled")

@@ -8,7 +8,7 @@ to that lifecycle.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
+from app.control.workflow_plan import current_workflow_step
 from app.domains.assembly.constants import (
     FLYE_METHOD,
     HIFIASM_METHOD,
@@ -29,6 +30,7 @@ from app.execution.input_integrity import (
     asset_input_dependencies,
 )
 from app.execution.lifecycle import MethodExecutionLifecycle, freeze_method_attempts
+from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
@@ -91,6 +93,111 @@ _ASSEMBLY_METHODS = frozenset(
         HIFIASM_ONT_METHOD,
     }
 )
+
+
+def assembly_primary_method_outcome_policy(
+    state: TopLevelState,
+) -> MethodOutcome | None:
+    """Return completion only after Assembly collection published its bundle.
+
+    An execution failure intentionally returns ``None`` here.  The parent
+    retry gate decides whether it continues with new parameters; only its
+    final terminal path may record a failed disposition.
+    """
+
+    output = assembly_stage_output(state)
+    primary_method = _rostered_primary_method(state, output)
+    if primary_method is None:
+        return None
+    bundle_ref = output.get("executed_candidate_bundle_ref")
+    if bundle_ref is None:
+        return None
+    try:
+        verified = load_executed_candidate_bundle(
+            absolute_data_dir(state),
+            state["session_id"],
+            ArtifactRef.model_validate(bundle_ref),
+            expected_method_name=primary_method,
+        )
+    except (OSError, TypeError, ValueError):
+        if output.get("status") != "draft_ready":
+            # A later delivery/commit validation failure must never rewrite a
+            # completed method fact as failed. The collect path remains strict.
+            return None
+        raise
+    return MethodOutcome(
+        method_name=primary_method,
+        disposition="completed",
+        refs=(verified.ref, verified.primary_output_ref),
+    )
+
+
+def assembly_terminal_method_outcome_policy(
+    state: TopLevelState,
+) -> MethodOutcome | None:
+    """Return the final Assembly fact after routing has stopped retrying."""
+
+    completed = assembly_primary_method_outcome_policy(state)
+    if completed is not None:
+        return completed
+    output = assembly_stage_output(state)
+    primary_method = _rostered_primary_method(state, output)
+    if primary_method is None:
+        return None
+    reason = str(output.get("reason") or "assembly failed")
+    attempts = [
+        attempt
+        for attempt in output.get("parameter_attempts") or []
+        if isinstance(attempt, dict) and attempt.get("method_id") == primary_method
+    ]
+    if any(
+        attempt.get("status")
+        in {"execution_failed", "executed", "review_failed", "reviewed"}
+        for attempt in attempts
+    ):
+        return MethodOutcome(
+            method_name=primary_method,
+            disposition="failed",
+            reason=reason,
+        )
+    if output.get("execution_mode") != "local":
+        return MethodOutcome(
+            method_name=primary_method,
+            disposition="skipped",
+            reason="local_execution_not_enabled",
+        )
+    return MethodOutcome(
+        method_name=primary_method,
+        disposition="not_started",
+        reason=reason,
+    )
+
+
+def _rostered_primary_method(
+    state: TopLevelState,
+    output: Mapping[str, object],
+) -> str | None:
+    """Return the sole frozen Assembly method and reject cursor drift."""
+
+    step = current_workflow_step(state)
+    if step is None or step["stage"] != "assembly":
+        raise ValueError("Assembly method outcome has no active Assembly occurrence")
+    if "selected_method_names" not in step:
+        legacy_primary = output.get("primary_method")
+        return (
+            legacy_primary
+            if isinstance(legacy_primary, str) and legacy_primary in _ASSEMBLY_METHODS
+            else None
+        )
+    roster = list(step["selected_method_names"])
+    if not roster:
+        return None
+    if len(roster) != 1 or roster[0] not in _ASSEMBLY_METHODS:
+        raise ValueError("Assembly occurrence has an invalid selected method roster")
+    primary_method = output.get("primary_method")
+    if primary_method is not None and primary_method != roster[0]:
+        raise ValueError("Assembly cursor primary method conflicts with frozen roster")
+    return roster[0]
 
 
 @dataclass(frozen=True, slots=True)

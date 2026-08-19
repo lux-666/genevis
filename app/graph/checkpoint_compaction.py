@@ -169,12 +169,10 @@ def _verify_durable_terminal_projection(
         raise TerminalCheckpointCompactionError(
             "ledger cannot reconstruct the terminal supervision state"
         )
-    durable_current_stage = summary.get("current_stage")
-    if (
-        state.get("current_stage") == "done"
-        and terminal_event.get("stage") == "done"
-    ):
-        durable_current_stage = "done"
+    # Workflow progress intentionally has no "current" occurrence after a
+    # session terminal.  The canonical session-terminal row, not the progress
+    # reducer, owns the checkpoint's terminal frontier label.
+    durable_current_stage = terminal_event.get("stage")
     if durable_current_stage != state.get("current_stage"):
         raise TerminalCheckpointCompactionError(
             "ledger cannot reconstruct the terminal current stage"

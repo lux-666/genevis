@@ -39,6 +39,7 @@ def test_top_level_state_marks_runtime_invariants_as_required() -> None:
         "workflow_steps",
         "workflow_step_index",
         "entered_workflow_step_index",
+        "workflow_step_outcome",
         "input_manifest_ref",
         "stage_plan_ref",
         "stage_seeds",

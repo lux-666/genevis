@@ -41,6 +41,7 @@ from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
 from app.stages.assembly.nodes import infer_input_profile
+from app.stages.assembly.routing import route_after_commit
 from app.storage.artifacts import publish_artifact_record, resolve_artifact_ref
 from app.storage.assembly_candidates import (
     load_executed_candidate_bundle,
@@ -301,6 +302,31 @@ class AssemblyStageTests(unittest.TestCase):
         approval_update = gate.load_apply_application()(blocked, application)
         return {**blocked, **approval_update}
 
+    def _reject_parameter_gate(self, blocked: dict) -> dict:
+        request = self._parameter_approval_request(blocked).model_copy(
+            update={"decision": "reject_parameters"}
+        )
+        canonical = normalize_resume_review_request(blocked, request)
+        intent = persist_review_intent(
+            blocked,
+            canonical,
+            source="test_assembly_parameter_rejection",
+        )
+        gate = get_review_gate(canonical.stage, canonical.gate_id)
+        prepared = gate.load_prepare_application()(blocked, intent.intent)
+        application_ref = persist_review_application(
+            blocked,
+            intent=intent,
+            prepared=prepared,
+        )
+        application = load_verified_review_application(
+            blocked["data_dir"],
+            application_ref,
+            expected_identity=ReviewApplicationIdentity.from_intent(intent.intent),
+        )
+        rejection_update = gate.load_apply_application()(blocked, application)
+        return {**blocked, **rejection_update}
+
     def _invoke_with_parameter_approvals(self, state: dict) -> dict:
         """Run assembly, approving only the shared parameter gate when reached."""
 
@@ -339,6 +365,80 @@ class AssemblyStageTests(unittest.TestCase):
         self.assertIn("freeze", hifiasm_nodes)
         self.assertIn("run", hifiasm_nodes)
         self.assertIn("collect", hifiasm_nodes)
+
+    def test_parameter_rejection_settles_explicit_roster_as_not_started(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_reads = Path(tmpdir) / "clean.fastq"
+            clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_long_reads:clean.fastq",
+                        "asset_type": "clean_long_reads",
+                        "path": str(clean_reads),
+                        "platform": "cycloneseq",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["workflow_steps"][1]["selected_method_names"] = [
+                "assembly.candidate.flye"
+            ]
+            state["shared_parameters"] = {
+                "read_type": "cyclone",
+                "estimated_genome_size": 2_000_000,
+            }
+            state["stage_outputs"] = {
+                "assembly": {
+                    "assembly_route": "cyclone",
+                    "execution_mode": "local",
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.flye",
+                    ),
+                }
+            }
+
+            blocked = self._invoke(build_stage(), state)
+            rejected = self._reject_parameter_gate(blocked)
+
+            self.assertEqual(rejected["supervision_state"], "failed_terminal")
+            self.assertEqual(rejected["workflow_step_outcome"]["outcome"], "failed")
+            events = [
+                json.loads(line)
+                for line in (Path(rejected["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            dispositions = [
+                event
+                for event in events
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(
+                dispositions[0]["summary"],
+                {
+                    "method_name": "assembly.candidate.flye",
+                    "disposition": "not_started",
+                    "reason": "parameter_recommendation_rejected_by_human",
+                },
+            )
+            self.assertEqual(dispositions[0]["workflow_step_id"], "step-001-assembly")
+
+    def test_failed_commit_is_routed_through_method_settlement(self):
+        state = {
+            "current_stage": "assembly",
+            "workflow_step_outcome": {
+                "workflow_step_id": "step-001-assembly",
+                "stage": "assembly",
+                "outcome": "failed",
+                "reason": "candidate bundle is invalid",
+            },
+        }
+
+        self.assertEqual(route_after_commit(state), "settle")
 
     def test_method_subgraphs_do_not_import_parent_graph_modules(self):
         for module in [flye_graph, nextdenovo_graph, hifiasm_graph]:
@@ -606,13 +706,12 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(
-                result["current_stage"],
-                "assembly_dedup",
-                result.get("last_error") or result["stage_outputs"].get("assembly"),
-            )
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "failed")
+            self.assertIn("executed candidate bundle", result["last_error"])
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["status"], "planned")
+            self.assertEqual(assembly["status"], "failed")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
             self.assertNotIn("fallback_method", assembly)
             candidate = load_planned_candidate_bundle(
@@ -703,7 +802,9 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "failed")
             assembly = result["stage_outputs"]["assembly"]
             self.assertIn("planned_candidate_bundle_ref", assembly)
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
@@ -748,7 +849,9 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "failed")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
             self.assertNotIn("selected_methods", assembly)
@@ -782,7 +885,9 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "failed")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
             self.assertEqual(assembly["input_ref"], str(raw_reads))
@@ -849,10 +954,12 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "failed")
             self.assertFalse(called_marker.exists())
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["status"], "planned")
+            self.assertEqual(assembly["status"], "failed")
             self.assertNotIn("draft_assembly_ref", assembly)
             candidate = load_planned_candidate_bundle(
                 result["data_dir"],
@@ -964,6 +1071,9 @@ class AssemblyStageTests(unittest.TestCase):
             result = self._invoke(build_stage(), approved)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
+            delivery = result["workflow_step_outcome"]["deliveries"][0]
+            self.assertEqual(delivery["resource_type"], "assembly")
+            self.assertEqual(delivery["delivery_mode"], "materialized")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
@@ -1025,6 +1135,17 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
             self.assertIn("artifact_registered", event_types)
+            dispositions = [
+                event
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(
+                dispositions[0]["summary"]["method_name"],
+                "assembly.candidate.flye",
+            )
+            self.assertEqual(dispositions[0]["summary"]["disposition"], "completed")
 
     def test_local_flye_execution_from_read_qc_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1455,13 +1576,25 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("stdout_ref", execution)
             self.assertIn("stderr_ref", execution)
             ledger_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
-            events = [
-                json.loads(line)["event_type"]
+            ledger_events = [
+                json.loads(line)
                 for line in ledger_path.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertIn("attempt_started", events)
-            self.assertIn("attempt_failed", events)
-            self.assertNotIn("attempt_succeeded", events)
+            event_types = [event["event_type"] for event in ledger_events]
+            self.assertIn("attempt_started", event_types)
+            self.assertIn("attempt_failed", event_types)
+            self.assertNotIn("attempt_succeeded", event_types)
+            dispositions = [
+                event
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(
+                dispositions[0]["summary"]["method_name"],
+                "assembly.candidate.hifiasm",
+            )
+            self.assertEqual(dispositions[0]["summary"]["disposition"], "failed")
 
     def test_local_nextdenovo_execution_writes_draft_assembly_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:

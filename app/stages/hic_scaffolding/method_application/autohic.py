@@ -26,6 +26,7 @@ from app.execution.lifecycle import (
     build_method_graph,
     freeze_method_attempts,
 )
+from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import current_parameter_attempt
 from app.schemas.artifacts import (
@@ -64,6 +65,88 @@ from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_variable
 
 METHOD = "hic_scaffolding.candidate.autohic"
+
+
+def autohic_method_outcome(state: TopLevelState) -> MethodOutcome | None:
+    """Return an outcome only at a final AutoHiC method boundary.
+
+    Execution failures remain unsettled until the parent retry gate decides
+    whether another parameter attempt will run.  A previously collected
+    AutoHiC result remains completed even if a later adoption-driven retry
+    fails; the occurrence-level method fact describes whether the selected
+    method ever completed its required collection boundary.
+    """
+
+    return _autohic_method_outcome(state, execution_failure_is_terminal=False)
+
+
+def terminal_autohic_method_outcome(state: TopLevelState) -> MethodOutcome | None:
+    """Settle an AutoHiC failure after parent retry/requirement routing."""
+
+    return _autohic_method_outcome(state, execution_failure_is_terminal=True)
+
+
+def _autohic_method_outcome(
+    state: TopLevelState,
+    *,
+    execution_failure_is_terminal: bool,
+) -> MethodOutcome | None:
+    output = hic_output(state)
+    status = str(output.get("status") or "")
+    attempts = [
+        item
+        for item in (output.get("parameter_attempts") or [])
+        if isinstance(item, dict) and item.get("method_id") == METHOD
+    ]
+    attempt_statuses = {str(item.get("status") or "") for item in attempts}
+    method_candidate = (output.get("method_candidates") or {}).get(METHOD) or {}
+    collected_success = (
+        method_candidate.get("status") == "executed"
+        or status == "autohic_review_ready"
+        or bool(attempt_statuses.intersection({"review_failed", "reviewed"}))
+    )
+    if collected_success:
+        return MethodOutcome(method_name=METHOD, disposition="completed")
+
+    if output.get("execution_mode") != "local":
+        return MethodOutcome(
+            method_name=METHOD,
+            disposition="skipped",
+            reason="local_execution_not_authorized",
+        )
+
+    if (
+        status == "failed"
+        and output.get("failure_kind") == "execution"
+        and not execution_failure_is_terminal
+    ):
+        return None
+
+    terminal_statuses = {
+        "blocked_missing_requirements",
+        "blocked_env",
+        "blocked_param",
+        "missing_tool",
+        "failed",
+        "failed_terminal",
+        "execution_parameter_retries_exhausted",
+    }
+    if status not in terminal_statuses:
+        return None
+
+    reason = str(output.get("reason") or "AutoHiC did not complete")
+    started = bool(
+        attempt_statuses.intersection(
+            {"execution_failed", "executed", "review_failed", "reviewed"}
+        )
+    )
+    return MethodOutcome(
+        method_name=METHOD,
+        disposition="failed" if started else "not_started",
+        reason=reason,
+    )
+
+
 LIFECYCLE = MethodExecutionLifecycle(
     stage="hic_scaffolding",
     name="autohic",
@@ -74,6 +157,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     process_failure="collect",
     failure_kind="execution_evidence",
     owner=ParameterAttemptOwner(),
+    outcome_policy=autohic_method_outcome,
 )
 
 
@@ -329,9 +413,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
             or Path(assembly_resolution.path).resolve(strict=False)
             != assembly.resolve(strict=False)
         ):
-            raise ValueError(
-                "resolved assembly no longer matches pre_hic_assembly_ref"
-            )
+            raise ValueError("resolved assembly no longer matches pre_hic_assembly_ref")
         assembly_dependencies: Sequence[InputDependency]
         if assembly_resolution.asset_records:
             assembly_dependencies = asset_input_dependencies(
@@ -344,9 +426,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
                 "primary_output_ref"
             )
             if assembly_artifact_ref is None:
-                raise ValueError(
-                    "run-owned pre-Hi-C assembly lacks primary_output_ref"
-                )
+                raise ValueError("run-owned pre-Hi-C assembly lacks primary_output_ref")
             assembly_dependencies = [
                 artifact_input_dependency(
                     state,

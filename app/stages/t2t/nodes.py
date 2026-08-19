@@ -22,7 +22,12 @@ from typing_extensions import TypedDict
 
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
-from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    assembly_delivery,
+    current_workflow_step_id,
+    fail_workflow_step,
+)
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
@@ -36,6 +41,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
+from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import current_parameter_attempt
 from app.review.application import (
@@ -116,6 +122,64 @@ from app.storage.paths import DataLayoutError
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
+
+
+def _settle_terminal_alignment(
+    state: TopLevelState,
+    stage_update: StateUpdate | None = None,
+) -> StateUpdate:
+    """Settle minimap2 before a terminal path that bypasses stage routing."""
+
+    projected = cast(TopLevelState, {**state, **(stage_update or {})})
+    return settle_method_outcomes(
+        projected,
+        stage="t2t",
+        outcomes=t2t_alignment_method_outcome(projected),
+        expected_method_names=(T2T_ALIGNMENT_METHOD,),
+    )
+
+
+def t2t_alignment_method_outcome(state: TopLevelState) -> MethodOutcome | None:
+    """Project the final minimap2 disposition from durable T2T evidence."""
+
+    output = read_t2t_stage_output(state)
+    status = str(output.get("status") or "")
+    paf_ref = output.get("alignment_paf_artifact_ref")
+    candidates_ref = output.get("telomere_extension_candidates_artifact_ref")
+    if paf_ref is not None and candidates_ref is not None:
+        return MethodOutcome(
+            method_name=T2T_ALIGNMENT_METHOD,
+            disposition="completed",
+            refs=(
+                ArtifactRef.model_validate(paf_ref),
+                ArtifactRef.model_validate(candidates_ref),
+            ),
+        )
+
+    skip_reason = output.get("candidate_skip_reason") or output.get("skip_reason")
+    if skip_reason or output.get("execution_enabled") is False:
+        return MethodOutcome(
+            method_name=T2T_ALIGNMENT_METHOD,
+            disposition="skipped",
+            reason=str(skip_reason or "t2t local alignment execution is disabled"),
+        )
+
+    if status not in {"failed", "failed_terminal", "blocked_env", "missing_tool"}:
+        return None
+
+    attempt_statuses = {
+        str(item.get("status") or "")
+        for item in (output.get("parameter_attempts") or [])
+        if isinstance(item, dict) and item.get("method_id") == T2T_ALIGNMENT_METHOD
+    }
+    started = bool(attempt_statuses.intersection({"executed", "execution_failed"}))
+    return MethodOutcome(
+        method_name=T2T_ALIGNMENT_METHOD,
+        disposition="failed" if started else "not_started",
+        reason=str(output.get("reason") or "t2t minimap2 did not complete"),
+    )
+
+
 T2T_ALIGNMENT_LIFECYCLE = MethodExecutionLifecycle(
     stage="t2t",
     name="t2t minimap2",
@@ -123,6 +187,7 @@ T2T_ALIGNMENT_LIFECYCLE = MethodExecutionLifecycle(
     frozen_status="alignment_frozen",
     ran_status="alignment_ran",
     owner=ParameterAttemptOwner(),
+    outcome_policy=t2t_alignment_method_outcome,
 )
 _T2T_INTERRUPT_ADAPTER = TypeAdapter(T2TInterruptJson)
 
@@ -223,6 +288,17 @@ def _fail(state: TopLevelState, reason: str) -> StateUpdate:
     return _update(state, {"status": "failed", "reason": reason})
 
 
+def _fail_terminal(state: TopLevelState, reason: str) -> StateUpdate:
+    """Project a failed cursor and settle the active frozen occurrence."""
+
+    stage_update = _fail(state, reason)
+    return {
+        **_settle_terminal_alignment(state, stage_update),
+        **stage_update,
+        **fail_workflow_step(state, "t2t", reason),
+    }
+
+
 def enter_t2t(state: TopLevelState) -> StateUpdate:
     """Mark T2T finishing as the active stage."""
     _output(state)
@@ -237,12 +313,7 @@ def block_t2t(state: TopLevelState) -> StateUpdate:
         _top_level_interrupt(interrupt_value) if interrupt_value is not None else None
     )
     if not interrupt:
-        return {
-            **_fail(state, "T2T review block has no persisted interrupt"),
-            "current_stage": "t2t",
-            "supervision_state": "failed_terminal",
-            "last_error": "T2T review block has no persisted interrupt",
-        }
+        return _fail_terminal(state, "T2T review block has no persisted interrupt")
     return {
         "current_stage": "t2t",
         "supervision_state": "blocked_human",
@@ -1010,233 +1081,186 @@ def commit_t2t(state: TopLevelState) -> StateUpdate:
             ).input_assembly_ref
         except ValueError as exc:
             reason = f"t2t frozen execution inputs are invalid: {exc}"
-            return {
-                **_fail(state, reason),
-                "current_stage": "t2t",
-                "supervision_state": "failed_terminal",
-                "last_error": reason,
-            }
+            return _fail_terminal(state, reason)
     assembly_ref = out.get("output_assembly_ref") or input_assembly_ref
-    update: StateUpdate = {
-        **advance_workflow_step(state, "t2t"),
+    if not assembly_ref:
+        return _fail_terminal(state, "t2t has no input or output assembly")
+    adopted_patch = bool(
+        out.get("patched_assembly_ref")
+        and str(assembly_ref) == str(out.get("patched_assembly_ref"))
+    )
+    try:
+        current_assembly = resolve_stage_resource(
+            state,
+            resource_spec=assembly_resource_spec(),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return _fail_terminal(
+            state, f"t2t assembly resource provenance is invalid: {exc}"
+        )
+    current_assembly_matches_output = bool(
+        current_assembly.found
+        and current_assembly.path
+        and _canonical_path(current_assembly.path) == _canonical_path(str(assembly_ref))
+    )
+    current_assembly_matches_input = bool(
+        current_assembly.found
+        and current_assembly.path
+        and input_assembly_ref
+        and _canonical_path(current_assembly.path)
+        == _canonical_path(str(input_assembly_ref))
+    )
+    if current_assembly_matches_output:
+        try:
+            current_candidate = _verify_t2t_adopted_candidate(
+                state,
+                current_assembly_metadata=current_assembly.metadata,
+                assembly_path=str(assembly_ref),
+            )
+            raw_assembly_ref = (state.get("resource_refs") or {}).get("assembly")
+            if raw_assembly_ref is None:
+                raise ValueError("the central assembly ResourceRef is missing")
+            persisted_assembly_ref = (
+                ResourceRef.from_dict(raw_assembly_ref)
+                if isinstance(raw_assembly_ref, dict)
+                else raw_assembly_ref
+            )
+        except (AssemblyCandidateBundleError, OSError, TypeError, ValueError) as exc:
+            return _fail_terminal(
+                state, f"t2t output candidate provenance is invalid: {exc}"
+            )
+        update: StateUpdate = _advance_t2t_with_delivery(
+            state,
+            current_candidate,
+            delivery_mode="materialized" if adopted_patch else "reused",
+        )
+        active_step_id = current_workflow_step_id(state, expected_stage="t2t")
+        if (
+            persisted_assembly_ref.source_stage == "t2t"
+            and persisted_assembly_ref.workflow_step_id == active_step_id
+        ):
+            return update
+        handoff_metadata = {
+            **dict(persisted_assembly_ref.metadata),
+            "patched": adopted_patch,
+            "candidate_bundle_ref": current_candidate.ref.model_dump(mode="json"),
+            "primary_output_ref": current_candidate.primary_output_ref.model_dump(
+                mode="json"
+            ),
+        }
+        update["resource_refs"] = update_resource_ref(
+            state, "assembly", [str(assembly_ref)], "t2t", handoff_metadata
+        )
+        return update
+    if not current_assembly_matches_input:
+        return _fail_terminal(
+            state,
+            "t2t assembly resource changed since input resolution; "
+            "refusing to overwrite a newer assembly",
+        )
+    try:
+        source_candidate = _verify_t2t_adopted_candidate(
+            state,
+            current_assembly_metadata=current_assembly.metadata,
+            assembly_path=str(input_assembly_ref),
+        )
+        assembly_dependency = _assembly_input_dependency(state, str(assembly_ref))
+        verify_input_dependencies(state, [assembly_dependency])
+    except (
+        AssemblyCandidateBundleError,
+        OSError,
+        TypeError,
+        ValueError,
+        DataLayoutError,
+    ) as exc:
+        return _fail_terminal(
+            state, f"t2t output assembly provenance is invalid: {exc}"
+        )
+
+    metadata: dict[str, Any] = {"patched": adopted_patch}
+    if assembly_dependency.kind != "artifact":
+        return _fail_terminal(state, "t2t output assembly must be a persisted artifact")
+    if (
+        adopted_patch
+        and assembly_dependency.artifact_ref.artifact_type != T2T_PATCHED_ASSEMBLY
+    ):
+        return _fail_terminal(
+            state,
+            f"adopted t2t patch does not reference a {T2T_PATCHED_ASSEMBLY!r} artifact",
+        )
+    output_candidate = source_candidate
+    if adopted_patch:
+        try:
+            decision_ref = _t2t_adoption_decision_ref(state, out)
+            output_candidate = publish_derived_assembly_candidate(
+                absolute_data_dir(state),
+                state["session_id"],
+                workflow_step_id=current_workflow_step_id(state, expected_stage="t2t"),
+                source_candidate=source_candidate,
+                primary_output_ref=assembly_dependency.artifact_ref,
+                stage="t2t",
+                method_name=T2T_CONTRACT_METHOD,
+                action_identity=decision_ref.artifact_id,
+            )
+        except (AssemblyCandidateBundleError, OSError, TypeError, ValueError) as exc:
+            return _fail_terminal(
+                state, f"t2t adopted candidate publication failed: {exc}"
+            )
+        input_primary_ref = source_candidate.primary_output_ref.model_dump(mode="json")
+        metadata.update(
+            {
+                "input_candidate_bundle_ref": source_candidate.ref.model_dump(
+                    mode="json"
+                ),
+                "input_primary_output_ref": input_primary_ref,
+            }
+        )
+    metadata.update(
+        {
+            "candidate_bundle_ref": output_candidate.ref.model_dump(mode="json"),
+            "primary_output_ref": output_candidate.primary_output_ref.model_dump(
+                mode="json"
+            ),
+        }
+    )
+    update = _advance_t2t_with_delivery(
+        state,
+        output_candidate,
+        delivery_mode="materialized" if adopted_patch else "reused",
+    )
+    update["resource_refs"] = update_resource_ref(
+        state, "assembly", [str(assembly_ref)], "t2t", metadata
+    )
+    return update
+
+
+def _advance_t2t_with_delivery(
+    state: TopLevelState,
+    candidate: VerifiedExecutedCandidate,
+    *,
+    delivery_mode: Literal["materialized", "reused"],
+) -> StateUpdate:
+    return {
+        **advance_workflow_step(
+            state,
+            "t2t",
+            outcome="completed",
+            deliveries=(
+                assembly_delivery(
+                    candidate.ref.model_dump(mode="json"),
+                    candidate.primary_output_ref.model_dump(mode="json"),
+                    delivery_mode=delivery_mode,
+                ),
+            ),
+        ),
         "route_trace": append_route_trace(state, "t2t_stage"),
     }
-    if assembly_ref:
-        adopted_patch = bool(
-            out.get("patched_assembly_ref")
-            and str(assembly_ref) == str(out.get("patched_assembly_ref"))
-        )
-        try:
-            current_assembly = resolve_stage_resource(
-                state,
-                resource_spec=assembly_resource_spec(),
-            )
-        except (OSError, TypeError, ValueError) as exc:
-            reason = f"t2t assembly resource provenance is invalid: {exc}"
-            return {
-                **_fail(state, reason),
-                "current_stage": "t2t",
-                "supervision_state": "failed_terminal",
-                "last_error": reason,
-            }
-        current_assembly_matches_output = bool(
-            current_assembly.found
-            and current_assembly.path
-            and _canonical_path(current_assembly.path)
-            == _canonical_path(str(assembly_ref))
-        )
-        current_assembly_matches_input = bool(
-            current_assembly.found
-            and current_assembly.path
-            and input_assembly_ref
-            and _canonical_path(current_assembly.path)
-            == _canonical_path(str(input_assembly_ref))
-        )
-        if current_assembly_matches_output:
-            try:
-                current_candidate = _verify_t2t_adopted_candidate(
-                    state,
-                    current_assembly_metadata=current_assembly.metadata,
-                    assembly_path=str(assembly_ref),
-                )
-                raw_assembly_ref = (state.get("resource_refs") or {}).get("assembly")
-                if raw_assembly_ref is None:
-                    raise ValueError("the central assembly ResourceRef is missing")
-                persisted_assembly_ref = (
-                    ResourceRef.from_dict(raw_assembly_ref)
-                    if isinstance(raw_assembly_ref, dict)
-                    else raw_assembly_ref
-                )
-            except (
-                AssemblyCandidateBundleError,
-                OSError,
-                TypeError,
-                ValueError,
-            ) as exc:
-                reason = f"t2t output candidate provenance is invalid: {exc}"
-                return {
-                    **_fail(state, reason),
-                    "current_stage": "t2t",
-                    "supervision_state": "failed_terminal",
-                    "last_error": reason,
-                }
-            active_step_id = current_workflow_step_id(state, expected_stage="t2t")
-            if (
-                persisted_assembly_ref.source_stage == "t2t"
-                and persisted_assembly_ref.workflow_step_id == active_step_id
-            ):
-                return update
-            handoff_metadata = {
-                **dict(persisted_assembly_ref.metadata),
-                "patched": adopted_patch,
-                "candidate_bundle_ref": current_candidate.ref.model_dump(mode="json"),
-                "primary_output_ref": (
-                    current_candidate.primary_output_ref.model_dump(mode="json")
-                ),
-            }
-            update["resource_refs"] = update_resource_ref(
-                state,
-                "assembly",
-                [str(assembly_ref)],
-                "t2t",
-                handoff_metadata,
-            )
-            return update
-        if not current_assembly_matches_input:
-            reason = (
-                "t2t assembly resource changed since input resolution; "
-                "refusing to overwrite a newer assembly"
-            )
-            return {
-                **_fail(state, reason),
-                "current_stage": "t2t",
-                "supervision_state": "failed_terminal",
-                "last_error": reason,
-            }
-
-        try:
-            assembly_dependency = _assembly_input_dependency(
-                state,
-                str(assembly_ref),
-            )
-            verify_input_dependencies(state, [assembly_dependency])
-        except (OSError, TypeError, ValueError, DataLayoutError) as exc:
-            reason = f"t2t output assembly provenance is invalid: {exc}"
-            return {
-                **_fail(state, reason),
-                "current_stage": "t2t",
-                "supervision_state": "failed_terminal",
-                "last_error": reason,
-            }
-
-        metadata: dict[str, Any] = {"patched": adopted_patch}
-        if assembly_dependency.kind == "artifact":
-            if (
-                adopted_patch
-                and assembly_dependency.artifact_ref.artifact_type
-                != T2T_PATCHED_ASSEMBLY
-            ):
-                reason = (
-                    "adopted t2t patch does not reference a "
-                    f"{T2T_PATCHED_ASSEMBLY!r} artifact"
-                )
-                return {
-                    **_fail(state, reason),
-                    "current_stage": "t2t",
-                    "supervision_state": "failed_terminal",
-                    "last_error": reason,
-                }
-            metadata["primary_output_ref"] = (
-                assembly_dependency.artifact_ref.model_dump(mode="json")
-            )
-        elif assembly_dependency.kind == "asset":
-            registry_ref = state.get("asset_registry_ref")
-            if registry_ref is None:
-                reason = "t2t output assembly asset has no asset_registry_ref"
-                return {
-                    **_fail(state, reason),
-                    "current_stage": "t2t",
-                    "supervision_state": "failed_terminal",
-                    "last_error": reason,
-                }
-            metadata.update(
-                {
-                    "asset_registry_ref": registry_ref,
-                    "asset_ids": [assembly_dependency.asset_id],
-                }
-            )
-
-        if adopted_patch:
-            try:
-                if assembly_dependency.kind != "artifact":
-                    raise AssemblyCandidateBundleError(
-                        "adopted t2t patch has no persisted primary output artifact"
-                    )
-                source_candidate = _verify_t2t_adopted_candidate(
-                    state,
-                    current_assembly_metadata=current_assembly.metadata,
-                    assembly_path=str(input_assembly_ref),
-                )
-                decision_ref = _t2t_adoption_decision_ref(state, out)
-                derived_candidate = publish_derived_assembly_candidate(
-                    absolute_data_dir(state),
-                    state["session_id"],
-                    workflow_step_id=current_workflow_step_id(
-                        state, expected_stage="t2t"
-                    ),
-                    source_candidate=source_candidate,
-                    primary_output_ref=assembly_dependency.artifact_ref,
-                    stage="t2t",
-                    method_name=T2T_CONTRACT_METHOD,
-                    action_identity=decision_ref.artifact_id,
-                )
-            except (
-                AssemblyCandidateBundleError,
-                OSError,
-                TypeError,
-                ValueError,
-            ) as exc:
-                reason = f"t2t adopted candidate publication failed: {exc}"
-                return {
-                    **_fail(state, reason),
-                    "current_stage": "t2t",
-                    "supervision_state": "failed_terminal",
-                    "last_error": reason,
-                }
-            metadata.update(
-                {
-                    "candidate_bundle_ref": derived_candidate.ref.model_dump(
-                        mode="json"
-                    ),
-                    "primary_output_ref": (
-                        derived_candidate.primary_output_ref.model_dump(mode="json")
-                    ),
-                    "input_candidate_bundle_ref": source_candidate.ref.model_dump(
-                        mode="json"
-                    ),
-                    "input_primary_output_ref": (
-                        source_candidate.primary_output_ref.model_dump(mode="json")
-                    ),
-                }
-            )
-        update["resource_refs"] = update_resource_ref(
-            state,
-            "assembly",
-            [str(assembly_ref)],
-            "t2t",
-            metadata,
-        )
-    return update
 
 
 def fail_t2t(state: TopLevelState) -> StateUpdate:
     """End the workflow only for invalid inputs or terminal tool failures."""
     out = _output(state)
-    return {
-        "current_stage": "t2t",
-        "supervision_state": "failed_terminal",
-        "last_error": out.get("reason", "t2t failed"),
-    }
+    return _fail_terminal(state, str(out.get("reason", "t2t failed")))
 
 
 class T2TReviewEffectV1(BaseModel):
@@ -1504,6 +1528,7 @@ def apply_t2t_review_application(
         raise ResumeValidationError("t2t review application has the wrong gate")
     effect = application.effect
     if effect.decision == "stop_pipeline":
+        reason = "t2t stopped by human review decision"
         stage_update = update_t2t_stage_output(
             state,
             {
@@ -1524,11 +1549,13 @@ def apply_t2t_review_application(
             },
         )
         return {
+            **_settle_terminal_alignment(state, stage_update),
+            **fail_workflow_step(state, "t2t", reason),
             "current_stage": "t2t",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
             **stage_update,
-            "last_error": "t2t stopped by human review decision",
+            "last_error": reason,
         }
     if (
         effect.output_candidate_bundle_ref is None
@@ -1608,7 +1635,20 @@ def apply_t2t_review_application(
         )
     output_path = _effect_ref_path(state, effect.output_primary_ref)
     return {
-        **advance_workflow_step(state, "t2t"),
+        **advance_workflow_step(
+            state,
+            "t2t",
+            outcome="completed",
+            deliveries=(
+                assembly_delivery(
+                    effect.output_candidate_bundle_ref.model_dump(mode="json"),
+                    effect.output_primary_ref.model_dump(mode="json"),
+                    delivery_mode=(
+                        "materialized" if effect.adopted_patch else "reused"
+                    ),
+                ),
+            ),
+        ),
         "active_interrupt": None,
         "route_trace": append_route_trace(state, "t2t_stage"),
         "stage_outputs": stage_update["stage_outputs"],

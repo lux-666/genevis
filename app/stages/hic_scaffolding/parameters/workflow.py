@@ -13,12 +13,14 @@ from typing import Any, Literal, cast
 from typing_extensions import TypedDict
 
 from app.control.lifecycle import ResumeValidationError
+from app.control.workflow_plan import fail_workflow_step
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (
     ExecutionEvidence,
     load_execution_evidence,
     read_execution_stderr_tail,
 )
+from app.execution.method_outcomes import settle_method_outcomes
 from app.llm.parameters.hic.recommender import (
     PROMPT_BUNDLE,
     autohic_parameter_prompt_hash,
@@ -120,6 +122,27 @@ from app.storage.parameter_evidence import (
 
 _RECOMMENDER_METHOD = "hic_scaffolding.parameter_recommender"
 _APPROVAL_METHOD = "hic_scaffolding.parameter_approval"
+
+
+def _settle_terminal_autohic(
+    state: TopLevelState,
+    stage_update: StateUpdate,
+) -> StateUpdate:
+    """Use the shared settlement boundary for a rejected parameter gate."""
+
+    # The adapter imports this workflow at module load, so defer the policy
+    # import until a human decision actually terminates the occurrence.
+    from app.stages.hic_scaffolding.method_application.autohic import (
+        terminal_autohic_method_outcome,
+    )
+
+    projected = cast(TopLevelState, {**state, **stage_update})
+    return settle_method_outcomes(
+        projected,
+        stage="hic_scaffolding",
+        outcomes=terminal_autohic_method_outcome(projected),
+        expected_method_names=(AUTOHIC_METHOD,),
+    )
 
 
 class _EffectiveRetryPolicy(TypedDict):
@@ -711,6 +734,10 @@ def apply_autohic_parameter_approval_application(
             },
         )
         return {
+            **_settle_terminal_autohic(state, stage_update),
+            **fail_workflow_step(
+                state, "hic_scaffolding", str(effect.rejection_reason)
+            ),
             "current_stage": "hic_scaffolding",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,

@@ -13,15 +13,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from app.control.errors import ResumeValidationError
+from app.control.workflow_plan import fail_workflow_step
 from app.domains.assembly.selection import validate_assembly_selection
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (
     load_execution_evidence,
     read_execution_stderr_tail,
 )
+from app.execution.method_outcomes import settle_method_outcomes
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
@@ -86,6 +88,9 @@ from app.schemas.parameter_recommendation import (
     ResolvedParameterSources,
 )
 from app.schemas.state import JsonValue, StateUpdate, TopLevelState
+from app.stages.assembly.method_application.support import (
+    assembly_terminal_method_outcome_policy,
+)
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
@@ -762,12 +767,24 @@ def apply_parameter_approval_application(
                 },
             },
         )
+        terminal_state = cast(TopLevelState, {**state, **stage_update})
+        # A rejected parameter proposal is a terminal Assembly occurrence.
+        # It bypasses the stage graph while the review transaction applies its
+        # effect, so it must cross the same shared disposition boundary here.
+        settlement = settle_method_outcomes(
+            terminal_state,
+            stage="assembly",
+            outcomes=assembly_terminal_method_outcome_policy(terminal_state),
+        )
         return {
             **stage_update,
-            "current_stage": "assembly",
-            "supervision_state": "failed_terminal",
+            **settlement,
+            **fail_workflow_step(
+                terminal_state,
+                "assembly",
+                str(effect.rejection_reason),
+            ),
             "active_interrupt": None,
-            "last_error": effect.rejection_reason,
         }
     if effect.approved_attempt is None:
         raise TypeError("approved Assembly parameter effect has no attempt")

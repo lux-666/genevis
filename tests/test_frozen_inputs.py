@@ -81,9 +81,7 @@ def _review_run_config(
         "requested_stages": [
             {"stage": "assembly_review", "allow_local_execution": False}
         ],
-        "assembly_review": {
-            "busco": {**busco_parameters(lineage), **busco_overrides}
-        },
+        "assembly_review": {"busco": {**busco_parameters(lineage), **busco_overrides}},
     }
 
 
@@ -611,8 +609,10 @@ class FrozenInputTests(unittest.TestCase):
             ("embryophyta_odb12", False),
             ("embryophyta_odb12.2", True),
         ):
-            with self.subTest(lineage_name=lineage_name), tempfile.TemporaryDirectory(
-            ) as tmp:
+            with (
+                self.subTest(lineage_name=lineage_name),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 root = Path(tmp)
                 _paths, manifest, run_config, _ = self._fixture(root)
                 lineage = ensure_busco_lineage(root, lineage_name=lineage_name)
@@ -720,14 +720,17 @@ class FrozenInputTests(unittest.TestCase):
             paths, manifest, run_config, _ = self._fixture(root)
             run_config.write_text(
                 json.dumps(
-                    _with_busco(root, {
-                        "requested_stages": _local_stage_requests("assembly"),
-                        "assembly": {
-                            "assembly_method": "flye",
-                            "flye_parameters": {},
-                            "assembly_route": "ont",
+                    _with_busco(
+                        root,
+                        {
+                            "requested_stages": _local_stage_requests("assembly"),
+                            "assembly": {
+                                "assembly_method": "flye",
+                                "flye_parameters": {},
+                                "assembly_route": "ont",
+                            },
                         },
-                    })
+                    )
                 )
                 + "\n",
                 encoding="utf-8",
@@ -748,13 +751,16 @@ class FrozenInputTests(unittest.TestCase):
             paths, manifest, run_config, _ = self._fixture(root)
             run_config.write_text(
                 json.dumps(
-                    _with_busco(root, {
-                        "requested_stages": _local_stage_requests("assembly"),
-                        "assembly": {
-                            "assembly_method": "hifiasm_ont",
-                            "hifiasm_ont_parameters": {"threads": 4},
+                    _with_busco(
+                        root,
+                        {
+                            "requested_stages": _local_stage_requests("assembly"),
+                            "assembly": {
+                                "assembly_method": "hifiasm_ont",
+                                "hifiasm_ont_parameters": {"threads": 4},
+                            },
                         },
-                    })
+                    )
                 )
                 + "\n",
                 encoding="utf-8",
@@ -785,10 +791,13 @@ class FrozenInputTests(unittest.TestCase):
             )
             run_config.write_text(
                 json.dumps(
-                    _with_busco(root, {
-                        "requested_stages": _local_stage_requests("assembly"),
-                        "assembly": {"flye_parameters": {}},
-                    })
+                    _with_busco(
+                        root,
+                        {
+                            "requested_stages": _local_stage_requests("assembly"),
+                            "assembly": {"flye_parameters": {}},
+                        },
+                    )
                 )
                 + "\n",
                 encoding="utf-8",
@@ -825,11 +834,14 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 run_config.write_text(
                     json.dumps(
-                        _with_busco(root, {
-                            "requested_stages": _local_stage_requests("assembly"),
-                            "shared_parameters": {"read_type": "ont_raw"},
-                            "assembly": {f"{method}_parameters": {}},
-                        })
+                        _with_busco(
+                            root,
+                            {
+                                "requested_stages": _local_stage_requests("assembly"),
+                                "shared_parameters": {"read_type": "ont_raw"},
+                                "assembly": {f"{method}_parameters": {}},
+                            },
+                        )
                     )
                     + "\n",
                     encoding="utf-8",
@@ -865,11 +877,14 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 run_config.write_text(
                     json.dumps(
-                        _with_busco(root, {
-                            "requested_stages": _local_stage_requests("assembly"),
-                            "shared_parameters": {"read_type": "ont_raw"},
-                            "assembly": {f"{method}_parameters": {}},
-                        })
+                        _with_busco(
+                            root,
+                            {
+                                "requested_stages": _local_stage_requests("assembly"),
+                                "shared_parameters": {"read_type": "ont_raw"},
+                                "assembly": {f"{method}_parameters": {}},
+                            },
+                        )
                     )
                     + "\n",
                     encoding="utf-8",
@@ -915,11 +930,14 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 run_config.write_text(
                     json.dumps(
-                        _with_busco(root, {
-                            "requested_stages": _local_stage_requests("assembly"),
-                            "shared_parameters": {"read_type": read_type},
-                            "assembly": {"flye_parameters": {}},
-                        })
+                        _with_busco(
+                            root,
+                            {
+                                "requested_stages": _local_stage_requests("assembly"),
+                                "shared_parameters": {"read_type": read_type},
+                                "assembly": {"flye_parameters": {}},
+                            },
+                        )
                     )
                     + "\n",
                     encoding="utf-8",
@@ -949,11 +967,14 @@ class FrozenInputTests(unittest.TestCase):
             )
             run_config.write_text(
                 json.dumps(
-                    _with_busco(root, {
-                        "requested_stages": _local_stage_requests("assembly"),
-                        "shared_parameters": {"read_type": "ont_raw"},
-                        "assembly": {"hifiasm_parameters": {}},
-                    })
+                    _with_busco(
+                        root,
+                        {
+                            "requested_stages": _local_stage_requests("assembly"),
+                            "shared_parameters": {"read_type": "ont_raw"},
+                            "assembly": {"hifiasm_parameters": {}},
+                        },
+                    )
                 )
                 + "\n",
                 encoding="utf-8",
@@ -979,11 +1000,14 @@ class FrozenInputTests(unittest.TestCase):
             paths, manifest, run_config, envs = self._fixture(root)
             run_config.write_text(
                 json.dumps(
-                    _with_busco(root, {
-                        "requested_stages": _stage_requests(
-                            "assembly", "read_qc", "assembly"
-                        )
-                    })
+                    _with_busco(
+                        root,
+                        {
+                            "requested_stages": _stage_requests(
+                                "assembly", "read_qc", "assembly"
+                            )
+                        },
+                    )
                 )
                 + "\n",
                 encoding="utf-8",

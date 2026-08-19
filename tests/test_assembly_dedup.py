@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.control.workflow_plan import workflow_steps_from_run_config
+from app.graph.builder import build_graph
 from app.integrity import sha256_file
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -16,6 +18,7 @@ from app.schemas.artifacts import (
     AssemblyCandidateBundle,
 )
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.assembly_dedup.builder import build_stage as build_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_review_stage
@@ -211,35 +214,234 @@ class AssemblyDedupStageTests(unittest.TestCase):
             metadata=metadata,
         ).to_dict()
 
-    def test_passes_through_when_candidate_is_not_materialized(self):
+    def test_local_dedup_without_materialized_assembly_fails_occurrence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._state(tmpdir)
-            state["stage_outputs"] = {
-                "assembly": {"status": "planned"},
-                "assembly_dedup": {"execution_mode": "local"},
-            }
-
-            result = build_dedup_stage().invoke(state)
-
-            dedup = result["stage_outputs"]["assembly_dedup"]
-            self.assertEqual(result["current_stage"], "assembly_review")
-            self.assertEqual(dedup["status"], "completed")
-            self.assertEqual(dedup["skip_reason"], "no_materialized_draft_assembly")
-            self.assertIsNone(dedup["purged_candidate_bundle_ref"])
-
-    def test_passes_through_when_assembly_output_is_absent(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._state(tmpdir)
-            state["stage_outputs"] = {"assembly_dedup": {"execution_mode": "local"}}
-
-            result = build_dedup_stage().invoke(state)
-
-            dedup = result["stage_outputs"]["assembly_dedup"]
-            self.assertEqual(
-                result["current_stage"], "assembly_review", dedup.get("reason")
+            run_dir = v2_run_dir(tmpdir, "s1")
+            config = RunConfig.model_validate(
+                {
+                    "requested_stages": [
+                        {"stage": "assembly_dedup", "allow_local_execution": True}
+                    ]
+                }
             )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(run_dir),
+                workflow_steps=workflow_steps_from_run_config(config),
+            )
+            state["current_stage"] = "assembly_dedup"
+            state["workflow_step_index"] = 1
+            state["entered_workflow_step_index"] = 1
+            state["stage_outputs"] = {"assembly_dedup": {"execution_mode": "local"}}
+            self._publish_asset_registry(state, assets=[])
+            Ledger(run_dir).create_session("s1", state["input_manifest_ref"])
+
+            result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
+                state,
+                config={"configurable": {"thread_id": "s1"}},
+            )
+
+            dedup = result["stage_outputs"]["assembly_dedup"]
+            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["workflow_step_index"], 1)
+            self.assertEqual(dedup["status"], "failed")
+            self.assertEqual(dedup["reason"], "no_materialized_assembly")
+            self.assertEqual(dedup["purge_dups_status"], "not_started")
+            self.assertEqual(dedup["execution_mode"], "local")
+            terminal_events = [
+                row["event_type"]
+                for row in Ledger(run_dir).read_event_rows("s1")
+                if row.get("workflow_step_id") == "step-001-assembly_dedup"
+                and row["event_type"]
+                in {"stage_completed", "stage_failed", "stage_skipped"}
+            ]
+            self.assertEqual(terminal_events, ["stage_failed"])
+            dispositions = [
+                event
+                for event in Ledger(run_dir).read_events("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(dispositions[0]["disposition"], "not_started")
+            self.assertEqual(dispositions[0]["reason"], "no_materialized_assembly")
+
+    def test_nonlocal_dedup_without_materialized_assembly_fails_occurrence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = v2_run_dir(tmpdir, "s1")
+            config = RunConfig.model_validate(
+                {
+                    "requested_stages": [
+                        {"stage": "assembly_dedup", "allow_local_execution": False}
+                    ]
+                }
+            )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(run_dir),
+                workflow_steps=workflow_steps_from_run_config(config),
+            )
+            state["current_stage"] = "assembly_dedup"
+            state["workflow_step_index"] = 1
+            state["entered_workflow_step_index"] = 1
+            self._publish_asset_registry(state, assets=[])
+            Ledger(run_dir).create_session("s1", state["input_manifest_ref"])
+
+            result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
+                state,
+                config={"configurable": {"thread_id": "s1"}},
+            )
+
+            dedup = result["stage_outputs"]["assembly_dedup"]
+            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["workflow_step_index"], 1)
+            self.assertEqual(dedup["status"], "failed")
+            self.assertEqual(dedup["reason"], "no_materialized_assembly")
+            self.assertEqual(dedup["purge_dups_status"], "not_started")
+            self.assertNotIn("execution_mode", dedup)
+            terminal_events = [
+                row["event_type"]
+                for row in Ledger(run_dir).read_event_rows("s1")
+                if row.get("workflow_step_id") == "step-001-assembly_dedup"
+                and row["event_type"]
+                in {"stage_completed", "stage_failed", "stage_skipped"}
+            ]
+            self.assertEqual(terminal_events, ["stage_failed"])
+            dispositions = [
+                event
+                for event in Ledger(run_dir).read_events("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(dispositions[0]["disposition"], "not_started")
+            self.assertEqual(dispositions[0]["reason"], "no_materialized_assembly")
+
+    def test_invalid_candidate_handoff_fails_before_purge_dups_starts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            invalid_primary = Path(tmpdir) / "unbound.fasta"
+            invalid_primary.write_text(">contig1\nACGT\n", encoding="utf-8")
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=[str(invalid_primary)],
+                source_stage="assembly",
+                workflow_step_id="step-001-assembly",
+                metadata={},
+            ).to_dict()
+            ledger = Ledger(state["data_dir"])
+            ledger.create_session("s1", state["input_manifest_ref"])
+
+            result = build_graph(backend="memory", data_dir=state["data_dir"]).invoke(
+                state,
+                config={"configurable": {"thread_id": "s1"}},
+            )
+
+            dedup = result["stage_outputs"]["assembly_dedup"]
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(dedup["purge_dups_status"], "not_started")
+            events = ledger.read_events("s1")
+            disposition = next(
+                event
+                for event in events
+                if event["event_type"] == "method_disposition_recorded"
+            )
+            self.assertEqual(disposition["disposition"], "not_started")
+            self.assertFalse(
+                any(
+                    event["event_type"]
+                    in {"attempt_started", "attempt_succeeded", "attempt_failed"}
+                    for event in events
+                )
+            )
+
+    def test_nonlocal_dedup_passes_through_materialized_assembly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">contig1\nACGT\n", encoding="utf-8")
+            run_dir = v2_run_dir(tmpdir, "s1")
+            config = RunConfig.model_validate(
+                {
+                    "requested_stages": [
+                        {"stage": "assembly", "allow_local_execution": False},
+                        {"stage": "assembly_dedup", "allow_local_execution": False},
+                    ]
+                }
+            )
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(run_dir),
+                workflow_steps=workflow_steps_from_run_config(config),
+            )
+            state["current_stage"] = "assembly_dedup"
+            state["workflow_step_index"] = 2
+            state["entered_workflow_step_index"] = 2
+            self._publish_asset_registry(state, assets=[])
+            Ledger(run_dir).create_session("s1", state["input_manifest_ref"])
+            member_id = "s1:clean_long_reads:reads.fastq"
+            raw_bundle_ref, raw_primary_ref = self._publish_candidate(
+                state,
+                candidate_id="s1:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft=draft,
+                member_id=member_id,
+            )
+            raw_path = SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(
+                raw_primary_ref["path_ref"]
+            )
+            self._set_assembly_resource(
+                state,
+                primary_path=raw_path,
+                candidate_bundle_ref=raw_bundle_ref,
+                primary_output_ref=raw_primary_ref,
+                source_stage="assembly",
+                workflow_step_id="step-001-assembly",
+            )
+            result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
+                state,
+                config={"configurable": {"thread_id": "s1"}},
+            )
+
+            dedup = result["stage_outputs"]["assembly_dedup"]
+            self.assertEqual(result["current_stage"], "done")
             self.assertEqual(dedup["status"], "completed")
-            self.assertEqual(dedup["skip_reason"], "no_materialized_draft_assembly")
+            self.assertEqual(dedup["purge_dups_status"], "skipped")
+            self.assertEqual(
+                dedup["purge_dups_skip_reason"], "local_execution_not_enabled"
+            )
+            self.assertEqual(dedup["candidate_bundle_ref"], raw_bundle_ref)
+            self.assertEqual(result["skip_reasons"], {})
+            assembly = ResourceRef.from_dict(result["resource_refs"]["assembly"])
+            self.assertEqual(assembly.source_stage, "assembly_dedup")
+            self.assertEqual(assembly.workflow_step_id, "step-002-assembly_dedup")
+            self.assertEqual(assembly.metadata["candidate_bundle_ref"], raw_bundle_ref)
+            self.assertEqual(assembly.metadata["primary_output_ref"], raw_primary_ref)
+            self.assertFalse(assembly.metadata["deduplicated"])
+            terminal_events = [
+                row["event_type"]
+                for row in Ledger(run_dir).read_event_rows("s1")
+                if row.get("workflow_step_id") == "step-002-assembly_dedup"
+                and row["event_type"]
+                in {"stage_completed", "stage_failed", "stage_skipped"}
+            ]
+            self.assertEqual(terminal_events, ["stage_completed"])
+            events = Ledger(run_dir).read_events("s1")
+            dispositions = [
+                event
+                for event in events
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(dispositions[0]["disposition"], "skipped")
+            self.assertEqual(dispositions[0]["reason"], "local_execution_not_enabled")
+            deliveries = [
+                event for event in events if event["event_type"] == "resource_delivered"
+            ]
+            self.assertEqual(len(deliveries), 1)
+            self.assertEqual(deliveries[0]["delivery_mode"], "reused")
 
     def test_assembly_review_consumes_current_deduplicated_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,6 +480,21 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 workflow_step_id="step-002-assembly_dedup",
                 raw_candidate_bundle_ref=raw_bundle_ref,
                 raw_primary_output_ref=raw_primary_ref,
+            )
+            ledger = Ledger(state["data_dir"])
+            ledger.record_resource_delivered(
+                state["session_id"],
+                stage="assembly_dedup",
+                workflow_step_id="step-002-assembly_dedup",
+                resource_type="assembly",
+                delivery_mode="materialized",
+                candidate_bundle_ref=purged_bundle_ref,
+                primary_output_ref=purged_primary_ref,
+            )
+            ledger.record_stage_completed(
+                state["session_id"],
+                "assembly_dedup",
+                workflow_step_id="step-002-assembly_dedup",
             )
 
             result = build_review_stage().invoke(state)
@@ -445,6 +662,17 @@ class AssemblyDedupStageTests(unittest.TestCase):
             event_types = [event["event_type"] for event in events]
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
+            dispositions = [
+                event
+                for event in events
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(dispositions[0]["disposition"], "completed")
+            self.assertEqual(
+                result["workflow_step_outcome"]["deliveries"][0]["delivery_mode"],
+                "materialized",
+            )
 
 
 if __name__ == "__main__":

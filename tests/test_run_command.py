@@ -229,7 +229,15 @@ class InspectTextTests(unittest.TestCase):
                 "failed_steps": 0,
                 "blocked_steps": 0,
                 "unfinished_steps": 1,
+                "projection_authority": "degraded_stage_terminal_projection",
             },
+            "stage_terminal_integrity": [
+                {
+                    "kind": "conflicting_stage_terminal",
+                    "workflow_step_id": "step-002-read_qc",
+                    "stage": "read_qc",
+                }
+            ],
             "execution": {
                 "frozen_inputs_status": "verified",
                 "durable_progress": "checkpoint",
@@ -255,6 +263,44 @@ class InspectTextTests(unittest.TestCase):
             "lock_held=true",
             stdout,
         )
+        self.assertIn("WARNING: workflow_progress is a degraded projection", stdout)
+        self.assertIn("WARNING: stage_terminal_integrity:", stdout)
+
+    def test_print_inspect_text_does_not_warn_for_authoritative_projection(self):
+        summary = {
+            "session_id": "s1",
+            "supervision_state": "running",
+            "checkpoint_persistence": "sqlite",
+            "durable_resume_available": True,
+            "current_workflow_step_id": "step-001-read_qc",
+            "current_stage": "read_qc",
+            "artifact_count": 0,
+            "decisions_by_origin": {},
+            "workflow_progress": {
+                "plan_source": "frozen_run_config",
+                "total_steps": 2,
+                "completed_steps": 1,
+                "skipped_steps": 0,
+                "failed_steps": 0,
+                "blocked_steps": 0,
+                "unfinished_steps": 1,
+                "projection_authority": "authoritative",
+            },
+            "stage_terminal_integrity": [],
+            "execution": {
+                "frozen_inputs_status": "verified",
+                "durable_progress": "checkpoint",
+                "execution_lock_held": False,
+            },
+            "next_action": {"kind": "unknown", "summary": "No action."},
+        }
+
+        _result, stdout, stderr = _capture_call(
+            run_entry._print_inspect_text, summary, {}
+        )
+
+        self.assertEqual(stderr, "")
+        self.assertNotIn("degraded projection", stdout)
 
 
 class AttachedProgressTests(unittest.TestCase):
@@ -280,7 +326,12 @@ class AttachedProgressTests(unittest.TestCase):
 
         _result, stdout, stderr = _capture_call(
             run_entry._render_attached_progress,
-            progress_projection_input(state),
+            progress_projection_input(
+                state,
+                stage_terminals={
+                    ("step-000-inventory", "inventory"): {"event_type": "stage_skipped"}
+                },
+            ),
         )
 
         self.assertEqual(stderr, "")
@@ -288,6 +339,109 @@ class AttachedProgressTests(unittest.TestCase):
             stdout,
             "progress: finished=1/2 completed=0 skipped=1 "
             "current=step-001-read_qc stage=read_qc state=running\n",
+        )
+
+    def test_early_failure_finished_count_ignores_terminal_cursor_position(self):
+        stages = [
+            "inventory",
+            "read_qc",
+            "genome_survey",
+            "assembly",
+            "assembly_dedup",
+            "assembly_review",
+        ]
+        state = {
+            "session_id": "s1",
+            "workflow_steps": [
+                {
+                    "step_id": f"step-{index:03d}-{stage}",
+                    "stage": stage,
+                    "allow_local_execution": False,
+                    **(
+                        {
+                            "review_target": {
+                                "resource_type": "assembly",
+                                "producer_step_id": "step-004-assembly_dedup",
+                            }
+                        }
+                        if stage == "assembly_review"
+                        else {}
+                    ),
+                }
+                for index, stage in enumerate(stages)
+            ],
+            "workflow_step_index": 0,
+            "entered_workflow_step_index": 0,
+            "current_stage": "inventory",
+            "supervision_state": "failed_terminal",
+            "workflow_step_outcome": {
+                "workflow_step_id": "step-000-inventory",
+                "stage": "inventory",
+                "outcome": "failed",
+                "reason": "early failure",
+            },
+        }
+
+        _result, stdout, stderr = _capture_call(
+            run_entry._render_attached_progress,
+            progress_projection_input(
+                state,
+                stage_terminals={
+                    ("step-000-inventory", "inventory"): {"event_type": "stage_failed"}
+                },
+            ),
+        )
+
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            stdout,
+            "progress: finished=0/6 completed=0 skipped=0 "
+            "current=- stage=- state=failed\n",
+        )
+
+    def test_degraded_attached_progress_never_renders_done_silently(self):
+        state = {
+            "session_id": "s1",
+            "workflow_steps": [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                },
+                {
+                    "step_id": "step-001-read_qc",
+                    "stage": "read_qc",
+                    "allow_local_execution": False,
+                },
+            ],
+            "workflow_step_index": 1,
+            "entered_workflow_step_index": 0,
+            "current_stage": "read_qc",
+            "supervision_state": "running_stage",
+        }
+
+        _result, stdout, stderr = _capture_call(
+            run_entry._render_attached_progress,
+            progress_projection_input(
+                state,
+                stage_terminals={
+                    ("step-000-inventory", "inventory"): {
+                        "event_type": "stage_completed"
+                    }
+                },
+                terminal_integrity=({"kind": "conflicting_stage_terminal"},),
+            ),
+        )
+
+        self.assertEqual(
+            stdout,
+            "progress: finished=1/2 completed=1 skipped=0 "
+            "current=- stage=- state=running\n",
+        )
+        self.assertEqual(
+            stderr,
+            "warning: attached workflow progress is degraded because stage "
+            "terminal history is inconsistent.\n",
         )
 
 
@@ -488,9 +642,7 @@ class RunHandlerTests(unittest.TestCase):
                     patch(
                         "app.entrypoints.run.execute_frozen_session", return_value=0
                     ) as execute,
-                    patch(
-                        "app.execution.run_readiness.preflight_run_readiness"
-                    ),
+                    patch("app.execution.run_readiness.preflight_run_readiness"),
                 ):
                     code, stdout, stderr = _capture_call(run_entry._run, args)
 
@@ -706,9 +858,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
-                        "assembly_review": {
-                            "busco": _busco_config(str(lineage))
-                        },
+                        "assembly_review": {"busco": _busco_config(str(lineage))},
                     }
                 ),
                 encoding="utf-8",
@@ -781,9 +931,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
-                        "assembly_review": {
-                            "busco": _busco_config(str(lineage))
-                        },
+                        "assembly_review": {"busco": _busco_config(str(lineage))},
                     }
                 ),
                 encoding="utf-8",
@@ -960,9 +1108,7 @@ class FrozenHelperTests(unittest.TestCase):
                         ],
                         "t2t": {"mode": "manual_review"},
                         "assembly_review": {
-                            "busco": _busco_config(
-                                "/data/busco/embryophyta_odb10"
-                            )
+                            "busco": _busco_config("/data/busco/embryophyta_odb10")
                         },
                         "review_policy": {
                             "max_blocked_seconds": 300,
@@ -1003,16 +1149,22 @@ class FrozenHelperTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-t2t",
                     "stage": "t2t",
                     "allow_local_execution": False,
+                    "selected_method_names": ["t2t.alignment.minimap2"],
                 },
                 {
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-001-t2t",
@@ -1022,11 +1174,16 @@ class FrozenHelperTests(unittest.TestCase):
                     "step_id": "step-003-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
+                    "selected_method_names": ["t2t.alignment.minimap2"],
                 },
                 {
                     "step_id": "step-004-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-003-t2t",
@@ -1093,6 +1250,7 @@ class FrozenHelperTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 }
             ],
             stage_plan_ref="control/run_config.json",
@@ -1166,6 +1324,7 @@ class FrozenHelperTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 }
             ],
         )
@@ -1343,9 +1502,7 @@ class FrozenHelperTests(unittest.TestCase):
                         {"stage": "assembly_review", "allow_local_execution": False},
                     ],
                     assembly_review={
-                        "busco": _busco_config(
-                            "/data/busco/embryophyta_odb10"
-                        )
+                        "busco": _busco_config("/data/busco/embryophyta_odb10")
                     },
                 ),
             )

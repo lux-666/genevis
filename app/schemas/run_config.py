@@ -535,6 +535,7 @@ class RequestedStage(BaseModel):
 
     stage: RequestableStage
     allow_local_execution: StrictBool
+    selected_method_names: tuple[str, ...] = ()
 
 
 class RunConfig(BaseModel):
@@ -579,6 +580,17 @@ class RunConfig(BaseModel):
                 "run_config.requested_stages allow_local_execution is unsupported "
                 "for manual-only/non-local stage(s): " + ", ".join(invalid_local)
             )
+        for request in self.requested_stages:
+            expected = _selected_method_names_for_request(self, request)
+            if (
+                "selected_method_names" in request.model_fields_set
+                and request.selected_method_names != expected
+            ):
+                raise ValueError(
+                    "run_config.requested_stages selected_method_names does not "
+                    f"match the frozen roster for stage {request.stage!r}"
+                )
+            request.selected_method_names = expected
         return self
 
     @model_validator(mode="after")
@@ -620,6 +632,52 @@ class RunConfig(BaseModel):
         )
 
 
+def _selected_method_names_for_request(
+    run_config: RunConfig,
+    request: RequestedStage,
+) -> tuple[str, ...]:
+    """Return the ordered immutable method roster for one requested occurrence."""
+
+    fixed: dict[RequestableStage, tuple[str, ...]] = {
+        "genome_survey": (
+            "genome_survey.kmer_count.jellyfish",
+            "genome_survey.model.genomescope2",
+        ),
+        "assembly_dedup": ("assembly_dedup.purge_dups",),
+        "assembly_review": (
+            "assembly_review.eval.quast",
+            "assembly_review.eval.busco",
+        ),
+        "hic_scaffolding": ("hic_scaffolding.candidate.autohic",),
+        "t2t": ("t2t.alignment.minimap2",),
+        "gapcloser": (),
+        "base_polish": (),
+    }
+    if request.stage == "read_qc":
+        filter_method = (
+            run_config.read_qc.length_filter.method
+            if run_config.read_qc is not None
+            and run_config.read_qc.length_filter is not None
+            else "skip"
+        )
+        return (
+            "read_qc.long_read_stats.seqkit_stats",
+            (
+                "read_qc.length_filter.skip"
+                if filter_method == "skip"
+                else filter_method
+            ),
+        )
+    if request.stage == "assembly":
+        method = (
+            infer_assembly_method(run_config.assembly)
+            if run_config.assembly is not None
+            else None
+        )
+        return () if method is None else (f"assembly.candidate.{method}",)
+    return fixed[request.stage]
+
+
 def validate_assembly_review_execution_plan(run_config: RunConfig) -> None:
     """Validate the offline BUSCO lineage contract before inputs are frozen."""
 
@@ -628,19 +686,16 @@ def validate_assembly_review_execution_plan(run_config: RunConfig) -> None:
     review = run_config.assembly_review
     if review is None:
         raise ValueError(
-            "run_config: every requested assembly_review requires "
-            "assembly_review.busco"
+            "run_config: every requested assembly_review requires assembly_review.busco"
         )
     lineage_path = Path(review.busco.lineage_path)
     if not lineage_path.exists():
         raise ValueError(
-            "assembly_review.busco.lineage_path does not exist: "
-            f"{lineage_path}"
+            f"assembly_review.busco.lineage_path does not exist: {lineage_path}"
         )
     if not lineage_path.is_dir():
         raise ValueError(
-            "assembly_review.busco.lineage_path must be a directory: "
-            f"{lineage_path}"
+            f"assembly_review.busco.lineage_path must be a directory: {lineage_path}"
         )
     _validate_busco_lineage(lineage_path, review.busco)
 
@@ -650,8 +705,7 @@ def _require_nonempty_regular_file(path: Path, *, label: str) -> None:
         valid = path.is_file() and path.stat().st_size > 0
     except OSError as exc:
         raise ValueError(
-            f"assembly_review.busco.lineage {label} cannot be inspected: "
-            f"{path}: {exc}"
+            f"assembly_review.busco.lineage {label} cannot be inspected: {path}: {exc}"
         ) from exc
     if not valid:
         raise ValueError(
@@ -805,8 +859,7 @@ def _parse_busco_scores_cutoff(path: Path) -> set[str]:
         identities.add(identity)
     if not identities:
         raise ValueError(
-            "assembly_review.busco.lineage scores_cutoff contains no profiles: "
-            f"{path}"
+            f"assembly_review.busco.lineage scores_cutoff contains no profiles: {path}"
         )
     return identities
 
@@ -845,8 +898,7 @@ def _validate_busco_lineage(
     hmms_path = lineage_path / "hmms"
     if not hmms_path.is_dir():
         raise ValueError(
-            "assembly_review.busco.lineage hmms must be a directory: "
-            f"{hmms_path}"
+            f"assembly_review.busco.lineage hmms must be a directory: {hmms_path}"
         )
     profile_ids = {_busco_profile_identity(path) for path in hmms_path.glob("*.hmm")}
     expected_count = int(config["number_of_BUSCOs"])
@@ -878,8 +930,7 @@ def _validate_busco_lineage(
         reference_inputs = (ancestral, refseq)
         try:
             reference_ready = any(
-                path.is_file() and path.stat().st_size > 0
-                for path in reference_inputs
+                path.is_file() and path.stat().st_size > 0 for path in reference_inputs
             )
         except OSError as exc:
             raise ValueError(

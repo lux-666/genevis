@@ -11,7 +11,11 @@ from typing import cast
 from typing_extensions import TypedDict
 
 from app.configuration import load_descriptor_registry
-from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    current_workflow_step_id,
+    fail_workflow_step,
+)
 from app.domains.genome_size import resolve_explicit_genome_size
 from app.schemas.artifacts import (
     ArtifactMeta,
@@ -354,7 +358,7 @@ def plan_full_kmer_survey(state: TopLevelState) -> StateUpdate:
     if prior_update.get("status") == "failed":
         return _update_genome_survey_output(state, prior_update)
     notes = [
-        "full_mode_uses_available_short_or_long_genomic_reads",
+        "provided_only_result_uses_explicit_genome_size",
         "local_execution_not_enabled",
     ]
     if provided_overrides:
@@ -363,7 +367,7 @@ def plan_full_kmer_survey(state: TopLevelState) -> StateUpdate:
     result = GenomeSurveyResult(
         session_id=state["session_id"],
         mode="full",
-        status="planned",
+        status="completed",
         confidence="high",
         input_asset_refs=input_refs,
         candidate_methods=FULL_SURVEY_METHODS,
@@ -376,7 +380,10 @@ def plan_full_kmer_survey(state: TopLevelState) -> StateUpdate:
         genome_size_source=prior_update.get("genome_size_source"),
         genome_size_source_path=prior_update.get("genome_size_source_path"),
         notes=notes,
-        metadata={"input_family": input_family},
+        metadata={
+            "input_family": input_family,
+            "result_kind": "provided_only",
+        },
     )
     return _record_result(
         state,
@@ -388,6 +395,19 @@ def plan_full_kmer_survey(state: TopLevelState) -> StateUpdate:
             **prior_update,
             "skip_reason": None,
             "candidate_methods": result.candidate_methods,
+            "executed_methods": [],
+            "substeps": {
+                "kmer_count": {
+                    "name": "kmer_count",
+                    "status": "skipped",
+                    "method_name": "genome_survey.kmer_count.jellyfish",
+                },
+                "genome_model": {
+                    "name": "genome_model",
+                    "status": "skipped",
+                    "method_name": "genome_survey.model.genomescope2",
+                },
+            },
             "estimates": result.estimates,
             "measured_estimates": result.measured_estimates,
             "provided_overrides": result.provided_overrides,
@@ -557,7 +577,18 @@ def commit_genome_survey(state: TopLevelState) -> StateUpdate:
     outputs["genome_survey"] = committed_cursor
     trace = append_route_trace(state, "genome_survey_stage")
     return {
-        **advance_workflow_step(state, "genome_survey"),
+        **advance_workflow_step(
+            state,
+            "genome_survey",
+            outcome=(
+                "skipped" if survey_out.get("status") == "skipped" else "completed"
+            ),
+            reason=(
+                str(survey_out.get("skip_reason") or "no_usable_survey_reads")
+                if survey_out.get("status") == "skipped"
+                else None
+            ),
+        ),
         "route_trace": trace,
         "stage_outputs": validate_stage_outputs(outputs),
     }
@@ -571,11 +602,11 @@ def fail_genome_survey(state: TopLevelState) -> StateUpdate:
         "blocked_env": "genome_survey blocked on missing conda environment",
         "missing_tool": "genome_survey blocked on missing tool",
     }.get(status, "genome_survey failed")
-    return {
-        "current_stage": "genome_survey",
-        "supervision_state": "failed_terminal",
-        "last_error": survey_out.get("reason", default_reason),
-    }
+    return fail_workflow_step(
+        state,
+        "genome_survey",
+        str(survey_out.get("reason", default_reason)),
+    )
 
 
 def _record_result(

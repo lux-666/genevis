@@ -9,12 +9,13 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.control.occurrence_settlement import settle_workflow_step_outcome
 from app.control.projections import (
     ProgressProjectionInput,
     ProjectionBoundary,
     progress_projection_input,
 )
-from app.control.workflow_plan import current_workflow_step, workflow_step_by_id
+from app.control.workflow_plan import current_workflow_step
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
     CheckpointerBackend,
@@ -69,83 +70,35 @@ def build_graph(
     def operator_route_controller(state: TopLevelState) -> StateUpdate:
         session_id = state.get("session_id")
         runtime_data_dir = state.get("data_dir", data_dir)
-        supervision = state.get("supervision_state")
         route_update = route_controller(state)
         routed_stage = route_update.get(
             "current_stage",
             state.get("current_stage", "inventory"),
         )
-        if routed_stage == TERMINAL_STAGE and supervision not in {
+        if routed_stage == TERMINAL_STAGE and state.get("supervision_state") not in {
             "failed_terminal",
             "blocked_human",
         }:
             route_update["supervision_state"] = "completed"
         routed_state = cast(TopLevelState, {**state, **route_update})
+        stage_terminals: dict[tuple[str, str], dict[str, object]] = {}
+        terminal_integrity: list[dict[str, object]] = []
         if session_id:
-            from app.storage.ledger import Ledger
+            from app.storage.ledger import Ledger, project_stage_terminal_events
 
             ledger = Ledger(runtime_data_dir)
-            for skipped_step_id, reason in (state.get("skip_reasons") or {}).items():
-                try:
-                    skipped_step = workflow_step_by_id(state, skipped_step_id)
-                except ValueError:
-                    continue
-                ledger.record_stage_skipped(
-                    session_id,
-                    skipped_step["stage"],
-                    workflow_step_id=skipped_step_id,
-                    reason=str(reason),
-                    idempotency_key=f"stage-skipped:{skipped_step_id}",
-                )
-            # Settle only the occurrence adjacent to the compact workflow
-            # cursor. Replaying the whole route trace would bind an earlier
-            # same-stage occurrence to the current occurrence's cursor refs and
-            # can turn an idempotent resume into a LedgerConflictError.
-            steps = state.get("workflow_steps") or []
-            entered_index = state.get("entered_workflow_step_index")
-            workflow_index = state.get("workflow_step_index")
-            if (
-                type(entered_index) is int
-                and 0 <= entered_index < len(steps)
-                and type(workflow_index) is int
-            ):
-                settled_step = steps[entered_index]
-                settled_step_id = settled_step["step_id"]
-                settled_stage = settled_step["stage"]
-                settled_cursor = (state.get("stage_outputs") or {}).get(
-                    settled_stage, {}
-                )
-                settled_refs = ledger.references_from(
-                    settled_cursor,
-                    role_prefix=f"stage.{settled_stage}",
-                )
-                if supervision == "failed_terminal" and workflow_index == entered_index:
-                    ledger.record_stage_failed(
-                        session_id,
-                        settled_stage,
-                        workflow_step_id=settled_step_id,
-                        error=state.get("last_error"),
-                        refs=settled_refs,
-                        idempotency_key=f"stage-failed:{settled_step_id}",
-                    )
-                elif workflow_index == entered_index + 1:
-                    completion_marker = f"{settled_step_id}:{settled_stage}_stage"
-                    if completion_marker in (state.get("route_trace") or []):
-                        ledger.record_stage_completed(
-                            session_id,
-                            settled_stage,
-                            workflow_step_id=settled_step_id,
-                            refs=settled_refs,
-                            idempotency_key=f"stage-completed:{settled_step_id}",
-                        )
+            settle_workflow_step_outcome(
+                state,
+                data_dir=runtime_data_dir,
+            )
 
-            if supervision not in {
+            if routed_state.get("supervision_state") not in {
                 "failed_terminal",
                 "completed",
                 "blocked_human",
             }:
-                current = state.get("current_stage", "inventory")
-                step = current_workflow_step(state)
+                current = routed_state.get("current_stage", "inventory")
+                step = current_workflow_step(routed_state)
                 if step is not None:
                     ledger.record_stage_entered(
                         session_id,
@@ -154,12 +107,19 @@ def build_graph(
                         route_node="route_controller",
                         idempotency_key=f"stage-entered:{step['step_id']}",
                     )
+            stage_terminals, terminal_integrity = project_stage_terminal_events(
+                ledger.read_event_rows(session_id)
+            )
 
         if on_controller_transition is not None:
             progress_boundary.run(
                 "attached_progress",
                 on_controller_transition,
-                progress_projection_input(routed_state),
+                progress_projection_input(
+                    routed_state,
+                    stage_terminals=stage_terminals,
+                    terminal_integrity=terminal_integrity,
+                ),
                 disable_after_failure=True,
             )
         return route_update

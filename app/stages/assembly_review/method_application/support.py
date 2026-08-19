@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from app.configuration import load_descriptor_registry
+from app.control.workflow_plan import current_workflow_step
+from app.execution.method_outcomes import MethodOutcome
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ArtifactMeta,
@@ -63,6 +65,195 @@ def review_methods_error(methods: list[str]) -> str | None:
 
 def local_execution_enabled(output: AssemblyReviewCursor) -> bool:
     return output.get("execution_mode") == "local"
+
+
+def planner_evaluator_outcome(
+    state: TopLevelState,
+    *,
+    method_name: str,
+    signal_name: str,
+) -> MethodOutcome | None:
+    """Settle a selected evaluator that cannot enter a local method graph.
+
+    Planner routing bypasses the evaluator subgraphs when local execution was
+    not authorised.  This policy is deliberately used through the common
+    method-outcome settlement node, rather than making the stage planner a
+    second Ledger writer.
+    """
+
+    output = review_output(state)
+    # A failed occurrence is settled by the terminal policy below.  The
+    # planner boundary only owns the explicit no-local-execution bypass; it
+    # must not first write ``skipped`` and then force the failure finalizer to
+    # attempt a conflicting ``not_started`` disposition for the same method.
+    if str(output.get("status") or "") == "failed":
+        return None
+    if not _evaluator_selected(
+        state, output, method_name, signal_name
+    ) or local_execution_enabled(output):
+        return None
+    return MethodOutcome(
+        method_name=method_name,
+        disposition="skipped",
+        reason="local_execution_not_authorized",
+    )
+
+
+def evaluator_method_outcome(
+    state: TopLevelState,
+    *,
+    method_name: str,
+    signal_name: str,
+) -> MethodOutcome | None:
+    """Reduce one evaluator's complete candidate batch to one disposition."""
+
+    output = review_output(state)
+    if not _evaluator_selected(state, output, method_name, signal_name):
+        return None
+    candidate_ids = {
+        str(candidate.get("candidate_id"))
+        for candidate in output.get("candidates", [])
+        if candidate.get("candidate_id") is not None
+    }
+    signals = [
+        signal
+        for signal in output.get("signals", [])
+        if signal.get("signal_name") == signal_name
+        and signal.get("candidate_id") in candidate_ids
+    ]
+    by_candidate = {
+        str(signal["candidate_id"]): signal
+        for signal in signals
+        if signal.get("candidate_id") is not None
+    }
+    if (
+        candidate_ids
+        and len(by_candidate) == len(candidate_ids)
+        and all(signal.get("status") == "available" for signal in by_candidate.values())
+    ):
+        return MethodOutcome(method_name=method_name, disposition="completed")
+    has_attempt = any(
+        isinstance(attempt, Mapping) and attempt.get("method_id") == method_name
+        for attempt in output.get("execution_attempts") or []
+    )
+    if any(signal.get("status") == "failed" for signal in by_candidate.values()):
+        if not has_attempt:
+            return MethodOutcome(
+                method_name=method_name,
+                disposition="not_started",
+                reason=_evaluator_preflight_reason(
+                    by_candidate.values(), signal_name=signal_name
+                ),
+            )
+        return MethodOutcome(
+            method_name=method_name,
+            disposition="failed",
+            reason=f"{signal_name}_candidate_evaluation_failed",
+        )
+    if (
+        candidate_ids
+        and len(by_candidate) == len(candidate_ids)
+        and all(signal.get("status") == "missing" for signal in by_candidate.values())
+    ):
+        notes = {
+            str(note)
+            for signal in by_candidate.values()
+            for note in (signal.get("notes") or [])
+        }
+        if "execution_not_started" in notes:
+            return MethodOutcome(
+                method_name=method_name,
+                disposition="not_started",
+                reason=_evaluator_preflight_reason(
+                    by_candidate.values(), signal_name=signal_name
+                ),
+            )
+        reason = f"{signal_name}_requires_materialized_draft_assembly"
+        return MethodOutcome(
+            method_name=method_name,
+            disposition="skipped",
+            reason=reason,
+        )
+    if str(output.get("status") or "") == "failed" and has_attempt:
+        return MethodOutcome(
+            method_name=method_name,
+            disposition="failed",
+            reason=str(output.get("reason") or f"{signal_name}_execution_failed"),
+        )
+    if not has_attempt:
+        return MethodOutcome(
+            method_name=method_name,
+            disposition="not_started",
+            reason=_evaluator_preflight_reason(
+                by_candidate.values(), signal_name=signal_name
+            ),
+        )
+    return MethodOutcome(
+        method_name=method_name,
+        disposition="failed",
+        reason=f"{signal_name}_candidate_evaluation_incomplete",
+    )
+
+
+def _evaluator_preflight_reason(
+    signals: Iterable[object],
+    *,
+    signal_name: str,
+) -> str:
+    """Return the durable preflight note without consulting the Ledger."""
+
+    for signal in signals:
+        if not isinstance(signal, Mapping):
+            continue
+        for note in signal.get("notes") or []:
+            if note not in {"execution_not_started", "execution_skipped"}:
+                return str(note)
+    return f"{signal_name}_preflight_not_started"
+
+
+def mark_evaluator_not_started(
+    output: AssemblyReviewCursor,
+    *,
+    method_name: str,
+    signal_name: str,
+    reason: str,
+) -> list[AssemblyEvalSignalCursor]:
+    """Mark every planned candidate evaluator unavailable before execution."""
+
+    signals = list(output.get("signals") or [])
+    for candidate in output.get("candidates", []):
+        signals = update_signal(
+            signals,
+            signal_name=signal_name,
+            method_name=method_name,
+            candidate_id=str(candidate.get("candidate_id") or "unknown"),
+            status="missing",
+            metric_refs=[],
+            notes=[reason, "execution_not_started"],
+            metadata={},
+        )
+    return signals
+
+
+def _evaluator_selected(
+    state: TopLevelState,
+    output: AssemblyReviewCursor,
+    method_name: str,
+    signal_name: str,
+) -> bool:
+    """Use the frozen occurrence roster, with a plan-only unit-test fallback."""
+
+    # Production workflow freezes a non-empty plan with an explicit roster.
+    # Small legacy/unit states predate that control surface; preserve their
+    # review-plan fallback rather than asking current_workflow_step() to
+    # validate its intentionally absent/empty plan.
+    if state.get("workflow_steps"):
+        step = current_workflow_step(state)
+        if step is not None and "selected_method_names" in step:
+            return method_name in set(step["selected_method_names"])
+    review_plan = output.get("review_plan") or {}
+    planned_signals = review_plan.get("planned_signals") or []
+    return signal_name in set(planned_signals)
 
 
 def verified_review_candidate(

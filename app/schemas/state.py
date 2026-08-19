@@ -169,6 +169,30 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
             raise TypeError(
                 f"workflow_steps[{index}].allow_local_execution must be a bool"
             )
+        has_roster = "selected_method_names" in raw_step
+        roster: tuple[str, ...] = ()
+        if has_roster:
+            raw_roster = raw_step.get("selected_method_names")
+            if not isinstance(raw_roster, (list, tuple)):
+                raise TypeError(
+                    f"workflow_steps[{index}].selected_method_names must be a list"
+                )
+            roster = tuple(raw_roster)
+            if any(not isinstance(name, str) or not name.strip() for name in roster):
+                raise ValueError(
+                    f"workflow_steps[{index}].selected_method_names must contain "
+                    "non-empty strings"
+                )
+            if len(roster) != len(set(roster)):
+                raise ValueError(
+                    f"workflow_steps[{index}].selected_method_names must be unique"
+                )
+            stage_prefix = f"{stage}."
+            if any(not name.startswith(stage_prefix) for name in roster):
+                raise ValueError(
+                    f"workflow_steps[{index}].selected_method_names must use the "
+                    f"{stage!r} method prefix"
+                )
         expected_id = f"step-{index:03d}-{stage}"
         if raw_step.get("step_id") != expected_id:
             raise ValueError(f"workflow_steps[{index}].step_id must be {expected_id!r}")
@@ -184,6 +208,8 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
             "stage": cast(DomainStage, stage),
             "allow_local_execution": allow_local,
         }
+        if has_roster:
+            step["selected_method_names"] = list(roster)
         if stage == "assembly_review":
             if not has_review_target:
                 raise ValueError(
@@ -420,6 +446,8 @@ def validate_state_field(name: str, value: object) -> None:
     elif name in {"workflow_step_index", "entered_workflow_step_index"}:
         if type(value) is not int:
             raise TypeError(f"{name} must be an integer")
+    elif name == "workflow_step_outcome":
+        _validate_workflow_step_outcome(value)
     elif name == "stage_plan_ref":
         if not isinstance(value, str) or not value.strip():
             raise TypeError("stage_plan_ref must be a non-empty string")
@@ -466,6 +494,94 @@ def _validate_workflow_cursor(value: Mapping[str, object]) -> None:
         )
     if index == 0 and entered not in {-1, 0}:
         raise ValueError("the initial workflow cursor has an invalid entered index")
+    outcome = value.get("workflow_step_outcome")
+    _validate_workflow_step_outcome(outcome)
+    if isinstance(outcome, Mapping):
+        matching = [
+            (step_index, step)
+            for step_index, step in enumerate(steps)
+            if step["step_id"] == outcome.get("workflow_step_id")
+        ]
+        if len(matching) != 1 or matching[0][1]["stage"] != outcome.get("stage"):
+            raise ValueError(
+                "workflow_step_outcome does not match the frozen workflow plan"
+            )
+        outcome_index = matching[0][0]
+        if outcome.get("outcome") == "failed":
+            if index != outcome_index or entered != outcome_index:
+                raise ValueError(
+                    "failed workflow_step_outcome must remain on its occurrence"
+                )
+        elif index != outcome_index + 1:
+            raise ValueError(
+                "completed/skipped workflow_step_outcome must advance exactly once"
+            )
+
+
+def _validate_workflow_step_outcome(value: object) -> None:
+    """Validate the compact stage-to-parent terminal handoff."""
+
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise TypeError("workflow_step_outcome must be a JSON object or null")
+    unknown = set(value).difference(WorkflowStepOutcome.__annotations__)
+    missing = set(WorkflowStepOutcome.__required_keys__).difference(value)
+    if unknown:
+        raise ValueError(
+            "workflow_step_outcome contains unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    if missing:
+        raise ValueError(
+            "workflow_step_outcome is missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+    step_id = value.get("workflow_step_id")
+    stage = value.get("stage")
+    outcome = value.get("outcome")
+    if not isinstance(step_id, str) or not step_id:
+        raise ValueError("workflow_step_outcome.workflow_step_id must be non-empty")
+    if stage not in DOMAIN_STAGES or stage == "done":
+        raise ValueError("workflow_step_outcome.stage must be executable")
+    if outcome not in {"completed", "skipped", "failed"}:
+        raise ValueError("workflow_step_outcome.outcome is invalid")
+    reason = value.get("reason")
+    if outcome in {"skipped", "failed"} and (
+        not isinstance(reason, str) or not reason.strip()
+    ):
+        raise ValueError(f"workflow_step_outcome {outcome} requires a reason")
+    if reason is not None and not isinstance(reason, str):
+        raise TypeError("workflow_step_outcome.reason must be a string")
+    deliveries = value.get("deliveries", [])
+    if not isinstance(deliveries, list):
+        raise TypeError("workflow_step_outcome.deliveries must be a list")
+    if deliveries and outcome != "completed":
+        raise ValueError("only a completed occurrence may declare deliveries")
+    from app.schemas.artifacts import ArtifactRef
+
+    seen_resources: set[str] = set()
+    for index, delivery in enumerate(deliveries):
+        if not isinstance(delivery, Mapping):
+            raise TypeError(
+                f"workflow_step_outcome.deliveries[{index}] must be an object"
+            )
+        delivery_unknown = set(delivery).difference(ResourceDelivery.__annotations__)
+        delivery_missing = set(ResourceDelivery.__required_keys__).difference(delivery)
+        if delivery_unknown or delivery_missing:
+            raise ValueError(
+                f"workflow_step_outcome.deliveries[{index}] has invalid fields"
+            )
+        resource_type = delivery.get("resource_type")
+        if not isinstance(resource_type, str) or not resource_type:
+            raise ValueError("resource delivery type must be non-empty")
+        if resource_type in seen_resources:
+            raise ValueError("one occurrence may deliver a resource type only once")
+        seen_resources.add(resource_type)
+        if delivery.get("delivery_mode") not in {"materialized", "reused"}:
+            raise ValueError("resource delivery mode is invalid")
+        ArtifactRef.model_validate(delivery.get("candidate_bundle_ref"))
+        ArtifactRef.model_validate(delivery.get("primary_output_ref"))
 
 
 def _validate_active_interrupt(value: object) -> None:
@@ -582,7 +698,27 @@ class WorkflowStep(TypedDict):
     step_id: str
     stage: DomainStage
     allow_local_execution: bool
+    selected_method_names: NotRequired[list[str]]
     review_target: NotRequired[ReviewTarget]
+
+
+class ResourceDelivery(TypedDict):
+    """Compact immutable-resource claim emitted by a completed occurrence."""
+
+    resource_type: str
+    delivery_mode: Literal["materialized", "reused"]
+    candidate_bundle_ref: dict[str, Any]
+    primary_output_ref: dict[str, Any]
+
+
+class WorkflowStepOutcome(TypedDict):
+    """Explicit terminal fact supplied by a stage to the parent controller."""
+
+    workflow_step_id: str
+    stage: DomainStage
+    outcome: Literal["completed", "skipped", "failed"]
+    reason: NotRequired[str]
+    deliveries: NotRequired[list[ResourceDelivery]]
 
 
 class TopLevelState(TypedDict, total=False):
@@ -603,6 +739,11 @@ class TopLevelState(TypedDict, total=False):
     workflow_steps: Required[Annotated[list[WorkflowStep], freeze_workflow_steps]]
     workflow_step_index: Required[int]
     entered_workflow_step_index: Required[int]
+
+    # The latest occurrence terminal is declared by the stage boundary. The
+    # parent persists this fact; it never infers completion from cursor motion
+    # or route-trace markers.
+    workflow_step_outcome: Required[WorkflowStepOutcome | None]
 
     # Durable references to external contracts and compact artifact indexes.
     input_manifest_ref: Required[str]
@@ -653,6 +794,7 @@ class StateUpdate(TypedDict, total=False):
     workflow_steps: list[WorkflowStep]
     workflow_step_index: int
     entered_workflow_step_index: int
+    workflow_step_outcome: WorkflowStepOutcome | None
     input_manifest_ref: str
     asset_registry_ref: dict[str, Any] | None
     stage_plan_ref: str
@@ -685,6 +827,7 @@ def initial_state(
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
+                "selected_method_names": [],
             }
         ]
     )
@@ -698,6 +841,7 @@ def initial_state(
         workflow_steps=steps,
         workflow_step_index=0,
         entered_workflow_step_index=-1,
+        workflow_step_outcome=None,
         input_manifest_ref=input_manifest_ref,
         asset_registry_ref=None,
         stage_plan_ref=stage_plan_ref,

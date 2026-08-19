@@ -4,16 +4,15 @@ Collect callbacks are intentionally stage-specific, but storage and evidence
 failures must have one bounded, auditable outcome.  This module keeps that
 boundary small: business callbacks may still update signals and publish
 artifacts, while expected collection errors become a failed stage cursor and
-causal ledger events.
+causal attempt ledger events. The parent graph owns the occurrence-level
+``stage_failed`` terminal fact.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
-from app.control.workflow_plan import current_workflow_step_id
 from app.execution.attempt_owners import MethodExecution
 from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
@@ -60,9 +59,9 @@ def collect_with_failure_boundary(
     returns a failed stage update instead of allowing the exception to escape
     the graph.  A best-effort attempt lookup adds the more specific
     ``attempt_failed`` event — but only while the attempt has not already
-    succeeded, so one attempt never carries both terminal facts.
-    ``stage_failed`` remains the causal event even when the execution set
-    itself is malformed or unavailable.
+    succeeded, so one attempt never carries both terminal facts. The failed
+    stage cursor remains authoritative until the parent controller records the
+    occurrence-level ``stage_failed`` fact.
     """
 
     try:
@@ -102,9 +101,9 @@ def _record_collect_failure(
         if len(executions) == 1:
             attempt = executions[0]
     except (OSError, ValueError, LedgerConflictError):
-        # The stage event below is still useful when execution evidence is
-        # itself corrupt or absent. This is the local evidence parsing point;
-        # callback ValueError is deliberately not caught by the outer boundary.
+        # Attempt evidence is best-effort; the failed cursor is still returned
+        # when execution evidence is corrupt or absent. Callback ValueError is
+        # deliberately not caught by the outer boundary.
         attempt = None
 
     try:
@@ -133,26 +132,5 @@ def _record_collect_failure(
                     error=reason,
                 )
             except COLLECT_ERROR_TYPES:
-                # A prior attempt event must not suppress the stage event.
+                # The failed cursor remains the primary recovery signal.
                 pass
-
-    reason_digest = sha256(reason.encode("utf-8")).hexdigest()[:16]
-    try:
-        workflow_step_id = current_workflow_step_id(
-            state,
-            expected_stage=lifecycle.stage,
-        )
-        ledger.record_stage_failed(
-            state["session_id"],
-            lifecycle.stage,
-            workflow_step_id=workflow_step_id,
-            error=reason,
-            idempotency_key=(
-                f"collect:{state['session_id']}:{workflow_step_id}:"
-                f"{lifecycle.method_name}:failed:{reason_digest}"
-            ),
-        )
-    except COLLECT_ERROR_TYPES:
-        # The failed cursor is the primary recovery signal.  A broken ledger
-        # must not turn a bounded collect failure back into an uncaught error.
-        return

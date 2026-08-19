@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from app.control.workflow_plan import fail_workflow_step
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import append_route_trace
 from app.stages.gapcloser.state import update_gapcloser_stage_output
@@ -26,9 +27,11 @@ def stop_unimplemented_gapcloser(state: TopLevelState) -> StateUpdate:
     )
     update.update(
         {
-            "current_stage": GAPCLOSER_STAGE,
-            "supervision_state": "failed_terminal",
-            "last_error": GAPCLOSER_NOT_IMPLEMENTED_REASON,
+            **fail_workflow_step(
+                state,
+                GAPCLOSER_STAGE,
+                GAPCLOSER_NOT_IMPLEMENTED_REASON,
+            ),
             "route_trace": append_route_trace(state, "gapcloser_stage"),
         }
     )

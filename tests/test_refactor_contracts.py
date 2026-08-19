@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import tempfile
 import unittest
@@ -94,8 +95,12 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             hifi_reads = reads_dir / "hifi.fastq"
             hifi_reads.write_text("@hifi\nACGT\n+\n!!!!\n", encoding="utf-8")
             (reads_dir / "hifi.fofn").write_text(f"{hifi_reads}\n", encoding="utf-8")
-            (reads_dir / "ont-a.fastq.gz").write_bytes(b"")
-            (shared_dir / "hifi-b.fastq.gz").write_bytes(b"")
+            (reads_dir / "ont-a.fastq.gz").write_bytes(
+                gzip.compress(b"@ont\nACGT\n+\n!!!!\n")
+            )
+            (shared_dir / "hifi-b.fastq.gz").write_bytes(
+                gzip.compress(b"@hifi\nACGT\n+\n!!!!\n")
+            )
             (assembly_dir / "final.fasta").write_text(
                 ">contig\nACGT\n", encoding="utf-8"
             )

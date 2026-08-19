@@ -5,8 +5,10 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.execution.method_outcomes import method_outcome_settlement_node
 from app.schemas.state import TopLevelState
 from app.stages.t2t.nodes import (
+    T2T_ALIGNMENT_METHOD,
     apply_t2t_patches,
     block_t2t,
     build_t2t_alignment_graph,
@@ -18,6 +20,7 @@ from app.stages.t2t.nodes import (
     resolve_t2t_inputs,
     scan_assembly_telomeres,
     scan_read_telomeres,
+    t2t_alignment_method_outcome,
     validate_patched_assembly,
     write_t2t_report,
 )
@@ -67,6 +70,30 @@ def build_stage() -> CompiledStateGraph[
     graph.add_node("block", block_t2t)
     graph.add_node("commit", commit_t2t)
     graph.add_node("fail", fail_t2t)
+    graph.add_node(
+        "settle_alignment_before_report",
+        method_outcome_settlement_node(
+            stage="t2t",
+            method_name=T2T_ALIGNMENT_METHOD,
+            outcome_policy=t2t_alignment_method_outcome,
+        ),
+    )
+    graph.add_node(
+        "settle_alignment_before_failure",
+        method_outcome_settlement_node(
+            stage="t2t",
+            method_name=T2T_ALIGNMENT_METHOD,
+            outcome_policy=t2t_alignment_method_outcome,
+        ),
+    )
+    graph.add_node(
+        "settle_alignment_before_patches",
+        method_outcome_settlement_node(
+            stage="t2t",
+            method_name=T2T_ALIGNMENT_METHOD,
+            outcome_policy=t2t_alignment_method_outcome,
+        ),
+    )
 
     graph.add_edge(START, "enter")
     graph.add_conditional_edges(
@@ -80,7 +107,7 @@ def build_stage() -> CompiledStateGraph[
             "prepare_reads": "prepare_reads",
             "scan_reads": "scan_reads",
             "alignment": "alignment",
-            "fail": "fail",
+            "fail": "settle_alignment_before_failure",
         },
     )
     graph.add_conditional_edges(
@@ -90,55 +117,84 @@ def build_stage() -> CompiledStateGraph[
             "resolve_motif": "resolve_telomere_motif",
             "recommend": "recommend_parameters",
             "prepare_reads": "prepare_reads",
-            "report": "report",
-            "fail": "fail",
+            "report": "settle_alignment_before_report",
+            "fail": "settle_alignment_before_failure",
         },
     )
     graph.add_conditional_edges(
         "resolve_telomere_motif",
         route_after_motif_resolution,
-        {"recommend": "recommend_parameters", "fail": "fail"},
+        {
+            "recommend": "recommend_parameters",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "recommend_parameters",
         route_after_parameter_recommendation,
-        {"block": "block", "fail": "fail"},
+        {"block": "block", "fail": "settle_alignment_before_failure"},
     )
     graph.add_conditional_edges(
         "prepare_parameters",
         route_after_parameter_freeze,
-        {"scan_assembly": "scan_assembly", "fail": "fail"},
+        {
+            "scan_assembly": "scan_assembly",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "scan_assembly",
         route_after_assembly_scan,
-        {"prepare_reads": "prepare_reads", "fail": "fail"},
+        {
+            "prepare_reads": "prepare_reads",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "prepare_reads",
         route_after_read_prepare,
-        {"scan_reads": "scan_reads", "report": "report", "fail": "fail"},
+        {
+            "scan_reads": "scan_reads",
+            "report": "settle_alignment_before_report",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
-        "scan_reads", route_after_read_scan, {"alignment": "alignment", "fail": "fail"}
+        "scan_reads",
+        route_after_read_scan,
+        {"alignment": "alignment", "fail": "settle_alignment_before_failure"},
     )
     graph.add_conditional_edges(
         "alignment",
         route_after_alignment,
-        {"apply_patches": "apply_patches", "report": "report", "fail": "fail"},
+        {
+            "apply_patches": "settle_alignment_before_patches",
+            "report": "settle_alignment_before_report",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "apply_patches",
         route_after_patches,
-        {"validate_patched": "validate_patched", "report": "report", "fail": "fail"},
+        {
+            "validate_patched": "validate_patched",
+            "report": "report",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
-        "validate_patched", route_after_validation, {"report": "report", "fail": "fail"}
+        "validate_patched",
+        route_after_validation,
+        {"report": "report", "fail": "settle_alignment_before_failure"},
     )
     graph.add_conditional_edges(
         "report",
         route_after_report,
-        {"gate_review": "gate_review", "commit": "commit", "fail": "fail"},
+        {
+            "gate_review": "gate_review",
+            "commit": "commit",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "gate_review", route_after_gate, {"block": END, "commit": "commit"}
@@ -146,4 +202,7 @@ def build_stage() -> CompiledStateGraph[
     graph.add_edge("commit", END)
     graph.add_edge("fail", END)
     graph.add_edge("block", END)
+    graph.add_edge("settle_alignment_before_patches", "apply_patches")
+    graph.add_edge("settle_alignment_before_report", "report")
+    graph.add_edge("settle_alignment_before_failure", "fail")
     return graph.compile()

@@ -18,6 +18,7 @@ from app.execution.lifecycle import (
     load_method_executions,
     run_method_attempts,
 )
+from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
 from app.execution.method_runner import build_frozen_attempt
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
@@ -48,6 +49,7 @@ from app.schemas.parameter_recommendation import (
 from app.schemas.state import initial_state
 from app.stages.base import stage_output, update_stage_output
 from app.storage.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
     load_approved_parameter_chain_v3,
     load_parameter_recommendation_chain_v3,
@@ -59,9 +61,10 @@ from tests.data_v2 import v2_run_dir
 DIRECT_LIFECYCLE = MethodExecutionLifecycle(
     stage="assembly_review",
     name="contract method",
-    method_name="contract.method",
+    method_name="assembly_review.eval.quast",
     frozen_status="contract_frozen",
     ran_status="contract_ran",
+    outcome_policy=lambda _state: None,
 )
 
 
@@ -75,11 +78,17 @@ def _state(tmpdir: str, *, stage: str = "assembly_review") -> dict:
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
+                "selected_method_names": [],
             },
             {
                 "step_id": f"step-001-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
+                "selected_method_names": (
+                    ["assembly_review.eval.quast"]
+                    if stage == "assembly_review"
+                    else ["assembly.candidate.flye"]
+                ),
                 **(
                     {
                         "review_target": {
@@ -97,6 +106,7 @@ def _state(tmpdir: str, *, stage: str = "assembly_review") -> dict:
                         "step_id": "step-002-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "selected_method_names": ["assembly_review.eval.quast"],
                         "review_target": {
                             "resource_type": "assembly",
                             "producer_step_id": "step-001-assembly",
@@ -120,7 +130,7 @@ def _attempt(
     *,
     attempt_id: str = "s1:contract:0",
     stage: str = "assembly_review",
-    method_name: str = "contract.method",
+    method_name: str = "assembly_review.eval.quast",
     parameter_attempt_id: int | None = None,
     script_body: str = "#!/bin/sh\nexit 1\n",
 ) -> FrozenAttemptSpec:
@@ -570,6 +580,135 @@ def _v3_parameter_attempt(
 
 
 class ExecutionLifecycleContractTests(unittest.TestCase):
+    def test_method_graph_requires_an_outcome_policy(self):
+        lifecycle = MethodExecutionLifecycle(
+            stage="assembly_review",
+            name="missing outcome contract",
+            method_name="assembly_review.eval.quast",
+            frozen_status="outcome_frozen",
+            ran_status="outcome_ran",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires an outcome_policy"):
+            build_method_graph(lifecycle, _freeze_contract, _collect_contract)
+
+    def test_success_outcome_policy_settles_once_and_exact_replay_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly_review",
+                name="outcome contract",
+                method_name="assembly_review.eval.quast",
+                frozen_status="outcome_frozen",
+                ran_status="outcome_ran",
+                outcome_policy=lambda _state: MethodOutcome(
+                    method_name="assembly_review.eval.quast",
+                    disposition="completed",
+                ),
+            )
+            graph = build_method_graph(
+                lifecycle,
+                lambda state: update_stage_output(
+                    state, "assembly_review", {"status": "settled"}
+                ),
+                _collect_contract,
+            )
+
+            graph.invoke(state)
+            settle_method_outcomes(
+                state,
+                stage="assembly_review",
+                outcomes=MethodOutcome(
+                    method_name="assembly_review.eval.quast",
+                    disposition="completed",
+                ),
+                expected_method_names=("assembly_review.eval.quast",),
+            )
+
+            events = [
+                event
+                for event in Ledger(state["data_dir"]).read_events(state["session_id"])
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["method_name"], "assembly_review.eval.quast")
+            self.assertEqual(events[0]["disposition"], "completed")
+
+    def test_outcome_settlement_rejects_invalid_registered_method_and_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            outcome = MethodOutcome(
+                method_name="other.method",
+                disposition="skipped",
+                reason="planner selected another method",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not selected|not registered"):
+                settle_method_outcomes(
+                    state,
+                    stage="assembly_review",
+                    outcomes=outcome,
+                    expected_method_names=("assembly_review.eval.quast",),
+                )
+            with self.assertRaisesRegex(ValueError, "duplicate method outcome"):
+                settle_method_outcomes(
+                    state,
+                    stage="assembly_review",
+                    outcomes=(
+                        MethodOutcome(
+                            method_name="assembly_review.eval.quast",
+                            disposition="completed",
+                        ),
+                    )
+                    * 2,
+                )
+            self.assertEqual(
+                Ledger(state["data_dir"]).read_events(state["session_id"]),
+                [],
+            )
+
+    def test_none_outcome_policy_is_a_noop_after_the_shared_settlement_exit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            order: list[str] = []
+
+            def freeze_without_attempt(state: dict) -> dict:
+                order.append("freeze")
+                return update_stage_output(
+                    state,
+                    "assembly_review",
+                    {"status": "planner_continues"},
+                )
+
+            def retry_continuation_policy(_state: dict) -> None:
+                order.append("settle")
+                return None
+
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly_review",
+                name="outcome contract",
+                method_name="assembly_review.eval.quast",
+                frozen_status="outcome_frozen",
+                ran_status="outcome_ran",
+                outcome_policy=retry_continuation_policy,
+            )
+            graph = build_method_graph(
+                lifecycle,
+                freeze_without_attempt,
+                _collect_contract,
+            )
+
+            graph.invoke(state)
+
+            self.assertEqual(order, ["freeze", "settle"])
+            self.assertEqual(
+                Ledger(state["data_dir"]).read_events(state["session_id"]),
+                [],
+            )
+            edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
+            self.assertIn(("freeze", "settle_method_outcomes"), edges)
+            self.assertIn(("settle_method_outcomes", "__end__"), edges)
+
     def test_direct_graph_uses_injected_runner_and_collects(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _state(tmpdir)
@@ -792,7 +931,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             lifecycle = MethodExecutionLifecycle(
                 stage="assembly_review",
                 name="contract batch",
-                method_name="contract.method",
+                method_name="assembly_review.eval.quast",
                 frozen_status="batch_frozen",
                 ran_status="batch_ran",
                 process_failure="collect",
@@ -945,7 +1084,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             lifecycle = MethodExecutionLifecycle(
                 stage="assembly_review",
                 name="contract batch",
-                method_name="contract.method",
+                method_name="assembly_review.eval.quast",
                 frozen_status="batch_frozen",
                 ran_status="batch_ran",
                 process_failure="collect",
@@ -997,7 +1136,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             lifecycle = MethodExecutionLifecycle(
                 stage="assembly_review",
                 name="contract batch",
-                method_name="contract.method",
+                method_name="assembly_review.eval.quast",
                 frozen_status="batch_frozen",
                 ran_status="batch_ran",
                 process_failure="collect",
@@ -1058,7 +1197,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
             lifecycle = MethodExecutionLifecycle(
                 stage="assembly_review",
                 name="contract batch",
-                method_name="contract.method",
+                method_name="assembly_review.eval.quast",
                 frozen_status="batch_frozen",
                 ran_status="batch_ran",
                 process_failure="collect",
@@ -1367,6 +1506,7 @@ class ExecutionLifecycleContractTests(unittest.TestCase):
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": ["assembly_review.eval.quast"],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-001-assembly_review",

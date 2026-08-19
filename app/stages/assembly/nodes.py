@@ -13,7 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.configuration import load_descriptor_registry
 from app.control.errors import ResumeValidationError
-from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    assembly_delivery,
+    current_workflow_step_id,
+    fail_workflow_step,
+)
 from app.domains.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
@@ -780,10 +785,12 @@ def apply_route_selection_application(
 
     if effect.decision == "stop_human_review":
         return {
-            "current_stage": "assembly",
-            "supervision_state": "failed_terminal",
+            **fail_workflow_step(
+                state,
+                "assembly",
+                "assembly route selection stopped by human review",
+            ),
             "active_interrupt": None,
-            "last_error": "assembly route selection stopped by human review",
         }
 
     if (
@@ -1324,8 +1331,35 @@ def plan_candidate_attempts(state: TopLevelState) -> StateUpdate:
 
 
 def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
-    """Route compact assembly candidate refs to assembly_review."""
+    """Commit one verified, materialized assembly candidate for review."""
     assembly_out = assembly_stage_output(state)
+    executed_bundle_ref = assembly_out.get("executed_candidate_bundle_ref")
+    if executed_bundle_ref is None:
+        return _terminal_commit_failure(
+            state,
+            "assembly cannot complete without an executed candidate bundle",
+        )
+    try:
+        verified = load_executed_candidate_bundle(
+            absolute_data_dir(state),
+            state["session_id"],
+            ArtifactRef.model_validate(executed_bundle_ref),
+            expected_method_name=assembly_out.get("primary_method"),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return _terminal_commit_failure(
+            state,
+            f"assembly candidate bundle is invalid: {exc}",
+        )
+    checkpoint_primary = assembly_out.get("draft_assembly_ref")
+    if checkpoint_primary and Path(checkpoint_primary).resolve(
+        strict=False
+    ) != verified.primary_output_path.resolve(strict=False):
+        return _terminal_commit_failure(
+            state,
+            "assembly draft path does not match executed candidate primary output",
+        )
+
     committed_keys = [
         "artifact_refs",
         "candidate_methods",
@@ -1375,30 +1409,21 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
     outputs["assembly"] = committed
     trace = append_route_trace(state, "assembly_stage")
     update: StateUpdate = {
-        **advance_workflow_step(state, "assembly"),
+        **advance_workflow_step(
+            state,
+            "assembly",
+            outcome="completed",
+            deliveries=(
+                assembly_delivery(
+                    verified.ref.model_dump(mode="json"),
+                    verified.primary_output_ref.model_dump(mode="json"),
+                    delivery_mode="materialized",
+                ),
+            ),
+        ),
         "route_trace": trace,
         "stage_outputs": outputs,
-    }
-    executed_bundle_ref = assembly_out.get("executed_candidate_bundle_ref")
-    if executed_bundle_ref is not None:
-        try:
-            verified = load_executed_candidate_bundle(
-                absolute_data_dir(state),
-                state["session_id"],
-                ArtifactRef.model_validate(executed_bundle_ref),
-                expected_method_name=assembly_out.get("primary_method"),
-            )
-        except (OSError, TypeError, ValueError) as exc:
-            return _fail_update(state, f"assembly candidate bundle is invalid: {exc}")
-        checkpoint_primary = assembly_out.get("draft_assembly_ref")
-        if checkpoint_primary and Path(checkpoint_primary).resolve(
-            strict=False
-        ) != verified.primary_output_path.resolve(strict=False):
-            return _fail_update(
-                state,
-                "assembly draft path does not match executed candidate primary output",
-            )
-        update["resource_refs"] = update_resource_ref(
+        "resource_refs": update_resource_ref(
             state,
             "assembly",
             [str(verified.primary_output_path)],
@@ -1411,13 +1436,18 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
                 "selected_method": verified.bundle.method_name,
                 "candidate_id": verified.bundle.candidate_id,
             },
-        )
-    elif assembly_out.get("draft_assembly_ref"):
-        return _fail_update(
-            state,
-            "assembly draft output has no executed candidate bundle ref",
-        )
+        ),
+    }
     return update
+
+
+def _terminal_commit_failure(state: TopLevelState, reason: str) -> StateUpdate:
+    """Preserve commit validation evidence while settling Assembly as failed."""
+
+    return {
+        **_fail_update(state, reason),
+        **fail_workflow_step(state, "assembly", reason),
+    }
 
 
 def fail_assembly(state: TopLevelState) -> StateUpdate:
@@ -1429,11 +1459,12 @@ def fail_assembly(state: TopLevelState) -> StateUpdate:
         "missing_tool": "assembly blocked on missing tool",
         "blocked_param": "assembly blocked on missing Flye parameters",
     }.get(status, "assembly failed")
-    return {
-        "current_stage": "assembly",
-        "supervision_state": "failed_terminal",
-        "last_error": assembly_out.get("reason", default_reason),
-    }
+    reason = str(assembly_out.get("reason", default_reason))
+    return fail_workflow_step(
+        state,
+        "assembly",
+        reason,
+    )
 
 
 def block_assembly_for_human(state: TopLevelState) -> StateUpdate:

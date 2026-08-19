@@ -5,12 +5,16 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.execution.method_outcomes import method_outcome_settlement_node
 from app.schemas.state import TopLevelState
 from app.stages.assembly.method_application import (
     build_flye_graph,
     build_hifiasm_graph,
     build_hifiasm_ont_graph,
     build_nextdenovo_graph,
+)
+from app.stages.assembly.method_application.support import (
+    assembly_terminal_method_outcome_policy,
 )
 from app.stages.assembly.nodes import (
     block_assembly_for_human,
@@ -30,6 +34,7 @@ from app.stages.assembly.parameters.workflow import (
 )
 from app.stages.assembly.routing import (
     route_after_candidate_set,
+    route_after_commit,
     route_after_enter,
     route_after_execution_retry_gate,
     route_after_infer_profile,
@@ -66,6 +71,13 @@ def build_stage() -> CompiledStateGraph[
     graph.add_node("execution_retry_gate", execution_retry_gate)
     graph.add_node("commit", commit_assembly_plan)
     graph.add_node("fail", fail_assembly)
+    graph.add_node(
+        "settle_method_outcomes",
+        method_outcome_settlement_node(
+            stage="assembly",
+            outcome_policy=assembly_terminal_method_outcome_policy,
+        ),
+    )
     graph.add_node("block", block_assembly_for_human)
 
     graph.add_edge(START, "enter")
@@ -145,8 +157,13 @@ def build_stage() -> CompiledStateGraph[
         route_after_execution_retry_gate,
         {"recommend": "recommend_parameters", "commit": "commit", "fail": "fail"},
     )
-    graph.add_edge("commit", END)
-    graph.add_edge("fail", END)
+    graph.add_conditional_edges(
+        "commit",
+        route_after_commit,
+        {"settle": "settle_method_outcomes", "done": END},
+    )
+    graph.add_edge("fail", "settle_method_outcomes")
+    graph.add_edge("settle_method_outcomes", END)
     graph.add_edge("block", END)
 
     return graph.compile()

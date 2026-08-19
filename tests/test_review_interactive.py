@@ -65,11 +65,20 @@ def _review_occurrence_state(
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
+                "selected_method_names": [],
             },
             {
                 "step_id": f"step-001-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
+                "selected_method_names": (
+                    [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ]
+                    if stage == "assembly_review"
+                    else []
+                ),
                 **(
                     {
                         "review_target": {
@@ -94,9 +103,7 @@ def _verified_inputs_for_review(stage: str) -> SimpleNamespace:
         payload["assembly_review"] = assembly_review_config(
             "/data/busco/embryophyta_odb10"
         )
-    return SimpleNamespace(
-        run_config=RunConfig.model_validate(payload)
-    )
+    return SimpleNamespace(run_config=RunConfig.model_validate(payload))
 
 
 def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
@@ -136,6 +143,11 @@ def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
     )
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, "control/manifest.yaml")
+    ledger.record_stage_completed(
+        session_id,
+        "inventory",
+        workflow_step_id="step-000-inventory",
+    )
     ledger.record_review_requested(
         session_id,
         "assembly_review",
@@ -175,6 +187,11 @@ def _hic_blocked_session(tmp: str) -> tuple[str, str]:
     )
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, "control/manifest.yaml")
+    ledger.record_stage_completed(
+        session_id,
+        "inventory",
+        workflow_step_id="step-000-inventory",
+    )
     ledger.record_review_requested(
         session_id,
         "hic_scaffolding",
@@ -935,16 +952,22 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-t2t",
                     "stage": "t2t",
                     "allow_local_execution": False,
+                    "selected_method_names": ["t2t.alignment.minimap2"],
                 },
                 {
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": True,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-001-t2t",

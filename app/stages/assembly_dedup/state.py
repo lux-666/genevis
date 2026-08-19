@@ -36,7 +36,10 @@ class AssemblyDedupCursor(TypedDict, total=False):
     status: str
     reason: str
     failure_kind: str
-    skip_reason: str
+    purge_dups_status: Literal[
+        "not_started", "pending", "skipped", "completed", "failed"
+    ]
+    purge_dups_skip_reason: str
     execution_mode: str
     env: dict[str, str]
     env_target: str

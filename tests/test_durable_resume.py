@@ -240,6 +240,37 @@ def _build_blocked_state(
     )
     ledger = Ledger(run_dir)
     ledger.create_session(session_id, paths.to_ref(paths.input_manifest_path))
+    ledger.record_stage_completed(
+        session_id,
+        "inventory",
+        workflow_step_id="step-000-inventory",
+    )
+    ledger.record_resource_delivered(
+        session_id,
+        stage="assembly",
+        workflow_step_id=assembly_step_id,
+        resource_type="assembly",
+        delivery_mode="materialized",
+        candidate_bundle_ref=published_executed.ref,
+        primary_output_ref=primary.ref,
+    )
+    ledger.record_stage_completed(
+        session_id,
+        "assembly",
+        workflow_step_id=assembly_step_id,
+    )
+    for evaluator in (
+        "assembly_review.eval.quast",
+        "assembly_review.eval.busco",
+    ):
+        ledger.record_method_disposition(
+            session_id,
+            "assembly_review",
+            "step-002-assembly_review",
+            evaluator,
+            "skipped",
+            reason="local_execution_not_authorized",
+        )
     ledger.record_review_requested(
         session_id,
         "assembly_review",

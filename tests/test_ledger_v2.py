@@ -26,6 +26,8 @@ from app.storage.ledger import (
     SUMMARY_MAX_BYTES,
     Ledger,
     LedgerConflictError,
+    project_attempt_terminal_events,
+    project_stage_terminal_events,
 )
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
@@ -59,7 +61,455 @@ def _register_artifact(
     return register_artifact_records(paths.run_dir, paths.session_id, [artifact])[0]
 
 
+def _append_legacy_stage_terminal(
+    ledger: Ledger,
+    *,
+    event_type: str,
+    stage: str,
+    workflow_step_id: str,
+    summary: dict[str, object],
+) -> None:
+    """Inject pre-invariant terminal history for read-model compatibility tests."""
+
+    rows = ledger.read_event_rows("s1")
+    sequence = int(rows[-1]["sequence"]) + 1
+    row = {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "sequence": sequence,
+        "event_id": f"evt_legacy_{sequence:08d}",
+        "idempotency_key": f"legacy:{sequence}",
+        "session_id": "s1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": event_type,
+        "stage": stage,
+        "workflow_step_id": workflow_step_id,
+        "subject_id": workflow_step_id,
+        "refs": [],
+        "summary": summary,
+    }
+    with ledger.events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+def _append_legacy_attempt_terminal(
+    ledger: Ledger,
+    *,
+    event_type: str,
+    attempt_id: str,
+    workflow_step_id: str,
+    stage: str,
+    method_name: str,
+) -> None:
+    rows = ledger.read_event_rows("s1")
+    sequence = int(rows[-1]["sequence"]) + 1
+    row = {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "sequence": sequence,
+        "event_id": f"evt_legacy_{sequence:08d}",
+        "idempotency_key": f"legacy:{sequence}",
+        "session_id": "s1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": event_type,
+        "stage": stage,
+        "workflow_step_id": workflow_step_id,
+        "subject_id": attempt_id,
+        "refs": [],
+        "summary": {"method_name": method_name, "error": "legacy failure"},
+    }
+    with ledger.events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+def _append_legacy_idempotency_collision(
+    ledger: Ledger,
+    *,
+    idempotency_key: str,
+) -> None:
+    """Inject immutable bad history to exercise append-lock fail-closed paths."""
+
+    rows = ledger.read_event_rows("s1")
+    sequence = int(rows[-1]["sequence"]) + 1
+    row = {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "sequence": sequence,
+        "event_id": f"evt_legacy_{sequence:08d}",
+        "idempotency_key": idempotency_key,
+        "session_id": "s1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": "legacy_other_domain_fact",
+        "stage": None,
+        "workflow_step_id": None,
+        "subject_id": None,
+        "refs": [],
+        "summary": {"detail": "occupied by another domain"},
+    }
+    with ledger.events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
 class LedgerV2Tests(unittest.TestCase):
+    def test_attempt_terminal_writes_are_singleton_and_exact_replays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            attempt_id = "step-001-read_qc:attempt_000"
+            first = ledger.record_event(
+                "s1",
+                "attempt_succeeded",
+                {"method_name": "seqkit_stats"},
+                stage="read_qc",
+                workflow_step_id="step-001-read_qc",
+                subject_id=attempt_id,
+                idempotency_key="attempt:success",
+            )
+            self.assertEqual(
+                ledger.record_event(
+                    "s1",
+                    "attempt_succeeded",
+                    {"method_name": "seqkit_stats"},
+                    stage="read_qc",
+                    workflow_step_id="step-001-read_qc",
+                    subject_id=attempt_id,
+                    idempotency_key="attempt:success:replay",
+                ),
+                first,
+            )
+            with self.assertRaisesRegex(
+                LedgerConflictError, "requested=attempt_failed"
+            ):
+                ledger.record_event(
+                    "s1",
+                    "attempt_failed",
+                    {"method_name": "seqkit_stats", "error": "late failure"},
+                    stage="read_qc",
+                    workflow_step_id="step-001-read_qc",
+                    subject_id=attempt_id,
+                    idempotency_key="attempt:failure",
+                )
+            with self.assertRaisesRegex(
+                LedgerConflictError, "same terminal outcome has different semantic body"
+            ):
+                ledger.record_event(
+                    "s1",
+                    "attempt_succeeded",
+                    {"method_name": "different_method"},
+                    stage="read_qc",
+                    workflow_step_id="step-001-read_qc",
+                    subject_id=attempt_id,
+                    idempotency_key="attempt:success:drift",
+                )
+
+    def test_method_disposition_is_typed_unique_and_requires_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            first = ledger.record_method_disposition(
+                "s1",
+                "read_qc",
+                "step-001-read_qc",
+                "seqkit_stats",
+                "skipped",
+                reason="not selected",
+            )
+            self.assertEqual(
+                ledger.record_method_disposition(
+                    "s1",
+                    "read_qc",
+                    "step-001-read_qc",
+                    "seqkit_stats",
+                    "skipped",
+                    reason="not selected",
+                ),
+                first,
+            )
+            with self.assertRaisesRegex(LedgerConflictError, "method disposition"):
+                ledger.record_method_disposition(
+                    "s1",
+                    "read_qc",
+                    "step-001-read_qc",
+                    "seqkit_stats",
+                    "failed",
+                    reason="tool failed",
+                )
+            with self.assertRaisesRegex(ValueError, "requires a reason"):
+                ledger.record_method_disposition(
+                    "s1",
+                    "read_qc",
+                    "step-001-read_qc",
+                    "seqkit_length_filter",
+                    "skipped",
+                )
+            with self.assertRaisesRegex(ValueError, "must be recorded"):
+                ledger.record_event(
+                    "s1",
+                    "method_disposition_recorded",
+                    {"method_name": "seqkit_stats", "disposition": "completed"},
+                    stage="read_qc",
+                    workflow_step_id="step-001-read_qc",
+                )
+
+    def test_attempt_terminal_projection_fails_closed_for_legacy_conflicts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            attempt_id = "step-001-read_qc:attempt_000"
+            ledger.record_event(
+                "s1",
+                "attempt_succeeded",
+                {"method_name": "seqkit_stats"},
+                stage="read_qc",
+                workflow_step_id="step-001-read_qc",
+                subject_id=attempt_id,
+            )
+            _append_legacy_attempt_terminal(
+                ledger,
+                event_type="attempt_failed",
+                attempt_id=attempt_id,
+                workflow_step_id="step-001-read_qc",
+                stage="read_qc",
+                method_name="seqkit_stats",
+            )
+            terminals, diagnostics = project_attempt_terminal_events(
+                ledger.read_events("s1")
+            )
+            self.assertEqual(terminals[attempt_id]["event_type"], "attempt_failed")
+            self.assertEqual(diagnostics[0]["kind"], "conflicting_attempt_terminal")
+            self.assertEqual(diagnostics[0]["selected_sequence"], 2)
+
+    def test_stage_terminal_writes_reject_conflicting_outcomes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+            step_id = "step-001-genome_survey"
+            first = ledger.record_event(
+                "s1",
+                "stage_completed",
+                {},
+                stage="genome_survey",
+                workflow_step_id=step_id,
+                subject_id=step_id,
+                idempotency_key="terminal:first",
+            )
+
+            # A second idempotency key with the identical terminal fact is a
+            # replay, not a second row.
+            replay = ledger.record_event(
+                "s1",
+                "stage_completed",
+                {},
+                stage="genome_survey",
+                workflow_step_id=step_id,
+                subject_id=step_id,
+                idempotency_key="terminal:alternate-key",
+            )
+            self.assertEqual(replay, first)
+            with self.assertRaisesRegex(
+                LedgerConflictError,
+                "stage terminal conflicts with existing terminal outcome",
+            ):
+                ledger.record_stage_skipped(
+                    "s1",
+                    "genome_survey",
+                    workflow_step_id=step_id,
+                    reason="no_usable_survey_reads",
+                )
+            with self.assertRaisesRegex(LedgerConflictError, "requested=stage_failed"):
+                ledger.record_stage_failed(
+                    "s1",
+                    "genome_survey",
+                    workflow_step_id=step_id,
+                    error="late failure",
+                )
+            self.assertEqual(
+                [row["event_type"] for row in ledger.read_event_rows("s1")],
+                ["session_created", "stage_completed"],
+            )
+
+    def test_stage_terminal_writes_reject_same_type_payload_or_ref_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+            step_id = "step-001-genome_survey"
+            ledger.record_stage_skipped(
+                "s1",
+                "genome_survey",
+                workflow_step_id=step_id,
+                reason="no_usable_survey_reads",
+                idempotency_key="terminal:skip:first",
+            )
+
+            with self.assertRaisesRegex(
+                LedgerConflictError,
+                "same terminal outcome has different semantic body",
+            ):
+                ledger.record_stage_skipped(
+                    "s1",
+                    "genome_survey",
+                    workflow_step_id=step_id,
+                    reason="operator_declined",
+                    idempotency_key="terminal:skip:payload-drift",
+                )
+            with self.assertRaisesRegex(
+                LedgerConflictError,
+                "same terminal outcome has different semantic body",
+            ):
+                ledger.record_stage_skipped(
+                    "s1",
+                    "genome_survey",
+                    workflow_step_id=step_id,
+                    reason="no_usable_survey_reads",
+                    refs=[{"role": "diagnostic", "value": "different"}],
+                    idempotency_key="terminal:skip:ref-drift",
+                )
+            self.assertEqual(
+                [row["event_type"] for row in ledger.read_event_rows("s1")],
+                ["session_created", "stage_skipped"],
+            )
+
+    def test_stage_terminal_writes_reject_cross_stage_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+            step_id = "step-001-assembly"
+            ledger.record_event(
+                "s1",
+                "stage_completed",
+                {},
+                stage="assembly",
+                workflow_step_id=step_id,
+                subject_id=step_id,
+                idempotency_key="terminal:assembly:first",
+            )
+
+            with self.assertRaisesRegex(
+                LedgerConflictError,
+                "existing_stage=assembly; requested_stage=assembly_review",
+            ):
+                ledger.record_event(
+                    "s1",
+                    "stage_completed",
+                    {},
+                    stage="assembly_review",
+                    workflow_step_id=step_id,
+                    subject_id=step_id,
+                    idempotency_key="terminal:assembly:cross-stage",
+                )
+
+    def test_stage_terminal_read_model_reports_legacy_cross_stage_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+            step_id = "step-001-assembly"
+            ledger.record_stage_completed("s1", "assembly", workflow_step_id=step_id)
+            _append_legacy_stage_terminal(
+                ledger,
+                event_type="stage_skipped",
+                stage="assembly_review",
+                workflow_step_id=step_id,
+                summary={"reason": "legacy_stage_binding_drift"},
+            )
+
+            terminals, diagnostics = project_stage_terminal_events(
+                ledger.read_events("s1")
+            )
+
+            self.assertEqual(
+                terminals[(step_id, "assembly")]["event_type"], "stage_completed"
+            )
+            self.assertEqual(
+                terminals[(step_id, "assembly_review")]["event_type"],
+                "stage_skipped",
+            )
+            self.assertEqual(len(diagnostics), 1)
+            diagnostic = diagnostics[0]
+            self.assertEqual(
+                diagnostic["kind"], "conflicting_stage_terminal_stage_binding"
+            )
+            self.assertEqual(diagnostic["workflow_step_id"], step_id)
+            self.assertEqual(diagnostic["stages"], ["assembly", "assembly_review"])
+
+    def test_stage_terminal_replay_rejects_legacy_multiple_terminal_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+            step_id = "step-001-genome_survey"
+            ledger.record_stage_completed(
+                "s1", "genome_survey", workflow_step_id=step_id
+            )
+            _append_legacy_stage_terminal(
+                ledger,
+                event_type="stage_skipped",
+                stage="genome_survey",
+                workflow_step_id=step_id,
+                summary={"reason": "legacy_conflict"},
+            )
+
+            # This reuses the first row's default idempotency key. The terminal
+            # invariant must run before generic idempotency replay.
+            with self.assertRaisesRegex(
+                LedgerConflictError,
+                "multiple stage terminal events",
+            ):
+                ledger.record_stage_completed(
+                    "s1", "genome_survey", workflow_step_id=step_id
+                )
+
+    def test_stage_terminal_read_model_reports_legacy_conflicts_and_uses_precedence(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+            step_id = "step-001-genome_survey"
+            ledger.record_stage_completed(
+                "s1", "genome_survey", workflow_step_id=step_id
+            )
+            _append_legacy_stage_terminal(
+                ledger,
+                event_type="stage_skipped",
+                stage="genome_survey",
+                workflow_step_id=step_id,
+                summary={"reason": "no_usable_survey_reads"},
+            )
+            _append_legacy_stage_terminal(
+                ledger,
+                event_type="stage_failed",
+                stage="genome_survey",
+                workflow_step_id=step_id,
+                summary={"error": "late failure"},
+            )
+
+            terminals, diagnostics = project_stage_terminal_events(
+                ledger.read_events("s1")
+            )
+
+            self.assertEqual(
+                terminals[(step_id, "genome_survey")]["event_type"],
+                "stage_failed",
+            )
+            self.assertEqual(len(diagnostics), 1)
+            diagnostic = diagnostics[0]
+            self.assertEqual(diagnostic["kind"], "conflicting_stage_terminal")
+            self.assertEqual(diagnostic["workflow_step_id"], step_id)
+            self.assertEqual(diagnostic["stage"], "genome_survey")
+            self.assertEqual(diagnostic["terminal_count"], 3)
+            self.assertEqual(diagnostic["selected_event_type"], "stage_failed")
+            self.assertEqual(diagnostic["selected_sequence"], 4)
+            self.assertEqual(
+                [event["event_type"] for event in diagnostic["terminal_events"]],
+                ["stage_completed", "stage_skipped", "stage_failed"],
+            )
+            self.assertEqual(
+                [event["sequence"] for event in diagnostic["terminal_events"]],
+                [2, 3, 4],
+            )
+
     def test_session_and_events_are_one_idempotent_v2_stream(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
@@ -115,6 +565,67 @@ class LedgerV2Tests(unittest.TestCase):
                     stage="hic_scaffolding",
                     workflow_step_id="step-001-hic_scaffolding",
                     idempotency_key="skip:hic",
+                )
+
+    def test_cross_domain_key_occupancy_cannot_mask_natural_key_replays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+
+            ledger.record_stage_completed(
+                "s1",
+                "read_qc",
+                workflow_step_id="step-001-read_qc",
+                idempotency_key="collision:stage",
+            )
+            stage = ledger.read_event_rows("s1")[-1]
+            attempt = ledger.record_event(
+                "s1",
+                "attempt_succeeded",
+                {"method_name": "seqkit_stats"},
+                stage="read_qc",
+                workflow_step_id="step-001-read_qc",
+                subject_id="step-001-read_qc:attempt_000",
+                idempotency_key="collision:attempt",
+            )
+            method = ledger.record_method_disposition(
+                "s1",
+                "read_qc",
+                "step-001-read_qc",
+                "seqkit_stats",
+                "completed",
+            )
+            for row in (stage, attempt, method):
+                _append_legacy_idempotency_collision(
+                    ledger,
+                    idempotency_key=row["idempotency_key"],
+                )
+
+            with self.assertRaisesRegex(LedgerConflictError, "idempotency key"):
+                ledger.record_stage_completed(
+                    "s1",
+                    "read_qc",
+                    workflow_step_id="step-001-read_qc",
+                    idempotency_key="collision:stage",
+                )
+            with self.assertRaisesRegex(LedgerConflictError, "idempotency key"):
+                ledger.record_event(
+                    "s1",
+                    "attempt_succeeded",
+                    {"method_name": "seqkit_stats"},
+                    stage="read_qc",
+                    workflow_step_id="step-001-read_qc",
+                    subject_id="step-001-read_qc:attempt_000",
+                    idempotency_key="collision:attempt",
+                )
+            with self.assertRaisesRegex(LedgerConflictError, "idempotency key"):
+                ledger.record_method_disposition(
+                    "s1",
+                    "read_qc",
+                    "step-001-read_qc",
+                    "seqkit_stats",
+                    "completed",
                 )
 
     def test_large_collections_are_counts_and_refs_not_embedded_bodies(self):
@@ -440,7 +951,7 @@ class LedgerV2Tests(unittest.TestCase):
             self.assertEqual(rows[-2]["workflow_step_id"], "step-001-assembly")
             self.assertIsNone(rows[-1]["workflow_step_id"])
 
-    def test_session_terminal_is_a_same_outcome_singleton(self):
+    def test_session_terminal_replay_requires_the_complete_semantic_body(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
@@ -451,14 +962,19 @@ class LedgerV2Tests(unittest.TestCase):
                 stage="done",
                 error=None,
             )
-            replay = ledger.record_session_terminal(
-                "s1",
-                outcome="completed",
-                stage="assembly_review",
-                error="later diagnostics must not replace the first fact",
+            self.assertEqual(
+                ledger.record_session_terminal(
+                    "s1", outcome="completed", stage="done", error=None
+                ),
+                first,
             )
-
-            self.assertEqual(replay, first)
+            with self.assertRaisesRegex(LedgerConflictError, "different semantic body"):
+                ledger.record_session_terminal(
+                    "s1",
+                    outcome="completed",
+                    stage="assembly_review",
+                    error="later diagnostics must not replace the first fact",
+                )
             terminal_rows = [
                 row
                 for row in ledger.read_event_rows("s1")
@@ -466,6 +982,100 @@ class LedgerV2Tests(unittest.TestCase):
             ]
             self.assertEqual(terminal_rows, [first])
             self.assertEqual(first["idempotency_key"], "session:s1:terminal")
+
+    def test_session_terminal_replay_rejects_cross_domain_idempotency_collision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            first = ledger.record_session_terminal(
+                "s1", outcome="completed", stage="done"
+            )
+            collision = dict(first)
+            collision.update(
+                {
+                    "sequence": 2,
+                    "event_id": "evt_legacy_collision",
+                    "event_type": "legacy_cross_domain_fact",
+                    "stage": None,
+                    "summary": {"detail": "must not replay as terminal"},
+                }
+            )
+            with ledger.events_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(collision, separators=(",", ":")) + "\n")
+
+            with self.assertRaisesRegex(LedgerConflictError, "idempotency"):
+                ledger.record_session_terminal("s1", outcome="completed", stage="done")
+
+    def test_stage_terminal_requires_exact_roster_coverage_when_supplied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            step_id = "step-001-read_qc"
+            roster = (
+                "read_qc.long_read_stats.seqkit_stats",
+                "read_qc.length_filter.skip",
+            )
+            with self.assertRaisesRegex(LedgerConflictError, "missing="):
+                ledger.record_stage_completed(
+                    "s1",
+                    "read_qc",
+                    workflow_step_id=step_id,
+                    selected_method_names=roster,
+                )
+            ledger.record_method_disposition(
+                "s1",
+                "read_qc",
+                step_id,
+                roster[0],
+                "completed",
+            )
+            ledger.record_method_disposition(
+                "s1",
+                "read_qc",
+                step_id,
+                roster[1],
+                "completed",
+            )
+            ledger.record_stage_completed(
+                "s1",
+                "read_qc",
+                workflow_step_id=step_id,
+                selected_method_names=roster,
+            )
+            empty_step_id = "step-002-read_qc"
+            ledger.record_method_disposition(
+                "s1",
+                "read_qc",
+                empty_step_id,
+                "read_qc.long_read_stats.seqkit_stats",
+                "completed",
+            )
+            with self.assertRaisesRegex(LedgerConflictError, "extra="):
+                ledger.record_stage_completed(
+                    "s1",
+                    "read_qc",
+                    workflow_step_id=empty_step_id,
+                    selected_method_names=(),
+                )
+
+    def test_failed_session_terminal_persists_scope_and_completed_rejects_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            failed = ledger.record_session_terminal(
+                "s1",
+                outcome="failed",
+                stage="read_qc",
+                failure_scope="controller_boundary",
+            )
+            self.assertEqual(failed["summary"]["failure_scope"], "controller_boundary")
+            with self.assertRaisesRegex(ValueError, "must not include failure_scope"):
+                Ledger(_run(tmp, "s2").run_dir).record_session_terminal(
+                    "s2",
+                    outcome="completed",
+                    stage="done",
+                    failure_scope="occurrence",
+                )
 
     def test_session_terminal_rejects_a_conflicting_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:

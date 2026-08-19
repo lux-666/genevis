@@ -37,14 +37,25 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
     def _terminal_graph(self, paths: SessionPaths):
         saver = get_checkpointer("sqlite", data_dir=paths.run_dir)
         graph = StateGraph(TopLevelState)
-        graph.add_node(
-            "finish",
-            lambda state: {
+
+        def finish(state):
+            terminal_index = len(state["workflow_steps"]) - 1
+            terminal_step = state["workflow_steps"][terminal_index]
+            return {
                 "current_stage": "done",
                 "workflow_step_index": len(state["workflow_steps"]),
-                "entered_workflow_step_index": len(state["workflow_steps"]) - 1,
+                "entered_workflow_step_index": terminal_index,
                 "supervision_state": "completed",
-            },
+                "workflow_step_outcome": {
+                    "workflow_step_id": terminal_step["step_id"],
+                    "stage": terminal_step["stage"],
+                    "outcome": "completed",
+                },
+            }
+
+        graph.add_node(
+            "finish",
+            finish,
         )
         graph.set_entry_point("finish")
         return graph.compile(checkpointer=saver), saver
@@ -558,6 +569,12 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                     "supervision_state": "failed_terminal",
                     "last_error": "assembler failed",
                     "active_interrupt": None,
+                    "workflow_step_outcome": {
+                        "workflow_step_id": "step-002-assembly",
+                        "stage": "assembly",
+                        "outcome": "failed",
+                        "reason": "assembler failed",
+                    },
                 },
             )
             terminal_state = dict(graph.get_state(config).values)
@@ -581,7 +598,8 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             )
 
             self.assertEqual(summary["supervision_state"], "failed_terminal")
-            self.assertEqual(summary["current_stage"], "assembly")
+            self.assertIsNone(summary["current_stage"])
+            self.assertEqual(summary["latest_terminal_event"]["stage"], "assembly")
             self.assertEqual(summary["last_error"], "assembler failed")
             self.assertEqual(trace["supervision_state"], "failed_terminal")
             self.assertEqual(

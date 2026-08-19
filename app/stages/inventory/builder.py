@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.control.workflow_plan import fail_workflow_step
 from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
@@ -96,11 +97,7 @@ def _fail_inventory(state: TopLevelState) -> StateUpdate:
         reason = "inventory validation failed: " + "; ".join(errors)
     else:
         reason = inventory_out.get("reason", "inventory failed")
-    return {
-        "current_stage": "inventory",
-        "supervision_state": "failed_terminal",
-        "last_error": reason,
-    }
+    return fail_workflow_step(state, "inventory", str(reason))
 
 
 def build_stage(

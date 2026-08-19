@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Literal
 
 from app.execution.parameter_attempts import (
@@ -128,6 +129,22 @@ def route_after_method_subgraph(
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "retry_gate" if _current_attempt_has_execution_result(output) else "fail"
     return "commit"
+
+
+def route_after_commit(state: TopLevelState) -> Literal["settle", "done"]:
+    """Settle a failed commit before the outer Assembly graph terminates."""
+
+    raw_outcome = state.get("workflow_step_outcome")
+    outcome: Mapping[str, object] = (
+        raw_outcome if isinstance(raw_outcome, Mapping) else {}
+    )
+    if (
+        state.get("current_stage") == "assembly"
+        and outcome.get("stage") == "assembly"
+        and outcome.get("outcome") == "failed"
+    ):
+        return "settle"
+    return "done"
 
 
 def route_after_execution_retry_gate(

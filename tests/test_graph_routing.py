@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.control.projections import ProgressProjectionInput
-from app.control.workflow_plan import workflow_steps_from_run_config
+from app.control.workflow_plan import fail_workflow_step, workflow_steps_from_run_config
 from app.graph.builder import build_graph
 from app.graph.routing import route_controller, route_from_current_stage
 from app.schemas.run_config import RunConfig
@@ -132,6 +132,162 @@ class GraphRoutingTests(unittest.TestCase):
             self.assertFalse(any(row["event_type"] == "stage_skipped" for row in rows))
             self.assertFalse(
                 any(row["event_type"] == "session_terminal" for row in rows)
+            )
+
+    def test_advanced_skipped_occurrence_has_only_one_terminal_fact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "survey-skip-terminal")
+            rnaseq = run_dir / "rna.fastq"
+            rnaseq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = run_dir / "control" / "manifest.yaml"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "session_id": "survey-skip-terminal",
+                        "genome_size_estimate": 2_000_000,
+                        "assets": [
+                            {
+                                "asset_type": "raw_rnaseq_reads",
+                                "paths": [str(rnaseq)],
+                                "platform": "illumina",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = RunConfig.model_validate(
+                {
+                    "requested_stages": [
+                        {
+                            "stage": "genome_survey",
+                            "allow_local_execution": False,
+                        }
+                    ]
+                }
+            )
+            paths, verified_inputs = _freeze_verified_inputs(
+                run_dir,
+                manifest,
+                config,
+            )
+            input_manifest_ref = paths.to_ref(paths.input_manifest_path)
+            ledger = Ledger(run_dir)
+            ledger.create_session("survey-skip-terminal", input_manifest_ref)
+            state = initial_state(
+                session_id="survey-skip-terminal",
+                input_manifest_ref=input_manifest_ref,
+                data_dir=str(run_dir),
+                workflow_steps=workflow_steps_from_run_config(
+                    verified_inputs.run_config
+                ),
+            )
+
+            result = build_graph(
+                backend="memory",
+                data_dir=str(run_dir),
+                verified_inputs=verified_inputs,
+            ).invoke(
+                state,
+                config={"configurable": {"thread_id": "survey-skip-terminal"}},
+            )
+
+            self.assertEqual(result["supervision_state"], "completed")
+            terminals = [
+                row
+                for row in ledger.read_event_rows("survey-skip-terminal")
+                if row.get("workflow_step_id") == "step-001-genome_survey"
+                and row["event_type"]
+                in {"stage_failed", "stage_skipped", "stage_completed"}
+            ]
+            self.assertEqual(
+                [row["event_type"] for row in terminals],
+                ["stage_skipped"],
+            )
+            self.assertEqual(
+                terminals[0]["summary"]["reason"],
+                "no_usable_survey_reads",
+            )
+
+    def test_failed_occurrence_takes_precedence_over_same_update_skip_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "failed-over-skip")
+            reads = run_dir / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = run_dir / "control" / "manifest.yaml"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "session_id": "failed-over-skip",
+                        "assets": [
+                            {
+                                "asset_type": "raw_long_reads",
+                                "paths": [str(reads)],
+                                "platform": "ont",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = RunConfig.model_validate(
+                {
+                    "requested_stages": [
+                        {"stage": "gapcloser", "allow_local_execution": False}
+                    ]
+                }
+            )
+            paths, verified_inputs = _freeze_verified_inputs(
+                run_dir,
+                manifest,
+                config,
+            )
+            input_manifest_ref = paths.to_ref(paths.input_manifest_path)
+            ledger = Ledger(run_dir)
+            ledger.create_session("failed-over-skip", input_manifest_ref)
+            state = initial_state(
+                session_id="failed-over-skip",
+                input_manifest_ref=input_manifest_ref,
+                data_dir=str(run_dir),
+                workflow_steps=workflow_steps_from_run_config(
+                    verified_inputs.run_config
+                ),
+            )
+
+            def fail_with_skip(_state):
+                return {
+                    **fail_workflow_step(
+                        _state,
+                        "gapcloser",
+                        "synthetic stage failure",
+                    ),
+                    "skip_reasons": {"step-001-gapcloser": "stale synthetic skip"},
+                }
+
+            with patch(
+                "app.graph.builder.build_gapcloser_stage",
+                return_value=fail_with_skip,
+            ):
+                result = build_graph(
+                    backend="memory",
+                    data_dir=str(run_dir),
+                    verified_inputs=verified_inputs,
+                ).invoke(
+                    state,
+                    config={"configurable": {"thread_id": "failed-over-skip"}},
+                )
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            terminals = [
+                row
+                for row in ledger.read_event_rows("failed-over-skip")
+                if row.get("workflow_step_id") == "step-001-gapcloser"
+                and row["event_type"]
+                in {"stage_failed", "stage_skipped", "stage_completed"}
+            ]
+            self.assertEqual(
+                [row["event_type"] for row in terminals],
+                ["stage_failed"],
             )
 
     def test_attached_progress_observes_ledger_after_each_controller_transition(self):

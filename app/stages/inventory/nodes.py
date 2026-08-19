@@ -25,7 +25,13 @@ from pydantic import (
 from typing_extensions import TypedDict
 
 from app.control.errors import ResumeValidationError
-from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    assembly_delivery,
+    current_workflow_step_id,
+    fail_workflow_step,
+    seed_current_workflow_step,
+)
 from app.integrity import sha256_file
 from app.review.application import (
     PreparedReviewApplication,
@@ -45,6 +51,7 @@ from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.state import (
+    ResourceDelivery,
     ResourceRefs,
     StateUpdate,
     TopLevelState,
@@ -60,7 +67,10 @@ from app.storage.artifacts import (
     publish_artifact_record,
     recover_published_artifact,
 )
-from app.storage.assembly_candidates import publish_registered_assembly_candidate
+from app.storage.assembly_candidates import (
+    load_executed_candidate_bundle,
+    publish_registered_assembly_candidate,
+)
 from app.storage.frozen_inputs import (
     FrozenInputBundle,
     RegisteredReadDeclaration,
@@ -436,8 +446,11 @@ def _write_registry(
 
 
 def enter_inventory(state: TopLevelState) -> StateUpdate:
-    """Mark inventory as running.  No side effects."""
-    return {"supervision_state": "running_stage"}
+    """Mark Inventory as entered and running for standalone-stage execution."""
+    return {
+        **seed_current_workflow_step(state),
+        "supervision_state": "running_stage",
+    }
 
 
 def validate_inputs(
@@ -700,11 +713,73 @@ def _require_verified_inputs(
 
 def commit_inventory(state: TopLevelState) -> StateUpdate:
     """Complete inventory and advance one frozen workflow occurrence."""
+    try:
+        deliveries = _registered_assembly_deliveries(state)
+    except (OSError, TypeError, ValueError) as exc:
+        reason = f"inventory registered assembly delivery is invalid: {exc}"
+        return {
+            **update_inventory_stage_output(
+                state,
+                {"status": "failed", "reason": reason},
+            ),
+            **fail_workflow_step(state, "inventory", reason),
+        }
     trace = append_route_trace(state, "inventory_stage")
     return {
-        **advance_workflow_step(state, "inventory"),
+        **advance_workflow_step(
+            state,
+            "inventory",
+            outcome="completed",
+            deliveries=deliveries,
+        ),
         "route_trace": trace,
     }
+
+
+def _registered_assembly_deliveries(
+    state: TopLevelState,
+) -> tuple[ResourceDelivery, ...]:
+    """Return Inventory's materialized registered-assembly delivery, if any."""
+
+    raw_resource = (state.get("resource_refs") or {}).get("assembly")
+    if raw_resource is None:
+        return ()
+    if not isinstance(raw_resource, Mapping):
+        raise ValueError("inventory assembly resource projection must be a mapping")
+    resource = ResourceRef.from_dict(raw_resource)
+    if resource.source_stage != "inventory":
+        return ()
+    candidate_bundle_ref = resource.metadata.get("candidate_bundle_ref")
+    primary_output_ref = resource.metadata.get("primary_output_ref")
+    if not isinstance(candidate_bundle_ref, Mapping) or not isinstance(
+        primary_output_ref, Mapping
+    ):
+        raise ValueError(
+            "registered inventory assembly is missing its candidate relation"
+        )
+    verified = load_executed_candidate_bundle(
+        state.get("data_dir", "data"),
+        state["session_id"],
+        dict(candidate_bundle_ref),
+        expected_method_name="inventory.registered_assembly",
+    )
+    if verified.primary_output_ref.model_dump(mode="json") != dict(primary_output_ref):
+        raise ValueError(
+            "registered inventory assembly primary output differs from its candidate"
+        )
+    if len(resource.paths) != 1 or Path(resource.paths[0]).resolve(
+        strict=False
+    ) != verified.primary_output_path.resolve(strict=False):
+        raise ValueError(
+            "registered inventory assembly path differs from its candidate output"
+        )
+    return (
+        assembly_delivery(
+            verified.ref.model_dump(mode="json"),
+            verified.primary_output_ref.model_dump(mode="json"),
+            delivery_mode="materialized",
+        ),
+    )
 
 
 def prepare_inventory_review_application(
@@ -787,10 +862,12 @@ def apply_inventory_review_application(
 
     if effect.decision == "stop_human_review":
         return {
-            "current_stage": "inventory",
-            "supervision_state": "failed_terminal",
+            **fail_workflow_step(
+                state,
+                "inventory",
+                "inventory review stopped by human decision",
+            ),
             "active_interrupt": None,
-            "last_error": "inventory review stopped by human decision",
         }
 
     if effect.asset_registry_ref is None:

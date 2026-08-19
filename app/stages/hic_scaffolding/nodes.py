@@ -11,7 +11,13 @@ from pydantic import JsonValue as PydanticJsonValue
 
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
-from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    assembly_delivery,
+    current_workflow_step_id,
+    fail_workflow_step,
+)
+from app.execution.method_outcomes import settle_method_outcomes
 from app.review.application import (
     PreparedReviewApplication,
     ReviewIntentV1,
@@ -56,6 +62,31 @@ from app.storage.ledger import Ledger
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
+
+
+def _settle_terminal_autohic(
+    state: TopLevelState,
+    stage_update: StateUpdate | None = None,
+) -> StateUpdate:
+    """Settle AutoHiC before a direct terminal application bypasses the graph.
+
+    Review application is outside the stage graph, so it cannot rely on its
+    graph settlement nodes.  Apply the prospective cursor only for deriving
+    the typed outcome; the shared execution boundary remains the only ledger
+    disposition writer.
+    """
+
+    from app.stages.hic_scaffolding.method_application.autohic import (
+        terminal_autohic_method_outcome,
+    )
+
+    projected = cast(TopLevelState, {**state, **(stage_update or {})})
+    return settle_method_outcomes(
+        projected,
+        stage="hic_scaffolding",
+        outcomes=terminal_autohic_method_outcome(projected),
+        expected_method_names=(AUTOHIC_METHOD,),
+    )
 
 
 class HiCAssemblyResourceEffectV1(BaseModel):
@@ -311,17 +342,20 @@ def block_hic_scaffolding(state: TopLevelState) -> StateUpdate:
     hic_out = _hic_output(state)
     interrupt = dict(hic_out.get("active_interrupt") or {})
     if not interrupt:
+        reason = "Hi-C review block has no persisted interrupt"
         update = _fail_update(
             state,
-            "Hi-C review block has no persisted interrupt",
+            reason,
             failure_kind="review",
         )
         return {
+            **_settle_terminal_autohic(state, update),
+            **fail_workflow_step(state, "hic_scaffolding", reason),
             **update,
             "current_stage": "hic_scaffolding",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
-            "last_error": "Hi-C review block has no persisted interrupt",
+            "last_error": reason,
         }
     return {
         "current_stage": "hic_scaffolding",
@@ -334,11 +368,10 @@ def block_hic_requirements(state: TopLevelState) -> StateUpdate:
     """Stop the selected stage with a distinct missing-requirements outcome."""
 
     hic_out = _hic_output(state)
+    reason = str(hic_out.get("reason", "AutoHiC requirements are incomplete"))
     return {
-        "current_stage": "hic_scaffolding",
-        "supervision_state": "failed_terminal",
+        **fail_workflow_step(state, "hic_scaffolding", reason),
         "active_interrupt": None,
-        "last_error": hic_out.get("reason", "AutoHiC requirements are incomplete"),
     }
 
 
@@ -669,19 +702,26 @@ def apply_hic_scaffolding_review_application(
         if effect.retry.failure_kind is not None:
             retry_payload["failure_kind"] = effect.retry.failure_kind
         stage_update = _update_hic_output(state, retry_payload)
-        retry_exhausted = effect.retry.status == "review_parameter_retries_exhausted"
+        retry_failed = effect.retry.status in {
+            "review_parameter_retries_exhausted",
+            "failed",
+        }
         result: StateUpdate = {
             "current_stage": "hic_scaffolding",
             "supervision_state": (
-                "failed_terminal" if retry_exhausted else "running_stage"
+                "failed_terminal" if retry_failed else "running_stage"
             ),
             "active_interrupt": None,
             **stage_update,
         }
-        if retry_exhausted:
-            result["last_error"] = effect.retry.reason or (
-                "AutoHiC review retry budget exhausted"
-            )
+        if retry_failed:
+            reason = effect.retry.reason or "AutoHiC review retry budget exhausted"
+            result = {
+                **_settle_terminal_autohic(state, stage_update),
+                **fail_workflow_step(state, "hic_scaffolding", reason),
+                **result,
+                "last_error": reason,
+            }
         return result
 
     pre_hic_assembly_path = _rehydrate_hic_effect_path(
@@ -712,20 +752,49 @@ def apply_hic_scaffolding_review_application(
         },
     )
     if effect.decision == "stop_human_review":
+        reason = "hic_scaffolding stopped by human review decision"
         return {
+            **_settle_terminal_autohic(state, stage_update),
+            **fail_workflow_step(state, "hic_scaffolding", reason),
             "current_stage": "hic_scaffolding",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
             **stage_update,
-            "last_error": "hic_scaffolding stopped by human review decision",
+            "last_error": reason,
         }
     if effect.assembly_resource is None:
         raise ResumeValidationError("AutoHiC adoption application has no resource")
     resource_path = _rehydrate_hic_effect_path(state, effect.assembly_resource.path)
     resource_metadata = dict(effect.assembly_resource.metadata)
     resource_metadata["pre_hic_assembly_ref"] = effect.pre_hic_assembly_ref.path_ref
+    try:
+        delivery_candidate_ref = ArtifactRef.model_validate(
+            resource_metadata["candidate_bundle_ref"]
+        )
+        delivery_primary_ref = ArtifactRef.model_validate(
+            resource_metadata["primary_output_ref"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ResumeValidationError(
+            "AutoHiC adoption application has invalid assembly delivery provenance"
+        ) from exc
     return {
-        **advance_workflow_step(state, "hic_scaffolding"),
+        **advance_workflow_step(
+            state,
+            "hic_scaffolding",
+            outcome="completed",
+            deliveries=(
+                assembly_delivery(
+                    delivery_candidate_ref.model_dump(mode="json"),
+                    delivery_primary_ref.model_dump(mode="json"),
+                    delivery_mode=(
+                        "materialized"
+                        if effect.decision == "accept_candidate"
+                        else "reused"
+                    ),
+                ),
+            ),
+        ),
         "active_interrupt": None,
         **stage_update,
         "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
@@ -937,11 +1006,11 @@ def fail_hic_scaffolding(state: TopLevelState) -> StateUpdate:
     """Stop after recommendation, execution, or adoption preparation fails."""
 
     hic_out = _hic_output(state)
+    reason = str(hic_out.get("reason", "hic_scaffolding failed"))
     return {
-        "current_stage": "hic_scaffolding",
-        "supervision_state": "failed_terminal",
+        **_settle_terminal_autohic(state),
+        **fail_workflow_step(state, "hic_scaffolding", reason),
         "active_interrupt": None,
-        "last_error": hic_out.get("reason", "hic_scaffolding failed"),
     }
 
 

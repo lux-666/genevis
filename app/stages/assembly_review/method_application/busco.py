@@ -23,6 +23,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
+from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY,
@@ -33,13 +34,15 @@ from app.schemas.artifacts import (
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly_review.method_application.support import (
+    evaluator_method_outcome,
     local_execution_enabled,
+    mark_evaluator_not_started,
     mark_missing_signals,
+    planner_evaluator_outcome,
     review_methods_error,
     review_output,
     rewrite_eval_bundle,
     safe_candidate_id,
-    update_review_output,
     update_signal,
     verified_review_candidate,
 )
@@ -62,6 +65,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     ran_status=RAN_STATUS,
     cleanup_outputs=False,
     process_failure="collect",
+    outcome_policy=lambda state: busco_method_outcome(state),
 )
 
 
@@ -75,6 +79,22 @@ def build_busco_graph() -> CompiledStateGraph[
     )
 
 
+def busco_planner_outcome(state: TopLevelState) -> MethodOutcome | None:
+    return planner_evaluator_outcome(
+        state,
+        method_name=BUSCO_METHOD,
+        signal_name="busco",
+    )
+
+
+def busco_method_outcome(state: TopLevelState) -> MethodOutcome | None:
+    return evaluator_method_outcome(
+        state,
+        method_name=BUSCO_METHOD,
+        signal_name="busco",
+    )
+
+
 def freeze_busco_attempts(state: TopLevelState) -> StateUpdate:
     """Freeze BUSCO attempts when offline lineage parameters are supplied."""
     output = review_output(state)
@@ -83,32 +103,48 @@ def freeze_busco_attempts(state: TopLevelState) -> StateUpdate:
         return {}
     descriptor_error = review_methods_error([BUSCO_METHOD])
     if descriptor_error:
-        return update_review_output(
-            state, {"status": "failed", "reason": descriptor_error}
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=BUSCO_METHOD,
+            signal_name="busco",
+            reason="busco_not_configured",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {**output, "signals": signals},
+            status="evaluating",
         )
     params, error = busco_parameters(output)
     candidates = output.get("candidates", [])
     signals = output.get("signals", [])
     if error:
-        return update_review_output(
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=BUSCO_METHOD,
+            signal_name="busco",
+            reason="busco_not_configured",
+        )
+        return rewrite_eval_bundle(
             state,
-            {
-                "status": "failed",
-                "reason": f"BUSCO configuration is invalid: {error}",
-            },
+            {**output, "signals": signals},
+            status="evaluating",
         )
     try:
         materialized = [
             (candidate, verified_review_candidate(state, candidate))
             for candidate in candidates
         ]
-    except (OSError, TypeError, ValueError) as exc:
-        return update_review_output(
+    except (OSError, TypeError, ValueError):
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=BUSCO_METHOD,
+            signal_name="busco",
+            reason="busco_candidate_dependency_invalid",
+        )
+        return rewrite_eval_bundle(
             state,
-            {
-                "status": "failed",
-                "reason": f"BUSCO candidate dependency is invalid: {exc}",
-            },
+            {**output, "signals": signals},
+            status="evaluating",
         )
     signals = mark_missing_signals(
         signals,
@@ -138,7 +174,23 @@ def freeze_busco_attempts(state: TopLevelState) -> StateUpdate:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
-        return update_review_output(state, blocked)
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=BUSCO_METHOD,
+            signal_name="busco",
+            reason="busco_environment_preflight_failed",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {
+                **output,
+                "env_target": blocked["env_target"],
+                "missing_tools": blocked["missing_tools"],
+                "method_name": blocked["method_name"],
+                "signals": signals,
+            },
+            status="evaluating",
+        )
     attempts: list[FrozenAttemptSpec] = []
     lineage_path = Path(params["lineage_path"])
     lineage_dependency = directory_input_dependency(lineage_path)

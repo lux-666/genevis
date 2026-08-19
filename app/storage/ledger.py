@@ -65,9 +65,11 @@ _OCCURRENCE_EVENT_TYPES = frozenset(
         "attempt_started",
         "attempt_succeeded",
         "attempt_failed",
+        "method_disposition_recorded",
         "review_requested",
         "review_decision",
         "review_applied",
+        "resource_delivered",
         "stage_entered",
         "stage_skipped",
         "stage_completed",
@@ -82,7 +84,19 @@ _TYPED_REVIEW_EVENT_WRITERS = {
     "review_requested": "record_review_requested",
     "review_decision": "record_review_decision",
     "review_applied": "record_review_applied",
+    "method_disposition_recorded": "record_method_disposition",
+    "resource_delivered": "record_resource_delivered",
 }
+_STAGE_TERMINAL_PRECEDENCE = {
+    "stage_completed": 0,
+    "stage_skipped": 1,
+    "stage_failed": 2,
+}
+_ATTEMPT_TERMINAL_PRECEDENCE = {
+    "attempt_succeeded": 0,
+    "attempt_failed": 1,
+}
+_METHOD_DISPOSITIONS = frozenset({"not_started", "skipped", "completed", "failed"})
 
 
 class LedgerFormatError(ValueError):
@@ -91,6 +105,159 @@ class LedgerFormatError(ValueError):
 
 class LedgerConflictError(RuntimeError):
     """Raised when one idempotency key is reused for different facts."""
+
+
+def project_stage_terminal_events(
+    events: Iterable[Mapping[str, Any]],
+) -> tuple[
+    dict[tuple[str, str], dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Project one terminal outcome per workflow occurrence.
+
+    Immutable legacy ledgers may contain more than one terminal row for an
+    occurrence. Such history is never silently resolved by row order: the
+    read model applies ``failed > skipped > completed`` and returns a bounded
+    integrity diagnostic describing every duplicate or conflicting row.
+    """
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    by_workflow_step: dict[str, list[dict[str, Any]]] = {}
+    for raw_event in events:
+        event_type = raw_event.get("event_type")
+        if event_type not in _STAGE_TERMINAL_PRECEDENCE:
+            continue
+        workflow_step_id = raw_event.get("workflow_step_id")
+        stage = raw_event.get("stage")
+        if not isinstance(workflow_step_id, str) or not workflow_step_id:
+            continue
+        if not isinstance(stage, str) or not stage:
+            continue
+        event = dict(raw_event)
+        grouped.setdefault((workflow_step_id, stage), []).append(event)
+        by_workflow_step.setdefault(workflow_step_id, []).append(event)
+
+    canonical: dict[tuple[str, str], dict[str, Any]] = {}
+    diagnostics: list[dict[str, Any]] = []
+    for (workflow_step_id, stage), terminal_events in grouped.items():
+        selected_type = max(
+            (str(event["event_type"]) for event in terminal_events),
+            key=_STAGE_TERMINAL_PRECEDENCE.__getitem__,
+        )
+        selected = next(
+            event
+            for event in terminal_events
+            if event.get("event_type") == selected_type
+        )
+        canonical[(workflow_step_id, stage)] = selected
+        if len(terminal_events) == 1:
+            continue
+        event_types = [str(event["event_type"]) for event in terminal_events]
+        diagnostics.append(
+            {
+                "kind": (
+                    "duplicate_stage_terminal"
+                    if all(item == event_types[0] for item in event_types[1:])
+                    else "conflicting_stage_terminal"
+                ),
+                "workflow_step_id": workflow_step_id,
+                "stage": stage,
+                "terminal_count": len(terminal_events),
+                "selected_event_type": selected_type,
+                "selected_sequence": selected.get("sequence"),
+                "terminal_events": [
+                    {
+                        "event_type": event.get("event_type"),
+                        "sequence": event.get("sequence"),
+                        "event_id": event.get("event_id"),
+                    }
+                    for event in terminal_events
+                ],
+            }
+        )
+    for workflow_step_id, terminal_events in by_workflow_step.items():
+        stages = sorted({str(event["stage"]) for event in terminal_events})
+        if len(stages) <= 1:
+            continue
+        selected_type = max(
+            (str(event["event_type"]) for event in terminal_events),
+            key=_STAGE_TERMINAL_PRECEDENCE.__getitem__,
+        )
+        selected = next(
+            event
+            for event in terminal_events
+            if event.get("event_type") == selected_type
+        )
+        diagnostics.append(
+            {
+                "kind": "conflicting_stage_terminal_stage_binding",
+                "workflow_step_id": workflow_step_id,
+                "stage": None,
+                "stages": stages,
+                "terminal_count": len(terminal_events),
+                "selected_event_type": selected_type,
+                "selected_sequence": selected.get("sequence"),
+                "terminal_events": [
+                    {
+                        "event_type": event.get("event_type"),
+                        "stage": event.get("stage"),
+                        "sequence": event.get("sequence"),
+                        "event_id": event.get("event_id"),
+                    }
+                    for event in terminal_events
+                ],
+            }
+        )
+    return canonical, diagnostics
+
+
+def project_attempt_terminal_events(
+    events: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Project one conservative terminal outcome per immutable attempt ID."""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for raw_event in events:
+        if raw_event.get("event_type") not in _ATTEMPT_TERMINAL_PRECEDENCE:
+            continue
+        attempt_id = raw_event.get("subject_id") or raw_event.get("attempt_id")
+        if isinstance(attempt_id, str) and attempt_id:
+            grouped.setdefault(attempt_id, []).append(dict(raw_event))
+    canonical: dict[str, dict[str, Any]] = {}
+    diagnostics: list[dict[str, Any]] = []
+    for attempt_id, terminal_events in grouped.items():
+        selected = max(
+            terminal_events,
+            key=lambda event: _ATTEMPT_TERMINAL_PRECEDENCE[str(event["event_type"])],
+        )
+        canonical[attempt_id] = selected
+        if len(terminal_events) > 1:
+            event_types = [str(event["event_type"]) for event in terminal_events]
+            diagnostics.append(
+                {
+                    "kind": (
+                        "duplicate_attempt_terminal"
+                        if all(item == event_types[0] for item in event_types[1:])
+                        else "conflicting_attempt_terminal"
+                    ),
+                    "attempt_id": attempt_id,
+                    "terminal_count": len(terminal_events),
+                    "selected_event_type": selected.get("event_type"),
+                    "selected_sequence": selected.get("sequence"),
+                    "terminal_events": [
+                        {
+                            "event_type": event.get("event_type"),
+                            "sequence": event.get("sequence"),
+                            "event_id": event.get("event_id"),
+                            "workflow_step_id": event.get("workflow_step_id"),
+                            "stage": event.get("stage"),
+                            "method_name": event.get("method_name"),
+                        }
+                        for event in terminal_events
+                    ],
+                }
+            )
+    return canonical, diagnostics
 
 
 class Ledger:
@@ -214,6 +381,77 @@ class Ledger:
             subject_id=attempt.attempt_id,
             refs=self._artifact_refs(artifacts or []),
             idempotency_key=f"attempt:{attempt.attempt_id}:failed",
+        )
+
+    def record_method_disposition(
+        self,
+        session_id: str,
+        stage: str,
+        workflow_step_id: str,
+        method_name: str,
+        disposition: Literal["not_started", "skipped", "completed", "failed"],
+        *,
+        reason: str | None = None,
+        refs: Iterable[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record the one immutable disposition of a method occurrence.
+
+        A disposition is deliberately not an attempt result or an occurrence
+        terminal.  The append boundary keys it by the frozen occurrence and
+        method name, so an exact semantic replay returns the original row and
+        any changed disposition, reason, or evidence ref fails closed.
+        """
+
+        if not isinstance(method_name, str) or not method_name:
+            raise ValueError("method disposition requires a non-empty method_name")
+        if disposition not in _METHOD_DISPOSITIONS:
+            raise ValueError(
+                "method disposition must be one of: "
+                "not_started, skipped, completed, failed"
+            )
+        if disposition in {"skipped", "failed"} and (
+            not isinstance(reason, str) or not reason.strip()
+        ):
+            raise ValueError(f"method disposition {disposition!r} requires a reason")
+
+        step_id = _require_workflow_step_id(workflow_step_id)
+        subject_id = _method_disposition_subject_id(step_id, method_name)
+        return self._record_event(
+            session_id,
+            "method_disposition_recorded",
+            {
+                "method_name": method_name,
+                "disposition": disposition,
+                "reason": reason,
+            },
+            stage=stage,
+            workflow_step_id=step_id,
+            subject_id=subject_id,
+            refs=refs,
+            idempotency_key=f"method-disposition:{subject_id}",
+        )
+
+    def record_method_disposition_recorded(
+        self,
+        session_id: str,
+        stage: str,
+        workflow_step_id: str,
+        method_name: str,
+        disposition: Literal["not_started", "skipped", "completed", "failed"],
+        *,
+        reason: str | None = None,
+        refs: Iterable[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility spelling for :meth:`record_method_disposition`."""
+
+        return self.record_method_disposition(
+            session_id,
+            stage,
+            workflow_step_id,
+            method_name,
+            disposition,
+            reason=reason,
+            refs=refs,
         )
 
     def has_attempt_success(self, session_id: str, attempt_id: str) -> bool:
@@ -538,6 +776,43 @@ class Ledger:
             idempotency_key=idempotency_key or f"stage-entered:{workflow_step_id}",
         )
 
+    def record_resource_delivered(
+        self,
+        session_id: str,
+        *,
+        stage: str,
+        workflow_step_id: str,
+        resource_type: str,
+        delivery_mode: Literal["materialized", "reused"],
+        candidate_bundle_ref: Any,
+        primary_output_ref: Any,
+    ) -> dict[str, Any]:
+        """Persist an occurrence-owned immutable resource/candidate relation."""
+
+        if not isinstance(resource_type, str) or not resource_type:
+            raise ValueError("resource delivery requires a resource_type")
+        if delivery_mode not in {"materialized", "reused"}:
+            raise ValueError("resource delivery mode is invalid")
+        candidate_ref = self._indexed_named_artifact_ref(
+            "candidate_bundle_ref", candidate_bundle_ref
+        )
+        primary_ref = self._indexed_named_artifact_ref(
+            "primary_output_ref", primary_output_ref
+        )
+        return self._record_event(
+            session_id,
+            "resource_delivered",
+            {
+                "resource_type": resource_type,
+                "delivery_mode": delivery_mode,
+            },
+            stage=stage,
+            workflow_step_id=workflow_step_id,
+            subject_id=f"{workflow_step_id}:{resource_type}",
+            refs=[candidate_ref, primary_ref],
+            idempotency_key=f"resource-delivered:{workflow_step_id}:{resource_type}",
+        )
+
     def record_stage_skipped(
         self,
         session_id: str,
@@ -547,8 +822,9 @@ class Ledger:
         reason: str,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
+        selected_method_names: Iterable[str] | None = None,
     ) -> None:
-        self.record_event(
+        self._record_event(
             session_id,
             "stage_skipped",
             {"reason": reason},
@@ -557,6 +833,7 @@ class Ledger:
             subject_id=workflow_step_id,
             refs=refs,
             idempotency_key=idempotency_key or f"stage-skipped:{workflow_step_id}",
+            selected_method_names=selected_method_names,
         )
 
     def record_stage_completed(
@@ -567,8 +844,9 @@ class Ledger:
         workflow_step_id: str,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
+        selected_method_names: Iterable[str] | None = None,
     ) -> None:
-        self.record_event(
+        self._record_event(
             session_id,
             "stage_completed",
             {},
@@ -577,6 +855,7 @@ class Ledger:
             subject_id=workflow_step_id,
             refs=refs,
             idempotency_key=idempotency_key or f"stage-completed:{workflow_step_id}",
+            selected_method_names=selected_method_names,
         )
 
     def record_stage_failed(
@@ -588,8 +867,9 @@ class Ledger:
         error: str | None = None,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
+        selected_method_names: Iterable[str] | None = None,
     ) -> None:
-        self.record_event(
+        self._record_event(
             session_id,
             "stage_failed",
             {"error": error},
@@ -598,6 +878,7 @@ class Ledger:
             subject_id=workflow_step_id,
             refs=refs,
             idempotency_key=idempotency_key or f"stage-failed:{workflow_step_id}",
+            selected_method_names=selected_method_names,
         )
 
     def record_session_terminal(
@@ -608,6 +889,7 @@ class Ledger:
         stage: str | None = None,
         error: str | None = None,
         refs: Iterable[Any] | None = None,
+        failure_scope: Literal["occurrence", "controller_boundary"] | None = None,
     ) -> dict[str, Any]:
         """Append the single irreversible terminal fact for this session.
 
@@ -618,11 +900,31 @@ class Ledger:
         self.paths.require_session_id(session_id)
         if outcome not in {"completed", "failed"}:
             raise ValueError("terminal outcome must be one of: completed, failed")
+        if outcome == "completed":
+            if failure_scope is not None:
+                raise ValueError("completed terminal must not include failure_scope")
+            terminal_payload: dict[str, Any] = {"outcome": outcome, "error": error}
+        else:
+            # Direct Ledger callers historically had no scope argument.  Keep
+            # that call shape while ensuring every newly written failed row is
+            # explicit; recovery passes controller_boundary when its checkpoint
+            # proof establishes an inter-occurrence crash.
+            scope = failure_scope or "occurrence"
+            if scope not in {"occurrence", "controller_boundary"}:
+                raise ValueError(
+                    "failed terminal failure_scope must be one of: occurrence, "
+                    "controller_boundary"
+                )
+            terminal_payload = {
+                "outcome": outcome,
+                "error": error,
+                "failure_scope": scope,
+            }
 
         semantic = self._event_semantic(
             session_id,
             "session_terminal",
-            {"outcome": outcome, "error": error},
+            terminal_payload,
             stage=stage,
             subject_id=session_id,
             refs=refs,
@@ -644,11 +946,22 @@ class Ledger:
                     )
                 if terminals:
                     canonical = terminals[0]
-                    if canonical["summary"].get("outcome") == outcome:
-                        return canonical
-                    raise LedgerConflictError(
-                        "session terminal outcome conflicts with the canonical terminal"
-                    )
+                    if _semantic_body(canonical) != semantic:
+                        if canonical["summary"].get("outcome") != outcome:
+                            detail = "outcome conflicts with the canonical terminal"
+                        else:
+                            detail = "same outcome has different semantic body"
+                        raise LedgerConflictError(f"session terminal {detail}")
+                    natural_replay = canonical
+                else:
+                    natural_replay = None
+                idempotency_replay = self._idempotency_replay_locked(
+                    rows, key, semantic
+                )
+                if idempotency_replay is not None:
+                    return idempotency_replay
+                if natural_replay is not None:
+                    return natural_replay
                 return self._append_new_row_locked(handle, rows, semantic, key)
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -769,6 +1082,7 @@ class Ledger:
         subject_id: str | None = None,
         refs: Iterable[Any] | None = None,
         idempotency_key: str | None = None,
+        selected_method_names: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Internal append primitive used after a typed writer has verified facts."""
         self.paths.require_session_id(session_id)
@@ -798,16 +1112,41 @@ class Ledger:
             try:
                 handle.seek(0)
                 rows = self._rows_from_locked_handle(handle)
-                for existing in rows:
-                    if existing["idempotency_key"] != key:
-                        continue
-                    if _semantic_body(existing) != semantic:
-                        raise LedgerConflictError(
-                            f"idempotency key {key!r} already owns a different "
-                            "ledger fact"
+                existing_attempt_terminal = self._existing_attempt_terminal_locked(
+                    rows, semantic
+                )
+                existing_method_disposition = self._existing_method_disposition_locked(
+                    rows, semantic
+                )
+                existing_terminal = self._existing_stage_terminal_locked(rows, semantic)
+                self._assert_stage_terminal_method_coverage_locked(
+                    rows,
+                    semantic,
+                    selected_method_names=selected_method_names,
+                )
+                # Natural-key checks must execute before idempotency lookup, but
+                # must not return early: a key can be occupied by another domain
+                # fact and is still a conflict even when this write is an exact
+                # stage/attempt/method replay under a different key.
+                natural_replay = next(
+                    (
+                        existing
+                        for existing in (
+                            existing_attempt_terminal,
+                            existing_method_disposition,
+                            existing_terminal,
                         )
-                    return existing
-
+                        if existing is not None
+                    ),
+                    None,
+                )
+                idempotency_replay = self._idempotency_replay_locked(
+                    rows, key, semantic
+                )
+                if idempotency_replay is not None:
+                    return idempotency_replay
+                if natural_replay is not None:
+                    return natural_replay
                 return self._append_new_row_locked(handle, rows, semantic, key)
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -940,6 +1279,233 @@ class Ledger:
         handle.flush()
         os.fsync(handle.fileno())
         return row
+
+    @staticmethod
+    def _idempotency_replay_locked(
+        rows: Iterable[Mapping[str, Any]],
+        key: str,
+        semantic: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Validate one key owns exactly one immutable semantic fact."""
+
+        matches = [dict(row) for row in rows if row.get("idempotency_key") == key]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise LedgerConflictError(
+                f"ledger integrity conflict: idempotency key {key!r} owns multiple rows"
+            )
+        existing = matches[0]
+        if _semantic_body(existing) != semantic:
+            raise LedgerConflictError(
+                f"idempotency key {key!r} already owns a different ledger fact"
+            )
+        return existing
+
+    @staticmethod
+    def _existing_attempt_terminal_locked(
+        rows: Iterable[Mapping[str, Any]],
+        semantic: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Atomically enforce one succeeded-or-failed terminal per attempt."""
+
+        event_type = semantic.get("event_type")
+        if event_type not in _ATTEMPT_TERMINAL_PRECEDENCE:
+            return None
+        attempt_id = semantic.get("subject_id")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise DataLayoutError("attempt terminal requires an attempt subject_id")
+        terminals = [
+            dict(row)
+            for row in rows
+            if row.get("event_type") in _ATTEMPT_TERMINAL_PRECEDENCE
+            and row.get("subject_id") == attempt_id
+        ]
+        if not terminals:
+            return None
+        if len(terminals) > 1:
+            raise LedgerConflictError(
+                "ledger integrity conflict: multiple attempt terminal events for "
+                f"attempt_id={attempt_id!r}"
+            )
+        existing = terminals[0]
+        if _semantic_body(existing) == semantic:
+            return existing
+        existing_type = str(existing.get("event_type"))
+        if existing_type == event_type:
+            detail = "same terminal outcome has different semantic body"
+        else:
+            detail = f"existing={existing_type}; requested={event_type}"
+        raise LedgerConflictError(
+            "attempt terminal conflicts with existing terminal outcome for "
+            f"attempt_id={attempt_id!r}: {detail}"
+        )
+
+    @staticmethod
+    def _assert_stage_terminal_method_coverage_locked(
+        rows: Iterable[Mapping[str, Any]],
+        semantic: Mapping[str, Any],
+        *,
+        selected_method_names: Iterable[str] | None,
+    ) -> None:
+        """Require exact selected-method coverage before a stage terminal write.
+
+        Direct typed Ledger callers remain compatible when they omit the roster.
+        The authoritative occurrence settlement always supplies its frozen roster,
+        so production terminal writes are checked while the append lock is held.
+        """
+
+        if selected_method_names is None:
+            return
+        if semantic.get("event_type") not in _STAGE_TERMINAL_PRECEDENCE:
+            raise ValueError(
+                "selected_method_names is allowed only for stage terminal events"
+            )
+        workflow_step_id = semantic.get("workflow_step_id")
+        stage = semantic.get("stage")
+        if not isinstance(workflow_step_id, str) or not workflow_step_id:
+            raise DataLayoutError("stage terminal requires a workflow_step_id")
+        if not isinstance(stage, str) or not stage:
+            raise DataLayoutError("stage terminal requires a stage")
+        roster = tuple(selected_method_names)
+        if any(not isinstance(name, str) or not name.strip() for name in roster):
+            raise ValueError("selected_method_names must contain non-empty strings")
+        if len(roster) != len(set(roster)):
+            raise ValueError("selected_method_names must be unique")
+        disposition_rows = [
+            row
+            for row in rows
+            if row.get("event_type") == "method_disposition_recorded"
+            and row.get("workflow_step_id") == workflow_step_id
+        ]
+        disposition_names: list[str] = []
+        for row in disposition_rows:
+            if row.get("stage") != stage:
+                raise LedgerConflictError(
+                    "ledger integrity conflict: method disposition stage conflicts "
+                    f"with workflow_step_id={workflow_step_id!r}"
+                )
+            method_name = (row.get("summary") or {}).get("method_name")
+            if not isinstance(method_name, str) or not method_name:
+                raise LedgerConflictError(
+                    "ledger integrity conflict: method disposition has no valid "
+                    f"method_name for workflow_step_id={workflow_step_id!r}"
+                )
+            disposition_names.append(method_name)
+        if len(disposition_names) != len(set(disposition_names)):
+            raise LedgerConflictError(
+                "ledger integrity conflict: multiple method dispositions for "
+                f"workflow_step_id={workflow_step_id!r}"
+            )
+        if set(disposition_names) != set(roster):
+            missing = sorted(set(roster).difference(disposition_names))
+            extra = sorted(set(disposition_names).difference(roster))
+            detail: list[str] = []
+            if missing:
+                detail.append("missing=" + ", ".join(missing))
+            if extra:
+                detail.append("extra=" + ", ".join(extra))
+            raise LedgerConflictError(
+                "method disposition coverage does not match selected roster for "
+                f"workflow_step_id={workflow_step_id!r}: {'; '.join(detail)}"
+            )
+
+    @staticmethod
+    def _existing_method_disposition_locked(
+        rows: Iterable[Mapping[str, Any]],
+        semantic: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Enforce one exact method disposition under the append lock."""
+
+        if semantic.get("event_type") != "method_disposition_recorded":
+            return None
+        workflow_step_id = semantic.get("workflow_step_id")
+        stage = semantic.get("stage")
+        method_name = (semantic.get("summary") or {}).get("method_name")
+        if not isinstance(workflow_step_id, str) or not workflow_step_id:
+            raise DataLayoutError("method disposition requires a workflow_step_id")
+        if not isinstance(stage, str) or not stage:
+            raise DataLayoutError("method disposition requires a stage")
+        if not isinstance(method_name, str) or not method_name:
+            raise DataLayoutError("method disposition requires a method_name")
+
+        dispositions = [
+            dict(row)
+            for row in rows
+            if row.get("event_type") == "method_disposition_recorded"
+            and row.get("workflow_step_id") == workflow_step_id
+            and (row.get("summary") or {}).get("method_name") == method_name
+        ]
+        if not dispositions:
+            return None
+        if len(dispositions) > 1:
+            raise LedgerConflictError(
+                "ledger integrity conflict: multiple method dispositions for "
+                f"workflow_step_id={workflow_step_id!r}, method_name={method_name!r}"
+            )
+        existing = dispositions[0]
+        if _semantic_body(existing) == semantic:
+            return existing
+        raise LedgerConflictError(
+            "method disposition conflicts with existing disposition for "
+            f"workflow_step_id={workflow_step_id!r}, method_name={method_name!r}"
+        )
+
+    @staticmethod
+    def _existing_stage_terminal_locked(
+        rows: Iterable[Mapping[str, Any]],
+        semantic: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return an exact terminal replay or reject another occurrence terminal.
+
+        This is deliberately an append-boundary check rather than a projection
+        convention.  The caller holds the exclusive file lock used to allocate
+        sequences, so concurrent writers cannot both observe an unterminated
+        occurrence and append a second terminal fact.  Existing immutable
+        legacy conflicts remain readable and are diagnosed by
+        :func:`project_stage_terminal_events`.
+        """
+
+        event_type = semantic.get("event_type")
+        if event_type not in _STAGE_TERMINAL_PRECEDENCE:
+            return None
+        workflow_step_id = semantic.get("workflow_step_id")
+        stage = semantic.get("stage")
+        if not isinstance(workflow_step_id, str) or not workflow_step_id:
+            raise DataLayoutError("stage terminal requires a workflow_step_id")
+        if not isinstance(stage, str) or not stage:
+            raise DataLayoutError("stage terminal requires a stage")
+
+        terminals = [
+            dict(row)
+            for row in rows
+            if row.get("event_type") in _STAGE_TERMINAL_PRECEDENCE
+            and row.get("workflow_step_id") == workflow_step_id
+        ]
+        if not terminals:
+            return None
+        if len(terminals) > 1:
+            raise LedgerConflictError(
+                "ledger integrity conflict: multiple stage terminal events for "
+                f"workflow_step_id={workflow_step_id!r}, stage={stage!r}"
+            )
+
+        existing = terminals[0]
+        if _semantic_body(existing) == semantic:
+            return existing
+        existing_type = str(existing.get("event_type"))
+        existing_stage = str(existing.get("stage"))
+        if existing_stage != stage:
+            detail = f"existing_stage={existing_stage}; requested_stage={stage}"
+        elif existing_type == event_type:
+            detail = "same terminal outcome has different semantic body"
+        else:
+            detail = f"existing={existing_type}; requested={event_type}"
+        raise LedgerConflictError(
+            "stage terminal conflicts with existing terminal outcome for "
+            f"workflow_step_id={workflow_step_id!r}, stage={stage!r}: "
+            f"{detail}"
+        )
 
     def _validate_row(self, row: Any, line_number: int) -> None:
         required = {
@@ -1270,6 +1836,19 @@ def _default_idempotency_key(semantic: Mapping[str, Any]) -> str:
         ).encode("utf-8")
     ).hexdigest()
     return f"event:{semantic['event_type']}:{digest[:32]}"
+
+
+def _method_disposition_subject_id(workflow_step_id: str, method_name: str) -> str:
+    """Return a stable bounded identity for one occurrence/method pair."""
+
+    digest = _sha256_text(
+        json.dumps(
+            [workflow_step_id, method_name],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    return f"method-disposition:{digest[:32]}"
 
 
 def _subject_from_payload(payload: Mapping[str, Any]) -> str | None:

@@ -31,6 +31,7 @@ from app.stages.assembly.command_builder import (
 from app.stages.assembly.method_application.support import (
     AssemblyNativeOutputDeclaration,
     approved_method_read_type,
+    assembly_primary_method_outcome_policy,
     build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
@@ -53,6 +54,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     frozen_status="nextdenovo_frozen",
     ran_status="nextdenovo_ran",
     owner=ParameterAttemptOwner(),
+    outcome_policy=assembly_primary_method_outcome_policy,
 )
 
 
@@ -129,8 +131,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
     )
     nextdenovo_work_dir = working_dir / "nextdenovo_work"
     artifact_dir = stage_artifacts_dir(
-        state,
-        "assembly", "attempts", attempt_scope, "outputs", "nextdenovo"
+        state, "assembly", "attempts", attempt_scope, "outputs", "nextdenovo"
     )
     working_dir.mkdir(parents=True, exist_ok=True)
     nextdenovo_work_dir.mkdir(parents=True, exist_ok=True)
@@ -295,8 +296,7 @@ def _fofn(
         return None, [], f"NextDenovo local execution {exc}"
 
     fofn = stage_work_dir(
-        state,
-        "assembly", "attempts", f"{attempt_id:03d}", "nextdenovo", "input.fofn"
+        state, "assembly", "attempts", f"{attempt_id:03d}", "nextdenovo", "input.fofn"
     )
     fofn.parent.mkdir(parents=True, exist_ok=True)
     fofn.write_text("".join(f"{path}\n" for path in paths), encoding="utf-8")

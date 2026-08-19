@@ -5,8 +5,15 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.execution.method_outcomes import method_outcome_settlement_node
 from app.schemas.state import TopLevelState
-from app.stages.hic_scaffolding.method_application import build_autohic_graph
+from app.stages.hic_scaffolding.method_application.autohic import (
+    METHOD as AUTOHIC_METHOD,
+)
+from app.stages.hic_scaffolding.method_application.autohic import (
+    build_autohic_graph,
+    terminal_autohic_method_outcome,
+)
 from app.stages.hic_scaffolding.nodes import (
     block_hic_requirements,
     block_hic_scaffolding,
@@ -44,6 +51,22 @@ def build_stage() -> CompiledStateGraph[
     graph.add_node("autohic", build_autohic_graph())
     graph.add_node("execution_retry_gate", autohic_execution_retry_gate)
     graph.add_node("chromosome_assembly_review", prepare_autohic_adoption_review)
+    graph.add_node(
+        "settle_method_before_requirements_failure",
+        method_outcome_settlement_node(
+            stage="hic_scaffolding",
+            method_name=AUTOHIC_METHOD,
+            outcome_policy=terminal_autohic_method_outcome,
+        ),
+    )
+    graph.add_node(
+        "settle_method_before_failure",
+        method_outcome_settlement_node(
+            stage="hic_scaffolding",
+            method_name=AUTOHIC_METHOD,
+            outcome_policy=terminal_autohic_method_outcome,
+        ),
+    )
     graph.add_node("block", block_hic_scaffolding)
     graph.add_node("block_requirements", block_hic_requirements)
     graph.add_node("fail", fail_hic_scaffolding)
@@ -63,14 +86,14 @@ def build_stage() -> CompiledStateGraph[
         route_after_resolve,
         {
             "recommend": "recommend_autohic_parameters",
-            "requirements": "block_requirements",
-            "fail": "fail",
+            "requirements": "settle_method_before_requirements_failure",
+            "fail": "settle_method_before_failure",
         },
     )
     graph.add_conditional_edges(
         "recommend_autohic_parameters",
         route_after_recommendation,
-        {"block": "block", "fail": "fail"},
+        {"block": "block", "fail": "settle_method_before_failure"},
     )
     graph.add_conditional_edges(
         "autohic",
@@ -78,20 +101,25 @@ def build_stage() -> CompiledStateGraph[
         {
             "review": "chromosome_assembly_review",
             "retry_gate": "execution_retry_gate",
-            "requirements": "block_requirements",
-            "fail": "fail",
+            "requirements": "settle_method_before_requirements_failure",
+            "fail": "settle_method_before_failure",
         },
     )
     graph.add_conditional_edges(
         "execution_retry_gate",
         route_after_retry_gate,
-        {"recommend": "recommend_autohic_parameters", "fail": "fail"},
+        {
+            "recommend": "recommend_autohic_parameters",
+            "fail": "settle_method_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "chromosome_assembly_review",
         route_after_review,
-        {"block": "block", "fail": "fail"},
+        {"block": "block", "fail": "settle_method_before_failure"},
     )
+    graph.add_edge("settle_method_before_requirements_failure", "block_requirements")
+    graph.add_edge("settle_method_before_failure", "fail")
     graph.add_edge("block", END)
     graph.add_edge("block_requirements", END)
     graph.add_edge("fail", END)

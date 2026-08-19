@@ -206,6 +206,13 @@ def _write_assembly_review_request(
         method_name="assembly_review.contract",
         artifact_type="assembly_review.request",
     )
+    ledger = Ledger(run_dir)
+    ledger.create_session(session_id, paths.to_ref(paths.manifest_path))
+    ledger.record_stage_completed(
+        session_id,
+        "inventory",
+        workflow_step_id="step-000-inventory",
+    )
     return run_dir, persisted
 
 
@@ -716,9 +723,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                 "assembly": {"flye_parameters": {"threads": 4}},
                 "assembly_review": {
                     "quast": {"threads": 2},
-                    "busco": busco_parameters(
-                        "/data/busco/embryophyta_odb10"
-                    ),
+                    "busco": busco_parameters("/data/busco/embryophyta_odb10"),
                     "related_species_reference_dir": "/ref/ncbi_metazoa",
                 },
             }

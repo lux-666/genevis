@@ -34,6 +34,7 @@ from app.stages.assembly.method_application.hifiasm_outputs import (
 )
 from app.stages.assembly.method_application.support import (
     approved_assembly_read_type,
+    assembly_primary_method_outcome_policy,
     build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
@@ -56,6 +57,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     frozen_status="hifiasm_frozen",
     ran_status="hifiasm_ran",
     owner=ParameterAttemptOwner(),
+    outcome_policy=assembly_primary_method_outcome_policy,
 )
 
 
@@ -127,8 +129,7 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
     )
     output_dir = working_dir / "hifiasm_out"
     artifact_dir = stage_artifacts_dir(
-        state,
-        "assembly", "attempts", attempt_scope, "outputs", "hifiasm"
+        state, "assembly", "attempts", attempt_scope, "outputs", "hifiasm"
     )
     working_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -223,9 +224,7 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
         )
         input_dependencies = primary_deps + ul_deps + hic_r1_deps + hic_r2_deps
     except ValueError as exc:
-        return fail_update(
-            state, f"Hifiasm input dependency cardinality error: {exc}"
-        )
+        return fail_update(state, f"Hifiasm input dependency cardinality error: {exc}")
     return freeze_parameterized_attempt(
         state,
         LIFECYCLE,

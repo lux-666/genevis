@@ -25,6 +25,7 @@ from app.execution.evidence import (
     recover_execution_result,
 )
 from app.execution.input_integrity import verify_input_dependencies
+from app.execution.method_outcomes import OutcomePolicy, method_outcome_settlement_node
 from app.execution.method_runner import (
     RunnerResultIdentityError,
     bounded_failure_reason,
@@ -60,6 +61,7 @@ class MethodExecutionLifecycle:
     cleanup_outputs: bool = True
     process_failure: ProcessFailurePolicy = "fail"
     failure_kind: str | None = None
+    outcome_policy: OutcomePolicy | None = None
 
 
 def build_method_graph(
@@ -70,6 +72,11 @@ def build_method_graph(
     runner: Runner | None = None,
 ) -> CompiledMethodGraph:
     """Build the canonical freeze -> run -> collect method subgraph."""
+
+    if lifecycle.outcome_policy is None:
+        raise ValueError(
+            f"method lifecycle {lifecycle.method_name!r} requires an outcome_policy"
+        )
 
     graph = StateGraph(TopLevelState)
     graph.add_node("freeze", _as_langgraph_node(freeze))
@@ -89,7 +96,14 @@ def build_method_graph(
             )
         ),
     )
-    graph.add_node("done", _as_langgraph_node(_empty_update))
+    graph.add_node(
+        "settle_method_outcomes",
+        method_outcome_settlement_node(
+            stage=lifecycle.stage,
+            method_name=lifecycle.method_name,
+            outcome_policy=lifecycle.outcome_policy,
+        ),
+    )
     graph.add_conditional_edges(
         START,
         lambda state: _route_method_entry(state, lifecycle),
@@ -98,15 +112,23 @@ def build_method_graph(
     graph.add_conditional_edges(
         "freeze",
         lambda state: _route_after_freeze(state, lifecycle),
-        {"run": "run", "collect": "collect", "done": "done"},
+        {
+            "run": "run",
+            "collect": "collect",
+            "done": "settle_method_outcomes",
+        },
     )
     graph.add_conditional_edges(
         "run",
         lambda state: _route_after_run(state, lifecycle),
-        {"run": "run", "collect": "collect", "done": "done"},
+        {
+            "run": "run",
+            "collect": "collect",
+            "done": "settle_method_outcomes",
+        },
     )
-    graph.add_edge("collect", "done")
-    graph.add_edge("done", END)
+    graph.add_edge("collect", "settle_method_outcomes")
+    graph.add_edge("settle_method_outcomes", END)
     return graph.compile()
 
 
@@ -392,9 +414,7 @@ def run_method_attempts(
         state,
         lifecycle.stage,
         {
-            "status": (
-                lifecycle.ran_status if complete else lifecycle.frozen_status
-            ),
+            "status": (lifecycle.ran_status if complete else lifecycle.frozen_status),
             **owner_updates,
         },
     )
@@ -426,10 +446,6 @@ def _failure_update(
     if owner_updates:
         payload.update(owner_updates)
     return update_stage_output(state, lifecycle.stage, payload)
-
-
-def _empty_update(_state: TopLevelState) -> StateUpdate:
-    return {}
 
 
 def _as_langgraph_node(

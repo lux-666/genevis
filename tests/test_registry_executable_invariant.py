@@ -188,6 +188,7 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
 
                 build_method_graph.assert_called_once()
                 self.assertIs(build_method_graph.call_args.args[0], binding.lifecycle)
+                self.assertIsNotNone(binding.lifecycle.outcome_policy)
                 self.assertTrue(
                     {"freeze", "run", "collect"}.issubset(
                         method_graph.get_graph().nodes
@@ -200,22 +201,67 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
     def test_each_frozen_local_method_graph_runs_its_exact_lifecycle(self):
         for binding in LOCAL_BINDINGS:
             with self.subTest(method_name=binding.lifecycle.method_name):
+                workflow_steps = [
+                    {
+                        "step_id": workflow_step_id(0, "inventory"),
+                        "stage": "inventory",
+                        "allow_local_execution": False,
+                        "selected_method_names": [],
+                    }
+                ]
+                if binding.lifecycle.stage == "assembly_review":
+                    workflow_steps.append(
+                        {
+                            "step_id": workflow_step_id(1, "assembly"),
+                            "stage": "assembly",
+                            "allow_local_execution": False,
+                            "selected_method_names": [],
+                        }
+                    )
+                target_step_index = len(workflow_steps)
+                target_step = {
+                    "step_id": workflow_step_id(
+                        target_step_index, binding.lifecycle.stage
+                    ),
+                    "stage": binding.lifecycle.stage,
+                    "allow_local_execution": True,
+                    "selected_method_names": [binding.lifecycle.method_name],
+                }
+                if binding.lifecycle.stage == "assembly_review":
+                    target_step["review_target"] = {
+                        "resource_type": "assembly",
+                        "producer_step_id": workflow_step_id(1, "assembly"),
+                    }
+                workflow_steps.append(target_step)
                 state = initial_state(
                     session_id="lifecycle-invariant",
                     input_manifest_ref="inputs/manifest.yaml",
+                    workflow_steps=workflow_steps,
                 )
+                state["workflow_step_index"] = target_step_index
+                state["entered_workflow_step_index"] = target_step_index
+                state["current_stage"] = binding.lifecycle.stage
                 state["stage_outputs"] = {
                     binding.lifecycle.stage: {"status": binding.lifecycle.frozen_status}
                 }
-                with patch(
-                    "app.execution.lifecycle.run_method_attempts",
-                    return_value={
-                        "stage_outputs": {binding.lifecycle.stage: {"status": "failed"}}
-                    },
-                ) as run_method_attempts:
+                with (
+                    patch(
+                        "app.execution.lifecycle.run_method_attempts",
+                        return_value={
+                            "stage_outputs": {
+                                binding.lifecycle.stage: {"status": "failed"}
+                            }
+                        },
+                    ) as run_method_attempts,
+                    patch(
+                        "app.execution.method_outcomes.settle_method_outcomes",
+                        return_value={},
+                    ) as settle_method_outcomes,
+                ):
                     result = binding.method_builder().invoke(state)
 
                 run_method_attempts.assert_called_once()
+                settle_method_outcomes.assert_called_once()
                 self.assertIs(run_method_attempts.call_args.args[1], binding.lifecycle)
                 self.assertEqual(
                     result["stage_outputs"][binding.lifecycle.stage]["status"],
@@ -257,11 +303,16 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
                     "step_id": workflow_step_id(0, "inventory"),
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": workflow_step_id(1, "read_qc"),
                     "stage": "read_qc",
                     "allow_local_execution": True,
+                    "selected_method_names": [
+                        READ_QC_STATS_METHOD,
+                        canonical_method,
+                    ],
                 },
             ],
         )
@@ -339,11 +390,16 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
                         "step_id": workflow_step_id(0, "inventory"),
                         "stage": "inventory",
                         "allow_local_execution": False,
+                        "selected_method_names": [],
                     },
                     {
                         "step_id": workflow_step_id(1, "read_qc"),
                         "stage": "read_qc",
                         "allow_local_execution": True,
+                        "selected_method_names": [
+                            READ_QC_STATS_METHOD,
+                            READ_QC_FILTER_SKIP,
+                        ],
                     },
                 ],
             )

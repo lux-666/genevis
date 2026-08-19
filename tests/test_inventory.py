@@ -434,6 +434,9 @@ class InventoryStageTests(unittest.TestCase):
             path = self._build_manifest_file(tmpdir, manifest)
             _, result = self._invoke_inventory("s4", path)
             self.assertEqual(result["current_stage"], "assembly_review")
+            delivery = result["workflow_step_outcome"]["deliveries"][0]
+            self.assertEqual(delivery["resource_type"], "assembly")
+            self.assertEqual(delivery["delivery_mode"], "materialized")
             registry = json.loads(_registry_path(result).read_text())
             self.assertEqual(
                 registry["assets"][0]["asset_type"], "assembly_fasta_registered"

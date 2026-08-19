@@ -37,6 +37,7 @@ from app.stages.t2t.nodes import (
     _materialize_t2t_patches,
     _t2t_adoption_decision_ref,
     apply_t2t_review_application,
+    block_t2t,
     build_t2t_candidates,
     commit_t2t,
     prepare_t2t_review_application,
@@ -51,6 +52,7 @@ from app.stages.t2t.parameters.workflow import (
     apply_t2t_parameter_approval_application,
     prepare_t2t_parameter_approval_application,
 )
+from app.stages.t2t.state import update_t2t_stage_output
 from app.storage.artifacts import publish_artifact_record, read_artifact_records
 from app.storage.assembly_candidates import (
     AssemblyCandidateBundleError,
@@ -132,6 +134,31 @@ class T2TDescriptorTests(unittest.TestCase):
 
 
 class T2TStageTests(unittest.TestCase):
+    def test_missing_persisted_review_interrupt_settles_alignment_before_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, _reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly)
+            state["stage_outputs"] = {"t2t": {"execution_mode": "local"}}
+
+            update = block_t2t(state)
+
+            self.assertEqual(update["supervision_state"], "failed_terminal")
+            dispositions = [
+                event["summary"]
+                for event in Ledger(state["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                dispositions,
+                [
+                    {
+                        "method_name": "t2t.alignment.minimap2",
+                        "disposition": "not_started",
+                        "reason": "T2T review block has no persisted interrupt",
+                    }
+                ],
+            )
+
     def test_nonselection_review_clears_candidate_ids_without_reordering_notes(self):
         from app.stages.t2t.nodes import validate_t2t_intent_request
 
@@ -361,16 +388,22 @@ class T2TStageTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
+                    "selected_method_names": ["t2t.alignment.minimap2"],
                 },
                 {
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-001-t2t",
@@ -380,6 +413,7 @@ class T2TStageTests(unittest.TestCase):
                     "step_id": "step-003-base_polish",
                     "stage": "base_polish",
                     "allow_local_execution": True,
+                    "selected_method_names": [],
                 },
             ],
         )
@@ -566,6 +600,15 @@ class T2TStageTests(unittest.TestCase):
                 for event in Ledger(blocked["data_dir"]).read_events("s1")
             ]
             self.assertIn("attempt_succeeded", event_types)
+            dispositions = [
+                event["summary"]
+                for event in Ledger(blocked["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                [(item["method_name"], item["disposition"]) for item in dispositions],
+                [("t2t.alignment.minimap2", "completed")],
+            )
 
             result = self._apply_t2t_review(
                 blocked,
@@ -600,6 +643,15 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(t2t["status"], "skipped")
             self.assertEqual(t2t["output_assembly_ref"], expected_assembly)
             self.assertTrue(Path(t2t["t2t_finishing_report_ref"]).exists())
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                [(item["method_name"], item["disposition"]) for item in dispositions],
+                [("t2t.alignment.minimap2", "skipped")],
+            )
 
     def test_hic_final_assembly_has_priority_over_assembly_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -776,16 +828,22 @@ class T2TStageTests(unittest.TestCase):
                         "step_id": "step-000-inventory",
                         "stage": "inventory",
                         "allow_local_execution": False,
+                        "selected_method_names": [],
                     },
                     {
                         "step_id": "step-001-t2t",
                         "stage": "t2t",
                         "allow_local_execution": True,
+                        "selected_method_names": ["t2t.alignment.minimap2"],
                     },
                     {
                         "step_id": "step-002-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "selected_method_names": [
+                            "assembly_review.eval.quast",
+                            "assembly_review.eval.busco",
+                        ],
                         "review_target": {
                             "resource_type": "assembly",
                             "producer_step_id": "step-001-t2t",
@@ -882,6 +940,51 @@ class T2TStageTests(unittest.TestCase):
                 for event in Ledger(result["data_dir"]).read_events("s1")
             ]
             self.assertNotIn("attempt_succeeded", event_types)
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(dispositions[0]["method_name"], "t2t.alignment.minimap2")
+            self.assertEqual(dispositions[0]["disposition"], "failed")
+
+    def test_report_failure_after_alignment_keeps_method_completed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "env": {
+                    "PATH": str(self._fake_minimap2(tmpdir))
+                    + os.pathsep
+                    + os.environ["PATH"]
+                },
+            }
+
+            def fail_report(report_state):
+                return update_t2t_stage_output(
+                    report_state,
+                    {"status": "failed", "reason": "forced report failure"},
+                )
+
+            with patch(
+                "app.stages.t2t.builder.write_t2t_report",
+                new=fail_report,
+            ):
+                result = self._invoke_with_parameter_approval(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["last_error"], "forced report failure")
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                [(item["method_name"], item["disposition"]) for item in dispositions],
+                [("t2t.alignment.minimap2", "completed")],
+            )
 
     def test_malformed_clean_registry_member_blocks_without_falling_back_to_raw(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1103,16 +1206,22 @@ class T2TStageTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
+                    "selected_method_names": ["t2t.alignment.minimap2"],
                 },
                 {
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-001-t2t",
@@ -1131,6 +1240,23 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(
                 committed["resource_refs"]["assembly"]["workflow_step_id"],
                 "step-001-t2t",
+            )
+            delivery = committed["workflow_step_outcome"]["deliveries"][0]
+            ledger = Ledger(committed["data_dir"])
+            ledger.create_session("s1", "control/manifest.yaml")
+            ledger.record_resource_delivered(
+                "s1",
+                stage="t2t",
+                workflow_step_id="step-001-t2t",
+                resource_type="assembly",
+                delivery_mode=delivery["delivery_mode"],
+                candidate_bundle_ref=delivery["candidate_bundle_ref"],
+                primary_output_ref=delivery["primary_output_ref"],
+            )
+            ledger.record_stage_completed(
+                "s1",
+                "t2t",
+                workflow_step_id="step-001-t2t",
             )
             from app.stages.assembly_review.nodes import resolve_candidates
 
@@ -1727,6 +1853,15 @@ class T2TStageTests(unittest.TestCase):
             ):
                 self.assertTrue(Path(t2t[key]).is_file())
                 self.assertIn("/artifacts/steps/step-001-t2t/t2t/", t2t[key])
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                [(item["method_name"], item["disposition"]) for item in dispositions],
+                [("t2t.alignment.minimap2", "skipped")],
+            )
 
     def test_malformed_nonempty_read_input_fails_before_parameter_recommendation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1747,6 +1882,15 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("invalid t2t long-read input", result["last_error"])
             self.assertIsNone(result.get("active_interrupt"))
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                [(item["method_name"], item["disposition"]) for item in dispositions],
+                [("t2t.alignment.minimap2", "not_started")],
+            )
 
     def test_one_key_sparse_recommendation_is_preserved_in_approval_payload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1847,16 +1991,22 @@ class T2TStageTests(unittest.TestCase):
                         "step_id": "step-000-inventory",
                         "stage": "inventory",
                         "allow_local_execution": False,
+                        "selected_method_names": [],
                     },
                     {
                         "step_id": "step-001-t2t",
                         "stage": "t2t",
                         "allow_local_execution": True,
+                        "selected_method_names": ["t2t.alignment.minimap2"],
                     },
                     {
                         "step_id": "step-002-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "selected_method_names": [
+                            "assembly_review.eval.quast",
+                            "assembly_review.eval.busco",
+                        ],
                         "review_target": {
                             "resource_type": "assembly",
                             "producer_step_id": "step-001-t2t",
@@ -1970,16 +2120,22 @@ class T2TStageTests(unittest.TestCase):
                         "step_id": "step-000-inventory",
                         "stage": "inventory",
                         "allow_local_execution": False,
+                        "selected_method_names": [],
                     },
                     {
                         "step_id": "step-001-t2t",
                         "stage": "t2t",
                         "allow_local_execution": True,
+                        "selected_method_names": ["t2t.alignment.minimap2"],
                     },
                     {
                         "step_id": "step-002-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "selected_method_names": [
+                            "assembly_review.eval.quast",
+                            "assembly_review.eval.busco",
+                        ],
                         "review_target": {
                             "resource_type": "assembly",
                             "producer_step_id": "step-001-t2t",

@@ -83,6 +83,14 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
         "step-003-t2t",
         "step-004-assembly_review",
     ]
+    assert [step["selected_method_names"] for step in steps] == [
+        [],
+        ["t2t.alignment.minimap2"],
+        ["assembly_review.eval.quast", "assembly_review.eval.busco"],
+        ["t2t.alignment.minimap2"],
+        ["assembly_review.eval.quast", "assembly_review.eval.busco"],
+    ]
+
     assert steps[2]["review_target"] == {
         "resource_type": "assembly",
         "producer_step_id": "step-001-t2t",
@@ -100,15 +108,18 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
     )
 
     _apply(state, seed_current_workflow_step(state))
-    _apply(state, advance_workflow_step(state, "inventory"))
+    _apply(state, advance_workflow_step(state, "inventory", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
     assert state["stage_outputs"]["t2t"] == {"status": "seeded"}
     first_attempt = bind_attempt_to_current_workflow_step(state, _attempt())
 
     state["stage_outputs"]["t2t"] = {"status": "first-completed"}
-    _apply(state, advance_workflow_step(state, "t2t"))
+    _apply(state, advance_workflow_step(state, "t2t", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
-    _apply(state, advance_workflow_step(state, "assembly_review"))
+    _apply(
+        state,
+        advance_workflow_step(state, "assembly_review", outcome="completed"),
+    )
     _apply(state, seed_current_workflow_step(state))
 
     assert state["stage_outputs"]["t2t"] == {
@@ -127,6 +138,44 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
     assert paths.workflow_step_artifacts_dir(
         "step-001-t2t", "t2t"
     ) != paths.workflow_step_artifacts_dir("step-003-t2t", "t2t")
+
+
+def test_run_config_rejects_noncanonical_selected_method_roster() -> None:
+    with pytest.raises(ValueError, match="selected_method_names"):
+        RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {
+                        "stage": "t2t",
+                        "allow_local_execution": False,
+                        "selected_method_names": [],
+                    }
+                ]
+            }
+        )
+
+
+def test_workflow_step_roster_requires_unique_stage_prefixed_names() -> None:
+    with pytest.raises(ValueError, match="must be unique"):
+        validate_workflow_steps(
+            [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                    "selected_method_names": [],
+                },
+                {
+                    "step_id": "step-001-t2t",
+                    "stage": "t2t",
+                    "allow_local_execution": False,
+                    "selected_method_names": [
+                        "t2t.alignment.minimap2",
+                        "t2t.alignment.minimap2",
+                    ],
+                },
+            ]
+        )
 
 
 def test_frozen_workflow_plan_rejects_runtime_append_or_reorder() -> None:
@@ -278,21 +327,25 @@ def test_workflow_step_validation_accepts_placeholder_before_optional_review() -
             "step_id": "step-000-inventory",
             "stage": "inventory",
             "allow_local_execution": False,
+            "selected_method_names": [],
         },
         {
             "step_id": "step-001-t2t",
             "stage": "t2t",
             "allow_local_execution": False,
+            "selected_method_names": [],
         },
         {
             "step_id": "step-002-base_polish",
             "stage": "base_polish",
             "allow_local_execution": False,
+            "selected_method_names": [],
         },
         {
             "step_id": "step-003-assembly_review",
             "stage": "assembly_review",
             "allow_local_execution": False,
+            "selected_method_names": [],
             "review_target": {
                 "resource_type": "assembly",
                 "producer_step_id": "step-001-t2t",
@@ -318,7 +371,7 @@ def test_prebound_attempt_still_receives_canonical_occurrence_namespace() -> Non
         workflow_steps=workflow_steps_from_run_config(config),
     )
     _apply(state, seed_current_workflow_step(state))
-    _apply(state, advance_workflow_step(state, "inventory"))
+    _apply(state, advance_workflow_step(state, "inventory", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
 
     prebound = _attempt().model_copy(
@@ -346,7 +399,7 @@ def test_prebound_attempt_rejects_another_occurrence_namespace() -> None:
         workflow_steps=workflow_steps_from_run_config(config),
     )
     _apply(state, seed_current_workflow_step(state))
-    _apply(state, advance_workflow_step(state, "inventory"))
+    _apply(state, advance_workflow_step(state, "inventory", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
 
     prebound = _attempt().model_copy(

@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from app.configuration import load_descriptor_registry
-from app.control.workflow_plan import advance_workflow_step
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    current_workflow_step,
+    fail_workflow_step,
+)
+from app.execution.method_outcomes import MethodOutcome
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     append_route_trace,
@@ -15,6 +20,7 @@ from app.stages.read_qc.constants import (
     LENGTH_FILTER_DECISIONS,
     LENGTH_FILTER_METHOD_NAME,
     LENGTH_FILTER_SKIP,
+    LENGTH_FILTER_SKIP_METHOD_NAME,
     METHOD_NAME,
 )
 from app.stages.read_qc.state import (
@@ -82,6 +88,32 @@ def _blocked_update(
     return _update_read_qc_output(state, payload)
 
 
+def length_filter_skip_outcome(state: TopLevelState) -> MethodOutcome | None:
+    """Settle the selected planner-only raw-read pass-through method."""
+
+    step = current_workflow_step(state)
+    if (
+        step is None
+        or LENGTH_FILTER_SKIP_METHOD_NAME not in step["selected_method_names"]
+    ):
+        return None
+    output = _read_qc_output(state)
+    substep = (output.get("substeps") or {}).get("length_filter") or {}
+    if (
+        substep.get("method_name") == LENGTH_FILTER_SKIP_METHOD_NAME
+        and substep.get("status") == "skipped"
+    ):
+        return MethodOutcome(LENGTH_FILTER_SKIP_METHOD_NAME, "completed")
+    if output.get("status") in {
+        "failed",
+        "blocked_env",
+        "missing_tool",
+        "blocked_input",
+    }:
+        return MethodOutcome(LENGTH_FILTER_SKIP_METHOD_NAME, "not_started")
+    return None
+
+
 def enter_read_qc(state: TopLevelState) -> StateUpdate:
     """Mark read QC as running."""
     return {"supervision_state": "running_stage"}
@@ -105,32 +137,39 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
             {"blocked_input_ref": missing[0], "blocked_input_refs": missing},
         )
     metadata = resolution.metadata
+    registry_backed = bool(metadata.get("asset_ids")) and (
+        metadata.get("asset_registry_ref") is not None
+        or (
+            resolution.source_type == "asset"
+            and state.get("asset_registry_ref") is not None
+        )
+    )
+    artifact_backed = metadata.get("read_set_manifest_ref") is not None and bool(
+        metadata.get("artifact_refs")
+    )
+    if not registry_backed and not artifact_backed:
+        return _fail_update(
+            state,
+            "long_reads resource has no immutable registry or read-set provenance",
+        )
     asset_ids = list(metadata.get("asset_ids") or [])
     if not asset_ids:
         asset_ids = list(metadata.get("source_asset_ids") or [])
     artifact_refs = list(metadata.get("artifact_refs") or [])
     runtime_assets = [
-        asset
-        for asset in (metadata.get("assets") or [])
-        if isinstance(asset, dict)
+        asset for asset in (metadata.get("assets") or []) if isinstance(asset, dict)
     ]
     platforms = [
-        str(asset.get("platform") or "unknown")
-        for asset in runtime_assets
+        str(asset.get("platform") or "unknown") for asset in runtime_assets
     ] or [
         str(value)
         for value in (
             metadata.get("member_platforms") or metadata.get("platforms") or []
         )
     ]
-    formats = [
-        str(asset.get("format") or "unknown")
-        for asset in runtime_assets
-    ] or [
+    formats = [str(asset.get("format") or "unknown") for asset in runtime_assets] or [
         str(value)
-        for value in (
-            metadata.get("member_formats") or metadata.get("formats") or []
-        )
+        for value in (metadata.get("member_formats") or metadata.get("formats") or [])
     ]
     unique_platforms = list(dict.fromkeys(platforms))
     unique_formats = list(dict.fromkeys(formats))
@@ -145,9 +184,7 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
             "input_member_formats": formats,
             "raw_long_reads_path": str(paths[0]),
             "raw_long_reads_paths": [str(path) for path in paths],
-            "platform": (
-                unique_platforms[0] if len(unique_platforms) == 1 else None
-            ),
+            "platform": (unique_platforms[0] if len(unique_platforms) == 1 else None),
             "format": unique_formats[0] if len(unique_formats) == 1 else None,
             "input_source": resolution.source,
         },
@@ -199,12 +236,20 @@ def plan_length_filter(state: TopLevelState) -> StateUpdate:
     method_name = (
         request.get("method_name") or request.get("method") or LENGTH_FILTER_SKIP
     )
-    if not request or method_name == LENGTH_FILTER_SKIP:
+    if not request or method_name in {
+        LENGTH_FILTER_SKIP,
+        LENGTH_FILTER_SKIP_METHOD_NAME,
+    }:
+        if LENGTH_FILTER_SKIP_METHOD_NAME not in load_descriptor_registry().methods:
+            return _fail_update(
+                state,
+                f"descriptor missing: {LENGTH_FILTER_SKIP_METHOD_NAME}",
+            )
         return _length_filter_status_update(
             state,
             {
                 "status": "skipped",
-                "method_name": LENGTH_FILTER_SKIP,
+                "method_name": LENGTH_FILTER_SKIP_METHOD_NAME,
                 "skip_reason": "no_filtering_requested",
             },
             "length_filter_skipped",
@@ -223,29 +268,24 @@ def plan_length_filter(state: TopLevelState) -> StateUpdate:
             method_name=method_name,
         )
     if method_name != LENGTH_FILTER_METHOD_NAME:
-        return _length_filter_status_update(
+        return _fail_update(
             state,
-            {
-                "status": "skipped",
-                "method_name": method_name,
-                "skip_reason": "unknown_filter_method",
-                "thresholds": thresholds,
-            },
-            "length_filter_skipped",
-            method_name=method_name,
+            f"unsupported length filter method: {method_name}",
         )
+    if LENGTH_FILTER_METHOD_NAME not in load_descriptor_registry().methods:
+        return _fail_update(state, f"descriptor missing: {LENGTH_FILTER_METHOD_NAME}")
     min_len = thresholds.get("min_len")
     if not approved or not isinstance(min_len, int) or min_len <= 0:
         return _length_filter_status_update(
             state,
             {
                 "status": "skipped",
-                "method_name": method_name,
+                "method_name": LENGTH_FILTER_SKIP_METHOD_NAME,
                 "skip_reason": "threshold_decision_missing",
                 "thresholds": thresholds,
             },
             "length_filter_skipped",
-            method_name=method_name,
+            method_name=LENGTH_FILTER_SKIP,
         )
     return _length_filter_status_update(
         state,
@@ -262,6 +302,24 @@ def plan_length_filter(state: TopLevelState) -> StateUpdate:
 def commit_read_qc(state: TopLevelState) -> StateUpdate:
     """Advance to genome survey after read-QC planning or execution."""
     output = _read_qc_output(state)
+    post_filter_summary = output.get("post_filter_summary") or {}
+    if (
+        output.get("filtered_long_reads_ref") or output.get("filtered_long_reads_refs")
+    ) and post_filter_summary.get("num_seqs") == 0:
+        reason = "no_reads_retained"
+        failed_cursor = replace_read_qc_stage_output(
+            state,
+            {
+                **serialize_read_qc_stage_output(output),
+                "status": "failed",
+                "reason": reason,
+            },
+        )
+        return {
+            **fail_workflow_step(state, "read_qc", reason),
+            "route_trace": append_route_trace(state, "read_qc_stage"),
+            "stage_outputs": failed_cursor["stage_outputs"],
+        }
     status = "completed"
     committed_keys = [
         "artifact_refs",
@@ -311,7 +369,7 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
         },
     )
     update: StateUpdate = {
-        **advance_workflow_step(state, "read_qc"),
+        **advance_workflow_step(state, "read_qc", outcome="completed"),
         "route_trace": append_route_trace(state, "read_qc_stage"),
         "stage_outputs": cursor_update["stage_outputs"],
     }
@@ -325,9 +383,7 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
             "platforms": list(
                 dict.fromkeys(output.get("input_member_platforms") or [])
             ),
-            "formats": list(
-                dict.fromkeys(output.get("input_member_formats") or [])
-            ),
+            "formats": list(dict.fromkeys(output.get("input_member_formats") or [])),
             "member_platforms": list(output.get("input_member_platforms") or []),
             "member_formats": list(output.get("input_member_formats") or []),
             "member_count": len(read_paths),
@@ -342,9 +398,7 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
             metadata["artifact_refs"] = list(
                 output.get("filtered_long_reads_artifact_refs") or []
             )
-            metadata["source_asset_ids"] = list(
-                output.get("input_asset_refs") or []
-            )
+            metadata["source_asset_ids"] = list(output.get("input_asset_refs") or [])
         else:
             metadata["asset_registry_ref"] = state.get("asset_registry_ref")
             metadata["asset_ids"] = list(output.get("input_asset_refs") or [])
@@ -378,8 +432,5 @@ def fail_read_qc(state: TopLevelState) -> StateUpdate:
         "blocked_env": "read_qc blocked on missing conda environment",
         "missing_tool": "read_qc blocked on missing tool",
     }.get(status, "read_qc failed")
-    return {
-        "current_stage": "read_qc",
-        "supervision_state": "failed_terminal",
-        "last_error": output.get("reason") or default_reason,
-    }
+    reason = output.get("reason") or default_reason
+    return fail_workflow_step(state, "read_qc", reason)

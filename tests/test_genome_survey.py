@@ -46,27 +46,46 @@ from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
+def _ledger_events(result: dict) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+
+
 def _genome_survey_workflow_steps() -> list[dict]:
     return [
         {
             "step_id": "step-000-inventory",
             "stage": "inventory",
             "allow_local_execution": False,
+            "selected_method_names": [],
         },
         {
             "step_id": "step-001-genome_survey",
             "stage": "genome_survey",
             "allow_local_execution": True,
+            "selected_method_names": [
+                "genome_survey.kmer_count.jellyfish",
+                "genome_survey.model.genomescope2",
+            ],
         },
         {
             "step_id": "step-002-assembly",
             "stage": "assembly",
             "allow_local_execution": False,
+            "selected_method_names": [],
         },
         {
             "step_id": "step-003-assembly_review",
             "stage": "assembly_review",
             "allow_local_execution": False,
+            "selected_method_names": [
+                "assembly_review.eval.quast",
+                "assembly_review.eval.busco",
+            ],
             "review_target": {
                 "resource_type": "assembly",
                 "producer_step_id": "step-002-assembly",
@@ -449,6 +468,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "completed")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["confidence"], "high")
@@ -464,8 +484,22 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertTrue(artifact_ref.exists())
             payload = json.loads(artifact_ref.read_text(encoding="utf-8"))
             self.assertEqual(payload["mode"], "full")
-            self.assertEqual(payload["status"], "planned")
+            self.assertEqual(payload["status"], "completed")
+            self.assertEqual(payload["metadata"]["result_kind"], "provided_only")
+            self.assertNotIn("method_dispositions", payload["metadata"])
             self.assertEqual(payload["genome_size_source"], "provided")
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in _ledger_events(result)
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "genome_survey.kmer_count.jellyfish": "skipped",
+                    "genome_survey.model.genomescope2": "skipped",
+                },
+            )
 
     def test_manifest_size_overrides_survey_with_raw_short_reads(
         self,
@@ -500,6 +534,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "completed")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["confidence"], "high")
@@ -566,6 +601,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "completed")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["status"], "completed")
@@ -660,6 +696,18 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(event_types.count("attempt_started"), 2)
             self.assertEqual(event_types.count("attempt_succeeded"), 2)
             self.assertIn("artifact_registered", event_types)
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "genome_survey.kmer_count.jellyfish": "completed",
+                    "genome_survey.model.genomescope2": "completed",
+                },
+            )
 
     def test_local_full_mode_fails_when_genomescope_summary_has_no_genome_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -702,6 +750,17 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["status"], "failed")
             self.assertEqual(survey["error_code"], "GENOME_SIZE_UNAVAILABLE")
             self.assertIsNone(survey["genome_size_prior"])
+            self.assertEqual(
+                {
+                    event["summary"]["method_name"]: event["summary"]["disposition"]
+                    for event in _ledger_events(result)
+                    if event["event_type"] == "method_disposition_recorded"
+                },
+                {
+                    "genome_survey.kmer_count.jellyfish": "completed",
+                    "genome_survey.model.genomescope2": "completed",
+                },
+            )
             self.assertEqual(
                 survey["estimates"],
                 {"genome_size": None, "heterozygosity": None, "repeat_fraction": None},
@@ -1197,8 +1256,16 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("survey_parameters.hash_size", result["last_error"])
-            self.assertFalse(
-                (Path(state["data_dir"]) / "ledger" / "events.jsonl").exists()
+            self.assertEqual(
+                {
+                    event["summary"]["method_name"]: event["summary"]["disposition"]
+                    for event in _ledger_events(result)
+                    if event["event_type"] == "method_disposition_recorded"
+                },
+                {
+                    "genome_survey.kmer_count.jellyfish": "not_started",
+                    "genome_survey.model.genomescope2": "not_started",
+                },
             )
 
     def test_local_full_mode_requires_explicit_survey_parameters(self):
@@ -1223,8 +1290,16 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("survey_parameters.kmer_size", result["last_error"])
-            self.assertFalse(
-                (Path(state["data_dir"]) / "ledger" / "events.jsonl").exists()
+            self.assertEqual(
+                {
+                    event["summary"]["method_name"]: event["summary"]["disposition"]
+                    for event in _ledger_events(result)
+                    if event["event_type"] == "method_disposition_recorded"
+                },
+                {
+                    "genome_survey.kmer_count.jellyfish": "not_started",
+                    "genome_survey.model.genomescope2": "not_started",
+                },
             )
 
     def test_explicit_size_overrides_only_genome_measurement(
@@ -1314,6 +1389,18 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["error_code"], "GENOME_SIZE_UNAVAILABLE")
             self.assertIsNone(survey["genome_size_prior"])
 
+            self.assertEqual(
+                {
+                    event["summary"]["method_name"]: event["summary"]["disposition"]
+                    for event in _ledger_events(result)
+                    if event["event_type"] == "method_disposition_recorded"
+                },
+                {
+                    "genome_survey.kmer_count.jellyfish": "not_started",
+                    "genome_survey.model.genomescope2": "not_started",
+                },
+            )
+
     def test_no_usable_inputs_falls_back_to_explicit_genome_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             rnaseq = Path(tmpdir) / "rna_R1.fq.gz"
@@ -1334,6 +1421,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["workflow_step_outcome"]["outcome"], "skipped")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "skipped")
             self.assertEqual(survey["status"], "skipped")
@@ -1341,6 +1429,28 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
             self.assertEqual(survey["estimates"], {"genome_size": 2_000_000})
             self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]
+                for event in _ledger_events(result)
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                {
+                    name: summary["disposition"]
+                    for name, summary in dispositions.items()
+                },
+                {
+                    "genome_survey.kmer_count.jellyfish": "skipped",
+                    "genome_survey.model.genomescope2": "skipped",
+                },
+            )
+            self.assertEqual(
+                {name: summary["reason"] for name, summary in dispositions.items()},
+                {
+                    "genome_survey.kmer_count.jellyfish": "no_usable_reads",
+                    "genome_survey.model.genomescope2": "no_usable_reads",
+                },
+            )
 
 
 class GenomeSurveyEnvPreflightTests(unittest.TestCase):
@@ -1470,6 +1580,18 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("env_preflight_blocked", event_types)
             self.assertNotIn("attempt_started", event_types)
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "genome_survey.kmer_count.jellyfish": "not_started",
+                    "genome_survey.model.genomescope2": "not_started",
+                },
+            )
 
     def test_missing_jellyfish_in_env_blocks_with_missing_tool_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1642,6 +1764,18 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             self.assertEqual(survey["status"], "missing_tool")
             self.assertEqual(survey["method_name"], "genome_survey.model.genomescope2")
             self.assertIn("genomescope2", survey["missing_tools"])
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in _ledger_events(result)
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "genome_survey.kmer_count.jellyfish": "completed",
+                    "genome_survey.model.genomescope2": "not_started",
+                },
+            )
 
 
 if __name__ == "__main__":

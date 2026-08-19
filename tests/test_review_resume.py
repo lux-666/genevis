@@ -50,6 +50,37 @@ from tests.busco_fixture import assembly_review_config, ensure_busco_lineage
 from tests.data_v2 import v2_run_dir
 
 
+def _append_legacy_stage_terminal(
+    ledger: Ledger,
+    *,
+    session_id: str,
+    event_type: str,
+    stage: str,
+    workflow_step_id: str,
+    summary: dict[str, object],
+) -> None:
+    """Inject immutable pre-invariant history for inspect compatibility tests."""
+
+    rows = ledger.read_event_rows(session_id)
+    sequence = int(rows[-1]["sequence"]) + 1
+    row = {
+        "schema_version": 2,
+        "sequence": sequence,
+        "event_id": f"evt_legacy_{sequence:08d}",
+        "idempotency_key": f"legacy:{sequence}",
+        "session_id": session_id,
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": event_type,
+        "stage": stage,
+        "workflow_step_id": workflow_step_id,
+        "subject_id": workflow_step_id,
+        "refs": [],
+        "summary": summary,
+    }
+    with ledger.events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
 def _apply_review_application(
     state: dict,
     request: ResumeReviewRequest,
@@ -181,11 +212,16 @@ class ReviewResumeTests(unittest.TestCase):
                         "step_id": "step-000-inventory",
                         "stage": "inventory",
                         "allow_local_execution": False,
+                        "selected_method_names": [],
                     },
                     {
                         "step_id": "step-001-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "selected_method_names": [
+                            "assembly_review.eval.quast",
+                            "assembly_review.eval.busco",
+                        ],
                         "review_target": {
                             "resource_type": "assembly",
                             "producer_step_id": "step-000-inventory",
@@ -195,11 +231,18 @@ class ReviewResumeTests(unittest.TestCase):
                         "step_id": "step-002-hic_scaffolding",
                         "stage": "hic_scaffolding",
                         "allow_local_execution": False,
+                        "selected_method_names": [
+                            "hic_scaffolding.candidate.autohic",
+                        ],
                     },
                     {
                         "step_id": "step-003-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
+                        "selected_method_names": [
+                            "assembly_review.eval.quast",
+                            "assembly_review.eval.busco",
+                        ],
                         "review_target": {
                             "resource_type": "assembly",
                             "producer_step_id": "step-002-hic_scaffolding",
@@ -1116,6 +1159,16 @@ class ReviewResumeTests(unittest.TestCase):
                 workflow_step_id="step-001-read_qc",
                 reason="operator_declined",
             )
+            # Legacy/conflicting history must be diagnosed and projected by
+            # precedence, never silently changed by this later row.
+            _append_legacy_stage_terminal(
+                ledger,
+                session_id=session_id,
+                event_type="stage_completed",
+                stage="read_qc",
+                workflow_step_id="step-001-read_qc",
+                summary={},
+            )
             ledger.record_stage_completed(
                 session_id,
                 "assembly",
@@ -1126,11 +1179,13 @@ class ReviewResumeTests(unittest.TestCase):
                 "read_qc",
                 workflow_step_id="step-002-read_qc",
             )
-            ledger.record_stage_failed(
-                session_id,
-                "read_qc",
+            _append_legacy_stage_terminal(
+                ledger,
+                session_id=session_id,
+                event_type="stage_failed",
+                stage="read_qc",
                 workflow_step_id="step-002-read_qc",
-                error="stage failed",
+                summary={"error": "stage failed"},
             )
             ledger.record_stage_entered(
                 session_id,
@@ -1155,10 +1210,24 @@ class ReviewResumeTests(unittest.TestCase):
                     "unfinished_steps": 1,
                     "current_workflow_step_id": None,
                     "current_stage": None,
+                    "projection_authority": "degraded_stage_terminal_projection",
                 },
             )
             self.assertIsNone(summary["current_workflow_step_id"])
             self.assertIsNone(summary["current_stage"])
+            self.assertEqual(len(summary["stage_terminal_integrity"]), 2)
+            self.assertEqual(
+                summary["stage_terminal_integrity"][0]["kind"],
+                "conflicting_stage_terminal",
+            )
+            self.assertEqual(
+                summary["stage_terminal_integrity"][0]["selected_event_type"],
+                "stage_skipped",
+            )
+            self.assertEqual(
+                summary["stage_terminal_integrity"][1]["kind"],
+                "conflicting_stage_terminal_stage_binding",
+            )
             self.assertEqual(
                 summary["execution"],
                 {
@@ -1671,6 +1740,24 @@ def _assembly_blocked_state(
                 "rejected_candidates": {},
             }
         },
+        "resource_refs": {
+            "assembly": ResourceRef(
+                resource_type="assembly",
+                paths=[
+                    str(
+                        SessionPaths.from_run_dir(data_dir).resolve_ref(
+                            candidates[0]["primary_output_ref"]["path_ref"]
+                        )
+                    )
+                ],
+                source_stage="assembly",
+                workflow_step_id="step-001-assembly",
+                metadata={
+                    "candidate_bundle_ref": candidates[0]["bundle_ref"],
+                    "primary_output_ref": candidates[0]["primary_output_ref"],
+                },
+            ).to_dict()
+        },
         "skip_reasons": {},
     }
     state.update(_frozen_workflow("assembly_review", "hic_scaffolding"))
@@ -1697,6 +1784,21 @@ def _assembly_blocked_state(
     )
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, "control/manifest.yaml")
+    ledger.record_stage_completed(
+        session_id, "inventory", workflow_step_id="step-000-inventory"
+    )
+    ledger.record_resource_delivered(
+        session_id,
+        stage="assembly",
+        workflow_step_id="step-001-assembly",
+        resource_type="assembly",
+        delivery_mode="materialized",
+        candidate_bundle_ref=candidates[0]["bundle_ref"],
+        primary_output_ref=candidates[0]["primary_output_ref"],
+    )
+    ledger.record_stage_completed(
+        session_id, "assembly", workflow_step_id="step-001-assembly"
+    )
     ledger.record_review_requested(
         session_id,
         "assembly_review",
@@ -1911,6 +2013,23 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
 
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, "control/manifest.yaml")
+    ledger.record_stage_completed(
+        session_id, "inventory", workflow_step_id="step-000-inventory"
+    )
+    ledger.record_resource_delivered(
+        session_id,
+        stage="assembly_review",
+        workflow_step_id="step-001-assembly_review",
+        resource_type="assembly",
+        delivery_mode="reused",
+        candidate_bundle_ref=published_candidate.ref.model_dump(mode="json"),
+        primary_output_ref=published_pre_hic.ref.model_dump(mode="json"),
+    )
+    ledger.record_stage_completed(
+        session_id,
+        "assembly_review",
+        workflow_step_id="step-001-assembly_review",
+    )
     ledger.record_review_requested(
         session_id,
         "hic_scaffolding",
@@ -1959,6 +2078,22 @@ def _frozen_workflow_steps(stages: list[str]) -> list[dict]:
             "step_id": step_id,
             "stage": item,
             "allow_local_execution": False,
+            "selected_method_names": (
+                ["t2t.alignment.minimap2"]
+                if item == "t2t"
+                else (
+                    ["hic_scaffolding.candidate.autohic"]
+                    if item == "hic_scaffolding"
+                    else (
+                        [
+                            "assembly_review.eval.quast",
+                            "assembly_review.eval.busco",
+                        ]
+                        if item == "assembly_review"
+                        else []
+                    )
+                )
+            ),
         }
         if item == "assembly_review":
             step["review_target"] = {

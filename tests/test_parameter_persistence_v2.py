@@ -427,6 +427,12 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
         second_blocked,
         _decision_request(second_blocked, "reject_parameters"),
     )
+    assert rejected["supervision_state"] == "failed_terminal"
+    assert rejected["workflow_step_outcome"]["outcome"] == "failed"
+    assert (
+        rejected["workflow_step_outcome"]["reason"]
+        == "parameter_recommendation_rejected_by_human"
+    )
     rejected_assembly = rejected["stage_outputs"]["assembly"]
     assert rejected_assembly.get("parameter_attempts") in (None, [])
     assert rejected_assembly.get("retry_counts") in (

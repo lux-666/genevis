@@ -12,6 +12,7 @@ from app.reports.trace_writer import (
     SESSION_SUMMARY_JSON_FILENAME,
     SESSION_SUMMARY_MARKDOWN_FILENAME,
     STAGE_STATUS_BLOCKED_HUMAN,
+    STAGE_STATUS_COMPLETED,
     STAGE_STATUS_EXECUTED,
     STAGE_STATUS_FAILED,
     STAGE_STATUS_NO_EVIDENCE,
@@ -132,6 +133,69 @@ def _step_id(stage: str, *, occurrence: int = 0) -> str:
     stages = ("inventory", *_DEFAULT_REQUESTED_STAGES)
     index = [index for index, value in enumerate(stages) if value == stage][occurrence]
     return f"step-{index:03d}-{stage}"
+
+
+def _append_legacy_stage_terminal(
+    ledger: Ledger,
+    *,
+    event_type: str,
+    stage: str,
+    workflow_step_id: str,
+    summary: dict[str, object],
+) -> None:
+    """Inject immutable pre-invariant terminal history for trace coverage."""
+
+    rows = ledger.read_event_rows("s1")
+    sequence = int(rows[-1]["sequence"]) + 1
+    row = {
+        "schema_version": 2,
+        "sequence": sequence,
+        "event_id": f"evt_legacy_{sequence:08d}",
+        "idempotency_key": f"legacy:{sequence}",
+        "session_id": "s1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": event_type,
+        "stage": stage,
+        "workflow_step_id": workflow_step_id,
+        "subject_id": workflow_step_id,
+        "refs": [],
+        "summary": summary,
+    }
+    with ledger.events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+def _append_legacy_attempt_terminal(
+    ledger: Ledger,
+    *,
+    event_type: str,
+    attempt_id: str,
+    workflow_step_id: str,
+    stage: str,
+    method_name: str,
+) -> None:
+    rows = ledger.read_event_rows("s1")
+    sequence = int(rows[-1]["sequence"]) + 1
+    row = {
+        "schema_version": 2,
+        "sequence": sequence,
+        "event_id": f"evt_legacy_{sequence:08d}",
+        "idempotency_key": f"legacy:{sequence}",
+        "session_id": "s1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event_type": event_type,
+        "stage": stage,
+        "workflow_step_id": workflow_step_id,
+        "subject_id": attempt_id,
+        "refs": [],
+        "summary": {
+            "method_name": method_name,
+            "return_code": 1,
+            "error": "legacy failed",
+        },
+    }
+    with ledger.events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
 
 
 def _attempt(
@@ -450,6 +514,95 @@ class SessionSummaryBuildTests(unittest.TestCase):
             self.assertEqual(reviews[0]["resolution_basis"], "none")
             self.assertEqual(
                 _stage(trace, "read_qc")["methods"][0]["outcome"], "succeeded"
+            )
+
+    def test_attempt_conflict_uses_failed_canonical_method_and_failure_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            step_id = _step_id("read_qc")
+            method = "read_qc.long_read_stats.seqkit_stats"
+            _attempt(ledger, "s1", "read_qc", method, "succeeded")
+            _append_legacy_attempt_terminal(
+                ledger,
+                event_type="attempt_failed",
+                attempt_id=f"{step_id}:read_qc:attempt_000",
+                workflow_step_id=step_id,
+                stage="read_qc",
+                method_name=method,
+            )
+
+            trace = build_session_trace(paths.run_dir, "s1")
+
+            self.assertEqual(
+                _stage(trace, "read_qc")["methods"][0]["outcome"], "failed"
+            )
+            self.assertEqual(len(trace["failures"]), 1)
+            self.assertEqual(trace["failures"][0]["method_name"], method)
+            diagnostic = trace["attempt_terminal_integrity"][0]
+            self.assertEqual(diagnostic["kind"], "conflicting_attempt_terminal")
+            self.assertEqual(diagnostic["selected_event_type"], "attempt_failed")
+
+    def test_method_disposition_is_orthogonal_to_completed_pass_through_stage(self):
+        """A reused candidate is a completed delivery, not a fake attempt."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp, requested_stages=("assembly_dedup",))
+            ledger = Ledger(paths.run_dir)
+            step_id = "step-001-assembly_dedup"
+            ledger.record_method_disposition(
+                "s1",
+                "assembly_dedup",
+                step_id,
+                "assembly_dedup.purge_dups",
+                "skipped",
+                reason="local_execution_not_enabled",
+            )
+            ledger.record_stage_completed(
+                "s1", "assembly_dedup", workflow_step_id=step_id
+            )
+
+            trace = build_session_trace(paths.run_dir, "s1")
+
+            dedup = _stage(trace, "assembly_dedup")
+            self.assertEqual(dedup["status"], STAGE_STATUS_COMPLETED)
+            self.assertEqual(len(dedup["methods"]), 1)
+            method = dedup["methods"][0]
+            self.assertEqual(method["outcome"], "not_started")
+            self.assertEqual(method["disposition"], "skipped")
+            self.assertEqual(
+                method["disposition_reason"], "local_execution_not_enabled"
+            )
+            self.assertIsNone(method["attempt_id"])
+
+    def test_post_terminal_attempt_conflict_is_not_method_integrity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            step_id = _step_id("read_qc")
+            ledger.record_session_terminal("s1", outcome="completed", stage="done")
+            _attempt(
+                ledger,
+                "s1",
+                "read_qc",
+                "read_qc.long_read_stats.seqkit_stats",
+                "succeeded",
+            )
+            _append_legacy_attempt_terminal(
+                ledger,
+                event_type="attempt_failed",
+                attempt_id=f"{step_id}:read_qc:attempt_000",
+                workflow_step_id=step_id,
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+            )
+
+            trace = build_session_trace(paths.run_dir, "s1")
+
+            self.assertEqual(trace["attempt_terminal_integrity"], [])
+            self.assertEqual(trace["failures"], [])
+            self.assertEqual(
+                _stage(trace, "read_qc")["status"], STAGE_STATUS_NO_EVIDENCE
             )
 
     def test_candidate_evidence_without_attempt_is_planned_only(self):
@@ -1116,6 +1269,12 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 ),
             )
             ledger = Ledger(paths.run_dir)
+            for stage in ("inventory", "read_qc", "genome_survey", "assembly"):
+                ledger.record_stage_completed(
+                    "s1",
+                    stage,
+                    workflow_step_id=_step_id(stage),
+                )
             ledger.record_review_requested(
                 "s1",
                 "assembly_review",
@@ -1167,12 +1326,24 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 workflow_step_id=_step_id("genome_survey"),
                 reason="not_requested",
             )
+            _append_legacy_stage_terminal(
+                ledger,
+                event_type="stage_completed",
+                stage="genome_survey",
+                workflow_step_id=_step_id("genome_survey"),
+                summary={},
+            )
 
             trace = build_session_trace(paths.run_dir, "s1")
 
             self.assertEqual(
                 [event["event_type"] for event in trace["route"]],
-                ["stage_entered", "stage_completed", "stage_skipped"],
+                [
+                    "stage_entered",
+                    "stage_completed",
+                    "stage_skipped",
+                    "stage_completed",
+                ],
             )
             self.assertEqual(
                 _stage(trace, "genome_survey")["status"], STAGE_STATUS_SKIPPED
@@ -1180,6 +1351,16 @@ class SessionSummaryBuildTests(unittest.TestCase):
             self.assertEqual(
                 _stage(trace, "genome_survey")["lifecycle"]["skip_reason"],
                 "not_requested",
+            )
+            self.assertEqual(
+                trace["stage_terminal_integrity"][0]["selected_event_type"],
+                "stage_skipped",
+            )
+            markdown = write_session_trace(paths.run_dir, "s1")["markdown"]
+            self.assertIn("## Stage Terminal Integrity Warning", markdown)
+            self.assertIn(
+                "Progress is a degraded projection, not authoritative",
+                markdown,
             )
             self.assertNotIn("route", {gap["field"] for gap in trace["gaps"]})
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import inspect
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -31,17 +33,26 @@ from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
-def _read_qc_workflow_steps(*, include_genome_survey: bool = True) -> list[dict]:
+def _read_qc_workflow_steps(
+    *,
+    include_genome_survey: bool = True,
+    filter_method: str = "read_qc.length_filter.skip",
+) -> list[dict]:
     steps = [
         {
             "step_id": "step-000-inventory",
             "stage": "inventory",
             "allow_local_execution": False,
+            "selected_method_names": [],
         },
         {
             "step_id": "step-001-read_qc",
             "stage": "read_qc",
             "allow_local_execution": True,
+            "selected_method_names": [
+                "read_qc.long_read_stats.seqkit_stats",
+                filter_method,
+            ],
         },
     ]
     if include_genome_survey:
@@ -50,6 +61,10 @@ def _read_qc_workflow_steps(*, include_genome_survey: bool = True) -> list[dict]
                 "step_id": "step-002-genome_survey",
                 "stage": "genome_survey",
                 "allow_local_execution": False,
+                "selected_method_names": [
+                    "genome_survey.kmer_count.jellyfish",
+                    "genome_survey.model.genomescope2",
+                ],
             }
         )
     return steps
@@ -193,6 +208,13 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         )
         return state
 
+    @staticmethod
+    def _set_filter_roster(state: dict, method_name: str) -> None:
+        state["workflow_steps"][1]["selected_method_names"] = [
+            "read_qc.long_read_stats.seqkit_stats",
+            method_name,
+        ]
+
     def _fake_seqkit_bin(self, tmpdir: str) -> Path:
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir()
@@ -204,13 +226,35 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             "\\tavg_len\\tmax_len\\tN50\\tQ20(%%)\\tQ30(%%)\\tAvgQual\\n'\n"
             "  shift 3\n"
             '  for input in "$@"; do\n'
-            "    printf '%s\\tFASTQ\\tDNA\\t1\\t4\\t4\\t4.0\\t4\\t4"
-            '\\t75.0\\t50.0\\t18.5\\n\' "$input"\n'
+            '    if [ "$input" = "-" ]; then\n'
+            "      reads=$(awk '/^[@>]/ { count += 1 } END { print count + 0 }')\n"
+            "      bases=$((reads * 4))\n"
+            '      if [ "$reads" -eq 0 ]; then min=0; avg=0.0; max=0; n50=0; '
+            "q20=0.0; q30=0.0; avgqual=0.0; format=; seq_type=; else min=4; "
+            "avg=4.0; max=4; n50=4; q20=75.0; q30=50.0; avgqual=18.5; "
+            "format=FASTQ; seq_type=DNA; fi\n"
+            "      printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s"
+            '\\t%s\\t%s\\t%s\\n\' "$input" "$format" "$seq_type" "$reads" '
+            '"$bases" "$min" "$avg" "$max" "$n50" "$q20" "$q30" "$avgqual"\n'
+            "    else\n"
+            '      if [ -s "$input" ]; then reads=1; bases=4; min=4; avg=4.0; '
+            "max=4; n50=4; q20=75.0; q30=50.0; avgqual=18.5; format=FASTQ; "
+            "seq_type=DNA; else reads=0; bases=0; min=0; avg=0.0; max=0; n50=0; "
+            "q20=0.0; q30=0.0; avgqual=0.0; format=; seq_type=; fi\n"
+            "      printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s"
+            '\\t%s\\t%s\\t%s\\n\' "$input" "$format" "$seq_type" "$reads" '
+            '"$bases" "$min" "$avg" "$max" "$n50" "$q20" "$q30" "$avgqual"\n'
+            "    fi\n"
             "  done\n"
             "  exit 0\n"
             "fi\n"
-            'if [ "$1" = "seq" ] && [ "$2" = "-m" ]; then\n'
-            "  shift 3\n"
+            'if [ "$1" = "seq" ]; then\n'
+            '  if [ "$2" = "-m" ]; then\n'
+            "    shift 3\n"
+            '    if [ "${SEQKIT_TEST_EMPTY_FILTER:-}" = "1" ]; then exit 0; fi\n'
+            "  else\n"
+            "    shift\n"
+            "  fi\n"
             '  cat "$@"\n'
             "  exit 0\n"
             "fi\n"
@@ -387,6 +431,18 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
             self.assertIn("artifact_registered", event_types)
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "read_qc.long_read_stats.seqkit_stats": "completed",
+                    "read_qc.length_filter.skip": "completed",
+                },
+            )
             audit = audit_run_storage(result["data_dir"])
             self.assertGreaterEqual(
                 audit["artifact_index"]["reachable_record_count"], 2
@@ -403,12 +459,179 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "short.fastq\t9\t90\t10\t10\t10\t10\t10\t5\t12\n",
                 encoding="utf-8",
             )
+            aggregate_path = Path(tmpdir) / "aggregate_seqkit_stats.tsv"
+            aggregate_path.write_text(
+                "file\tformat\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len"
+                "\tN50\tQ20(%)\tQ30(%)\tAvgQual\n"
+                "-\tFASTQ\t10\t1090\t10\t109\t1000\t1000"
+                "\t83.394495\t73.807339\t22.127400\n",
+                encoding="utf-8",
+            )
 
-            summary = parse_seqkit_summary(stats_path)
+            summary = parse_seqkit_summary(
+                stats_path,
+                aggregate_stats_path=aggregate_path,
+            )
 
-        self.assertAlmostEqual(summary["q20_percent"], ((90 * 1000) + (10 * 90)) / 1090)
-        self.assertAlmostEqual(summary["q30_percent"], ((80 * 1000) + (5 * 90)) / 1090)
-        self.assertAlmostEqual(summary["avg_qual"], ((30 * 1000) + (12 * 90)) / 1090)
+        self.assertEqual(summary["n50"], 1000)
+        self.assertAlmostEqual(
+            summary["q20_percent"], ((90 * 1000) + (10 * 90)) / 1090, places=5
+        )
+        self.assertAlmostEqual(
+            summary["q30_percent"], ((80 * 1000) + (5 * 90)) / 1090, places=5
+        )
+        expected_avg_qual = -10 * math.log10(
+            ((1000 * (10 ** (-30 / 10))) + (90 * (10 ** (-12 / 10)))) / 1090
+        )
+        self.assertAlmostEqual(summary["avg_qual"], expected_avg_qual, places=2)
+        self.assertNotAlmostEqual(summary["avg_qual"], ((30 * 1000) + (12 * 90)) / 1090)
+
+    def test_multi_file_summary_uses_whole_read_set_aggregate_n50(self):
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            per_file_stats = root / "seqkit_stats.tsv"
+            aggregate_stats = root / "aggregate_seqkit_stats.tsv"
+            header = "file\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\tN50\n"
+            # A has 100 reads of length 100; B has one read of length 1000.
+            # The aggregate 50% base threshold is crossed by the 100 bp reads,
+            # so the true N50 is 100, not B's per-file N50 of 1000.
+            per_file_stats.write_text(
+                header
+                + "A.fastq\t100\t10000\t100\t100\t100\t100\n"
+                + "B.fastq\t1\t1000\t1000\t1000\t1000\t1000\n",
+                encoding="utf-8",
+            )
+            aggregate_stats.write_text(
+                header + "-\t101\t11000\t100\t108.91\t1000\t100\n",
+                encoding="utf-8",
+            )
+
+            summary = parse_seqkit_summary(
+                per_file_stats,
+                aggregate_stats_path=aggregate_stats,
+            )
+
+        self.assertEqual(summary["files"], 2)
+        self.assertEqual(summary["num_seqs"], 101)
+        self.assertEqual(summary["sum_len"], 11_000)
+        self.assertEqual(summary["n50"], 100)
+
+    def test_aggregate_helper_streams_exact_inputs_into_one_seqkit_stats_invocation(
+        self,
+    ):
+        from app.stages.read_qc.method_application.support import (
+            seqkit_aggregate_length_commands,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = root / "A.fastq"
+            second = root / "B.fastq"
+            first.write_text("@A\nACGT\n+\n!!!!\n", encoding="utf-8")
+            second.write_text("@B\nTGCA\n+\n!!!!\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake_seqkit = bin_dir / "seqkit"
+            fake_seqkit.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "seq" ]; then\n'
+                "  shift\n"
+                '  cat "$@"\n'
+                "  exit 0\n"
+                "fi\n"
+                'if [ "$1" = "stats" ] && [ "$2" = "-a" ] '
+                '&& [ "$3" = "-T" ] && [ "$4" = "-" ]; then\n'
+                "  cat >/dev/null\n"
+                "  printf 'file\\tformat\\tnum_seqs\\tsum_len\\tmin_len\\tavg_len"
+                "\\tmax_len\\tN50\\tQ20(%%)\\tQ30(%%)\\tAvgQual\\n'\n"
+                "  printf -- '-\\tFASTQ\\t2\\t8\\t4\\t4.0\\t4\\t4\\t75\\t50"
+                "\\t18.5\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 2\n",
+                encoding="utf-8",
+            )
+            fake_seqkit.chmod(0o755)
+            aggregate = root / "aggregate_seqkit_stats.tsv"
+            script = "set -euo pipefail\n" + seqkit_aggregate_length_commands(
+                f"{first} {second}",
+                aggregate_stats_path=aggregate,
+            )
+
+            subprocess.run(
+                ["/bin/bash", "-c", script],
+                check=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            rows = list(
+                csv.DictReader(
+                    aggregate.read_text(encoding="utf-8").splitlines(),
+                    delimiter="\t",
+                )
+            )
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "file": "-",
+                    "format": "FASTQ",
+                    "num_seqs": "2",
+                    "sum_len": "8",
+                    "min_len": "4",
+                    "avg_len": "4.0",
+                    "max_len": "4",
+                    "N50": "4",
+                    "Q20(%)": "75",
+                    "Q30(%)": "50",
+                    "AvgQual": "18.5",
+                }
+            ],
+        )
+
+    def test_multi_file_summary_rejects_missing_aggregate_row(self):
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
+        from app.storage.paths import DataLayoutError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            per_file_stats = root / "seqkit_stats.tsv"
+            aggregate_stats = root / "aggregate_seqkit_stats.tsv"
+            header = "file\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\tN50\n"
+            per_file_stats.write_text(
+                header
+                + "A.fastq\t100\t10000\t100\t100\t100\t100\n"
+                + "B.fastq\t1\t1000\t1000\t1000\t1000\t1000\n",
+                encoding="utf-8",
+            )
+            aggregate_stats.write_text(header, encoding="utf-8")
+
+            with self.assertRaisesRegex(DataLayoutError, "exactly one row"):
+                parse_seqkit_summary(
+                    per_file_stats,
+                    aggregate_stats_path=aggregate_stats,
+                )
+
+    def test_summary_rejects_per_file_only_fallback(self):
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
+        from app.storage.paths import DataLayoutError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats = Path(tmpdir) / "seqkit_stats.tsv"
+            stats.write_text(
+                "file\tnum_seqs\tsum_len\nreads.fastq\t1\t4\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                DataLayoutError,
+                "aggregate stats are required",
+            ):
+                parse_seqkit_summary(stats)
 
     def test_fasta_seqkit_quality_metrics_are_not_applicable(self):
         from app.domains.parameter_recommendation.facts import build_canonical_facts
@@ -422,7 +645,16 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "reads.fasta\tFASTA\t1\t100\t100\t100\t100\t100\t0\t0\t0\n",
                 encoding="utf-8",
             )
-            summary = parse_seqkit_summary(stats_path)
+            aggregate_path = Path(tmpdir) / "fasta_aggregate.tsv"
+            aggregate_path.write_text(
+                "file\tformat\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len"
+                "\tN50\tQ20(%)\tQ30(%)\tAvgQual\n"
+                "-\tFASTA\t1\t100\t100\t100\t100\t100\t0\t0\t0\n",
+                encoding="utf-8",
+            )
+            summary = parse_seqkit_summary(
+                stats_path, aggregate_stats_path=aggregate_path
+            )
 
         self.assertIsNone(summary["q20_percent"])
         self.assertIsNone(summary["q30_percent"])
@@ -435,9 +667,70 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         self.assertIsNone(facts.reads.q20_fraction)
         self.assertIsNone(facts.reads.mean_quality)
 
-    def _run_repeated_read_qc(
-        self, tmpdir: str, *, local_consents: list[bool]
-    ) -> dict:
+    def test_empty_fastq_quality_metrics_are_canonicalized_from_blank_or_zero_cells(
+        self,
+    ):
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
+
+        header = (
+            "file\tformat\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len"
+            "\tN50\tQ20(%)\tQ30(%)\tAvgQual\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            per_file_stats = root / "seqkit_stats.tsv"
+            aggregate_stats = root / "aggregate_seqkit_stats.tsv"
+            per_file_stats.write_text(
+                header + "reads.fastq\tFASTQ\t0\t0\t0\t0.0\t0\t0\t\t\t\n",
+                encoding="utf-8",
+            )
+
+            for raw_quality_cells in ("\t\t\t", "\t0\t0.0\t0"):
+                with self.subTest(raw_quality_cells=raw_quality_cells):
+                    aggregate_stats.write_text(
+                        header
+                        + "-\tFASTQ\t0\t0\t0\t0.0\t0\t0"
+                        + raw_quality_cells
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    summary = parse_seqkit_summary(
+                        per_file_stats,
+                        aggregate_stats_path=aggregate_stats,
+                    )
+                    self.assertEqual(summary["q20_percent"], 0.0)
+                    self.assertEqual(summary["q30_percent"], 0.0)
+                    self.assertEqual(summary["avg_qual"], 0.0)
+
+    def test_empty_fasta_with_blank_seqkit_format_keeps_quality_inapplicable(self):
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
+
+        header = (
+            "file\tformat\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len"
+            "\tN50\tQ20(%)\tQ30(%)\tAvgQual\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            per_file_stats = root / "seqkit_stats.tsv"
+            aggregate_stats = root / "aggregate_seqkit_stats.tsv"
+            per_file_stats.write_text(
+                header + "reads.fasta\t\t0\t0\t0\t0.0\t0\t0\t0\t0.0\t0.00\n",
+                encoding="utf-8",
+            )
+            aggregate_stats.write_text(
+                header + "-\t\t0\t0\t0\t0.0\t0\t0\t0\t0.0\t0.00\n",
+                encoding="utf-8",
+            )
+            summary = parse_seqkit_summary(
+                per_file_stats,
+                aggregate_stats_path=aggregate_stats,
+            )
+
+        self.assertIsNone(summary["q20_percent"])
+        self.assertIsNone(summary["q30_percent"])
+        self.assertIsNone(summary["avg_qual"])
+
+    def _run_repeated_read_qc(self, tmpdir: str, *, local_consents: list[bool]) -> dict:
         fq = Path(tmpdir) / "reads.fastq"
         fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         registry = self._write_registry(
@@ -458,12 +751,17 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
+                "selected_method_names": [],
             },
             *[
                 {
                     "step_id": f"step-{index:03d}-read_qc",
                     "stage": "read_qc",
                     "allow_local_execution": consent,
+                    "selected_method_names": [
+                        "read_qc.long_read_stats.seqkit_stats",
+                        "read_qc.length_filter.seqkit_seq",
+                    ],
                 }
                 for index, consent in enumerate(local_consents, start=1)
             ],
@@ -489,6 +787,11 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         state["current_stage"] = "read_qc"
         state["workflow_step_index"] = 1
         state["entered_workflow_step_index"] = 0
+        state["workflow_step_outcome"] = {
+            "workflow_step_id": "step-000-inventory",
+            "stage": "inventory",
+            "outcome": "completed",
+        }
         state["asset_registry_ref"] = self._publish_registry_ref(
             state["data_dir"], "s1", registry
         )
@@ -500,9 +803,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
     def test_repeated_read_qc_false_true_applies_filter_only_to_local_occurrence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = self._run_repeated_read_qc(
-                tmpdir, local_consents=[False, True]
-            )
+            result = self._run_repeated_read_qc(tmpdir, local_consents=[False, True])
 
             paths = SessionPaths.from_run_dir(result["data_dir"])
             first_script = paths.workflow_step_work_path(
@@ -517,9 +818,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
     def test_repeated_read_qc_true_true_freezes_second_inputs_as_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = self._run_repeated_read_qc(
-                tmpdir, local_consents=[True, True]
-            )
+            result = self._run_repeated_read_qc(tmpdir, local_consents=[True, True])
 
             self.assertEqual(result["supervision_state"], "completed")
             frozen_attempts = [
@@ -584,8 +883,34 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 read_qc["substeps"]["length_filter"]["skip_reason"],
                 "no_filtering_requested",
             )
+            self.assertEqual(
+                read_qc["substeps"]["length_filter"]["method_name"],
+                "read_qc.length_filter.skip",
+            )
             self.assertNotIn("filtered_long_reads_ref", read_qc)
             self.assertEqual(result["resource_refs"]["long_reads"]["paths"], [str(fq)])
+
+            ledger_events = Ledger(result["data_dir"]).read_events("s1")
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "read_qc.long_read_stats.seqkit_stats": "completed",
+                    "read_qc.length_filter.skip": "completed",
+                },
+            )
+            self.assertFalse(
+                any(
+                    event["event_type"].startswith("attempt_")
+                    and event.get("summary", {}).get("method_name")
+                    == "read_qc.length_filter.skip"
+                    for event in ledger_events
+                )
+            )
 
             artifact_events = [
                 json.loads(line)
@@ -596,11 +921,43 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertNotIn("read_qc.long_reads.fofn", artifact_types)
 
+    def test_nonlocal_seqkit_stats_records_selected_method_as_skipped(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "reads.fastq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {"read_qc": {}}
+
+            result = build_stage().invoke(state)
+
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in Ledger(result["data_dir"]).read_events("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "read_qc.long_read_stats.seqkit_stats": "skipped",
+                    "read_qc.length_filter.skip": "completed",
+                },
+            )
+
     def test_multiple_raw_long_reads_write_multi_line_raw_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq1 = Path(tmpdir) / "reads_1.fastq"
             fq2 = Path(tmpdir) / "reads_2.fastq"
-            fq1.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            fq1.write_text("@r1\twith-tab\nACGT\n+\n!!!!\n", encoding="utf-8")
             fq2.write_text("@r2\nTGCA\n+\n!!!!\n", encoding="utf-8")
             registry = self._write_registry(
                 tmpdir,
@@ -654,6 +1011,57 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             stats_script_text = stats_script.read_text(encoding="utf-8")
             self.assertIn(str(fq1), stats_script_text)
             self.assertIn(str(fq2), stats_script_text)
+            self.assertIn("seqkit seq", stats_script_text)
+            self.assertIn("seqkit stats -a -T -", stats_script_text)
+            artifact_events = [
+                json.loads(line)
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            aggregate = next(
+                event
+                for event in artifact_events
+                if event["artifact_type"] == "read_qc.long_read_aggregate_stats"
+            )
+            self.assertTrue(
+                (Path(result["data_dir"]) / aggregate["path_ref"]).is_file()
+            )
+            self.assertEqual(
+                aggregate["provenance"]["kind"],
+                "direct_whole_read_set",
+            )
+            self.assertEqual(aggregate["provenance"]["read_set"], "raw")
+            self.assertEqual(
+                [
+                    entry["asset_id"]
+                    for entry in aggregate["provenance"]["input_dependencies"]
+                ],
+                [
+                    "s1:raw_long_reads:reads_1.fastq",
+                    "s1:raw_long_reads:reads_2.fastq",
+                ],
+            )
+            self.assertEqual(
+                aggregate["dependency_refs"],
+                [result["asset_registry_ref"]],
+            )
+            summary_payload = json.loads(
+                Path(read_qc["summary_artifact_ref"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                summary_payload["aggregate_stats_artifact_ref"]["artifact_type"],
+                "read_qc.long_read_aggregate_stats",
+            )
+            summary_event = next(
+                event
+                for event in artifact_events
+                if event["artifact_type"] == "read_qc.long_read_summary"
+            )
+            self.assertEqual(
+                summary_event["dependency_refs"][0],
+                summary_payload["aggregate_stats_artifact_ref"],
+            )
 
     def test_approved_min_length_filter_runs_and_writes_filtered_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -671,6 +1079,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_seqkit_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
+            self._set_filter_roster(state, "read_qc.length_filter.seqkit_seq")
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
@@ -735,6 +1144,18 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
             self.assertEqual(read_qc["final_read_set"], "post_filter")
             self.assertIn("raw_summary_artifact_ref", read_qc)
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in Ledger(result["data_dir"]).read_events("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "read_qc.long_read_stats.seqkit_stats": "completed",
+                    "read_qc.length_filter.seqkit_seq": "completed",
+                },
+            )
             artifact_events = [
                 json.loads(line)
                 for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
@@ -744,6 +1165,48 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.filtered_long_reads", artifact_types)
             self.assertNotIn("read_qc.filtered_long_reads.fofn", artifact_types)
+            post_filter_aggregate = next(
+                event
+                for event in artifact_events
+                if event["artifact_type"] == "read_qc.long_read_aggregate_stats"
+                and event["provenance"]["read_set"] == "post_filter"
+            )
+            filtered_read_ref = {
+                key: next(
+                    event
+                    for event in artifact_events
+                    if event["artifact_type"] == "read_qc.filtered_long_reads"
+                )[key]
+                for key in (
+                    "schema_version",
+                    "artifact_id",
+                    "path_ref",
+                    "sha256",
+                    "size_bytes",
+                    "artifact_type",
+                )
+            }
+            self.assertEqual(
+                post_filter_aggregate["dependency_refs"],
+                [filtered_read_ref],
+            )
+            self.assertEqual(
+                post_filter_aggregate["provenance"]["input_artifact_refs"],
+                [filtered_read_ref],
+            )
+            post_filter_summary_event = next(
+                event
+                for event in artifact_events
+                if event["artifact_type"] == "read_qc.long_read_summary"
+                and event["path_ref"]
+                == Path(read_qc["post_filter_summary_artifact_ref"])
+                .relative_to(Path(result["data_dir"]))
+                .as_posix()
+            )
+            self.assertEqual(
+                post_filter_summary_event["dependency_refs"],
+                [post_filter_summary["aggregate_stats_artifact_ref"]],
+            )
 
     def test_multiple_raw_long_reads_filter_to_multi_line_filtered_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -768,6 +1231,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_seqkit_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
+            self._set_filter_roster(state, "read_qc.length_filter.seqkit_seq")
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
@@ -810,6 +1274,68 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 [str(path) for path in filtered_refs],
             )
 
+    def test_multi_file_filter_with_no_retained_reads_writes_aggregate_zero_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            inputs = []
+            assets = []
+            for index in (1, 2):
+                path = Path(tmpdir) / f"reads_{index}.fastq"
+                path.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+                inputs.append(path)
+                assets.append(
+                    {
+                        "asset_id": f"s1:raw_long_reads:reads_{index}.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(path),
+                    }
+                )
+            registry = self._write_registry(tmpdir, assets=assets)
+            fake_bin = self._fake_seqkit_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            self._set_filter_roster(state, "read_qc.length_filter.seqkit_seq")
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "execution_mode": "local",
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                        "SEQKIT_TEST_EMPTY_FILTER": "1",
+                    },
+                    "length_filter_request": {
+                        "approved": True,
+                        "method_name": "read_qc.length_filter.seqkit_seq",
+                        "thresholds": {"min_len": 1000},
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            read_qc = result["stage_outputs"]["read_qc"]
+            self.assertEqual(read_qc["status"], "failed")
+            self.assertEqual(read_qc["reason"], "no_reads_retained")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(
+                result["workflow_step_outcome"]["outcome"],
+                "failed",
+            )
+            self.assertNotIn("long_reads", result.get("resource_refs") or {})
+            self.assertEqual(read_qc["post_filter_summary"]["num_seqs"], 0)
+            self.assertEqual(read_qc["post_filter_summary"]["sum_len"], 0)
+            self.assertEqual(read_qc["post_filter_summary"]["n50"], 0)
+            self.assertEqual(read_qc["post_filter_summary"]["q20_percent"], 0.0)
+            self.assertEqual(read_qc["post_filter_summary"]["q30_percent"], 0.0)
+            self.assertEqual(read_qc["post_filter_summary"]["avg_qual"], 0.0)
+            aggregate_path = Path(result["data_dir"]) / "artifacts"
+            self.assertTrue(
+                any(
+                    json.loads(line)["artifact_type"]
+                    == "read_qc.long_read_aggregate_stats"
+                    for line in (aggregate_path / "index.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
+            )
+
     def test_approved_min_length_filter_names_fasta_output_with_fasta_extension(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fasta = Path(tmpdir) / "reads.fna"
@@ -827,6 +1353,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_seqkit_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
+            self._set_filter_roster(state, "read_qc.length_filter.seqkit_seq")
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
@@ -868,6 +1395,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_seqkit_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
+            self._set_filter_roster(state, "read_qc.length_filter.seqkit_seq")
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
@@ -890,9 +1418,25 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 read_qc["substeps"]["length_filter"]["skip_reason"],
                 "threshold_decision_missing",
             )
+            self.assertEqual(
+                read_qc["substeps"]["length_filter"]["method_name"],
+                "read_qc.length_filter.skip",
+            )
             self.assertNotIn("filtered_long_reads_ref", read_qc)
             self.assertNotIn("length_filter_request", read_qc)
             self.assertEqual(result["resource_refs"]["long_reads"]["paths"], [str(fq)])
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in Ledger(result["data_dir"]).read_events("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "read_qc.long_read_stats.seqkit_stats": "completed",
+                    "read_qc.length_filter.seqkit_seq": "skipped",
+                },
+            )
 
     def test_non_seqkit_filter_selection_does_not_run_without_executable_route(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -910,6 +1454,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_seqkit_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
+            self._set_filter_roster(state, "read_qc.length_filter.filtlong")
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
@@ -926,16 +1471,17 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            read_qc = result["stage_outputs"]["read_qc"]
-            self.assertEqual(read_qc["substeps"]["length_filter"]["status"], "skipped")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("unsupported length filter method", result["last_error"])
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in Ledger(result["data_dir"]).read_events("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            }
             self.assertEqual(
-                read_qc["substeps"]["length_filter"]["skip_reason"],
-                "unknown_filter_method",
+                dispositions,
+                {"read_qc.long_read_stats.seqkit_stats": "completed"},
             )
-            self.assertEqual(
-                read_qc["length_filter_method"], "read_qc.length_filter.filtlong"
-            )
-            self.assertEqual(result["resource_refs"]["long_reads"]["paths"], [str(fq)])
 
     def test_missing_seqkit_records_failed_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -976,6 +1522,18 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             ]
             self.assertIn(
                 "attempt_failed", [event["event_type"] for event in ledger_events]
+            )
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "read_qc.long_read_stats.seqkit_stats": "failed",
+                    "read_qc.length_filter.skip": "not_started",
+                },
             )
 
 
@@ -1115,11 +1673,24 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
+            state["workflow_steps"][1]["selected_method_names"] = [
+                "read_qc.long_read_stats.seqkit_stats",
+                "read_qc.length_filter.seqkit_seq",
+            ]
             self._freeze_read_qc_dependencies(state, fq)
             # Empty PATH removes conda binary, which forces frozen env preflight
             # to report blocked_env. No PATH override is supplied on
             # stage_outputs.read_qc.env, so the resolver path is taken.
-            state["stage_outputs"] = {"read_qc": {"execution_mode": "local"}}
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "execution_mode": "local",
+                    "length_filter_request": {
+                        "approved": True,
+                        "method_name": "read_qc.length_filter.seqkit_seq",
+                        "thresholds": {"min_len": 1000},
+                    },
+                }
+            }
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = ""
             try:
@@ -1142,6 +1713,18 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("env_preflight_blocked", event_types)
+            dispositions = {
+                event["summary"]["method_name"]: event["summary"]["disposition"]
+                for event in ledger_events
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    "read_qc.long_read_stats.seqkit_stats": "not_started",
+                    "read_qc.length_filter.seqkit_seq": "not_started",
+                },
+            )
 
     def test_missing_tool_in_env_blocks_with_missing_tool_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:

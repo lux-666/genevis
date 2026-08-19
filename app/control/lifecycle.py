@@ -12,8 +12,11 @@ from typing import Any, Literal, cast
 from langchain_core.runnables import RunnableConfig
 
 from app.control import errors as control_errors
+from app.control.occurrence_settlement import settle_workflow_step_outcome
+from app.control.projections import reduce_workflow_progress
 from app.control.workflow_plan import (
     current_workflow_step_id,
+    fail_workflow_step,
     workflow_steps_from_run_config,
 )
 from app.review.application import (
@@ -36,11 +39,16 @@ from app.schemas.artifacts import ArtifactRef
 from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.schemas.state import (
     ActiveInterrupt,
+    StateUpdate,
     TopLevelState,
     validate_top_level_state,
 )
 from app.storage.artifacts import read_artifact_records
-from app.storage.ledger import Ledger, LedgerConflictError
+from app.storage.ledger import (
+    Ledger,
+    LedgerConflictError,
+    project_stage_terminal_events,
+)
 from app.storage.paths import SessionPaths
 
 ResumeValidationError = control_errors.ResumeValidationError
@@ -86,6 +94,25 @@ def reconcile_canonical_terminal_checkpoint(
     if expected_supervision is None:
         raise TerminalFinalizationError(
             f"canonical Ledger terminal has unsupported outcome: {outcome!r}"
+        )
+    failure_scope = (
+        summary.get("failure_scope") if isinstance(summary, Mapping) else None
+    )
+    if outcome_key == "completed" and failure_scope is not None:
+        raise TerminalFinalizationError(
+            "completed canonical Ledger terminal must not carry failure_scope"
+        )
+    if (
+        outcome_key == "failed"
+        and failure_scope is not None
+        and failure_scope
+        not in {
+            "occurrence",
+            "controller_boundary",
+        }
+    ):
+        raise TerminalFinalizationError(
+            "canonical Ledger terminal has an invalid failure_scope"
         )
     if checkpoint_state.get("supervision_state") != expected_supervision:
         raise TerminalFinalizationError(
@@ -142,12 +169,43 @@ def finalize_authoritative_terminal(
 
     update_error: Exception | None = None
     if normalize_failure:
+        pending_outcome = terminal_state.get("workflow_step_outcome")
+        workflow_index = terminal_state.get("workflow_step_index")
+        entered_index = terminal_state.get("entered_workflow_step_index")
+        between_occurrences = (
+            isinstance(pending_outcome, Mapping)
+            and pending_outcome.get("outcome") in {"completed", "skipped"}
+            and type(workflow_index) is int
+            and type(entered_index) is int
+            and workflow_index == entered_index + 1
+        )
+        if between_occurrences:
+            occurrence_failure: StateUpdate = {
+                "supervision_state": "failed_terminal",
+                "last_error": str(
+                    terminal_state.get("last_error") or "workflow execution failed"
+                ),
+            }
+        else:
+            try:
+                occurrence_failure = fail_workflow_step(
+                    cast(TopLevelState, terminal_state),
+                    str(terminal_state.get("current_stage") or ""),
+                    str(
+                        terminal_state.get("last_error") or "workflow execution failed"
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise TerminalFinalizationError(
+                    "cannot normalize a runtime failure without an active frozen "
+                    f"workflow occurrence: {exc}"
+                ) from exc
+        terminal_state.update(occurrence_failure)
         try:
             graph.update_state(
                 config,
                 {
-                    "supervision_state": "failed_terminal",
-                    "last_error": terminal_state.get("last_error"),
+                    **occurrence_failure,
                     "active_interrupt": None,
                 },
             )
@@ -172,6 +230,118 @@ def finalize_authoritative_terminal(
         raise TerminalFinalizationError(
             f"terminal checkpoint could not be verified: {detail}"
         ) from exc
+
+    try:
+        settle_workflow_step_outcome(
+            checkpoint_state,
+            data_dir=paths.run_dir,
+        )
+    except (OSError, TypeError, ValueError, LedgerConflictError) as exc:
+        raise TerminalFinalizationError(
+            f"terminal checkpoint occurrence settlement failed: {exc}"
+        ) from exc
+
+    stage_terminals, terminal_integrity = project_stage_terminal_events(
+        ledger.read_event_rows(session_id)
+    )
+    if terminal_integrity:
+        raise TerminalFinalizationError(
+            "terminal checkpoint has non-authoritative occurrence history"
+        )
+    steps = list(checkpoint_state.get("workflow_steps") or [])
+    failure_scope: Literal["occurrence", "controller_boundary"] | None = None
+    if supervision == "completed":
+        if checkpoint_state.get("workflow_step_index") != len(steps):
+            raise TerminalFinalizationError(
+                "completed terminal checkpoint has not reached the end of its plan"
+            )
+        unsettled = [
+            step["step_id"]
+            for step in steps
+            if stage_terminals.get((step["step_id"], step["stage"]), {}).get(
+                "event_type"
+            )
+            not in {"stage_completed", "stage_skipped"}
+        ]
+        if unsettled:
+            raise TerminalFinalizationError(
+                "completed terminal checkpoint has unsettled workflow occurrences: "
+                + ", ".join(unsettled)
+            )
+    else:
+        failed = [
+            terminal
+            for terminal in stage_terminals.values()
+            if terminal.get("event_type") == "stage_failed"
+        ]
+        workflow_step_outcome = checkpoint_state.get("workflow_step_outcome")
+        if (
+            isinstance(workflow_step_outcome, Mapping)
+            and workflow_step_outcome.get("outcome") == "failed"
+        ):
+            if (
+                len(failed) != 1
+                or failed[0].get("workflow_step_id")
+                != workflow_step_outcome.get("workflow_step_id")
+                or failed[0].get("stage") != workflow_step_outcome.get("stage")
+            ):
+                raise TerminalFinalizationError(
+                    "failed terminal checkpoint lacks one matching failed occurrence"
+                )
+            failed_step_id = str(workflow_step_outcome.get("workflow_step_id") or "")
+            failed_index = next(
+                (
+                    index
+                    for index, step in enumerate(steps)
+                    if step.get("step_id") == failed_step_id
+                ),
+                None,
+            )
+            prefix_settled = failed_index is not None and all(
+                stage_terminals.get((step["step_id"], step["stage"]), {}).get(
+                    "event_type"
+                )
+                in {"stage_completed", "stage_skipped"}
+                for step in steps[:failed_index]
+            )
+            no_terminal_after_failed = failed_index is not None and all(
+                (step["step_id"], step["stage"]) not in stage_terminals
+                for step in steps[failed_index + 1 :]
+            )
+            if not prefix_settled or not no_terminal_after_failed:
+                raise TerminalFinalizationError(
+                    "failed occurrence is not the terminal edge of a fully "
+                    "settled workflow prefix"
+                )
+            failure_scope = "occurrence"
+        else:
+            workflow_index = checkpoint_state.get("workflow_step_index")
+            entered_index = checkpoint_state.get("entered_workflow_step_index")
+            boundary_failure = (
+                not failed
+                and isinstance(workflow_step_outcome, Mapping)
+                and workflow_step_outcome.get("outcome") in {"completed", "skipped"}
+                and type(workflow_index) is int
+                and type(entered_index) is int
+                and workflow_index == entered_index + 1
+            )
+            prefix_settled = boundary_failure and all(
+                stage_terminals.get((step["step_id"], step["stage"]), {}).get(
+                    "event_type"
+                )
+                in {"stage_completed", "stage_skipped"}
+                for step in steps[:workflow_index]
+            )
+            no_terminal_after_frontier = boundary_failure and all(
+                (step["step_id"], step["stage"]) not in stage_terminals
+                for step in steps[workflow_index:]
+            )
+            if not prefix_settled or not no_terminal_after_frontier:
+                raise TerminalFinalizationError(
+                    "failed terminal checkpoint has neither a failed occurrence "
+                    "nor a fully settled inter-occurrence frontier"
+                )
+            failure_scope = "controller_boundary"
 
     expected = {
         "session_id": session_id,
@@ -215,6 +385,7 @@ def finalize_authoritative_terminal(
             stage=checkpoint_state.get("current_stage"),
             error=(checkpoint_state.get("last_error") if outcome == "failed" else None),
             refs=refs,
+            failure_scope=failure_scope,
         )
     except LedgerConflictError as exc:
         raise TerminalFinalizationError(str(exc)) from exc
@@ -286,15 +457,23 @@ def inspect_state(
     except ResumeValidationError as exc:
         decision_requirements = None
         request_error = str(exc)
+    workflow_progress = _checkpoint_workflow_progress(snapshot, active_interrupt)
     summary: dict[str, Any] = {
         "session_id": snapshot.get("session_id"),
-        "current_stage": snapshot.get("current_stage"),
-        "current_workflow_step_id": _current_workflow_step_id(snapshot),
+        # These public current fields are reduced from explicit occurrence
+        # facts.  A checkpoint cursor is not evidence that earlier occurrences
+        # settled, so it cannot independently establish workflow progress.
+        "current_stage": workflow_progress["current_stage"],
+        "current_workflow_step_id": workflow_progress["current_workflow_step_id"],
         "supervision_state": snapshot.get("supervision_state"),
         "active_interrupt": active_interrupt,
         "stage_statuses": _stage_statuses(snapshot),
         "latest_artifact_refs": _latest_artifact_refs(snapshot),
         "decision_requirements": decision_requirements,
+        "workflow_progress": workflow_progress,
+        # Kept only as an explicitly non-authoritative checkpoint observation
+        # for callers that need to display the paused graph node.
+        "checkpoint_current_stage": snapshot.get("current_stage"),
     }
     if request_error:
         summary["review_request_verification_error"] = request_error
@@ -464,11 +643,6 @@ def inspect_session(
         decision_requirements,
         review_status=latest_active_review,
     )
-    latest_stage = _latest_stage_projection(authoritative_events)
-    current_stage = latest_stage.get("stage") if latest_stage else None
-    current_workflow_step_id = (
-        latest_stage.get("workflow_step_id") if latest_stage else None
-    )
     route_trace = _durable_route_trace(authoritative_events)
     last_error = _latest_error(authoritative_events)
     latest_failed_report = (
@@ -477,13 +651,24 @@ def inspect_session(
     latest_blocked_report = (
         latest_operator_report if supervision_state == "blocked_human" else None
     )
+    stage_terminals, stage_terminal_integrity = project_stage_terminal_events(
+        authoritative_events
+    )
     workflow_progress, execution = _inspect_execution_read_model(
         paths,
-        authoritative_events,
+        stage_terminals=stage_terminals,
+        stage_terminal_integrity=stage_terminal_integrity,
         supervision_state=supervision_state,
+        failure_scope=(
+            latest_terminal.get("failure_scope")
+            if isinstance(latest_terminal, Mapping)
+            else None
+        ),
         latest_unresolved_review_request=latest_unresolved_review_request,
-        current_workflow_step_id=current_workflow_step_id,
-        current_stage=current_stage,
+    )
+    workflow_progress_integrity = workflow_progress.pop(
+        "integrity_diagnostics",
+        [],
     )
     if workflow_progress["plan_source"] == "frozen_run_config":
         current_workflow_step_id = workflow_progress["current_workflow_step_id"]
@@ -543,6 +728,7 @@ def inspect_session(
         "review_occurrences": review_occurrences,
         "review_status_integrity_errors": list(review_history.integrity_errors),
         "terminal_integrity": review_history.terminal_integrity,
+        "stage_terminal_integrity": stage_terminal_integrity,
         "latest_review_request_artifact": latest_request_artifact,
         "latest_review_decision_artifact": latest_decision_artifact,
         "latest_operator_report": latest_operator_report,
@@ -555,6 +741,7 @@ def inspect_session(
         "decision_requirements": decision_requirements,
         "artifact_count": len(artifacts),
         "workflow_progress": workflow_progress,
+        "workflow_progress_integrity": workflow_progress_integrity,
         "execution": execution,
     }
     if decision_requirements_error:
@@ -791,13 +978,83 @@ def _stage_statuses(state: Mapping[str, Any]) -> dict[str, str]:
     return statuses
 
 
-def _current_workflow_step_id(state: Mapping[str, Any]) -> str | None:
-    """Return the frozen current occurrence ID, if this is a valid plan state."""
+def _checkpoint_workflow_progress(
+    state: Mapping[str, Any],
+    active_interrupt: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Reduce only explicit in-checkpoint occurrence facts.
 
+    A detached checkpoint does not retain the durable prefix of stage terminal
+    events, so it cannot prove the cursor's implied completed occurrences.  An
+    in-flight ``workflow_step_outcome`` is still an explicit fact and is
+    included as such, but the reducer is deliberately marked degraded and
+    withholds a current occurrence.  Durable :func:`inspect_session` supplies
+    the complete Ledger terminal map and is authoritative.
+    """
+
+    outcome = state.get("workflow_step_outcome")
+    stage_terminals: dict[tuple[str, str], dict[str, Any]] = {}
+    if isinstance(outcome, Mapping):
+        step_id = outcome.get("workflow_step_id")
+        stage = outcome.get("stage")
+        terminal_outcome = outcome.get("outcome")
+        event_type_by_outcome = {
+            "completed": "stage_completed",
+            "skipped": "stage_skipped",
+            "failed": "stage_failed",
+        }
+        event_type = (
+            event_type_by_outcome.get(terminal_outcome)
+            if isinstance(terminal_outcome, str)
+            else None
+        )
+        if isinstance(step_id, str) and isinstance(stage, str) and event_type:
+            stage_terminals[(step_id, stage)] = {"event_type": event_type}
+
+    checkpoint_only = {
+        "kind": "checkpoint_only_stage_terminal_prefix",
+        "detail": (
+            "checkpoint state does not contain the durable occurrence-terminal "
+            "prefix required to determine current workflow progress"
+        ),
+    }
     try:
-        return current_workflow_step_id(state)  # type: ignore[arg-type]
+        reduction = reduce_workflow_progress(
+            state.get("workflow_steps"),
+            stage_terminals=stage_terminals,
+            active_gate=(
+                active_interrupt
+                if state.get("supervision_state") == "blocked_human"
+                and isinstance(active_interrupt, Mapping)
+                else None
+            ),
+            session_outcome=(
+                "completed"
+                if state.get("supervision_state") == "completed"
+                else "failed"
+                if state.get("supervision_state") == "failed_terminal"
+                else None
+            ),
+            terminal_integrity=(checkpoint_only,),
+        )
     except (TypeError, ValueError):
-        return None
+        return {
+            "plan_source": "unavailable",
+            "total_steps": None,
+            "completed_steps": None,
+            "skipped_steps": None,
+            "failed_steps": None,
+            "blocked_steps": None,
+            "unfinished_steps": None,
+            "current_workflow_step_id": None,
+            "current_stage": None,
+            "projection_authority": "unavailable",
+            "integrity_diagnostics": [checkpoint_only],
+        }
+    return {
+        "plan_source": "checkpoint_only",
+        **reduction,
+    }
 
 
 def _validate_active_interrupt_workflow_step(
@@ -1120,26 +1377,14 @@ def _terminal_supervision_state(outcome: Any) -> str:
     return normalized
 
 
-def _latest_stage_projection(events: list[dict[str, Any]]) -> dict[str, str] | None:
-    for event in reversed(events):
-        stage = event.get("stage")
-        workflow_step_id = event.get("workflow_step_id")
-        if stage and workflow_step_id:
-            return {
-                "stage": str(stage),
-                "workflow_step_id": str(workflow_step_id),
-            }
-    return None
-
-
 def _inspect_execution_read_model(
     paths: SessionPaths,
-    events: list[dict[str, Any]],
     *,
+    stage_terminals: Mapping[tuple[str, str], Mapping[str, Any]],
+    stage_terminal_integrity: list[dict[str, Any]],
     supervision_state: str,
+    failure_scope: object,
     latest_unresolved_review_request: dict[str, Any] | None,
-    current_workflow_step_id: str | None,
-    current_stage: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Project verified-plan progress plus per-session execution evidence.
 
@@ -1185,55 +1430,23 @@ def _inspect_execution_read_model(
     except (OSError, ValueError):
         durable_progress = "unavailable"
 
-    step_by_id = {step["step_id"]: step for step in steps}
-    terminal_by_step: dict[str, str] = {}
-    for event in events:
-        step_id = event.get("workflow_step_id")
-        event_type = event.get("event_type")
-        step = step_by_id.get(str(step_id))
-        if step is None or event.get("stage") != step["stage"]:
-            continue
-        if event_type in {"stage_completed", "stage_skipped", "stage_failed"}:
-            terminal_by_step[str(step_id)] = str(event_type)
-
-    completed_steps = sum(
-        event_type == "stage_completed" for event_type in terminal_by_step.values()
+    active_gate = (
+        latest_unresolved_review_request
+        if supervision_state == "blocked_human"
+        else None
     )
-    skipped_steps = sum(
-        event_type == "stage_skipped" for event_type in terminal_by_step.values()
+    reduction = reduce_workflow_progress(
+        steps,
+        stage_terminals=stage_terminals,
+        active_gate=active_gate,
+        session_outcome=supervision_state,
+        failure_scope=(failure_scope if isinstance(failure_scope, str) else None),
+        terminal_integrity=stage_terminal_integrity,
     )
-    failed_steps = sum(
-        event_type == "stage_failed" for event_type in terminal_by_step.values()
-    )
-    blocked_step_id: str | None = None
-    if supervision_state == "blocked_human" and latest_unresolved_review_request:
-        candidate_step_id = str(
-            latest_unresolved_review_request.get("workflow_step_id") or ""
-        )
-        candidate_step = step_by_id.get(candidate_step_id)
-        if (
-            candidate_step is not None
-            and latest_unresolved_review_request.get("stage") == candidate_step["stage"]
-        ):
-            blocked_step_id = candidate_step_id
-    active_step = step_by_id.get(current_workflow_step_id or "")
-    active_step_matches = (
-        active_step is not None and active_step["stage"] == current_stage
-    )
-    total_steps = len(steps)
     return (
         {
             "plan_source": "frozen_run_config",
-            "total_steps": total_steps,
-            "completed_steps": completed_steps,
-            "skipped_steps": skipped_steps,
-            "failed_steps": failed_steps,
-            "blocked_steps": int(blocked_step_id is not None),
-            "unfinished_steps": total_steps - completed_steps - skipped_steps,
-            "current_workflow_step_id": (
-                current_workflow_step_id if active_step_matches else None
-            ),
-            "current_stage": current_stage if active_step_matches else None,
+            **reduction,
         },
         {
             "frozen_inputs_status": "verified",

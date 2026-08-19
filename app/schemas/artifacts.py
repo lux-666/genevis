@@ -18,6 +18,7 @@ from typing_extensions import TypedDict
 from app.integrity import sha256_file
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
+READ_QC_LONG_READ_AGGREGATE_STATS = "read_qc.long_read_aggregate_stats"
 READ_QC_LONG_READ_SUMMARY = "read_qc.long_read_summary"
 READ_QC_FILTERED_LONG_READS = "read_qc.filtered_long_reads"
 READ_QC_READ_SET_MANIFEST = "read_qc.read_set_manifest"
@@ -108,6 +109,8 @@ T2T_STATUS_SUMMARY = "t2t.status_summary"
 T2T_FINISHING_REPORT = "t2t.finishing_report"
 T2T_PATCHED_ASSEMBLY = "t2t.patched_assembly"
 T2T_PATCH_RECORDS = "t2t.patch_records"
+
+
 class ArtifactMeta(BaseModel):
     """Metadata stored in state/ledger instead of large file contents."""
 
@@ -401,9 +404,7 @@ class AssemblyCandidateBundle(BaseModel):
     @model_validator(mode="after")
     def _validate_status_contract(self) -> "AssemblyCandidateBundle":
         if set(self.input_member_ids) != set(self.input_member_platforms):
-            raise ValueError(
-                "candidate input member ID and platform roles must match"
-            )
+            raise ValueError("candidate input member ID and platform roles must match")
         if not self.input_member_ids.get("primary"):
             raise ValueError("candidate bundle requires primary input member IDs")
         for role, member_ids in self.input_member_ids.items():

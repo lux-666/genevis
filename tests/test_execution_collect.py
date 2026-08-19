@@ -89,14 +89,9 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                         len(output["reason"]), COLLECT_REASON_MAX_CHARS
                     )
                     events = Ledger(run_dir).read_events(session_id)
-                    stage_failures = [
-                        event
-                        for event in events
-                        if event["event_type"] == "stage_failed"
-                    ]
-                    self.assertEqual(len(stage_failures), 1)
-                    self.assertEqual(stage_failures[0]["stage"], "genome_survey")
-                    self.assertEqual(stage_failures[0]["error"], output["reason"])
+                    self.assertFalse(
+                        any(event["event_type"] == "stage_failed" for event in events)
+                    )
 
     def test_collect_callback_value_error_remains_visible(self):
         """A callback contract bug must not become a normal collect failure."""
@@ -123,7 +118,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
 
             self.assertEqual(Ledger(run_dir).read_events("s1"), [])
 
-    def test_failure_records_attempt_and_stage_events_when_evidence_is_valid(self):
+    def test_failure_records_attempt_event_and_leaves_stage_terminal_to_parent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
             state = _state(run_dir, "s1", status="jellyfish_ran")
@@ -133,6 +128,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 method_name="genome_survey.kmer_count.jellyfish",
                 frozen_status="jellyfish_frozen",
                 ran_status="jellyfish_ran",
+                outcome_policy=lambda _state: None,
             )
             working_dir = SessionPaths.from_run_dir(run_dir).workflow_step_work_path(
                 "step-001-genome_survey", "genome_survey", "jellyfish"
@@ -172,7 +168,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 event["event_type"] for event in Ledger(run_dir).read_events("s1")
             ]
             self.assertIn("attempt_failed", event_types)
-            self.assertIn("stage_failed", event_types)
+            self.assertNotIn("stage_failed", event_types)
 
     def test_shared_graph_applies_collect_failure_boundary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,6 +180,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 method_name="genome_survey.kmer_count.jellyfish",
                 frozen_status="jellyfish_frozen",
                 ran_status="jellyfish_ran",
+                outcome_policy=lambda _state: None,
             )
 
             def freeze(current):
@@ -224,7 +221,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
             self.assertEqual(output["failure_kind"], "collect")
             self.assertIn("required output disappeared", output["reason"])
 
-    def test_existing_attempt_failure_does_not_suppress_stage_failure_event(self):
+    def test_existing_attempt_failure_does_not_create_stage_terminal_event(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = v2_run_dir(tmpdir, "s1")
             state = _state(run_dir, "s1", status="jellyfish_ran")
@@ -295,7 +292,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
                 event["event_type"] for event in Ledger(run_dir).read_events("s1")
             ]
             self.assertIn("attempt_failed", event_types)
-            self.assertIn("stage_failed", event_types)
+            self.assertNotIn("stage_failed", event_types)
 
     def test_ledger_conflict_at_collect_boundary_is_bounded(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -324,12 +321,12 @@ class CollectFailureBoundaryTests(unittest.TestCase):
             self.assertEqual(output["status"], "failed")
             self.assertEqual(output["failure_kind"], "collect")
             self.assertIn("idempotency key", output["reason"])
-            stage_failures = [
-                event
-                for event in Ledger(run_dir).read_events("s1")
-                if event["event_type"] == "stage_failed"
-            ]
-            self.assertEqual(len(stage_failures), 1)
+            self.assertFalse(
+                any(
+                    event["event_type"] == "stage_failed"
+                    for event in Ledger(run_dir).read_events("s1")
+                )
+            )
 
     def test_collect_failure_after_attempt_success_keeps_single_terminal_fact(self):
         # Adapters own attempt_succeeded; the boundary must not add a
@@ -388,7 +385,7 @@ class CollectFailureBoundaryTests(unittest.TestCase):
             ]
             self.assertIn("attempt_succeeded", event_types)
             self.assertNotIn("attempt_failed", event_types)
-            self.assertIn("stage_failed", event_types)
+            self.assertNotIn("stage_failed", event_types)
 
 
 if __name__ == "__main__":

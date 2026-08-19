@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from app.control.lifecycle import ResumeValidationError
+from app.control.workflow_plan import fail_workflow_step
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.domains.parameter_recommendation.resolution import (
     render_stage_values,
     resolve_parameters,
 )
+from app.execution.method_outcomes import settle_method_outcomes
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
@@ -133,6 +135,28 @@ from app.storage.parameter_evidence import (
 _RECOMMENDER_METHOD = "t2t.parameter_recommender"
 _APPROVAL_METHOD = "t2t.parameter_approval"
 _MOTIF_RESOLVER_METHOD = T2T_MOTIF_RESOLVER_ID
+
+
+def _settle_terminal_alignment(
+    state: TopLevelState,
+    stage_update: StateUpdate,
+) -> StateUpdate:
+    """Use the shared settlement boundary for a rejected parameter gate."""
+
+    # ``nodes`` imports this module to run recommendation logic; defer the
+    # outcome-policy import to avoid a module initialization cycle.
+    from app.stages.t2t.nodes import (
+        T2T_ALIGNMENT_METHOD,
+        t2t_alignment_method_outcome,
+    )
+
+    projected = cast(TopLevelState, {**state, **stage_update})
+    return settle_method_outcomes(
+        projected,
+        stage="t2t",
+        outcomes=t2t_alignment_method_outcome(projected),
+        expected_method_names=(T2T_ALIGNMENT_METHOD,),
+    )
 
 
 def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
@@ -1056,6 +1080,8 @@ def apply_t2t_parameter_approval_application(
             },
         )
         return {
+            **_settle_terminal_alignment(state, stage_update),
+            **fail_workflow_step(state, "t2t", str(effect.rejection_reason)),
             "current_stage": "t2t",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,

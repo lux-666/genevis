@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 
 from langgraph.graph.state import CompiledStateGraph
 
-from app.control.workflow_plan import current_workflow_step_id
+from app.control.workflow_plan import current_workflow_step, current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import artifact_input_dependency
 from app.execution.lifecycle import (
@@ -16,6 +17,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
+from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     GENOME_SURVEY_KMER_DB,
@@ -32,17 +34,67 @@ from app.stages.genome_survey.method_application.support import (
     survey_output,
     update_survey_output,
 )
+from app.workflow import is_terminal_failure
 
 METHOD_NAME = "genome_survey.model.genomescope2"
 FROZEN_STATUS = "genomescope2_frozen"
 RAN_STATUS = "genomescope2_ran"
 COLLECTED_STATUS = "genomescope2_collected"
+
+
+def genomescope2_outcome(state: TopLevelState) -> MethodOutcome | None:
+    """Return GenomeScope2's disposition without settling a retry path."""
+
+    if not _is_selected(state):
+        return None
+    output = survey_output(state)
+    substep = (output.get("substeps") or {}).get("genome_model") or {}
+    if substep.get("status") == "executed":
+        return MethodOutcome(METHOD_NAME, "completed")
+    if substep.get("status") == "skipped":
+        return MethodOutcome(
+            METHOD_NAME,
+            "skipped",
+            reason=str(substep.get("skip_reason") or "local_execution_not_enabled"),
+        )
+    if output.get("status") == "skipped":
+        return MethodOutcome(METHOD_NAME, "skipped", reason="no_usable_reads")
+    if not is_terminal_failure(output.get("status")):
+        return None
+    if not _has_execution_result(output):
+        return MethodOutcome(METHOD_NAME, "not_started")
+    return MethodOutcome(
+        METHOD_NAME,
+        "failed",
+        reason=str(output.get("reason") or "genomescope2_failed"),
+    )
+
+
+def _is_selected(state: TopLevelState) -> bool:
+    step = current_workflow_step(state)
+    roster = step.get("selected_method_names") if step is not None else None
+    return isinstance(roster, list) and METHOD_NAME in roster
+
+
+def _has_execution_result(output: Mapping[str, object]) -> bool:
+    attempts = output.get("execution_attempts")
+    if not isinstance(attempts, list):
+        return False
+    return any(
+        attempt.get("method_id") == METHOD_NAME
+        and attempt.get("status") in {"executed", "execution_failed"}
+        for attempt in attempts
+        if isinstance(attempt, Mapping)
+    )
+
+
 LIFECYCLE = MethodExecutionLifecycle(
     stage="genome_survey",
     name="genomescope2",
     method_name=METHOD_NAME,
     frozen_status=FROZEN_STATUS,
     ran_status=RAN_STATUS,
+    outcome_policy=genomescope2_outcome,
 )
 
 

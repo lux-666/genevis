@@ -477,22 +477,29 @@ def _foreground_review_available() -> bool:
 
 
 def _render_attached_progress(progress: ProgressProjectionInput) -> None:
-    """Render ephemeral occurrence progress from the frozen graph cursor."""
+    """Render ephemeral progress from authoritative occurrence reductions."""
 
     progress_state = {
         "blocked_human": "blocked",
         "failed_terminal": "failed",
         "completed": "completed",
     }.get(progress.supervision_state, "running")
+    finished = progress.completed_workflow_steps + progress.skipped_workflow_steps
     print(
-        f"progress: finished={progress.workflow_step_index}/"
+        f"progress: finished={finished}/"
         f"{progress.total_workflow_steps} "
         f"completed={progress.completed_workflow_steps} "
         f"skipped={progress.skipped_workflow_steps} "
         f"current={progress.workflow_step_id or '-'} "
-        f"stage={progress.current_stage} "
+        f"stage={progress.current_stage or '-'} "
         f"state={progress_state}"
     )
+    if progress.projection_authority == "degraded_stage_terminal_projection":
+        print(
+            "warning: attached workflow progress is degraded because stage "
+            "terminal history is inconsistent.",
+            file=sys.stderr,
+        )
 
 
 def _print_projection_warnings(boundary: ProjectionBoundary) -> None:
@@ -1516,6 +1523,17 @@ def _print_inspect_text(
             f"unfinished={workflow_progress.get('unfinished_steps')} "
             f"source={workflow_progress.get('plan_source')}"
         )
+        if (
+            workflow_progress.get("projection_authority")
+            == "degraded_stage_terminal_projection"
+        ):
+            print(
+                "WARNING: workflow_progress is a degraded projection because "
+                "stage terminal history is inconsistent."
+            )
+    stage_terminal_integrity = summary.get("stage_terminal_integrity") or []
+    if stage_terminal_integrity:
+        print(f"WARNING: stage_terminal_integrity: {stage_terminal_integrity}")
     execution = summary.get("execution") or {}
     if execution:
         lock_held = execution.get("execution_lock_held")

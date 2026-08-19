@@ -26,8 +26,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.control.lifecycle import ResumeValidationError
 from app.control.workflow_plan import (
     advance_workflow_step,
+    assembly_delivery,
     current_workflow_step,
     current_workflow_step_id,
+    fail_workflow_step,
     workflow_step_by_id,
 )
 from app.reference.ncbi_metazoa import (
@@ -128,7 +130,7 @@ from app.storage.assembly_candidates import (
     load_executed_candidate_bundle,
     publish_derived_assembly_candidate,
 )
-from app.storage.ledger import Ledger
+from app.storage.ledger import Ledger, project_stage_terminal_events
 from app.workflow import is_terminal_failure
 
 logger = logging.getLogger(__name__)
@@ -270,7 +272,7 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
 
 
 def _validate_review_target_handoff(state: TopLevelState) -> None:
-    """Require the current assembly to come from this Review's frozen producer."""
+    """Verify the frozen producer's immutable assembly handoff from Ledger."""
 
     step = current_workflow_step(state)
     if step is None or step["stage"] != "assembly_review":
@@ -285,12 +287,14 @@ def _validate_review_target_handoff(state: TopLevelState) -> None:
 
     raw_assembly_ref = (state.get("resource_refs") or {}).get("assembly")
     if raw_assembly_ref is None:
-        return
+        raise ValueError("the central assembly ResourceRef is missing")
     assembly_ref = (
         ResourceRef.from_dict(raw_assembly_ref)
         if isinstance(raw_assembly_ref, dict)
         else raw_assembly_ref
     )
+    if assembly_ref.resource_type != "assembly":
+        raise ValueError("the central ResourceRef is not an assembly")
     if assembly_ref.workflow_step_id != producer_step_id:
         raise ValueError(
             "current assembly producer step does not match frozen review_target: "
@@ -303,6 +307,87 @@ def _validate_review_target_handoff(state: TopLevelState) -> None:
             f"expected {producer_step['stage']!r}, got "
             f"{assembly_ref.source_stage!r}"
         )
+    try:
+        candidate_ref = ArtifactRef.model_validate(
+            assembly_ref.metadata.get("candidate_bundle_ref")
+        )
+        primary_ref = ArtifactRef.model_validate(
+            assembly_ref.metadata.get("primary_output_ref")
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "the central assembly ResourceRef has no canonical candidate provenance"
+        ) from exc
+
+    ledger = Ledger(absolute_data_dir(state))
+    terminals, diagnostics = project_stage_terminal_events(
+        ledger.read_event_rows(state["session_id"])
+    )
+    if any(
+        diagnostic.get("workflow_step_id") == producer_step_id
+        for diagnostic in diagnostics
+    ):
+        raise ValueError(
+            "frozen assembly producer has non-authoritative terminal history"
+        )
+    canonical = terminals.get((producer_step_id, producer_step["stage"]))
+    if canonical is None or canonical.get("event_type") != "stage_completed":
+        raise ValueError(
+            "frozen assembly producer does not have a canonical stage_completed event"
+        )
+    deliveries = [
+        event
+        for event in ledger.read_event_rows(state["session_id"])
+        if event.get("event_type") == "resource_delivered"
+        and event.get("workflow_step_id") == producer_step_id
+        and event.get("stage") == producer_step["stage"]
+        and (event.get("summary") or {}).get("resource_type") == "assembly"
+    ]
+    if len(deliveries) != 1:
+        raise ValueError(
+            "frozen assembly producer must have exactly one immutable assembly delivery"
+        )
+    if (deliveries[0].get("summary") or {}).get("delivery_mode") not in {
+        "materialized",
+        "reused",
+    }:
+        raise ValueError("assembly delivery has an invalid delivery mode")
+    delivery_refs = {
+        ref.get("role"): ref
+        for ref in deliveries[0].get("refs") or []
+        if isinstance(ref, Mapping)
+    }
+    try:
+        delivered_candidate_ref = ArtifactRef.model_validate(
+            {
+                key: value
+                for key, value in dict(
+                    delivery_refs.get("candidate_bundle_ref") or {}
+                ).items()
+                if key != "role"
+            }
+        )
+        delivered_primary_ref = ArtifactRef.model_validate(
+            {
+                key: value
+                for key, value in dict(
+                    delivery_refs.get("primary_output_ref") or {}
+                ).items()
+                if key != "role"
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "assembly delivery has invalid immutable artifact refs"
+        ) from exc
+    if candidate_ref != delivered_candidate_ref or primary_ref != delivered_primary_ref:
+        raise ValueError(
+            "central assembly candidate provenance does not match frozen delivery"
+        )
+    if list(assembly_ref.paths) != [
+        str(session_paths(state).resolve_ref(delivered_primary_ref.path_ref))
+    ]:
+        raise ValueError("central assembly path does not match frozen delivery")
 
 
 def plan_review_metrics(state: TopLevelState) -> StateUpdate:
@@ -1315,6 +1400,7 @@ def apply_assembly_review_application(
         raise ResumeValidationError("assembly_review application has the wrong gate")
 
     if effect.decision == "stop_human_review":
+        reason = "assembly_review stopped by human review decision"
         review_update = update_assembly_review_output(
             state,
             {
@@ -1339,11 +1425,12 @@ def apply_assembly_review_application(
             },
         )
         return {
+            **fail_workflow_step(state, "assembly_review", reason),
             "current_stage": "assembly_review",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
             **review_update,
-            "last_error": "assembly_review stopped by human review decision",
+            "last_error": reason,
         }
 
     if (
@@ -1400,7 +1487,22 @@ def apply_assembly_review_application(
         review_payload["polished_assembly"] = final_path
     review_update = update_assembly_review_output(state, review_payload)
     return {
-        **advance_workflow_step(state, "assembly_review"),
+        **advance_workflow_step(
+            state,
+            "assembly_review",
+            outcome="completed",
+            deliveries=(
+                assembly_delivery(
+                    effect.candidate_bundle_ref.model_dump(mode="json"),
+                    effect.primary_output_ref.model_dump(mode="json"),
+                    delivery_mode=(
+                        "reused"
+                        if effect.action_execution_mode == "none"
+                        else "materialized"
+                    ),
+                ),
+            ),
+        ),
         "active_interrupt": None,
         "route_trace": append_route_trace(state, "assembly_review_stage"),
         "stage_outputs": review_update["stage_outputs"],
@@ -2250,9 +2352,7 @@ def fail_assembly_review(state: TopLevelState) -> StateUpdate:
     }.get(status, "assembly_review failed")
     reason = ar_out.get("reason") or assembly_out.get("reason") or default_reason
     return {
-        "current_stage": "assembly_review",
-        "supervision_state": "failed_terminal",
-        "last_error": str(reason),
+        **fail_workflow_step(state, "assembly_review", str(reason)),
     }
 
 

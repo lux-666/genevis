@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 
-from app.control.workflow_plan import current_workflow_step_id
+from app.control.workflow_plan import current_workflow_step, current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
     CompiledMethodGraph,
@@ -15,9 +16,11 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
+from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     READ_QC_FILTERED_LONG_READS,
+    READ_QC_LONG_READ_AGGREGATE_STATS,
     READ_QC_LONG_READ_STATS,
     READ_QC_LONG_READ_SUMMARY,
     READ_QC_READ_SET_MANIFEST,
@@ -39,6 +42,7 @@ from app.stages.read_qc.method_application.support import (
     read_input_dependencies,
     read_paths_from_output,
     read_qc_output,
+    seqkit_aggregate_length_commands,
     update_read_qc_output,
 )
 from app.stages.read_qc.state import ReadQCSubstepJson
@@ -47,6 +51,52 @@ from app.storage.artifacts import (
     record_registered_artifacts,
 )
 from app.storage.ledger import Ledger
+from app.workflow import is_terminal_failure
+
+
+def seqkit_length_filter_outcome(state: TopLevelState) -> MethodOutcome | None:
+    """Return a terminal disposition only when this filter was selected."""
+
+    if not _is_selected(state):
+        return None
+    output = read_qc_output(state)
+    substep = (output.get("substeps") or {}).get("length_filter") or {}
+    if substep.get("status") == "executed":
+        return MethodOutcome(LENGTH_FILTER_METHOD_NAME, "completed")
+    if substep.get("status") == "skipped":
+        return MethodOutcome(
+            LENGTH_FILTER_METHOD_NAME,
+            "skipped",
+            reason=str(substep.get("skip_reason") or "method_not_run"),
+        )
+    if is_terminal_failure(output.get("status"), extra_statuses={"blocked_input"}):
+        if not _has_execution_result(output):
+            return MethodOutcome(LENGTH_FILTER_METHOD_NAME, "not_started")
+        return MethodOutcome(
+            LENGTH_FILTER_METHOD_NAME,
+            "failed",
+            reason=str(output.get("reason") or "seqkit_length_filter_failed"),
+        )
+    return None
+
+
+def _is_selected(state: TopLevelState) -> bool:
+    step = current_workflow_step(state)
+    roster = step.get("selected_method_names") if step is not None else None
+    return isinstance(roster, list) and LENGTH_FILTER_METHOD_NAME in roster
+
+
+def _has_execution_result(output: Mapping[str, object]) -> bool:
+    attempts = output.get("execution_attempts")
+    if not isinstance(attempts, list):
+        return False
+    return any(
+        attempt.get("method_id") == LENGTH_FILTER_METHOD_NAME
+        and attempt.get("status") in {"executed", "execution_failed"}
+        for attempt in attempts
+        if isinstance(attempt, Mapping)
+    )
+
 
 LIFECYCLE = MethodExecutionLifecycle(
     stage="read_qc",
@@ -54,6 +104,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     method_name=LENGTH_FILTER_METHOD_NAME,
     frozen_status="length_filter_frozen",
     ran_status="length_filter_ran",
+    outcome_policy=seqkit_length_filter_outcome,
 )
 
 
@@ -97,6 +148,9 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
         for index, input_path in enumerate(input_paths, start=1)
     ]
     post_filter_stats_path = working_dir / "post_filter_seqkit_stats.tsv"
+    post_filter_aggregate_stats_path = (
+        working_dir / "post_filter_aggregate_seqkit_stats.tsv"
+    )
     script_path = working_dir / "run_length_filter.sh"
     commands = [
         f"seqkit seq -m {min_len} {shlex.quote(str(input_path))} "
@@ -104,12 +158,17 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
         for input_path, filtered_path in zip(input_paths, filtered_paths)
     ]
     filtered_args = " ".join(shlex.quote(str(path)) for path in filtered_paths)
+    aggregate_command = seqkit_aggregate_length_commands(
+        filtered_args,
+        aggregate_stats_path=post_filter_aggregate_stats_path,
+    )
     script_path.write_text(
-        "set -e\n"
+        "set -euo pipefail\n"
         + "\n".join(commands)
         + "\n"
         + f"seqkit stats -a -T {filtered_args} "
-        + f"> {shlex.quote(str(post_filter_stats_path))}\n",
+        + f"> {shlex.quote(str(post_filter_stats_path))}\n"
+        + aggregate_command,
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -124,7 +183,11 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
         method_name=LENGTH_FILTER_METHOD_NAME,
         script_path=script_path,
         working_dir=working_dir,
-        expected_outputs=[*filtered_paths, post_filter_stats_path],
+        expected_outputs=[
+            *filtered_paths,
+            post_filter_stats_path,
+            post_filter_aggregate_stats_path,
+        ],
         env=output.get("env"),
         env_spec=env_spec,
         input_dependencies=input_dependencies,
@@ -138,6 +201,7 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
             "filtered_long_reads_path": str(filtered_paths[0]),
             "filtered_long_reads_paths": [str(path) for path in filtered_paths],
             "post_filter_stats_path": str(post_filter_stats_path),
+            "post_filter_aggregate_stats_path": str(post_filter_aggregate_stats_path),
             "thresholds": {"min_len": min_len},
         },
     )
@@ -250,7 +314,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         "thresholds": {"min_len": min_len},
         "tool": "seqkit",
     }
-    stats_path = publish_or_recover_work_artifact(
+    published_stats = publish_or_recover_work_artifact(
         state.get("data_dir", "data"),
         attempt.session_id,
         stats_path,
@@ -258,8 +322,40 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         method_name=METHOD_NAME,
         artifact_type=READ_QC_LONG_READ_STATS,
         metadata=stats_metadata,
-    ).path
-    summary = parse_seqkit_summary(stats_path)
+    )
+    stats_path = published_stats.path
+    aggregate_stats = attempt.metadata.get("post_filter_aggregate_stats_path")
+    if not isinstance(aggregate_stats, str) or not aggregate_stats:
+        return fail_update(
+            state,
+            "SeqKit filter requires a direct whole-read-set aggregate",
+        )
+    direct_input_refs = [
+        published.ref.model_dump(mode="json") for published in published_reads
+    ]
+    aggregate_metadata = {
+        **stats_metadata,
+        "aggregation": "whole_read_set_direct_input_stream",
+        "dependency_refs": direct_input_refs,
+        "provenance": {
+            "kind": "direct_whole_read_set",
+            "read_set": "post_filter",
+            "input_artifact_refs": direct_input_refs,
+        },
+    }
+    published_aggregate = publish_or_recover_work_artifact(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        Path(aggregate_stats),
+        stage="read_qc",
+        method_name=METHOD_NAME,
+        artifact_type=READ_QC_LONG_READ_AGGREGATE_STATS,
+        metadata=aggregate_metadata,
+    )
+    summary = parse_seqkit_summary(
+        stats_path,
+        aggregate_stats_path=published_aggregate.path,
+    )
     summary_source = Path(attempt.working_dir) / "post_filter_read_qc_summary.json"
     summary_source.write_text(
         json.dumps(
@@ -274,6 +370,9 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
                 "filtered_long_reads_paths": [str(path) for path in paths],
                 "thresholds": {"min_len": min_len},
                 "read_set": "post_filter",
+                "aggregate_stats_artifact_ref": published_aggregate.ref.model_dump(
+                    mode="json"
+                ),
                 "summary": summary,
             },
             indent=2,
@@ -288,6 +387,8 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         "format": "json",
         "thresholds": {"min_len": min_len},
         "tool": "seqkit",
+        "aggregate_stats_ref": published_aggregate.ref.model_dump(mode="json"),
+        "dependency_refs": [published_aggregate.ref.model_dump(mode="json")],
     }
     summary_path = publish_or_recover_work_artifact(
         state.get("data_dir", "data"),
@@ -315,6 +416,13 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
             method_name=METHOD_NAME,
             artifact_type=READ_QC_LONG_READ_STATS,
             metadata=stats_metadata,
+        ),
+        ArtifactMeta.from_file(
+            published_aggregate.path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_AGGREGATE_STATS,
+            metadata=aggregate_metadata,
         ),
         ArtifactMeta.from_file(
             summary_path,

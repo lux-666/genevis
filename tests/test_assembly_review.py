@@ -43,6 +43,7 @@ from app.stages.assembly_review.method_application.busco import (
 from app.stages.assembly_review.method_application.quast import (
     build_quast_graph,
     freeze_quast_attempts,
+    quast_method_outcome,
 )
 from app.stages.assembly_review.nodes import resolve_candidates
 from app.storage.artifacts import publish_artifact_record
@@ -50,6 +51,7 @@ from app.storage.assembly_candidates import (
     publish_derived_assembly_candidate,
     publish_registered_assembly_candidate,
 )
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -122,6 +124,122 @@ class AssemblyReviewStageTests(unittest.TestCase):
         self.assertEqual(freeze_quast_attempts(state), {})
         self.assertEqual(freeze_busco_attempts(state), {})
 
+    def test_quast_outcome_requires_every_candidate_and_survives_warnings(self):
+        state = {
+            "stage_outputs": {
+                "assembly_review": {
+                    "status": "completed_with_warnings",
+                    "review_plan": {"planned_signals": ["quast"]},
+                    "candidates": [
+                        {
+                            "candidate_id": "flye_01",
+                            "method_name": "assembly.candidate.flye",
+                            "source": "test",
+                            "status": "executed",
+                            "bundle_ref": {
+                                "schema_version": 2,
+                                "artifact_id": "bundle-flye",
+                                "path_ref": "artifacts/flye.bundle.json",
+                                "sha256": "0" * 64,
+                                "size_bytes": 0,
+                                "artifact_type": ASSEMBLY_CANDIDATE_BUNDLE,
+                            },
+                            "primary_output_ref": {
+                                "schema_version": 2,
+                                "artifact_id": "assembly-flye",
+                                "path_ref": "artifacts/flye.fasta",
+                                "sha256": "1" * 64,
+                                "size_bytes": 0,
+                                "artifact_type": ASSEMBLY_DRAFT_ASSEMBLY,
+                            },
+                        },
+                        {
+                            "candidate_id": "hifiasm_01",
+                            "method_name": "assembly.candidate.hifiasm",
+                            "source": "test",
+                            "status": "executed",
+                            "bundle_ref": {
+                                "schema_version": 2,
+                                "artifact_id": "bundle-hifiasm",
+                                "path_ref": "artifacts/hifiasm.bundle.json",
+                                "sha256": "2" * 64,
+                                "size_bytes": 0,
+                                "artifact_type": ASSEMBLY_CANDIDATE_BUNDLE,
+                            },
+                            "primary_output_ref": {
+                                "schema_version": 2,
+                                "artifact_id": "assembly-hifiasm",
+                                "path_ref": "artifacts/hifiasm.fasta",
+                                "sha256": "3" * 64,
+                                "size_bytes": 0,
+                                "artifact_type": ASSEMBLY_DRAFT_ASSEMBLY,
+                            },
+                        },
+                    ],
+                    "signals": [
+                        {
+                            "signal_name": "quast",
+                            "candidate_id": "flye_01",
+                            "status": "available",
+                        },
+                        {
+                            "signal_name": "quast",
+                            "candidate_id": "hifiasm_01",
+                            "status": "available",
+                        },
+                    ],
+                }
+            }
+        }
+        outcome = quast_method_outcome(state)
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.disposition, "completed")
+
+        # A subsequent stage-level failure cannot revise a fully settled QUAST
+        # result.  The outcome is derived from the evaluator's durable signals.
+        state["stage_outputs"]["assembly_review"]["status"] = "failed"
+        settled_before_later_failure = quast_method_outcome(state)
+        self.assertIsNotNone(settled_before_later_failure)
+        self.assertEqual(settled_before_later_failure.disposition, "completed")
+
+        # A failed preflight has no execution cursor and therefore remains
+        # not_started, even if the enclosing review output is failed.
+        state["stage_outputs"]["assembly_review"]["signals"] = [
+            {
+                "signal_name": "quast",
+                "candidate_id": candidate_id,
+                "status": "missing",
+                "notes": [
+                    "quast_environment_preflight_failed",
+                    "execution_not_started",
+                ],
+            }
+            for candidate_id in ["flye_01", "hifiasm_01"]
+        ]
+        state["stage_outputs"]["assembly_review"]["execution_attempts"] = []
+        preflight = quast_method_outcome(state)
+        self.assertIsNotNone(preflight)
+        self.assertEqual(preflight.disposition, "not_started")
+        self.assertEqual(preflight.reason, "quast_environment_preflight_failed")
+
+        # Only the matching evaluator's durable execution cursor permits a
+        # failed disposition.
+        state["stage_outputs"]["assembly_review"]["signals"][0]["status"] = "failed"
+        state["stage_outputs"]["assembly_review"]["signals"][0]["notes"] = [
+            "quast_execution_failed"
+        ]
+        state["stage_outputs"]["assembly_review"]["execution_attempts"] = [
+            {
+                "attempt_id": "s1:assembly_review:quast:flye_01",
+                "method_id": "assembly_review.eval.quast",
+                "status": "execution_failed",
+            }
+        ]
+        execution = quast_method_outcome(state)
+        self.assertIsNotNone(execution)
+        self.assertEqual(execution.disposition, "failed")
+        self.assertEqual(execution.reason, "quast_candidate_evaluation_failed")
+
     def test_resolves_t2t_and_hic_derived_current_candidates_without_fallback(self):
         producer_cases = (
             ("t2t", T2T_PATCHED_ASSEMBLY, "t2t.contract"),
@@ -148,16 +266,22 @@ class AssemblyReviewStageTests(unittest.TestCase):
                             "step_id": "step-000-inventory",
                             "stage": "inventory",
                             "allow_local_execution": False,
+                            "selected_method_names": [],
                         },
                         {
                             "step_id": producer_step_id,
                             "stage": producer_stage,
                             "allow_local_execution": True,
+                            "selected_method_names": [],
                         },
                         {
                             "step_id": "step-002-assembly_review",
                             "stage": "assembly_review",
                             "allow_local_execution": True,
+                            "selected_method_names": [
+                                "assembly_review.eval.quast",
+                                "assembly_review.eval.busco",
+                            ],
                             "review_target": {
                                 "resource_type": "assembly",
                                 "producer_step_id": producer_step_id,
@@ -249,6 +373,29 @@ class AssemblyReviewStageTests(unittest.TestCase):
                         ),
                     },
                 ).to_dict()
+                ledger = Ledger(data_dir)
+                ledger.create_session(session_id, "control/manifest.yaml")
+                ledger.record_stage_completed(
+                    session_id,
+                    "inventory",
+                    workflow_step_id="step-000-inventory",
+                )
+                ledger.record_resource_delivered(
+                    session_id,
+                    stage=producer_stage,
+                    workflow_step_id=producer_step_id,
+                    resource_type="assembly",
+                    delivery_mode="materialized",
+                    candidate_bundle_ref=derived_candidate.ref.model_dump(mode="json"),
+                    primary_output_ref=derived_candidate.primary_output_ref.model_dump(
+                        mode="json"
+                    ),
+                )
+                ledger.record_stage_completed(
+                    session_id,
+                    producer_stage,
+                    workflow_step_id=producer_step_id,
+                )
 
                 update = resolve_candidates(state)
                 review = update["stage_outputs"]["assembly_review"]
@@ -392,16 +539,22 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-assembly",
                     "stage": "assembly",
                     "allow_local_execution": True,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": True,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-001-assembly",
@@ -411,6 +564,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     "step_id": "step-003-hic_scaffolding",
                     "stage": "hic_scaffolding",
                     "allow_local_execution": True,
+                    "selected_method_names": [
+                        "hic_scaffolding.candidate.autohic",
+                    ],
                 },
             ],
         )
@@ -616,6 +772,27 @@ class AssemblyReviewStageTests(unittest.TestCase):
             workflow_step_id="step-001-assembly",
             metadata=metadata,
         ).to_dict()
+        ledger = Ledger(data_dir)
+        ledger.create_session(session_id, "control/manifest.yaml")
+        ledger.record_stage_completed(
+            session_id,
+            "inventory",
+            workflow_step_id="step-000-inventory",
+        )
+        ledger.record_resource_delivered(
+            session_id,
+            stage="assembly",
+            workflow_step_id="step-001-assembly",
+            resource_type="assembly",
+            delivery_mode="materialized",
+            candidate_bundle_ref=current_ref.model_dump(mode="json"),
+            primary_output_ref=current_primary.model_dump(mode="json"),
+        )
+        ledger.record_stage_completed(
+            session_id,
+            "assembly",
+            workflow_step_id="step-001-assembly",
+        )
 
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
@@ -762,7 +939,22 @@ class AssemblyReviewStageTests(unittest.TestCase):
         graph = build_stage()
         result = graph.invoke(state)
         self.assertEqual(result["supervision_state"], "failed_terminal")
-        self.assertIn("no executed candidate bundle ref", result.get("last_error", ""))
+        self.assertIn(
+            "central assembly ResourceRef is missing",
+            result.get("last_error", ""),
+        )
+        dispositions = [
+            event
+            for event in Ledger(result["data_dir"]).read_events(result["session_id"])
+            if event["event_type"] == "method_disposition_recorded"
+        ]
+        self.assertEqual(
+            {event["method_name"]: event["disposition"] for event in dispositions},
+            {
+                "assembly_review.eval.quast": "not_started",
+                "assembly_review.eval.busco": "not_started",
+            },
+        )
 
     def test_single_assembly_candidate_blocks_human(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -834,6 +1026,29 @@ class AssemblyReviewStageTests(unittest.TestCase):
             ]
             self.assertIn("review_requested", event_types)
             self.assertNotIn("attempt_started", event_types)
+            events = Ledger(result["data_dir"]).read_events(result["session_id"])
+            dispositions = [
+                event
+                for event in events
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 2)
+            self.assertEqual(
+                {event["method_name"]: event["disposition"] for event in dispositions},
+                {
+                    "assembly_review.eval.quast": "skipped",
+                    "assembly_review.eval.busco": "skipped",
+                },
+            )
+            self.assertTrue(all(event["reason"] for event in dispositions))
+            review_sequence = next(
+                event["sequence"]
+                for event in events
+                if event["event_type"] == "review_requested"
+            )
+            self.assertTrue(
+                all(event["sequence"] < review_sequence for event in dispositions)
+            )
 
     def test_default_review_report_shows_missing_or_pending_signals(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1164,7 +1379,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("assembly_review.busco_short_summary", artifact_types)
             self.assertIn("assembly_review.busco_summary", artifact_types)
 
-    def test_local_busco_missing_lineage_fails_terminally(self):
+    def test_local_busco_missing_lineage_is_not_started_before_human_gate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"
             draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -1190,8 +1405,26 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("busco_lineage_not_supplied", result["last_error"])
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            events = Ledger(result["data_dir"]).read_events(result["session_id"])
+            dispositions = [
+                event
+                for event in events
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            by_method = {event["method_name"]: event for event in dispositions}
+            self.assertEqual(
+                by_method["assembly_review.eval.quast"]["disposition"], "completed"
+            )
+            self.assertEqual(
+                by_method["assembly_review.eval.busco"]["disposition"],
+                "not_started",
+            )
+            self.assertEqual(
+                by_method["assembly_review.eval.busco"]["reason"],
+                "busco_not_configured",
+            )
+            self.assertEqual(len(dispositions), 2)
 
     def test_local_busco_failure_marks_signal_failed_and_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmpdir:

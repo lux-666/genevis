@@ -6,11 +6,17 @@ import json
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from langgraph.graph.state import CompiledStateGraph
 
 from app.configuration import load_descriptor_registry
-from app.control.workflow_plan import advance_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import (
+    advance_workflow_step,
+    assembly_delivery,
+    current_workflow_step_id,
+    fail_workflow_step,
+)
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
     artifact_input_dependency,
@@ -22,6 +28,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
+from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -66,6 +73,7 @@ PURGE_DUPS_LIFECYCLE = MethodExecutionLifecycle(
     frozen_status="dedup_frozen",
     ran_status="dedup_ran",
     cleanup_outputs=False,
+    outcome_policy=lambda state: purge_dups_method_outcome_policy(state),
 )
 
 
@@ -95,8 +103,111 @@ def _update_output(
     return update_assembly_dedup_output(state, payload)
 
 
-def _fail(state: TopLevelState, reason: str) -> StateUpdate:
-    return _update_output(state, {"status": "failed", "reason": reason})
+def _fail(
+    state: TopLevelState,
+    reason: str,
+    *,
+    purge_dups_status: str = "failed",
+) -> StateUpdate:
+    return _update_output(
+        state,
+        {
+            "status": "failed",
+            "reason": reason,
+            "purge_dups_status": purge_dups_status,
+        },
+    )
+
+
+def purge_dups_method_outcome_policy(state: TopLevelState) -> MethodOutcome | None:
+    """Map durable purge_dups collect/failure facts to one method outcome."""
+
+    output = _output(state)
+    skipped = purge_dups_planner_outcome_policy(state)
+    if skipped is not None:
+        return skipped
+    if (
+        output.get("purged_candidate_bundle_ref") is not None
+        and output.get("purged_primary_output_ref") is not None
+    ):
+        try:
+            verified = load_executed_candidate_bundle(
+                absolute_data_dir(state),
+                state["session_id"],
+                ArtifactRef.model_validate(output.get("purged_candidate_bundle_ref")),
+                expected_method_name=ASSEMBLY_DEDUP_METHOD,
+            )
+            if ArtifactRef.model_validate(output.get("purged_primary_output_ref")) != (
+                verified.primary_output_ref
+            ):
+                raise ValueError("purged candidate primary output ref drifted")
+        except (OSError, TypeError, ValueError):
+            if output.get("status") == "failed":
+                return None
+            raise
+        return MethodOutcome(
+            method_name=ASSEMBLY_DEDUP_METHOD,
+            disposition="completed",
+            refs=(
+                verified.ref,
+                verified.primary_output_ref,
+            ),
+        )
+    if output.get("status") != "failed":
+        return None
+    attempts = [
+        attempt
+        for attempt in output.get("execution_attempts") or []
+        if isinstance(attempt, dict)
+        and attempt.get("method_id") == ASSEMBLY_DEDUP_METHOD
+    ]
+    started = any(
+        attempt.get("status") in {"executed", "execution_failed"}
+        for attempt in attempts
+    )
+    return MethodOutcome(
+        method_name=ASSEMBLY_DEDUP_METHOD,
+        disposition="failed" if started else "not_started",
+        reason=str(output.get("reason") or "assembly_dedup failed"),
+    )
+
+
+def purge_dups_planner_outcome_policy(state: TopLevelState) -> MethodOutcome | None:
+    """Return the deliberate no-local-execution disposition, if selected."""
+
+    output = _output(state)
+    if (
+        output.get("status") != "pass_through"
+        and output.get("purge_dups_status") != "skipped"
+    ):
+        return None
+    return MethodOutcome(
+        method_name=ASSEMBLY_DEDUP_METHOD,
+        disposition="skipped",
+        reason="local_execution_not_enabled",
+        refs=(
+            ArtifactRef.model_validate(output.get("candidate_bundle_ref")),
+            ArtifactRef.model_validate(output.get("input_primary_output_ref")),
+        ),
+    )
+
+
+def _fail_workflow_occurrence(
+    state: TopLevelState,
+    dedup_out: AssemblyDedupCursor,
+) -> StateUpdate:
+    """Settle a failed occurrence after its cursor has recorded the method fact."""
+
+    reason = str(dedup_out.get("reason") or "assembly_dedup failed")
+    return fail_workflow_step(state, "assembly_dedup", reason)
+
+
+def _is_failed_dedup_update(update: StateUpdate) -> bool:
+    outputs = update.get("stage_outputs")
+    if not isinstance(outputs, Mapping):
+        return False
+    cursor = outputs.get("assembly_dedup")
+    return isinstance(cursor, Mapping) and cursor.get("status") == "failed"
 
 
 def enter_assembly_dedup(state: TopLevelState) -> StateUpdate:
@@ -106,24 +217,44 @@ def enter_assembly_dedup(state: TopLevelState) -> StateUpdate:
 
 
 def plan_purge_dups(state: TopLevelState) -> StateUpdate:
+    try:
+        candidate = _selected_assembly_candidate(state)
+    except (OSError, TypeError, ValueError) as exc:
+        return _fail(
+            state,
+            f"assembly candidate handoff is invalid: {exc}",
+            purge_dups_status="not_started",
+        )
+    if candidate is None:
+        return _fail(
+            state,
+            "no_materialized_assembly",
+            purge_dups_status="not_started",
+        )
+
+    candidate_payload: dict[str, object] = {
+        "candidate_bundle_ref": candidate.ref.model_dump(mode="json"),
+        "candidate_id": candidate.bundle.candidate_id,
+        "input_primary_output_ref": candidate.primary_output_ref.model_dump(
+            mode="json"
+        ),
+        "method_name": ASSEMBLY_DEDUP_METHOD,
+        "input_assembly_ref": str(candidate.primary_output_path),
+        "input_member_ids": list(candidate.bundle.input_member_ids["primary"]),
+        "input_member_platforms": list(
+            candidate.bundle.input_member_platforms["primary"]
+        ),
+        "cutoffs_strategy": "calcuts_auto",
+        "get_seqs_exclude_haplotigs": True,
+    }
     if _output(state).get("execution_mode") != "local":
         return _update_output(
             state,
             {
-                "status": "skipped",
-                "skip_reason": "local_execution_not_enabled",
-            },
-        )
-    try:
-        candidate = _selected_assembly_candidate(state)
-    except (OSError, TypeError, ValueError) as exc:
-        return _fail(state, f"assembly candidate handoff is invalid: {exc}")
-    if candidate is None:
-        return _update_output(
-            state,
-            {
-                "status": "skipped",
-                "skip_reason": "no_materialized_draft_assembly",
+                **candidate_payload,
+                "status": "pass_through",
+                "purge_dups_status": "skipped",
+                "purge_dups_skip_reason": "local_execution_not_enabled",
             },
         )
 
@@ -132,21 +263,10 @@ def plan_purge_dups(state: TopLevelState) -> StateUpdate:
     return _update_output(
         state,
         {
+            **candidate_payload,
             "status": "ready_to_run",
-            "candidate_bundle_ref": candidate.ref.model_dump(mode="json"),
-            "candidate_id": candidate.bundle.candidate_id,
-            "input_primary_output_ref": (
-                candidate.primary_output_ref.model_dump(mode="json")
-            ),
-            "method_name": ASSEMBLY_DEDUP_METHOD,
-            "input_assembly_ref": str(candidate.primary_output_path),
+            "purge_dups_status": "pending",
             "output_assembly_ref": str(dedup_dir / "purged_assembly.fasta"),
-            "input_member_ids": list(candidate.bundle.input_member_ids["primary"]),
-            "input_member_platforms": list(
-                candidate.bundle.input_member_platforms["primary"]
-            ),
-            "cutoffs_strategy": "calcuts_auto",
-            "get_seqs_exclude_haplotigs": True,
         },
     )
 
@@ -161,7 +281,9 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     registry = load_descriptor_registry()
     if ASSEMBLY_DEDUP_METHOD not in registry.methods:
         return _fail(
-            state, f"assembly dedup descriptor missing: {ASSEMBLY_DEDUP_METHOD}"
+            state,
+            f"assembly dedup descriptor missing: {ASSEMBLY_DEDUP_METHOD}",
+            purge_dups_status="not_started",
         )
 
     env_spec, _packages, blocked = resolve_method_env(
@@ -176,7 +298,10 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
-        return _update_output(state, blocked)
+        return _update_output(
+            state,
+            {**blocked, "purge_dups_status": "not_started"},
+        )
 
     try:
         source_candidate = _dedup_source_candidate(state, dedup_out)
@@ -186,7 +311,11 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             list(dedup_out.get("input_member_platforms") or []),
         )
     except (OSError, TypeError, ValueError) as exc:
-        return _fail(state, f"purge_dups frozen input is invalid: {exc}")
+        return _fail(
+            state,
+            f"purge_dups frozen input is invalid: {exc}",
+            purge_dups_status="not_started",
+        )
 
     input_assembly_ref = source_candidate.primary_output_path
     output_assembly_ref = Path(dedup_out["output_assembly_ref"])
@@ -316,7 +445,6 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             "input_member_ids": [member.member_id for member in selected_members],
             "input_member_platforms": [member.platform for member in selected_members],
             "read_mapping_presets": mapping_presets,
-            "read_bam_ref": str(read_bam),
             "read_paf_ref": str(read_paf),
             "split_assembly_ref": str(split_assembly),
             "base_cov_ref": str(base_cov),
@@ -335,16 +463,23 @@ def collect_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     executions = load_method_executions(state, PURGE_DUPS_LIFECYCLE)
     if len(executions) != 1:
         return _fail(state, "purge_dups requires exactly one execution attempt")
-    return _update_output(state, {"status": "dedup_ran"})
+    return _collect_purge_dups_result(state, executions[0])
 
 
 def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
+    """Deliver an already-collected purge_dups or pass-through candidate."""
+
+    try:
+        return _commit_assembly_dedup(state)
+    except (OSError, TypeError, ValueError) as exc:
+        return _fail(state, f"assembly dedup commit failed: {exc}")
+
+
+def _commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
     dedup_out = _output(state)
-    if dedup_out.get("status") not in {"dedup_ran", "skipped"}:
+    if dedup_out.get("status") not in {"dedup_ran", "pass_through"}:
         return {}
 
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
     source_candidate = None
     if dedup_out.get("candidate_bundle_ref") is not None:
         try:
@@ -352,7 +487,9 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
         except (OSError, TypeError, ValueError) as exc:
             return _fail(state, f"dedup source candidate is invalid: {exc}")
 
-    if dedup_out.get("status") == "skipped":
+    if dedup_out.get("status") == "pass_through":
+        if source_candidate is None:
+            return _fail(state, "dedup pass-through has no verified source candidate")
         stage_update = _update_output(
             state,
             {
@@ -364,44 +501,113 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
             },
         )
         update: StateUpdate = {
-            **advance_workflow_step(state, "assembly_dedup"),
+            **advance_workflow_step(
+                state,
+                "assembly_dedup",
+                outcome="completed",
+                deliveries=(
+                    assembly_delivery(
+                        source_candidate.ref.model_dump(mode="json"),
+                        source_candidate.primary_output_ref.model_dump(mode="json"),
+                        delivery_mode="reused",
+                    ),
+                ),
+            ),
             "route_trace": append_route_trace(state, "assembly_dedup_stage"),
             **stage_update,
         }
-        if source_candidate is not None:
-            update["resource_refs"] = update_resource_ref(
-                state,
-                "assembly",
-                [str(source_candidate.primary_output_path)],
-                "assembly_dedup",
-                {
-                    "candidate_bundle_ref": source_candidate.ref.model_dump(
-                        mode="json"
-                    ),
-                    "primary_output_ref": (
-                        source_candidate.primary_output_ref.model_dump(mode="json")
-                    ),
-                    "raw_candidate_bundle_ref": source_candidate.ref.model_dump(
-                        mode="json"
-                    ),
-                    "raw_primary_output_ref": (
-                        source_candidate.primary_output_ref.model_dump(mode="json")
-                    ),
-                    "deduplicated": False,
-                },
-            )
+        update["resource_refs"] = update_resource_ref(
+            state,
+            "assembly",
+            [str(source_candidate.primary_output_path)],
+            "assembly_dedup",
+            {
+                "candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
+                "primary_output_ref": source_candidate.primary_output_ref.model_dump(
+                    mode="json"
+                ),
+                "raw_candidate_bundle_ref": source_candidate.ref.model_dump(
+                    mode="json"
+                ),
+                "raw_primary_output_ref": (
+                    source_candidate.primary_output_ref.model_dump(mode="json")
+                ),
+                "deduplicated": False,
+            },
+        )
         return update
 
     if source_candidate is None:
         return _fail(state, "purge_dups has no verified source candidate")
-    executions = load_method_executions(state, PURGE_DUPS_LIFECYCLE)
-    if len(executions) != 1:
-        return _fail(state, "purge_dups requires exactly one execution attempt")
-    execution = executions[0]
+    verified_purged = load_executed_candidate_bundle(
+        absolute_data_dir(state),
+        state["session_id"],
+        ArtifactRef.model_validate(dedup_out.get("purged_candidate_bundle_ref")),
+        expected_method_name=ASSEMBLY_DEDUP_METHOD,
+    )
+    if ArtifactRef.model_validate(dedup_out.get("purged_primary_output_ref")) != (
+        verified_purged.primary_output_ref
+    ):
+        return _fail(state, "purged candidate primary output ref drifted")
+    stage_update = _update_output(
+        state,
+        {
+            "status": "completed",
+            "purged_assembly_ref": str(verified_purged.primary_output_path),
+        },
+    )
+    completed_update: StateUpdate = {
+        **advance_workflow_step(
+            state,
+            "assembly_dedup",
+            outcome="completed",
+            deliveries=(
+                assembly_delivery(
+                    verified_purged.ref.model_dump(mode="json"),
+                    verified_purged.primary_output_ref.model_dump(mode="json"),
+                    delivery_mode="materialized",
+                ),
+            ),
+        ),
+        "route_trace": append_route_trace(state, "assembly_dedup_stage"),
+        **stage_update,
+    }
+    completed_update["resource_refs"] = update_resource_ref(
+        state,
+        "assembly",
+        [str(verified_purged.primary_output_path)],
+        "assembly_dedup",
+        {
+            "candidate_bundle_ref": verified_purged.ref.model_dump(mode="json"),
+            "primary_output_ref": verified_purged.primary_output_ref.model_dump(
+                mode="json"
+            ),
+            "raw_candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
+            "raw_primary_output_ref": source_candidate.primary_output_ref.model_dump(
+                mode="json"
+            ),
+            "deduplicated": True,
+        },
+    )
+    return completed_update
+
+
+def _collect_purge_dups_result(
+    state: TopLevelState,
+    execution: Any,
+) -> StateUpdate:
+    """Publish and verify the candidate before lifecycle outcome settlement."""
+
+    dedup_out = _output(state)
+    if dedup_out.get("status") != PURGE_DUPS_LIFECYCLE.ran_status:
+        return {}
+    source_candidate = _dedup_source_candidate(state, dedup_out)
     attempt = execution.attempt
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
     output_assembly_ref = Path(str(dedup_out["output_assembly_ref"]))
     if not output_assembly_ref.is_file() or output_assembly_ref.stat().st_size <= 0:
-        return _fail(state, "purge_dups primary assembly output is missing or empty")
+        raise ValueError("purge_dups primary assembly output is missing or empty")
 
     artifacts: list[ArtifactMeta] = []
     artifacts.append(
@@ -419,6 +625,9 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
         )
     )
     attempt_metadata = dict(attempt.metadata)
+    # The default freeze path deliberately omits ``read_bam_ref``. Alternate
+    # diagnostic attempts may attach one, and collection treats it as optional
+    # rather than making BAM/samtools part of the purge_dups execution contract.
     for key, artifact_type in [
         ("read_bam_ref", "assembly_dedup.read_alignment_bam"),
         ("read_paf_ref", "assembly_dedup.read_alignment_paf"),
@@ -552,7 +761,7 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
         expected_parameter_attempt_id=0,
     )
     if verified_purged.primary_output_ref != primary_output:
-        raise ValueError("purged candidate primary output ref drifted")
+        return _fail(state, "purged candidate primary output ref drifted")
     artifacts.extend([plan_artifact, bundle_artifact])
     register_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
@@ -565,11 +774,11 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
         artifact_payloads,
         attempt_id=attempt_id,
     )
-
-    stage_update = _update_output(
+    return _update_output(
         state,
         {
-            "status": "completed",
+            "status": "dedup_ran",
+            "purge_dups_status": "completed",
             "purged_assembly_ref": str(verified_purged.primary_output_path),
             "purged_candidate_bundle_ref": verified_purged.ref.model_dump(mode="json"),
             "purged_primary_output_ref": (
@@ -578,38 +787,16 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
             "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
         },
     )
-    completed_update: StateUpdate = {
-        **advance_workflow_step(state, "assembly_dedup"),
-        "route_trace": append_route_trace(state, "assembly_dedup_stage"),
-        **stage_update,
-    }
-    completed_update["resource_refs"] = update_resource_ref(
-        state,
-        "assembly",
-        [str(verified_purged.primary_output_path)],
-        "assembly_dedup",
-        {
-            "candidate_bundle_ref": verified_purged.ref.model_dump(mode="json"),
-            "primary_output_ref": verified_purged.primary_output_ref.model_dump(
-                mode="json"
-            ),
-            "raw_candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
-            "raw_primary_output_ref": (
-                source_candidate.primary_output_ref.model_dump(mode="json")
-            ),
-            "deduplicated": True,
-        },
-    )
-    return completed_update
 
 
 def fail_assembly_dedup(state: TopLevelState) -> StateUpdate:
-    dedup_out = _output(state)
-    return {
-        "current_stage": "assembly_dedup",
-        "supervision_state": "failed_terminal",
-        "last_error": dedup_out.get("reason", "assembly_dedup failed"),
-    }
+    return _fail_workflow_occurrence(state, _output(state))
+
+
+def route_after_dedup_commit(state: TopLevelState) -> str:
+    """Route commit validation failures through the terminal settlement node."""
+
+    return "fail" if _output(state).get("status") == "failed" else "done"
 
 
 def _selected_assembly_candidate(

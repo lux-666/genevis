@@ -13,8 +13,16 @@ def route_controller(state: TopLevelState) -> StateUpdate:
         return {}
     step = current_workflow_step(state)
     if step is None:
-        return {"current_stage": "done", "supervision_state": "completed"}
-    return {"supervision_state": "idle", **seed_current_workflow_step(state)}
+        return {
+            "current_stage": "done",
+            "supervision_state": "completed",
+            "workflow_step_outcome": None,
+        }
+    return {
+        "supervision_state": "idle",
+        "workflow_step_outcome": None,
+        **seed_current_workflow_step(state),
+    }
 
 
 def route_from_current_stage(state: TopLevelState) -> str:

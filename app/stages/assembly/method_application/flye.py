@@ -32,6 +32,7 @@ from app.stages.assembly.command_builder import (
 from app.stages.assembly.method_application.support import (
     AssemblyNativeOutputDeclaration,
     approved_method_read_type,
+    assembly_primary_method_outcome_policy,
     build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
@@ -61,6 +62,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     frozen_status="flye_frozen",
     ran_status="flye_ran",
     owner=ParameterAttemptOwner(),
+    outcome_policy=assembly_primary_method_outcome_policy,
 )
 
 
@@ -131,8 +133,7 @@ def freeze_flye_attempt(state: TopLevelState) -> StateUpdate:
     working_dir = stage_work_dir(state, "assembly", "attempts", attempt_scope, "flye")
     output_dir = working_dir / "flye_out"
     artifact_dir = stage_artifacts_dir(
-        state,
-        "assembly", "attempts", attempt_scope, "outputs", "flye"
+        state, "assembly", "attempts", attempt_scope, "outputs", "flye"
     )
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)

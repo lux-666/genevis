@@ -34,6 +34,7 @@ from app.stages.assembly.method_application.hifiasm_outputs import (
 )
 from app.stages.assembly.method_application.support import (
     approved_assembly_read_type,
+    assembly_primary_method_outcome_policy,
     build_read_input_dependencies,
     collect_method_artifacts,
     fail_update,
@@ -56,6 +57,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     frozen_status="hifiasm_ont_frozen",
     ran_status="hifiasm_ont_ran",
     owner=ParameterAttemptOwner(),
+    outcome_policy=assembly_primary_method_outcome_policy,
 )
 
 
@@ -140,8 +142,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
     )
     output_dir = working_dir / "hifiasm_ont_out"
     artifact_dir = stage_artifacts_dir(
-        state,
-        "assembly", "attempts", attempt_scope, "outputs", "hifiasm_ont"
+        state, "assembly", "attempts", attempt_scope, "outputs", "hifiasm_ont"
     )
     working_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -19,6 +19,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
+from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
@@ -30,13 +31,15 @@ from app.schemas.artifacts import (
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly_review.method_application.support import (
+    evaluator_method_outcome,
     local_execution_enabled,
+    mark_evaluator_not_started,
     mark_missing_signals,
+    planner_evaluator_outcome,
     review_methods_error,
     review_output,
     rewrite_eval_bundle,
     safe_candidate_id,
-    update_review_output,
     update_signal,
     verified_review_candidate,
 )
@@ -59,6 +62,7 @@ LIFECYCLE = MethodExecutionLifecycle(
     ran_status=RAN_STATUS,
     cleanup_outputs=False,
     process_failure="collect",
+    outcome_policy=lambda state: quast_method_outcome(state),
 )
 
 
@@ -72,6 +76,22 @@ def build_quast_graph() -> CompiledStateGraph[
     )
 
 
+def quast_planner_outcome(state: TopLevelState) -> MethodOutcome | None:
+    return planner_evaluator_outcome(
+        state,
+        method_name=QUAST_METHOD,
+        signal_name="quast",
+    )
+
+
+def quast_method_outcome(state: TopLevelState) -> MethodOutcome | None:
+    return evaluator_method_outcome(
+        state,
+        method_name=QUAST_METHOD,
+        signal_name="quast",
+    )
+
+
 def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
     """Freeze local QUAST attempts for materialized assembly candidates."""
     output = review_output(state)
@@ -80,8 +100,16 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
         return {}
     descriptor_error = review_methods_error([QUAST_METHOD])
     if descriptor_error:
-        return update_review_output(
-            state, {"status": "failed", "reason": descriptor_error}
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_not_configured",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {**output, "signals": signals},
+            status="evaluating",
         )
     candidates = output.get("candidates", [])
     try:
@@ -89,13 +117,17 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
             (candidate, verified_review_candidate(state, candidate))
             for candidate in candidates
         ]
-    except (OSError, TypeError, ValueError) as exc:
-        return update_review_output(
+    except (OSError, TypeError, ValueError):
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_candidate_dependency_invalid",
+        )
+        return rewrite_eval_bundle(
             state,
-            {
-                "status": "failed",
-                "reason": f"QUAST candidate dependency is invalid: {exc}",
-            },
+            {**output, "signals": signals},
+            status="evaluating",
         )
     signals = mark_missing_signals(
         output.get("signals", []),
@@ -109,11 +141,21 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
     )
     if not materialized:
         return rewrite_eval_bundle(
-            state, {**output, "signals": signals}, status="quast_skipped"
+            state, {**output, "signals": signals}, status="evaluating"
         )
     threads, error = quast_threads(output)
     if error:
-        return update_review_output(state, {"status": "failed", "reason": error})
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_not_configured",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {**output, "signals": signals},
+            status="evaluating",
+        )
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, blocked = resolve_method_env(
@@ -128,7 +170,23 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
-        return update_review_output(state, blocked)
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_environment_preflight_failed",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {
+                **output,
+                "env_target": blocked["env_target"],
+                "missing_tools": blocked["missing_tools"],
+                "method_name": blocked["method_name"],
+                "signals": signals,
+            },
+            status="evaluating",
+        )
     attempts: list[FrozenAttemptSpec] = []
     for candidate, verified in materialized:
         candidate_id = candidate.get("candidate_id", "unknown")

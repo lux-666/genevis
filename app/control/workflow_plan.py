@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from app.schemas.state import (
     DomainStage,
+    ResourceDelivery,
     StateUpdate,
     TopLevelState,
     WorkflowStep,
+    WorkflowStepOutcome,
     validate_stage_outputs,
     validate_workflow_steps,
 )
@@ -37,6 +39,7 @@ def workflow_steps_from_requests(
             "step_id": workflow_step_id(0, "inventory"),
             "stage": "inventory",
             "allow_local_execution": False,
+            "selected_method_names": [],
         }
     ]
     for index, request in enumerate(requests, start=1):
@@ -46,6 +49,7 @@ def workflow_steps_from_requests(
                 "step_id": workflow_step_id(index, stage),
                 "stage": stage,
                 "allow_local_execution": bool(request.allow_local_execution),
+                "selected_method_names": list(request.selected_method_names),
             }
         )
         if stage == "assembly_review":
@@ -142,17 +146,20 @@ def seed_current_workflow_step(state: TopLevelState) -> StateUpdate:
 
 def advance_workflow_step(
     state: TopLevelState,
-    completed_stage: str,
+    stage: str,
+    *,
+    outcome: Literal["completed", "skipped"],
+    reason: str | None = None,
+    deliveries: Sequence[ResourceDelivery] = (),
 ) -> StateUpdate:
-    """Advance exactly one position in the frozen plan after stage completion."""
+    """Advance one frozen occurrence with an explicit terminal outcome."""
 
     step = current_workflow_step(state)
     if step is None:
         raise ValueError("cannot advance a terminal workflow")
-    if step["stage"] != completed_stage:
+    if step["stage"] != stage:
         raise ValueError(
-            f"cannot complete {completed_stage!r} while active workflow step is "
-            f"{step['stage']!r}"
+            f"cannot settle {stage!r} while active workflow step is {step['stage']!r}"
         )
     index = int(state["workflow_step_index"])
     entered = int(state.get("entered_workflow_step_index", -1))
@@ -164,10 +171,76 @@ def advance_workflow_step(
     next_stage: DomainStage = (
         "done" if next_index == len(steps) else steps[next_index]["stage"]
     )
-    return {
+    if outcome == "skipped" and (not isinstance(reason, str) or not reason.strip()):
+        raise ValueError("a skipped workflow occurrence requires a reason")
+    if outcome == "skipped" and deliveries:
+        raise ValueError("a skipped workflow occurrence cannot deliver resources")
+    terminal: WorkflowStepOutcome = {
+        "workflow_step_id": step["step_id"],
+        "stage": step["stage"],
+        "outcome": outcome,
+    }
+    if reason is not None:
+        terminal["reason"] = reason
+    if deliveries:
+        terminal["deliveries"] = list(deliveries)
+    update: StateUpdate = {
         "workflow_step_index": next_index,
         "current_stage": next_stage,
         "supervision_state": ("completed" if next_stage == "done" else "running_stage"),
+        "workflow_step_outcome": terminal,
+    }
+    if outcome == "skipped":
+        update["skip_reasons"] = {
+            **(state.get("skip_reasons") or {}),
+            step["step_id"]: str(reason),
+        }
+    return update
+
+
+def fail_workflow_step(
+    state: TopLevelState,
+    stage: str,
+    reason: str,
+) -> StateUpdate:
+    """Stop the active occurrence with an explicit failed terminal outcome."""
+
+    step = current_workflow_step(state)
+    if step is None or step["stage"] != stage:
+        raise ValueError("failed stage does not match the active workflow occurrence")
+    if int(state.get("entered_workflow_step_index", -1)) != int(
+        state["workflow_step_index"]
+    ):
+        raise ValueError("cannot fail a workflow step before it is entered")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("a failed workflow occurrence requires a reason")
+    terminal: WorkflowStepOutcome = {
+        "workflow_step_id": step["step_id"],
+        "stage": step["stage"],
+        "outcome": "failed",
+        "reason": reason,
+    }
+    return {
+        "current_stage": step["stage"],
+        "supervision_state": "failed_terminal",
+        "last_error": reason,
+        "workflow_step_outcome": terminal,
+    }
+
+
+def assembly_delivery(
+    candidate_bundle_ref: Mapping[str, Any],
+    primary_output_ref: Mapping[str, Any],
+    *,
+    delivery_mode: Literal["materialized", "reused"],
+) -> ResourceDelivery:
+    """Build the exact candidate relation owned by one assembly delivery."""
+
+    return {
+        "resource_type": "assembly",
+        "delivery_mode": delivery_mode,
+        "candidate_bundle_ref": dict(candidate_bundle_ref),
+        "primary_output_ref": dict(primary_output_ref),
     }
 
 

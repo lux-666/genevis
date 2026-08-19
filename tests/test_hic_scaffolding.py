@@ -51,6 +51,7 @@ from app.stages.hic_scaffolding.method_application.autohic import (
 )
 from app.stages.hic_scaffolding.nodes import (
     apply_hic_scaffolding_review_application,
+    block_hic_scaffolding,
     prepare_hic_scaffolding_review_application,
     resolve_hic_inputs,
 )
@@ -153,11 +154,16 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-000-inventory",
@@ -167,11 +173,15 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     "step_id": "step-002-hic_scaffolding",
                     "stage": "hic_scaffolding",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "hic_scaffolding.candidate.autohic",
+                    ],
                 },
                 {
                     "step_id": "step-003-gapcloser",
                     "stage": "gapcloser",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
             ],
         )
@@ -602,6 +612,30 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, nodes)
 
+    def test_missing_persisted_review_interrupt_settles_autohic_before_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir, None)
+            state["stage_outputs"] = {"hic_scaffolding": {"execution_mode": "local"}}
+
+            update = block_hic_scaffolding(state)
+
+            self.assertEqual(update["supervision_state"], "failed_terminal")
+            dispositions = [
+                event["summary"]
+                for event in Ledger(state["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                dispositions,
+                [
+                    {
+                        "method_name": AUTOHIC_METHOD,
+                        "disposition": "not_started",
+                        "reason": "Hi-C review block has no persisted interrupt",
+                    }
+                ],
+            )
+
     def test_selected_stage_missing_assembly_blocks_requirements(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(
@@ -615,6 +649,21 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(hic["status"], "blocked_missing_requirements")
             self.assertIn("pre_hic_assembly_ref", hic["missing_requirements"])
             self.assertEqual(result["supervision_state"], "failed_terminal")
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                dispositions,
+                [
+                    {
+                        "method_name": AUTOHIC_METHOD,
+                        "disposition": "not_started",
+                        "reason": hic["reason"],
+                    }
+                ],
+            )
 
     def test_selected_stage_missing_reads_blocks_instead_of_skipping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1155,6 +1204,20 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 first_candidate,
             )
             self.assertEqual(replay_hic["parameter_attempts"][0]["status"], "executed")
+            dispositions = [
+                event["summary"]
+                for event in Ledger(replay["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                dispositions,
+                [
+                    {
+                        "method_name": AUTOHIC_METHOD,
+                        "disposition": "completed",
+                    }
+                ],
+            )
 
     def test_missing_frozen_expected_output_fails_collect_before_publication(self):
         review_artifact_types = {
@@ -1218,6 +1281,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     }
                     self.assertNotIn("attempt_succeeded", new_event_types)
                     self.assertNotIn("artifact_registered", new_event_types)
+                    dispositions = [
+                        event["summary"]
+                        for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                        if event["event_type"] == "method_disposition_recorded"
+                    ]
+                    self.assertEqual(len(dispositions), 1)
+                    self.assertEqual(dispositions[0]["method_name"], AUTOHIC_METHOD)
+                    self.assertEqual(dispositions[0]["disposition"], "failed")
 
     def test_late_publication_failure_leaves_only_indexed_orphan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1249,6 +1320,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertNotIn("hic_review_bundle_ref", hic)
             self.assertNotIn("hic_qc_report_ref", hic)
             self.assertIsNone(result.get("active_interrupt"))
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(dispositions[0]["method_name"], AUTOHIC_METHOD)
+            self.assertEqual(dispositions[0]["disposition"], "failed")
             self.assertEqual(len(hic["parameter_attempts"]), 1)
 
             records_after = read_artifact_records(result["data_dir"], "s1")
@@ -1924,6 +2003,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 hic.get("notes") or [],
             )
             self.assertIsNone(result.get("active_interrupt"))
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(len(dispositions), 1)
+            self.assertEqual(dispositions[0]["method_name"], AUTOHIC_METHOD)
+            self.assertEqual(dispositions[0]["disposition"], "failed")
 
     def test_empty_sparse_mapping_reaches_approval_and_uses_l1_enzyme(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2156,6 +2243,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertLessEqual(len(stderr_tail.splitlines()), 200)
             self.assertNotIn("stderr_ref", json.dumps(model_request))
             self.assertNotIn("path_ref", json.dumps(model_request))
+            self.assertFalse(
+                any(
+                    event["event_type"] == "method_disposition_recorded"
+                    for event in Ledger(retry_blocked["data_dir"]).read_event_rows("s1")
+                )
+            )
 
             initial_manifest_ref = hic["parameter_attempts"][0][
                 "recommendation_manifest_ref"
@@ -2220,6 +2313,15 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(frozen["l2_approved"], {"number_of_edit_rounds": 3})
             self.assertEqual(frozen["parameters"]["restriction_enzyme"], "HindIII")
             self.assertEqual(frozen["parameters"]["number_of_edit_rounds"], 3)
+            dispositions = [
+                event["summary"]
+                for event in Ledger(result["data_dir"]).read_event_rows("s1")
+                if event["event_type"] == "method_disposition_recorded"
+            ]
+            self.assertEqual(
+                [(item["method_name"], item["disposition"]) for item in dispositions],
+                [(AUTOHIC_METHOD, "completed")],
+            )
 
     def test_review_can_request_fresh_parameter_retry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2457,7 +2559,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 for event in Ledger(result["data_dir"]).read_events("s1")
             ]
             self.assertIn("attempt_failed", event_types)
-            self.assertIn("stage_failed", event_types)
+            self.assertNotIn("stage_failed", event_types)
             self.assertNotIn("attempt_succeeded", event_types)
 
 
