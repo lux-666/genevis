@@ -9,6 +9,18 @@ Agent。它把传统生信 pipeline 中分散的脚本、参数、人工判断�
 > 从测序数据或已有组装结果出发，Gene Agent 负责识别输入、规划分析阶段、
 > 调度已批准的本地生信工具、记录产物与证据，并在需要人工判断的位置停下来。
 
+## Prerequisites
+
+Gene Agent 的运行环境需要：
+
+- **Python 3.11+**，推荐通过 conda/mamba 创建专用环境（见 `docs/deployment/migration.md`）
+- **LLM API 端点**：assembly 参数推荐需要 LLM；符合条件的 review 超时自动决策也会使用 LLM。复制 `.env.example` 为 `.env` 并填入真实配置
+- **conda 工具环境**：所有生信工具（seqkit、flye、QUAST、BUSCO、minimap2 等）需在 `env_geno_exec`（或你自定义的 conda env）中可用。运行 `gene-agent bootstrap` 做一次性环境检查
+- **BUSCO lineage 数据**：离线或在线下载对应物种类群的 lineage（如 `insecta_odb10`），解压后通过 `assembly_review.busco.lineage_path` 指向
+- **输入数据**：长读长测序数据（FASTQ/FASTA），通过 manifest 声明
+
+开发机（Mac）只需 `gene_agent` conda 环境即可做代码开发和测试；真实生信执行在配有 GPU/大内存的 Linux 服务器或 HPC 上完成。
+
 ## Why This Project Exists
 
 长读长基因组分析通常不是一次命令就能结束的任务。真实项目里会遇到：
@@ -137,6 +149,64 @@ Stage subgraphs own method planning, validation, execution handoff, artifact
 collection and review boundaries. This keeps biological method choice out of
 the parent router and makes each stage independently testable.
 
+## Quickstart: Contig Assembly
+
+从长读长测序数据出发，跑通 contig 级组装（Read QC → Genome Survey → Assembly
+→ Dedup → Assembly Review）的最短路径：
+
+### 1. 准备环境
+
+```bash
+# 复制并编辑环境变量
+cp .env.example .env
+chmod 600 .env
+# 编辑 .env，填入 LLM API key 等信息
+
+# 检查工具环境（需要联网或已配置好 conda）
+conda run -n gene_agent gene-agent bootstrap
+```
+
+### 2. 准备输入文件
+
+从 `docs/examples/` 复制模板并填写：
+
+- `docs/examples/contig_manifest.template.yaml` → `manifest.yaml`
+  - 替换 `session_id`、`sample_id`、`genome_size_estimate`、测序文件路径和平台
+- `docs/examples/contig_run_config.template.json` → `run_config.json`
+  - 替换 BUSCO lineage 路径为你的实际路径
+  - 调整 genome survey 的 k-mer/hash 参数，以及 `assembly_method`、`read_type`、线程数
+
+其他模板参考：
+
+| 模板 | 适用场景 |
+|---|---|
+| `contig_manifest.template.yaml` + `contig_run_config.template.json` | 测序数据 → contig 组装 |
+| `existing_assembly_manifest.template.yaml` + `assembly_review_run_config.template.json` | 已有 assembly → review only |
+| `repeated_stage_occurrences_run_config.template.json` | 多次重复 stage（如多轮 review） |
+
+### 3. 运行
+
+```bash
+gene-agent run \
+  --manifest /absolute/path/to/manifest.yaml \
+  --run-config /absolute/path/to/run_config.json \
+  --data-dir /absolute/path/to/data
+```
+
+运行需要真实 TTY 终端（stdin/stdout 都是 interactive）。流程会依次执行
+`inventory → read_qc → genome_survey → assembly → assembly_dedup →
+assembly_review`，遇到 assembly parameter approval 和 assembly review
+human gate 时停下来等待人工决策。
+
+### 4. 恢复与检查
+
+进程中断后，用 `inspect` 查看状态，用 `review` 或 `resume` 继续：
+
+```bash
+gene-agent inspect --session-id <SESSION> --data-dir /abs/path/to/data
+gene-agent review --session-id <SESSION> --data-dir /abs/path/to/data --checkpointer sqlite
+```
+
 ## How To Run It
 
 真实/操作员运行从确定性的结构化输入边界开始：
@@ -227,49 +297,10 @@ TUI 的实际流程是：
 这段追问流程。规划 LLM 失败或返回非法 draft 时，本次规划中止并保留草稿供
 `/resume` 重试，不使用确定性 stage plan 回退。
 
-TUI 最终会把选择落到 run config：
-
-```json
-{
-  "requested_stages": [
-    {
-      "stage": "read_qc",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "genome_survey",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "assembly",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "assembly_dedup",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "assembly_review",
-      "allow_local_execution": true
-    }
-  ],
-  "assembly": {
-    "assembly_method": "flye",
-    "assembly_route": "ont",
-    "flye_parameters": {"threads": 16}
-  },
-  "assembly_review": {
-    "quast": {"threads": 8},
-    "busco": {
-      "lineage_path": "/absolute/path/to/busco_downloads/lineages/insecta_odb10",
-      "lineage_name": "insecta_odb10",
-      "lineage_version": "odb10",
-      "lineage_source": "operator_offline_cache",
-      "threads": 8
-    }
-  }
-}
-```
+TUI 最终会把选择落到与
+`docs/examples/contig_run_config.template.json` 相同的 RunConfig 合同。该文件是
+raw reads 到 contig 五阶段流程的唯一权威配置示例；README 不再复制一份可能漂移的
+完整 JSON。
 
 `requested_stages` 的字面顺序就是业务 occurrence 顺序；未列出的 stage 没有运行时
 occurrence，也不会伪造 skipped 事件。每个 item 的 `allow_local_execution` 只决定
@@ -285,82 +316,11 @@ occurrence，也不会伪造 skipped 事件。每个 item 的 `allow_local_execu
 方法选择和参数由各 stage 的 config 控制；冻结后的 `workflow_steps` 才保存派生的
 `selected_method_names` roster。
 
-示例：从 long reads 做 read QC、Flye assembly、purge_dups 和 QUAST/BUSCO
-review：
-
-```json
-{
-  "requested_stages": [
-    {
-      "stage": "read_qc",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "genome_survey",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "assembly",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "assembly_dedup",
-      "allow_local_execution": true
-    },
-    {
-      "stage": "assembly_review",
-      "allow_local_execution": true
-    }
-  ],
-  "review_policy": {
-    "max_blocked_seconds": 300,
-    "stages": {
-      "assembly_review": {
-        "max_blocked_seconds": -1
-      }
-    }
-  },
-  "shared_parameters": {
-    "platform": "ont",
-    "read_type": "ont_raw"
-  },
-  "read_qc": {
-    "length_filter": {
-      "method": "read_qc.length_filter.seqkit_seq",
-      "approved": true,
-      "thresholds": {
-        "min_len": 1000
-      }
-    }
-  },
-  "genome_survey": {
-    "survey_parameters": {
-      "kmer_size": 21,
-      "hash_size": "1G",
-      "threads": 8
-    }
-  },
-  "assembly": {
-    "assembly_method": "flye",
-    "assembly_route": "ont",
-    "flye_parameters": {
-      "threads": 16
-    }
-  },
-  "assembly_review": {
-    "quast": {
-      "threads": 8
-    },
-    "busco": {
-      "lineage_path": "/absolute/path/to/busco_downloads/lineages/insecta_odb10",
-      "lineage_name": "insecta_odb10",
-      "lineage_version": "odb10",
-      "lineage_source": "local",
-      "threads": 8
-    }
-  }
-}
-```
+从 long reads 执行 read QC、genome survey、Flye、purge_dups 和
+QUAST/BUSCO review 的完整例子只维护在
+`docs/examples/contig_manifest.template.yaml` 与
+`docs/examples/contig_run_config.template.json`。RunConfig 不接受说明性元数据或
+`assembly_dedup` 参数块；purge_dups 的方法 roster 由 descriptor 派生。
 
 用户提供的 genome size 属于输入样本事实，只写在 manifest 的
 `genome_size_estimate`；RunConfig 不重复保存该值。运行中由 genome survey

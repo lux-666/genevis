@@ -99,7 +99,7 @@ public resume timeout override are not part of the interface.
 
 The three JSON examples
 `docs/examples/assembly_review_run_config.template.json`,
-`docs/examples/read_qc_assembly_review_run_config.template.json`, and
+`docs/examples/contig_run_config.template.json`, and
 `docs/examples/repeated_stage_occurrences_run_config.template.json` deliberately
 set the global default to `300` while setting
 `review_policy.stages.assembly_review.max_blocked_seconds` to `-1`. JSON does

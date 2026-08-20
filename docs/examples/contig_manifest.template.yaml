@@ -1,0 +1,22 @@
+# Contig-level manifest template.
+#
+# Copy this file to a server-local directory, edit the placeholders,
+# then pair with contig_run_config.template.json.
+#
+# Schema reference: app/schemas/manifest.py (InputManifest / InputAssetSpec).
+
+session_id: contig-run-YYYYMMDD-a
+sample_id: sample_name
+genome_size_estimate: 500000000
+
+assets:
+  - asset_type: raw_long_reads
+    paths:
+      - /ABS/PATH/TO/long_reads.fastq.gz
+    platform: cycloneseq
+    layout: single
+    format: fastq
+    compression: gzip
+    metadata:
+      source: <basecaller-or-archive-name>
+      note: replace with real server-local paths; do not commit private paths

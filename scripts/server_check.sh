@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Server-side environment check for gene-agent.
-# Reports the current commit/branch and verifies the conda envs and core tools
-# needed by the executable workflow. Never installs anything; never modifies the
-# filesystem. Exits non-zero on any missing piece so a server operator can
-# fix the environment before running workflows.
+# Reports the current commit/branch and verifies the method environments needed
+# by the authoritative five-stage contig template. Never installs anything;
+# never modifies the filesystem. Exits non-zero on any missing piece so a server
+# operator can fix the environment before running workflows.
 #
 # Usage:
 #   bash scripts/server_check.sh
 set -euo pipefail
 
 ORCHESTRATOR_ENV="gene_agent"
-EXEC_ENV="env_geno_exec"
-EXEC_TOOLS=("seqkit" "flye" "quast.py" "jellyfish" "genomescope2")
+CONTIG_RUN_CONFIG="docs/examples/contig_run_config.template.json"
+ENVS_CONFIG="config/envs.yaml"
 
 fail() {
   printf 'error: %s\n' "$1" >&2
@@ -48,27 +48,46 @@ if ! conda run -n "${ORCHESTRATOR_ENV}" python -c 'from langgraph.checkpoint.sql
 fi
 ok "${ORCHESTRATOR_ENV} has langgraph-checkpoint-sqlite"
 
-if ! conda env list | awk '{print $1}' | grep -qx "${EXEC_ENV}"; then
-  fail "conda env '${EXEC_ENV}' not found; create it with the bioinformatics tool stack before running workflows"
+if [[ ! -f "${CONTIG_RUN_CONFIG}" ]]; then
+  fail "authoritative contig run config not found: ${CONTIG_RUN_CONFIG}"
 fi
-ok "${EXEC_ENV} env exists"
-
-missing_tools=()
-for tool in "${EXEC_TOOLS[@]}"; do
-  if conda run -n "${EXEC_ENV}" command -v "${tool}" >/dev/null 2>&1; then
-    ok "${EXEC_ENV} has ${tool}"
-  else
-    missing_tools+=("${tool}")
-  fi
-done
-
-if (( ${#missing_tools[@]} > 0 )); then
-  printf 'error: missing tools in %s:' "${EXEC_ENV}" >&2
-  for tool in "${missing_tools[@]}"; do
-    printf ' %s' "${tool}" >&2
-  done
-  printf '\n' >&2
-  fail "install the missing tool(s) into '${EXEC_ENV}' (e.g. conda install -n ${EXEC_ENV} -c bioconda <tool>) and rerun"
+if [[ ! -f "${ENVS_CONFIG}" ]]; then
+  fail "environment mapping not found: ${ENVS_CONFIG}"
 fi
+
+readiness_output=""
+if ! readiness_output="$(GENE_AGENT_ENVS_CONFIG="${ENVS_CONFIG}" conda run \
+  -n "${ORCHESTRATOR_ENV}" \
+  python -c '
+import sys
+
+from app.execution.run_readiness import (
+    effective_method_closure,
+    preflight_run_readiness,
+)
+from app.schemas.run_config import load_run_config
+
+run_config_path, env_config_path = sys.argv[1:]
+try:
+    run_config = load_run_config(run_config_path)
+    closure = effective_method_closure(run_config)
+    methods = preflight_run_readiness(
+        run_config,
+        effective_methods=closure,
+        config_path=env_config_path,
+        llm_probe=lambda: None,
+    )
+except (OSError, TypeError, ValueError) as exc:
+    print(f"CONTIG_READINESS_ERROR: {exc}")
+else:
+    print("contig methods checked: " + ", ".join(methods))
+' "${CONTIG_RUN_CONFIG}" "${ENVS_CONFIG}")"; then
+  fail "could not invoke the authoritative contig readiness check"
+fi
+printf '%s\n' "${readiness_output}"
+if [[ "${readiness_output}" == *"CONTIG_READINESS_ERROR:"* ]]; then
+  fail "install or remap the missing contig method requirements, then rerun"
+fi
+ok "authoritative five-stage contig method environments are ready"
 
 echo "== server check passed =="

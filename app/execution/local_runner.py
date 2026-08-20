@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 
 from app.integrity import sha256_file
@@ -53,12 +52,13 @@ class LocalRunner:
             ]
             shell = False
         else:
-            parts: list[str] = []
             if spec.env_setup:
-                parts.append(spec.env_setup)
-            parts.append(f"{shlex.quote(spec.interpreter)} {shlex.quote(script_path)}")
-            command = " && ".join(parts)
-            shell = True
+                raise ValueError(
+                    "FrozenAttemptSpec.env_setup is unsupported for direct "
+                    "execution; use spec.env or a dedicated setup script"
+                )
+            command: list[str] | str = [spec.interpreter, script_path]
+            shell = False
 
         with (
             stdout_path.open("w", encoding="utf-8") as stdout,

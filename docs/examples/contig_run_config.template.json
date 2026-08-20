@@ -5,6 +5,10 @@
       "allow_local_execution": true
     },
     {
+      "stage": "genome_survey",
+      "allow_local_execution": true
+    },
+    {
       "stage": "assembly",
       "allow_local_execution": true
     },
@@ -17,6 +21,7 @@
       "allow_local_execution": true
     }
   ],
+
   "review_policy": {
     "max_blocked_seconds": 300,
     "stages": {
@@ -25,16 +30,28 @@
       }
     }
   },
+
   "shared_parameters": {
+    "platform": "cycloneseq",
     "read_type": "cyclone"
   },
+
+  "genome_survey": {
+    "survey_parameters": {
+      "kmer_size": 21,
+      "hash_size": "1G",
+      "threads": 8
+    }
+  },
+
   "assembly": {
     "assembly_method": "flye",
     "assembly_route": "cyclone",
     "flye_parameters": {
-      "threads": 4
+      "threads": 8
     }
   },
+
   "assembly_review": {
     "quast": {
       "threads": 8
@@ -44,6 +61,7 @@
       "lineage_name": "insecta_odb10",
       "lineage_version": "odb10",
       "lineage_source": "local",
+      "mode": "genome",
       "threads": 8
     }
   }

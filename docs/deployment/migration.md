@@ -58,6 +58,21 @@ Install the required subset with Bioconda/Conda Forge or the deployment method
 appropriate to the server. Missing commands produce structured preflight
 failures; the workflow does not fabricate success.
 
+For the authoritative Flye-based five-stage contig template, a fresh shared
+tool environment can be provisioned with:
+
+```bash
+conda create -n env_geno_exec -c conda-forge -c bioconda \
+  seqkit jellyfish genomescope2 flye minimap2 purge_dups gzip quast busco -y
+```
+
+The package `purge_dups` must expose `pbcstat`, `calcuts`, `split_fa`,
+`purge_dups`, and `get_seqs`; package installation alone is not treated as
+proof. `scripts/server_check.sh` derives the selected method closure from
+`docs/examples/contig_run_config.template.json`, resolves it through
+`config/envs.yaml`, and verifies the actual commands. Those two files remain
+the requirement authorities; this command is only a provisioning convenience.
+
 ## AutoHiC Packages
 
 AutoHiC uses its configured environment plus external package roots. Update the
@@ -107,8 +122,9 @@ Do not commit this file.
 
 Schema-valid templates live in `docs/examples/`:
 
-- `real_data_manifest.template.yaml`;
-- `read_qc_assembly_review_run_config.template.json`;
+- `contig_manifest.template.yaml` paired with
+  `contig_run_config.template.json` for the authoritative raw-read five-stage
+  contig workflow;
 - `existing_assembly_manifest.template.yaml` paired with
   `assembly_review_run_config.template.json`.
 
@@ -116,9 +132,8 @@ Copy a template to a server-local directory and replace placeholder paths. Do
 not commit private paths or real sample metadata.
 
 For the raw-read assembly example, the operator-provided genome-size estimate
-lives in the paired manifest. The existing-assembly review example does not
-require a genome-size estimate; both run configs contain execution choices
-only.
+lives in the paired manifest while measured survey results remain stage output.
+The existing-assembly review example does not require a genome-size estimate.
 
 ## Start an Operator Run
 

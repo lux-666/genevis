@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from app.configuration import load_descriptor_registry
 from app.execution.env_resolver import (
     EnvResolver,
     EnvSpec,
@@ -21,20 +22,23 @@ class RunReadinessError(ValueError):
     """Raised when the confirmed run cannot start on the current machine."""
 
 
-_FIXED_LOCAL_METHODS: dict[str, tuple[str, ...]] = {
-    "read_qc": ("read_qc.long_read_stats.seqkit_stats",),
-    "genome_survey": (
-        "genome_survey.kmer_count.jellyfish",
-        "genome_survey.model.genomescope2",
-    ),
-    "assembly_dedup": ("assembly_dedup.purge_dups",),
-    "assembly_review": (
-        "assembly_review.eval.quast",
-        "assembly_review.eval.busco",
-    ),
-    "hic_scaffolding": ("hic_scaffolding.candidate.autohic",),
-    "t2t": ("t2t.alignment.minimap2",),
-}
+def _fixed_local_methods() -> dict[str, tuple[str, ...]]:
+    """Return registry-derived rosters for stages with fixed local methods."""
+
+    registry = load_descriptor_registry()
+    read_qc = tuple(
+        method_name
+        for method_name in registry.by_stage.get("read_qc", ())
+        if registry.methods[method_name].planner.selection_role == "always"
+    )
+    return {
+        "read_qc": read_qc,
+        "genome_survey": tuple(registry.by_stage.get("genome_survey", ())),
+        "assembly_dedup": tuple(registry.by_stage.get("assembly_dedup", ())),
+        "assembly_review": tuple(registry.by_stage.get("assembly_review", ())),
+        "hic_scaffolding": tuple(registry.by_stage.get("hic_scaffolding", ())),
+        "t2t": tuple(registry.by_stage.get("t2t", ())),
+    }
 
 _NON_EXECUTABLE_METHODS = {"read_qc.length_filter.skip"}
 _LLM_REQUIRED_STAGES = {"assembly", "hic_scaffolding", "t2t"}
@@ -48,6 +52,7 @@ def effective_method_closure(
 ) -> dict[str, tuple[str, ...]]:
     """Return the canonical local-method closure for readiness and freeze."""
 
+    fixed_local_methods = _fixed_local_methods()
     local_stages = list(
         dict.fromkeys(
             request.stage
@@ -66,7 +71,7 @@ def effective_method_closure(
             methods.append(method_name)
 
     for stage in local_stages:
-        for method_name in _FIXED_LOCAL_METHODS.get(stage, ()):
+        for method_name in fixed_local_methods.get(stage, ()):
             add(stage, method_name)
         if stage == "read_qc":
             length_filter = (
@@ -92,7 +97,7 @@ def effective_method_closure(
                 )
             add(stage, f"assembly.candidate.{method}")
 
-        if stage not in _FIXED_LOCAL_METHODS and stage not in {"read_qc", "assembly"}:
+        if stage not in fixed_local_methods and stage not in {"read_qc", "assembly"}:
             for method_name in explicitly_selected.get(stage, ()):
                 add(stage, method_name)
     return {stage: tuple(methods) for stage, methods in closure.items()}

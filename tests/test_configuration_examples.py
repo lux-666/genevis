@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import json
-import re
 import unittest
 from pathlib import Path
 
 import yaml
 
 from app.schemas.manifest import InputManifest
-from app.schemas.run_config import (
-    RunConfig,
-    load_run_config,
-    validate_genome_size_execution_plan,
-)
+from app.schemas.run_config import load_run_config, validate_genome_size_execution_plan
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = PROJECT_ROOT / "docs" / "examples"
@@ -44,13 +39,19 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                     payload["requested_stages"],
                 )
 
-    def test_assembly_template_pairs_with_manifest_owned_genome_size(self):
+    def test_authoritative_contig_template_pairs_with_manifest(self):
         pairs = (
             (
-                "real_data_manifest.template.yaml",
-                "read_qc_assembly_review_run_config.template.json",
+                "contig_manifest.template.yaml",
+                "contig_run_config.template.json",
                 True,
-                ["read_qc", "assembly", "assembly_dedup", "assembly_review"],
+                [
+                    "read_qc",
+                    "genome_survey",
+                    "assembly",
+                    "assembly_dedup",
+                    "assembly_review",
+                ],
             ),
             (
                 "existing_assembly_manifest.template.yaml",
@@ -72,6 +73,9 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                 self.assertEqual(config.requested_stage_names(), expected_stages)
                 if needs_genome_size:
                     self.assertIsNotNone(manifest.genome_size_estimate)
+                    self.assertIsNotNone(config.genome_survey)
+                    assert config.genome_survey is not None
+                    self.assertIsNotNone(config.genome_survey.survey_parameters)
                     validate_genome_size_execution_plan(config, manifest)
                 else:
                     self.assertEqual(
@@ -104,32 +108,18 @@ class PublishedConfigurationContractTests(unittest.TestCase):
             ],
         )
 
-    def test_readme_run_config_example_loads_with_current_schema(self):
+    def test_readme_points_to_authoritative_contig_template(self):
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-        section = readme.split("### 2. RunConfig Layer", maxsplit=1)[1].split(
-            "### 3. Stage selection and gates",
-            maxsplit=1,
-        )[0]
-        match = re.search(r"```json\n(?P<payload>.*?)\n```", section, flags=re.DOTALL)
-        self.assertIsNotNone(match)
-        assert match is not None
+        self.assertIn("docs/examples/contig_manifest.template.yaml", readme)
+        self.assertIn("docs/examples/contig_run_config.template.json", readme)
 
-        config = RunConfig.model_validate(json.loads(match.group("payload")))
-
-        self.assertIn("requested_stages", config.model_fields_set)
-        self.assertEqual(
-            [request.model_dump(mode="json") for request in config.requested_stages],
-            json.loads(match.group("payload"))["requested_stages"],
+    def test_server_check_derives_requirements_from_authoritative_template(self):
+        server_check = (PROJECT_ROOT / "scripts" / "server_check.sh").read_text(
+            encoding="utf-8"
         )
-
-        assert config.shared_parameters is not None
-        self.assertEqual(config.shared_parameters.read_type, "ont_raw")
-        assert config.assembly is not None
-        assert config.assembly.flye_parameters is not None
-        self.assertEqual(
-            config.assembly.flye_parameters.model_dump(exclude_none=True),
-            {"threads": 16},
-        )
+        self.assertIn("docs/examples/contig_run_config.template.json", server_check)
+        self.assertIn("effective_method_closure", server_check)
+        self.assertNotIn("EXEC_TOOLS=", server_check)
 
 
 if __name__ == "__main__":
