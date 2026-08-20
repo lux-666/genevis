@@ -138,8 +138,10 @@ files, verifies the selected locally executable method closure and any mandatory
 LLM endpoint, and only then freezes them and their dependency snapshot. The
 readiness check is read-only and does not create a run session on failure. It
 does not probe unselected assemblers. The run config requires one
-`requested_stages` list of `{stage, allow_local_execution}` objects in the run
-config; the boolean authorizes local process execution only for that occurrence.
+`requested_stages` list of `{stage, allow_local_execution}` objects. Freeze
+derives each occurrence's method roster from stage configuration and the method
+catalog and stores it in the canonical frozen workflow step. The boolean
+authorizes local process execution only for that occurrence.
 `requested_stages: null` is rejected, while `[]` is valid. Inventory registers
 an `assembly_fasta_registered` input as the central assembly resource;
 `assembly_review` is the recommended review-only entry, but the executor does

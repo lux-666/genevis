@@ -36,7 +36,8 @@ boundary instead: `gene-agent run --manifest PATH --run-config PATH --data-dir
 PATH`. Its file-authored run config must explicitly contain
 one `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
 Its literal order and repeated occurrences are preserved; the boolean is the
-local-process authorization for that occurrence.
+local-process authorization for that occurrence. Freeze derives the method
+roster into the canonical frozen workflow step.
 `requested_stages: null` is rejected, while `[]` is valid. The command
 validates/canonicalizes both files and converges on the same whole-run freeze
 and SQLite executor below. `session_id`
@@ -84,12 +85,15 @@ confirmed RunConfig containing T2T without a later Review remains valid;
 recommendation does not become validation policy.
 
 `selected_stage_occurrences` is the one editable draft sequence. Every strict
-`{stage, allow_local_execution}` object is an ordered occurrence, so duplicate
-stages may independently grant or withhold local-process authorization. The
+`{stage, allow_local_execution}` source object is an ordered occurrence, so
+duplicate stages may independently grant or withhold local-process
+authorization. Its canonical frozen projection also carries the derived
+`selected_method_names` roster. The
 operator edits the complete ordered sequence, then confirms every occurrence's
 authorization; methods and parameters remain stage-scoped configuration and do
-not imply consent. At confirmation these objects are materialized unchanged as
-`requested_stages` and then become immutable `workflow_steps` with the implicit
+not imply consent. At confirmation these objects become `requested_stages`,
+then freeze derives the per-occurrence roster into immutable `workflow_steps`
+with the implicit
 inventory occurrence. Runtime recommendations that require upstream evidence
 remain deferred. If the planning model fails or returns an invalid draft, the
 planning attempt stops and the durable draft remains resumable; the TUI does

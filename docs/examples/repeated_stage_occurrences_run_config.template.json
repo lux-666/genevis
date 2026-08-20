@@ -2,29 +2,19 @@
   "requested_stages": [
     {
       "stage": "t2t",
-      "allow_local_execution": false,
-      "selected_method_names": ["t2t.alignment.minimap2"]
+      "allow_local_execution": false
     },
     {
       "stage": "assembly_review",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "assembly_review.eval.quast",
-        "assembly_review.eval.busco"
-      ]
+      "allow_local_execution": true
     },
     {
       "stage": "t2t",
-      "allow_local_execution": true,
-      "selected_method_names": ["t2t.alignment.minimap2"]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly_review",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "assembly_review.eval.quast",
-        "assembly_review.eval.busco"
-      ]
+      "allow_local_execution": true
     }
   ],
   "review_policy": {

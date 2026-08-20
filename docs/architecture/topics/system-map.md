@@ -109,9 +109,12 @@ PATH --data-dir PATH`. The manifest solely owns
 `<data-dir>/runs/<session_id>/`. The command preflights both documents, freezes
 them only while stdin and stdout are attached to real TTYs, then executes the
 exact requested occurrence sequence and dependency closure with SQLite. Its
-run config must explicitly contain a `requested_stages` JSON
-list of `{stage, allow_local_execution}` objects; the boolean is local-process
-authorization for that particular occurrence. `requested_stages: null` is
+run config must explicitly contain a `requested_stages` JSON list of
+`{stage, allow_local_execution}` objects. Freeze derives each occurrence's
+method roster from stage configuration and the method catalog and stores it in
+the canonical frozen workflow step. The boolean is local-process authorization
+for that particular occurrence.
+`requested_stages: null` is
 rejected while `[]` is a valid empty biological-stage plan. `gene-agent tui`
 remains an optional conversational intake and planning path into that same
 freeze/executor.

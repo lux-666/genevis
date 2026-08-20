@@ -55,10 +55,12 @@ rejecting, or removing stages. Every reached stage still validates the logical
 resources its own contract requires.
 
 The public file-authored `gene-agent run` boundary freezes the literal
-`{stage, allow_local_execution}` occurrence list without applying a special
-existing-assembly ordering rule. Inventory registers the supplied assembly
-resource; stages absent from the list have no occurrence, and a reached stage
-either validates its inputs or reports its own input failure.
+occurrence list without applying a special existing-assembly ordering rule.
+Freeze derives each occurrence's method roster from stage configuration and the
+method catalog and stores it in the canonical frozen workflow step. Inventory
+registers the supplied assembly resource; stages absent from the list have no
+occurrence, and a reached stage either validates its inputs or reports its own
+input failure.
 
 Final confirmation uses the same whole-run freeze as every other TUI run. The
 feature must not introduce another executor, unchecked path override, second

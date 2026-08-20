@@ -73,11 +73,15 @@ gene-agent run \
 The manifest owns `session_id`, and output is placed at
 `data/server_run/out/runs/<session_id>/`. The command validates/canonicalizes
 both files. The run config must explicitly contain one `requested_stages` list
-of `{stage, allow_local_execution}` objects; the boolean authorizes local
-process execution for that occurrence. `requested_stages: null` is rejected, while
-`[]` is valid. Literal order and repeats are preserved, but unclosed mandatory
-Assembly/T2T Review boundaries are rejected rather than repaired or auto-filled;
-see [Runtime orchestration](../architecture/topics/runtime-orchestration.md).
+of `{stage, allow_local_execution}` objects. Freeze derives each occurrence's
+method roster from stage configuration and the method catalog and stores it in
+the canonical frozen workflow step. The boolean authorizes local process
+execution for that occurrence.
+`requested_stages: null` is rejected, while `[]` is valid. Literal order and
+repeats are preserved. Review is optional: only an explicitly requested Review
+binds to the nearest earlier assembly handoff; the executor never inserts one
+or rejects a sequence merely because Review is absent; see
+[Runtime orchestration](../architecture/topics/runtime-orchestration.md).
 The command then freezes that exact stage scope and dependency snapshot before
 SQLite execution. A new run must be launched with real stdin and stdout TTYs;
 the public boundary rejects noninteractive automation before freeze. If an

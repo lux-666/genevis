@@ -2,29 +2,19 @@
   "requested_stages": [
     {
       "stage": "read_qc",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "read_qc.long_read_stats.seqkit_stats",
-        "read_qc.length_filter.skip"
-      ]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly",
-      "allow_local_execution": true,
-      "selected_method_names": ["assembly.candidate.flye"]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly_dedup",
-      "allow_local_execution": true,
-      "selected_method_names": ["assembly_dedup.purge_dups"]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly_review",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "assembly_review.eval.quast",
-        "assembly_review.eval.busco"
-      ]
+      "allow_local_execution": true
     }
   ],
   "review_policy": {

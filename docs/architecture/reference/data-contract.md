@@ -51,6 +51,8 @@ Biological and stage contracts remain governed by their current specifications.
    session identity; `data-dir` owns layout placement at
    `runs/<session_id>/`. The run config must explicitly contain a
    `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
+   Freeze derives the ordered method roster from each stage's configuration and
+   method catalog, then stores it only in the frozen `workflow_steps` projection.
    The list preserves literal order and repeated stage occurrences; `stage` is
    one occurrence's routing choice and `allow_local_execution` is its
    process authorization. There is no separate local-execution array.
@@ -66,6 +68,10 @@ Biological and stage contracts remain governed by their current specifications.
    explicitly requested Review step carries
    `review_target = {resource_type: "assembly", producer_step_id: "..."}` for
    the exact nearest earlier assembly-handoff occurrence it must consume.
+8. Gene Agent is a single-operator local pip tool and trusts the operating-system
+   account controlling the run directory. Integrity validation addresses partial
+   writes, crashes, incompatible versions, and accidental corruption; adversarial
+   isolation from that same operator is outside the product scope.
 
 ## 3. Replay Terminology
 

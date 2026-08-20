@@ -2,11 +2,7 @@
   "requested_stages": [
     {
       "stage": "assembly_review",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "assembly_review.eval.quast",
-        "assembly_review.eval.busco"
-      ]
+      "allow_local_execution": true
     }
   ],
   "review_policy": {

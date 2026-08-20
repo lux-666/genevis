@@ -150,7 +150,8 @@ gene-agent run --manifest PATH --run-config PATH --data-dir PATH
 要求 run config 显式提供 `requested_stages` JSON 对象列表；每项形如
 `{"stage": "assembly_review", "allow_local_execution": true}`，其中 stage
 定义一个有序 occurrence，布尔值只授权该 occurrence 启动本地进程。列表保留字面
-顺序、允许重复且无需遵循 registry order，但必须通过 RunConfig 序列校验；
+顺序、允许重复且无需遵循 registry order，但必须通过 RunConfig 序列校验；冻结时
+系统再把每个 occurrence 的方法 roster 写入 canonical `workflow_steps`。
 冻结时会在首位隐式加入 `step-000-inventory`，其余 `step_id`
 由列表位置生成。`requested_stages` 不得为 `null`，但 `[]` 是有效的 inventory-only
 计划。随后命令冻结 occurrence 序列及保守的依赖闭包，并以 SQLite 执行已冻结的
@@ -213,12 +214,12 @@ TUI 的实际流程是：
 1. 让用户用自然语言描述任务。
 2. 用 LLM intent parser 和保守的本地识别器确定 intake 追问范围；这一步只决定还要问哪些样本事实，不决定最终 stages。
 3. 逐项确认当前 intake 支持的 HiFi、ONT、成对 Hi-C、物种和 telomere motif，并持续重建 `manifest_draft.yaml`。
-4. intake 完成后，把原始请求、确认后的 manifest 和现有 method catalog 交给 LLM，生成一个复用 `AskPlanState` 字段的 Plan Draft：有序 `{stage, allow_local_execution}` occurrence、methods 和部分 planning-time parameters。
+4. intake 完成后，把原始请求、确认后的 manifest 和现有 method catalog 交给 LLM，生成一个复用 `AskPlanState` 字段的 Plan Draft：有序 `{stage, allow_local_execution}` occurrence、methods 和部分 planning-time parameters；冻结时再将 methods 物化为每个 occurrence 的 `selected_method_names` roster。
 5. 进入现有 `Plan Draft` 页面，展示 session、data dir、manifest、inputs、occurrences、methods、parameters 和 attention 项。
 6. 在 draft 里可以按 `Enter/c` 继续，按 occurrence 编号编辑单项，按 `s` 编辑可重复的有序 occurrence list，按 `r` 丢弃当前 draft；丢弃后可通过 `/resume` 重新生成。
 7. 进入单个 occurrence 后，可以按 `l` 单独授权/拒绝本地执行，按 `m` 改 stage-scoped method，按 `p` 改 parameters，按 `b` 返回 draft。依赖上游结果的运行期推荐参数仍显示为 deferred，不在这里伪造数值。
 8. draft 锁定后不会立刻执行；TUI 会再展示 final run plan 并询问 `Proceed?`。拒绝时返回同一个 Plan Draft 继续编辑。
-9. 用户确认后，TUI 原样写出 occurrence 对象；每个布尔值只授权对应 occurrence 是否可在本机启动工具。
+9. 用户确认后，TUI 写出 occurrence 对象；每个布尔值只授权对应 occurrence 是否可在本机启动工具，冻结时再派生 `selected_method_names`。
 10. TUI 冻结输入后，在同一进程内调用 session executor；不会再拼装或启动另一个 CLI 命令。运行中遇到 human gate 时，TUI 在 sqlite checkpoint 上收集决策、写 decision artifact、更新 checkpoint 并继续 graph。
 
 当前 TUI intake 的输入范围是 PacBio HiFi、ONT 和显式成对的 Hi-C reads，外加
@@ -233,37 +234,23 @@ TUI 最终会把选择落到 run config：
   "requested_stages": [
     {
       "stage": "read_qc",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "read_qc.long_read_stats.seqkit_stats",
-        "read_qc.length_filter.seqkit_seq"
-      ]
+      "allow_local_execution": true
     },
     {
       "stage": "genome_survey",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "genome_survey.kmer_count.jellyfish",
-        "genome_survey.model.genomescope2"
-      ]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly",
-      "allow_local_execution": true,
-      "selected_method_names": ["assembly.candidate.flye"]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly_dedup",
-      "allow_local_execution": true,
-      "selected_method_names": ["assembly_dedup.purge_dups"]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly_review",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "assembly_review.eval.quast",
-        "assembly_review.eval.busco"
-      ]
+      "allow_local_execution": true
     }
   ],
   "assembly": {
@@ -286,14 +273,17 @@ TUI 最终会把选择落到 run config：
 
 `requested_stages` 的字面顺序就是业务 occurrence 顺序；未列出的 stage 没有运行时
 occurrence，也不会伪造 skipped 事件。每个 item 的 `allow_local_execution` 只决定
-该 occurrence 能否启动本地进程。对公共 `gene-agent run`，它必须是显式、非
+该 occurrence 能否启动本地进程。冻结时系统根据 stage 配置和 method catalog
+派生每个 occurrence 的 roster，并将其写入 canonical `workflow_steps`。对公共
+`gene-agent run`，它必须是显式、非
 `null` 的 JSON 对象列表；`None` 只表示 planner/TUI 尚未完成的草稿，不能进入冻结
 或运行边界。
 
 ### 2. RunConfig Layer: choose execution and parameters
 
 `requested_stages` 的每个对象同时说明“要走哪个阶段”和“该阶段是否授权本地执行”。
-方法参数仍由各 stage 的 config 控制。
+方法选择和参数由各 stage 的 config 控制；冻结后的 `workflow_steps` 才保存派生的
+`selected_method_names` roster。
 
 示例：从 long reads 做 read QC、Flye assembly、purge_dups 和 QUAST/BUSCO
 review：
@@ -303,37 +293,23 @@ review：
   "requested_stages": [
     {
       "stage": "read_qc",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "read_qc.long_read_stats.seqkit_stats",
-        "read_qc.length_filter.seqkit_seq"
-      ]
+      "allow_local_execution": true
     },
     {
       "stage": "genome_survey",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "genome_survey.kmer_count.jellyfish",
-        "genome_survey.model.genomescope2"
-      ]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly",
-      "allow_local_execution": true,
-      "selected_method_names": ["assembly.candidate.flye"]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly_dedup",
-      "allow_local_execution": true,
-      "selected_method_names": ["assembly_dedup.purge_dups"]
+      "allow_local_execution": true
     },
     {
       "stage": "assembly_review",
-      "allow_local_execution": true,
-      "selected_method_names": [
-        "assembly_review.eval.quast",
-        "assembly_review.eval.busco"
-      ]
+      "allow_local_execution": true
     }
   ],
   "review_policy": {
@@ -555,13 +531,6 @@ Compile check:
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache \
 conda run -n gene_agent python -m compileall app tests
-```
-
-Graph smoke:
-
-```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache \
-conda run -n gene_agent python -c "from app.graph.builder import build_graph; from app.schemas.state import initial_state; g=build_graph(); s=initial_state(session_id='smoke', input_manifest_ref='inputs/manifest.yaml'); r=g.invoke(s, config={'configurable': {'thread_id': 'smoke'}}); print(r['current_stage']); print(r['route_trace'])"
 ```
 
 ## Current Boundaries

@@ -140,7 +140,7 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
     ) != paths.workflow_step_artifacts_dir("step-003-t2t", "t2t")
 
 
-def test_run_config_rejects_noncanonical_selected_method_roster() -> None:
+def test_run_config_rejects_method_roster_as_source_input() -> None:
     with pytest.raises(ValueError, match="selected_method_names"):
         RunConfig.model_validate(
             {
@@ -148,11 +148,28 @@ def test_run_config_rejects_noncanonical_selected_method_roster() -> None:
                     {
                         "stage": "t2t",
                         "allow_local_execution": False,
-                        "selected_method_names": [],
-                    }
+                        "selected_method_names": ["t2t.alignment.minimap2"],
+                    },
                 ]
             }
         )
+
+
+def test_freeze_projection_derives_method_roster() -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "t2t", "allow_local_execution": False},
+            ]
+        }
+    )
+
+    assert "selected_method_names" not in config.model_dump(
+        mode="json"
+    )["requested_stages"][0]
+    assert workflow_steps_from_run_config(config)[1]["selected_method_names"] == [
+        "t2t.alignment.minimap2"
+    ]
 
 
 def test_workflow_step_roster_requires_unique_stage_prefixed_names() -> None:

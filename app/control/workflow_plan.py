@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from app.configuration import load_descriptor_registry
+from app.schemas.run_config import RequestedStage, RunConfig, infer_assembly_method
 from app.schemas.state import (
     DomainStage,
     ResourceDelivery,
@@ -19,7 +21,6 @@ from app.workflow import analyze_review_sequence
 
 if TYPE_CHECKING:
     from app.schemas.descriptors import FrozenAttemptSpec
-    from app.schemas.run_config import RequestedStage, RunConfig
 
 
 def workflow_step_id(index: int, stage: str) -> str:
@@ -28,11 +29,10 @@ def workflow_step_id(index: int, stage: str) -> str:
     return f"step-{index:03d}-{stage}"
 
 
-def workflow_steps_from_requests(
-    requests: Sequence["RequestedStage"],
-) -> list[WorkflowStep]:
-    """Project RunConfig requests into the immutable runtime plan."""
+def workflow_steps_from_run_config(run_config: RunConfig) -> list[WorkflowStep]:
+    """Freeze one validated RunConfig into its exact runtime sequence."""
 
+    requests = run_config.requested_stages
     review_bindings = analyze_review_sequence([request.stage for request in requests])
     steps: list[WorkflowStep] = [
         {
@@ -49,7 +49,9 @@ def workflow_steps_from_requests(
                 "step_id": workflow_step_id(index, stage),
                 "stage": stage,
                 "allow_local_execution": bool(request.allow_local_execution),
-                "selected_method_names": list(request.selected_method_names),
+                "selected_method_names": list(
+                    _selected_method_names_for_request(run_config, request)
+                ),
             }
         )
         if stage == "assembly_review":
@@ -61,10 +63,38 @@ def workflow_steps_from_requests(
     return validate_workflow_steps(steps)
 
 
-def workflow_steps_from_run_config(run_config: "RunConfig") -> list[WorkflowStep]:
-    """Return the exact execution sequence represented by a validated config."""
+def _selected_method_names_for_request(
+    run_config: RunConfig,
+    request: RequestedStage,
+) -> tuple[str, ...]:
+    """Derive one occurrence's immutable method roster at freeze projection."""
 
-    return workflow_steps_from_requests(run_config.requested_stages)
+    registry = load_descriptor_registry()
+    stage_methods = tuple(registry.by_stage.get(request.stage, ()))
+    if request.stage == "read_qc":
+        filter_method = (
+            run_config.read_qc.length_filter.method
+            if run_config.read_qc is not None
+            and run_config.read_qc.length_filter is not None
+            else "skip"
+        )
+        always = tuple(
+            method_name
+            for method_name in stage_methods
+            if registry.methods[method_name].planner.selection_role == "always"
+        )
+        selected_filter = (
+            "read_qc.length_filter.skip" if filter_method == "skip" else filter_method
+        )
+        return (*always, selected_filter)
+    if request.stage == "assembly":
+        method = (
+            infer_assembly_method(run_config.assembly)
+            if run_config.assembly is not None
+            else None
+        )
+        return () if method is None else (f"assembly.candidate.{method}",)
+    return stage_methods
 
 
 def current_workflow_step(state: TopLevelState) -> WorkflowStep | None:

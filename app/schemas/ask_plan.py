@@ -48,7 +48,8 @@ class AskPlanState(BaseModel):
     manifest_ref: str
     # This is the one mutable pre-freeze workflow sequence. Its literal order,
     # duplicate occurrences, and each occurrence's local-execution consent are
-    # projected unchanged into RunConfig.requested_stages at confirmation.
+    # preserved at confirmation. Freeze later derives each occurrence's method
+    # roster into the canonical workflow plan.
     selected_stage_occurrences: list[PlanStageOccurrence] | None = None
     selected_methods: dict[str, str | list[str]] | None = None
     # Three parameter scopes, threaded consistently through response -> merge ->

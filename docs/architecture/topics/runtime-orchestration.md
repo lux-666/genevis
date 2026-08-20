@@ -30,6 +30,8 @@ overrides. `data-dir` is the layout root and the run lives at
 `<data-dir>/runs/<session_id>/`. The handler validates and canonicalizes both
 source documents and requires an explicit `requested_stages` JSON list. Each
 item is `{ "stage": "<stage>", "allow_local_execution": <boolean> }`.
+Freeze derives the method roster from stage configuration and the method
+catalog, then stores it in the canonical frozen `workflow_steps` projection.
 The list is an ordered occurrence sequence: it preserves operator order, may
 depart from registry order, and permits repeated stage names, subject to the
 sequence validation below. `allow_local_execution` authorizes only that
@@ -68,8 +70,10 @@ and invokes it with the session ID as the LangGraph thread ID. Inventory
 validation and asset registration consume this already verified in-memory
 manifest, RunConfig, canonical declarations, and run-owned paths; they do not
 reopen an unchecked control file. The bundle is closure context, not a graph
-channel or checkpoint payload. A new process validates again before building
-its graph. The public run always uses SQLite. Every new structured run and
+channel or checkpoint payload. A new process validates the frozen transaction
+again before building its graph. This is operational consistency checking under
+the trusted-local-operator model defined in the data contract. The public run
+always uses SQLite. Every new structured run and
 confirmed TUI draft requires stdin and stdout to be real TTYs before freeze;
 missing capability fails without publishing frozen inputs. An already-frozen
 blocked checkpoint remains recoverable through `inspect`, `review`, and
@@ -251,8 +255,8 @@ state; it is never executable semantics and public `gene-agent run` rejects JSON
 `null` before freeze.
 
 `workflow_steps` is the frozen runtime projection of the operator plan. Each
-occurrence carries its canonical `selected_method_names` roster from the frozen
-RunConfig. Resume restores and applies only the decision bound to the
+occurrence carries its canonical `selected_method_names` roster derived from
+the frozen stage configuration and method catalog. Resume restores and applies only the decision bound to the
 interrupted occurrence; it does not rewrite the remaining sequence, method
 roster, or frozen run config.
 
