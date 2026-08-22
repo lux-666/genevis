@@ -15,6 +15,8 @@ from unittest.mock import patch
 from app.entrypoints.tui import (
     _apply_llm_plan_draft,
     _freeze_and_execute,
+    _generate_plan_draft_with_configured_llm,
+    _plan_draft_context,
     _resume_tui_session,
     _start_tui_session,
     _tui_main,
@@ -39,6 +41,7 @@ from app.storage.frozen_inputs import (
     frozen_execution_lock,
 )
 from app.storage.paths import SessionPaths
+from app.workflow import MANUAL_ONLY_STAGES, recommended_workflow_template
 from tests.busco_fixture import ensure_busco_lineage
 
 
@@ -72,6 +75,41 @@ class TuiWorkflowTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(ValueError, "JSON list"):
                     _apply_llm_plan_draft(plan, payload)
+
+    def test_llm_plan_prompt_consumes_canonical_workflow_context(self):
+        plan = AskPlanState(
+            session_id="s1",
+            data_dir="data",
+            request_text="inventory only",
+            entry_request={},
+            manifest_ref="missing.yaml",
+        )
+        context = _plan_draft_context(plan)
+        captured: dict[str, str] = {}
+
+        def invoke(system: str, user: str):
+            captured["system"] = system
+            captured["user"] = user
+            return {"selected_stage_occurrences": []}
+
+        with patch("app.entrypoints.tui._invoke_json_model", side_effect=invoke):
+            result = _generate_plan_draft_with_configured_llm(plan)
+
+        self.assertEqual(result.selected_stage_occurrences, [])
+        self.assertEqual(
+            context["canonical_t2t_workflow"],
+            recommended_workflow_template("t2t"),
+        )
+        self.assertEqual(
+            context["manual_only_stages"],
+            sorted(MANUAL_ONLY_STAGES),
+        )
+        self.assertIn("canonical_t2t_workflow", captured["system"])
+        self.assertIn('"canonical_t2t_workflow"', captured["user"])
+        self.assertNotIn(
+            "includes read_qc, genome_survey, assembly",
+            captured["system"],
+        )
 
     def test_initial_goal_can_confirm_ont_and_hic_assets_inline(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -584,9 +622,7 @@ class TuiWorkflowTests(unittest.TestCase):
                         allow_local_execution=True,
                     )
                 ],
-                selected_methods={
-                    "assembly_review": ["assembly_review.eval.quast"]
-                },
+                selected_methods={"assembly_review": ["assembly_review.eval.quast"]},
                 method_parameters={
                     "assembly_review.eval.quast": {"threads": 4},
                     "assembly_review.eval.busco": busco,

@@ -31,7 +31,11 @@ from app.schemas.run_config import (
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.warnings import PlanWarning as PlanWarning
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
-from app.workflow import MANUAL_ONLY_STAGES, STAGE_ORDER
+from app.workflow import (
+    MANUAL_ONLY_STAGES,
+    STAGE_ORDER,
+    recommended_workflow_for_manifest,
+)
 
 from .planner_catalog import (
     build_planner_method_catalog as build_planner_method_catalog,
@@ -969,32 +973,14 @@ def _all_selectable_stages() -> list[str]:
 
 
 def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
-    from app.workflow import recommended_workflow_template
-
     manifest = _load_manifest(manifest_ref)
     if manifest is None:
         return []
-    asset_types = {asset.asset_type for asset in manifest.assets}
-    if "raw_long_reads" in asset_types:
-        return list(recommended_workflow_template("t2t"))
-    if "assembly_fasta_registered" in asset_types:
-        return [
-            "assembly_review",
-            "hic_scaffolding",
-            "gapcloser",
-            "t2t",
-            "base_polish",
-            "assembly_review",
-        ]
-    if "hic_reads_registered" in asset_types:
-        return [
-            "hic_scaffolding",
-            "gapcloser",
-            "t2t",
-            "base_polish",
-            "assembly_review",
-        ]
-    return []
+    return list(
+        recommended_workflow_for_manifest(
+            {asset.asset_type for asset in manifest.assets}
+        )
+    )
 
 
 def _suggested_stages(plan: AskPlanState, available: list[str]) -> list[str]:

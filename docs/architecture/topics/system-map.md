@@ -91,37 +91,21 @@ reports are regenerable views where supported. Follow
 
 The stage registry contains inventory, read QC, genome survey, assembly,
 assembly deduplication, assembly review, Hi-C scaffolding, GapCloser, T2T
-finishing, and Base Polish. A run's requested-stage list is instead a literal,
-ordered sequence of occurrences: stages may be repeated and need not follow
-registry order. Freeze adds one implicit inventory occurrence as
-`step-000-inventory`, then assigns every requested occurrence a position-based
-`step_id`. The frozen `workflow_steps` sequence—not registry order—is runtime
-authority. Review is an optional occurrence: freeze never inserts it, and an
-explicit Review binds to the nearest earlier assembly handoff. GapCloser and
-Base Polish remain manual-only placeholders; an occurrence of either fails
-closed at its own stage boundary. Exact rules belong to
+finishing, and Base Polish. Operator plans compile to immutable occurrences;
+registry order remains registration/display guidance rather than runtime
+successor logic. GapCloser and Base Polish remain manual-only placeholders.
+Exact occurrence, Review-binding, and placeholder rules belong to
 [Runtime orchestration](runtime-orchestration.md) and
 [Stage contracts](../reference/stage-contracts.md).
 
 Real/operator new runs enter through `gene-agent run --manifest PATH --run-config
-PATH --data-dir PATH`. The manifest solely owns
-`session_id`; `data-dir` is the layout root, so outputs live under
-`<data-dir>/runs/<session_id>/`. The command preflights both documents, freezes
-them only while stdin and stdout are attached to real TTYs, then executes the
-exact requested occurrence sequence and dependency closure with SQLite. Its
-run config must explicitly contain a `requested_stages` JSON list of
-`{stage, allow_local_execution}` objects. Freeze derives each occurrence's
-method roster from stage configuration and the method catalog and stores it in
-the canonical frozen workflow step. The boolean is local-process authorization
-for that particular occurrence.
-`requested_stages: null` is
-rejected while `[]` is a valid empty biological-stage plan. `gene-agent tui`
-remains an optional conversational intake and planning path into that same
-freeze/executor.
-Other public commands inspect,
-audit, review, resume, or bootstrap. Production method execution is a local
-subprocess on the CLI host; running on a server means starting the same CLI in
-the server checkout, not using an in-agent SSH or scheduler runner.
+PATH --data-dir PATH`; `gene-agent tui` is the optional conversational producer
+of the same frozen-session executor. Exact file ownership, TTY, RunConfig, and
+freeze semantics live in the run-data and runtime documents. Other public
+commands inspect, audit, review, resume, or bootstrap. Production method
+execution is a local subprocess on the CLI host; running on a server means
+starting the same CLI in the server checkout, not using an in-agent SSH or
+scheduler runner.
 
 ## Navigate by edge
 

@@ -33,22 +33,11 @@ session through the appropriate recovery path.
 
 For real/operator runs with already prepared files, use the deterministic
 boundary instead: `gene-agent run --manifest PATH --run-config PATH --data-dir
-PATH`. Its file-authored run config must explicitly contain
-one `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
-Its literal order and repeated occurrences are preserved; the boolean is the
-local-process authorization for that occurrence. Freeze derives the method
-roster into the canonical frozen workflow step.
-`requested_stages: null` is rejected, while `[]` is valid. The command
-validates/canonicalizes both files and converges on the same whole-run freeze
-and SQLite executor below. `session_id`
-belongs only to the manifest. An unfinished Plan Draft may still use `None`
-before it has selected a sequence; this is draft incompleteness, not an
-executable workflow meaning or second runtime route.
-
-The TUI-authored RunConfig payload explicitly writes
-`review_policy.max_blocked_seconds: 300` before validation and freeze so the
-operator-facing per-task configuration exposes the same editable default as a
-file-authored run.
+PATH`. It treats those files as the settled draft and converges on the same
+whole-run freeze and executor. Exact public RunConfig, occurrence, authorization,
+and review-policy fields belong to the [run-data contract](../reference/data-contract.md).
+An unfinished Plan Draft may still use `None` before stage selection; this is
+draft incompleteness, not a second executable runtime meaning.
 
 Current intake directly models PacBio HiFi reads, ONT reads, explicit paired
 Hi-C lanes, an explicit no-Hi-C fact, species facts, and a telomere motif when
@@ -67,13 +56,10 @@ planning-time parameters, and attention items.
 
 Assembly Review is a recommendation, not a completion rule. The default
 Assembly recommendation may append `assembly_dedup -> assembly_review`. The
-canonical complete-genome/T2T recommendation is:
-
-```text
-read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
-        -> hic_scaffolding -> gapcloser -> t2t -> base_polish
-        -> assembly_review
-```
+canonical complete-genome/T2T occurrence sequence is owned by
+[stage contracts](../reference/stage-contracts.md) and generated for planners by
+`app.workflow.recommended_workflow_template`; this topic does not maintain a
+second literal array.
 
 The final Review is a second occurrence of the reusable stage. With the current
 Base Polish placeholder, freeze binds that otherwise unreachable Review to T2T,
@@ -84,20 +70,14 @@ repeat Review or other stages in the editable occurrence list. An intent or
 confirmed RunConfig containing T2T without a later Review remains valid;
 recommendation does not become validation policy.
 
-`selected_stage_occurrences` is the one editable draft sequence. Every strict
-`{stage, allow_local_execution}` source object is an ordered occurrence, so
-duplicate stages may independently grant or withhold local-process
-authorization. Its canonical frozen projection also carries the derived
-`selected_method_names` roster. The
-operator edits the complete ordered sequence, then confirms every occurrence's
-authorization; methods and parameters remain stage-scoped configuration and do
-not imply consent. At confirmation these objects become `requested_stages`,
-then freeze derives the per-occurrence roster into immutable `workflow_steps`
-with the implicit
-inventory occurrence. Runtime recommendations that require upstream evidence
-remain deferred. If the planning model fails or returns an invalid draft, the
-planning attempt stops and the durable draft remains resumable; the TUI does
-not invent a deterministic fallback stage plan.
+`selected_stage_occurrences` is the one editable draft sequence. Duplicate
+stages remain distinct operator choices, each with its own local-process consent.
+Methods and parameters are stage-scoped configuration and do not imply consent.
+Confirmation compiles the draft through the same canonical occurrence/freeze
+contract used by structured runs. Runtime recommendations that require upstream
+evidence remain deferred. If the planning model fails or returns an invalid
+draft, the planning attempt stops and the durable draft remains resumable; the
+TUI does not invent a deterministic fallback stage plan.
 
 The draft uses three distinct selection states:
 
@@ -119,18 +99,12 @@ Final confirmation invokes the same transaction-like publication boundary used
 by the public structured `run` command:
 
 ```text
-confirmed draft
-  -> input_manifest.yaml
-  -> run_config.json
-  -> dependency_manifest.json
-  -> frozen_inputs.json commit marker
-  -> execute_frozen_session(session_id)
+confirmed draft -> verified frozen transaction -> execute_frozen_session
 ```
 
-The marker is written last and binds the hashes and identities of the other
-documents. An identical repeated freeze is idempotent. A changed request,
-partial freeze, corrupt hash, or existing execution evidence without a valid
-checkpoint fails closed instead of silently rebuilding inputs.
+Exact frozen files, publication order, hashes, idempotence, and crash behavior
+belong to the [run-data contract](../reference/data-contract.md). A partial or
+invalid freeze fails closed instead of silently rebuilding inputs.
 
 After final confirmation and the TTY check, the TUI computes one canonical
 effective local-method closure. A read-only readiness pass probes exactly that

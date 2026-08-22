@@ -47,6 +47,9 @@ rationale, and coordination procedure into one linear ranking:
 - Accepted topic and reference nodes under `docs/architecture/` govern intended
   cross-cutting behavior; `docs/architecture/README.md` routes readers to the
   single owner for each boundary.
+- Reference pages own exact schemas, normative arrays, default values, and
+  lifecycle invariants. Topic pages may explain flows and relationships but
+  must link to those owners instead of copying a second normative contract.
 - `docs/architecture/reference/stage-contracts.md` and
   `docs/architecture/reference/descriptors.md` govern stable domain boundaries.
 - Code and tests are the evidence for what is implemented now. They do not
@@ -204,21 +207,13 @@ Use human gates for decisions with biological or irreversible consequences:
 
 Do not interrupt for ordinary local validation or deterministic file collection.
 
-The review wait is an operator-interface policy, not a scheduler. Keep the
-frozen RunConfig default at `review_policy.max_blocked_seconds: 300`; accept
-per-stage overrides only for registry-backed review stages. Every new run must
+The review wait is an operator-interface policy, not a scheduler. Its exact
+default, override domain, countdown meanings, immutable bindings, and
+attached-versus-detached behavior are owned by the
+[run-data contract](data-contract.md#12-review-contract). Every new run must
 verify a real stdin/stdout TTY before freeze and then remain attached to the
 single interactive executor. The public new-run contract has no
 non-interactive branch.
-
-`-1` waits indefinitely, `0` immediately triggers the registered eligible
-resolver, and a positive value provides an Enter-claim countdown before
-triggering that resolver at expiry. The timer starts only after the immutable
-review request exists. It must never invent a decision from registry defaults.
-For `parameter_approval`, the registered resolver may only approve the exact
-persisted recommendation bound by that request. The registered typed
-intent/application lifecycle performs the gate-specific validation and durable
-effects before pure checkpoint application.
 
 Preserve each resolver's immutable request bindings, evidence eligibility,
 decision origin, rationale artifact, and countdown audit metadata. Resolver

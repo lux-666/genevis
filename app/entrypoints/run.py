@@ -1849,11 +1849,11 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
         validate_project_bootstrap_plan,
     )
 
-    # Determine config path
-    if args.config:
-        config_path = Path(args.config)
-    else:
-        config_path = Path("config/envs.yaml")
+    # Keep bootstrap on the same active-config selection used by run/freeze:
+    # explicit CLI path > GENE_AGENT_ENVS_CONFIG > repository default.
+    config_path = (
+        Path(args.config) if args.config else env_resolver.active_config_path()
+    )
 
     update_requested = bool(getattr(args, "update", False))
     apply_requested = bool(getattr(args, "apply", False))

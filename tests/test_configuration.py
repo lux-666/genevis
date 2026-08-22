@@ -22,11 +22,10 @@ from app.schemas.descriptors import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize(
-    "relative_path", ["config/envs.yaml", "config/envs.yaml.example"]
-)
-def test_purge_dups_default_tools_exclude_bam_diagnostics(relative_path: str) -> None:
-    with (PROJECT_ROOT / relative_path).open("r", encoding="utf-8") as handle:
+def test_env_template_purge_dups_default_tools_exclude_bam_diagnostics() -> None:
+    with (PROJECT_ROOT / "config/envs.yaml.example").open(
+        "r", encoding="utf-8"
+    ) as handle:
         document = yaml.safe_load(handle)
 
     tools = document["methods"]["assembly_dedup.purge_dups"]["required_tools"]
@@ -40,6 +39,21 @@ def test_purge_dups_default_tools_exclude_bam_diagnostics(relative_path: str) ->
         "get_seqs",
     ]
     assert "samtools" not in tools
+
+
+def test_env_template_covers_every_registered_local_method() -> None:
+    registry = load_descriptor_registry()
+    expected = {
+        name
+        for name, method in registry.methods.items()
+        if method.planner.execution_kind == "local"
+    }
+    with (PROJECT_ROOT / "config/envs.yaml.example").open(
+        "r", encoding="utf-8"
+    ) as handle:
+        document = yaml.safe_load(handle)
+
+    assert set(document["methods"]) == expected
 
 
 def test_descriptor_registry_loading_is_cwd_independent(tmp_path, monkeypatch) -> None:

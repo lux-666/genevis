@@ -607,8 +607,7 @@ def inspect_session(
         supervision_state = "running"
 
     db_path = paths.checkpoint_db_path
-    durable_available = db_path.exists()
-    checkpoint_persistence = "sqlite" if durable_available else "memory_only"
+    checkpoint_persistence = "sqlite" if db_path.exists() else "memory_only"
 
     decision_requirements_error: str | None = None
     if latest_unresolved_review_request and (
@@ -666,6 +665,7 @@ def inspect_session(
         ),
         latest_unresolved_review_request=latest_unresolved_review_request,
     )
+    durable_available = execution.get("durable_progress") == "checkpoint"
     workflow_progress_integrity = workflow_progress.pop(
         "integrity_diagnostics",
         [],

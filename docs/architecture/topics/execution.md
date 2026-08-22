@@ -76,8 +76,11 @@ schema. Exact state transitions and failure policies belong to the
 `Runner` is a small dependency-injection protocol. Production calls omit the
 test override and therefore instantiate `LocalRunner`, which executes the
 frozen script with `subprocess.run` in its declared working directory. Conda
-selection, when present, is expressed as `conda run`; otherwise the retained
-shell script runs through the local shell path.
+selection, when present, is expressed as a direct argv sequence such as
+`conda run ... <interpreter> <script_path>`; without Conda the argv begins with
+the frozen interpreter and script path. Production invocation always uses
+`shell=False`. A non-empty frozen `env_setup` is rejected rather than evaluated
+or concatenated into a shell command.
 
 “Local” means local to the host running the `gene-agent` process. A real server
 run is achieved by starting the same CLI in the server checkout. There is no

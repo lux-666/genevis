@@ -61,19 +61,10 @@ path.
 
 ## Foreground review policy
 
-`RunConfig.review_policy.max_blocked_seconds` defaults to `300`. A frozen
-configuration may override it per registry-backed review stage through
-`review_policy.stages.<stage>.max_blocked_seconds`; an unregistered stage is
-invalid. The effective value is copied into the immutable request so the gate
-can be verified without consulting mutable current configuration.
-
-The values have exactly these meanings during the original attached executor,
-whether produced by structured `run` files or a confirmed TUI draft:
-
-- `-1`: wait indefinitely for an operator decision.
-- `0`: immediately normalize that gate's eligible automatic request, if any.
-- a positive integer: display an Enter-claim countdown, then trigger the same
-  normalizer if it expires.
+The effective frozen review policy is copied into the immutable request so the
+gate can be verified without consulting mutable current configuration. Exact
+defaults, allowed per-stage overrides, and numeric meanings are owned by the
+[review contract](../reference/data-contract.md#12-review-contract).
 
 The timer never supplies a default decision. Assembly Review retains its
 evidence eligibility and bound LLM recommendation artifact; assembly route
@@ -95,34 +86,13 @@ does not invoke it, and prints manual recovery commands. A later `review` or
 a countdown from the prior `blocked_at` time. Strict/auto review modes and a
 public resume timeout override are not part of the interface.
 
-### Example policy override
-
-The three JSON examples
-`docs/examples/assembly_review_run_config.template.json`,
-`docs/examples/contig_run_config.template.json`, and
-`docs/examples/repeated_stage_occurrences_run_config.template.json` deliberately
-set the global default to `300` while setting
-`review_policy.stages.assembly_review.max_blocked_seconds` to `-1`. JSON does
-not permit comments: in each example this is an intentional per-stage override
-that makes Assembly Review wait permanently for a human decision; it does not
-inherit or eventually use the global 300-second countdown.
-
 ## Parameter-approval timeout behavior
 
 The countdown begins only after a parameter recommendation has been parsed,
-verified, persisted beneath its schema-3 manifest, and bound into an immutable
-`parameter_approval` review request. It controls the default approval of that
-one exact recommendation; it does not control recommendation generation,
-modify parameters, request another recommendation, or choose registry defaults.
-
-For every registered parameter-approval gate:
-
-- `-1` never approves automatically and waits for a manual approve/reject
-  decision;
-- `0` immediately approves the exact persisted recommendation;
-- a positive value displays an Enter-claim countdown, opens the manual
-  approve/reject prompt when claimed, and approves the same recommendation at
-  expiry.
+verified, persisted beneath its integrity root, and bound into an immutable
+`parameter_approval` request. It may resolve only that exact recommendation; it
+does not generate, edit, merge, or replace parameters. The precise timer-value
+contract remains in the run-data reference rather than being repeated here.
 
 One shared timeout-request normalizer enforces `decision=approve_parameters`
 and `decided_by=auto_rule` and enriches audit metadata. It performs no state

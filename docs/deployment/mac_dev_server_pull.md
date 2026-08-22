@@ -1,31 +1,34 @@
 # Mac Development and Server Execution
 
+This page owns the Git handoff and server-update procedure. It does not repeat
+the run/freeze/recovery contract; operators use
+[Run and Recovery](../user_guide/run-and-recovery.md) after the checkout is ready.
+
+The bootstrap, contig-readiness, and code-test boundaries are indexed in
+[Deployment Entry Points](README.md).
+
 The Mac checkout owns editing, review, lightweight verification, commits, and
-pushes. The server checkout owns environment validation and real
-bioinformatics execution.
+pushes. The Linux/server checkout owns environment validation and real
+bioinformatics execution. Git is the supported code-transfer boundary; Gene
+Agent has no in-agent SSH runner, remote scheduler backend, or Mac-side artifact
+collector.
 
-Git is the only supported code-transfer boundary. Gene Agent does not provide
-an in-agent remote runner, SSH ControlMaster execution, gateway dispatch, or
-Mac-side artifact collection from the server.
+## Source boundary
 
-## Source Boundary
+Tracked project material includes code, descriptors, dependency declarations,
+tests, documentation, examples, and helper scripts.
 
-Tracked in Git:
+Server-local material includes:
 
-- application code, descriptors, and configuration defaults;
-- tests and current documentation;
-- manifest/run-config templates and server helper scripts;
-- the pinned NCBI Metazoa reference manifest and alias table.
+- real FASTQ/FASTA/BAM inputs and sample metadata;
+- `.env`, API keys, and other credentials;
+- active `config/envs.yaml`; only `config/envs.yaml.example` is committed;
+- Conda environments and external package installations;
+- databases, BUSCO lineages, model files, runtime artifacts, Ledger, reports,
+  and checkpoints;
+- copied run configs containing host/private paths.
 
-Server-local and untracked:
-
-- real FASTQ/FASTA/BAM inputs;
-- Conda environments and external software installations;
-- generated artifacts, ledger, reports, and checkpoints;
-- databases, model files, and private run configurations.
-
-The NCBI Metazoa reference export is provisioned without downloading through
-the application:
+The NCBI Metazoa reference export is provisioned from a server-local source:
 
 ```bash
 python scripts/install_ncbi_metazoa_reference.py \
@@ -34,101 +37,89 @@ python scripts/install_ncbi_metazoa_reference.py \
 python scripts/install_ncbi_metazoa_reference.py --verify-only
 ```
 
-The installer verifies the tracked manifest hashes. Assembly review reports a
-version mismatch rather than consuming an unverified snapshot.
+The installer verifies the tracked manifest hashes. Assembly Review reports a
+version mismatch instead of consuming an unverified snapshot.
 
-## Mac Workflow
+## First pull after the host-config split
+
+`config/envs.yaml` is now ignored machine-local state. On an existing server
+checkout that still has this path tracked, the first pull containing that Git
+transition can delete the working-tree copy. Before that pull, save the active
+mapping outside the repository:
+
+```bash
+mkdir -p "$HOME/gene-agent-host-config-backups"
+host_config_backup="$HOME/gene-agent-host-config-backups/envs.yaml.$(date +%Y%m%d%H%M%S)"
+cp -p config/envs.yaml "$host_config_backup"
+
+# Make the tracked path clean only after the external backup exists.
+git restore --source=HEAD --worktree -- config/envs.yaml
+git pull --ff-only
+
+cp -p "$host_config_backup" config/envs.yaml
+git status --short --ignored -- config/envs.yaml
+```
+
+The `git restore` above discards only the old tracked working copy after its
+exact host mapping has been backed up outside the checkout. After the pull, the
+copy command restores that mapping at the now-ignored path. Git should report
+`!! config/envs.yaml`; then run the normal bootstrap preview and server checks.
+A fresh clone has only `config/envs.yaml.example`; `gene-agent bootstrap
+--apply` creates the active file from that seed. Normal execution does not
+silently use the example when the active mapping is missing.
+
+## Mac workflow
 
 ```bash
 git status --short
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent \
-  python -m unittest discover -s tests -t . -p 'test*.py' -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache \
+  conda run -n gene_agent pytest -q
 git diff --check
 git add ...
 git commit -m "..."
 git push
 ```
 
-Small committed fixtures may be used locally. They do not replace real-data
-verification on the server.
+Only stage intended files. Do not add `.env`, real input paths, runtime data,
+checkpoints, reports, credentials, or caches. Small committed fixtures support
+local regression tests but do not replace a server real-data run.
 
-## Server Workflow
+## Server update workflow
+
+Before pulling, inspect whether the checkout has active sessions. The current
+pre-release runtime has no checkpoint migration; finish those sessions or keep
+the old checkout and environment available for their resumes.
+
+The ordinary update sequence below applies only after this host has completed
+the `config/envs.yaml` tracking split above. If
+`git check-ignore config/envs.yaml` does not identify the repository ignore
+rule, use the backup and first-pull sequence before any normal pull.
+
+Then update and verify:
 
 ```bash
-git pull
+git status --short
+git pull --ff-only
 bash scripts/server_check.sh
 bash scripts/server_test.sh
 ```
 
-For a real server run, copy and fill the structured templates with server-owned
-paths, then use the deterministic boundary:
+The two scripts may be called by absolute path from another directory because
+they locate the repository root themselves.
 
-```bash
-gene-agent run \
-  --manifest /absolute/path/to/manifest.yaml \
-  --run-config /absolute/path/to/run_config.json \
-  --data-dir data/server_run/out
-```
+Do not blur their scope:
 
-The manifest owns `session_id`, and output is placed at
-`data/server_run/out/runs/<session_id>/`. The command validates/canonicalizes
-both files. The run config must explicitly contain one `requested_stages` list
-of `{stage, allow_local_execution}` objects. Freeze derives each occurrence's
-method roster from stage configuration and the method catalog and stores it in
-the canonical frozen workflow step. The boolean authorizes local process
-execution for that occurrence.
-`requested_stages: null` is rejected, while `[]` is valid. Literal order and
-repeats are preserved. Review is optional: only an explicitly requested Review
-binds to the nearest earlier assembly handoff; the executor never inserts one
-or rejects a sequence merely because Review is absent; see
-[Runtime orchestration](../architecture/topics/runtime-orchestration.md).
-The command then freezes that exact stage scope and dependency snapshot before
-SQLite execution. A new run must be launched with real stdin and stdout TTYs;
-the public boundary rejects noninteractive automation before freeze. If an
-attached process later stops at a human gate, the durable `blocked_human`
-checkpoint remains recoverable through `inspect`, `review`, and `resume`.
-`gene-agent tui --data-dir data/server_run/out` remains an optional
-conversational intake/planning alternative using the same frozen executor. The
-server owns all real paths and generated output.
+- `server_check.sh` validates orchestrator prerequisites and the tool/package
+  closure selected by the
+  authoritative five-stage contig template. It deliberately does not probe the
+  real LLM endpoint, private inputs, or the selected BUSCO lineage.
+- `server_test.sh` runs code regression/compile/diff checks. It does not execute
+  Flye, Jellyfish, purge_dups, QUAST, BUSCO, or a real-data pipeline.
+- the actual `gene-agent run` preflight validates run-specific inputs and
+  services before freeze.
 
-## Block and Resume
+After both scripts exit zero, copy/fill server-local templates and follow
+[Run and Recovery](../user_guide/run-and-recovery.md).
 
-When a session reaches a human gate, the SQLite checkpointer preserves the
-parent graph under the run directory. Inspect the exact gate and candidate:
-
-```bash
-gene-agent inspect \
-  --session-id server-run-YYYYMMDD-a \
-  --data-dir data/server_run/out \
-  --write-decision-template data/server_run/decision.json
-```
-
-Edit the generated template, then resume:
-
-```bash
-gene-agent resume \
-  --session-id server-run-YYYYMMDD-a \
-  --decision-file data/server_run/decision.json \
-  --data-dir data/server_run/out \
-  --checkpointer sqlite
-```
-
-Resume validates session identity, review-request bindings, the decision body,
-checkpoint availability, and durable refs before changing workflow state.
-
-This pre-release runtime has no checkpoint migration. Before pulling upgraded
-code over an active server checkout, complete active sessions or retain the
-previous checkout and environment for their resumes; newer code can be unable
-to read an older SQLite checkpoint.
-
-## Environment Expectations
-
-- the orchestrator runs in the configured Python environment (default:
-  `gene_agent`);
-- bioinformatics commands run through the method mapping in
-  `config/envs.yaml`;
-- AutoHiC external package roots and models pass bootstrap/preflight;
-- missing commands or package files produce structured blocked/failure state,
-  never fake success.
-
-New-host provisioning is documented in [`migration.md`](migration.md).
+New-host provisioning is documented separately in
+[New Host Setup](migration.md).

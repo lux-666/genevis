@@ -48,24 +48,13 @@ belong to the [run-data contract](../reference/data-contract.md).
 ## Progress is direct consumption, not another store
 
 Interactive execution introduces no durable progress projection. Attached and
-detached surfaces call the same pure reducer over the verified frozen plan,
-canonical occurrence/session terminals, and a verified active gate. The parent
-commits delivery and terminal events before attached rendering. Detached
-inspection reconstructs those same reducer inputs; SQLite checkpoint
-availability and the execution marker/lock remain adjacent operational state.
-Neither surface derives completion or current occurrence from cursor advance,
-the last stage-bearing Ledger row, or `route_trace`.
-
-Legacy terminal conflicts use conservative precedence with explicit integrity
-diagnostics and a degraded-authority marker. They are never silently resolved
-by last-event overwrite. Counts such as `finished=2/5` remain presentation-time
-arithmetic and are not written to a durable progress store.
-
-Those counts are not
-written to an artifact, report, Ledger event, checkpoint field, progress table,
-or batch record. A multi-session caller may calculate an aggregate from several
-read-only inspections, but that aggregate remains outside every run and never
-becomes workflow truth.
+detached surfaces call the same pure reducer. Its exact inputs, occurrence
+counting, conflict handling, and current-step rules are owned by the
+[run-data contract](../reference/data-contract.md#410-one-workflow-progress-reducer).
+Checkpoint availability, execution marker/lock, cursor, Ledger tail, and route
+trace remain diagnostic state rather than alternate progress owners. A caller
+may aggregate several read-only inspections outside the runs, but no such batch
+projection becomes workflow truth.
 
 ## Cross-stage handoff
 

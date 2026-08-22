@@ -40,6 +40,7 @@ def _fixed_local_methods() -> dict[str, tuple[str, ...]]:
         "t2t": tuple(registry.by_stage.get("t2t", ())),
     }
 
+
 _NON_EXECUTABLE_METHODS = {"read_qc.length_filter.skip"}
 _LLM_REQUIRED_STAGES = {"assembly", "hic_scaffolding", "t2t"}
 _BUSCO_METHOD = "assembly_review.eval.busco"
@@ -151,15 +152,19 @@ def preflight_run_readiness(
         except (TypeError, ValueError) as exc:
             failures.append(f"{method_name}: invalid dependency configuration: {exc}")
             continue
+        if not spec.required_tools and not spec.package_tools:
+            failures.append(
+                f"{method_name}: resolved env mapping declares no required_tools "
+                "or package_tools"
+            )
+            continue
         try:
             result = preflight(spec, runner=runner)
         except OSError as exc:
             failures.append(f"{method_name}: environment probe failed: {exc}")
             continue
         if result.status != "ok":
-            failures.append(
-                f"{method_name}: {result.detail or result.status}"
-            )
+            failures.append(f"{method_name}: {result.detail or result.status}")
             continue
         if method_name == _BUSCO_METHOD:
             version_failure = _busco_version_failure(
@@ -180,9 +185,7 @@ def preflight_run_readiness(
                 )
 
     if failures:
-        raise RunReadinessError(
-            "local method readiness failed: " + "; ".join(failures)
-        )
+        raise RunReadinessError("local method readiness failed: " + "; ".join(failures))
 
     if run_requires_llm(run_config):
         try:
@@ -234,9 +237,7 @@ def _busco_version_failure(
     if _pad_version(actual, len(minimum)) < _pad_version(minimum, len(actual)):
         expected = ".".join(str(part) for part in minimum)
         found = ".".join(str(part) for part in actual)
-        return (
-            f"BUSCO {found} does not satisfy >={expected} required for {selector}"
-        )
+        return f"BUSCO {found} does not satisfy >={expected} required for {selector}"
     return None
 
 

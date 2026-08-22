@@ -15,9 +15,9 @@ class LocalRunner:
 
     When the frozen attempt declares `conda_env` or `conda_prefix`, the command
     is dispatched through `conda run` so the method sees the configured
-    environment's tools regardless of the outer shell. When neither is set the
-    runner keeps the PATH-driven shell path used by stage scripts and
-    fake-binary tests.
+    environment's tools regardless of the outer shell. When neither is set,
+    the frozen interpreter and script are invoked directly as argv. Both paths
+    use ``shell=False`` and reject legacy ``env_setup`` shell fragments.
     """
 
     def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
@@ -32,8 +32,15 @@ class LocalRunner:
         env = os.environ.copy()
         env.update(spec.env)
 
+        if spec.env_setup:
+            raise ValueError(
+                "FrozenAttemptSpec.env_setup is unsupported for direct "
+                "execution; use spec.env or a dedicated setup script"
+            )
+
         use_conda = bool(spec.conda_env or spec.conda_prefix)
         script_path = str(spec.script_path)
+        command: list[str]
         if use_conda:
             conda_bin = spec.conda_bin or "conda"
             target = (
@@ -41,7 +48,7 @@ class LocalRunner:
                 if spec.conda_prefix
                 else ["-n", spec.conda_env]
             )
-            command: list[str] | str = [
+            command = [
                 conda_bin,
                 "run",
                 "--live-stream",
@@ -50,15 +57,8 @@ class LocalRunner:
                 spec.interpreter,
                 script_path,
             ]
-            shell = False
         else:
-            if spec.env_setup:
-                raise ValueError(
-                    "FrozenAttemptSpec.env_setup is unsupported for direct "
-                    "execution; use spec.env or a dedicated setup script"
-                )
-            command: list[str] | str = [spec.interpreter, script_path]
-            shell = False
+            command = [spec.interpreter, script_path]
 
         with (
             stdout_path.open("w", encoding="utf-8") as stdout,
@@ -71,7 +71,7 @@ class LocalRunner:
                 command,
                 cwd=spec.working_dir,
                 env=env,
-                shell=shell,
+                shell=False,
                 stdout=stdout,
                 stderr=stderr,
                 check=False,

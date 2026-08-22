@@ -30,6 +30,7 @@ from app.stages.gapcloser.state import (
 from app.storage.ledger import Ledger
 from app.workflow import (
     MANUAL_ONLY_STAGES,
+    recommended_workflow_for_manifest,
     recommended_workflow_template,
     stages_through,
 )
@@ -213,6 +214,56 @@ def test_manifest_recommendation_includes_complete_placeholder_positions(
         "base_polish",
         "assembly_review",
     ]
+
+
+def test_manifest_recommendations_use_the_canonical_workflow_helper(tmp_path) -> None:
+    assembly = tmp_path / "assembly.fasta"
+    assembly.write_text(">contig\nACGT\n", encoding="utf-8")
+    assembly_manifest = tmp_path / "assembly_manifest.yaml"
+    assembly_manifest.write_text(
+        "session_id: assembly-s1\nassets:\n"
+        "  - asset_type: assembly_fasta_registered\n"
+        f"    paths:\n      - {assembly}\n"
+        "    format: fasta\n    platform: unknown\n",
+        encoding="utf-8",
+    )
+
+    assert _recommended_stages_from_manifest(str(assembly_manifest)) == list(
+        recommended_workflow_for_manifest({"assembly_fasta_registered"})
+    )
+    assert recommended_workflow_for_manifest({"assembly_fasta_registered"}) == [
+        "assembly_review",
+        "hic_scaffolding",
+        "gapcloser",
+        "t2t",
+        "base_polish",
+        "assembly_review",
+    ]
+    hic_r1 = tmp_path / "hic_R1.fastq"
+    hic_r2 = tmp_path / "hic_R2.fastq"
+    hic_r1.write_text("@r1/1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    hic_r2.write_text("@r1/2\nTGCA\n+\n!!!!\n", encoding="utf-8")
+    hic_manifest = tmp_path / "hic_manifest.yaml"
+    hic_manifest.write_text(
+        "session_id: hic-s1\nassets:\n"
+        "  - asset_type: hic_reads_registered\n"
+        f"    paths:\n      - {hic_r1}\n      - {hic_r2}\n"
+        "    format: fastq\n    platform: illumina\n    layout: paired\n",
+        encoding="utf-8",
+    )
+
+    hic_recommendation = [
+        "hic_scaffolding",
+        "gapcloser",
+        "t2t",
+        "base_polish",
+        "assembly_review",
+    ]
+    assert (
+        recommended_workflow_for_manifest({"hic_reads_registered"})
+        == hic_recommendation
+    )
+    assert _recommended_stages_from_manifest(str(hic_manifest)) == hic_recommendation
 
 
 def test_contig_only_route_does_not_enter_placeholders() -> None:

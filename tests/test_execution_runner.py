@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+import pytest
+
 from app.execution.fake_runner import FakeRunner
 from app.execution.local_runner import LocalRunner
 from app.execution.method_runner import build_frozen_attempt
@@ -65,3 +69,67 @@ def test_local_runner_executes_exact_declared_absolute_script_path(tmp_path) -> 
     assert attempt.script_path == declared_script
     assert expected_output.read_text(encoding="utf-8").strip() == "expected"
     assert not decoy_output.exists()
+
+
+def test_local_runner_invokes_direct_argv_with_shell_disabled(
+    tmp_path, monkeypatch
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    script_path = work_dir / "run.sh"
+    script_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    attempt = build_frozen_attempt(
+        attempt_id="s1:test:argv",
+        session_id="s1",
+        stage="read_qc",
+        method_name="read_qc.long_read_stats.seqkit_stats",
+        script_path=script_path,
+        working_dir=work_dir,
+        expected_outputs=[],
+        env=None,
+        env_spec=None,
+    )
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("app.execution.local_runner.subprocess.run", fake_run)
+
+    result = LocalRunner().run(attempt)
+
+    assert result.success
+    assert observed["command"] == [attempt.interpreter, str(attempt.script_path)]
+    assert observed["kwargs"]["shell"] is False
+
+
+@pytest.mark.parametrize("conda_env", [None, "env_read_qc"])
+def test_local_runner_rejects_env_setup_for_every_dispatch_path(
+    tmp_path, conda_env
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    script_path = work_dir / "run.sh"
+    script_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    attempt = build_frozen_attempt(
+        attempt_id="s1:test:env-setup",
+        session_id="s1",
+        stage="read_qc",
+        method_name="read_qc.long_read_stats.seqkit_stats",
+        script_path=script_path,
+        working_dir=work_dir,
+        expected_outputs=[],
+        env=None,
+        env_spec=None,
+    ).model_copy(
+        update={
+            "conda_bin": "conda" if conda_env else None,
+            "conda_env": conda_env,
+            "env_setup": "source /tmp/legacy-setup.sh",
+        }
+    )
+
+    with pytest.raises(ValueError, match="env_setup is unsupported"):
+        LocalRunner().run(attempt)

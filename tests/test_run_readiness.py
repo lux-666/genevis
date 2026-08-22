@@ -246,6 +246,116 @@ def test_local_method_failure_stops_before_llm_probe(tmp_path: Path) -> None:
     assert llm_calls == []
 
 
+def test_selected_method_rejects_zero_requirement_stage_fallback(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "envs.yaml"
+    config_path.write_text(
+        "default:\n"
+        "  conda_bin: /usr/bin/true\n"
+        "  fallback_env: test-env\n"
+        "stages:\n"
+        "  assembly:\n"
+        "    conda_env: test-env\n"
+        "packages: {}\n"
+        "methods:\n"
+        "  assembly_dedup.purge_dups:\n"
+        "    required_tools: [purge_dups]\n"
+        "  assembly_review.eval.quast:\n"
+        "    required_tools: [quast.py]\n"
+        "  assembly_review.eval.busco:\n"
+        "    required_tools: [busco]\n",
+        encoding="utf-8",
+    )
+    run_config = _assembly_config()
+
+    with pytest.raises(
+        RunReadinessError,
+        match=(
+            "assembly\\.candidate\\.flye: resolved env mapping declares no "
+            "required_tools or package_tools"
+        ),
+    ):
+        preflight_run_readiness(
+            run_config,
+            effective_methods=effective_method_closure(run_config),
+            config_path=config_path,
+            runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+                command, 0, "BUSCO 6.1.0\n", ""
+            ),
+            llm_probe=lambda: None,
+        )
+
+
+def test_selected_method_accepts_stage_level_requirement_mapping(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "envs.yaml"
+    config_path.write_text(
+        "default:\n"
+        "  conda_bin: /usr/bin/true\n"
+        "  fallback_env: test-env\n"
+        "stages:\n"
+        "  assembly:\n"
+        "    conda_env: test-env\n"
+        "    required_tools: [flye]\n"
+        "packages: {}\n"
+        "methods:\n"
+        "  assembly_dedup.purge_dups:\n"
+        "    required_tools: [purge_dups]\n"
+        "  assembly_review.eval.quast:\n"
+        "    required_tools: [quast.py]\n"
+        "  assembly_review.eval.busco:\n"
+        "    required_tools: [busco]\n",
+        encoding="utf-8",
+    )
+    run_config = _assembly_config()
+
+    methods = preflight_run_readiness(
+        run_config,
+        effective_methods=effective_method_closure(run_config),
+        config_path=config_path,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            "BUSCO 6.1.0\n" if command[-2:] == ["busco", "--version"] else "",
+            "",
+        ),
+        llm_probe=lambda: None,
+    )
+
+    assert "assembly.candidate.flye" in methods
+
+
+def test_selected_method_rejects_empty_resolved_requirement_mapping(
+    tmp_path: Path,
+) -> None:
+    config_path = _env_config(tmp_path / "envs.yaml")
+    document = config_path.read_text(encoding="utf-8").replace(
+        "    required_tools: [flye]\n",
+        "    required_tools: []\n",
+    )
+    config_path.write_text(document, encoding="utf-8")
+    run_config = _assembly_config()
+
+    with pytest.raises(
+        RunReadinessError,
+        match=(
+            "assembly\\.candidate\\.flye: resolved env mapping declares no "
+            "required_tools or package_tools"
+        ),
+    ):
+        preflight_run_readiness(
+            run_config,
+            effective_methods=effective_method_closure(run_config),
+            config_path=config_path,
+            runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+                command, 0, "BUSCO 6.1.0\n", ""
+            ),
+            llm_probe=lambda: None,
+        )
+
+
 def test_review_only_path_does_not_require_llm() -> None:
     review_only = RunConfig.model_validate(
         {

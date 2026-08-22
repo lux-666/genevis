@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.entrypoints.run import _run_bootstrap
 from app.execution.env_resolver import EnvResolver
@@ -105,8 +107,8 @@ class MethodPreflightTests(unittest.TestCase):
             conda.write_text(
                 "#!/bin/sh\n"
                 "last=''\n"
-                "for arg in \"$@\"; do last=\"$arg\"; done\n"
-                "[ \"$last\" = flye ] && exit 1\n"
+                'for arg in "$@"; do last="$arg"; done\n'
+                '[ "$last" = flye ] && exit 1\n'
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -134,6 +136,36 @@ class MethodPreflightTests(unittest.TestCase):
             self.assertIn("[tools]", output)
             self.assertIn("missing tool(s): flye", output)
             self.assertIn("Fix: install the listed executable", output)
+
+    def test_bootstrap_uses_active_config_environment_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conda = root / "conda"
+            conda.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            conda.chmod(0o755)
+            config = root / "host-envs.yaml"
+            config.write_text(
+                "default:\n"
+                f"  conda_bin: {conda}\n"
+                "  fallback_env: tools\n"
+                "methods:\n"
+                "  assembly.candidate.flye:\n"
+                "    required_tools: [flye]\n"
+                "packages: {}\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {"GENE_AGENT_ENVS_CONFIG": str(config)},
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = _run_bootstrap(argparse.Namespace(config=None, apply=True))
+
+            self.assertEqual(code, 0)
+            self.assertIn(f"Checking configuration: {config}", stdout.getvalue())
 
     def test_bootstrap_reports_missing_package_paths(self):
         with tempfile.TemporaryDirectory() as tmp:

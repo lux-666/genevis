@@ -759,6 +759,10 @@ durable progress as `fresh`, `checkpoint`, `partial`, or `unavailable`, and the
 local advisory execution-lock observation as `true`, `false`, or `null` when
 unknown. The lock does not prove remote liveness or scheduler state, and
 inspection must not create the control directory or lock file.
+`durable_resume_available` is true only when the frozen inputs verify and this
+read model proves a `checkpoint` row for the inspected session. Mere SQLite-file
+existence, an unreadable database, or a database without that session may still
+report `checkpoint_persistence: sqlite`, but cannot advertise resumability.
 
 ## 14. Checkpoint
 

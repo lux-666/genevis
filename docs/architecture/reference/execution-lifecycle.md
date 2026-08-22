@@ -207,7 +207,12 @@ current run's `work/steps/<workflow_step_id>/<stage>/` tree; the declared absolu
 lexically below that working directory and resolve somewhere inside the run;
 every expected output must resolve inside the run. The retained script must
 exist and match its frozen SHA-256. The Runner executes that exact declared path
-with the frozen working directory as cwd.
+with the frozen working directory as cwd. Production local dispatch is direct
+argv execution: either `<interpreter> <script_path>` or a `conda run` wrapper
+followed by that pair, always with `shell=False`. A non-empty legacy
+`FrozenAttemptSpec.env_setup` is unsupported and must fail before either
+dispatch path; environment overrides use the typed `env` mapping or a dedicated
+frozen setup script instead.
 
 After the occurrence gate and before checking live inputs or invoking the
 Runner, the run node searches the

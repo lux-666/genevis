@@ -435,9 +435,7 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
             ),
             "requested_assembly_method": draft.intent.requested_assembly_method,
             "use_ultralong_ont": draft.intent.use_ultralong_ont,
-            "use_hic_phasing": (
-                False if degraded else draft.intent.use_hic_phasing
-            ),
+            "use_hic_phasing": (False if degraded else draft.intent.use_hic_phasing),
         },
     }
     return AskPlanState(
@@ -472,11 +470,10 @@ def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
         "needed for every stated goal: combine multiple goals instead of stopping "
         "at the first one. Preserve the literal order and duplicate occurrences "
         "given in requested_stage_scope. When requested_stage_scope is non-empty, "
-        "it is a hard ceiling: do not add any other stage. A T2T goal normally "
-        "includes read_qc, genome_survey, assembly, assembly_dedup, "
-        "assembly_review, hic_scaffolding, gapcloser, t2t, base_polish, and a "
-        "finish assembly_review in that order. Set allow_local_execution=false "
-        "for gapcloser and base_polish because they have no local executor. "
+        "it is a hard ceiling: do not add any other stage. For a T2T goal, use "
+        "canonical_t2t_workflow from the context. Set allow_local_execution=false "
+        "for every stage listed in manual_only_stages because those stages have "
+        "no local executor. "
         "Choose methods "
         "that match the confirmed input platforms. Include a method choice for "
         "every selected stage that has selectable methods. For read_qc include "
@@ -502,6 +499,7 @@ def _plan_draft_context(plan: Any) -> dict[str, Any]:
     from app.configuration import load_descriptor_registry
     from app.entrypoints.ask_planner import _all_selectable_stages, _load_manifest
     from app.entrypoints.planner_catalog import load_planner_method_catalog
+    from app.workflow import MANUAL_ONLY_STAGES, recommended_workflow_template
 
     requested_scope = [
         str(stage)
@@ -555,6 +553,8 @@ def _plan_draft_context(plan: Any) -> dict[str, Any]:
         ),
         "available_stages_in_order": available_stages,
         "requested_stage_scope": requested_scope,
+        "canonical_t2t_workflow": list(recommended_workflow_template("t2t")),
+        "manual_only_stages": sorted(MANUAL_ONLY_STAGES),
         "methods_by_stage": methods_by_stage,
     }
 

@@ -27,9 +27,17 @@
 Bootstrap prepares mutable machine/project configuration. It is not a workflow
 run and it does not own biological inputs.
 
+`config/envs.yaml.example` is the committed generic seed. The default active
+`config/envs.yaml` is ignored, machine-local state created or updated by
+bootstrap; execution never falls back to the example when the active file is
+missing. Active-config selection is shared with execution: explicit
+`bootstrap --config PATH`, then `GENE_AGENT_ENVS_CONFIG`, then the repository
+default. An override should be absolute when callers may use different current
+directories.
+
 | Bootstrap owns | Bootstrap does not own |
 |---|---|
-| Missing or explicitly selected fields in `config/envs.yaml` | Run manifests, run configuration, `resource_refs`, artifacts, ledger events, checkpoints, or reports |
+| Missing or explicitly selected fields in the active environment mapping | Run manifests, run configuration, `resource_refs`, artifacts, ledger events, checkpoints, or reports |
 | Selected `GENE_AGENT_*` overrides in project `.env`, with secrets redacted and protected | Descriptor creation or method registration |
 | Validation of package paths and canaries declared in the active config | Installing arbitrary tools, Conda environments, reference databases, or workflow packages |
 | Probing configured method environments with execution-time precedence | Freezing a session or rebuilding the dependency snapshot of an existing session |
@@ -88,7 +96,8 @@ from that snapshot, not from later bootstrap edits. Each executable method then
 creates its narrower method-attempt freeze from the approved inputs and frozen
 dependency selection.
 
-Bootstrap probes the complete configured machine catalog. Separately, after a
+Bootstrap probes every package and method entry declared in the active machine
+mapping. Separately, after a
 run's final confirmation and TTY check, both structured run and TUI perform a
 read-only readiness probe for only the canonical effective method closure (and
 the mandatory LLM endpoint when the chosen workflow reaches one). The exact
@@ -96,3 +105,10 @@ same closure is then frozen into the dependency snapshot. A failed run-specific
 probe creates no session. A first-run bootstrap preview with no persisted config
 cannot probe a configuration that has not been written yet; the first `--apply`
 performs validation and preflight immediately after writing it.
+
+Every locally executable method in that selected closure must resolve through
+the active config to a non-empty `required_tools` and/or `package_tools`
+declaration. Method-level entries may override a stage-level declaration, while
+stage-level requirements remain valid user-authored configuration. A bare
+default Conda target or an empty resolved requirement set fails closed, so a
+configuration omission cannot become a zero-tool pass.

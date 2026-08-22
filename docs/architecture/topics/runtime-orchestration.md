@@ -28,18 +28,11 @@ All three paths are required. The manifest solely owns `session_id`; the CLI
 does not expose session, checkpointer, local-execution, launch, or ask
 overrides. `data-dir` is the layout root and the run lives at
 `<data-dir>/runs/<session_id>/`. The handler validates and canonicalizes both
-source documents and requires an explicit `requested_stages` JSON list. Each
-item is `{ "stage": "<stage>", "allow_local_execution": <boolean> }`.
-Freeze derives the method roster from stage configuration and the method
-catalog, then stores it in the canonical frozen `workflow_steps` projection.
-The list is an ordered occurrence sequence: it preserves operator order, may
-depart from registry order, and permits repeated stage names, subject to the
-sequence validation below. `allow_local_execution` authorizes only that
-occurrence's process execution. `requested_stages` must not be `null`;
-`[]` is the valid empty biological-stage plan. The handler freezes that exact
-sequence plus its conservative dependency closure.
-It publishes `input_manifest.yaml`, `run_config.json`, and
-`dependency_manifest.json` before publishing `frozen_inputs.json` last.
+source documents, freezes the literal operator-authored occurrence plan and its
+dependency closure, then enters the shared executor. Exact RunConfig fields,
+occurrence identity, authorization, empty-plan, publication-order, and immutable
+workflow-step rules belong to the
+[run-data contract](../reference/data-contract.md), not this explanatory topic.
 
 The accepted pre-freeze boundary requires manifest validation, before creating
 or publishing that frozen transaction, to prove every declared biological
@@ -49,13 +42,10 @@ decompressed byte and malformed compression fails. Container byte size alone is
 not sufficient. The exact intake invariant is owned by the
 [run-data contract](../reference/data-contract.md#49-declared-input-content-is-logically-non-empty).
 
-RunConfig owns the literal occurrence sequence. The absence of
-`assembly_review` after Assembly, Hi-C Scaffolding, T2T, or another assembly
-handoff producer is not a sequence error, and validation never inserts,
-reorders, or repairs Review occurrences. When Review is explicitly present,
-workflow projection binds it to the nearest earlier occurrence that owns the
-central `assembly` handoff. Structural validation and runtime candidate loading
-then verify that exact producer identity.
+RunConfig owns the literal occurrence sequence. Planning recommendations never
+become validation rules or silently insert/reorder Review. The exact reusable
+Review placement and producer-binding contract lives in
+[stage contracts](../reference/stage-contracts.md).
 
 `gene-agent tui` is an optional conversational intake/planning boundary that
 uses the same frozen publication and executor. Other public subcommands are
@@ -79,29 +69,13 @@ missing capability fails without publishing frozen inputs. An already-frozen
 blocked checkpoint remains recoverable through `inspect`, `review`, and
 `resume`, but it is not a second non-interactive new-run path.
 
-The frozen RunConfig review policy defaults to
-`review_policy.max_blocked_seconds: 300` and permits per-stage overrides only
-for stages registered with the review registry. `-1` waits indefinitely; `0`
-immediately normalizes the gate's eligible automatic request; a positive value
-starts an Enter-claim countdown that uses the same registered timeout-request
-normalizer at expiry. The timer never chooses from registry defaults. Assembly
-Review keeps its evidence-qualified LLM recommender, assembly route selection
-uses its registered recommendation normalizer, and Assembly, AutoHiC, and T2T
-parameter approval share a normalizer that accepts only the persisted
-recommendation bound to the immutable request. Gates without a normalizer remain
-manual. The resume transaction receives the active lease and a
-`ProjectionBoundary`; it may fall back to a manual decision only before intent
-commit (`awaiting_decision`). A committed automatic intent is recovered with
-`request=None`, never replaced by a manual decision. Identity or integrity
-drift fails closed.
-This mechanism exists only while the originating run is foreground and
-interactive. Enter cancels it and opens manual prompts. Ctrl-C, EOF, process
-exit preserve a durable human block; there is no daemon/background timer.
-Starting the frozen session again
-does not invoke an already-blocked checkpoint or restore its timer. Subsequent
-`review` and `resume` commands are manual and must not infer a deadline from the
-original block time. The public interfaces have no strict/auto review mode or
-resume-timeout override.
+Foreground gates use the frozen review policy and registered resolver while the
+originating executor remains attached. Process interruption preserves a durable
+manual block rather than a daemon deadline; later `review` and `resume` do not
+recreate the old countdown. Exact values, resolver eligibility, immutable
+bindings, and recovery states are owned by the
+[review contract](../reference/data-contract.md#12-review-contract) and explained
+operationally in [Review and resume](review-and-resume.md).
 
 ## Unified interactive execution
 
@@ -139,16 +113,10 @@ review briefs, Enter-claim countdowns, manual decisions, automatic timeout
 decisions, and terminal summaries. Entry points must not implement parallel
 gate or progress loops.
 
-Attached and detached progress call the same occurrence reducer defined by the
+Attached and detached progress call the same reducer defined by the
 [run-data contract](../reference/data-contract.md#410-one-workflow-progress-reducer).
-It consumes the verified frozen plan, canonical occurrence/session terminals,
-and a verified active gate. The attached controller invokes it only after the
-corresponding Ledger terminal and delivery events have committed. Detached
-inspection derives the same facts on demand; SQLite checkpoint availability and
-the execution progress marker/lock are adjacent operational signals only.
-Neither surface infers completion from the workflow cursor, last Ledger row, or
-`route_trace`, and neither publishes a progress artifact, progress table,
-background watcher, event bus, or second progress authority.
+Checkpoint, marker, and lock state remain execution diagnostics rather than a
+second progress authority.
 
 ## Parent graph
 
@@ -159,65 +127,22 @@ START -> route_controller -> selected stage subgraph
                             -> route_controller -> ... -> END
 ```
 
-Before graph entry, the frozen RunConfig is projected into `workflow_steps`.
-Inventory is always the implicit first occurrence (`step-000-inventory`) and
-each requested item becomes the next position-derived ID, for example
-`step-001-t2t`, `step-002-assembly_review`, and `step-003-t2t`. This immutable
-sequence is the sole runtime routing authority. The controller advances one
-position at a time, stops on a human block or terminal failure, and never
-appends, reorders, deduplicates, or fills in stages.
-
-Each frozen `assembly_review` step also contains
-`review_target: {resource_type: "assembly", producer_step_id: "..."}`. The
-producer ID is the exact earlier occurrence selected by the sequence analysis,
-not merely a stage name. Before candidate loading, Assembly Review verifies the
-central assembly `ResourceRef.source_stage` and `.workflow_step_id` against that
-target.
+Before graph entry, the operator plan is projected into immutable occurrence
+records consumed by the controller. The exact IDs, cursor rules, Review target,
+and settlement identities are owned by the run-data and stage contracts.
 
 `app.workflow.STAGE_ORDER` is a registration/default-planning/display aid. It
 is not runtime order or a successor table. The canonical complete-genome
-recommendation is the following occurrence sequence:
+occurrence recommendation is owned by
+[stage contracts](../reference/stage-contracts.md) and produced by
+`app.workflow.recommended_workflow_template`; runtime never treats that helper
+as a successor table.
 
-```text
-read_qc
--> genome_survey
--> assembly
--> assembly_dedup
--> assembly_review
--> hic_scaffolding
--> gapcloser
--> t2t
--> base_polish
--> assembly_review
--> done
-```
-
-The first Review evaluates the latest pre-scaffolding assembly handoff. The
-second occurrence reserves the finish-Review position after Base Polish. It
-will evaluate the Base Polish handoff once that stage implements and publishes
-one; with the current placeholder implementation, freeze binds this otherwise
-unreachable Review to T2T, the nearest actual handoff producer.
-`done` is the implicit parent terminal and is not written into RunConfig.
-Assembly-only planning may recommend the prefix through the first Review. The
-complete recommendation is editable planning guidance, not a RunConfig
-requirement: an operator may omit, move, or repeat stages before freeze, and no
-helper may rewrite the confirmed literal sequence. The controller does not
-inspect FASTQ contents, choose an assembler, build a command, or interpret
-biological metrics.
-
-Review placement follows delivery provenance rather than a named pipeline slot.
-For example, `assembly -> hic_scaffolding -> assembly_review` intentionally
-binds Review to the Hi-C occurrence, while `t2t -> assembly_review` binds it to
-T2T. In the canonical complete recommendation, the final Review currently also
-binds to T2T because Base Polish is not an assembly-handoff producer and runtime
-terminates at its `blocked_not_implemented` boundary before reaching Review.
-The intended future contract is that an implemented Base Polish occurrence
-publishes its own central assembly handoff, at which point the unchanged
-nearest-producer algorithm binds the following Review to Base Polish. Both
-`t2t` and `t2t -> base_polish` remain valid operator-authored sequence shapes
-without a later Review; the latter fails because Base Polish is unimplemented,
-not because Review is missing. The same rule applies when Gap Closing gains its
-central assembly handoff.
+The recommendation is editable planning guidance rather than a RunConfig
+requirement. The controller does not inspect FASTQ contents, select an assembler,
+build commands, or interpret biological metrics. Reusable Review follows proven
+assembly-delivery provenance; its exact placement examples and future producer
+rule remain in the stage contract.
 
 The controller wrapper is thin but not pure. Every settling stage path returns
 an explicit `workflow_step_outcome` for its active occurrence. A
@@ -246,19 +171,9 @@ stages.
 
 The parent registers ten domain stages explicitly in `app/graph/builder.py`; the
 subgraphs are composable but there is no dynamic plugin registry. `gapcloser` and
-`base_polish` are manual-only placeholders. The canonical complete-genome and
-manifest-derived recommendations include their intended positions with local
-execution disabled; generic prefix expansion omits them. A frozen occurrence of
-either terminates with `blocked_not_implemented`. An absent stage has no runtime
-occurrence and is not skipped. `None` is only an unfinished planner/TUI draft
-state; it is never executable semantics and public `gene-agent run` rejects JSON
-`null` before freeze.
-
-`workflow_steps` is the frozen runtime projection of the operator plan. Each
-occurrence carries its canonical `selected_method_names` roster derived from
-the frozen stage configuration and method catalog. Resume restores and applies only the decision bound to the
-interrupted occurrence; it does not rewrite the remaining sequence, method
-roster, or frozen run config.
+`base_polish` are manual-only placeholders and fail closed if reached. Resume
+applies only the decision bound to the interrupted immutable occurrence; it does
+not rewrite the remaining plan or method roster.
 
 `stage_seeds` are immutable stage-scoped RunConfig projections. Every repeated
 occurrence starts from a fresh copy of the same stage seed and its own copied

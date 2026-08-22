@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from app.execution import env_resolver
 from app.execution.env_resolver import (
-    DEFAULT_CONFIG_PATH,
     EnvResolver,
     EnvSpec,
     preflight,
@@ -35,8 +34,11 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             self.assertEqual(resolver.config_path, config)
             self.assertEqual(resolver.resolve(stage="unknown").conda_env, "shared_env")
 
-    def test_default_envs_yaml_loads_and_covers_core_mainline(self):
-        resolver = EnvResolver(DEFAULT_CONFIG_PATH)
+    def test_env_template_loads_and_covers_core_mainline(self):
+        template_path = (
+            Path(__file__).resolve().parents[1] / "config" / "envs.yaml.example"
+        )
+        resolver = EnvResolver(template_path)
 
         seqkit_spec = resolver.resolve(
             stage="read_qc",
@@ -82,7 +84,6 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             {pkg.name for pkg in packages}, {"autohic", "juicer", "three_d_dna"}
         )
         self.assertTrue(all(pkg.install_root for pkg in packages))
-
 
     def test_method_override_beats_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,6 +187,13 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 EnvResolver(Path(tmp) / "missing.yaml")
+
+    def test_missing_active_config_does_not_fallback_to_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_path = Path(tmp) / "config" / "envs.yaml"
+            with patch.object(env_resolver, "DEFAULT_CONFIG_PATH", active_path):
+                with self.assertRaises(FileNotFoundError):
+                    EnvResolver()
 
     def test_malformed_yaml_is_normalized_to_value_error(self):
         with tempfile.TemporaryDirectory() as tmp:

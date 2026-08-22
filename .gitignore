@@ -9,6 +9,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+config/envs.yaml
 config/envs.local.yaml
 
 data/

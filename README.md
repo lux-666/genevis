@@ -1,515 +1,171 @@
 # Gene Agent
 
-Gene Agent 是一个面向长读长基因组组装项目的 LangGraph 工作流
-Agent。它把传统生信 pipeline 中分散的脚本、参数、人工判断和运行记录，
-整理成可恢复、可审计、可人机协同决策的工程化流程。
+Gene Agent 是面向长读长基因组组装的可恢复、可审计工作流系统。它用
+LangGraph 编排已批准的本地生信工具，把 manifest、参数推荐、人工决策、
+运行证据和阶段产物保存在同一个 session 边界内。
 
-一句话概括：
-
-> 从测序数据或已有组装结果出发，Gene Agent 负责识别输入、规划分析阶段、
-> 调度已批准的本地生信工具、记录产物与证据，并在需要人工判断的位置停下来。
-
-## Prerequisites
-
-Gene Agent 的运行环境需要：
-
-- **Python 3.11+**，推荐通过 conda/mamba 创建专用环境（见 `docs/deployment/migration.md`）
-- **LLM API 端点**：assembly 参数推荐需要 LLM；符合条件的 review 超时自动决策也会使用 LLM。复制 `.env.example` 为 `.env` 并填入真实配置
-- **conda 工具环境**：所有生信工具（seqkit、flye、QUAST、BUSCO、minimap2 等）需在 `env_geno_exec`（或你自定义的 conda env）中可用。运行 `gene-agent bootstrap` 做一次性环境检查
-- **BUSCO lineage 数据**：离线或在线下载对应物种类群的 lineage（如 `insecta_odb10`），解压后通过 `assembly_review.busco.lineage_path` 指向
-- **输入数据**：长读长测序数据（FASTQ/FASTA），通过 manifest 声明
-
-开发机（Mac）只需 `gene_agent` conda 环境即可做代码开发和测试；真实生信执行在配有 GPU/大内存的 Linux 服务器或 HPC 上完成。
-
-## Why This Project Exists
-
-长读长基因组分析通常不是一次命令就能结束的任务。真实项目里会遇到：
-
-- 输入文件类型复杂：ONT、HiFi、CLR、CycloneSEQ long reads、short reads、Hi-C、已有 assembly 等。
-- 分析阶段长：read QC、genome survey、assembly、assembly review、Hi-C scaffolding、T2T finishing。
-- 方法选择依赖上下文：同一阶段可能有 Flye、NextDenovo、QUAST、BUSCO、AutoHiC、minimap2 等不同工具。
-- 中间结果巨大：FASTQ、FASTA、BAM、日志和指标表不适合塞进 agent state。
-- 生物学判断不能乱自动化：assembly 是否接受、Hi-C scaffolding 是否可信、T2T patch 是否采用，都需要证据和人工 gate。
-
-Gene Agent 的目标不是“替代所有生信专家”，而是把一个多阶段 genome project
-变成一个有状态、有证据、有恢复能力的工作流系统。
-
-## Stage Registry And Planning Recommendations
+当前可直接使用的 raw-read contig 路径完整保留五个分析阶段：
 
 ```text
-inventory
--> read_qc
--> genome_survey
--> assembly
--> assembly_dedup
--> assembly_review
--> hic_scaffolding
--> gapcloser
--> t2t
--> base_polish
--> done
+Read QC (`read_qc`)
+-> Genome Survey (`genome_survey`)
+-> Assembly (`assembly`)
+-> Assembly Dedup (`assembly_dedup`)
+-> Assembly Review (`assembly_review`)
 ```
 
-This is the unique stage registry/display order, not an automatic planning
-template or runtime successor table. It includes the manual-only `gapcloser`
-and `base_polish` placeholders. Runtime order comes only from the literal
-frozen `requested_stages` occurrence list. The recommended Assembly template
-appends `assembly_dedup` and then `assembly_review`; the complete-genome
-recommendation includes the full intended handoff sequence:
+Inventory 会在冻结计划时作为隐式第一步加入。完整的 stage 合同、可执行方法和
+当前实现状态分别由
+[stage contracts](docs/architecture/reference/stage-contracts.md)、
+[descriptor registry](descriptors/registry.yaml) 和
+[implementation map](docs/architecture/langgraph-implementation-map.md) 维护；
+README 不复制第二份方法表或完整工作流数组。
 
-```text
-read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
--> hic_scaffolding -> gapcloser -> t2t -> base_polish -> assembly_review
-```
+## Current Capabilities
 
-The parent graph is composable but statically registered in `app/graph/builder.py`;
-it does not dynamically discover stage plugins or insert successor stages.
-`assembly_review` is an optional reusable stage: freeze binds each explicit
-Review to the nearest earlier assembly handoff but never inserts a missing
-Review or rejects a sequence merely because Review is absent. These are editable
-planning recommendations, not a fixed RunConfig sequence; a caller may bypass
-planning and provide the exact literal occurrence list it wants to execute.
-The owner contracts are [runtime orchestration](docs/architecture/topics/runtime-orchestration.md)
-and [stage contracts](docs/architecture/reference/stage-contracts.md).
+- 结构化 `manifest + RunConfig` 的确定性启动入口；
+- 可选 TUI intake 与可编辑规划；
+- occurrence 级本地执行授权，允许同一 stage 重复出现；
+- 方法级 freeze/run/collect 与可验证 Artifact/Ledger 证据；
+- SQLite checkpoint、人工 gate、`inspect`、`review` 和 `resume`；
+- 完整五阶段 contig 路径，以及非默认后续路径中已接线的 Hi-C scaffolding
+  与 T2T 能力；
+- 对未实现的 GapCloser/Base Polish fail closed，不伪装成功。
 
-`gapcloser` 和 `base_polish` 当前只是父图中已注册的 manual-only
-placeholder：完整流程推荐会列出它们并关闭本地执行授权；显式运行到达时会以
-`blocked_not_implemented` fail closed，不会伪装成已经执行。
+精确运行、冻结、进度和恢复语义由
+[run-data contract](docs/architecture/reference/data-contract.md) 等 reference owner
+维护；[runtime orchestration](docs/architecture/topics/runtime-orchestration.md) 只负责解释
+这些合同如何连接。
 
-核心原则是保持 top-level state 很小：graph state 只保存 session、当前阶段、
-artifact ref、route trace、interrupt 信息等控制字段；大文件、日志、指标表和
-脚本都落在 artifact registry、ledger 或运行目录里。
+## Architecture at a Glance
 
-## What It Can Do Today
-
-已实现的核心能力：
-
-- **LangGraph stage orchestration**：thin parent graph 负责路由，每个生信阶段封装成独立 subgraph。
-- **Deterministic workflow entry**：操作员可用结构化 manifest 和 run config 通过 `gene-agent run` 启动可复现运行；TUI 仍提供可选的对话式 intake 与规划。
-- **Verified frozen-input consumption**：executor 在建图前验证完整冻结事务；Inventory 只消费该 in-memory verified bundle，trace 也不会信任 hash-invalid 的 run config。
-- **Opt-in local execution**：只有显式批准的 occurrence 才会真正运行本地工具；同一 stage 的重复 occurrence 可分别授权或拒绝。未批准或未满足条件时输出计划、blocked state 或 review gate。
-- **Shared execution boundary**：通过 `EnvResolver`、`env_dispatch`、`LocalRunner` 统一解析 conda 环境、做 preflight、冻结命令并收集产物。
-- **Durable resume**：基于 sqlite checkpointer、ledger 和 decision file，支持跨进程恢复 `assembly_review`、`hic_scaffolding` 等人工 gate。
-- **Human-in-the-loop review**：review registry 统一声明 gate、允许的决策、occurrence 校验、dispatch 与 timing metadata；stage code 仍拥有 payload 语义、prompt 分支和 resume effects。
-- **Reusable assembly review**：每个 Review occurrence 都冻结一个精确的 assembly producer target，并验证 central `ResourceRef` provenance 后才加载 candidate；后续 Review 复用同一合同。
-- **Operator observability**：`inspect` 和 session run trace 从 durable records
-  还原状态、下一步动作和关键 artifact；blocked/failed operator report 是运行边界
-  写下的 live compact projection，当前重建限制见 architecture conformance。
-
-当前 descriptor registry 中的全部方法都具有已接线的运行或规划语义：
-
-| Stage | Registered capabilities |
-|---|---|
-| inventory | —（注册 manifest assets，不选择工具） |
-| read_qc | SeqKit stats、显式 planner-only skip、SeqKit length filter |
-| genome_survey | Jellyfish、GenomeScope2 |
-| assembly | Flye、Hifiasm、Hifiasm-ONT、NextDenovo |
-| assembly_dedup | purge_dups |
-| assembly_review | QUAST、BUSCO |
-| hic_scaffolding | AutoHiC（内部使用 Juicer、3D-DNA 和模型校正） |
-| t2t | minimap2 |
-
-`gapcloser` 和 `base_polish` 不在 descriptor registry 中，也不允许写入
-`allow_local_execution: true`。它们目前只有父图位置、严格状态合同和显式失败边界，没有可执行方法。
-
-未实现的方法不进入 registry，也不出现在当前能力表中。
-
-## Architecture
-
-```text
-app/
-  workflow.py   stage registry order, default planning, and failure predicates
-  control/      frozen occurrence plan plus lifecycle and resume semantics
-  domains/      stage-neutral biological rules and shared input parsing
-  graph/        parent LangGraph, route controller, checkpoint factory
-  stages/       one subgraph per biological workflow stage
-  schemas/      typed contracts for state, assets, plans, descriptors, artifacts
-  execution/    env resolution, frozen attempts, local runner, process evidence
-  storage/      run layout, artifact publication/index, parameter evidence, ledger
-  review/       review gate registry, policies, recommendation/resume helpers
-  reports/      operator reports and run traces
-  entrypoints/  CLI boundaries, planner/TUI, review/resume commands
-
-docs/
-  architecture/
-    README.md               topic router and architecture graph
-    topics/                 system map and task-oriented subsystem design
-    reference/              exact contracts, governance, and conformance debt
-  deployment/               installation and server-execution guidance
-  user_guide/               current operator guides
-```
-
-The parent graph intentionally stays thin:
+Gene Agent 把操作入口、冻结的运行事实、生物阶段图、方法执行和持久证据
+分开管理。父图刻意保持很薄：
 
 ```text
 START -> route_controller -> <stage_subgraph> -> route_controller -> END
 ```
 
-Stage subgraphs own method planning, validation, execution handoff, artifact
-collection and review boundaries. This keeps biological method choice out of
-the parent router and makes each stage independently testable.
+`route_controller` 只按冻结的 occurrence 计划路由；每个 stage subgraph 自己负责
+阶段内方法规划、验证、执行交接、产物收集和人工 gate。大型文件和日志
+始终留在运行目录/Artifact/Ledger 边界，不塞进 top-level graph state。
 
-## Quickstart: Contig Assembly
+```text
+app/
+  entrypoints/  public CLI, TUI, inspect, review and resume boundaries
+  workflow.py   stage registry and canonical recommendation helpers
+  graph/        thin parent graph, routing and checkpoint integration
+  control/      frozen occurrence lifecycle, settlement, progress and resume
+  stages/       one biological subgraph per registered stage
+  execution/    environment resolution, attempt freeze, runner and evidence
+  storage/      run layout, Artifact/Resource indexes and Ledger
+  schemas/      typed input, plan, state and evidence contracts
+  review/       human-gate registry and decision application
+  reports/      operator-facing projections without control authority
+```
 
-从长读长测序数据出发，跑通 contig 级组装（Read QC → Genome Survey → Assembly
-→ Dedup → Assembly Review）的最短路径：
+开发者从 [Developer Guide](docs/developer_guide/README.md) 进入权威 architecture map；
+操作员从 [User Guide](docs/user_guide/README.md) 进入安装、运行和恢复文档。
+这个概览保留系统边界，但不成为 schema、workflow 数组或默认值的第二权威。
 
-### 1. 准备环境
+## Host Boundary
+
+Mac 开发机负责编辑和代码测试；真实生信工具在 Linux 服务器或 HPC checkout 中由
+同一个 CLI 本地执行。Gene Agent 不提供内置 SSH、远程 runner 或调度器提交后端。
+
+真实 contig 运行需要：
+
+- Python 3.11+ 的 `gene_agent` orchestrator 环境；
+- 所选方法对应的 Conda 工具环境；
+- Assembly 参数推荐所需的可达 LLM endpoint；
+- Assembly Review 所需的有效 BUSCO lineage；
+- 足够的 CPU、内存和存储。GPU 只在所选方法本身需要时才是要求。
+
+新主机安装见 [New Host Setup](docs/deployment/migration.md)。Mac/server 的 Git
+交付边界见 [Mac Development and Server Execution](docs/deployment/mac_dev_server_pull.md)。
+
+## Quickstart: Five-stage Contig Run
+
+### 1. Install the orchestrator
 
 ```bash
-# 复制并编辑环境变量
-cp .env.example .env
-chmod 600 .env
-# 编辑 .env，填入 LLM API key 等信息
+conda create -n gene_agent python=3.11 -y
+conda run -n gene_agent pip install -e '.[dev]'
+```
 
-# 检查工具环境（需要联网或已配置好 conda）
+Python 依赖的唯一权威是 [pyproject.toml](pyproject.toml)。
+
+### 2. Prepare and check the host
+
+```bash
 conda run -n gene_agent gene-agent bootstrap
+# 审阅计划后，需要写入配置时再执行：
+conda run -n gene_agent gene-agent bootstrap --apply
+
+bash scripts/server_check.sh
+bash scripts/server_test.sh
 ```
 
-### 2. 准备输入文件
+`config/envs.yaml.example` 是提交到 Git 的通用种子；bootstrap 生成或更新的
+`config/envs.yaml` 是被忽略的本机配置，不再作为仓库共享配置提交。
+`server_check.sh` 检查 orchestrator 前置条件和权威 contig 模板选中的
+工具/package closure；真实
+`gene-agent run` 还会检查输入、LLM 和 BUSCO lineage。`server_test.sh` 只做代码回归、
+compile 和 diff 检查，不是真实数据生信 smoke test。
 
-从 `docs/examples/` 复制模板并填写：
+### 3. Copy the authoritative templates
 
-- `docs/examples/contig_manifest.template.yaml` → `manifest.yaml`
-  - 替换 `session_id`、`sample_id`、`genome_size_estimate`、测序文件路径和平台
-- `docs/examples/contig_run_config.template.json` → `run_config.json`
-  - 替换 BUSCO lineage 路径为你的实际路径
-  - 调整 genome survey 的 k-mer/hash 参数，以及 `assembly_method`、`read_type`、线程数
+```bash
+cp docs/examples/contig_manifest.template.yaml /server/path/manifest.yaml
+cp docs/examples/contig_run_config.template.json /server/path/run_config.json
+```
 
-其他模板参考：
+替换 manifest 中的 session/sample、基因组大小和 reads 路径，并在 RunConfig 中填写
+真实 BUSCO lineage。当前 contig 模板选择 Flye；如果更换 assembler，必须同步安装并
+检查该方法派生出的完整工具 closure，不能只改方法名。
 
-| 模板 | 适用场景 |
-|---|---|
-| `contig_manifest.template.yaml` + `contig_run_config.template.json` | 测序数据 → contig 组装 |
-| `existing_assembly_manifest.template.yaml` + `assembly_review_run_config.template.json` | 已有 assembly → review only |
-| `repeated_stage_occurrences_run_config.template.json` | 多次重复 stage（如多轮 review） |
+不要把真实输入路径、样本信息、BUSCO 数据、`.env` 或运行目录提交到 Git。
 
-### 3. 运行
+### 4. Start the run
 
 ```bash
 gene-agent run \
-  --manifest /absolute/path/to/manifest.yaml \
-  --run-config /absolute/path/to/run_config.json \
-  --data-dir /absolute/path/to/data
+  --manifest /server/path/manifest.yaml \
+  --run-config /server/path/run_config.json \
+  --data-dir /server/path/data
 ```
 
-运行需要真实 TTY 终端（stdin/stdout 都是 interactive）。流程会依次执行
-`inventory → read_qc → genome_survey → assembly → assembly_dedup →
-assembly_review`，遇到 assembly parameter approval 和 assembly review
-human gate 时停下来等待人工决策。
+新运行需要 stdin/stdout 都连接真实 TTY。计划顺序、重复 occurrence、本地执行授权和
+gate 行为来自已验证并冻结的 RunConfig，README 不维护它们的第二份精确说明。
 
-### 4. 恢复与检查
-
-进程中断后，用 `inspect` 查看状态，用 `review` 或 `resume` 继续：
-
-```bash
-gene-agent inspect --session-id <SESSION> --data-dir /abs/path/to/data
-gene-agent review --session-id <SESSION> --data-dir /abs/path/to/data --checkpointer sqlite
-```
-
-## How To Run It
-
-真实/操作员运行从确定性的结构化输入边界开始：
-
-```text
-gene-agent run --manifest PATH --run-config PATH --data-dir PATH
-```
-
-`manifest` 是唯一的 `session_id` 所有者；`data-dir` 是布局根目录，运行输出固定在
-`<data-dir>/runs/<session_id>/`。命令在写出任何运行输入之前校验并规范化两个文件，
-要求 run config 显式提供 `requested_stages` JSON 对象列表；每项形如
-`{"stage": "assembly_review", "allow_local_execution": true}`，其中 stage
-定义一个有序 occurrence，布尔值只授权该 occurrence 启动本地进程。列表保留字面
-顺序、允许重复且无需遵循 registry order，但必须通过 RunConfig 序列校验；冻结时
-系统再把每个 occurrence 的方法 roster 写入 canonical `workflow_steps`。
-冻结时会在首位隐式加入 `step-000-inventory`，其余 `step_id`
-由列表位置生成。`requested_stages` 不得为 `null`，但 `[]` 是有效的 inventory-only
-计划。随后命令冻结 occurrence 序列及保守的依赖闭包，并以 SQLite 执行已冻结的
-会话。冻结发布顺序为
-`input_manifest.yaml`、`run_config.json`、`dependency_manifest.json`，最后才是提交标记
-`frozen_inputs.json`。
-
-例如，复制并填写 `docs/examples/` 的模板后：
-
-```bash
-gene-agent run \
-  --manifest /absolute/path/to/manifest.yaml \
-  --run-config /absolute/path/to/run_config.json \
-  --data-dir /absolute/path/to/data
-```
-
-新的结构化运行要求 stdin/stdout 都连接真实 TTY；校验失败会在 freeze 前退出，不会
-发布 frozen inputs。公共 `run` 不提供非交互新运行分支。到达 gate 后，当前终端负责
-倒计时、人工决定和继续执行；若进程中断，durable `blocked_human` checkpoint 仍可通过
-`inspect`、`review` 和 `resume` 恢复。
-
-`gene-agent tui` 是可选的对话式 intake/规划入口：它收集样本事实、生成可编辑 Plan
-Draft，并在确认后进入同一冻结和执行边界。未回答 stage selection 是 `None`；明确选择
-Inventory-only 是 `[]`。当推荐为空时，stage prompt 的 Enter 明确接受这个
-Inventory-only 推荐，跳过 occurrence-local consent、method 与 parameter 问题，随后进入
-final confirmation。`bootstrap` 只是初始化或修复本机配置的辅助工具。
-
-`bootstrap --apply` 在写入 `config/envs.yaml`、完成 Juicer conformance 后，
-还会在当前主机逐项检查配置中的全部 method。检查使用实际 method -> stage ->
-default 解析出的 conda 环境执行 `conda run ... command -v`，并按相同环境去重。
-AutoHiC、Juicer、3D-DNA、juicer-tools 的安装目录、canary 和模型路径仍由 package
-preflight 检查。任何失败都会列出具体 method、conda target、缺失工具或路径以及
-修复提示；修好后重新运行 bootstrap 即可。
-
-### 1. Optional TUI / Plan Layer: choose stages
-
-TUI 的入口就是启动一个交互式对话框：
-
-```bash
-gene-agent tui
-```
-
-启动后会出现类似提示：
-
-```text
-=== gene-agent interactive ===
-
-Describe what you want to do (e.g. '对 /path/reads.fa 以卵鳎为目标物种进行 T2T 级别基因组组装'):
->
-```
-
-这时输入一句话任务，例如：
-
-```text
-对 /data/project/reads.fastq.gz 以卵鳎为目标物种进行 chromosome 级别基因组组装
-```
-
-TUI 的实际流程是：
-
-1. 让用户用自然语言描述任务。
-2. 用 LLM intent parser 和保守的本地识别器确定 intake 追问范围；这一步只决定还要问哪些样本事实，不决定最终 stages。
-3. 逐项确认当前 intake 支持的 HiFi、ONT、成对 Hi-C、物种和 telomere motif，并持续重建 `manifest_draft.yaml`。
-4. intake 完成后，把原始请求、确认后的 manifest 和现有 method catalog 交给 LLM，生成一个复用 `AskPlanState` 字段的 Plan Draft：有序 `{stage, allow_local_execution}` occurrence、methods 和部分 planning-time parameters；冻结时再将 methods 物化为每个 occurrence 的 `selected_method_names` roster。
-5. 进入现有 `Plan Draft` 页面，展示 session、data dir、manifest、inputs、occurrences、methods、parameters 和 attention 项。
-6. 在 draft 里可以按 `Enter/c` 继续，按 occurrence 编号编辑单项，按 `s` 编辑可重复的有序 occurrence list，按 `r` 丢弃当前 draft；丢弃后可通过 `/resume` 重新生成。
-7. 进入单个 occurrence 后，可以按 `l` 单独授权/拒绝本地执行，按 `m` 改 stage-scoped method，按 `p` 改 parameters，按 `b` 返回 draft。依赖上游结果的运行期推荐参数仍显示为 deferred，不在这里伪造数值。
-8. draft 锁定后不会立刻执行；TUI 会再展示 final run plan 并询问 `Proceed?`。拒绝时返回同一个 Plan Draft 继续编辑。
-9. 用户确认后，TUI 写出 occurrence 对象；每个布尔值只授权对应 occurrence 是否可在本机启动工具，冻结时再派生 `selected_method_names`。
-10. TUI 冻结输入后，在同一进程内调用 session executor；不会再拼装或启动另一个 CLI 命令。运行中遇到 human gate 时，TUI 在 sqlite checkpoint 上收集决策、写 decision artifact、更新 checkpoint 并继续 graph。
-
-当前 TUI intake 的输入范围是 PacBio HiFi、ONT 和显式成对的 Hi-C reads，外加
-物种及 telomere motif。CLR、CycloneSEQ、short reads 和已有 assembly 尚未接入
-这段追问流程。规划 LLM 失败或返回非法 draft 时，本次规划中止并保留草稿供
-`/resume` 重试，不使用确定性 stage plan 回退。
-
-TUI 最终会把选择落到与
-`docs/examples/contig_run_config.template.json` 相同的 RunConfig 合同。该文件是
-raw reads 到 contig 五阶段流程的唯一权威配置示例；README 不再复制一份可能漂移的
-完整 JSON。
-
-`requested_stages` 的字面顺序就是业务 occurrence 顺序；未列出的 stage 没有运行时
-occurrence，也不会伪造 skipped 事件。每个 item 的 `allow_local_execution` 只决定
-该 occurrence 能否启动本地进程。冻结时系统根据 stage 配置和 method catalog
-派生每个 occurrence 的 roster，并将其写入 canonical `workflow_steps`。对公共
-`gene-agent run`，它必须是显式、非
-`null` 的 JSON 对象列表；`None` 只表示 planner/TUI 尚未完成的草稿，不能进入冻结
-或运行边界。
-
-### 2. RunConfig Layer: choose execution and parameters
-
-`requested_stages` 的每个对象同时说明“要走哪个阶段”和“该阶段是否授权本地执行”。
-方法选择和参数由各 stage 的 config 控制；冻结后的 `workflow_steps` 才保存派生的
-`selected_method_names` roster。
-
-从 long reads 执行 read QC、genome survey、Flye、purge_dups 和
-QUAST/BUSCO review 的完整例子只维护在
-`docs/examples/contig_manifest.template.yaml` 与
-`docs/examples/contig_run_config.template.json`。RunConfig 不接受说明性元数据或
-`assembly_dedup` 参数块；purge_dups 的方法 roster 由 descriptor 派生。
-
-用户提供的 genome size 属于输入样本事实，只写在 manifest 的
-`genome_size_estimate`；RunConfig 不重复保存该值。运行中由 genome survey
-得到的测量值则保留为独立的 stage output。
-
-`allow_local_execution` 是 occurrence 级本地执行授权边界：只有为 `true` 的
-requested-stage 对象才可启动本地工具，`assembly_dedup` 也遵守同一规则。同名
-stage 的两个 occurrence 可以分别授权或拒绝本地执行。`false` 只是否决当前
-occurrence 启动本地进程，不能用来绕过 workflow sequence、必填 stage config 或
-冻结前输入校验；例如任一 `assembly_review` occurrence 都必须提供完整 BUSCO lineage
-配置。lineage 会按声明的 odb10/odb12/odb12.2 合同检查 `dataset.cfg` identity 和计数、
-HMM profiles、`scores_cutoff`、版本所需的 `lengths_cutoff` 以及 reference data。
-重复 Read QC 的 `[false, true]` 仍按各 occurrence 独立执行授权。
-
-`review_policy.max_blocked_seconds` 的默认值是 `300`。可在
-`review_policy.stages.<stage>.max_blocked_seconds` 为已注册的 review stage 覆盖；
-未注册 stage 会被拒绝。`-1` 表示无限等待人工决定；`0` 表示在前台交互运行中立即
-触发该 gate 已有且仍满足资格的自动 resolver；正整数则给出按 Enter 可接管的倒计时，
-并在到期时触发同一 resolver。timer 本身不提供决定，也不会从 registry 默认项伪造
-批准。当前 Assembly Review 保留原有的 evidence eligibility + LLM recommendation
-链，assembly route selection 保留原有的推荐路线 timeout applier；Assembly、AutoHiC
-和 T2T 的 parameter approval 共用一个 resolver，只能接受 immutable request 绑定的
-当前持久化推荐。没有 resolver 的 gate 仍直接进入人工处理。自动 transaction 失败时，
-只有同一个 blocked request 仍可验证，当前终端才回落人工提示；身份或完整性漂移会
-fail closed。倒计时只存在于由 `run` 或 TUI 启动的原始 attached executor 中：按 Enter
-会取消倒计时并打开人工决策提示；Ctrl-C、EOF 或进程退出只留下 durable
-`blocked_human` checkpoint。之后必须用 `review` 或带 decision file 的 `resume` 人工
-处理；重新执行同一 frozen session 也只显示这些人工恢复命令，不调用 blocked graph、
-不按旧的 `blocked_at` 或已流逝的时间自动采纳，也没有 daemon/background wake。公共
-`resume` 没有 review timeout 覆盖，且不存在 strict/auto review mode。
-
-`run` 是公开的确定性新运行边界；它不接受 `session-id`、checkpointer 或
-`local-exec` 覆盖参数。TUI 负责可选的对话式输入、确认计划和冻结 handoff；两条路径
-都只通过同一 frozen-session executor 运行。
-
-### 3. Stage selection and gates
-
-即使 `requested_stages` 里包含某个 stage，stage 内部仍会根据 manifest、
-artifact registry 和已有产物决定执行、跳过或阻塞。
-
-几个实际例子：
-
-- **existing assembly input**：如果 manifest 提供已有 assembly，Inventory 将它注册为
-  central `assembly` resource。`assembly_review` 是通常推荐的首个分析 occurrence，
-  不是公共 `gene-agent run` 的冻结前限制；公共 run 保留操作者提供的 occurrence
-  顺序。每个实际到达的 stage 自行校验其输入，未列 stage 没有 occurrence，也不会生成
-  synthetic skip。
-- **Hi-C scaffolding**：父图只在当前冻结 occurrence 是 `hic_scaffolding` 时进入
-  该子图；未列入 `requested_stages` 就没有这个 occurrence，也不产生 bypass/skip
-  事件。一旦到达，stage 会检查 contig assembly、成对 Hi-C R1/R2 reads 和 AutoHiC
-  运行配置，缺少必要条件会以 `blocked_missing_requirements` 终止，而不会写
-  stage-local skip。AutoHiC 是固定且唯一的方法；LLM 推荐限制酶并等待人工
-  批准后，AutoHiC 内部完成 Juicer mapping、3D-DNA scaffolding、深度学习
-  纠错、染色体划分和 HTML report 生成，最后进入染色体组装采纳 gate。
-- **human gates**：`assembly_review`、`hic_scaffolding`、`t2t` 等阶段会在需要
-  人工判断时进入 `blocked_human`，并写 review request artifact。
-
-`RunConfig.requested_stages` 是编译后 occurrence list 的唯一执行权威；manifest
-只声明输入资产和样本事实，不携带全局 assembly 目标：
-
-```yaml
-session_id: demo-session
-sample_id: demo
-genome_size_estimate: 500000000
-assets:
-  - asset_type: raw_long_reads
-    paths:
-      - /absolute/path/to/reads.fastq.gz
-    platform: ont
-    format: fastq
-  - asset_type: hic_reads_registered
-    paths:
-      - /absolute/path/to/hic_R1.fastq.gz
-      - /absolute/path/to/hic_R2.fastq.gz
-    platform: illumina
-    layout: paired
-    format: fastq
-```
-
-如果目标仅为 contig level，规划时不应选择 `hic_scaffolding`；父图会按
-冻结的 `requested_stages` 根本不创建该 occurrence。用户明确选择 Hi-C 后，只有
-对应 occurrence 的 `allow_local_execution: true` 才允许按 AutoHiC 流程启动本地
-工具。
-
-## Inspect / Review / Resume
-
-Inspect a durable session:
+### 5. Inspect or recover
 
 ```bash
 gene-agent inspect \
   --session-id <SESSION> \
-  --data-dir /absolute/path/to/data
+  --data-dir /server/path/data
 ```
 
-外部同时启动多个 contig 时，每个 contig 仍是一份 manifest、RunConfig 和唯一
-`session_id`，分别调用同一个 `run`。聚合方只轮询各 session 的只读 JSON：
-
-```bash
-gene-agent inspect \
-  --session-id <SESSION> \
-  --data-dir /absolute/path/to/data \
-  --json
-```
-
-`inspect_schema_version: 1` 提供 occurrence 级 `workflow_progress` 和 `execution`；
-它们直接来自 verified frozen plan、Ledger、checkpoint 与本机 execution lock，不会
-写回批次状态或进度投影。`inspect --trace` 会生成 report，不能作为轮询协议。
-
-Review and resume a blocked human gate:
-
-```bash
-gene-agent review \
-  --session-id <SESSION> \
-  --data-dir /absolute/path/to/data \
-  --checkpointer sqlite
-```
-
-Generate a decision template for automation:
-
-```bash
-gene-agent inspect \
-  --session-id <SESSION> \
-  --data-dir /absolute/path/to/data \
-  --write-decision-template /absolute/path/to/decision.json
-
-gene-agent resume \
-  --session-id <SESSION> \
-  --data-dir /absolute/path/to/data \
-  --decision-file /absolute/path/to/decision.json \
-  --checkpointer sqlite
-```
-
-## Adding a Registered Method Capability
-
-The invariant is **registered = wired behavior**: a local method needs a real
-execution adapter, while a `planner_only` method needs explicit, tested routing
-semantics and must not pretend to launch a process. A new method is added as one
-complete slice:
-
-1. add or reuse its package descriptor and add its method descriptor;
-2. register the package, method, and stage entry in
-   `descriptors/registry.yaml`;
-3. for `local` execution, implement a stage adapter that prepares
-   `FrozenAttemptSpec` values and collects biological outputs through the shared
-   execution lifecycle; for `planner_only`, implement the explicit no-process
-   stage behavior;
-4. add stage routing and run-config validation for its actual parameters;
-5. expose the canonical method ID to the planner where user selection applies;
-6. add selection, execution, failure, and artifact tests.
-
-`tests/test_registry_executable_invariant.py` derives registered local coverage
-from imported lifecycles, verifies each shared freeze/run/collect graph and
-outer stage node, and proves the planner-only Read-QC skip route cannot launch
-a filter attempt. Descriptor/configuration tests also fail closed on undeclared
-descriptor YAML fields.
-
-## Verification
-
-Primary regression suite:
-
-```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache \
-conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v
-```
-
-Compile check:
-
-```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache \
-conda run -n gene_agent python -m compileall app tests
-```
+人工 review、decision template、恢复命令、`inspect --trace` 与 session summary 的区别
+见唯一操作手册 [Run and Recovery](docs/user_guide/run-and-recovery.md)。
 
 ## Current Boundaries
 
-Intentional boundaries:
+- 本地进程执行必须由对应 occurrence 显式授权；
+- 大型 FASTQ/FASTA/BAM、日志和结果表不进入 LangGraph state；
+- `gapcloser`、`base_polish` 当前是 manual-only placeholder；
+- 当前版本没有 checkpoint migration。更新含活动 session 的服务器 checkout 前，先
+  完成运行或保留旧 checkout 与对应环境；
+- 本机缺少真实生信工具只说明本机不是已配置执行主机，不等同于产品回归失败。
 
-- No in-agent remote execution. Real heavy bioinformatics runs happen by running the same CLI inside the server/HPC checkout.
-- Real execution is opt-in per stage. The agent should not silently launch expensive tools.
-- Unimplemented methods remain outside the descriptor registry.
-- Large biological files stay outside graph state.
+## Documentation Authority
 
-## Read More
-
-- `docs/architecture/README.md`：按问题选择主题、沿依赖边按需加载设计
-- `docs/architecture/topics/system-map.md`：系统地图与两级冻结边界
-- `docs/architecture/topics/tui-and-planning.md`：TUI、规划和整次运行输入冻结
-- `docs/architecture/topics/execution.md`：方法级 freeze/run/collect 生命周期
-- `docs/architecture/topics/data-and-storage.md`：状态、资源、artifact、ledger 和 checkpoint 的数据流
-- `docs/architecture/reference/stage-contracts.md`：各阶段输入/输出合同
-- `docs/architecture/reference/conformance.md`：已接受设计与当前实现之间的明确差距
-- `docs/deployment/migration.md`：新机器安装与验证
-- `docs/deployment/mac_dev_server_pull.md`：Mac 开发与服务器/HPC 执行边界
+- [Documentation Map](docs/README.md)：仓库级权威矩阵和文档维护规则；
+- [User Guide](docs/user_guide/README.md)：操作员的安装、运行、gate 和恢复入口；
+- [Developer Guide](docs/developer_guide/README.md)：开发者按改动类型进入权威合同和代码；
+- [Architecture Map](docs/architecture/README.md)：按问题选择 topic/reference；
+- [Run and Recovery](docs/user_guide/run-and-recovery.md)：唯一操作员运行与恢复手册；
+- [Parameter Recommendation](docs/user_guide/parameter_recommendation.md)：操作者如何查看和批准参数推荐；
+- [New Host Setup](docs/deployment/migration.md)：新主机安装；
+- [Mac/Server Workflow](docs/deployment/mac_dev_server_pull.md)：Git 同步和服务器更新；
+- [Configuration Examples](docs/examples/)：可复制、schema-valid 的输入模板。
