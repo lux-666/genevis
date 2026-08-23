@@ -608,6 +608,9 @@ class T2TFinishingBundle(BaseModel):
 
 ASSEMBLY_INPUT_PROFILE = "assembly.input_profile"
 ASSEMBLY_ROUTE_DECISION = "assembly.route_decision"
+ASSEMBLY_METHOD_MODEL_REQUEST = "assembly.method.model_request"
+ASSEMBLY_METHOD_MODEL_RESPONSE = "assembly.method.model_response"
+ASSEMBLY_METHOD_RECOMMENDATION = "assembly.method.recommendation"
 
 
 class AssemblyInputProfile(BaseModel):
@@ -629,7 +632,12 @@ class AssemblyInputProfile(BaseModel):
     recommendation_reasoning: str
     uncertainty_notes: list[str] = Field(default_factory=list)
     profile_source: Literal[
-        "manifest", "run_config", "run_config_explicit", "llm_inferred"
+        "manifest",
+        "run_config",
+        "run_config_explicit",
+        "llm_inferred",
+        "human_confirmed",
+        "policy_timeout",
     ]
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

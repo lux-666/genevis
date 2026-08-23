@@ -30,7 +30,11 @@ from app.storage.audit import verify_checkpoint_free_artifact_retention
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
-from tests.busco_fixture import assembly_review_config, ensure_busco_lineage
+from tests.busco_fixture import (
+    assembly_review_config,
+    ensure_busco_lineage,
+    ensure_test_host_envs,
+)
 
 
 class TerminalCheckpointCompactionTests(unittest.TestCase):
@@ -307,6 +311,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 encoding="utf-8",
             )
             lineage = ensure_busco_lineage(paths.run_dir)
+            envs = ensure_test_host_envs(paths.control_dir, lineage_path=lineage)
             freeze_session_inputs(
                 paths,
                 manifest_draft=paths.manifest_path,
@@ -324,6 +329,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                     ],
                     "assembly_review": assembly_review_config(lineage),
                 },
+                config_path=envs,
                 selected_methods={},
                 probe_environments=False,
             )

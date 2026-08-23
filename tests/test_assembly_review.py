@@ -249,6 +249,10 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "hic_scaffolding.contract",
             ),
         )
+        producer_method_names = {
+            "t2t": "t2t.alignment.minimap2",
+            "hic_scaffolding": "hic_scaffolding.candidate.autohic",
+        }
         for producer_stage, primary_type, method_name in producer_cases:
             with (
                 self.subTest(producer_stage=producer_stage),
@@ -272,7 +276,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                             "step_id": producer_step_id,
                             "stage": producer_stage,
                             "allow_local_execution": True,
-                            "selected_method_names": [],
+                            "selected_method_names": [
+                                producer_method_names[producer_stage]
+                            ],
                         },
                         {
                             "step_id": "step-002-assembly_review",
@@ -545,7 +551,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     "step_id": "step-001-assembly",
                     "stage": "assembly",
                     "allow_local_execution": True,
-                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-002-assembly_review",
@@ -573,6 +578,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
         state["workflow_step_index"] = 2
         state["entered_workflow_step_index"] = 2
         state["current_stage"] = "assembly_review"
+        stage_outputs["assembly_review"] = {
+            "related_species_reference_dir": str(self._test_reference_dir(state))
+        }
         state["stage_outputs"] = stage_outputs
         if candidate_bundles:
             candidate_refs = [
@@ -627,6 +635,14 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 )
                 self._set_candidate_refs(state, [str(bundle)])
         return state
+
+    @staticmethod
+    def _test_reference_dir(state: dict) -> Path:
+        """Provide an explicit incomplete snapshot for isolated stage seams."""
+        root = Path(state["data_dir"]) / "isolated_ncbi_metazoa"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "reference_manifest.json").write_text("{}", encoding="utf-8")
+        return root
 
     def _write_candidate_bundle(
         self,
@@ -1106,6 +1122,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
+                "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
@@ -1233,6 +1250,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
+                "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
@@ -1308,6 +1326,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
+                "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
@@ -1399,6 +1418,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
+                "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
             }
@@ -1448,6 +1468,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
+                "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
@@ -1501,6 +1522,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
+                "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "busco_parameters": {
                     "lineage_path": str(lineage),
@@ -1577,6 +1599,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             primary_path.unlink()
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
+                "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
             }
 

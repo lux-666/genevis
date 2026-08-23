@@ -9,23 +9,24 @@ contract owned by [`user_guide/run-and-recovery.md`](../user_guide/run-and-recov
 | Operation | Authoritative entry | Owns | Does not own |
 |---|---|---|---|
 | Bootstrap | `gene-agent bootstrap` / `bootstrap --apply` | machine configuration lifecycle, the active environment mapping, declared package canaries, and every method entry declared in that mapping | package installation, biological inputs, or a run session |
-| Contig acceptance | [`scripts/server_check.sh`](../../scripts/server_check.sh) | read-only orchestrator prerequisites plus the selected method/package closure derived from the authoritative five-stage contig template | LLM reachability, private inputs, BUSCO lineage contents, or biological execution |
+| Contig acceptance | [`scripts/server_check.sh`](../../scripts/server_check.sh) | read-only orchestrator prerequisites, fixed-stage method/package closure, and host BUSCO/NCBI database integrity derived from the authoritative five-stage contig template | deferred Assembly-candidate readiness, LLM reachability, private inputs, or biological execution |
 | Code verification | [`scripts/server_test.sh`](../../scripts/server_test.sh) | pytest regression, compileall, and diff check | Conda tool readiness, real-data smoke, or any biological command |
 
 ## Host configuration lifecycle
 
-`config/envs.yaml.example` is the generic seed used only when the active host
+`docs/examples/envs.yaml.example` is the generic seed used only when the active host
 mapping is missing. The default active mapping is `config/envs.yaml`; that file
 is machine-local deployment state and must remain ignored/untracked. All public
 readiness paths select the same mapping: an explicit `bootstrap --config PATH`
 wins for that bootstrap invocation, otherwise `GENE_AGENT_ENVS_CONFIG` wins,
 otherwise the repository default is used. Use an absolute override when commands
-may start outside the checkout.
+may start outside the checkout; a relative override is resolved from the caller's
+current directory, while the default path is anchored to the checkout.
 
 The default bootstrap command previews and validates a plan; `--apply` writes
 it. Bootstrap then checks every package and method entry declared in the active
-mapping, which may be broader than the methods selected by the current contig
-template.
+mapping, including any Assembly candidates the host exposes. That catalog scope
+may be broader than the fixed methods checked for one contig run.
 
 Bootstrap does not install Conda environments, tools, databases, BUSCO lineages,
 models, or an LLM service. Those are provisioned by the operator and referenced
@@ -46,12 +47,14 @@ bash /path/to/gene_agent/scripts/server_check.sh
 bash /path/to/gene_agent/scripts/server_test.sh
 ```
 
-`server_check.sh` derives its method closure through the same Python readiness
-code used by `gene-agent run`; it deliberately does not maintain a shell list
-of tools. A successful check is orchestrator and selected tool/package
-acceptance only. The actual run
-still validates its manifest, selected LLM endpoint, and BUSCO lineage before
-freeze.
+`server_check.sh` derives its fixed-stage method closure through the same Python
+readiness code used by `gene-agent run`; it deliberately does not maintain a
+shell list of tools. Assembly method selection remains deferred until upstream
+evidence is available. The selected candidate is resolved and checked from the
+frozen dependency snapshot at Assembly stage entry. Because the authoritative
+contig template includes Assembly Review, the check also validates the BUSCO
+lineage and NCBI snapshot declared in the active host mapping. The actual run
+additionally validates its manifest and selected LLM endpoint.
 
 A successful bootstrap is not a proof that `server_check.sh` will pass, and a
 successful `server_check.sh` is not a proof that every declaration in the active

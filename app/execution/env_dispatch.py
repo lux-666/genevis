@@ -58,6 +58,20 @@ def has_explicit_path_override(stage_out: Mapping[str, object]) -> bool:
     return isinstance(env, Mapping) and bool(env.get("PATH"))
 
 
+def _has_frozen_input_contract(data_dir: str | Path) -> bool:
+    # A PATH-only execution is a pre-freeze/unit-test seam. Once a run has
+    # committed control inputs, the stage cursor is untrusted and cannot opt
+    # out of the frozen dependency resolver. Treat partial transactions as
+    # frozen too so execution fails closed instead of using an injected PATH.
+    try:
+        paths = SessionPaths.from_run_dir(data_dir)
+    except DataLayoutError:
+        return False
+    from app.storage.frozen_inputs import has_frozen_input_contract
+
+    return has_frozen_input_contract(paths)
+
+
 def resolve_method_env(
     stage_out: Mapping[str, object],
     *,
@@ -74,15 +88,37 @@ def resolve_method_env(
     Returns ``(spec, packages, None)`` when the caller should attach ``spec``'s
     conda fields and use ``packages`` (already preflighted) to build explicit
     script paths; ``(None, [], None)`` when the caller supplied an explicit
-    PATH override on the conda side (packages still returned empty, since the
-    fake-bin tests don't declare package_tools); and ``(None, [], payload)``
-    when preflight failed. ``payload`` has ``status`` / ``reason`` /
-    ``env_target`` / ``missing_tools`` / ``method_name`` so callers can merge
-    it into their stage output dict and route to the terminal failure edge.
+    PATH override through the pre-freeze/unit-test seam; and ``(None, [],
+    payload)`` when preflight failed. A PATH override is rejected once a
+    frozen or partial transaction exists. ``payload`` has ``status`` /
+    ``reason`` / ``env_target`` / ``missing_tools`` / ``method_name`` so
+    callers can merge it into their stage output dict and route to the
+    terminal failure edge.
     """
     if not isinstance(workflow_step_id, str) or not workflow_step_id:
         raise ValueError("workflow_step_id must be a non-empty string")
     if has_explicit_path_override(stage_out):
+        if _has_frozen_input_contract(data_dir):
+            return (
+                None,
+                [],
+                _record_preflight_block(
+                    data_dir=data_dir,
+                    session_id=session_id,
+                    input_manifest_ref=input_manifest_ref,
+                    stage=stage,
+                    method_name=method_name,
+                    workflow_step_id=workflow_step_id,
+                    status="blocked_env",
+                    env_target="frozen-dependency-contract",
+                    missing_tools=[],
+                    detail=(
+                        "explicit stage cursor PATH override is rejected after "
+                        "the frozen input contract exists; use the frozen "
+                        "dependency resolver"
+                    ),
+                ),
+            )
         # PATH override: skip conda preflight, but still resolve and preflight
         # external packages (filesystem-only, independent of conda/PATH) so the
         # Juicer method can locate entry scripts from the declared roots. When
@@ -122,6 +158,27 @@ def resolve_method_env(
             "explicit config_path"
         )
     spec = resolver.resolve(stage=stage, method_name=method_name)
+    if not spec.required_tools and not spec.package_tools:
+        detail = (
+            f"{method_name}: resolved frozen env mapping declares no "
+            "required_tools or package_tools"
+        )
+        return (
+            None,
+            [],
+            _record_preflight_block(
+                data_dir=data_dir,
+                session_id=session_id,
+                input_manifest_ref=input_manifest_ref,
+                stage=stage,
+                method_name=method_name,
+                workflow_step_id=workflow_step_id,
+                status="missing_tool",
+                env_target=spec.display_target(),
+                missing_tools=[],
+                detail=detail,
+            ),
+        )
     conda_result = preflight(spec)
     if conda_result.status != "ok":
         return (

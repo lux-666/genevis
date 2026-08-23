@@ -90,7 +90,12 @@ the resolver itself remains a non-throwing query for absence. Environment and
 method preflight still occurs when a method attempt is frozen. In addition, the
 confirmed-run boundary performs a read-only readiness probe over the canonical
 effective local-method closure before the whole-run freeze; this is a machine
-readiness check, not a second stage-resource planning authority.
+readiness check, not a second stage-resource planning authority. Assembly is
+the one deferred-method stage: whole-run freeze captures its candidate
+dependency scope without selecting a method, and stage entry selects a method
+only from that frozen scope before the attempt freeze. The resolver therefore
+must not re-read a live `envs.yaml` or infer method identity from a resource
+path.
 
 When inventory contains clean and raw assets for one logical resource,
 `ResourceSpec.asset_type_priority_groups` determines the preferred type. Once a

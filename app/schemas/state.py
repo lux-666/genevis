@@ -193,6 +193,11 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
                     f"workflow_steps[{index}].selected_method_names must use the "
                     f"{stage!r} method prefix"
                 )
+            if stage == "assembly" and len(roster) > 1:
+                raise ValueError(
+                    f"workflow_steps[{index}].selected_method_names must contain "
+                    "at most one Assembly method"
+                )
         expected_id = f"step-{index:03d}-{stage}"
         if raw_step.get("step_id") != expected_id:
             raise ValueError(f"workflow_steps[{index}].step_id must be {expected_id!r}")

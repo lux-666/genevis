@@ -852,9 +852,7 @@ def _verified_current_occurrence_ref(
     if len(matches) != 1:
         raise ParameterEvidenceError(f"{label} artifact identity is ambiguous")
     if matches[0].get("workflow_step_id") != workflow_step_id:
-        raise ParameterEvidenceError(
-            f"{label} targets another workflow occurrence"
-        )
+        raise ParameterEvidenceError(f"{label} targets another workflow occurrence")
     return ref
 
 

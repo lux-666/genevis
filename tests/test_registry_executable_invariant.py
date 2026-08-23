@@ -11,14 +11,17 @@ from unittest.mock import patch
 
 from app.control.workflow_plan import workflow_step_id
 from app.entrypoints.ask_planner import (
+    READ_QC_FILTER_SEQKIT,
     READ_QC_FILTER_SKIP,
     READ_QC_STATS_METHOD,
     build_planner_method_catalog,
     build_run_config_payload,
 )
+from app.entrypoints.run import _stage_seeds_from_run_config
 from app.execution.lifecycle import MethodExecutionLifecycle
 from app.schemas.ask_plan import AskPlanState, PlanStageOccurrence
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.assembly import builder as assembly_builder
 from app.stages.assembly.method_application import (
@@ -292,7 +295,27 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
             confirmed=True,
         )
         filter_config = build_run_config_payload(plan)["read_qc"]["length_filter"]
-        self.assertEqual(filter_config["method"], LENGTH_FILTER_SKIP)
+        # The public RunConfig contains only the operator's approval and
+        # thresholds.  Method identity is an internal, fixed-stage choice.
+        self.assertEqual(set(filter_config), {"approved", "thresholds"})
+        self.assertNotIn("method", filter_config)
+        run_config = RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {"stage": "read_qc", "allow_local_execution": True}
+                ],
+                "read_qc": {"length_filter": filter_config},
+            }
+        )
+        stage_seeds = _stage_seeds_from_run_config(
+            run_config,
+            shared_parameters=None,
+        )
+        internal_filter_request = stage_seeds["read_qc"]["length_filter_request"]
+        self.assertEqual(internal_filter_request["method"], LENGTH_FILTER_SKIP)
+        self.assertEqual(
+            internal_filter_request["thresholds"], filter_config["thresholds"]
+        )
 
         raw_paths = ["/inputs/reads_1.fastq.gz", "/inputs/reads_2.fastq.gz"]
         state = initial_state(
@@ -322,7 +345,7 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
         state["stage_outputs"] = {
             "read_qc": {
                 "status": "length_filter_pending",
-                "length_filter_request": filter_config,
+                "length_filter_request": internal_filter_request,
                 "raw_long_reads_paths": raw_paths,
             }
         }
@@ -359,6 +382,47 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
             committed["stage_outputs"]["read_qc"]["raw_long_reads_paths"], raw_paths
         )
         self.assertEqual(committed["resource_refs"]["long_reads"]["paths"], raw_paths)
+
+    def test_read_qc_filter_method_is_injected_only_in_internal_stage_seed(self):
+        for selected_method, expected_method, parameters in (
+            (READ_QC_FILTER_SKIP, LENGTH_FILTER_SKIP, {}),
+            (
+                READ_QC_FILTER_SEQKIT,
+                "read_qc.length_filter.seqkit_seq",
+                {READ_QC_FILTER_SEQKIT: {"min_len": 1000}},
+            ),
+        ):
+            with self.subTest(selected_method=selected_method):
+                plan = AskPlanState(
+                    session_id="planner-only-boundary",
+                    data_dir="data",
+                    entry_request={
+                        "command": "run",
+                        "manifest": "inputs/manifest.yaml",
+                    },
+                    manifest_ref="inputs/manifest.yaml",
+                    selected_stage_occurrences=[
+                        PlanStageOccurrence(stage="read_qc", allow_local_execution=True)
+                    ],
+                    selected_methods={
+                        "read_qc": [READ_QC_STATS_METHOD, selected_method]
+                    },
+                    method_parameters=parameters or None,
+                    confirmed=True,
+                )
+                payload = build_run_config_payload(plan)
+                public_filter_config = payload["read_qc"]["length_filter"]
+                self.assertEqual(set(public_filter_config), {"approved", "thresholds"})
+                self.assertNotIn("method", public_filter_config)
+                run_config = RunConfig.model_validate(payload)
+                stage_seeds = _stage_seeds_from_run_config(
+                    run_config,
+                    shared_parameters=None,
+                )
+                self.assertEqual(
+                    stage_seeds["read_qc"]["length_filter_request"]["method"],
+                    expected_method,
+                )
 
     def test_planner_only_filter_events_are_scoped_to_the_filter_method(self):
         with TemporaryDirectory() as tmpdir:

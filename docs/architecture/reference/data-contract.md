@@ -45,14 +45,23 @@ Biological and stage contracts remain governed by their current specifications.
    gate. Arbitrary historical-node time travel is not a product requirement.
 4. Report filenames and artifact types are internal implementation details.
 5. “Planner” in current parameter code means a stage parameter recommender. It
-   does not mean method selection or parent-graph planning.
+   does not mean parent-graph planning or the separate Assembly method advisor.
 6. Public deterministic runs use `gene-agent run --manifest PATH --run-config
    PATH --data-dir PATH`. The manifest solely owns the
    session identity; `data-dir` owns layout placement at
    `runs/<session_id>/`. The run config must explicitly contain a
    `requested_stages` JSON list of `{stage, allow_local_execution}` objects.
-   Freeze derives the ordered method roster from each stage's configuration and
-   method catalog, then stores it only in the frozen `workflow_steps` projection.
+   Freeze derives the ordered method roster for fixed-method stages from the
+   descriptor registry's defaults and stores it only in the frozen
+   `workflow_steps` projection. Assembly is the one stage-owned exception:
+   `selected_method_names` may be omitted so the stage can recommend and
+   confirm its method after upstream QC/survey evidence exists. Omission is
+   deferred binding, not an empty roster. The reader still accepts an explicit
+   legacy `[]`, but that remains an unbound old occurrence and must not be
+   silently upgraded into the new deferred contract.
+   New workflow projection always writes fixed-stage rosters. The state reader
+   still accepts a missing fixed-stage roster only to reopen older checkpoints;
+   that recovery compatibility is not a second current plan-generation path.
    The list preserves literal order and repeated stage occurrences; `stage` is
    one occurrence's routing choice and `allow_local_execution` is its
    process authorization. There is no separate local-execution array.
@@ -185,15 +194,32 @@ inferred from one another:
   `attempt_failed`, keyed by its immutable `attempt_id` and bound stage,
   method, and workflow occurrence.
 
-The frozen occurrence also owns an ordered `selected_method_names` roster. It
-is immutable intent, not another lifecycle outcome: registry membership and a
-displayed candidate list do not select a method, while later input,
-authorization, or environment checks may make a rostered method `not_started`
-or `skipped`. The roster is resolved into each requested occurrence before the
-RunConfig is frozen, copied into `WorkflowStep`, and is therefore stable across
-repeated-stage recovery. A runtime decision that would change method identity
-requires a new workflow occurrence; retries remain attempts of the same
-rostered method.
+The frozen occurrence owns an ordered `selected_method_names` roster for fixed
+stages. It is immutable intent, not another lifecycle outcome: registry
+membership and a displayed candidate list do not select a method, while later
+authorization or environment checks may make a rostered method `not_started`
+or `skipped`. Assembly may omit the roster at freeze. In that case the
+Assembly stage owns a deferred method binding: after the preceding QC/survey
+evidence it persists and, where required, obtains human confirmation of an
+`assembly_selection`, then binds exactly its validated `primary_method` for
+candidate planning and parameter recommendation. The selected method must be
+present in the frozen dependency snapshot and pass stage-time preflight; it is
+not read from live configuration. At settlement, the dynamic method is valid
+only when `primary_method` equals `assembly_selection.primary_method` and its
+method disposition is recorded. A present empty roster is rejected for
+new plan generation, but remains readable as an inert legacy roster and is
+never equivalent to this deferred state. Retries remain attempts of the same
+bound method.
+
+Planners, TUI drafts, committed examples, and direct CLI input must not emit an
+Assembly method or method-parameter block in RunConfig. The schema rejects that
+shape: an old document must be edited to remove those fields before it can be
+frozen. There is no migration execution path that bypasses stage-time
+recommendation. Conversational intake may retain a recognized tool name only as
+a non-authoritative routing hint for clarifying questions; that hint must be
+discarded before a plan draft is built or persisted and must never reach the
+frozen RunConfig, Plan Draft model input, or Assembly recommendation context as
+a selection fact.
 
 These domains are orthogonal. A stage may complete after a method is skipped
 when it still delivers its stage contract, may fail before a method starts,
@@ -210,10 +236,12 @@ Shared method settlement validates the resulting `MethodOutcome` against the
 active occurrence roster and is the sole disposition writer. Stage modules
 must not call that Ledger writer directly or infer an outcome from private
 cursor text. Before any occurrence terminal is appended, the shared settlement
-boundary requires exact set equality between its frozen roster and its durable
-method dispositions. Missing and extra methods both fail closed; an open human
-gate or retry may remain temporarily uncovered because it is not an occurrence
-terminal.
+boundary requires exact set equality between the occurrence's effective roster
+and its durable method dispositions. For fixed stages the effective roster is
+the frozen roster; for deferred Assembly it is the validated stage-owned
+binding described above. Missing and extra methods both fail closed; an open
+human gate or retry may remain temporarily uncovered because it is not an
+occurrence terminal.
 
 The stage-to-parent `workflow_step_outcome` object is a compact checkpoint
 handoff, not durable truth. It contains the exact occurrence identity,
@@ -305,8 +333,8 @@ authoritative current occurrence when plan-prefix integrity cannot be proven.
 | Run identity and requested configuration | `control/` | IDs and refs |
 | Run-owned copied input bytes, when materialized | input artifacts | Ref, hash, size, provenance summary |
 | External biological input declaration and member identity | frozen input manifest plus immutable asset registry | Manifest/registry refs, ordered asset IDs, counts, and verification summary |
-| Machine environment and package selection | frozen dependency manifest | Ref and verification status |
-| Supplied reference/database provenance | frozen run configuration and the owning stage's immutable evidence record | Ref, bounded identity, and verification status |
+| Machine environment, package, and host database selection | frozen dependency manifest | Ref and verification status |
+| Reference/database provenance and content verification | frozen host database registry plus the owning stage's immutable evidence record | Ref, bounded identity, and verification status |
 | Per-file sequencing identity, platform, format, and declaration provenance | immutable asset registry | Registry ArtifactRef, ordered member IDs, counts, platform/format sets |
 | Derived read-to-source correspondence | immutable read-set manifest | Manifest ArtifactRef, ordered source IDs, counts |
 | Assembly primary and method-native products | immutable executed candidate bundle plus artifact index | Executed bundle ArtifactRef, selected method/candidate IDs |
@@ -314,7 +342,7 @@ authoritative current occurrence when plan-prefix integrity cannot be proven.
 | Descriptor, catalog, case, and policy basis | immutable run snapshot | Ref, hash, selected IDs |
 | Exact model invocation | `model_request.json` | Request ref, model ID |
 | Raw model result | `model_response.json` | Response ref, validity enum |
-| Parsed parameter recommendation | `recommendation.json` | Recommendation ref/hash |
+| Parsed method or parameter recommendation | `recommendation.json` | Recommendation ref/hash and compact accepted projection |
 | Response-shape parse result | `response_parse.json` | Ref, parsed/invalid status and parser error |
 | Human review request | immutable review request artifact | Request ID/ref/hash, gate ID, workflow-step ID |
 | Human decision | immutable decision artifact | Decision enum, actor, ref/hash, workflow-step ID |
@@ -474,7 +502,38 @@ initial immutable basis except for explicitly modeled retry context.
 Cross-run physical deduplication is an implementation detail only. Runtime code
 must not replace a session-relative snapshot ref with a global hash-only ref.
 
-## 10. Parameter-Recommendation Data Boundary
+## 10. Recommendation Data Boundary
+
+### 10.0 Policy
+
+The exact advisory policy is owned by
+[recommendation-policy.md](recommendation-policy.md). Frozen
+`RunConfig.assembly` carries `method_route_advisor` and `parameter_advisor`;
+the Assembly cursor repeats those modes so recovery and evidence readers do not
+reopen RunConfig to interpret a recommendation record.
+
+### 10.1 Assembly method recommendation
+
+Deferred Assembly selection is one durable recommendation transaction after
+upstream QC/survey evidence is available:
+
+1. persist the exact method-advisor request, including the allowed method set;
+2. invoke the model once, then persist its raw response separately;
+3. validate an explicit `recommended_method`, read type, route, input
+   compatibility, and descriptor-backed candidate identity;
+4. persist the parsed recommendation and ask for human confirmation;
+5. after confirmation, bind the compact `assembly_selection`, then start the
+   independent parameter-recommendation transaction.
+
+A response for a selected route without an explicit method fails closed. If a
+process crash occurs after the raw response is published but before the next
+checkpoint, retry recovers that response by the immutable request hash rather
+than invoking the model again. Checkpoint state stores only the three artifact
+refs plus the compact accepted selection/profile projection; prompt messages,
+raw responses, reasoning bodies, QC/survey evidence, and candidate catalogs
+remain in immutable artifacts.
+
+### 10.2 Parameter recommendation
 
 [`parameter-recommendation.md`](parameter-recommendation.md) is normative for the
 model DTO, prompt rendering, response parsing, approval, and stage/model
@@ -674,8 +733,10 @@ Requirements:
   keys uniqueness by workflow-step ID and validates the stage binding. Exact
   semantic replay returns the existing row; another outcome or changed
   summary/refs conflicts regardless of idempotency key. The same append lock
-  also proves that the occurrence's durable disposition names equal its frozen
-  `selected_method_names` roster before allowing any terminal.
+  also proves that the occurrence's durable disposition names equal its
+  effective method roster before allowing any terminal. For deferred Assembly,
+  the effective roster is the validated `primary_method` bound to
+  `assembly_selection`.
 - Each immutable attempt has at most one terminal event among
   `attempt_succeeded` and `attempt_failed`, under the same append-lock rule.
 - `method_disposition_recorded` is occurrence-bound and keyed by method name.
@@ -776,6 +837,9 @@ Checkpoint state may contain:
   authority;
 - immutable stage-scoped seeds; each repeated occurrence receives a fresh copy
   of its stage seed rather than an occurrence-specific method configuration;
+- for a deferred Assembly occurrence, the compact validated
+  `assembly_selection`/`primary_method`, bounded accepted input-profile
+  projection, and immutable method request/response/recommendation refs;
 - current stage status cursor;
 - current parameter-recommendation ref;
 - current parameter-attempt ID and compact ordered `ParameterAttempt` chain, or
@@ -816,7 +880,7 @@ handoff after its Ledger terminal exists.
 Checkpoint state must not contain:
 
 - parameter catalogs, rules, cases, or descriptor snapshots;
-- full input profiles or model contexts;
+- raw evidence profiles, prompt/model contexts, or candidate catalogs;
 - model responses or reasoning;
 - full or unbounded candidate, signal, metric, or comparison-table bodies;
 - response-parse documents;

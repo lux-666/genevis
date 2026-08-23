@@ -13,10 +13,12 @@
 
 ## Definition
 
-A parameter recommender runs after method selection. It asks an LLM for the
-parameters to bind into a reviewable approval request. It does not select the
-method, route the parent graph, approve its own answer, or synthesize a fallback
-answer.
+A parameter recommender runs after method selection. For Assembly, method
+selection is deliberately stage-local: after the upstream QC/survey evidence,
+the stage persists and confirms `assembly_selection`, then the recommender
+receives its validated `primary_method`. It asks an LLM for the parameters to
+bind into a reviewable approval request. It does not select the method, route
+the parent graph, approve its own answer, or synthesize a fallback answer.
 
 Assembly, Hi-C, and T2T share lifecycle and persistence concepts, but they do
 not share one universal biological DTO.
@@ -77,7 +79,8 @@ construction and are not merely prompt assets.
 ## Required flow
 
 ```text
-selected method + allowlisted producer outputs/run facts
+fixed-stage selected method, or validated Assembly `assembly_selection`
+  + allowlisted producer outputs/run facts
   -> canonical typed facts through the anti-corruption boundary
   -> schema-3 input snapshot with typed stage context and dependency refs
   -> immutable basis snapshot
@@ -210,8 +213,11 @@ names, and mixed identities fail closed. The response, parse, recommendation,
 and T2T motif-manifest leaves retain their own declared schema versions; the
 hard cutover applies to the recommendation snapshot/manifest root and the
 approved attempt boundary. Checkpoint state contains bounded cursors and refs,
-not the request/response bodies. No execution attempt is added before the
-approval gate resolves.
+not the request/response bodies. For Assembly, the compact stage cursor may
+carry the validated selection/primary-method cursor needed to resume; the full
+recommendation, approval, model, command, and evidence records remain immutable
+artifacts and Ledger facts. No execution attempt is added before the approval
+gate resolves.
 
 After approval, the compact `ParameterAttempt` is the only relation owner for
 the approved parameters, constructed command, frozen runner input, execution,

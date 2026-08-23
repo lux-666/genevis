@@ -32,6 +32,11 @@ from app.entrypoints.run import (
     generate_session_id,
 )
 from app.entrypoints.tui import _tui_main, run_tui
+from app.execution.dependency_snapshot import (
+    FrozenDependencyResolver,
+    capture_dependency_snapshot,
+)
+from app.execution.env_resolver import EnvResolver
 from app.review.base import ReviewPayload
 from app.review.persistence import (
     PersistedReviewRequest,
@@ -49,6 +54,7 @@ from tests.busco_fixture import (
     assembly_review_config,
     busco_parameters,
     ensure_busco_lineage,
+    ensure_test_host_envs,
 )
 from tests.data_v2 import v2_run_dir
 
@@ -74,6 +80,15 @@ def _active_lease(paths: SessionPaths) -> FrozenExecutionLease:
         run_dir=paths.run_dir,
         active=True,
     )
+
+
+def _frozen_database_resolver(root: Path, lineage: Path) -> FrozenDependencyResolver:
+    envs = ensure_test_host_envs(root, lineage_path=lineage)
+    active = EnvResolver(envs)
+    snapshot = capture_dependency_snapshot(
+        config_path=envs, resolver=active, probe_environments=False
+    )
+    return FrozenDependencyResolver(snapshot)
 
 
 def _finalized_terminal(*args, **_kwargs) -> TerminalFinalizationResult:
@@ -129,6 +144,8 @@ def _write_assembly_review_request(
     reads = run_dir / "fixture_reads.fastq"
     reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
     lineage = ensure_busco_lineage(run_dir)
+    envs = run_dir / "envs.yaml"
+    _frozen_database_resolver(run_dir, lineage)
     freeze_session_inputs(
         paths,
         manifest_draft={
@@ -149,6 +166,7 @@ def _write_assembly_review_request(
             "assembly_review": assembly_review_config(lineage),
         },
         selected_methods={},
+        config_path=envs,
         probe_environments=False,
     )
     payload = ReviewPayload(
@@ -443,21 +461,13 @@ class EntrypointTests(unittest.TestCase):
 
         self.assertEqual(session_id, "gene-20260508-000001")
 
-    def test_build_selection_materializes_route_as_canonical_selection(
-        self,
-    ):
+    def test_build_selection_keeps_route_as_stage_time_method_hint(self):
         selection = _build_assembly_selection(
             assembly=AssemblyRunConfig(assembly_route="ont"),
             shared_parameters=None,
         )
 
-        self.assertIsNotNone(selection)
-        self.assertEqual(
-            selection.model_dump(mode="json")["primary_method"],
-            "assembly.candidate.hifiasm_ont",
-        )
-        self.assertEqual(selection.model_dump(mode="json")["read_type"], "ont_raw")
-        self.assertEqual(selection.model_dump(mode="json")["source"], "run_config")
+        self.assertIsNone(selection)
 
     def test_inspect_missing_session_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -656,10 +666,35 @@ class EntrypointTests(unittest.TestCase):
 
 
 class FrozenRunConfigSeedingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._resolver_tmp = tempfile.TemporaryDirectory()
+        root = Path(self._resolver_tmp.name)
+        resolver = _frozen_database_resolver(root, ensure_busco_lineage(root))
+        self.addCleanup(self._resolver_tmp.cleanup)
+        self._resolver_patch = patch(
+            "app.execution.dependency_snapshot.load_frozen_dependency_resolver",
+            return_value=resolver,
+        )
+        self._resolver_patch.start()
+        self.addCleanup(self._resolver_patch.stop)
+
     def _execute_config(self, run_config: RunConfig) -> tuple[int, dict, str, str]:
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lineage = ensure_busco_lineage(root)
+            resolver = _frozen_database_resolver(root, lineage)
+            payload = run_config.model_dump(mode="json", exclude_none=True)
+            review = payload.get("assembly_review")
+            if isinstance(review, dict) and isinstance(review.get("busco"), dict):
+                requested = review["busco"]
+                review["busco"] = {
+                    "lineage": "embryophyta_odb10",
+                    "mode": requested.get("mode", "genome"),
+                    "threads": requested.get("threads", 4),
+                }
+            execution_config = RunConfig.model_validate(payload)
             paths = SessionPaths(tmp, "s1")
-            bundle = SimpleNamespace(paths=paths, run_config=run_config)
+            bundle = SimpleNamespace(paths=paths, run_config=execution_config)
             graph = _FakeGraph(
                 {
                     "current_stage": "done",
@@ -673,6 +708,10 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
 
             with (
                 patch("app.entrypoints.run.Ledger"),
+                patch(
+                    "app.execution.dependency_snapshot.load_frozen_dependency_resolver",
+                    return_value=resolver,
+                ),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
                     "app.entrypoints.run.initial_state",
@@ -708,7 +747,6 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                 "shared_parameters": {"read_type": "ont_raw"},
                 "read_qc": {
                     "length_filter": {
-                        "method": "read_qc.length_filter.seqkit_seq",
                         "approved": False,
                         "thresholds": {},
                     }
@@ -720,11 +758,9 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                         "threads": 4,
                     }
                 },
-                "assembly": {"flye_parameters": {"threads": 4}},
                 "assembly_review": {
                     "quast": {"threads": 2},
                     "busco": busco_parameters("/data/busco/embryophyta_odb10"),
-                    "related_species_reference_dir": "/ref/ncbi_metazoa",
                 },
             }
         )
@@ -743,92 +779,43 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
             self.assertNotIn("execution_mode", stage_seeds[stage])
         self.assertEqual(
             stage_seeds["read_qc"]["length_filter_request"]["method"],
-            "read_qc.length_filter.seqkit_seq",
+            "skip",
         )
         self.assertEqual(
             stage_seeds["genome_survey"]["survey_parameters"]["kmer_size"],
             21,
         )
-        self.assertEqual(stage_seeds["assembly"]["flye_parameters"], {"threads": 4})
-        self.assertEqual(
-            stage_seeds["assembly"]["assembly_selection"]["primary_method"],
-            "assembly.candidate.flye",
-        )
+        # Assembly method and parameters are stage-time recommendations, not
+        # RunConfig input.  The seed may carry review policy, but never a
+        # method selection or method-specific parameter block.
+        self.assertNotIn("assembly_selection", stage_seeds["assembly"])
+        self.assertNotIn("flye_parameters", stage_seeds["assembly"])
         self.assertEqual(
             stage_seeds["assembly_review"]["quast_parameters"],
             {"threads": 2},
         )
 
-    def test_frozen_executor_seeds_hifiasm_ont_selection(self):
-        run_config = RunConfig.model_validate(
-            {
-                "requested_stages": [
-                    {"stage": "assembly", "allow_local_execution": True},
-                    {"stage": "assembly_review", "allow_local_execution": False},
-                ],
-                "shared_parameters": {"platform": "ont"},
-                "assembly": {
-                    "assembly_method": "hifiasm_ont",
-                    "hifiasm_ont_parameters": {"threads": 4},
-                },
-                "assembly_review": assembly_review_config(
-                    "/data/busco/embryophyta_odb10"
-                ),
-            }
-        )
-
-        code, state, _stdout, stderr = self._execute_config(run_config)
-
-        self.assertEqual(code, 0)
-        self.assertEqual(stderr, "")
-        assembly = state["stage_seeds"]["assembly"]
-        self.assertEqual(
-            assembly["assembly_selection"]["primary_method"],
-            "assembly.candidate.hifiasm_ont",
-        )
-        self.assertEqual(assembly["assembly_selection"]["read_type"], "ont_raw")
-        self.assertEqual(assembly["hifiasm_ont_parameters"], {"threads": 4})
-
-    def test_frozen_executor_rejects_explicit_method_without_read_type(self):
-        run_config = RunConfig.model_validate(
-            {
-                "requested_stages": [
-                    {"stage": "assembly", "allow_local_execution": True},
-                    {"stage": "assembly_review", "allow_local_execution": False},
-                ],
-                "assembly": {
-                    "assembly_method": "hifiasm_ont",
-                    "hifiasm_ont_parameters": {"threads": 4},
-                },
-                "assembly_review": assembly_review_config(
-                    "/data/busco/embryophyta_odb10"
-                ),
-            }
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            paths = SessionPaths(tmp, "s1")
-            bundle = SimpleNamespace(paths=paths, run_config=run_config)
-            with (
-                patch("app.entrypoints.run.Ledger"),
-                patch("app.entrypoints.run.initial_state", return_value={}),
-                patch("app.entrypoints.run.build_graph") as build_graph,
-            ):
-                code, stdout, stderr = _capture_cli(
-                    _execute_verified_frozen_session,
-                    bundle,
-                    checkpointer="memory",
-                    resume_checkpoint=False,
-                    interactive_gate=False,
-                    lease=_active_lease(paths),
-                )
-
-        self.assertEqual(code, 1)
-        self.assertEqual(stdout, "")
-        self.assertIn(
-            "assembly.assembly_method is set but no read_type could be inferred",
-            stderr,
-        )
-        build_graph.assert_not_called()
+    def test_frozen_executor_rejects_legacy_assembly_method_and_parameters(self):
+        with self.assertRaises(ValueError):
+            RunConfig.model_validate(
+                {
+                    "requested_stages": [
+                        {"stage": "assembly", "allow_local_execution": True},
+                        {
+                            "stage": "assembly_review",
+                            "allow_local_execution": False,
+                        },
+                    ],
+                    "shared_parameters": {"platform": "ont"},
+                    "assembly": {
+                        "assembly_method": "hifiasm_ont",
+                        "hifiasm_ont_parameters": {"threads": 4},
+                    },
+                    "assembly_review": assembly_review_config(
+                        "/data/busco/embryophyta_odb10"
+                    ),
+                }
+            )
 
     def test_terminal_finalization_failure_flushes_projection_warning_once(self):
         run_config = RunConfig(requested_stages=[])

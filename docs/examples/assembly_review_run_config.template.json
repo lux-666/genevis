@@ -16,14 +16,6 @@
   "assembly_review": {
     "quast": {
       "threads": 16
-    },
-    "busco": {
-      "lineage_path": "/absolute/path/to/busco_downloads/lineages/embryophyta_odb10",
-      "lineage_name": "embryophyta_odb10",
-      "lineage_version": "odb10",
-      "lineage_source": "operator_offline_cache",
-      "mode": "genome",
-      "threads": 16
     }
   }
 }

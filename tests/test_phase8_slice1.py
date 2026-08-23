@@ -201,6 +201,7 @@ class InputProfilerTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-assembly",
@@ -211,6 +212,10 @@ class InputProfilerTests(unittest.TestCase):
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-001-assembly",
@@ -405,7 +410,19 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["status"], "failed")
             self.assertIn("assembly requires long reads", assembly["reason"])
 
-    def test_infer_input_profile_explicit_route_skips_llm(self):
+    def test_infer_input_profile_route_hint_still_uses_method_advisor(self):
+        class FakeModel:
+            def invoke(self, _messages):
+                return json.dumps(
+                    {
+                        "recommended_route": "hifi",
+                        "recommended_read_type": "pacbio_hifi",
+                        "recommended_method": "assembly.candidate.hifiasm",
+                        "reasoning": "HiFi input",
+                        "uncertainty_notes": [],
+                    }
+                )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -426,20 +443,36 @@ class InputProfilerTests(unittest.TestCase):
 
             with patch(
                 "app.stages.assembly.decision.build_chat_model",
-                side_effect=AssertionError("LLM should not run"),
+                return_value=FakeModel(),
             ):
                 result = infer_input_profile(resolved)
 
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(
-                assembly["input_profile"]["profile_source"], "run_config_explicit"
+                assembly["input_profile"]["profile_source"], "llm_inferred"
             )
-            self.assertEqual(assembly["route_decision"]["selected_route"], "hifi")
+            self.assertEqual(
+                assembly["recommended_assembly_selection"]["primary_method"],
+                "assembly.candidate.hifiasm",
+            )
+            self.assertNotIn("assembly_selection", assembly)
             self.assertTrue(
                 self._ref_path(state, assembly["input_profile_ref"]).exists()
             )
 
-    def test_explicit_cyclone_route_defaults_to_flye_assembly_selection(self):
+    def test_cyclone_route_hint_does_not_prebind_flye(self):
+        class FakeModel:
+            def invoke(self, _messages):
+                return json.dumps(
+                    {
+                        "recommended_route": "cyclone",
+                        "recommended_read_type": "cyclone",
+                        "recommended_method": "assembly.candidate.flye",
+                        "reasoning": "Cyclone input",
+                        "uncertainty_notes": [],
+                    }
+                )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -456,22 +489,32 @@ class InputProfilerTests(unittest.TestCase):
             state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
             resolved = {**state, **resolve_extended_inputs(state)}
 
-            result = infer_input_profile(resolved)
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=FakeModel(),
+            ):
+                result = infer_input_profile(resolved)
 
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["selected_route"], "cyclone")
-            selection = assembly["assembly_selection"]
+            selection = assembly["recommended_assembly_selection"]
             self.assertEqual(selection["read_type"], "cyclone")
             self.assertEqual(selection["primary_method"], "assembly.candidate.flye")
-            self.assertNotIn("fallback_method", selection)
-            self.assertEqual(selection["source"], "run_config")
-            self.assertEqual(
-                selection["rationale"],
-                "run_config explicitly selected cyclone read type",
-            )
-            self.assertNotIn("method_decision", assembly)
+            self.assertEqual(selection["source"], "recommendation")
+            self.assertNotIn("assembly_selection", assembly)
 
-    def test_explicit_ont_route_preserves_ont_selection(self):
+    def test_ont_route_hint_does_not_prebind_hifiasm_ont(self):
+        class FakeModel:
+            def invoke(self, _messages):
+                return json.dumps(
+                    {
+                        "recommended_route": "ont",
+                        "recommended_read_type": "ont_raw",
+                        "recommended_method": "assembly.candidate.hifiasm_ont",
+                        "reasoning": "ONT input",
+                        "uncertainty_notes": [],
+                    }
+                )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -488,23 +531,21 @@ class InputProfilerTests(unittest.TestCase):
             state["stage_outputs"] = {"assembly": {"assembly_route": "ont"}}
             resolved = {**state, **resolve_extended_inputs(state)}
 
-            result = infer_input_profile(resolved)
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=FakeModel(),
+            ):
+                result = infer_input_profile(resolved)
 
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["selected_route"], "ont")
-            self.assertEqual(assembly["route_decision"]["selected_route"], "ont")
             self.assertEqual(assembly["input_profile"]["recommended_route"], "ont")
-            selection = assembly["assembly_selection"]
+            selection = assembly["recommended_assembly_selection"]
             self.assertEqual(selection["read_type"], "ont_raw")
             self.assertEqual(
                 selection["primary_method"], "assembly.candidate.hifiasm_ont"
             )
-            self.assertNotIn("fallback_method", selection)
-            self.assertEqual(selection["source"], "run_config")
-            self.assertEqual(
-                selection["rationale"], "run_config explicitly selected ont read type"
-            )
-            self.assertNotIn("method_decision", assembly)
+            self.assertEqual(selection["source"], "recommendation")
+            self.assertNotIn("assembly_selection", assembly)
 
     def test_infer_input_profile_llm_prompt_receives_skill_text(self):
         class FakeModel:
@@ -516,6 +557,8 @@ class InputProfilerTests(unittest.TestCase):
                 return json.dumps(
                     {
                         "recommended_route": "cyclone",
+                        "recommended_read_type": "cyclone",
+                        "recommended_method": "assembly.candidate.flye",
                         "confidence": 0.72,
                         "reasoning": "Cyclone-like reads",
                         "uncertainty_notes": ["coverage absent"],
@@ -535,6 +578,38 @@ class InputProfilerTests(unittest.TestCase):
                     }
                 ],
             )
+            state["stage_outputs"] = {
+                "read_qc": {"post_filter_summary": {"n50": 12345}},
+                "genome_survey": {
+                    "confidence": "high",
+                    "estimates": {"genome_size_bp": 2000000},
+                    "result_artifact_ref": "artifacts/survey.json",
+                },
+            }
+            state["workflow_steps"] = [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                    "selected_method_names": [],
+                },
+                {
+                    "step_id": "step-001-read_qc",
+                    "stage": "read_qc",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-002-genome_survey",
+                    "stage": "genome_survey",
+                    "allow_local_execution": True,
+                },
+                {
+                    "step_id": "step-003-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": True,
+                },
+            ]
+            state["workflow_step_index"] = 3
             resolved = {**state, **resolve_extended_inputs(state)}
             model = FakeModel()
 
@@ -545,17 +620,238 @@ class InputProfilerTests(unittest.TestCase):
 
             self.assertIsNotNone(model.messages)
             self.assertIn("Route Selection Skill", model.messages[0]["content"])
+            prompt_payload = json.loads(model.messages[1]["content"])
+            self.assertEqual(
+                prompt_payload["data_profile"]["read_qc_summary"]["n50"],
+                12345,
+            )
+            self.assertEqual(
+                prompt_payload["data_profile"]["genome_survey"]["confidence"],
+                "high",
+            )
+            self.assertEqual(
+                prompt_payload["data_profile"]["evidence_status"],
+                {"read_qc": "available", "genome_survey": "available"},
+            )
             self.assertEqual(
                 result["stage_outputs"]["assembly"]["input_profile"][
                     "recommended_route"
                 ],
                 "cyclone",
             )
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(
+                assembly["recommended_assembly_selection"]["primary_method"],
+                "assembly.candidate.flye",
+            )
+            self.assertIsNotNone(assembly["assembly_method_model_request_ref"])
+            self.assertIsNotNone(assembly["assembly_method_model_response_ref"])
+            self.assertIsNotNone(assembly["assembly_method_recommendation_ref"])
             self.assertNotIn(
                 "route_selector_prompt", result["stage_outputs"]["assembly"]
             )
             self.assertNotIn(
                 "route_selector_source", result["stage_outputs"]["assembly"]
+            )
+
+    def test_route_selector_masks_evidence_without_completed_producer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state["stage_outputs"] = {
+                "read_qc": {"summary": {"n50": 12345}},
+                "genome_survey": {"estimates": {"genome_size_bp": 2000000}},
+            }
+            state["shared_parameters"] = {"read_type": "ont_raw"}
+            state["stage_outputs"]["assembly"] = {
+                **(state["stage_outputs"].get("assembly") or {}),
+            }
+            state["workflow_steps"] = [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                    "selected_method_names": [],
+                },
+                {
+                    "step_id": "step-001-assembly",
+                    "stage": "assembly",
+                    "allow_local_execution": True,
+                },
+            ]
+            resolved = {**state, **resolve_extended_inputs(state)}
+            assembly_cursor = resolved["stage_outputs"]["assembly"]
+            from app.stages.assembly.nodes import _route_selector_payload
+
+            prompt_payload = _route_selector_payload(
+                resolved,
+                assembly_cursor,
+                {"rules": {}},
+            )
+            self.assertIsNone(prompt_payload["data_profile"]["read_qc_summary"])
+            self.assertIsNone(
+                prompt_payload["data_profile"]["genome_survey"]["estimates"]
+            )
+            self.assertEqual(
+                prompt_payload["data_profile"]["evidence_status"],
+                {"read_qc": "unavailable", "genome_survey": "unavailable"},
+            )
+            self.assertIn("evidence_status", prompt_payload["data_profile"])
+
+    def test_deferred_mixed_inputs_reach_method_recommender(self):
+        class FakeModel:
+            def __init__(self):
+                self.messages = None
+
+            def invoke(self, messages):
+                self.messages = messages
+                return json.dumps(
+                    {
+                        "recommended_route": "hifi",
+                        "recommended_read_type": "pacbio_hifi",
+                        "recommended_method": "assembly.candidate.hifiasm",
+                        "reasoning": "Prefer the HiFi evidence",
+                        "uncertainty_notes": [],
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ont = Path(tmpdir) / "ont.fastq"
+            hifi = Path(tmpdir) / "hifi.fastq"
+            ont.write_text("@o\nACGT\n+\n!!!!\n", encoding="utf-8")
+            hifi.write_text("@h\nACGT\n+\n!!!!\n", encoding="utf-8")
+            state = self._state(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "ont",
+                        "asset_type": "clean_long_reads",
+                        "path": str(ont),
+                        "platform": "ont",
+                    },
+                    {
+                        "asset_id": "hifi",
+                        "asset_type": "clean_long_reads",
+                        "path": str(hifi),
+                        "platform": "pacbio_hifi",
+                    },
+                ],
+            )
+            resolved = {**state, **resolve_extended_inputs(state)}
+            self.assertEqual(
+                resolved["stage_outputs"]["assembly"]["status"],
+                "resolved_extended",
+            )
+            model = FakeModel()
+
+            with patch(
+                "app.stages.assembly.decision.build_chat_model", return_value=model
+            ):
+                result = infer_input_profile(resolved)
+
+            assert model.messages is not None
+            prompt = json.loads(model.messages[1]["content"])
+            self.assertIn("assembly.candidate.hifiasm", prompt["allowed_methods"])
+            self.assertIn("assembly.candidate.hifiasm_ont", prompt["allowed_methods"])
+            self.assertEqual(
+                result["stage_outputs"]["assembly"]["recommended_assembly_selection"][
+                    "primary_method"
+                ],
+                "assembly.candidate.hifiasm",
+            )
+
+    def test_method_response_replays_without_second_model_call(self):
+        class FakeModel:
+            def invoke(self, _messages):
+                return json.dumps(
+                    {
+                        "recommended_route": "cyclone",
+                        "recommended_read_type": "cyclone",
+                        "recommended_method": "assembly.candidate.flye",
+                        "reasoning": "Cyclone input",
+                        "uncertainty_notes": [],
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+            state = self._state(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "cyclone",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                        "platform": "cycloneseq",
+                    }
+                ],
+            )
+            resolved = {**state, **resolve_extended_inputs(state)}
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=FakeModel(),
+            ):
+                first = infer_input_profile(resolved)
+
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                side_effect=AssertionError("persisted response must be replayed"),
+            ):
+                replay = infer_input_profile(resolved)
+
+            first_assembly = first["stage_outputs"]["assembly"]
+            replay_assembly = replay["stage_outputs"]["assembly"]
+            self.assertEqual(
+                replay_assembly["recommended_assembly_selection"],
+                first_assembly["recommended_assembly_selection"],
+            )
+            self.assertEqual(
+                replay_assembly["assembly_method_model_response_ref"],
+                first_assembly["assembly_method_model_response_ref"],
+            )
+
+    def test_selected_route_without_recommended_method_fails_closed(self):
+        class RouteOnlyModel:
+            def invoke(self, _messages):
+                return json.dumps(
+                    {
+                        "recommended_route": "cyclone",
+                        "reasoning": "legacy route-only response",
+                        "uncertainty_notes": [],
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+            state = self._state(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "cyclone",
+                        "asset_type": "clean_long_reads",
+                        "path": str(reads),
+                        "platform": "cycloneseq",
+                    }
+                ],
+            )
+            resolved = {**state, **resolve_extended_inputs(state)}
+
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=RouteOnlyModel(),
+            ):
+                result = infer_input_profile(resolved)
+
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(
+                assembly["input_profile"]["recommended_route"],
+                "insufficient_data",
+            )
+            self.assertIsNone(assembly["recommended_assembly_selection"])
+            self.assertIn(
+                "recommended_method is required",
+                " ".join(assembly["input_profile"]["uncertainty_notes"]),
             )
 
     def test_infer_input_profile_llm_failure_returns_insufficient_data(self):
@@ -673,6 +969,34 @@ class InputProfilerTests(unittest.TestCase):
                 result["stage_outputs"]["assembly"]["selected_route"], "cyclone"
             )
 
+    def test_reentered_human_selection_preserves_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state = self._blocked_route_state(state, self._route_assembly())
+            applied = _apply_route_review(state, self._request(state, "select_ont"))
+            resumed = {**state, **applied}
+            assembly = dict(resumed["stage_outputs"]["assembly"])
+            assembly["status"] = "resolved_extended"
+            resumed["stage_outputs"] = {
+                **resumed["stage_outputs"],
+                "assembly": assembly,
+            }
+
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                side_effect=AssertionError(
+                    "confirmed human selection must not rerun LLM"
+                ),
+            ):
+                result = infer_input_profile(resumed)
+
+            restored = result["stage_outputs"]["assembly"]
+            self.assertEqual(restored["assembly_selection"]["source"], "human")
+            self.assertEqual(
+                restored["input_profile"]["profile_source"], "human_confirmed"
+            )
+            self.assertEqual(restored["route_decision"]["decided_by"], "human_override")
+
     def test_route_decision_maps_to_assembly_selection(self):
         """Route decisions write the complete canonical assembly selection."""
         cases = [
@@ -760,8 +1084,19 @@ class InputProfilerTests(unittest.TestCase):
             self.assertNotIn("review_policy", payload)
             self.assertNotIn("review_policy_outcome", payload)
 
-    def test_explicit_route_maps_to_assembly_selection(self):
-        """An explicit run-config route writes the canonical assembly selection."""
+    def test_explicit_route_is_only_a_hint_until_method_advisor_confirms(self):
+        class FakeModel:
+            def invoke(self, _messages):
+                return json.dumps(
+                    {
+                        "recommended_route": "hifi",
+                        "recommended_read_type": "pacbio_hifi",
+                        "recommended_method": "assembly.candidate.hifiasm",
+                        "reasoning": "HiFi route hint plus upstream evidence",
+                        "uncertainty_notes": [],
+                    }
+                )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             state["stage_outputs"] = {
@@ -772,20 +1107,19 @@ class InputProfilerTests(unittest.TestCase):
                 }
             }
 
-            result = infer_input_profile(state)
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=FakeModel(),
+            ):
+                result = infer_input_profile(state)
             assembly = result["stage_outputs"]["assembly"]
 
             self.assertEqual(assembly["status"], "profile_ready")
-            self.assertEqual(assembly["selected_route"], "hifi")
-            selection = assembly["assembly_selection"]
+            selection = assembly["recommended_assembly_selection"]
             self.assertEqual(selection["read_type"], "pacbio_hifi")
             self.assertEqual(selection["primary_method"], "assembly.candidate.hifiasm")
-            self.assertNotIn("fallback_method", selection)
-            self.assertEqual(selection["source"], "run_config")
-            self.assertEqual(
-                selection["rationale"], "run_config explicitly selected hifi read type"
-            )
-            self.assertNotIn("method_decision", assembly)
+            self.assertEqual(selection["source"], "recommendation")
+            self.assertNotIn("assembly_selection", assembly)
 
     def test_route_decision_honors_explicit_resume_method_and_read_type(self):
         """Selector V2 uses method_name plus metadata.read_type for human intent."""

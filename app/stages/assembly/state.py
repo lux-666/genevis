@@ -67,7 +67,12 @@ class AssemblyInputProfileCursor(TypedDict, total=False):
     recommendation_reasoning: str
     uncertainty_notes: list[str]
     profile_source: Literal[
-        "manifest", "run_config", "run_config_explicit", "llm_inferred"
+        "manifest",
+        "run_config",
+        "run_config_explicit",
+        "llm_inferred",
+        "human_confirmed",
+        "policy_timeout",
     ]
     notes: list[str]
     metadata: JsonObject
@@ -152,6 +157,17 @@ class AssemblyStageCursor(TypedDict, total=False):
 
     assembly_selection: AssemblySelectionCursor
     recommended_assembly_selection: AssemblySelectionCursor | None
+    method_recommendation_mode: Literal[
+        "advisor",
+        "deterministic_baseline",
+    ]
+    parameter_recommendation_mode: Literal[
+        "advisor",
+        "deterministic_baseline",
+    ]
+    assembly_method_model_request_ref: JsonObject | None
+    assembly_method_model_response_ref: JsonObject | None
+    assembly_method_recommendation_ref: JsonObject | None
     input_profile: AssemblyInputProfileCursor
     input_profile_ref: JsonObject
     route_decision: JsonObject

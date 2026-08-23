@@ -45,7 +45,7 @@ class DocumentationContractTests(unittest.TestCase):
             "../app/workflow.py",
             "../descriptors/registry.yaml",
             "../config/envs.yaml",
-            "../config/envs.yaml.example",
+            "examples/envs.yaml.example",
             "examples/",
             "architecture/reference/data-contract.md",
             "architecture/reference/parameter-recommendation.md",
@@ -88,7 +88,9 @@ class DocumentationContractTests(unittest.TestCase):
         )
 
         self.assertIn("\nconfig/envs.yaml\n", f"\n{gitignore}")
-        self.assertTrue((PROJECT_ROOT / "config" / "envs.yaml.example").is_file())
+        self.assertTrue(
+            (PROJECT_ROOT / "docs" / "examples" / "envs.yaml.example").is_file()
+        )
         self.assertIn("ignored, machine-local state", bootstrap_topic)
         self.assertIn("never falls back to the example", bootstrap_topic)
         self.assertIn("must remain ignored/untracked", deployment_map)
@@ -163,7 +165,8 @@ class DocumentationContractTests(unittest.TestCase):
             self.assertIn('cd "${REPO_ROOT}"', script)
 
         self.assertIn(
-            "orchestrator prerequisites plus selected contig tool/package closure",
+            "orchestrator prerequisites, fixed contig tool/package closure, "
+            "and host databases",
             server_check,
         )
         self.assertIn('CALLER_CWD="$(pwd -P)"', server_check)
@@ -173,7 +176,11 @@ class DocumentationContractTests(unittest.TestCase):
         )
         self.assertIn("LLM endpoint", server_check)
         self.assertIn("real inputs", server_check)
-        self.assertIn("BUSCO lineage", server_check)
+        self.assertIn("BUSCO/NCBI database registry", server_check)
+        self.assertIn(
+            "Assembly method selection: deferred to stage entry", server_check
+        )
+        self.assertIn("stage-owned method selection", server_check)
         self.assertIn("code regression and compile checks only", server_test)
         self.assertIn("not a real-data or biological-tool smoke test", server_test)
         self.assertIn("pytest -q", server_test)
@@ -208,5 +215,6 @@ class DocumentationContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("every method entry declared", deployment_map)
-        self.assertIn("selected method/package closure", deployment_map)
+        self.assertIn("fixed-stage method/package closure", deployment_map)
+        self.assertIn("Assembly method selection remains deferred", deployment_map)
         self.assertIn("not a proof that `server_check.sh` will pass", deployment_map)

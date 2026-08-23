@@ -21,7 +21,7 @@ from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.assembly_dedup.builder import build_stage as build_dedup_stage
-from app.stages.assembly_review.builder import build_stage as build_review_stage
+from app.stages.assembly_review.nodes import resolve_candidates
 from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
@@ -497,7 +497,8 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 workflow_step_id="step-002-assembly_dedup",
             )
 
-            result = build_review_stage().invoke(state)
+            update = resolve_candidates(state)
+            result = {**state, **update}
 
             candidates = result["stage_outputs"]["assembly_review"]["candidates"]
             self.assertEqual(candidates[0]["source"], "assembly_dedup")

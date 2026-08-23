@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
+import json
 import os
 import stat
 import tempfile
@@ -25,6 +27,7 @@ from app.execution.project_bootstrap import (
     ProjectConfigChange,
     apply_project_bootstrap_plan,
     build_project_bootstrap_plan,
+    collect_project_bootstrap_plan,
 )
 
 
@@ -34,6 +37,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             config_path = root / "config" / "envs.yaml"
             package_roots, error_model, chromosome_model = _autohic_fixture(root)
+            database_paths = _database_fixture(root)
             stdout = io.StringIO()
             stderr = io.StringIO()
             fake_bin = root / "bin"
@@ -47,6 +51,8 @@ class ProjectBootstrapTests(unittest.TestCase):
             try:
                 answers = [
                     "tools",
+                    str(database_paths["busco"]),
+                    str(database_paths["ncbi"]),
                     str(package_roots["autohic"]),
                     str(package_roots["juicer"]),
                     str(package_roots["three_d_dna"]),
@@ -71,6 +77,16 @@ class ProjectBootstrapTests(unittest.TestCase):
                 self.assertTrue(config_path.is_file())
                 resolver = EnvResolver(config_path)
                 self.assertEqual(resolver.resolve(stage="unknown").conda_env, "tools")
+                self.assertIsNotNone(resolver.databases)
+                assert resolver.databases is not None
+                self.assertEqual(
+                    resolver.databases.busco.default_lineage,
+                    "metazoa_odb10",
+                )
+                self.assertEqual(
+                    resolver.databases.busco.lineages["metazoa_odb10"].version,
+                    "odb10",
+                )
                 self.assertEqual(
                     set(resolver.packages),
                     {"autohic", "juicer", "three_d_dna", "juicer_tools"},
@@ -104,10 +120,12 @@ class ProjectBootstrapTests(unittest.TestCase):
 
     def test_rerun_is_idempotent_and_does_not_prompt_for_valid_config(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config" / "envs.yaml"
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
             config_path.write_text(
-                "default:\n  fallback_env: tools\npackages: {}\n", encoding="utf-8"
+                yaml.safe_dump(_minimal_host_config(root), sort_keys=False),
+                encoding="utf-8",
             )
             before = config_path.read_bytes()
 
@@ -128,7 +146,8 @@ class ProjectBootstrapTests(unittest.TestCase):
             config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
             config_path.write_text(
-                "default:\n  fallback_env: tools\npackages: {}\n", encoding="utf-8"
+                yaml.safe_dump(_minimal_host_config(root), sort_keys=False),
+                encoding="utf-8",
             )
             previous_key = os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
             try:
@@ -155,11 +174,17 @@ class ProjectBootstrapTests(unittest.TestCase):
 
     def test_existing_values_are_preserved_without_overwrite_approval(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config" / "envs.yaml"
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
+            document = _minimal_host_config(root)
+            document["default"] = {
+                "conda_bin": "micromamba",
+                "fallback_env": "existing",
+            }
+            document["custom"] = {"keep": "value"}
             config_path.write_text(
-                "default:\n  conda_bin: micromamba\n"
-                "  fallback_env: existing\ncustom:\n  keep: value\n",
+                yaml.safe_dump(document, sort_keys=False),
                 encoding="utf-8",
             )
 
@@ -173,9 +198,44 @@ class ProjectBootstrapTests(unittest.TestCase):
             self.assertEqual(plan.config_data["default"]["fallback_env"], "existing")
             self.assertEqual(plan.config_data["custom"], {"keep": "value"})
 
+    def test_existing_pre_database_config_collects_one_migration_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                "default:\n  fallback_env: tools\npackages: {}\n",
+                encoding="utf-8",
+            )
+            databases = _database_fixture(root)
+            answers = iter(
+                [
+                    str(databases["busco"]),
+                    str(databases["ncbi"]),
+                    "n",
+                    "n",
+                ]
+            )
+
+            plan = collect_project_bootstrap_plan(
+                config_path,
+                prompt=lambda _message: next(answers),
+            )
+
+            self.assertEqual(plan.unresolved_fields, [])
+            self.assertEqual(
+                plan.config_data["databases"]["busco"]["default_lineage"],
+                "metazoa_odb10",
+            )
+            self.assertEqual(
+                plan.config_data["databases"]["ncbi_metazoa"]["reference_dir"],
+                str(databases["ncbi"]),
+            )
+
     def test_update_replaces_only_selected_existing_field_on_final_enter(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config" / "envs.yaml"
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
             config_path.write_text(
                 "default:\n"
@@ -186,6 +246,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                 "  keep: value\n",
                 encoding="utf-8",
             )
+            _attach_database_registry(config_path, root)
             stdout = io.StringIO()
 
             with (
@@ -210,12 +271,14 @@ class ProjectBootstrapTests(unittest.TestCase):
 
     def test_update_rejects_stale_plan_without_losing_concurrent_edit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config" / "envs.yaml"
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
             config_path.write_text(
                 "default:\n  fallback_env: existing\npackages: {}\n",
                 encoding="utf-8",
             )
+            _attach_database_registry(config_path, root)
             responses = iter(["2", "replacement"])
 
             def answer(_prompt: str = "") -> str:
@@ -270,12 +333,14 @@ class ProjectBootstrapTests(unittest.TestCase):
 
     def test_update_preview_uses_unset_to_new_value(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config" / "envs.yaml"
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
             config_path.write_text(
                 "default:\n  fallback_env: existing\npackages: {}\n",
                 encoding="utf-8",
             )
+            _attach_database_registry(config_path, root)
             stdout = io.StringIO()
 
             with (
@@ -367,6 +432,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                 "    canary_paths: [juicer_tools.jar]\n",
                 encoding="utf-8",
             )
+            _attach_database_registry(config_path, root)
 
             with (
                 patch("sys.stdin.isatty", return_value=True),
@@ -389,12 +455,14 @@ class ProjectBootstrapTests(unittest.TestCase):
 
     def test_update_interrupt_at_confirmation_does_not_write(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config" / "envs.yaml"
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
             config_path.write_text(
                 "default:\n  fallback_env: existing\npackages: {}\n",
                 encoding="utf-8",
             )
+            _attach_database_registry(config_path, root)
             before = config_path.read_bytes()
             stdout = io.StringIO()
 
@@ -461,6 +529,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                 "default:\n  fallback_env: tools\npackages: {}\n",
                 encoding="utf-8",
             )
+            _attach_database_registry(config_path, root)
             dotenv_path = root / ".env"
             dotenv_path.write_text("GENE_AGENT_LLM_API_KEY=old-secret\n")
             dotenv_path.chmod(0o644)
@@ -534,6 +603,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             config_path = root / "config" / "envs.yaml"
             package_roots, error_model, chromosome_model = _autohic_fixture(root)
+            database_values = _database_values(root)
             (package_roots["juicer"] / "scripts").symlink_to(
                 "CPU", target_is_directory=True
             )
@@ -551,6 +621,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                     "juicer_tools_root": str(package_roots["juicer_tools"]),
                     "error_model_path": str(error_model),
                     "chromosome_model_path": str(chromosome_model),
+                    **database_values,
                 },
             )
             apply_project_bootstrap_plan(plan)
@@ -588,6 +659,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                 "packages: {}\n",
                 encoding="utf-8",
             )
+            _attach_database_registry(config_path, root)
             before = config_path.read_bytes()
             previous_key = os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
             try:
@@ -624,6 +696,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             config_path.write_text(
                 "default:\n  fallback_env: tools\n", encoding="utf-8"
             )
+            _attach_database_registry(config_path, root)
             dotenv_path = root / ".env"
             dotenv_path.write_text(
                 "GENE_AGENT_LLM_API_KEY=old\nKEEP=yes\n", encoding="utf-8"
@@ -677,6 +750,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             config_path = root / "config" / "envs.yaml"
             package_roots, error_model, chromosome_model = _autohic_fixture(root)
+            database_values = _database_values(root)
             plan = build_project_bootstrap_plan(
                 config_path,
                 config_values={
@@ -688,6 +762,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                     "juicer_tools_root": str(package_roots["juicer_tools"]),
                     "error_model_path": str(error_model),
                     "chromosome_model_path": str(chromosome_model),
+                    **database_values,
                 },
             )
             self.assertEqual(plan.conformance_packages, {"juicer"})
@@ -703,6 +778,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             config_path = root / "config" / "envs.yaml"
             package_roots, error_model, chromosome_model = _autohic_fixture(root)
+            database_values = _database_values(root)
             roots = {
                 "autohic_root": package_roots["autohic"],
                 "juicer_root": package_roots["juicer"],
@@ -716,6 +792,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                     "autohic_conda_target": "autohic",
                     "error_model_path": str(error_model),
                     "chromosome_model_path": str(chromosome_model),
+                    **database_values,
                 }
             )
             plan = build_project_bootstrap_plan(
@@ -727,9 +804,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             resolver = apply_project_bootstrap_plan(plan)
             autohic = resolver.packages["autohic"]
             self.assertEqual(autohic.model_path("error"), error_model)
-            self.assertEqual(
-                autohic.model_path("chromosome"), chromosome_model
-            )
+            self.assertEqual(autohic.model_path("chromosome"), chromosome_model)
             self.assertEqual(
                 verify_envs_yaml(config_path, conformance_packages={"juicer"}), []
             )
@@ -740,7 +815,10 @@ class ProjectBootstrapTests(unittest.TestCase):
             config_path = root / "custom-envs.yaml"
             plan = build_project_bootstrap_plan(
                 config_path,
-                config_values={"shared_conda_target": "tools"},
+                config_values={
+                    "shared_conda_target": "tools",
+                    **_database_values(root),
+                },
                 dotenv_values={"GENE_AGENT_LLM_MODEL": "custom-model"},
                 configure_autohic=False,
                 template_path=root / "missing-template.yaml",
@@ -758,6 +836,76 @@ class ProjectBootstrapTests(unittest.TestCase):
                     os.environ.pop("GENE_AGENT_LLM_MODEL", None)
                 else:
                     os.environ["GENE_AGENT_LLM_MODEL"] = previous
+
+    def test_verify_envs_yaml_rejects_database_placeholders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "envs.yaml"
+            issues = verify_envs_yaml(
+                config_path,
+                config_data={
+                    "default": {"fallback_env": "tools"},
+                    "packages": {},
+                    "stages": {},
+                    "methods": {},
+                    "databases": {
+                        "busco": {
+                            "default_lineage": "metazoa_odb10",
+                            "lineages": {
+                                "metazoa_odb10": {
+                                    "path": "/path/to/busco/metazoa_odb10",
+                                    "version": "odb10",
+                                    "source": "busco_downloads",
+                                }
+                            },
+                        },
+                        "ncbi_metazoa": {"reference_dir": "/path/to/ncbi_metazoa"},
+                    },
+                },
+            )
+
+        self.assertTrue(
+            any(
+                "databases.busco.lineages.metazoa_odb10.path" in issue
+                for issue in issues
+            )
+        )
+        self.assertTrue(
+            any("databases.ncbi_metazoa.reference_dir" in issue for issue in issues)
+        )
+
+    def test_verify_envs_yaml_deep_validates_database_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = _database_fixture(root)
+            (paths["busco"] / "scores_cutoff").write_text(
+                "wrong_profile 0.5\n", encoding="utf-8"
+            )
+            issues = verify_envs_yaml(
+                root / "envs.yaml",
+                config_data={
+                    "default": {"fallback_env": "tools"},
+                    "packages": {},
+                    "stages": {},
+                    "methods": {},
+                    "databases": {
+                        "busco": {
+                            "default_lineage": "metazoa_odb10",
+                            "lineages": {
+                                "metazoa_odb10": {
+                                    "path": str(paths["busco"]),
+                                    "version": "odb10",
+                                    "source": "busco_downloads",
+                                }
+                            },
+                        },
+                        "ncbi_metazoa": {
+                            "reference_dir": str(paths["ncbi"]),
+                        },
+                    },
+                },
+            )
+
+        self.assertTrue(any("scores_cutoff profiles" in issue for issue in issues))
 
 
 def _autohic_fixture(root: Path) -> tuple[dict[str, Path], Path, Path]:
@@ -791,6 +939,102 @@ def _autohic_fixture(root: Path) -> tuple[dict[str, Path], Path, Path]:
     error_model.write_bytes(b"error")
     chromosome_model.write_bytes(b"chromosome")
     return package_roots, error_model, chromosome_model
+
+
+def _database_fixture(root: Path) -> dict[str, Path]:
+    """Create the smallest structurally valid BUSCO and NCBI fixtures."""
+
+    busco = root / "metazoa_odb10"
+    (busco / "hmms").mkdir(parents=True, exist_ok=True)
+    (busco / "dataset.cfg").write_text(
+        "name=metazoa_odb10\n"
+        "domain=metazoa\n"
+        "creation_date=2024-01-01\n"
+        "number_of_BUSCOs=1\n"
+        "number_of_species=1\n",
+        encoding="utf-8",
+    )
+    (busco / "hmms" / "BUSCO1.hmm").write_text(
+        "HMMER3/f [3.4 | Nov 2023]\n"
+        "NAME  BUSCO1\n"
+        "LENG  10\n"
+        "ALPH  amino\n"
+        "HMM  A C D E F G H I K L M N P Q R S T V W Y\n"
+        "//\n",
+        encoding="ascii",
+    )
+    (busco / "scores_cutoff").write_text("BUSCO1 0.5\n", encoding="utf-8")
+    (busco / "lengths_cutoff").write_text("BUSCO1 10\n", encoding="utf-8")
+    (busco / "refseq_db.faa.gz").write_bytes(b"fixture")
+
+    ncbi = root / "ncbi_metazoa"
+    ncbi.mkdir(parents=True, exist_ok=True)
+    files = {
+        "Metazoa.ncbi.tsv": "Organism Name\tAssembly Accession\n",
+        "Metazoa.ncbi.lineage": "Organism Taxonomic ID\tLineage\n",
+        "species_alias.tsv": "alias\tscientific_name\n",
+    }
+    manifest_files: dict[str, dict[str, int | str]] = {}
+    for name, content in files.items():
+        path = ncbi / name
+        path.write_text(content, encoding="utf-8")
+        raw = path.read_bytes()
+        manifest_files[name] = {
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        }
+    (ncbi / "reference_manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_id": "fixture",
+                "source_provider": "tests",
+                "source_version": "1",
+                "exported_at": "2024-01-01T00:00:00Z",
+                "files": manifest_files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {"busco": busco, "ncbi": ncbi}
+
+
+def _database_values(root: Path) -> dict[str, str]:
+    paths = _database_fixture(root)
+    return {
+        "busco_lineage_path": str(paths["busco"]),
+        "ncbi_metazoa_reference_dir": str(paths["ncbi"]),
+    }
+
+
+def _minimal_host_config(root: Path) -> dict[str, object]:
+    paths = _database_fixture(root)
+    lineage = paths["busco"]
+    return {
+        "default": {"fallback_env": "tools"},
+        "packages": {},
+        "databases": {
+            "busco": {
+                "default_lineage": lineage.name,
+                "lineages": {
+                    lineage.name: {
+                        "path": str(lineage),
+                        "version": "odb10",
+                        "source": "tests",
+                    }
+                },
+            },
+            "ncbi_metazoa": {"reference_dir": str(paths["ncbi"])},
+        },
+    }
+
+
+def _attach_database_registry(config_path: Path, root: Path) -> None:
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    document["databases"] = _minimal_host_config(root)["databases"]
+    config_path.write_text(
+        yaml.safe_dump(document, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

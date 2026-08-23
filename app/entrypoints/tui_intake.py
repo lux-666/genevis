@@ -225,15 +225,7 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
         requested_stages = []
         target_assembly_level = "contig"
 
-    requested_assembly_method: (
-        Literal[
-            "flye",
-            "nextdenovo",
-            "hifiasm",
-            "hifiasm_ont",
-        ]
-        | None
-    ) = None
+    method_hint = _recognized_assembly_method_hint(text)
     if "hifiasm" in lower:
         ont_mode = bool(
             re.search(
@@ -241,27 +233,29 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
                 lower,
             )
         )
-        requested_assembly_method = "hifiasm_ont" if ont_mode else "hifiasm"
-    elif "nextdenovo" in lower:
-        requested_assembly_method = "nextdenovo"
-    elif re.search(r"\bflye\b", lower):
-        requested_assembly_method = "flye"
-    elif re.search(r"(?:\bhifi\b|\bccs\b|pacbio[ _-]?hi[- ]?fi)", lower):
-        requested_assembly_method = "hifiasm"
-
-    use_ultralong_ont = requested_assembly_method == "hifiasm" and bool(
-        re.search(
-            r"(?:--ul\b|ultra[- ]?long.{0,12}(?:ont|nanopore)|"
-            r"(?:ont|nanopore).{0,12}ultra[- ]?long|超长.{0,8}(?:ont|纳米孔)|"
-            r"(?:ont|纳米孔).{0,8}超长)",
-            lower,
+    else:
+        ont_mode = False
+    use_ultralong_ont = (
+        method_hint == "hifiasm"
+        and not ont_mode
+        and bool(
+            re.search(
+                r"(?:--ul\b|ultra[- ]?long.{0,12}(?:ont|nanopore)|"
+                r"(?:ont|nanopore).{0,12}ultra[- ]?long|超长.{0,8}(?:ont|纳米孔)|"
+                r"(?:ont|纳米孔).{0,8}超长)",
+                lower,
+            )
         )
     )
-    use_hic_phasing = requested_assembly_method == "hifiasm" and (
-        bool(_HIC_PHASING_RE.search(text))
-        and not (
-            bool(_HIC_SCAFFOLDING_ONLY_RE.search(text))
-            and not bool(re.search(r"--h[12]\b", lower))
+    use_hic_phasing = (
+        method_hint == "hifiasm"
+        and not ont_mode
+        and (
+            bool(_HIC_PHASING_RE.search(text))
+            and not (
+                bool(_HIC_SCAFFOLDING_ONLY_RE.search(text))
+                and not bool(re.search(r"--h[12]\b", lower))
+            )
         )
     )
 
@@ -271,10 +265,32 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
         target_species=target_species,
         target_assembly_level=target_assembly_level,
         requested_stages=requested_stages,
-        requested_assembly_method=requested_assembly_method,
         use_ultralong_ont=use_ultralong_ont,
         use_hic_phasing=use_hic_phasing,
     )
+
+
+def _recognized_assembly_method_hint(
+    text: str,
+) -> Literal["flye", "nextdenovo", "hifiasm", "hifiasm_ont"] | None:
+    """Recognize a tool name only as a one-shot asset-collection hint."""
+
+    lower = text.lower()
+    if "hifiasm" in lower:
+        ont_mode = bool(
+            re.search(
+                r"hifiasm(?:[_ -]?ont)|(?:--ont\b)|hifiasm.{0,12}(?:ont模式|ont mode)",
+                lower,
+            )
+        )
+        return "hifiasm_ont" if ont_mode else "hifiasm"
+    if "nextdenovo" in lower:
+        return "nextdenovo"
+    if re.search(r"\bflye\b", lower):
+        return "flye"
+    if re.search(r"(?:\bhifi\b|\bccs\b|pacbio[ _-]?hi[- ]?fi)", lower):
+        return "hifiasm"
+    return None
 
 
 def parse_workflow_intent(
@@ -316,9 +332,6 @@ def parse_workflow_intent(
             else parsed.target_assembly_level
         ),
         requested_stages=requested_stages,
-        requested_assembly_method=(
-            fallback.requested_assembly_method or parsed.requested_assembly_method
-        ),
         use_ultralong_ont=(
             fallback.use_ultralong_ont
             if deterministic_scope_recognized
@@ -339,11 +352,15 @@ def required_roles_for_intent(intent: WorkflowIntent) -> list[IntakeRole]:
     requires_hic = "hic_scaffolding" in stages or (
         intent.target_assembly_level == "chromosome"
     )
-    method = intent.requested_assembly_method
-    roles: list[IntakeRole] = ["hifi_reads"] if method == "hifiasm" else ["ont_reads"]
-    if method == "hifiasm" and intent.use_ultralong_ont:
+    method_hint = _recognized_assembly_method_hint(intent.goal_text)
+    roles: list[IntakeRole] = (
+        ["hifi_reads"]
+        if method_hint == "hifiasm" or intent.use_ultralong_ont
+        else ["ont_reads"]
+    )
+    if method_hint == "hifiasm" and intent.use_ultralong_ont:
         roles.append("ont_reads")
-    if method == "hifiasm_ont":
+    if method_hint == "hifiasm_ont":
         roles = ["ont_reads"]
     if requires_hic or intent.use_hic_phasing:
         roles.append("hic_reads")

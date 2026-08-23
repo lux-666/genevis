@@ -6,6 +6,10 @@
 > whole-run freeze, or draft recovery.  
 > **Comes from:** operator goal text, confirmed sample facts, descriptor-derived
 > method catalog, and machine configuration prepared by [bootstrap](bootstrap.md).  
+> **Authority:** the frozen RunConfig owns stage occurrence and local-execution
+> consent; the Assembly stage owns method identity and method parameters after
+> upstream evidence exists. Intake text is a routing hint, never an execution
+> authority.
 > **Feeds into:** immutable frozen inputs and
 > [runtime orchestration](runtime-orchestration.md).  
 > **Contract dependencies:** [run data](../reference/data-contract.md),
@@ -51,8 +55,18 @@ not be mistaken for TUI support; see the
 The intent parser decides which facts the TUI still needs to ask about. It does
 not authorize tools or own the final stage set. Once intake is complete, the
 planner receives the confirmed manifest view and a method catalog derived from
-the descriptor registry. It produces the editable Plan Draft: stages, methods,
-planning-time parameters, and attention items.
+the descriptor registry. It produces the editable Plan Draft for stages and
+attention items. Fixed-stage methods come from the registry's internal defaults
+rather than a user method field. Assembly is deferred: its stage later
+recommends and confirms `assembly_selection` after upstream QC/survey evidence,
+then recommends parameters for the bound method.
+
+Intent parsing may recognize a named assembly tool as a transient asset-role
+hint only. It asks whether HiFi, ONT, or both roles should be collected; the
+hint is not a durable `WorkflowIntent` field and must not create a second
+execution path, preselect `assembly_selection`, or feed a method name to the
+Plan Draft model. Legacy durable intake documents that still contain a method
+field fail schema validation rather than being silently reinterpreted.
 
 Assembly Review is a recommendation, not a completion rule. The default
 Assembly recommendation may append `assembly_dedup -> assembly_review`. The
@@ -72,12 +86,13 @@ recommendation does not become validation policy.
 
 `selected_stage_occurrences` is the one editable draft sequence. Duplicate
 stages remain distinct operator choices, each with its own local-process consent.
-Methods and parameters are stage-scoped configuration and do not imply consent.
-Confirmation compiles the draft through the same canonical occurrence/freeze
-contract used by structured runs. Runtime recommendations that require upstream
-evidence remain deferred. If the planning model fails or returns an invalid
-draft, the planning attempt stops and the durable draft remains resumable; the
-TUI does not invent a deterministic fallback stage plan.
+Method identity and parameters are not user-authored stage fields in the public
+draft and do not imply consent. Confirmation compiles the draft through the
+same canonical occurrence/freeze contract used by structured runs. Runtime
+recommendations that require upstream evidence remain deferred. If the planning
+model fails or returns an invalid draft, the planning attempt stops and the
+durable draft remains resumable; the TUI does not invent a deterministic
+fallback stage plan.
 
 The draft uses three distinct selection states:
 
@@ -107,16 +122,26 @@ belong to the [run-data contract](../reference/data-contract.md). A partial or
 invalid freeze fails closed instead of silently rebuilding inputs.
 
 After final confirmation and the TTY check, the TUI computes one canonical
-effective local-method closure. A read-only readiness pass probes exactly that
-closure plus any mandatory LLM endpoint. Only after every probe succeeds does
-the freeze store the same closure in the dependency snapshot; no session is
-created on readiness failure. Bootstrap remains the broader machine-level
-diagnostic for all configured methods. After freeze, the executor resolves from
-the snapshot rather than later edits to `config/envs.yaml`.
+effective local-method closure for fixed stages and captures the complete
+configured candidate scope needed by deferred Assembly. A read-only readiness
+pass probes the fixed closure plus any mandatory LLM endpoint; Assembly's
+selected method is preflighted when its stage binds it. Only after the checks
+needed for publication succeed does freeze store the dependency snapshot; no
+session is created on readiness failure. Bootstrap remains the broader
+machine-level diagnostic for all configured methods. After freeze, the executor
+resolves from the snapshot rather than later edits to `config/envs.yaml`.
 
-Whole-run freeze does not generate every future method command. Each selected
-stage later creates the narrower method-attempt freeze described in
-[Method execution](execution.md).
+Whole-run freeze does not generate every future method command. Planning-time
+shared-fact collection is derived from the declared deferred-Assembly scope:
+a local Assembly occurrence requires a normalized `read_type` when available,
+and requires an explicit genome size only when no prior local Genome Survey can
+supply it. Each selected stage later creates the narrower method-attempt freeze
+described in [Method execution](execution.md).
+
+The mutable draft also carries the two independent recommendation modes defined
+by the [recommendation-policy contract](../reference/recommendation-policy.md).
+They are planning choices, not method selections, and become immutable at the
+same whole-run freeze boundary.
 
 ## Post-freeze convergence
 

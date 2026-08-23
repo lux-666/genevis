@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
+from app.schemas.tui_intake import RecommendationPolicy
+
 
 def run_tui(data_dir: str, *, resume_session: str | None = None) -> int:
     """Launch a new conversational run or route one durable TUI session."""
@@ -401,18 +403,10 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         if draft.method_parameters is not None
         else {}
     )
+    # Assembly method selection is runtime-derived.  Keep explicit legacy
+    # selected_methods if a durable draft already contains them, but do not
+    # synthesize a new method choice from intake intent.
     selected_methods = draft.selected_methods
-    if selected_methods is None and draft.intent.requested_assembly_method:
-        method_id = f"assembly.candidate.{draft.intent.requested_assembly_method}"
-        selected_methods = {"assembly": method_id}
-        if draft.intent.requested_assembly_method == "hifiasm":
-            method_parameters[method_id] = {
-                **method_parameters.get(method_id, {}),
-                "use_ultralong_ont": draft.intent.use_ultralong_ont,
-                "use_hic_phasing": (
-                    False if degraded else draft.intent.use_hic_phasing
-                ),
-            }
 
     requested_stages = list(draft.intent.requested_stages)
     if degraded:
@@ -433,10 +427,10 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
             "target_assembly_level": (
                 "contig" if degraded else draft.intent.target_assembly_level
             ),
-            "requested_assembly_method": draft.intent.requested_assembly_method,
             "use_ultralong_ont": draft.intent.use_ultralong_ont,
             "use_hic_phasing": (False if degraded else draft.intent.use_hic_phasing),
         },
+        "recommendation_policy": draft.recommendation_policy.model_dump(),
     }
     return AskPlanState(
         session_id=draft.session_id,
@@ -461,9 +455,9 @@ def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
     context = _plan_draft_context(plan)
     system = (
         "You create one editable Gene Agent Plan Draft. Return exactly one JSON "
-        "object with selected_stage_occurrences, selected_methods, and optional "
-        "shared_parameters, method_parameters, and stage_parameters. Use only "
-        "the stages, method IDs, and planning-time parameter names supplied in "
+        "object with selected_stage_occurrences and optional shared_parameters, "
+        "method_parameters, and stage_parameters. Use only "
+        "the stages and planning-time parameter names supplied in "
         "the context. selected_stage_occurrences must contain the complete ordered "
         "workflow JSON list, which may be empty for an Inventory-only run; each "
         "non-empty item contains stage and allow_local_execution. "
@@ -474,11 +468,10 @@ def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
         "canonical_t2t_workflow from the context. Set allow_local_execution=false "
         "for every stage listed in manual_only_stages because those stages have "
         "no local executor. "
-        "Choose methods "
-        "that match the confirmed input platforms. Include a method choice for "
-        "every selected stage that has selectable methods. For read_qc include "
-        "seqkit stats plus exactly one length-filter choice; for genome_survey "
-        "include both Jellyfish and GenomeScope2. Fill only parameters that are "
+        "Do not choose methods in this draft. The system fills fixed-stage "
+        "defaults (read_qc stats plus skip, Jellyfish plus GenomeScope2, "
+        "Purge_dups, QUAST plus BUSCO, AutoHiC, and minimap2); Assembly stays "
+        "deferred until upstream evidence is available. Fill only parameters that are "
         "explicit in the request/intake or are ordinary planning defaults. Never "
         "invent paths, database provenance, species facts, genome size, or review "
         "decisions. Do not fill runtime-derived catalog L2 parameters; omit them "
@@ -496,9 +489,7 @@ def _generate_plan_draft_with_configured_llm(plan: Any) -> Any:
 
 
 def _plan_draft_context(plan: Any) -> dict[str, Any]:
-    from app.configuration import load_descriptor_registry
     from app.entrypoints.ask_planner import _all_selectable_stages, _load_manifest
-    from app.entrypoints.planner_catalog import load_planner_method_catalog
     from app.workflow import MANUAL_ONLY_STAGES, recommended_workflow_template
 
     requested_scope = [
@@ -507,35 +498,6 @@ def _plan_draft_context(plan: Any) -> dict[str, Any]:
         if str(stage) in _all_selectable_stages()
     ]
     available_stages = requested_scope or _all_selectable_stages()
-    catalog = load_planner_method_catalog()
-    registry = load_descriptor_registry()
-    executor_parameters = _executor_planning_parameters_by_method()
-    methods_by_stage: dict[str, list[dict[str, Any]]] = {}
-    for stage in dict.fromkeys(available_stages):
-        methods: list[dict[str, Any]] = []
-        for item in catalog.methods_for_stage(stage):
-            method_name = str(item["method_name"])
-            descriptor = registry.methods.get(method_name)
-            required_parameters = list(item.get("required_parameters") or [])
-            parameter_defaults = dict(item.get("parameter_defaults") or {})
-            planning_parameters = set(required_parameters)
-            planning_parameters.update(parameter_defaults)
-            planning_parameters.update(executor_parameters.get(method_name, set()))
-            methods.append(
-                {
-                    "method_name": method_name,
-                    "goal": descriptor.goal if descriptor is not None else None,
-                    "planning_parameters": sorted(planning_parameters),
-                    "required_parameters": required_parameters,
-                    "conditional_required_parameters": list(
-                        item.get("conditional_required_parameters") or []
-                    ),
-                    "parameter_defaults": parameter_defaults,
-                    "selection_role": item.get("selection_role"),
-                }
-            )
-        if methods:
-            methods_by_stage[stage] = methods
 
     manifest = _load_manifest(plan.manifest_ref)
     return {
@@ -555,15 +517,15 @@ def _plan_draft_context(plan: Any) -> dict[str, Any]:
         "requested_stage_scope": requested_scope,
         "canonical_t2t_workflow": list(recommended_workflow_template("t2t")),
         "manual_only_stages": sorted(MANUAL_ONLY_STAGES),
-        "methods_by_stage": methods_by_stage,
+        "method_selection": "system_defaults_and_runtime_recommendation",
     }
 
 
 def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
     from app.entrypoints.ask_planner import (
-        _STAGES_NEEDING_METHOD_SELECTION,
         _all_selectable_stages,
         _auto_fill_inferred_defaults,
+        _fill_draft_default_methods,
         merge_clarification_response,
     )
     from app.schemas.ask_plan import AskClarificationResponse, AskPlanState
@@ -609,39 +571,16 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
             kind="stage_selection", selected_stage_occurrences=occurrences
         ),
     )
+    candidate = _fill_draft_default_methods(candidate)
 
     raw_methods = payload.get("selected_methods") or {}
     if not isinstance(raw_methods, Mapping):
         raise ValueError("Plan Draft selected_methods must be an object")
     methods = {str(stage): value for stage, value in raw_methods.items()}
-    extra_method_stages = set(methods).difference(candidate.selected_stage_names or [])
-    if extra_method_stages:
-        raise ValueError(
-            "Plan Draft selects methods for unselected stages: "
-            f"{sorted(extra_method_stages)}"
-        )
-    missing_method_stages = {
-        stage
-        for stage in candidate.selected_stage_names or []
-        if stage in _STAGES_NEEDING_METHOD_SELECTION
-        and stage not in methods
-        and any(
-            occurrence.stage == stage and occurrence.allow_local_execution
-            for occurrence in candidate.selected_stage_occurrences or []
-        )
-    }
-    if missing_method_stages:
-        raise ValueError(
-            "Plan Draft is missing method choices for stages: "
-            f"{sorted(missing_method_stages)}"
-        )
     if methods:
-        candidate = merge_clarification_response(
-            candidate,
-            AskClarificationResponse(
-                kind="method_selection",
-                selected_methods=dict(methods),
-            ),
+        raise ValueError(
+            "Plan Draft must not choose methods; fixed methods are system defaults "
+            "and Assembly is recommended at stage time"
         )
 
     raw_shared = payload.get("shared_parameters") or {}
@@ -683,6 +622,7 @@ def _apply_llm_plan_draft(plan: Any, payload: Mapping[str, Any]) -> Any:
                 stage_parameters=stage_parameters or None,
             ),
         )
+    candidate = _fill_draft_default_methods(candidate)
     candidate = _auto_fill_inferred_defaults(candidate)
     return AskPlanState.model_validate(candidate.model_dump(mode="python"))
 
@@ -735,18 +675,7 @@ def _validate_llm_plan_parameters(
 
 
 def _executor_planning_parameters_by_method() -> dict[str, set[str]]:
-    from app.schemas.run_config import (
-        FlyeRunParameters,
-        HifiasmOntRunParameters,
-        HifiasmRunParameters,
-        NextDenovoRunParameters,
-    )
-
     return {
-        "assembly.candidate.flye": set(FlyeRunParameters.model_fields),
-        "assembly.candidate.nextdenovo": set(NextDenovoRunParameters.model_fields),
-        "assembly.candidate.hifiasm": set(HifiasmRunParameters.model_fields),
-        "assembly.candidate.hifiasm_ont": set(HifiasmOntRunParameters.model_fields),
         "hic_scaffolding.candidate.autohic": {"threads"},
         "t2t.alignment.minimap2": {"mode"},
     }
@@ -774,6 +703,7 @@ def _discard_generated_plan_fields(draft: Any) -> Any:
             "shared_parameters": _shared_parameters_from_intake(draft),
             "method_parameters": None,
             "stage_parameters": None,
+            "recommendation_policy": draft.recommendation_policy,
             "lifecycle": "planning",
         }
     )
@@ -787,6 +717,10 @@ def _copy_planner_fields_to_draft(draft: Any, plan: Any, *, lifecycle: str) -> A
             "shared_parameters": plan.shared_parameters,
             "method_parameters": plan.method_parameters,
             "stage_parameters": plan.stage_parameters,
+            "recommendation_policy": RecommendationPolicy.model_validate(
+                (plan.entry_request or {}).get("recommendation_policy")
+                or RecommendationPolicy()
+            ),
             "lifecycle": lifecycle,
         }
     )
@@ -1004,6 +938,7 @@ def _review_resumed_draft(draft: Any) -> Any | None:
         print("  3          替换 ONT reads")
         print("  4          替换 Hi-C reads / 声明没有 Hi-C")
         print("  5          替换 HiFi reads")
+        print("  6          修改推荐策略")
         print("  0          返回")
         action = input("> ").strip().lower()
         if action in {"", "1", "continue", "继续"}:
@@ -1018,10 +953,53 @@ def _review_resumed_draft(draft: Any) -> Any | None:
             draft = _replace_draft_asset(draft, role="hic_reads")
         elif action == "5":
             draft = _replace_draft_asset(draft, role="hifi_reads")
+        elif action == "6":
+            draft = _edit_recommendation_policy(draft)
         else:
             print("无法识别该选择。\n")
             continue
         save_tui_session_draft(draft)
+
+
+def _edit_recommendation_policy(draft: Any) -> Any:
+    from app.entrypoints.tui_intake import save_tui_session_draft
+    from app.schemas.run_config import RecommendationMode
+
+    policy = draft.recommendation_policy
+    print(
+        "Method/route advisor 当前模式："
+        f"{policy.method_route_advisor}（advisor/deterministic_baseline）"
+    )
+    raw = input("> ").strip().lower() or policy.method_route_advisor
+    method_route_mode: RecommendationMode = (
+        "deterministic_baseline" if raw == "deterministic_baseline" else "advisor"
+    )
+    if raw not in {"advisor", "deterministic_baseline"}:
+        print("未修改：method/route advisor 模式无效。")
+        method_route_mode = policy.method_route_advisor
+    print(
+        "Parameter advisor 当前模式："
+        f"{policy.parameter_advisor}（advisor/deterministic_baseline）"
+    )
+    raw_parameters = input("> ").strip().lower() or policy.parameter_advisor
+    parameter_mode: RecommendationMode = (
+        "deterministic_baseline"
+        if raw_parameters == "deterministic_baseline"
+        else "advisor"
+    )
+    if raw_parameters not in {"advisor", "deterministic_baseline"}:
+        print("未修改：parameter advisor 模式无效。")
+        parameter_mode = policy.parameter_advisor
+    updated = draft.model_copy(
+        update={
+            "recommendation_policy": RecommendationPolicy(
+                method_route_advisor=method_route_mode,
+                parameter_advisor=parameter_mode,
+            )
+        }
+    )
+    save_tui_session_draft(updated)
+    return updated
 
 
 def _replace_draft_goal(draft: Any) -> Any:
@@ -1100,6 +1078,7 @@ def _reset_draft_planning(draft: Any) -> Any:
             "shared_parameters": _shared_parameters_from_intake(draft),
             "method_parameters": None,
             "stage_parameters": None,
+            "recommendation_policy": draft.recommendation_policy,
             "lifecycle": lifecycle,
         }
     )
@@ -1252,8 +1231,7 @@ def _parse_goal_with_configured_llm(request_text: str) -> Mapping[str, Any]:
     system = (
         "Extract only explicit workflow-goal facts. Return one JSON object with "
         "goal_text, optional sample_id/target_species, target_assembly_level "
-        "(contig/scaffold/chromosome), requested_stages, optional explicit "
-        "requested_assembly_method (flye/nextdenovo/hifiasm/hifiasm_ont), and "
+        "(contig/scaffold/chromosome), requested_stages, and "
         "explicit use_ultralong_ont/use_hic_phasing booleans. Do not invent paths, "
         "parameters, methods, or machine capabilities."
     )

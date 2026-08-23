@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import hashlib
 import io
 import json
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -15,12 +17,13 @@ from unittest.mock import patch
 from app.control.lifecycle import TerminalFinalizationResult
 from app.entrypoints.run import execute_frozen_session
 from app.execution.dependency_snapshot import (
+    DependencySnapshotError,
+    FrozenDependencyResolver,
     capture_dependency_snapshot,
     load_dependency_snapshot,
     load_frozen_dependency_resolver,
 )
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.env_resolver import PreflightResult
 from app.schemas.state import initial_state
 from app.stages.inventory.nodes import register_assets, validate_inputs
 from app.storage.artifacts import resolve_artifact_ref
@@ -35,7 +38,7 @@ from app.storage.frozen_inputs import (
     validate_frozen_inputs,
 )
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
-from tests.busco_fixture import busco_parameters, ensure_busco_lineage
+from tests.busco_fixture import ensure_busco_lineage
 
 
 def _stage_requests(
@@ -63,10 +66,7 @@ def _with_busco(root: Path, payload: dict[str, object]) -> dict[str, object]:
         **payload,
         "assembly_review": {
             "busco": {
-                "lineage_path": str(lineage),
-                "lineage_name": "embryophyta_odb10",
-                "lineage_version": "odb10",
-                "lineage_source": "test_fixture",
+                "lineage": lineage.name,
                 "threads": 4,
             }
         },
@@ -75,14 +75,45 @@ def _with_busco(root: Path, payload: dict[str, object]) -> dict[str, object]:
 
 def _review_run_config(
     lineage: Path,
+    *,
+    lineage_selector: str | None = None,
     **busco_overrides: object,
 ) -> dict[str, object]:
+    selected_lineage = lineage_selector or lineage.name
     return {
         "requested_stages": [
             {"stage": "assembly_review", "allow_local_execution": False}
         ],
-        "assembly_review": {"busco": {**busco_parameters(lineage), **busco_overrides}},
+        "assembly_review": {
+            "busco": {"lineage": selected_lineage, "threads": 4, **busco_overrides}
+        },
     }
+
+
+def _write_database_registry(root: Path) -> Path:
+    """Create a complete host-owned DB registry for freeze fixtures."""
+    lineage = ensure_busco_lineage(root)
+    reference = root / "ncbi_metazoa"
+    reference.mkdir(parents=True, exist_ok=True)
+    files = {
+        "Metazoa.ncbi.tsv": "accession\n",
+        "Metazoa.ncbi.lineage": "taxid\tlineage\n",
+        "species_alias.tsv": "alias\tscientific_name\n",
+    }
+    manifest_files: dict[str, dict[str, object]] = {}
+    for name, content in files.items():
+        path = reference / name
+        path.write_text(content, encoding="utf-8")
+        data = content.encode()
+        manifest_files[name] = {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data),
+        }
+    (reference / "reference_manifest.json").write_text(
+        json.dumps({"files": manifest_files}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return lineage
 
 
 def _finalized_terminal(*args, **_kwargs) -> TerminalFinalizationResult:
@@ -217,6 +248,7 @@ class FrozenInputTests(unittest.TestCase):
                         "step_id": "step-000-inventory",
                         "stage": "inventory",
                         "allow_local_execution": False,
+                        "selected_method_names": [],
                     }
                 ],
             )
@@ -281,6 +313,7 @@ class FrozenInputTests(unittest.TestCase):
 
     def _fixture(self, root: Path) -> tuple[SessionPaths, Path, Path, Path]:
         root.mkdir(parents=True, exist_ok=True)
+        lineage = _write_database_registry(root)
         reads = root / "reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
         manifest = root / "manifest_draft.yaml"
@@ -299,7 +332,17 @@ class FrozenInputTests(unittest.TestCase):
         envs.write_text(
             "default:\n  fallback_env: original-env\n"
             "stages:\n  assembly:\n    conda_env: original-assembly\n"
-            "packages: {}\n",
+            "packages: {}\n"
+            "databases:\n"
+            "  busco:\n"
+            "    default_lineage: embryophyta_odb10\n"
+            "    lineages:\n"
+            "      embryophyta_odb10:\n"
+            f"        path: {lineage}\n"
+            "        version: odb10\n"
+            "        source: test_fixture\n"
+            "  ncbi_metazoa:\n"
+            f"    reference_dir: {root / 'ncbi_metazoa'}\n",
             encoding="utf-8",
         )
         return SessionPaths(root / "data", "s1"), manifest, run_config, envs
@@ -396,10 +439,10 @@ class FrozenInputTests(unittest.TestCase):
             self.assertEqual(bundle.manifest, prepared.manifest)
             self.assertEqual(bundle.run_config, prepared.run_config)
 
-    def test_requested_review_without_busco_creates_no_session(self) -> None:
+    def test_requested_review_without_busco_uses_registry_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            paths, manifest, run_config, _ = self._fixture(root)
+            paths, manifest, run_config, envs = self._fixture(root)
             run_config.write_text(
                 json.dumps(
                     {
@@ -414,56 +457,49 @@ class FrozenInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(
-                FrozenInputValidationError,
-                "assembly_review.busco",
-            ):
-                prepare_session_inputs(
-                    manifest_draft=manifest,
-                    run_config_draft=run_config,
-                )
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
+            freeze_session_inputs(
+                paths,
+                prepared_inputs=prepared,
+                config_path=envs,
+            )
 
-            self.assertFalse(paths.data_root.exists())
-            self.assertFalse(paths.run_dir.exists())
+            self.assertTrue(paths.run_dir.exists())
 
     def test_busco_lineage_must_be_existing_directory_before_freeze(self) -> None:
         for kind in ("missing", "file"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                paths, manifest, run_config, _ = self._fixture(root)
+                paths, manifest, run_config, envs = self._fixture(root)
                 lineage = root / "invalid_lineage"
                 if kind == "file":
                     lineage.write_text("not a directory\n", encoding="utf-8")
                 run_config.write_text(
-                    json.dumps(
-                        {
-                            "requested_stages": [
-                                {
-                                    "stage": "assembly_review",
-                                    "allow_local_execution": False,
-                                }
-                            ],
-                            "assembly_review": {
-                                "busco": {
-                                    "lineage_path": str(lineage),
-                                    "lineage_name": "embryophyta_odb10",
-                                    "lineage_version": "odb10",
-                                    "lineage_source": "test_fixture",
-                                    "threads": 4,
-                                }
-                            },
-                        }
+                    json.dumps(_review_run_config(root / "embryophyta_odb10")),
+                    encoding="utf-8",
+                )
+                envs.write_text(
+                    envs.read_text(encoding="utf-8").replace(
+                        f"path: {root / 'embryophyta_odb10'}",
+                        f"path: {lineage}",
                     ),
                     encoding="utf-8",
                 )
 
                 with self.assertRaisesRegex(
                     FrozenInputValidationError,
-                    "does not exist" if kind == "missing" else "must be a directory",
+                    "does not exist"
+                    if kind == "missing"
+                    else "must be a directory|is not a directory",
                 ):
-                    prepare_session_inputs(
+                    freeze_session_inputs(
+                        paths,
                         manifest_draft=manifest,
                         run_config_draft=run_config,
+                        config_path=envs,
                     )
 
                 self.assertFalse(paths.data_root.exists())
@@ -480,39 +516,25 @@ class FrozenInputTests(unittest.TestCase):
         ):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                paths, manifest, run_config, _ = self._fixture(root)
-                lineage = root / "invalid_lineage"
-                lineage.mkdir()
+                paths, manifest, run_config, envs = self._fixture(root)
+                lineage = root / "embryophyta_odb10"
                 dataset_config = lineage / "dataset.cfg"
-                if kind == "empty_dataset_config":
+                if kind == "empty_lineage":
+                    for child in lineage.iterdir():
+                        if child.is_dir():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
+                elif kind == "empty_dataset_config":
                     dataset_config.write_text("", encoding="utf-8")
                 elif kind == "whitespace_dataset_config":
                     dataset_config.write_text("  \n\t\n", encoding="utf-8")
                 elif kind == "config_directory":
+                    dataset_config.unlink()
                     dataset_config.mkdir()
                 run_config.write_text(
-                    json.dumps(
-                        {
-                            "requested_stages": [
-                                {
-                                    "stage": "assembly_review",
-                                    "allow_local_execution": False,
-                                }
-                            ],
-                            "assembly_review": {
-                                "busco": {
-                                    "lineage_path": str(lineage),
-                                    "lineage_name": "embryophyta_odb10",
-                                    "lineage_version": "odb10",
-                                    "lineage_source": "test_fixture",
-                                    "threads": 4,
-                                }
-                            },
-                        }
-                    ),
-                    encoding="utf-8",
+                    json.dumps(_review_run_config(lineage)), encoding="utf-8"
                 )
-
                 with self.assertRaisesRegex(
                     FrozenInputValidationError,
                     (
@@ -521,9 +543,11 @@ class FrozenInputTests(unittest.TestCase):
                         else "dataset.cfg must be a non-empty regular file"
                     ),
                 ):
-                    prepare_session_inputs(
+                    freeze_session_inputs(
+                        paths,
                         manifest_draft=manifest,
                         run_config_draft=run_config,
+                        config_path=envs,
                     )
 
                 self.assertFalse(paths.data_root.exists())
@@ -542,16 +566,23 @@ class FrozenInputTests(unittest.TestCase):
             "missing_lengths": "odb10 lengths_cutoff must be a non-empty",
             "missing_ancestral": "eukaryota ancestral must be a non-empty",
             "missing_refseq": "eukaryota refseq_db.faa.gz must be a non-empty",
-            "declared_identity_mismatch": "lineage identity mismatch",
+            "declared_identity_mismatch": "BUSCO lineage is not configured",
             "declared_version_mismatch": "lineage_version must match",
         }
         for kind, expected in cases.items():
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                paths, manifest, run_config, _ = self._fixture(root)
+                paths, manifest, run_config, envs = self._fixture(root)
                 lineage = ensure_busco_lineage(root)
+                lineage_selector: str | None = None
                 overrides: dict[str, object] = {}
-                if kind == "missing_config_key":
+                if kind == "empty_lineage":
+                    for child in lineage.iterdir():
+                        if child.is_dir():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
+                elif kind == "missing_config_key":
                     dataset_config = lineage / "dataset.cfg"
                     dataset_config.write_text(
                         dataset_config.read_text(encoding="utf-8").replace(
@@ -586,18 +617,31 @@ class FrozenInputTests(unittest.TestCase):
                 elif kind == "missing_refseq":
                     (lineage / "refseq_db.faa.gz").unlink()
                 elif kind == "declared_identity_mismatch":
-                    overrides["lineage_name"] = "insecta_odb10"
+                    lineage_selector = "insecta_odb10"
                 elif kind == "declared_version_mismatch":
-                    overrides["lineage_version"] = "odb12"
+                    envs.write_text(
+                        envs.read_text(encoding="utf-8").replace(
+                            "        version: odb10\n", "        version: odb12\n"
+                        ),
+                        encoding="utf-8",
+                    )
                 run_config.write_text(
-                    json.dumps(_review_run_config(lineage, **overrides)),
+                    json.dumps(
+                        _review_run_config(
+                            lineage,
+                            lineage_selector=lineage_selector,
+                            **overrides,
+                        )
+                    ),
                     encoding="utf-8",
                 )
 
                 with self.assertRaisesRegex(FrozenInputValidationError, expected):
-                    prepare_session_inputs(
+                    freeze_session_inputs(
+                        paths,
                         manifest_draft=manifest,
                         run_config_draft=run_config,
+                        config_path=envs,
                     )
 
                 self.assertFalse(paths.data_root.exists())
@@ -628,7 +672,7 @@ class FrozenInputTests(unittest.TestCase):
                 )
 
                 self.assertEqual(
-                    prepared.run_config.assembly_review.busco.lineage_name,
+                    prepared.run_config.assembly_review.busco.lineage,
                     lineage_name,
                 )
 
@@ -642,9 +686,11 @@ class FrozenInputTests(unittest.TestCase):
             prepared.manifest.session_id = "other-session"
             prepared.run_config.requested_stages.append("not-a-stage")  # type: ignore[arg-type]
 
-            with self.assertRaisesRegex(
-                FrozenInputValidationError,
-                "run-config draft failed validation",
+            with (
+                self.assertWarns(UserWarning),
+                self.assertRaisesRegex(
+                    FrozenInputValidationError, "run-config draft failed validation"
+                ),
             ):
                 freeze_session_inputs(paths, prepared_inputs=prepared)
 
@@ -712,9 +758,10 @@ class FrozenInputTests(unittest.TestCase):
 
             self.assertFalse(paths.data_root.exists())
 
-    def test_prepare_rejects_local_assembly_without_genome_size_before_layout(
+    def test_prepare_accepts_deferred_local_assembly_without_stage_method_facts(
         self,
     ) -> None:
+        """Assembly method and genome/read-role checks belong to stage time."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, _ = self._fixture(root)
@@ -724,11 +771,7 @@ class FrozenInputTests(unittest.TestCase):
                         root,
                         {
                             "requested_stages": _local_stage_requests("assembly"),
-                            "assembly": {
-                                "assembly_method": "flye",
-                                "flye_parameters": {},
-                                "assembly_route": "ont",
-                            },
+                            "assembly": {"assembly_route": "auto"},
                         },
                     )
                 )
@@ -736,56 +779,24 @@ class FrozenInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(FrozenInputValidationError, "genome size"):
-                prepare_session_inputs(
-                    manifest_draft=manifest,
-                    run_config_draft=run_config,
-                )
-
-            self.assertFalse(paths.data_root.exists())
-            self.assertFalse(paths.run_dir.exists())
-
-    def test_prepare_rejects_explicit_assembly_method_without_read_type(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            paths, manifest, run_config, _ = self._fixture(root)
-            run_config.write_text(
-                json.dumps(
-                    _with_busco(
-                        root,
-                        {
-                            "requested_stages": _local_stage_requests("assembly"),
-                            "assembly": {
-                                "assembly_method": "hifiasm_ont",
-                                "hifiasm_ont_parameters": {"threads": 4},
-                            },
-                        },
-                    )
-                )
-                + "\n",
-                encoding="utf-8",
+            prepared = prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
             )
 
-            with self.assertRaisesRegex(
-                FrozenInputValidationError,
-                "assembly.assembly_method is set but no read_type could be inferred",
-            ):
-                prepare_session_inputs(
-                    manifest_draft=manifest,
-                    run_config_draft=run_config,
-                )
-
+            assert prepared.run_config.assembly is not None
+            self.assertEqual(prepared.run_config.assembly.assembly_route, "auto")
             self.assertFalse(paths.data_root.exists())
             self.assertFalse(paths.run_dir.exists())
 
-    def test_freeze_rejects_inferred_local_method_without_read_type(self) -> None:
+    def test_freeze_defers_assembly_read_role_validation_until_stage_time(self) -> None:
+        """A route/read-type mismatch is not a freeze-time method decision."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
             manifest.write_text(
                 manifest.read_text(encoding="utf-8").replace(
-                    "assets:\n",
-                    "genome_size_estimate: 1000\nassets:\n",
+                    "platform: ont", "platform: pacbio_hifi"
                 ),
                 encoding="utf-8",
             )
@@ -795,7 +806,8 @@ class FrozenInputTests(unittest.TestCase):
                         root,
                         {
                             "requested_stages": _local_stage_requests("assembly"),
-                            "assembly": {"flye_parameters": {}},
+                            "shared_parameters": {"read_type": "ont_raw"},
+                            "assembly": {"assembly_route": "ont"},
                         },
                     )
                 )
@@ -803,106 +815,16 @@ class FrozenInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(
-                FrozenInputValidationError,
-                "local assembly method 'flye'.*no read_type could be inferred",
-            ):
-                freeze_session_inputs(
-                    paths,
-                    manifest_draft=manifest,
-                    run_config_draft=run_config,
-                    config_path=envs,
-                )
+            bundle = freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+            )
 
-            self.assertFalse(paths.data_root.exists())
-            self.assertFalse(paths.run_dir.exists())
-
-    def test_freeze_rejects_local_flye_and_nextdenovo_without_reads(self) -> None:
-        for method in ("flye", "nextdenovo"):
-            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                paths, manifest, run_config, envs = self._fixture(root)
-                manifest.write_text(
-                    "session_id: s1\n"
-                    "genome_size_estimate: 1000\n"
-                    "assets:\n"
-                    "  - asset_type: raw_short_dna_reads\n"
-                    "    paths: [reads.fastq]\n"
-                    "    platform: illumina\n"
-                    "    format: fastq\n",
-                    encoding="utf-8",
-                )
-                run_config.write_text(
-                    json.dumps(
-                        _with_busco(
-                            root,
-                            {
-                                "requested_stages": _local_stage_requests("assembly"),
-                                "shared_parameters": {"read_type": "ont_raw"},
-                                "assembly": {f"{method}_parameters": {}},
-                            },
-                        )
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-
-                with self.assertRaisesRegex(
-                    FrozenInputValidationError,
-                    "requires registered long-read declarations",
-                ):
-                    freeze_session_inputs(
-                        paths,
-                        manifest_draft=manifest,
-                        run_config_draft=run_config,
-                        config_path=envs,
-                    )
-
-                self.assertFalse(paths.data_root.exists())
-                self.assertFalse(paths.run_dir.exists())
-
-    def test_freeze_rejects_local_methods_with_wrong_read_family(self) -> None:
-        for method in ("flye", "nextdenovo"):
-            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                paths, manifest, run_config, envs = self._fixture(root)
-                manifest.write_text(
-                    manifest.read_text(encoding="utf-8")
-                    .replace("platform: ont", "platform: pacbio_hifi")
-                    .replace(
-                        "assets:\n",
-                        "genome_size_estimate: 1000\nassets:\n",
-                    ),
-                    encoding="utf-8",
-                )
-                run_config.write_text(
-                    json.dumps(
-                        _with_busco(
-                            root,
-                            {
-                                "requested_stages": _local_stage_requests("assembly"),
-                                "shared_parameters": {"read_type": "ont_raw"},
-                                "assembly": {f"{method}_parameters": {}},
-                            },
-                        )
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-
-                with self.assertRaisesRegex(
-                    FrozenInputValidationError,
-                    "compatible with read_type 'ont_raw'",
-                ):
-                    freeze_session_inputs(
-                        paths,
-                        manifest_draft=manifest,
-                        run_config_draft=run_config,
-                        config_path=envs,
-                    )
-
-                self.assertFalse(paths.data_root.exists())
-                self.assertFalse(paths.run_dir.exists())
+            assert bundle.run_config.assembly is not None
+            self.assertEqual(bundle.run_config.assembly.assembly_route, "ont")
+            self.assertNotIn("assembly_method", bundle.run_config.assembly.model_dump())
 
     def test_prepare_accepts_registered_read_type_families(self) -> None:
         cases = (
@@ -935,7 +857,7 @@ class FrozenInputTests(unittest.TestCase):
                             {
                                 "requested_stages": _local_stage_requests("assembly"),
                                 "shared_parameters": {"read_type": read_type},
-                                "assembly": {"flye_parameters": {}},
+                                "assembly": {},
                             },
                         )
                     )
@@ -954,7 +876,9 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 self.assertFalse(paths.data_root.exists())
 
-    def test_freeze_rejects_method_incompatible_shared_read_type(self) -> None:
+    def test_freeze_defers_method_read_type_compatibility_until_stage_time(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
@@ -972,7 +896,7 @@ class FrozenInputTests(unittest.TestCase):
                         {
                             "requested_stages": _local_stage_requests("assembly"),
                             "shared_parameters": {"read_type": "ont_raw"},
-                            "assembly": {"hifiasm_parameters": {}},
+                            "assembly": {"assembly_route": "auto"},
                         },
                     )
                 )
@@ -980,19 +904,15 @@ class FrozenInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(
-                FrozenInputValidationError,
-                "incompatible with inferred read_type 'ont_raw'",
-            ):
-                freeze_session_inputs(
-                    paths,
-                    manifest_draft=manifest,
-                    run_config_draft=run_config,
-                    config_path=envs,
-                )
+            bundle = freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+            )
 
-            self.assertFalse(paths.data_root.exists())
-            self.assertFalse(paths.run_dir.exists())
+            assert bundle.run_config.assembly is not None
+            self.assertEqual(bundle.run_config.assembly.assembly_route, "auto")
 
     def test_run_config_occurrences_are_the_only_dependency_stage_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1317,13 +1237,11 @@ class FrozenInputTests(unittest.TestCase):
             self.assertEqual(
                 resolver.resolve(stage="assembly").conda_env, "original-assembly"
             )
-            with patch(
-                "app.execution.env_dispatch.preflight",
-                return_value=PreflightResult(
-                    status="ok", env_target="original-assembly"
-                ),
+            with self.assertRaisesRegex(
+                DependencySnapshotError,
+                "requested method is absent from the frozen dependency snapshot",
             ):
-                spec, packages, blocked = resolve_method_env(
+                resolve_method_env(
                     {},
                     stage="assembly",
                     method_name="assembly.unknown",
@@ -1333,9 +1251,6 @@ class FrozenInputTests(unittest.TestCase):
                     input_manifest_ref="control/input_manifest.yaml",
                     config_path=envs,
                 )
-            self.assertIsNone(blocked)
-            self.assertEqual(spec.conda_env if spec else None, "original-assembly")
-            self.assertEqual(packages, [])
 
     def test_execute_frozen_session_uses_verified_canonical_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1625,6 +1540,111 @@ class FrozenInputTests(unittest.TestCase):
                 ["assembly.candidate.flye", "assembly_review.eval.quast"],
             )
             self.assertEqual(set(snapshot.packages), {"selected", "internal"})
+
+    def test_deferred_assembly_freeze_captures_all_candidate_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, run_config, envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": _local_stage_requests("assembly"),
+                        "shared_parameters": {"platform": "ont"},
+                        "assembly": {},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            envs.write_text(
+                "default:\n  fallback_env: default-env\n"
+                "stages:\n  assembly: {conda_env: assembly-env}\n"
+                "packages: {}\n"
+                "methods:\n"
+                "  assembly.candidate.flye: {conda_env: flye-env, "
+                "required_tools: [flye]}\n"
+                "  assembly.candidate.nextdenovo: {conda_env: nextdenovo-env, "
+                "required_tools: [nextdenovo]}\n"
+                "  assembly.candidate.hifiasm: {conda_env: hifiasm-env, "
+                "required_tools: [hifiasm]}\n"
+                "  assembly.candidate.hifiasm_ont: {conda_env: hifiasm-ont-env, "
+                "required_tools: [hifiasm]}\n",
+                encoding="utf-8",
+            )
+
+            bundle = freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+            )
+            snapshot = load_dependency_snapshot(
+                paths.dependency_manifest_path,
+                expected_sha256=bundle.marker.files["dependency_manifest"].sha256,
+            )
+
+            expected = {
+                "assembly.candidate.flye",
+                "assembly.candidate.nextdenovo",
+                "assembly.candidate.hifiasm",
+                "assembly.candidate.hifiasm_ont",
+            }
+            self.assertEqual(set(snapshot.selected_methods), expected)
+            self.assertEqual(set(snapshot.method_environments), expected)
+
+    def test_database_registry_is_captured_and_resolved_from_frozen_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envs = Path(tmp) / "envs.yaml"
+            envs.write_text(
+                "default:\n  fallback_env: default-env\n"
+                "databases:\n"
+                "  busco:\n"
+                "    default_lineage: metazoa_odb10\n"
+                "    lineages:\n"
+                "      metazoa_odb10:\n"
+                "        path: /db/busco/metazoa_odb10\n"
+                "        version: odb10\n"
+                "        source: busco_downloads\n"
+                "      embryophyta_odb10:\n"
+                "        path: /db/busco/embryophyta_odb10\n"
+                "        version: odb10\n"
+                "        source: busco_downloads\n"
+                "  ncbi_metazoa:\n"
+                "    reference_dir: /db/ncbi_metazoa\n",
+                encoding="utf-8",
+            )
+
+            snapshot = capture_dependency_snapshot(config_path=envs)
+            self.assertIsNotNone(snapshot.databases)
+            assert snapshot.databases is not None
+            self.assertEqual(snapshot.databases.busco.default_lineage, "metazoa_odb10")
+            frozen = FrozenDependencyResolver(snapshot)
+            self.assertEqual(
+                frozen.resolve_busco_lineage("embryophyta_odb10").path,
+                "/db/busco/embryophyta_odb10",
+            )
+            self.assertEqual(
+                frozen.resolve_busco_lineage().path, "/db/busco/metazoa_odb10"
+            )
+
+    def test_pre_database_v2_snapshot_without_registry_remains_loadable(self) -> None:
+        """Adding the optional registry must not break existing v2 manifests."""
+        with tempfile.TemporaryDirectory() as tmp:
+            envs = Path(tmp) / "envs.yaml"
+            envs.write_text("default:\n  fallback_env: default-env\n", encoding="utf-8")
+            current = capture_dependency_snapshot(config_path=envs)
+            legacy_payload = current.model_dump(mode="json", exclude={"databases"})
+            manifest = Path(tmp) / "dependency_manifest.json"
+            manifest.write_text(
+                json.dumps(legacy_payload, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+            loaded = load_dependency_snapshot(manifest)
+
+            self.assertEqual(loaded.schema_version, 2)
+            self.assertIsNone(loaded.databases)
 
     def test_execute_frozen_session_rejects_any_tampered_control_input(self) -> None:
         targets = (

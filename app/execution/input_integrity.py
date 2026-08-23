@@ -87,9 +87,7 @@ def directory_input_dependency(path: str | Path) -> DirectoryInputDependency:
     """Freeze deterministic byte evidence for one external directory tree."""
 
     canonical = _canonical(path)
-    file_count, total_size_bytes, tree_sha256 = _directory_evidence(
-        Path(canonical)
-    )
+    file_count, total_size_bytes, tree_sha256 = _directory_evidence(Path(canonical))
     return DirectoryInputDependency(
         path=canonical,
         file_count=file_count,
@@ -180,8 +178,7 @@ def verify_input_dependencies(
                 digests[dependency.path] = actual
             if actual != dependency.sha256:
                 raise ValueError(
-                    f"file input dependency checksum changed: "
-                    f"{dependency.path!r}"
+                    f"file input dependency checksum changed: {dependency.path!r}"
                 )
             continue
 
@@ -239,9 +236,7 @@ def _directory_evidence(path: Path) -> tuple[int, int, str]:
             )
         size_bytes = entry.stat().st_size
         file_sha256 = sha256_file(entry)
-        digest.update(
-            f"f\\0{relative}\\0{size_bytes}\\0{file_sha256}\\0".encode()
-        )
+        digest.update(f"f\\0{relative}\\0{size_bytes}\\0{file_sha256}\\0".encode())
         file_count += 1
         total_size_bytes += size_bytes
     return file_count, total_size_bytes, digest.hexdigest()

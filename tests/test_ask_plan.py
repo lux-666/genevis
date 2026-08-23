@@ -13,8 +13,6 @@ from app.entrypoints.ask_planner import (
     READ_QC_STATS_METHOD,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
-    _extract_busco_version,
-    _infer_parameter_defaults,
     _recommended_stages_from_manifest,
     build_initial_plan_draft,
     build_planner_method_catalog,
@@ -38,16 +36,6 @@ def _base_plan(**overrides) -> AskPlanState:
             PlanStageOccurrence(stage=stage, allow_local_execution=True)
             for stage in stages
         ]
-    occurrences = overrides.get("selected_stage_occurrences") or []
-    if overrides.get("confirmed") and any(
-        occurrence.stage == "assembly_review" for occurrence in occurrences
-    ):
-        method_parameters = dict(overrides.get("method_parameters") or {})
-        method_parameters.setdefault(
-            "assembly_review.eval.busco",
-            _busco_method_parameters(),
-        )
-        overrides["method_parameters"] = method_parameters
     base = dict(
         session_id="s1",
         data_dir="data",
@@ -60,18 +48,6 @@ def _base_plan(**overrides) -> AskPlanState:
 
 def _read_qc_default_methods() -> list[str]:
     return [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP]
-
-
-def _busco_method_parameters(
-    lineage_path: str = "/data/busco/embryophyta_odb10",
-) -> dict[str, object]:
-    return {
-        "lineage_path": lineage_path,
-        "lineage_name": "embryophyta_odb10",
-        "lineage_version": "odb10",
-        "lineage_source": "test_fixture",
-        "threads": 8,
-    }
 
 
 def _requested_stage_names(payload: dict) -> list[str]:
@@ -402,9 +378,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             self.assertEqual(draft.selected_stage_names, ["assembly"])
-            self.assertEqual(
-                draft.selected_methods["assembly"], "assembly.candidate.flye"
-            )
+            self.assertNotIn("assembly", draft.selected_methods or {})
 
     def test_pacbio_hifi_assembly_draft_writes_hifi_route_to_run_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,24 +398,22 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
 
             draft = build_initial_plan_draft(plan)
-            method_parameters = dict(draft.method_parameters or {})
-            method_parameters["assembly_review.eval.busco"] = (
-                _busco_method_parameters()
-            )
             payload = build_run_config_payload(
                 draft.model_copy(
                     update={
-                        "method_parameters": method_parameters,
                         "confirmed": True,
                     }
                 )
             )
 
+            self.assertNotIn("assembly", draft.selected_methods or {})
             self.assertEqual(
-                draft.selected_methods["assembly"], "assembly.candidate.hifiasm"
+                payload["assembly"],
+                {
+                    "method_route_advisor": "advisor",
+                    "parameter_advisor": "advisor",
+                },
             )
-            self.assertEqual(payload["assembly"]["assembly_method"], "hifiasm")
-            self.assertEqual(payload["assembly"]["assembly_route"], "hifi")
 
     def test_multi_stage_goal_keeps_requested_stages_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -500,9 +472,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
                     "genome_survey.model.genomescope2",
                 ],
             )
-            self.assertEqual(
-                draft.selected_methods["assembly"], "assembly.candidate.flye"
-            )
+            self.assertNotIn("assembly", draft.selected_methods or {})
             self.assertEqual(
                 draft.selected_methods["assembly_review"],
                 [
@@ -531,7 +501,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
                 ],
                 21,
             )
-            self.assertEqual(draft.method_parameters["assembly.candidate.flye"], {})
+            self.assertNotIn("assembly.candidate.flye", draft.method_parameters or {})
             self.assertEqual(
                 draft.method_parameters["assembly_review.eval.quast"]["threads"], 4
             )
@@ -582,26 +552,15 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
     def test_method_selection_includes_non_pipeline_stages(self):
         plan = _base_plan(
             stage_names=["read_qc", "assembly"],
+            shared_parameters={
+                "platform": "ont",
+                "read_type": "ont_raw",
+                "estimated_genome_size": 2_000_000,
+            },
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        self.assertIn("read_qc", result.choices["methods_by_stage"])
-        self.assertIn("assembly", result.choices["methods_by_stage"])
-        read_qc_defaults = result.choices["defaults"]["read_qc"]
-        self.assertEqual(read_qc_defaults, _read_qc_default_methods())
-        read_qc_methods = {
-            m["method_name"]: m for m in result.choices["methods_by_stage"]["read_qc"]
-        }
-        self.assertEqual(
-            read_qc_methods[READ_QC_FILTER_SKIP]["display_name"],
-            "skip filtering, use raw reads",
-        )
-        flye = [
-            m
-            for m in result.choices["methods_by_stage"]["assembly"]
-            if m["method_name"] == "assembly.candidate.flye"
-        ]
-        self.assertNotIn("execution_support", flye[0])
+        self.assertEqual(result.kind, "confirm")
+        self.assertNotIn("method_selection", result.choices)
 
     def test_assembly_review_method_selection_uses_registered_method_names(self):
         plan = _base_plan(
@@ -609,10 +568,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "parameter_values")
-        self.assertIn(
-            "assembly_review.eval.busco.lineage_path",
-            result.required_fields,
-        )
+        self.assertFalse(any("lineage_" in field for field in result.required_fields))
         self.assertNotIn("methods_by_stage", result.choices)
 
     def test_assembly_review_rejects_removing_busco(self):
@@ -641,10 +597,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
             stage_names=["read_qc"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        self.assertEqual(
-            result.choices["defaults"]["read_qc"], _read_qc_default_methods()
-        )
+        self.assertEqual(result.kind, "confirm")
 
     def test_empty_method_name_rejected(self):
         plan = _base_plan(
@@ -1177,18 +1130,14 @@ class AskPlannerConfirmTests(unittest.TestCase):
 
 
 class AskPlannerRunConfigTests(unittest.TestCase):
-    def test_build_run_config_from_confirmed_plan_with_advanced_flye_overrides(self):
+    def test_build_run_config_keeps_deferred_assembly_out_of_payload(self):
         plan = _base_plan(
             stage_names=["read_qc", "assembly", "assembly_review"],
-            selected_methods={
-                "read_qc": _read_qc_default_methods(),
-                "assembly": "assembly.candidate.flye",
-            },
+            selected_methods={"read_qc": _read_qc_default_methods()},
             shared_parameters={
                 "read_type": "ont_raw",
                 "estimated_genome_size": 2_000_000,
             },
-            method_parameters={"assembly.candidate.flye": {"threads": 8}},
             confirmed=True,
         )
         payload = build_run_config_payload(plan)
@@ -1200,140 +1149,69 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             payload["review_policy"],
             {"max_blocked_seconds": 300},
         )
-        self.assertEqual(payload["read_qc"]["length_filter"]["method"], "skip")
+        self.assertEqual(
+            payload["read_qc"]["length_filter"],
+            {"approved": False, "thresholds": {}},
+        )
         self.assertEqual(payload["shared_parameters"]["read_type"], "ont_raw")
         self.assertNotIn("estimated_genome_size", payload["shared_parameters"])
-        self.assertEqual(payload["assembly"]["flye_parameters"]["threads"], 8)
-
-    def test_build_run_config_executes_selected_nextdenovo_method(self):
-        plan = _base_plan(
-            stage_names=["assembly", "assembly_review"],
-            selected_methods={"assembly": "assembly.candidate.nextdenovo"},
-            shared_parameters={
-                "platform": "ont",
-                "read_type": "ont_raw",
-                "estimated_genome_size": 2000000,
-            },
-            method_parameters={"assembly.candidate.nextdenovo": {"threads": 8}},
-            confirmed=True,
-        )
-
-        payload = build_run_config_payload(plan)
-
-        self.assertEqual(
-            _local_execution_stage_names(payload), ["assembly", "assembly_review"]
-        )
         self.assertEqual(
             payload["assembly"],
             {
-                "assembly_method": "nextdenovo",
-                "nextdenovo_parameters": {
-                    "threads": 8,
-                },
+                "method_route_advisor": "advisor",
+                "parameter_advisor": "advisor",
             },
         )
 
-    def test_build_run_config_executes_selected_hifiasm_method(self):
+    def test_build_run_config_rejects_legacy_assembly_method_selection(self):
         plan = _base_plan(
             stage_names=["assembly", "assembly_review"],
-            selected_methods={"assembly": "assembly.candidate.hifiasm"},
-            shared_parameters={
-                "platform": "pacbio_hifi",
-                "read_type": "pacbio_hifi",
-                "estimated_genome_size": 2000000,
-            },
+            selected_methods={"assembly": "assembly.candidate.flye"},
             confirmed=True,
         )
-        plan = _auto_fill_inferred_defaults(plan)
-
-        payload = build_run_config_payload(plan)
-
-        self.assertEqual(
-            _local_execution_stage_names(payload), ["assembly", "assembly_review"]
-        )
-        self.assertEqual(
-            payload["assembly"],
-            {
-                "assembly_method": "hifiasm",
-                "assembly_route": "hifi",
-                "hifiasm_parameters": {},
-            },
-        )
-
-    def test_build_run_config_executes_selected_hifiasm_ont_method(self):
-        plan = _base_plan(
-            stage_names=["assembly", "assembly_review"],
-            selected_methods={"assembly": "assembly.candidate.hifiasm_ont"},
-            shared_parameters={
-                "platform": "ont",
-                "read_type": "ont_raw",
-                "estimated_genome_size": 2000000,
-            },
-            confirmed=True,
-        )
-        plan = _auto_fill_inferred_defaults(plan)
-
-        payload = build_run_config_payload(plan)
-
-        self.assertEqual(
-            _local_execution_stage_names(payload), ["assembly", "assembly_review"]
-        )
-        self.assertEqual(
-            payload["assembly"],
-            {
-                "assembly_method": "hifiasm_ont",
-                "assembly_route": "ont",
-                "hifiasm_ont_parameters": {},
-            },
-        )
-
-    def test_build_run_config_rejects_multiple_executable_assembly_methods(self):
-        plan = _base_plan(
-            stage_names=["assembly"],
-            selected_methods={
-                "assembly": [
-                    "assembly.candidate.flye",
-                    "assembly.candidate.nextdenovo",
-                ],
-            },
-            shared_parameters={
-                "platform": "ont",
-                "read_type": "ont_raw",
-                "estimated_genome_size": 2000000,
-            },
-            method_parameters={
-                "assembly.candidate.flye": {"threads": 8},
-                "assembly.candidate.nextdenovo": {"threads": 8},
-            },
-            confirmed=True,
-        )
-
-        with self.assertRaisesRegex(ValueError, "exactly one executable"):
+        with self.assertRaisesRegex(ValueError, "method selection is deferred"):
             build_run_config_payload(plan)
 
-    def test_build_run_config_uses_shared_assembly_parameters(self):
+    def test_build_run_config_projects_recommendation_ablation_policy(self):
         plan = _base_plan(
-            stage_names=["read_qc", "assembly", "assembly_review"],
-            selected_methods={
-                "read_qc": _read_qc_default_methods(),
-                "assembly": "assembly.candidate.flye",
-            },
+            stage_names=["assembly"],
             shared_parameters={
                 "platform": "ont",
                 "read_type": "ont_raw",
-                "estimated_genome_size": 2000000,
+                "estimated_genome_size": 2_000_000,
             },
+            confirmed=True,
+        )
+        plan = plan.model_copy(
+            update={
+                "entry_request": {
+                    **plan.entry_request,
+                    "recommendation_policy": {
+                        "method_route_advisor": "deterministic_baseline",
+                        "parameter_advisor": "deterministic_baseline",
+                    },
+                }
+            }
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(
+            payload["assembly"],
+            {
+                "method_route_advisor": "deterministic_baseline",
+                "parameter_advisor": "deterministic_baseline",
+            },
+        )
+
+    def test_build_run_config_rejects_legacy_assembly_method_parameters(self):
+        plan = _base_plan(
+            stage_names=["assembly"],
             method_parameters={"assembly.candidate.flye": {"threads": 8}},
             confirmed=True,
         )
-        payload = build_run_config_payload(plan)
-        self.assertEqual(payload["shared_parameters"]["platform"], "ont")
-        self.assertEqual(payload["shared_parameters"]["read_type"], "ont_raw")
-        self.assertNotIn("estimated_genome_size", payload["shared_parameters"])
-        self.assertEqual(
-            payload["assembly"]["flye_parameters"],
-            {"threads": 8},
-        )
+        with self.assertRaisesRegex(ValueError, "method parameters are deferred"):
+            build_run_config_payload(plan)
 
     def test_build_run_config_includes_assembly_dedup_as_locally_executable(self):
         plan = _base_plan(
@@ -1413,13 +1291,11 @@ class AskPlannerRunConfigTests(unittest.TestCase):
     def test_build_run_config_for_assembly_goal_uses_requested_boundary(self):
         plan = _base_plan(
             stage_names=["assembly", "assembly_review"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
             shared_parameters={
                 "platform": "ont",
                 "read_type": "ont_raw",
                 "estimated_genome_size": 2000000,
             },
-            method_parameters={"assembly.candidate.flye": {"threads": 8}},
             confirmed=True,
         )
 
@@ -1430,6 +1306,13 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             _local_execution_stage_names(payload), ["assembly", "assembly_review"]
+        )
+        self.assertEqual(
+            payload["assembly"],
+            {
+                "method_route_advisor": "advisor",
+                "parameter_advisor": "advisor",
+            },
         )
         self.assertNotIn("read_qc", _requested_stage_names(payload))
         self.assertNotIn("base_polish", _requested_stage_names(payload))
@@ -1474,7 +1357,10 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             confirmed=True,
         )
         payload = build_run_config_payload(plan)
-        self.assertEqual(payload["read_qc"]["length_filter"]["method"], "skip")
+        self.assertEqual(
+            payload["read_qc"]["length_filter"],
+            {"approved": False, "thresholds": {}},
+        )
 
     def test_build_run_config_uses_selected_seqkit_filter_threshold(self):
         plan = _base_plan(
@@ -1492,7 +1378,6 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(
             payload["read_qc"]["length_filter"],
             {
-                "method": READ_QC_FILTER_SEQKIT,
                 "approved": True,
                 "thresholds": {"min_len": 1000},
             },
@@ -1563,10 +1448,6 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             method_parameters={
                 "assembly_review.eval.quast": {"threads": 4},
                 "assembly_review.eval.busco": {
-                    "lineage_path": "/data/busco/embryophyta_odb10",
-                    "lineage_name": "embryophyta_odb10",
-                    "lineage_version": "2024-01-08",
-                    "lineage_source": "local",
                     "threads": 16,
                 },
             },
@@ -1577,16 +1458,10 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(payload["assembly_review"]["quast"], {"threads": 4})
         self.assertEqual(
             payload["assembly_review"]["busco"],
-            {
-                "lineage_path": "/data/busco/embryophyta_odb10",
-                "lineage_name": "embryophyta_odb10",
-                "lineage_version": "2024-01-08",
-                "lineage_source": "local",
-                "threads": 16,
-            },
+            {"threads": 16},
         )
 
-    def test_build_run_config_raises_valueerror_for_partial_busco_params(self):
+    def test_build_run_config_uses_host_database_with_default_busco_threads(self):
         plan = _base_plan(
             stage_names=["assembly_review"],
             selected_methods={
@@ -1597,10 +1472,8 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             },
             confirmed=True,
         )
-        with self.assertRaisesRegex(
-            ValueError, r"assembly_review\.eval\.busco\.lineage_path is required"
-        ):
-            build_run_config_payload(plan)
+        payload = build_run_config_payload(plan)
+        self.assertEqual(payload["assembly_review"]["busco"], {"threads": 8})
 
 
 class AskPlannerBuscoFlowTests(unittest.TestCase):
@@ -1615,12 +1488,9 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
             "assembly_review.eval.quast.threads",
             result.required_fields,
         )
-        self.assertIn(
-            "assembly_review.eval.busco.lineage_path",
-            result.required_fields,
-        )
+        self.assertFalse(any("lineage_" in field for field in result.required_fields))
 
-    def test_busco_parameter_clarification_asks_for_all_fields(self):
+    def test_busco_parameter_clarification_never_asks_for_database_fields(self):
         plan = _base_plan(
             stage_names=["assembly_review"],
             selected_methods={
@@ -1632,19 +1502,9 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "parameter_values")
-        required = result.required_fields
-        for field in (
-            "lineage_path",
-            "lineage_name",
-            "lineage_version",
-            "lineage_source",
-        ):
-            self.assertTrue(
-                any(f"assembly_review.eval.busco.{field}" in f for f in required),
-                f"Missing required field: assembly_review.eval.busco.{field}",
-            )
+        self.assertFalse(any("lineage_" in field for field in result.required_fields))
 
-    def test_missing_busco_fields_block_confirmation(self):
+    def test_missing_busco_database_fields_do_not_block_confirmation(self):
         plan = _base_plan(
             stage_names=["assembly_review"],
             selected_methods={
@@ -1656,9 +1516,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "parameter_values")
-        self.assertTrue(
-            any("lineage_path" in f for f in result.required_fields),
-        )
+        self.assertFalse(any("lineage_" in field for field in result.required_fields))
 
     def test_build_run_config_payload_with_busco_after_auto_fill(self):
         plan = _base_plan(
@@ -1672,10 +1530,6 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
             method_parameters={
                 "assembly_review.eval.quast": {"threads": 2},
                 "assembly_review.eval.busco": {
-                    "lineage_path": "/data/busco/lineage",
-                    "lineage_name": "embryophyta_odb10",
-                    "lineage_version": "2024-01-08",
-                    "lineage_source": "local",
                     "threads": 12,
                 },
             },
@@ -1686,94 +1540,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
 
         self.assertIn("assembly_review", _local_execution_stage_names(config))
         self.assertEqual(config["assembly_review"]["quast"]["threads"], 2)
-        self.assertEqual(
-            config["assembly_review"]["busco"]["lineage_name"], "embryophyta_odb10"
-        )
-
-    def test_busco_lineage_path_warning_surfaces_in_plan(self):
-        plan = _base_plan(
-            stage_names=["assembly_review"],
-            selected_methods={
-                "assembly_review": ["assembly_review.eval.busco"],
-            },
-            method_parameters={
-                "assembly_review.eval.quast": {"threads": 4},
-                "assembly_review.eval.busco": {
-                    "lineage_path": "/nonexistent/busco/lineage",
-                    "lineage_name": "test_odb10",
-                    "lineage_version": "2024-01-01",
-                    "lineage_source": "local",
-                    "threads": 8,
-                },
-            },
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "confirm")
-        self.assertIn("warnings", result.summary)
-        self.assertTrue(
-            any("not an existing directory" in w for w in result.summary["warnings"]),
-        )
-
-    def test_busco_defaults_derived_from_lineage_path(self):
-        plan = _base_plan(
-            stage_names=["assembly_review"],
-            selected_methods={
-                "assembly_review": ["assembly_review.eval.busco"],
-            },
-            method_parameters={
-                "assembly_review.eval.busco": {
-                    "lineage_path": "/data/busco/insecta_odb10",
-                },
-            },
-        )
-        cap = {
-            "required_parameters": [
-                "lineage_path",
-                "lineage_name",
-                "lineage_version",
-                "lineage_source",
-                "threads",
-            ],
-            "parameter_defaults": {"threads": 8},
-        }
-        inferred, _ = _infer_parameter_defaults(plan, "assembly_review.eval.busco", cap)
-        self.assertEqual(inferred["lineage_name"], "insecta_odb10")
-        self.assertEqual(inferred["lineage_version"], "odb10")
-        self.assertEqual(inferred["lineage_source"], "local")
-        self.assertEqual(inferred["threads"], 8)
-
-    def test_busco_defaults_no_version_when_undetectable(self):
-        plan = _base_plan(
-            stage_names=["assembly_review"],
-            selected_methods={
-                "assembly_review": ["assembly_review.eval.busco"],
-            },
-            method_parameters={
-                "assembly_review.eval.busco": {
-                    "lineage_path": "/data/busco/custom_lineage",
-                },
-            },
-        )
-        cap = {
-            "required_parameters": [
-                "lineage_path",
-                "lineage_name",
-                "lineage_version",
-                "lineage_source",
-                "threads",
-            ],
-            "parameter_defaults": {"threads": 8},
-        }
-        inferred, _ = _infer_parameter_defaults(plan, "assembly_review.eval.busco", cap)
-        self.assertEqual(inferred["lineage_name"], "custom_lineage")
-        self.assertNotIn("lineage_version", inferred)
-        self.assertEqual(inferred["lineage_source"], "local")
-
-    def test_extract_busco_version_variants(self):
-        self.assertEqual(_extract_busco_version("insecta_odb10"), "odb10")
-        self.assertEqual(_extract_busco_version("vertebrata_odb11"), "odb11")
-        self.assertEqual(_extract_busco_version("eukaryota_odb12.2"), "odb12.2")
-        self.assertEqual(_extract_busco_version("no_version_here"), "")
+        self.assertEqual(config["assembly_review"]["busco"], {"threads": 12})
 
 
 class AskPlannerStageAvailabilityTests(unittest.TestCase):

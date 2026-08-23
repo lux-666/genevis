@@ -31,11 +31,6 @@
     }
   },
 
-  "shared_parameters": {
-    "platform": "cycloneseq",
-    "read_type": "cyclone"
-  },
-
   "genome_survey": {
     "survey_parameters": {
       "kmer_size": 21,
@@ -44,24 +39,8 @@
     }
   },
 
-  "assembly": {
-    "assembly_method": "flye",
-    "assembly_route": "cyclone",
-    "flye_parameters": {
-      "threads": 8
-    }
-  },
-
   "assembly_review": {
     "quast": {
-      "threads": 8
-    },
-    "busco": {
-      "lineage_path": "/absolute/path/to/busco_downloads/lineages/insecta_odb10",
-      "lineage_name": "insecta_odb10",
-      "lineage_version": "odb10",
-      "lineage_source": "local",
-      "mode": "genome",
       "threads": 8
     }
   }

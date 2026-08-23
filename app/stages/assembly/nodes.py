@@ -68,6 +68,9 @@ from app.review.persistence import (
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_INPUT_PROFILE,
+    ASSEMBLY_METHOD_MODEL_REQUEST,
+    ASSEMBLY_METHOD_MODEL_RESPONSE,
+    ASSEMBLY_METHOD_RECOMMENDATION,
     ASSEMBLY_ROUTE_DECISION,
     ArtifactMeta,
     ArtifactRef,
@@ -77,6 +80,7 @@ from app.schemas.artifacts import (
     AssemblyRouteDecision,
 )
 from app.schemas.plan import AssemblyCandidatePlan
+from app.schemas.run_config import RecommendationMode
 from app.schemas.state import (
     ActiveInterrupt,
     JsonValue,
@@ -87,6 +91,8 @@ from app.schemas.state import (
 from app.stages.assembly.decision import (
     AssemblyDecisionRequest,
     make_assembly_decision,
+    render_assembly_decision_messages,
+    restore_assembly_decision,
 )
 from app.stages.assembly.method_application.support import (
     ASSEMBLY_EXECUTION_CONTRACT_KEY,
@@ -120,6 +126,8 @@ from app.stages.read_resolution import (
 from app.stages.resource_resolution import update_resource_ref
 from app.storage.artifacts import (
     publish_artifact_record,
+    read_artifact_records,
+    resolve_artifact_ref,
 )
 from app.storage.assembly_candidates import load_executed_candidate_bundle
 from app.storage.ledger import Ledger
@@ -134,7 +142,12 @@ ROUTE_VALUES: frozenset[str] = frozenset({"cyclone", "ont", "hifi"})
 SelectedAssemblyRoute = Literal["cyclone", "ont", "hifi"]
 RecommendedAssemblyRoute = Literal["cyclone", "ont", "hifi", "insufficient_data"]
 InputProfileSource = Literal[
-    "manifest", "run_config", "run_config_explicit", "llm_inferred"
+    "manifest",
+    "run_config",
+    "run_config_explicit",
+    "llm_inferred",
+    "human_confirmed",
+    "policy_timeout",
 ]
 
 
@@ -228,9 +241,14 @@ class RouteRecommendation(TypedDict):
     """Validated route recommendation used to construct the input profile."""
 
     recommended_route: RecommendedAssemblyRoute
+    recommended_method: str | None
+    recommended_read_type: NormalizedReadType | None
     reasoning: str
     uncertainty_notes: list[str]
     source: str
+    model_request_ref: ArtifactRefJson | None
+    model_response_ref: ArtifactRefJson | None
+    recommendation_ref: ArtifactRefJson | None
 
 
 def _fail_update(state: TopLevelState, reason: str) -> StateUpdate:
@@ -274,12 +292,10 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
         context="assembly.resolve_extended_inputs",
     )
     if hinted_read_type is None:
-        if platforms != ["unknown"]:
-            return _fail_update(
-                state,
-                "mixed long-read platforms require an explicit "
-                "assembly method/read type",
-            )
+        # A mixed ONT+HiFi manifest is precisely the case where the method
+        # advisor needs to see both inputs.  Do not force a user method (or
+        # silently pick one) before QC/survey evidence reaches that advisor.
+        # The selected primary read set is narrowed only after the human gate.
         primary_members = list(all_members)
     else:
         primary_members = _members_for_read_type(all_members, hinted_read_type)
@@ -520,16 +536,24 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
     if assembly_out.get("status") != "resolved_extended":
         return {}
 
+    policy = assembly_route_policy(state)
     existing_selection = _selection_from_output(assembly_out)
-    explicit_route = assembly_out.get("explicit_route")
-    if existing_selection or explicit_route:
-        selection = existing_selection or _selection_from_route(
-            explicit_route,
-            source="run_config",
-            rationale=f"run_config explicitly selected {explicit_route} read type",
-        )
-        if selection is None:
-            return _fail_update(state, f"unsupported assembly route: {explicit_route}")
+    if existing_selection:
+        selection = existing_selection
+        profile_source: InputProfileSource
+        decided_by: Literal["auto_rule", "human_override", "run_config_explicit"]
+        if selection.source == "human" or (
+            policy == "deterministic_baseline"
+            and selection.source in {"recommendation", "run_config"}
+        ):
+            profile_source = "human_confirmed"
+            decided_by = "human_override"
+        elif selection.source == "timeout":
+            profile_source = "policy_timeout"
+            decided_by = "auto_rule"
+        else:
+            profile_source = "run_config_explicit"
+            decided_by = "run_config_explicit"
         profile = _build_input_profile(
             state,
             assembly_out,
@@ -538,7 +562,7 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
             ),
             reasoning=selection.rationale,
             uncertainty_notes=[],
-            profile_source="run_config_explicit",
+            profile_source=profile_source,
         )
         profile_ref = _write_assembly_json_artifact(
             state,
@@ -553,7 +577,7 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
         decision = AssemblyRouteDecision(
             session_id=state["session_id"],
             selected_route=selected_route,
-            decided_by="run_config_explicit",
+            decided_by=decided_by,
             rationale=profile.recommendation_reasoning,
             metadata={"assembly_selection": selection.model_dump(mode="json")},
         )
@@ -579,6 +603,8 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
                     AssemblySelectionCursor, selection.model_dump(mode="json")
                 ),
                 "selected_route": selected_route,
+                "method_recommendation_mode": policy,
+                "parameter_recommendation_mode": assembly_parameter_policy(state),
             },
         )
 
@@ -588,13 +614,23 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
         include_actions=True,
         required_files=(),
     )
-    recommendation = _recommend_route_with_decision_boundary(state, assembly_out, ctx)
+    if policy == "deterministic_baseline":
+        recommendation = _deterministic_method_recommendation(assembly_out)
+    elif _assembly_method_candidates(assembly_out):
+        recommendation = _recommend_route_with_decision_boundary(
+            state, assembly_out, ctx
+        )
+    else:
+        recommendation = _unavailable_route_recommendation(
+            "no descriptor-backed Assembly method is compatible with observed inputs"
+        )
     recommended_route = recommendation["recommended_route"]
     recommended_selection = (
         _selection_from_route(
             recommended_route,
             source="recommendation",
             rationale=str(recommendation.get("reasoning") or "selector recommendation"),
+            method=recommendation.get("recommended_method"),
         )
         if recommended_route != "insufficient_data"
         else None
@@ -631,7 +667,72 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
             )
             if recommended_selection
             else None,
+            "assembly_method_model_request_ref": cast(
+                dict[str, JsonValue] | None, recommendation.get("model_request_ref")
+            ),
+            "assembly_method_model_response_ref": cast(
+                dict[str, JsonValue] | None, recommendation.get("model_response_ref")
+            ),
+            "assembly_method_recommendation_ref": cast(
+                dict[str, JsonValue] | None, recommendation.get("recommendation_ref")
+            ),
+            "method_recommendation_mode": policy,
+            "parameter_recommendation_mode": assembly_parameter_policy(state),
         },
+    )
+
+
+def assembly_route_policy(state: TopLevelState) -> RecommendationMode:
+    """Read the frozen method/route advisory mode from the active RunConfig."""
+
+    seed = (state.get("stage_seeds") or {}).get("assembly") or {}
+    mode = seed.get("method_route_advisor") if isinstance(seed, Mapping) else None
+    return cast(
+        RecommendationMode,
+        mode if mode in {"advisor", "deterministic_baseline"} else "advisor",
+    )
+
+
+def _deterministic_method_recommendation(
+    assembly_out: AssemblyStageCursor,
+) -> RouteRecommendation:
+    read_type = assembly_out.get("normalized_read_type") or normalize_read_type(
+        None, platform=assembly_out.get("platform")
+    )
+    if not read_type:
+        return _unavailable_route_recommendation(
+            "deterministic method baseline requires an explicit route or "
+            "single registered platform"
+        )
+    candidates = _assembly_method_candidates(assembly_out)
+    primary = default_primary_method(read_type)
+    if primary not in candidates:
+        return _unavailable_route_recommendation(
+            f"deterministic baseline method {primary!r} is unavailable for inputs"
+        )
+    return {
+        "recommended_route": cast(
+            RecommendedAssemblyRoute, _route_from_read_type(read_type)
+        ),
+        "recommended_method": primary,
+        "recommended_read_type": read_type,
+        "reasoning": "deterministic baseline selected by registered input type",
+        "uncertainty_notes": [],
+        "source": "policy",
+        "model_request_ref": None,
+        "model_response_ref": None,
+        "recommendation_ref": None,
+    }
+
+
+def assembly_parameter_policy(state: TopLevelState) -> RecommendationMode:
+    """Read the frozen parameter advisory mode from the Assembly seed."""
+
+    seed = (state.get("stage_seeds") or {}).get("assembly") or {}
+    mode = seed.get("parameter_advisor") if isinstance(seed, Mapping) else None
+    return cast(
+        RecommendationMode,
+        mode if mode in {"advisor", "deterministic_baseline"} else "advisor",
     )
 
 
@@ -648,7 +749,44 @@ def select_route(state: TopLevelState) -> StateUpdate:
     if recommended_route == "insufficient_data":
         return _block_for_route_review(state, "assembly_route_insufficient_data")
 
-    # All LLM recommendations require human gate (unless max_blocked_seconds configured)
+    if assembly_route_policy(state) == "deterministic_baseline":
+        recommended_selection_value = assembly_out.get("recommended_assembly_selection")
+        if not isinstance(recommended_selection_value, dict):
+            return _fail_update(
+                state,
+                "deterministic method baseline did not produce a selection",
+            )
+        decision = AssemblyRouteDecision(
+            session_id=state["session_id"],
+            selected_route=cast(SelectedAssemblyRoute, recommended_route),
+            decided_by="run_config_explicit",
+            rationale=str(profile.get("recommendation_reasoning") or ""),
+            metadata={
+                "assembly_selection": recommended_selection_value,
+                "method_recommendation_mode": "deterministic_baseline",
+            },
+        )
+        decision_ref = _write_assembly_json_artifact(
+            state,
+            "route_decision.json",
+            decision.model_dump(mode="json"),
+            artifact_type=ASSEMBLY_ROUTE_DECISION,
+            method_name="assembly.route_selector",
+        )
+        return update_assembly_stage_output(
+            state,
+            {
+                "status": "route_selected",
+                "method_recommendation_mode": "deterministic_baseline",
+                "parameter_recommendation_mode": assembly_parameter_policy(state),
+                "route_decision": decision.model_dump(mode="json"),
+                "route_decision_ref": decision_ref,
+                "assembly_selection": recommended_selection_value,
+                "selected_route": cast(SelectedAssemblyRoute, recommended_route),
+            },
+        )
+
+    # All LLM recommendations require human gate unless timeout policy applies.
     return _block_for_route_review(
         state, "assembly_selection_human_confirmation_required"
     )
@@ -1373,6 +1511,8 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
         "input_source",
         "input_type",
         "assembly_selection",
+        "method_recommendation_mode",
+        "parameter_recommendation_mode",
         "normalized_read_type",
         "read_type_prior",
         "method_application_notes",
@@ -1637,14 +1777,18 @@ def _selection_from_output(
 
 
 def _selection_from_route(
-    route: str | None, *, source: AssemblySelectionSource, rationale: str
+    route: str | None,
+    *,
+    source: AssemblySelectionSource,
+    rationale: str,
+    method: str | None = None,
 ) -> AssemblySelection | None:
     read_type = normalize_read_type(route)
     if not read_type:
         return None
     return AssemblySelection(
         read_type=read_type,
-        primary_method=default_primary_method(read_type),
+        primary_method=method or default_primary_method(read_type),
         source=source,
         rationale=rationale,
         metadata={"route": route},
@@ -1696,15 +1840,27 @@ def _requested_method(
 ) -> str:
     try:
         if request.method_name:
-            return normalize_method_id(request.method_name)
-        recommended = dict(assembly_out.get("recommended_assembly_selection") or {})
-        recommended_method = recommended.get("primary_method")
-        if recommended_method and recommended.get("read_type") == read_type:
-            return normalize_method_id(str(recommended_method))
-        existing = _selection_from_output(assembly_out)
-        if existing and existing.read_type == read_type:
-            return existing.primary_method
-        return default_primary_method(read_type)
+            method = normalize_method_id(request.method_name)
+        else:
+            recommended = dict(assembly_out.get("recommended_assembly_selection") or {})
+            recommended_method = recommended.get("primary_method")
+            if recommended_method and recommended.get("read_type") == read_type:
+                method = normalize_method_id(str(recommended_method))
+            else:
+                existing = _selection_from_output(assembly_out)
+                if existing and existing.read_type == read_type:
+                    method = existing.primary_method
+                else:
+                    method = default_primary_method(read_type)
+        candidates = _assembly_method_candidates(assembly_out)
+        strict_recommendation = bool(
+            assembly_out.get("assembly_method_model_request_ref")
+        )
+        if strict_recommendation and candidates and method not in candidates:
+            raise ResumeValidationError(
+                f"assembly method {method!r} is not available for current inputs"
+            )
+        return method
     except ValueError as exc:
         raise ResumeValidationError(str(exc)) from exc
 
@@ -1800,16 +1956,63 @@ def _recommend_route_with_decision_boundary(
     ctx: dict[str, Any],
 ) -> RouteRecommendation:
     prompt_payload = _route_selector_payload(state, assembly_out, ctx)
-    decision = make_assembly_decision(
-        AssemblyDecisionRequest(
-            kind="route_selection",
-            session_id=state["session_id"],
-            prompt_payload=prompt_payload,
-            system_prompt="You are an expert genome assembly route selector.\n\n"
-            + str(ctx.get("skill_text") or ""),
-            allowed_actions=list(ctx.get("allowed_actions") or []),
-        )
+    allowed_actions = list(ctx.get("allowed_actions") or [])
+    allowed_methods = list(prompt_payload.get("allowed_methods") or [])
+    request = AssemblyDecisionRequest(
+        kind="route_selection",
+        session_id=state["session_id"],
+        prompt_payload=prompt_payload,
+        system_prompt="You are an expert genome assembly method and route advisor.\n\n"
+        + str(ctx.get("skill_text") or ""),
+        allowed_actions=allowed_actions,
+        allowed_methods=allowed_methods,
     )
+    messages = render_assembly_decision_messages(request)
+    try:
+        request_ref = ArtifactRef.model_validate(
+            _write_assembly_json_artifact(
+                state,
+                "method_model_request.json",
+                {
+                    "schema_version": 1,
+                    "kind": request.kind,
+                    "session_id": request.session_id,
+                    "allowed_actions": allowed_actions,
+                    "allowed_methods": allowed_methods,
+                    "prompt_payload": prompt_payload,
+                    "messages": messages,
+                },
+                artifact_type=ASSEMBLY_METHOD_MODEL_REQUEST,
+                method_name="assembly.method_recommender",
+            )
+        )
+        recovered = _recover_assembly_method_response(state, request_ref)
+        if recovered is None:
+            decision = make_assembly_decision(request, messages=messages)
+            response_ref = ArtifactRef.model_validate(
+                _write_assembly_json_artifact(
+                    state,
+                    "method_model_response.json",
+                    {
+                        "schema_version": 1,
+                        "request_sha256": request_ref.sha256,
+                        "raw_response": decision.raw_response,
+                        "validity": "parsed" if decision.valid else "invalid",
+                        "error": decision.error,
+                        "model_id": decision.model_id,
+                    },
+                    artifact_type=ASSEMBLY_METHOD_MODEL_RESPONSE,
+                    method_name="assembly.method_recommender",
+                )
+            )
+        else:
+            response_ref, response_record = recovered
+            decision = restore_assembly_decision(response_record, request)
+    except (OSError, TypeError, ValueError) as exc:
+        return _unavailable_route_recommendation(
+            f"assembly method recommendation persistence failed: {exc}"
+        )
+
     if decision.valid and decision.parsed:
         payload = decision.parsed
         raw_route = payload.get("recommended_route")
@@ -1819,6 +2022,48 @@ def _recommend_route_with_decision_boundary(
             and raw_route in {*ROUTE_VALUES, "insufficient_data"}
             else "insufficient_data"
         )
+        try:
+            recommended_method = _validated_recommended_method(
+                payload,
+                assembly_out,
+                allowed_methods,
+                recommended_route,
+            )
+        except (TypeError, ValueError) as exc:
+            return _unavailable_route_recommendation(
+                f"assembly method recommendation is invalid: {exc}",
+                model_request_ref=request_ref,
+                model_response_ref=response_ref,
+            )
+        if recommended_route != "insufficient_data" and recommended_method is None:
+            return _unavailable_route_recommendation(
+                "assembly method recommendation did not contain a valid method"
+            )
+        try:
+            recommendation_ref = ArtifactRef.model_validate(
+                _write_assembly_json_artifact(
+                    state,
+                    "method_recommendation.json",
+                    {
+                        "schema_version": 1,
+                        "request_sha256": request_ref.sha256,
+                        "response_sha256": response_ref.sha256,
+                        "recommended_route": recommended_route,
+                        "recommended_method": recommended_method,
+                        "recommended_read_type": payload.get("recommended_read_type"),
+                        "reasoning": payload.get(
+                            "reasoning", payload.get("recommendation_reasoning", "")
+                        ),
+                        "uncertainty_notes": payload.get("uncertainty_notes", []),
+                    },
+                    artifact_type=ASSEMBLY_METHOD_RECOMMENDATION,
+                    method_name="assembly.method_recommender",
+                )
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return _unavailable_route_recommendation(
+                f"assembly method recommendation persistence failed: {exc}"
+            )
         raw_notes = payload.get("uncertainty_notes")
         uncertainty_notes = (
             cast(list[str], raw_notes)
@@ -1828,22 +2073,51 @@ def _recommend_route_with_decision_boundary(
         )
         return {
             "recommended_route": recommended_route,
+            "recommended_method": recommended_method,
+            "recommended_read_type": _recommended_read_type(payload, recommended_route),
             "reasoning": str(
                 payload.get("reasoning", payload.get("recommendation_reasoning", ""))
             ),
             "uncertainty_notes": uncertainty_notes,
             "source": "llm",
+            "model_request_ref": cast(
+                ArtifactRefJson, request_ref.model_dump(mode="json")
+            ),
+            "model_response_ref": cast(
+                ArtifactRefJson, response_ref.model_dump(mode="json")
+            ),
+            "recommendation_ref": cast(
+                ArtifactRefJson, recommendation_ref.model_dump(mode="json")
+            ),
         }
-    return {
-        "recommended_route": "insufficient_data",
-        "reasoning": (
-            "route selector LLM unavailable; route selection requires human/data review"
-        ),
-        "source": "llm_unavailable",
-        "uncertainty_notes": [
-            f"route selector LLM unavailable: {decision.error or 'invalid decision'}",
-        ],
-    }
+    try:
+        invalid_recommendation_ref = ArtifactRef.model_validate(
+            _write_assembly_json_artifact(
+                state,
+                "method_recommendation.json",
+                {
+                    "schema_version": 1,
+                    "request_sha256": request_ref.sha256,
+                    "response_sha256": response_ref.sha256,
+                    "status": "invalid",
+                    "error": decision.error or "invalid decision",
+                },
+                artifact_type=ASSEMBLY_METHOD_RECOMMENDATION,
+                method_name="assembly.method_recommender",
+            )
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return _unavailable_route_recommendation(
+            f"assembly method recommendation persistence failed: {exc}",
+            model_request_ref=request_ref,
+            model_response_ref=response_ref,
+        )
+    return _unavailable_route_recommendation(
+        f"route selector LLM unavailable: {decision.error or 'invalid decision'}",
+        model_request_ref=request_ref,
+        model_response_ref=response_ref,
+        recommendation_ref=invalid_recommendation_ref,
+    )
 
 
 def _route_selector_payload(
@@ -1851,6 +2125,12 @@ def _route_selector_payload(
     assembly_out: AssemblyStageCursor,
     ctx: dict[str, Any],
 ) -> dict[str, Any]:
+    stage_outputs = state.get("stage_outputs") or {}
+    read_qc = dict(stage_outputs.get("read_qc") or {})
+    survey = dict(stage_outputs.get("genome_survey") or {})
+    evidence_status = _route_selector_evidence_status(state)
+    read_qc_available = evidence_status["read_qc"] == "available"
+    survey_available = evidence_status["genome_survey"] == "available"
     data_profile = {
         "session_id": state.get("session_id"),
         "ont_reads_ref": assembly_out.get("ont_reads_ref"),
@@ -1859,19 +2139,200 @@ def _route_selector_payload(
         "platform": assembly_out.get("platform"),
         "target_level": assembly_out.get("target_level"),
         "genome_size_prior": assembly_out.get("genome_size_prior"),
+        "resolved_genome_size": assembly_out.get("resolved_genome_size"),
+        "read_qc_summary": (
+            read_qc.get("post_filter_summary") or read_qc.get("summary")
+        )
+        if read_qc_available
+        else None,
+        "genome_survey": {
+            "confidence": survey.get("confidence") if survey_available else None,
+            "estimates": survey.get("estimates") if survey_available else None,
+            "result_artifact_ref": (
+                survey.get("result_artifact_ref") if survey_available else None
+            ),
+        },
         "has_hifi": assembly_out.get("has_hifi"),
         "has_hic": assembly_out.get("has_hic"),
+        "primary_member_platforms": list(
+            (assembly_out.get("assembly_input_member_platforms") or {}).get(
+                "primary", []
+            )
+        ),
+        "evidence_status": evidence_status,
     }
+    allowed_methods = _assembly_method_candidates(assembly_out)
     return {
         "data_profile": data_profile,
         "rules": ctx.get("rules") or {},
         "cases": ctx.get("cases") or [],
         "allowed_actions": ctx.get("allowed_actions") or [],
+        "allowed_methods": allowed_methods,
         "required_output": {
             "recommended_route": "one of allowed_actions",
+            "recommended_read_type": "normalized read type matching route",
+            "recommended_method": "one of allowed_methods",
             "reasoning": "short explanation",
             "uncertainty_notes": "list of strings",
         },
+        "evidence_rule": (
+            "data_profile.evidence_status is authoritative. Fields paired with "
+            "unavailable evidence are null and must not be inferred or used as "
+            "observations. Return insufficient_data unless the available "
+            "evidence supports one route."
+        ),
+    }
+
+
+def _route_selector_evidence_status(state: TopLevelState) -> dict[str, str]:
+    """Distinguish completed upstream evidence from stale or absent cursors."""
+
+    current_index = int(state.get("workflow_step_index", 0))
+    prior_steps = list((state.get("workflow_steps") or [])[:current_index])
+    skipped_step_ids = set((state.get("skip_reasons") or {}).keys())
+    status: dict[str, str] = {}
+    for stage in ("read_qc", "genome_survey"):
+        completed = any(
+            step.get("stage") == stage and step.get("step_id") not in skipped_step_ids
+            for step in prior_steps
+        )
+        status[stage] = "available" if completed else "unavailable"
+    return status
+
+
+def _assembly_method_candidates(assembly_out: AssemblyStageCursor) -> list[str]:
+    """Return descriptor-backed methods compatible with observed read inputs."""
+
+    observed: set[NormalizedReadType] = set()
+    if assembly_out.get("hifi_reads_ref") or assembly_out.get("has_hifi"):
+        observed.add("pacbio_hifi")
+    if assembly_out.get("ont_reads_ref"):
+        observed.add("ont_raw")
+    for platform in (assembly_out.get("assembly_input_member_platforms") or {}).get(
+        "primary", []
+    ):
+        read_type = normalize_read_type(None, platform=platform)
+        if read_type is not None:
+            observed.add(read_type)
+    prior = assembly_out.get("normalized_read_type")
+    if prior is not None:
+        observed.add(prior)
+    if not observed:
+        observed = {"cyclone", "ont_raw", "pacbio_clr", "pacbio_hifi"}
+    registry = load_descriptor_registry()
+    compatible = {
+        method for read_type in observed for method in compatible_methods(read_type)
+    }
+    return [
+        method
+        for method in registry.by_stage.get("assembly", ())
+        if method in compatible
+    ]
+
+
+def _recommended_read_type(
+    payload: Mapping[str, Any], recommended_route: RecommendedAssemblyRoute
+) -> NormalizedReadType | None:
+    raw = payload.get("recommended_read_type")
+    read_type = normalize_read_type(raw) if raw is not None else None
+    if read_type is None and recommended_route != "insufficient_data":
+        read_type = normalize_read_type(recommended_route)
+    return read_type
+
+
+def _validated_recommended_method(
+    payload: Mapping[str, Any],
+    assembly_out: AssemblyStageCursor,
+    allowed_methods: list[str],
+    recommended_route: RecommendedAssemblyRoute,
+) -> str | None:
+    raw_method = payload.get("recommended_method")
+    if raw_method is None:
+        if recommended_route == "insufficient_data":
+            return None
+        raise ValueError("recommended_method is required for a selected route")
+    if not isinstance(raw_method, str):
+        raise ValueError("recommended_method must be a string")
+    method = normalize_method_id(raw_method)
+    if method not in allowed_methods:
+        raise ValueError(f"recommended_method {method!r} is not an input candidate")
+    read_type = _recommended_read_type(payload, recommended_route)
+    route_read_type = normalize_read_type(recommended_route)
+    if read_type != route_read_type:
+        raise ValueError(
+            f"recommended_read_type {read_type!r} conflicts with "
+            f"recommended_route {recommended_route!r}"
+        )
+    if read_type is None or not is_method_read_type_compatible(method, read_type):
+        raise ValueError(
+            f"recommended_method {method!r} is incompatible with "
+            f"recommended_read_type {read_type!r}"
+        )
+    # Ensure the model cannot select a method supported by a different input
+    # class merely because it appears in a broad descriptor catalog.
+    if method not in _assembly_method_candidates(assembly_out):
+        raise ValueError(f"recommended_method {method!r} is not available for inputs")
+    return method
+
+
+def _recover_assembly_method_response(
+    state: TopLevelState, request_ref: ArtifactRef
+) -> tuple[ArtifactRef, dict[str, Any]] | None:
+    """Recover a prior response published before a checkpoint was written."""
+
+    records = read_artifact_records(absolute_data_dir(state), state["session_id"])
+    step_id = current_workflow_step_id(state, expected_stage="assembly")
+    for record in reversed(records):
+        if (
+            record.get("artifact_type") != ASSEMBLY_METHOD_MODEL_RESPONSE
+            or record.get("method_id") != "assembly.method_recommender"
+            or record.get("workflow_step_id") != step_id
+        ):
+            continue
+        ref = ArtifactRef.model_validate(
+            {key: record[key] for key in ArtifactRef.model_fields if key in record}
+        )
+        path = resolve_artifact_ref(absolute_data_dir(state), state["session_id"], ref)
+        body = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(body, dict):
+            raise ValueError("persisted Assembly model response is not an object")
+        if body.get("request_sha256") != request_ref.sha256:
+            continue
+        return ref, body
+    return None
+
+
+def _unavailable_route_recommendation(
+    reason: str,
+    *,
+    model_request_ref: ArtifactRef | None = None,
+    model_response_ref: ArtifactRef | None = None,
+    recommendation_ref: ArtifactRef | None = None,
+) -> RouteRecommendation:
+    return {
+        "recommended_route": "insufficient_data",
+        "recommended_method": None,
+        "recommended_read_type": None,
+        "reasoning": (
+            "route selector LLM unavailable; route selection requires human/data review"
+        ),
+        "source": "llm_unavailable",
+        "uncertainty_notes": [reason],
+        "model_request_ref": (
+            cast(ArtifactRefJson, model_request_ref.model_dump(mode="json"))
+            if model_request_ref
+            else None
+        ),
+        "model_response_ref": (
+            cast(ArtifactRefJson, model_response_ref.model_dump(mode="json"))
+            if model_response_ref
+            else None
+        ),
+        "recommendation_ref": (
+            cast(ArtifactRefJson, recommendation_ref.model_dump(mode="json"))
+            if recommendation_ref
+            else None
+        ),
     }
 
 

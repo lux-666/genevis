@@ -51,6 +51,23 @@ def resolve_assembly_parameters(
     return resolved
 
 
+def resolve_baseline_assembly_parameters(
+    *,
+    catalog: MethodParameterCatalog,
+    l0_executor_values: dict[str, Any],
+    approved_l2: dict[str, Any],
+    snapshot: RecommendationInputSnapshotV3,
+) -> ResolvedParameterSources:
+    """Resolve a deterministic baseline attempt without any L2 mapping."""
+
+    return resolve_assembly_parameters(
+        catalog=catalog,
+        l0_executor_values=l0_executor_values,
+        approved_l2=approved_l2,
+        snapshot=snapshot,
+    )
+
+
 def render_assembly_cli(
     catalog: MethodParameterCatalog,
     resolved: ResolvedParameterSources,

@@ -489,12 +489,11 @@ class RecommendationInputSnapshotV3(BaseModel):
                 == self.stage_context.long_read_asset_count + 1
             )
             registry_ref_count = sum(
-                ref.artifact_type == "asset_registry"
-                for ref in refs.stage_input_refs
+                ref.artifact_type == "asset_registry" for ref in refs.stage_input_refs
             )
-            has_registry_manifest = (
-                registry_ref_count == 1 and len(refs.stage_input_refs) in {1, 2}
-            )
+            has_registry_manifest = registry_ref_count == 1 and len(
+                refs.stage_input_refs
+            ) in {1, 2}
             if not has_exact_asset_refs and not has_registry_manifest:
                 raise ValueError(
                     "T2T parameter snapshot stage_input_refs must contain the input "

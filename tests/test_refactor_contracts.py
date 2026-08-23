@@ -90,8 +90,6 @@ class ExecutionRefactorContractTests(unittest.TestCase):
             shared_dir.mkdir()
             assembly_dir = source_dir / "assembly"
             assembly_dir.mkdir()
-            busco_dir = source_dir / "busco" / "metazoa"
-            busco_dir.mkdir(parents=True)
             hifi_reads = reads_dir / "hifi.fastq"
             hifi_reads.write_text("@hifi\nACGT\n+\n!!!!\n", encoding="utf-8")
             (reads_dir / "hifi.fofn").write_text(f"{hifi_reads}\n", encoding="utf-8")
@@ -119,13 +117,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                         "requested_stages": [],
                         "assembly": {"hifi_reads_ref": "reads/hifi.fofn"},
                         "assembly_review": {
-                            "busco": {
-                                "lineage_path": "busco/metazoa",
-                                "lineage_name": "metazoa",
-                                "lineage_version": "v1",
-                                "lineage_source": "local",
-                                "threads": 4,
-                            }
+                            "busco": {"lineage": "metazoa", "threads": 4}
                         },
                         "t2t": {
                             "assembly_fasta_ref": "assembly/final.fasta",
@@ -159,8 +151,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 str((source_dir / "reads/hifi.fofn").resolve()),
             )
             self.assertEqual(
-                canonical["assembly_review"]["busco"]["lineage_path"],
-                str((source_dir / "busco/metazoa").resolve()),
+                canonical["assembly_review"]["busco"]["lineage"], "metazoa"
             )
             self.assertEqual(
                 canonical["t2t"]["assembly_fasta_ref"],
@@ -311,6 +302,57 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 [event["workflow_step_id"] for event in blocked_events],
                 ["step-001-assembly_dedup", "step-002-assembly_dedup"],
             )
+
+    def test_path_override_is_rejected_after_frozen_inputs_exist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            reads = root / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths: [{reads}]\n"
+                "    platform: ont\n"
+                "    format: fastq\n",
+                encoding="utf-8",
+            )
+            run_config = root / "run_config.json"
+            run_config.write_text('{"requested_stages": []}\n', encoding="utf-8")
+            envs = root / "envs.yaml"
+            envs.write_text(
+                "default:\n  fallback_env: original-env\n"
+                "stages:\n  assembly:\n    conda_env: original-assembly\n"
+                "packages: {}\n",
+                encoding="utf-8",
+            )
+            run_dir = v2_run_dir(root / "data", "s1")
+            freeze_session_inputs(
+                SessionPaths.from_run_dir(run_dir),
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+                selected_methods={},
+            )
+
+            spec, packages, blocked = resolve_method_env(
+                {"env": {"PATH": "/tmp/untrusted-stage-bin"}},
+                stage="assembly",
+                method_name="assembly.candidate.flye",
+                workflow_step_id="step-001-assembly",
+                session_id="s1",
+                data_dir=run_dir,
+                input_manifest_ref="control/input_manifest.yaml",
+                config_path=envs,
+            )
+
+            self.assertIsNone(spec)
+            self.assertEqual(packages, [])
+            self.assertIsNotNone(blocked)
+            assert blocked is not None
+            self.assertEqual(blocked["status"], "blocked_env")
+            self.assertIn("PATH override is rejected", blocked["reason"])
 
     def test_wrong_artifact_type_fails_with_data_layout_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:

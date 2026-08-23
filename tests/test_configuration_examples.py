@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 
 from app.schemas.manifest import InputManifest
-from app.schemas.run_config import load_run_config, validate_genome_size_execution_plan
+from app.schemas.run_config import load_run_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = PROJECT_ROOT / "docs" / "examples"
@@ -76,7 +76,6 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                     self.assertIsNotNone(config.genome_survey)
                     assert config.genome_survey is not None
                     self.assertIsNotNone(config.genome_survey.survey_parameters)
-                    validate_genome_size_execution_plan(config, manifest)
                 else:
                     self.assertEqual(
                         [asset.asset_type for asset in manifest.assets],
@@ -107,6 +106,33 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                 ("assembly_review", True),
             ],
         )
+
+    def test_contig_template_defers_assembly_and_does_not_repeat_manifest_facts(self):
+        path = EXAMPLES_DIR / "contig_run_config.template.json"
+        config = load_run_config(path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNone(config.assembly)
+        self.assertNotIn("shared_parameters", payload)
+
+    def test_database_paths_live_only_in_the_host_seed(self):
+        forbidden = {
+            "lineage_path",
+            "lineage_name",
+            "lineage_version",
+            "lineage_source",
+            "related_species_reference_dir",
+        }
+        for path in sorted(EXAMPLES_DIR.glob("*run_config.template.json")):
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertTrue(all(field not in text for field in forbidden))
+
+        host_seed = yaml.safe_load(
+            (EXAMPLES_DIR / "envs.yaml.example").read_text(encoding="utf-8")
+        )
+        self.assertIn("busco", host_seed["databases"])
+        self.assertIn("ncbi_metazoa", host_seed["databases"])
 
     def test_readme_points_to_authoritative_contig_template(self):
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")

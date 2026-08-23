@@ -23,7 +23,11 @@ from app.domains.assembly.constants import (
     HIFIASM_ONT_METHOD,
     NEXTDENOVO_METHOD,
 )
-from app.domains.assembly.selection import NormalizedReadType, method_read_type
+from app.domains.assembly.selection import (
+    NormalizedReadType,
+    method_read_type,
+    validate_assembly_selection,
+)
 from app.execution.attempt_owners import MethodExecution
 from app.execution.input_integrity import (
     artifact_input_dependency,
@@ -177,18 +181,30 @@ def _rostered_primary_method(
     state: TopLevelState,
     output: Mapping[str, object],
 ) -> str | None:
-    """Return the sole frozen Assembly method and reject cursor drift."""
+    """Return the fixed or verified stage-owned Assembly method binding."""
 
     step = current_workflow_step(state)
     if step is None or step["stage"] != "assembly":
         raise ValueError("Assembly method outcome has no active Assembly occurrence")
     if "selected_method_names" not in step:
-        legacy_primary = output.get("primary_method")
-        return (
-            legacy_primary
-            if isinstance(legacy_primary, str) and legacy_primary in _ASSEMBLY_METHODS
-            else None
-        )
+        primary_method = output.get("primary_method")
+        selection = output.get("assembly_selection")
+        if primary_method is None and selection is None:
+            return None
+        if (
+            not isinstance(primary_method, str)
+            or primary_method not in _ASSEMBLY_METHODS
+        ):
+            raise ValueError("stage-owned Assembly binding has no valid primary method")
+        try:
+            selected = validate_assembly_selection(selection)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("stage-owned Assembly method binding is invalid") from exc
+        if selected.primary_method != primary_method:
+            raise ValueError(
+                "Assembly cursor primary method conflicts with assembly selection"
+            )
+        return primary_method
     roster = list(step["selected_method_names"])
     if not roster:
         return None
@@ -512,6 +528,12 @@ def load_current_approved_recommendation(
     except (ParameterAttemptStateError, ParameterEvidenceError) as exc:
         return None, f"{label} recommendation evidence is invalid: {exc}"
     return bundle, None
+
+
+def current_parameter_policy(output: AssemblyStageCursor) -> str:
+    """Return the frozen parameter-advisor mode for the active Assembly cursor."""
+
+    return str(output.get("parameter_recommendation_mode") or "advisor")
 
 
 def approved_method_read_type(

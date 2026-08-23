@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from app.control.workflow_plan import workflow_step_by_id
@@ -50,7 +51,6 @@ def settle_workflow_step_outcome(
     settled_step_id = str(outcome.get("workflow_step_id") or "")
     settled_step = workflow_step_by_id(state, settled_step_id)
     settled_stage = settled_step["stage"]
-    selected_method_names = settled_step.get("selected_method_names")
     if outcome.get("stage") != settled_stage:
         raise ValueError("workflow_step_outcome stage conflicts with frozen plan")
     settled_index = next(
@@ -72,6 +72,10 @@ def settle_workflow_step_outcome(
 
     ledger = Ledger(data_dir)
     settled_cursor = (state.get("stage_outputs") or {}).get(settled_stage, {})
+    selected_method_names = _settled_method_names(
+        settled_step,
+        settled_cursor,
+    )
     settled_refs = ledger.references_from(
         settled_cursor,
         role_prefix=f"stage.{settled_stage}",
@@ -138,6 +142,40 @@ def settle_workflow_step_outcome(
         )
     else:
         raise ValueError("workflow_step_outcome has an invalid outcome")
+
+
+def _settled_method_names(
+    step: Mapping[str, object],
+    cursor: object,
+) -> list[str] | None:
+    """Return the fixed roster or one verified stage-owned Assembly binding."""
+
+    frozen = step.get("selected_method_names")
+    if frozen is not None:
+        if not isinstance(frozen, list):
+            raise TypeError("workflow step selected_method_names must be a list")
+        return [str(name) for name in frozen]
+    if step.get("stage") != "assembly":
+        return None
+    if not isinstance(cursor, dict):
+        raise TypeError("dynamic Assembly method binding requires a stage cursor")
+    primary_method = cursor.get("primary_method")
+    selection = cursor.get("assembly_selection")
+    if primary_method is None and selection is None:
+        return None
+    if not isinstance(primary_method, str) or not primary_method:
+        raise ValueError("dynamic Assembly method binding has no primary_method")
+    from app.domains.assembly.selection import validate_assembly_selection
+
+    try:
+        selected = validate_assembly_selection(selection)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("dynamic Assembly method binding is invalid") from exc
+    if selected.primary_method != primary_method:
+        raise ValueError(
+            "dynamic Assembly primary_method conflicts with assembly_selection"
+        )
+    return [primary_method]
 
 
 def _validate_assembly_delivery_projection(

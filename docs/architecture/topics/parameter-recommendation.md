@@ -28,16 +28,20 @@
 
 ## What the recommender does
 
-A recommender starts only after a method is known. It builds a strict
-model-facing request, calls the model, parses one sparse parameter mapping,
-persists the evidence chain, and opens a human approval gate. It does not
-select a method, route the parent graph, approve its own output, or fabricate a
-fallback when the model call or response shape fails.
+A recommender starts only after a method is known. For Assembly, the method is
+known only after the stage has consumed upstream QC/survey evidence and
+persisted/confirmed `assembly_selection`; the recommender then uses its
+validated `primary_method`. It builds a strict model-facing request, calls the
+model, parses one sparse parameter mapping, persists the evidence chain, and
+opens a human approval gate. It does not select a method, route the parent
+graph, approve its own output, or fabricate a fallback when the model call or
+response shape fails.
 
 The implemented flow is:
 
 ```text
-authoritative run facts + selected method
+authoritative run facts + fixed-stage selected method
+  or validated Assembly `assembly_selection`
   -> canonical typed facts and stage context
   -> schema-3 input and basis snapshots
   -> exact persisted model messages
@@ -116,7 +120,10 @@ Approval creates the compact `ParameterAttempt`; no execution attempt exists
 before approval. That cursor is the sole relation owner for the recommendation
 root, approval decision, frozen parameters, command, frozen runner input,
 execution, and later review evidence. Stage cursors select the current attempt
-and must not mirror those refs in method-specific keys.
+and must not mirror those refs in method-specific keys. The compact Assembly
+cursor may retain only the validated selection/primary-method cursor and
+immutable refs needed to resume; the recommendation, approval, command, and
+execution evidence remain in artifacts and Ledger facts.
 
 For retry-capable Assembly and AutoHiC flows, a retry first seals its
 predecessor and then builds a new schema-3 recommendation chain. The prompt

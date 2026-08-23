@@ -164,12 +164,64 @@ def test_freeze_projection_derives_method_roster() -> None:
         }
     )
 
-    assert "selected_method_names" not in config.model_dump(
-        mode="json"
-    )["requested_stages"][0]
+    assert (
+        "selected_method_names"
+        not in config.model_dump(mode="json")["requested_stages"][0]
+    )
     assert workflow_steps_from_run_config(config)[1]["selected_method_names"] == [
         "t2t.alignment.minimap2"
     ]
+
+
+def test_freeze_projection_defers_unselected_assembly_method() -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True},
+            ]
+        }
+    )
+
+    assembly_step = workflow_steps_from_run_config(config)[1]
+
+    assert assembly_step["stage"] == "assembly"
+    assert "selected_method_names" not in assembly_step
+
+
+def test_unapproved_read_qc_filter_rosters_skip_not_executable_method() -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "read_qc", "allow_local_execution": True},
+            ],
+            "read_qc": {
+                "length_filter": {
+                    "approved": False,
+                    "thresholds": {"min_len": 1000},
+                }
+            },
+        }
+    )
+
+    roster = workflow_steps_from_run_config(config)[1]["selected_method_names"]
+
+    assert "read_qc.length_filter.seqkit_seq" not in roster
+    assert "read_qc.length_filter.skip" in roster
+
+
+def test_run_config_rejects_legacy_assembly_method_and_parameters() -> None:
+    with pytest.raises(ValueError, match="assembly_method|flye_parameters"):
+        RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {"stage": "assembly", "allow_local_execution": True},
+                ],
+                "assembly": {
+                    "assembly_method": "flye",
+                    "flye_parameters": {"threads": 4},
+                },
+            }
+        )
 
 
 def test_workflow_step_roster_requires_unique_stage_prefixed_names() -> None:
@@ -193,6 +245,46 @@ def test_workflow_step_roster_requires_unique_stage_prefixed_names() -> None:
                 },
             ]
         )
+
+
+def test_workflow_step_reader_accepts_legacy_missing_fixed_roster() -> None:
+    legacy = validate_workflow_steps(
+        [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+                "selected_method_names": [],
+            },
+            {
+                "step_id": "step-001-t2t",
+                "stage": "t2t",
+                "allow_local_execution": True,
+            },
+        ]
+    )
+    assert "selected_method_names" not in legacy[1]
+
+
+def test_workflow_step_reader_keeps_legacy_empty_assembly_roster() -> None:
+    legacy = validate_workflow_steps(
+        [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+                "selected_method_names": [],
+            },
+            {
+                "step_id": "step-001-assembly",
+                "stage": "assembly",
+                "allow_local_execution": True,
+                "selected_method_names": [],
+            },
+        ]
+    )
+
+    assert legacy[1]["selected_method_names"] == []
 
 
 def test_frozen_workflow_plan_rejects_runtime_append_or_reorder() -> None:

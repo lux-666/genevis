@@ -22,14 +22,17 @@ bash scripts/server_test.sh
 These checks have deliberately different scope:
 
 - `server_check.sh` probes orchestrator prerequisites, then derives and probes
-  the tool/package closure selected by
+  the fixed-stage tool/package closure in
   `docs/examples/contig_run_config.template.json` through the active environment
-  mapping. It does not validate real input files, the LLM endpoint, or the actual
-  BUSCO lineage selected for a run.
+  mapping. Assembly is deliberately deferred and its selected candidate is
+  checked at stage entry. It also validates the host BUSCO/NCBI database
+  registry needed by Assembly Review. The script does not validate real input
+  files or the LLM endpoint.
 - `server_test.sh` runs the Python regression/compile/diff checks. It is not a
   real-data bioinformatics smoke test.
-- `gene-agent run` performs the selected run-specific input, tool/package, LLM,
-  and BUSCO checks before it publishes frozen inputs.
+- `gene-agent run` performs run-specific input, fixed tool/package, database,
+  and LLM checks before it publishes frozen inputs; a deferred Assembly method
+  is checked later from that frozen dependency snapshot.
 
 ## Five-stage contig input
 
@@ -43,14 +46,16 @@ cp docs/examples/contig_run_config.template.json /server/path/run_config.json
 This pair is the authoritative five-stage contig example named in the root
 README; the exact occurrence list remains in the JSON rather than being copied
 into another guide. Inventory is added as the implicit first occurrence during
-freeze. Fill every placeholder with server-local paths. The template currently
-selects Flye; changing the assembler also changes the derived method/tool closure
-and therefore requires the corresponding host installation.
+freeze. Fill every placeholder with server-local paths. The template
+intentionally leaves the Assembly method and parameters unset. After upstream
+QC/survey evidence exists, Assembly recommends and confirms a compatible method,
+then recommends its parameters. The active environment mapping must declare the
+tool requirements of every candidate that the run may select.
 
 The example files, not this guide, own the complete schema-valid payload. The
-exact occurrence and freeze contract is linked above; an operator-authored
-RunConfig remains literal execution authority and is never silently rewritten
-from a recommendation.
+exact occurrence and freeze contract is linked above; RunConfig remains the
+literal occurrence/authorization authority. Deferred Assembly method and
+parameter decisions are stage-owned evidence rather than startup configuration.
 
 ## Start
 

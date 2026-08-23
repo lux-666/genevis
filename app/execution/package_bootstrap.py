@@ -105,8 +105,7 @@ def conform_juicer(
             status="error",
             actions_taken=actions,
             detail=(
-                "referenced jar package is not configured: "
-                f"{juicer_spec.jar_root_ref}"
+                f"referenced jar package is not configured: {juicer_spec.jar_root_ref}"
             ),
         )
     if juicer_tools_spec:
@@ -158,8 +157,7 @@ def conform_juicer(
             if apply:
                 jar_target.symlink_to(jar_source)
                 actions.append(
-                    "Created symlink: scripts/common/juicer_tools.jar -> "
-                    f"{jar_source}"
+                    f"Created symlink: scripts/common/juicer_tools.jar -> {jar_source}"
                 )
             else:
                 actions.append(
@@ -273,9 +271,7 @@ def verify_envs_yaml(
                     f"packages.juicer conformance: {conformance_result.detail}"
                 )
             elif jar_spec is not None:
-                allowed_missing["juicer"] = {
-                    "scripts/common/juicer_tools.jar"
-                }
+                allowed_missing["juicer"] = {"scripts/common/juicer_tools.jar"}
 
     for package_name, package_spec in resolver.packages.items():
         preflight_result = package_preflight(package_spec)
@@ -301,5 +297,49 @@ def verify_envs_yaml(
                 issues.append(f"{field} is still a placeholder: {configured}")
             elif model_path is None or not model_path.is_file():
                 issues.append(f"{field} does not exist: {model_path}")
+
+    # Database declarations are part of the same host configuration lifecycle.
+    # Bootstrap validates every configured entry, while run readiness later
+    # narrows that catalog to the databases required by the selected workflow.
+    if resolver.databases is None:
+        issues.append(
+            "databases registry is missing; configure databases.busco and "
+            "databases.ncbi_metazoa in the active envs.yaml"
+        )
+    else:
+        from app.execution.database_resolution import canonical_database_path
+        from app.reference.ncbi_metazoa import validate_reference_snapshot
+        from app.schemas.run_config import validate_busco_lineage
+
+        for lineage_name, lineage in resolver.databases.busco.lineages.items():
+            field = f"databases.busco.lineages.{lineage_name}.path"
+            lineage_path = canonical_database_path(lineage.path, resolver)
+            if "/path/to/" in lineage.path:
+                issues.append(f"{field} is still a placeholder: {lineage.path}")
+                continue
+            if not lineage_path.is_dir():
+                issues.append(f"{field} does not exist: {lineage_path}")
+                continue
+            try:
+                validate_busco_lineage(
+                    lineage_path,
+                    lineage_name=lineage_name,
+                    lineage_version=lineage.version,
+                    lineage_source=lineage.source,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                issues.append(f"{field} failed validation: {exc}")
+
+        ncbi_path = resolver.databases.ncbi_metazoa.reference_dir
+        ncbi_field = "databases.ncbi_metazoa.reference_dir"
+        if "/path/to/" in ncbi_path:
+            issues.append(f"{ncbi_field} is still a placeholder: {ncbi_path}")
+        else:
+            try:
+                validate_reference_snapshot(
+                    canonical_database_path(ncbi_path, resolver)
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                issues.append(f"{ncbi_field} failed validation: {exc}")
 
     return issues

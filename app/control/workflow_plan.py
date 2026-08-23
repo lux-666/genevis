@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from app.configuration import load_descriptor_registry
-from app.schemas.run_config import RequestedStage, RunConfig, infer_assembly_method
+from app.schemas.run_config import RequestedStage, RunConfig
 from app.schemas.state import (
     DomainStage,
     ResourceDelivery,
@@ -44,16 +44,19 @@ def workflow_steps_from_run_config(run_config: RunConfig) -> list[WorkflowStep]:
     ]
     for index, request in enumerate(requests, start=1):
         stage = cast(DomainStage, request.stage)
-        steps.append(
-            {
-                "step_id": workflow_step_id(index, stage),
-                "stage": stage,
-                "allow_local_execution": bool(request.allow_local_execution),
-                "selected_method_names": list(
-                    _selected_method_names_for_request(run_config, request)
-                ),
-            }
-        )
+        selected_method_names = _selected_method_names_for_request(run_config, request)
+        step: WorkflowStep = {
+            "step_id": workflow_step_id(index, stage),
+            "stage": stage,
+            "allow_local_execution": bool(request.allow_local_execution),
+        }
+        # A missing roster is intentional and distinct from an empty roster:
+        # Assembly may bind its method only after upstream stage evidence is
+        # available. Fixed stages keep their registry-derived immutable roster,
+        # including an explicit empty list for manual-only stages.
+        if selected_method_names is not None:
+            step["selected_method_names"] = list(selected_method_names)
+        steps.append(step)
         if stage == "assembly_review":
             producer = steps[review_bindings[index]]
             steps[-1]["review_target"] = {
@@ -66,17 +69,17 @@ def workflow_steps_from_run_config(run_config: RunConfig) -> list[WorkflowStep]:
 def _selected_method_names_for_request(
     run_config: RunConfig,
     request: RequestedStage,
-) -> tuple[str, ...]:
-    """Derive one occurrence's immutable method roster at freeze projection."""
+) -> tuple[str, ...] | None:
+    """Derive a fixed roster, or defer Assembly binding to its stage."""
 
     registry = load_descriptor_registry()
     stage_methods = tuple(registry.by_stage.get(request.stage, ()))
     if request.stage == "read_qc":
+        length_filter = (
+            run_config.read_qc.length_filter if run_config.read_qc is not None else None
+        )
         filter_method = (
-            run_config.read_qc.length_filter.method
-            if run_config.read_qc is not None
-            and run_config.read_qc.length_filter is not None
-            else "skip"
+            length_filter.selected_method() if length_filter is not None else "skip"
         )
         always = tuple(
             method_name
@@ -88,12 +91,9 @@ def _selected_method_names_for_request(
         )
         return (*always, selected_filter)
     if request.stage == "assembly":
-        method = (
-            infer_assembly_method(run_config.assembly)
-            if run_config.assembly is not None
-            else None
-        )
-        return () if method is None else (f"assembly.candidate.{method}",)
+        # Assembly is the first stage whose method roster is bound at stage
+        # time, after upstream evidence and human confirmation.
+        return None
     return stage_methods
 
 

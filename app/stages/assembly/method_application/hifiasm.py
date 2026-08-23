@@ -28,6 +28,7 @@ from app.stages.assembly.command_builder import (
     parameter_sources_payload,
     render_assembly_cli,
     resolve_assembly_parameters,
+    resolve_baseline_assembly_parameters,
 )
 from app.stages.assembly.method_application.hifiasm_outputs import (
     hifiasm_native_output_declarations,
@@ -37,6 +38,7 @@ from app.stages.assembly.method_application.support import (
     assembly_primary_method_outcome_policy,
     build_read_input_dependencies,
     collect_method_artifacts,
+    current_parameter_policy,
     fail_update,
     freeze_parameterized_attempt,
     load_assembly_execution_contract,
@@ -165,10 +167,19 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
                 )
             l0_values["assembly_hic_r1_reads"] = hic_r1
             l0_values["assembly_hic_r2_reads"] = hic_r2
-        resolved = resolve_assembly_parameters(
+        resolver = (
+            resolve_baseline_assembly_parameters
+            if current_parameter_policy(output) == "deterministic_baseline"
+            else resolve_assembly_parameters
+        )
+        resolved = resolver(
             catalog=catalog,
             snapshot=approved_bundle.chain.input_snapshot,
-            approved_l2=approved_bundle.approved_l2,
+            approved_l2=(
+                {}
+                if resolver is resolve_baseline_assembly_parameters
+                else approved_bundle.approved_l2
+            ),
             l0_executor_values=l0_values,
         )
         argv = render_assembly_cli(catalog, resolved)

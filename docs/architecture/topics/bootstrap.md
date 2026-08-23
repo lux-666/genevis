@@ -6,7 +6,7 @@
 > diagnosing package and Conda readiness before freezing a run.
 >
 > **Comes from:** operator-supplied machine paths and environment choices,
-> configured method identities, and package declarations.
+> the host method catalog, and package/database declarations.
 >
 > **Feeds into:** the dependency snapshot used by
 > [TUI and planning](tui-and-planning.md), [method execution](execution.md), and
@@ -27,17 +27,18 @@
 Bootstrap prepares mutable machine/project configuration. It is not a workflow
 run and it does not own biological inputs.
 
-`config/envs.yaml.example` is the committed generic seed. The default active
+`docs/examples/envs.yaml.example` is the committed generic seed. The default active
 `config/envs.yaml` is ignored, machine-local state created or updated by
 bootstrap; execution never falls back to the example when the active file is
 missing. Active-config selection is shared with execution: explicit
 `bootstrap --config PATH`, then `GENE_AGENT_ENVS_CONFIG`, then the repository
 default. An override should be absolute when callers may use different current
-directories.
+directories: relative overrides follow the caller's current directory, whereas
+the default `config/envs.yaml` is checkout-anchored.
 
 | Bootstrap owns | Bootstrap does not own |
 |---|---|
-| Missing or explicitly selected fields in the active environment mapping | Run manifests, run configuration, `resource_refs`, artifacts, ledger events, checkpoints, or reports |
+| Missing or explicitly selected fields in the active environment/package/database mapping | Run manifests, run configuration, `resource_refs`, artifacts, ledger events, checkpoints, or reports |
 | Selected `GENE_AGENT_*` overrides in project `.env`, with secrets redacted and protected | Descriptor creation or method registration |
 | Validation of package paths and canaries declared in the active config | Installing arbitrary tools, Conda environments, reference databases, or workflow packages |
 | Probing configured method environments with execution-time precedence | Freezing a session or rebuilding the dependency snapshot of an existing session |
@@ -77,8 +78,9 @@ After a persisted candidate is available, bootstrap:
    and the chosen mode authorizes writes;
 3. verifies every declared package canary;
 4. groups configured method entries by Conda target and probes their required
-   executables; and
-5. reports every package, method, target, missing executable, and repair hint
+   executables;
+5. verifies every declared BUSCO lineage and the NCBI snapshot manifest; and
+6. reports every package, method, database, target, missing executable, and repair hint
    before returning non-zero.
 
 This is readiness validation, not installation. The only implemented
@@ -90,11 +92,11 @@ package installer is not implemented and must not be inferred from the word
 ## Relationship to the two freezes
 
 `config/envs.yaml` is mutable machine state. When the operator later confirms a
-TUI plan, the whole-run freeze captures the selected environment and package
-closure in `control/dependency_manifest.json`. The frozen executor resolves
-from that snapshot, not from later bootstrap edits. Each executable method then
-creates its narrower method-attempt freeze from the approved inputs and frozen
-dependency selection.
+TUI plan, the whole-run freeze captures the selected environment/package
+closure and typed database registry in `control/dependency_manifest.json`. The
+frozen executor resolves from that snapshot, not from later bootstrap edits.
+Each executable method then creates its narrower method-attempt freeze from the
+approved inputs and frozen dependency selection.
 
 Bootstrap probes every package and method entry declared in the active machine
 mapping. Separately, after a

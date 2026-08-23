@@ -43,12 +43,6 @@ class WorkflowIntent(BaseModel):
     target_species: str | None = Field(default=None, min_length=1)
     target_assembly_level: Literal["contig", "scaffold", "chromosome"] = "contig"
     requested_stages: list[str] = Field(default_factory=list)
-    requested_assembly_method: Literal[
-        "flye",
-        "nextdenovo",
-        "hifiasm",
-        "hifiasm_ont",
-    ] | None = None
     use_ultralong_ont: bool = False
     use_hic_phasing: bool = False
     # Intake staging fields for T2T batched collection.  ``telomere_motif``
@@ -257,6 +251,18 @@ class DegradationDecision(BaseModel):
     confirmed: bool = False
 
 
+RecommendationMode = Literal["advisor", "deterministic_baseline"]
+
+
+class RecommendationPolicy(BaseModel):
+    """Independent ablation switches for stage-local advisory decisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method_route_advisor: RecommendationMode = "advisor"
+    parameter_advisor: RecommendationMode = "advisor"
+
+
 class TuiSessionDraft(BaseModel):
     """Versioned source of truth for a mutable pre-freeze TUI session."""
 
@@ -277,6 +283,9 @@ class TuiSessionDraft(BaseModel):
     shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, object]] | None = None
     stage_parameters: dict[str, dict[str, object]] | None = None
+    recommendation_policy: RecommendationPolicy = Field(
+        default_factory=RecommendationPolicy
+    )
     degradation_decision: DegradationDecision | None = None
     lifecycle: TuiLifecycle = "intake"
     revision: int = Field(default=1, ge=1)

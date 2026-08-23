@@ -39,8 +39,6 @@ from app.schemas.manifest import (
 from app.schemas.run_config import (
     RunConfig,
     canonicalize_run_config_paths,
-    validate_assembly_review_execution_plan,
-    validate_genome_size_execution_plan,
 )
 from app.storage.paths import SessionPaths, ensure_run_layout
 
@@ -524,8 +522,6 @@ def prepare_session_inputs(
             run_config,
             declarations.read_declarations,
         )
-        validate_assembly_review_execution_plan(run_config)
-        validate_genome_size_execution_plan(run_config, manifest)
     except FrozenInputValidationError:
         raise
     except (ValidationError, ValueError) as exc:
@@ -596,11 +592,17 @@ def freeze_session_inputs(
         run_config,
         selected_methods=selected_methods,
     )
-    ensure_run_layout(paths)
     manifest_bytes = _manifest_bytes(manifest)
     run_config_bytes = _run_config_bytes(run_config)
 
-    lock_path = paths.control_dir / ".frozen-inputs.lock"
+    # Keep the create-only freeze lock outside ``data_root``.  Creating
+    # ``control/`` or ``runs/<session>/`` before validation would make an
+    # invalid request mutate the data layout and look like an unmarked legacy
+    # run.
+    lock_path = (
+        paths.data_root.parent
+        / f".{paths.data_root.name}.{paths.session_id}.frozen-inputs.lock"
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -623,6 +625,21 @@ def freeze_session_inputs(
                     + ", ".join(str(path) for path in partial)
                 )
 
+            # Load the active config once, under the freeze lock.  Database
+            # readiness and dependency capture must use this same resolver;
+            # otherwise envs.yaml can change between two independent reads.
+            from app.execution.database_resolution import validate_review_databases
+            from app.execution.env_resolver import EnvResolver
+
+            try:
+                resolver = EnvResolver(config_path)
+                validate_review_databases(run_config, resolver)
+            except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+                raise FrozenInputValidationError(
+                    f"host database contract is not ready: {exc}"
+                ) from exc
+            ensure_run_layout(paths)
+
             # Kept inside the lock so a successful freeze binds the exact
             # dependency snapshot used to calculate the commit marker.
             from app.execution.dependency_snapshot import (
@@ -636,6 +653,7 @@ def freeze_session_inputs(
                 methods=dependency_methods,
                 preflight_runner=preflight_runner,
                 probe_environments=probe_environments,
+                resolver=resolver,
             )
             dependency_bytes = dependency_snapshot_bytes(dependency_snapshot)
             marker = _build_marker(
@@ -697,7 +715,6 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
             run_config,
             declarations.read_declarations,
         )
-        validate_genome_size_execution_plan(run_config, manifest)
     except (FrozenInputValidationError, ValueError) as exc:
         raise FrozenInputIntegrityError(
             f"frozen manifest/run-config biological validation is invalid: {exc}"
@@ -892,6 +909,29 @@ def _dependency_scope(
                 )
             if normalized not in methods:
                 methods.append(normalized)
+    # Fixed-stage defaults are system-owned, so callers must not have to copy
+    # them into ``selected_methods`` merely to obtain a complete dependency
+    # snapshot. Keep accepting the explicit mapping as a migration/input
+    # validation seam, then union the canonical local closure derived from the
+    # RunConfig and descriptor registry.
+    from app.execution.run_readiness import effective_method_closure
+
+    for method_names in effective_method_closure(
+        run_config,
+        selected_methods=selected_methods,
+    ).values():
+        for method in method_names:
+            if method not in methods:
+                methods.append(method)
+    if run_config.any_occurrence_allows_local_execution("assembly"):
+        from app.execution.run_readiness import assembly_candidate_method_scope
+
+        # Deferred Assembly needs a complete immutable dependency snapshot so
+        # the later recommendation never consults live envs.yaml. This is
+        # capture scope only, not startup readiness or execution consent.
+        for method in assembly_candidate_method_scope():
+            if method not in methods:
+                methods.append(method)
     return stages, methods
 
 
@@ -988,113 +1028,17 @@ def _validate_assembly_input_contract(
     run_config: RunConfig,
     read_declarations: Sequence[RegisteredReadDeclaration],
 ) -> None:
-    """Cross-validate method-owned read roles before freezing control files."""
+    """Cross-validate explicit Assembly input selectors before freezing."""
 
     assembly = run_config.assembly
     if assembly is None:
         return
-    from app.domains.assembly.selection import (
-        is_method_read_type_compatible,
-        resolve_read_type,
-    )
-    from app.schemas.run_config import infer_assembly_method
-
-    method = infer_assembly_method(assembly)
-    local_assembly = run_config.any_occurrence_allows_local_execution("assembly")
-    shared_parameters = run_config.shared_parameters
-    read_type = resolve_read_type(
-        ("assembly.assembly_route", assembly.assembly_route),
-        (
-            "shared_parameters.read_type",
-            shared_parameters.read_type if shared_parameters else None,
-        ),
-        (
-            "shared_parameters.platform",
-            None,
-            shared_parameters.platform if shared_parameters else None,
-        ),
-        context="storage.frozen_inputs.assembly_input_contract",
-    )
-    method_requires_read_type = method is not None and (
-        assembly.assembly_method is not None or local_assembly
-    )
-    if method_requires_read_type:
-        assert method is not None
-        if read_type is None:
-            if assembly.assembly_method is not None:
-                message = (
-                    "run_config: assembly.assembly_method is set but no "
-                    "read_type could be inferred"
-                )
-            else:
-                message = (
-                    f"run_config: local assembly method {method!r} was inferred "
-                    "but no read_type could be inferred"
-                )
-            raise FrozenInputValidationError(
-                message + "; set assembly.assembly_route, shared_parameters.read_type, "
-                "or shared_parameters.platform"
-            )
-        if not is_method_read_type_compatible(method, read_type):
-            raise FrozenInputValidationError(
-                f"run_config: assembly method {method!r} is incompatible with "
-                f"inferred read_type {read_type!r}"
-            )
-    if local_assembly and method in {"flye", "nextdenovo"}:
-        registered_read_types = {
-            declaration_read_type
-            for declaration in read_declarations
-            if (
-                declaration_read_type := resolve_read_type(
-                    (
-                        "registered long-read declaration",
-                        None,
-                        declaration.platform,
-                    ),
-                    context="storage.frozen_inputs.registered_read_type",
-                )
-            )
-            is not None
-        }
-        compatible_declaration = read_type in registered_read_types or (
-            read_type in {"ont_raw", "ont_hq"}
-            and bool(registered_read_types.intersection({"ont_raw", "ont_hq"}))
-        )
-        if not compatible_declaration:
-            raise FrozenInputValidationError(
-                f"{method} execution requires registered long-read declarations "
-                f"compatible with read_type {read_type!r}"
-            )
     hifi_paths = {
         declaration.path
         for declaration in read_declarations
         if declaration.platform == "pacbio_hifi"
     }
-    ont_paths = {
-        declaration.path
-        for declaration in read_declarations
-        if declaration.platform == "ont"
-    }
     paired_entries = [asset for asset in manifest.assets if asset.paired_reads]
-    if method == "hifiasm" and local_assembly:
-        if not hifi_paths:
-            raise FrozenInputValidationError(
-                "HiFi Hifiasm execution requires registered pacbio_hifi reads"
-            )
-        params = assembly.hifiasm_parameters
-        if params and params.use_ultralong_ont and not ont_paths:
-            raise FrozenInputValidationError(
-                "hifiasm use_ultralong_ont requires registered ONT reads"
-            )
-        if params and params.use_hic_phasing and not paired_entries:
-            raise FrozenInputValidationError(
-                "hifiasm use_hic_phasing requires registered paired Hi-C reads"
-            )
-    if method == "hifiasm_ont" and local_assembly:
-        if not ont_paths:
-            raise FrozenInputValidationError(
-                "Hifiasm ONT execution requires registered ONT reads"
-            )
     if assembly.hifi_reads_ref:
         selected = str(Path(assembly.hifi_reads_ref).resolve(strict=False))
         if selected not in hifi_paths:

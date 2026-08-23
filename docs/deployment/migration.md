@@ -26,7 +26,7 @@ documentation, schema-valid examples, and helper scripts.
 The following remain machine-local:
 
 - `.env` and credentials;
-- active `config/envs.yaml` (the committed seed is `config/envs.yaml.example`);
+- active `config/envs.yaml` (the committed seed is `docs/examples/envs.yaml.example`);
 - Conda environments and external package installations;
 - BUSCO lineages, databases, and model weights;
 - real FASTQ/FASTA/BAM inputs and private run configs;
@@ -46,7 +46,9 @@ development dependencies are declared only in [`../../pyproject.toml`](../../pyp
 
 Execution reads the active environment mapping: `GENE_AGENT_ENVS_CONFIG` when
 set, otherwise `config/envs.yaml`. Use an absolute override when invoking tools
-from different current directories. `config/envs.yaml.example` is the generic
+from different current directories; relative overrides resolve from the caller's
+current directory, while the default stays checkout-anchored.
+`docs/examples/envs.yaml.example` is the generic
 bootstrap seed; it is not a second active resolver input. Inspect the proposed
 changes first and write only after review:
 
@@ -55,11 +57,22 @@ conda run -n gene_agent gene-agent bootstrap
 conda run -n gene_agent gene-agent bootstrap --apply
 ```
 
+Fill the single `databases:` block in that active file once: register available
+BUSCO lineage aliases (including one default) and the NCBI Metazoa snapshot.
+Per-run RunConfig files do not repeat database paths, versions, or provenance.
+For Assembly Review, a RunConfig may only select a registered BUSCO alias with
+`assembly_review.busco.lineage` and set executor knobs such as `threads`; host
+database identity and location remain in this active mapping and other fields
+are rejected.
+Running bootstrap interactively against a pre-database `envs.yaml` now proposes
+this migration instead of treating the missing block as an intentionally empty
+catalog.
+
 Bootstrap does not install arbitrary packages or Conda environments. It
 initializes/validates host mappings, verifies declared package canaries, performs
 the bounded Juicer conformance action when configured, and probes every method
 entry declared in the active mapping. That declared-catalog scope can be broader
-than the selected contig-template check below.
+than the fixed-stage contig check below.
 
 The precise bootstrap boundary is maintained in
 [Project Bootstrap](../architecture/topics/bootstrap.md). Method identity and
@@ -67,10 +80,10 @@ capability come from [`../../descriptors/registry.yaml`](../../descriptors/regis
 and its referenced descriptors; installation prose must not become another
 method registry.
 
-## Provision the Flye contig tool set
+## Provision the contig tool set
 
-The checked-in five-stage contig example currently selects Flye. A convenient
-shared environment is:
+The checked-in five-stage contig example deliberately does not bind an
+assembler. A convenient CycloneSeq-first shared environment is:
 
 ```bash
 conda create -n env_geno_exec -c conda-forge -c bioconda \
@@ -78,15 +91,16 @@ conda create -n env_geno_exec -c conda-forge -c bioconda \
 ```
 
 This command is a provisioning convenience, not the requirement authority.
-`scripts/server_check.sh` derives the actual selected method closure from
+`scripts/server_check.sh` derives the fixed-stage method closure from
 `docs/examples/contig_run_config.template.json`, resolves it through the active
 host mapping, and checks every command/package requirement. In particular,
 `purge_dups` must expose all of its helper commands; package installation alone
 does not prove readiness.
 
-If the template is changed to Hifiasm, Hifiasm-ONT, NextDenovo, or another
-registered assembler, install that method's derived closure before expecting
-the check to pass.
+Assembly chooses its method after upstream evidence exists. Declare and install
+every Assembly candidate that a run may select on this host; `bootstrap` checks
+that declared catalog. The selected candidate receives a second,
+stage-time preflight from the frozen dependency snapshot before execution.
 
 ## Conditional services and data
 
@@ -102,12 +116,16 @@ GENE_AGENT_LLM_MAX_TOKENS=16000
 GENE_AGENT_LLM_TIMEOUT_SECONDS=180
 ```
 
-Do not commit it. Assembly parameter recommendation requires a reachable LLM.
+Do not commit it. Assembly method and parameter recommendation requires a
+reachable LLM.
 Assembly Review requires a real BUSCO lineage whose identity and contents match
-the selected RunConfig. AutoHiC additionally needs its declared external package
-roots, Juicer/3D-DNA/JAR layout, and model files.
+`databases.busco` in the active host mapping; its NCBI snapshot comes from
+`databases.ncbi_metazoa` in that same file. RunConfig does not repeat either
+database path. AutoHiC additionally needs its declared external package roots,
+Juicer/3D-DNA/JAR layout, and model files.
 
-These run-specific checks are not faked by a successful tool-only host check.
+Bootstrap catalog validation is not a substitute for the contig-specific
+database and tool checks below.
 
 ## Verify the checkout
 
@@ -121,8 +139,8 @@ bash /path/to/gene_agent/scripts/server_test.sh
 
 Scope:
 
-- `server_check.sh`: orchestrator prerequisites plus the selected contig template
-  tool/package closure;
+- `server_check.sh`: orchestrator prerequisites plus the fixed contig template
+  tool/package closure; deferred Assembly-candidate readiness is stage-owned;
 - `server_test.sh`: Python regression, compile, and diff checks only;
 - real-data smoke: an explicit operator run using server-local inputs, described
   in [Run and Recovery](../user_guide/run-and-recovery.md).

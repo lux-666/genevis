@@ -47,6 +47,16 @@ def _candidate(candidate_id: str, method_name: str = "flye") -> dict:
     }
 
 
+def _empty_reference(root: str | Path) -> Path:
+    reference = Path(root) / "empty_reference"
+    reference.mkdir()
+    (reference / "reference_manifest.json").write_text(
+        json.dumps({"snapshot_date": "2024-01-01", "record_count": 0}),
+        encoding="utf-8",
+    )
+    return reference
+
+
 class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
     def _state(self, tmpdir: str, session_id: str, manifest_text: str) -> dict:
         run_dir = v2_run_dir(tmpdir, session_id)
@@ -93,12 +103,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
         """Node handles an unavailable snapshot and writes valid fallback outputs."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create an empty reference directory with manifest but no data files
-            empty_ref_dir = Path(tmpdir) / "empty_reference"
-            empty_ref_dir.mkdir()
-            manifest_content = {"snapshot_date": "2024-01-01", "record_count": 0}
-            (empty_ref_dir / "reference_manifest.json").write_text(
-                json.dumps(manifest_content)
-            )
+            empty_ref_dir = _empty_reference(tmpdir)
 
             state = self._state(
                 tmpdir,
@@ -151,6 +156,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
                 "assembly_review": {
                     "status": "evaluated",
                     "candidates": [_candidate("c1")],
+                    "related_species_reference_dir": str(_empty_reference(tmpdir)),
                     "signals": [
                         {
                             "candidate_id": "c1",

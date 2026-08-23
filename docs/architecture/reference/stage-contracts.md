@@ -27,8 +27,12 @@ enter -> validate_inputs -> plan_methods -> method_subgraph
 ```
 
 - validation reads compact state and verified refs only;
-- the frozen occurrence roster contains only methods registered for that stage;
-- planning resolves applicability and parameters without rewriting that roster;
+- fixed-method stages receive a roster containing only their registry-default
+  methods; Assembly may omit `selected_method_names` for stage-owned deferred
+  binding (omission is not an empty roster);
+- planning resolves applicability and parameters without rewriting a fixed
+  roster; deferred Assembly first recommends/confirms its method from upstream
+  QC/survey evidence and then binds one validated `primary_method`;
 - method execution uses the shared freeze/run/collect lifecycle;
 - collection publishes artifacts and compact evidence refs;
 - review may open a human gate;
@@ -45,8 +49,10 @@ is a recoverable pause on the still-active occurrence and returns no occurrence
 outcome. A method disposition, attempt result, private cursor status, or route
 marker never implies an occurrence outcome. The shared occurrence-settlement
 boundary, invoked by both the parent controller and terminal recovery, validates
-the explicit handoff, proves exact coverage of the frozen method roster,
-records any immutable delivery, and writes the single occurrence terminal.
+the explicit handoff, proves exact coverage of the effective method roster,
+records any immutable delivery, and writes the single occurrence terminal. For
+deferred Assembly, settlement uses the validated stage-owned method binding as
+the effective roster and requires its method disposition.
 
 The frozen occurrence sequence decides which stage subgraphs are reached.  It
 does not prove that their biological inputs exist: every reached stage resolves
@@ -214,9 +220,27 @@ Registered methods:
 - `assembly.candidate.hifiasm_ont`;
 - `assembly.candidate.nextdenovo`.
 
-Method compatibility is validated against the selected read type and run
-configuration. Assembly, AutoHiC, and T2T parameter recommendations occur only
-after method selection and require human approval before freezing an attempt.
+Method compatibility is validated against the selected read type and upstream
+evidence. The recommendation payload carries explicit upstream-evidence status;
+a field whose producer did not complete is null and must not be treated as an
+observation. Assembly's route/method decision is stage-local and follows the
+frozen [recommendation policy](recommendation-policy.md). In advisor mode, the
+advisor recommends a method from the input-compatible frozen candidate set,
+the stage persists separate immutable model-request, model-response, and
+parsed-recommendation artifacts, and human confirmation binds
+`assembly_selection`. In deterministic-baseline mode, the stage skips the model
+and fails closed when route/platform evidence cannot determine a compatible
+default method. A crash after advisor-response publication replays that
+response by request hash instead of calling the model again. Assembly, AutoHiC,
+and T2T parameter
+recommendations occur only after method selection and require human approval
+before freezing an attempt; the frozen parameter policy determines whether that
+recommendation is model-proposed or an empty-L2 deterministic baseline. The
+dynamic Assembly method must resolve through
+the frozen dependency snapshot and pass stage-time preflight; it is not read
+from live environment configuration.
+The exact fact placement is owned by the
+[run-data contract](data-contract.md#101-assembly-method-recommendation).
 Each recommendation is an attempt-local sparse mapping; retries do not inherit
 omitted values or route around approval through model output.
 
@@ -294,10 +318,13 @@ Registered methods:
 - `assembly_review.eval.busco`.
 
 QUAST and BUSCO evidence is collected through an ordered shared lifecycle.
-BUSCO runs only with operator-provided offline lineage provenance. Review may
-accept a candidate, adopt a separately completed polish/purge action, or stop
-the workflow. Decisions are bound to the current review request and typed
-candidate refs.
+BUSCO and NCBI reference data resolve only from the host database registry
+captured in the frozen dependency manifest. RunConfig may carry executor knobs
+and an optional logical BUSCO lineage alias in `assembly_review.busco.lineage`,
+but never owns database paths, versions, or provenance; those fields are
+invalid RunConfig input. Review may accept a candidate, adopt a separately
+completed polish/purge action, or stop the workflow. Decisions are bound to
+the current review request and typed candidate refs.
 
 Signals such as duplicated BUSCO content, size inflation, abnormal depth, or
 missing/inconsistent evidence prevent unsupported automatic acceptance.

@@ -21,6 +21,7 @@ class AssemblyDecisionRequest(BaseModel):
     prompt_payload: dict[str, Any]
     system_prompt: str | None = None
     allowed_actions: list[str] = Field(default_factory=list)
+    allowed_methods: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "AssemblyDecisionRequest":
@@ -82,7 +83,9 @@ def make_assembly_decision(
     raw_content = response_text(response)
     try:
         parsed = parse_json_object(raw_content)
-        _validate_route_selection(parsed, request.allowed_actions)
+        _validate_route_selection(
+            parsed, request.allowed_actions, request.allowed_methods
+        )
         return AssemblyDecisionResult(
             kind=request.kind,
             raw_response=raw_content,
@@ -99,8 +102,51 @@ def make_assembly_decision(
 
 
 def _validate_route_selection(
-    parsed: dict[str, Any], allowed_actions: list[str]
+    parsed: dict[str, Any], allowed_actions: list[str], allowed_methods: list[str]
 ) -> None:
     recommended = parsed.get("recommended_route")
     if recommended not in set(allowed_actions):
         raise ValueError(f"recommended_route {recommended!r} not in allowed actions")
+    # ``recommended_method`` was added after the original route-only contract.
+    # Keep accepting old persisted/model responses during migration, but when
+    # present it is an explicit, fail-closed candidate selection.
+    method = parsed.get("recommended_method")
+    if recommended != "insufficient_data" and allowed_methods and method is None:
+        raise ValueError("recommended_method is required for a selected route")
+    if method is not None and allowed_methods and method not in set(allowed_methods):
+        raise ValueError(f"recommended_method {method!r} not in allowed methods")
+
+
+def restore_assembly_decision(
+    record: dict[str, Any], request: AssemblyDecisionRequest
+) -> AssemblyDecisionResult:
+    """Rehydrate one immutable Assembly decision without invoking the model."""
+
+    if record.get("schema_version") != 1:
+        raise ValueError("persisted Assembly model response is not schema v1")
+    raw_response = record.get("raw_response")
+    validity = record.get("validity")
+    error = record.get("error")
+    model_id = record.get("model_id")
+    if not isinstance(raw_response, str) or validity not in {"parsed", "invalid"}:
+        raise ValueError("persisted Assembly model response is malformed")
+    if error is not None and not isinstance(error, str):
+        raise ValueError("persisted Assembly model response has an invalid error")
+    if validity == "invalid":
+        return AssemblyDecisionResult(
+            kind=request.kind,
+            raw_response=raw_response,
+            valid=False,
+            error=error,
+            model_id=model_id if isinstance(model_id, str) else None,
+        )
+    parsed = parse_json_object(raw_response)
+    _validate_route_selection(parsed, request.allowed_actions, request.allowed_methods)
+    return AssemblyDecisionResult(
+        kind=request.kind,
+        raw_response=raw_response,
+        parsed=parsed,
+        valid=True,
+        error=error,
+        model_id=model_id if isinstance(model_id, str) else None,
+    )

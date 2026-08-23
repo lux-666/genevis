@@ -24,7 +24,6 @@ from app.schemas.manifest import InputManifest
 from app.schemas.run_config import (
     DEFAULT_REVIEW_MAX_BLOCKED_SECONDS,
     AutoHiCRunParameters,
-    HifiasmRunParameters,
     RequestableStage,
     RunConfig,
 )
@@ -44,29 +43,23 @@ from .planner_catalog import (
     load_planner_method_catalog,
 )
 
-_ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE = {
-    "assembly.candidate.flye",
-    "assembly.candidate.nextdenovo",
-}
-_ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE = {
-    "assembly.candidate.flye",
-    "assembly.candidate.nextdenovo",
-    "assembly.candidate.hifiasm",
-    "assembly.candidate.hifiasm_ont",
-}
+_DEFERRED_ASSEMBLY_CANDIDATES_MAY_NEED_GENOME_SIZE = True
 
 # ---------------------------------------------------------------------------
 # Planner stage-selection policy. Method metadata comes from descriptors.
 # ---------------------------------------------------------------------------
 
 _STAGE_SELECTION_MODE: dict[str, str] = {
-    "read_qc": "read_qc_filter_choice",
-    "genome_survey": "choose_many",
-    "assembly": "choose_many",
+    # These stages are system-owned defaults in the initial plan.  Assembly is
+    # deliberately deferred: its recommender runs after upstream evidence is
+    # available and materializes the method at the execution boundary.
+    "read_qc": "auto",
+    "genome_survey": "auto",
+    "assembly": "deferred",
     "assembly_dedup": "pipeline",
     "assembly_review": "pipeline",
     "hic_scaffolding": "pipeline",
-    "t2t": "choose_many",
+    "t2t": "auto",
 }
 
 READ_QC_STATS_METHOD = "read_qc.long_read_stats.seqkit_stats"
@@ -106,9 +99,10 @@ def _build_assembly_review_config(plan: AskPlanState) -> dict[str, Any]:
     return ar_config
 
 
-_STAGES_NEEDING_METHOD_SELECTION = {
-    stage for stage, mode in _STAGE_SELECTION_MODE.items() if mode != "pipeline"
-}
+# Kept as a compatibility export for older callers.  New planning never asks
+# the operator to choose methods; fixed stages receive system defaults and
+# Assembly is bound after upstream evidence is available.
+_STAGES_NEEDING_METHOD_SELECTION: set[str] = set()
 
 
 def _get_method_descriptor(method_name: str) -> dict[str, Any] | None:
@@ -147,6 +141,22 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
         return list(READ_QC_DEFAULT_METHODS)
     if stage == "hic_scaffolding":
         return ["hic_scaffolding.candidate.autohic"]
+    if stage == "genome_survey":
+        return [
+            "genome_survey.kmer_count.jellyfish",
+            "genome_survey.model.genomescope2",
+        ]
+    if stage == "assembly_dedup":
+        return ["assembly_dedup.purge_dups"]
+    if stage == "assembly_review":
+        return [
+            "assembly_review.eval.quast",
+            "assembly_review.eval.busco",
+        ]
+    if stage == "t2t":
+        return "t2t.alignment.minimap2"
+    if stage == "assembly":
+        return None
     if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
         methods = [m["method_name"] for m in _executable_methods_for_stage(stage)]
         return methods or None
@@ -214,18 +224,11 @@ def _fill_draft_default_methods(plan: AskPlanState) -> AskPlanState:
 def _draft_default_methods_for_stage(
     plan: AskPlanState, stage: str
 ) -> str | list[str] | None:
+    if stage == "assembly":
+        return None
     default = _default_methods_for_stage(stage)
     if default:
         return default
-    if stage == "genome_survey":
-        return [
-            "genome_survey.kmer_count.jellyfish",
-            "genome_survey.model.genomescope2",
-        ]
-    if stage == "assembly":
-        return _draft_assembly_method(plan)
-    if stage == "t2t":
-        return "t2t.alignment.minimap2"
     executable = [
         method["method_name"] for method in _executable_methods_for_stage(stage)
     ]
@@ -233,18 +236,12 @@ def _draft_default_methods_for_stage(
 
 
 def _draft_assembly_method(plan: AskPlanState) -> str | None:
-    manifest = _load_manifest(plan.manifest_ref)
-    if not manifest:
-        return None
-    asset_types = {asset.asset_type for asset in manifest.assets}
-    if "raw_long_reads" not in asset_types:
-        return None
-    if "assembly_fasta_registered" in asset_types:
-        return None
-    platforms = _raw_long_read_platforms(manifest, include_unknown=True)
-    if platforms == {"pacbio_hifi"}:
-        return "assembly.candidate.hifiasm"
-    return "assembly.candidate.flye"
+    """Compatibility helper for callers inspecting old draft behavior.
+
+    New plans never materialize an Assembly method during planning.  Runtime
+    recommendation owns that decision after upstream evidence exists.
+    """
+    return None
 
 
 def next_clarification(
@@ -355,8 +352,13 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
         if shared_parameters:
             payload["shared_parameters"] = shared_parameters
     assembly_config = _build_assembly_execution_config(plan, local_stages)
-    if assembly_config:
-        payload["assembly"] = assembly_config
+    if "assembly" in local_stages:
+        policy = (plan.entry_request or {}).get("recommendation_policy") or {}
+        payload["assembly"] = {
+            **(assembly_config or {}),
+            "method_route_advisor": policy.get("method_route_advisor", "advisor"),
+            "parameter_advisor": policy.get("parameter_advisor", "advisor"),
+        }
     if "read_qc" in local_stages:
         payload["read_qc"] = {"length_filter": _read_qc_length_filter_config(plan)}
     if "genome_survey" in local_stages:
@@ -382,36 +384,38 @@ def _build_assembly_execution_config(
     plan: AskPlanState,
     local_stages: Collection[str],
 ) -> dict[str, Any] | None:
-    """Translate the one executable assembly selection into the run-config API."""
+    """Keep Assembly method/parameter choices out of the initial RunConfig.
+
+    Assembly is the one stage whose method is selected only after QC/survey
+    evidence is available.  Older AskPlan documents may still contain the
+    planning-era ``selected_methods`` and ``method_parameters`` fields; they
+    must not silently become a second execution path.  Reject those payloads
+    explicitly so the runtime can migrate/recommend at the stage boundary.
+    """
     if "assembly" not in local_stages:
         return None
 
     selected = (plan.selected_methods or {}).get("assembly")
     methods = selected if isinstance(selected, list) else [selected] if selected else []
-    executable = list(methods)
-    if len(executable) != 1:
+    if methods:
         raise ValueError(
-            "assembly local execution requires exactly one executable method selection"
+            "assembly method selection is deferred until QC/survey evidence; "
+            "do not put selected_methods['assembly'] in RunConfig"
         )
 
-    method_name = executable[0]
-    config_method = method_name.rsplit(".", 1)[-1]
-    supplied = dict((plan.method_parameters or {}).get(method_name) or {})
-    allowed_parameter_fields = (
-        HifiasmRunParameters.model_fields if config_method == "hifiasm" else {"threads"}
-    )
-    params = {
-        name: value
-        for name, value in supplied.items()
-        if name in allowed_parameter_fields
+    assembly_parameters = {
+        method: values
+        for method, values in (plan.method_parameters or {}).items()
+        if method.startswith("assembly.") and values
     }
-    parameter_key = f"{config_method}_parameters"
-    config: dict[str, Any] = {"assembly_method": config_method, parameter_key: params}
-    if config_method == "hifiasm":
-        config["assembly_route"] = "hifi"
-    elif config_method == "hifiasm_ont":
-        config["assembly_route"] = "ont"
-    return config
+    if assembly_parameters:
+        raise ValueError(
+            "assembly method parameters are deferred until the method "
+            "recommendation; do not put assembly method_parameters in RunConfig"
+        )
+    # The stage is still requested and locally executable; its runtime
+    # boundary will materialize the advisor's accepted method and parameters.
+    return None
 
 
 def _build_hic_scaffolding_config(plan: AskPlanState) -> dict[str, Any] | None:
@@ -1040,17 +1044,10 @@ def _check_conditional_requirements(
 
 
 def _needs_method_selection(plan: AskPlanState) -> bool:
-    locally_enabled = _locally_enabled_stage_names(plan)
-    if plan.selected_methods is not None:
-        # Check if all non-pipeline stages have methods selected
-        for stage in locally_enabled:
-            if (
-                stage in _STAGES_NEEDING_METHOD_SELECTION
-                and stage not in plan.selected_methods
-            ):
-                return True
-        return False
-    return any(stage in _STAGES_NEEDING_METHOD_SELECTION for stage in locally_enabled)
+    # Method selection is no longer a planning clarification.  Explicit
+    # selected_methods from older AskPlan documents remain readable and are
+    # validated when merged, but new plans use defaults plus deferred Assembly.
+    return False
 
 
 def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
@@ -1153,7 +1150,7 @@ def _fill_missing_method_defaults(
 ) -> dict[str, str | list[str]]:
     filled = dict(methods)
     for stage in _locally_enabled_stage_names(plan):
-        if stage in filled or stage not in _STAGES_NEEDING_METHOD_SELECTION:
+        if stage in filled or stage == "assembly":
             continue
         default = _default_methods_for_stage(stage)
         if default:
@@ -1171,7 +1168,7 @@ def _read_qc_length_filter_config(plan: AskPlanState) -> dict[str, Any]:
         READ_QC_FILTER_SKIP,
     )
     if filter_method == READ_QC_FILTER_SKIP:
-        return {"method": "skip", "approved": False, "thresholds": {}}
+        return {"approved": False, "thresholds": {}}
     if filter_method == READ_QC_FILTER_SEQKIT:
         params = (plan.method_parameters or {}).get(READ_QC_FILTER_SEQKIT) or {}
         min_len = _coerce_positive_int(params.get("min_len"))
@@ -1180,11 +1177,10 @@ def _read_qc_length_filter_config(plan: AskPlanState) -> dict[str, Any]:
                 "read_qc.length_filter.seqkit_seq.min_len must be a positive integer"
             )
         return {
-            "method": filter_method,
             "approved": True,
             "thresholds": {"min_len": min_len},
         }
-    return {"method": filter_method, "approved": False, "thresholds": {}}
+    return {"approved": False, "thresholds": {}}
 
 
 def _build_genome_survey_config(plan: AskPlanState) -> dict[str, Any] | None:
@@ -1245,14 +1241,7 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
         and "estimated_genome_size" not in merged_shared
     ):
         return True
-    if (
-        (plan.selected_stage_names or [])
-        and any(
-            method in _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE
-            for _, method in _iter_selected_methods(plan)
-        )
-        and plan.shared_parameters is None
-    ):
+    if _assembly_needs_shared_read_type(plan) and plan.shared_parameters is None:
         return True
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
@@ -1363,33 +1352,7 @@ def _infer_parameter_defaults(
     """
     inferred = dict(cap.get("parameter_defaults") or {})
     warnings: list[str] = []
-    if method == "assembly_review.eval.busco":
-        provided = (plan.method_parameters or {}).get(method, {})
-        lineage_path = provided.get("lineage_path") or inferred.get("lineage_path")
-        if lineage_path:
-            if not Path(lineage_path).is_dir():
-                warnings.append(
-                    "assembly_review.eval.busco: lineage_path "
-                    f"'{lineage_path}' is not an existing directory; "
-                    "the run cannot be frozen"
-                )
-            lp = Path(lineage_path)
-            name = lp.name
-            if "lineage_name" not in inferred:
-                inferred["lineage_name"] = name
-            version = _extract_busco_version(name)
-            if version and "lineage_version" not in inferred:
-                inferred["lineage_version"] = version
-            if "lineage_source" not in inferred:
-                inferred["lineage_source"] = "local"
     return inferred, warnings
-
-
-def _extract_busco_version(lineage_name: str) -> str:
-    import re
-
-    m = re.search(r"(odb\d+(?:\.\d+)?)$", lineage_name)
-    return m.group(1) if m else ""
 
 
 def _infer_shared_parameter_defaults(
@@ -1456,16 +1419,20 @@ def _raw_long_read_platforms(manifest: Any, *, include_unknown: bool) -> set[str
 
 
 def _assembly_needs_shared_read_type(plan: AskPlanState) -> bool:
-    return any(
-        method in _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE
-        for _, method in _iter_selected_methods(plan)
-    )
+    return _has_local_deferred_assembly(plan)
 
 
 def _assembly_needs_shared_genome_size(plan: AskPlanState) -> bool:
+    return (
+        _has_local_deferred_assembly(plan)
+        and _DEFERRED_ASSEMBLY_CANDIDATES_MAY_NEED_GENOME_SIZE
+    )
+
+
+def _has_local_deferred_assembly(plan: AskPlanState) -> bool:
     return any(
-        method in _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE
-        for _, method in _iter_selected_methods(plan)
+        occurrence.stage == "assembly" and occurrence.allow_local_execution
+        for occurrence in plan.selected_stage_occurrences or []
     )
 
 

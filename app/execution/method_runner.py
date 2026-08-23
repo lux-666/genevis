@@ -91,9 +91,7 @@ def build_frozen_attempt(
         "script_sha256": sha256_file(declared_script),
         "working_dir": declared_working_dir,
         "interpreter": interpreter,
-        "expected_outputs": [
-            path.expanduser().absolute() for path in expected_outputs
-        ],
+        "expected_outputs": [path.expanduser().absolute() for path in expected_outputs],
         "env": {str(k): str(v) for k, v in (env or {}).items()},
         "input_dependencies": list(input_dependencies),
         "metadata": metadata or {},

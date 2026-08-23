@@ -89,9 +89,7 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
             )
             writer.writeheader()
             for taxid, value in lineage.items():
-                writer.writerow(
-                    {"Organism Taxonomic ID": taxid, lineage_header: value}
-                )
+                writer.writerow({"Organism Taxonomic ID": taxid, lineage_header: value})
         self._write_manifest(root)
 
     def _write_manifest(self, root: Path) -> None:
@@ -245,8 +243,7 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                     "1": "Metazoa;Targetiformes;Targetidae;Targetus;Targetus absentus",
                     "2": "Metazoa;Targetiformes;Targetidae;Targetus;Targetus relative",
                     "3": (
-                        "Metazoa;Targetiformes;Targetidae;Otherus;"
-                        "Otherus familymember"
+                        "Metazoa;Targetiformes;Targetidae;Otherus;Otherus familymember"
                     ),
                     "4": (
                         "Metazoa;Targetiformes;Otheridae;Yetanother;"

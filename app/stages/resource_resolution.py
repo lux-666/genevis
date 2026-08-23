@@ -215,24 +215,14 @@ def _preferred_records(
             ]
             for group in groups:
                 selected = [
-                    record
-                    for record in platform_records
-                    if record.asset_type in group
+                    record for record in platform_records if record.asset_type in group
                 ]
                 if selected:
                     selected_ids.update(record.asset_id for record in selected)
                     break
-        return [
-            record
-            for record in records
-            if record.asset_id in selected_ids
-        ]
+        return [record for record in records if record.asset_id in selected_ids]
     for group in groups:
-        selected = [
-            record
-            for record in records
-            if record.asset_type in group
-        ]
+        selected = [record for record in records if record.asset_type in group]
         if selected:
             return selected
     return records
@@ -254,25 +244,14 @@ def _metadata_from_records(
             "asset_ids": [record.asset_id for record in records],
             "platforms": list(
                 dict.fromkeys(
-                    str(record.platform)
-                    for record in records
-                    if record.platform
+                    str(record.platform) for record in records if record.platform
                 )
             ),
             "formats": list(
-                dict.fromkeys(
-                    str(record.format)
-                    for record in records
-                    if record.format
-                )
+                dict.fromkeys(str(record.format) for record in records if record.format)
             ),
-            "asset_types": list(
-                dict.fromkeys(record.asset_type for record in records)
-            ),
-            "assets": [
-                record.model_dump(mode="json")
-                for record in records
-            ],
+            "asset_types": list(dict.fromkeys(record.asset_type for record in records)),
+            "assets": [record.model_dump(mode="json") for record in records],
         }
     )
     return metadata

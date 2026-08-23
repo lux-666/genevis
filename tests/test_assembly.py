@@ -189,6 +189,54 @@ class _ParameterModel:
         return _ParameterResponse(parameters)
 
 
+class _AssemblyMethodModel:
+    """Deterministic method advisor for deferred Assembly-stage tests.
+
+    ``assembly_route`` is deliberately not read as a method choice.  The
+    advisor receives the resolved input profile and chooses a compatible
+    descriptor-backed method; the test helper then submits that recommendation
+    through the normal human route/method confirmation gate.
+    """
+
+    def invoke(self, _messages: list[dict[str, str]]) -> str:
+        request = json.loads(_messages[1]["content"])
+        profile = request["data_profile"]
+        allowed_methods = request["allowed_methods"]
+        platforms = profile.get("primary_member_platforms") or []
+        platform = profile.get("platform")
+        if (
+            profile.get("has_hifi")
+            or profile.get("hifi_reads_ref")
+            or platform == "pacbio_hifi"
+            or "pacbio_hifi" in platforms
+        ):
+            route = "hifi"
+            read_type = "pacbio_hifi"
+            preferred = "assembly.candidate.hifiasm"
+        elif (
+            profile.get("ont_reads_ref")
+            or platform in {"ont", "ont_raw", "ont_hq"}
+            or any(item in {"ont", "ont_raw", "ont_hq"} for item in platforms)
+        ):
+            route = "ont"
+            read_type = "ont_raw"
+            preferred = "assembly.candidate.hifiasm_ont"
+        else:
+            route = "cyclone"
+            read_type = "cyclone"
+            preferred = "assembly.candidate.flye"
+        method = preferred if preferred in allowed_methods else allowed_methods[0]
+        return json.dumps(
+            {
+                "recommended_route": route,
+                "recommended_read_type": read_type,
+                "recommended_method": method,
+                "reasoning": "deterministic test advisor selected a compatible method",
+                "uncertainty_notes": [],
+            }
+        )
+
+
 class AssemblyDescriptorTests(unittest.TestCase):
     def test_descriptor_registry_loads_assembly_candidates(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
@@ -247,9 +295,15 @@ class AssemblyDescriptorTests(unittest.TestCase):
 
 class AssemblyStageTests(unittest.TestCase):
     def _invoke(self, graph, state: dict) -> dict:
-        with patch(
-            "app.llm.parameters.assembly.recommender.build_chat_model",
-            return_value=_ParameterModel(),
+        with (
+            patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=_ParameterModel(),
+            ),
+            patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=_AssemblyMethodModel(),
+            ),
         ):
             return graph.invoke(state)
 
@@ -328,13 +382,68 @@ class AssemblyStageTests(unittest.TestCase):
         return {**blocked, **rejection_update}
 
     def _invoke_with_parameter_approvals(self, state: dict) -> dict:
-        """Run assembly, approving only the shared parameter gate when reached."""
+        """Run deferred Assembly, confirming method then approving parameters."""
 
         graph = build_stage()
         current = state
         for _ in range(8):
             result = AssemblyStageTests._invoke(self, graph, current)
             interrupt = result.get("active_interrupt") or {}
+            if (
+                result.get("supervision_state") == "blocked_human"
+                and interrupt.get("gate_id") == "route_selection"
+            ):
+                assembly = result["stage_outputs"]["assembly"]
+                if assembly.get("block_reason") != (
+                    "assembly_selection_human_confirmation_required"
+                ):
+                    return result
+                selection = assembly.get("recommended_assembly_selection") or {}
+                read_type = selection.get("read_type")
+                method = selection.get("primary_method")
+                self.assertIsInstance(read_type, str)
+                self.assertIsInstance(method, str)
+                route = {
+                    "pacbio_hifi": "hifi",
+                    "ont_raw": "ont",
+                    "ont_hq": "ont",
+                    "cyclone": "cyclone",
+                }[read_type]
+                request = ResumeReviewRequest(
+                    session_id=result["session_id"],
+                    stage="assembly",
+                    gate_id="route_selection",
+                    review_request_id=interrupt["review_request_id"],
+                    review_request_hash=interrupt["request_hash"],
+                    decision=f"select_{route}",
+                    method_name=method,
+                    metadata={"read_type": read_type},
+                )
+                canonical = normalize_resume_review_request(result, request)
+                intent = persist_review_intent(
+                    result,
+                    canonical,
+                    source="test_assembly_method_confirmation",
+                )
+                gate = get_review_gate(canonical.stage, canonical.gate_id)
+                prepared = gate.load_prepare_application()(result, intent.intent)
+                application_ref = persist_review_application(
+                    result,
+                    intent=intent,
+                    prepared=prepared,
+                )
+                application = load_verified_review_application(
+                    result["data_dir"],
+                    application_ref,
+                    expected_identity=ReviewApplicationIdentity.from_intent(
+                        intent.intent
+                    ),
+                )
+                current = {
+                    **result,
+                    **gate.load_apply_application()(result, application),
+                }
+                continue
             if not (
                 result.get("supervision_state") == "blocked_human"
                 and interrupt.get("gate_id") == "parameter_approval"
@@ -491,6 +600,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-assembly",
@@ -501,11 +611,16 @@ class AssemblyStageTests(unittest.TestCase):
                     "step_id": "step-002-assembly_dedup",
                     "stage": "assembly_dedup",
                     "allow_local_execution": True,
+                    "selected_method_names": ["assembly_dedup.purge_dups"],
                 },
                 {
                     "step_id": "step-003-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-002-assembly_dedup",
@@ -1829,6 +1944,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
+                    "selected_method_names": [],
                 },
                 {
                     "step_id": "step-001-assembly",
@@ -1839,11 +1955,16 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                     "step_id": "step-002-assembly_dedup",
                     "stage": "assembly_dedup",
                     "allow_local_execution": True,
+                    "selected_method_names": ["assembly_dedup.purge_dups"],
                 },
                 {
                     "step_id": "step-003-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-002-assembly_dedup",

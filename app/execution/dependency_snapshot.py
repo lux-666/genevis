@@ -17,6 +17,8 @@ from typing import Any, Callable, Iterable, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.execution.env_resolver import (
+    BuscoLineageSpec,
+    DatabaseRegistry,
     EnvResolver,
     EnvSpec,
     PackagePreflightResult,
@@ -65,6 +67,11 @@ class DependencySnapshot(BaseModel):
     stage_environments: dict[str, EnvSpec] = Field(default_factory=dict)
     method_environments: dict[str, EnvSpec] = Field(default_factory=dict)
     packages: dict[str, PackageSpec] = Field(default_factory=dict)
+    databases: DatabaseRegistry | None = None
+    # The NCBI manifest is an external directory, so its content identity is
+    # frozen separately from the registry path.  This remains optional for
+    # old schema-2 snapshots and for non-review runs.
+    ncbi_manifest_sha256: str | None = None
     environment_preflight: dict[str, PreflightResult] = Field(default_factory=dict)
     package_preflight: dict[str, PackagePreflightResult] = Field(default_factory=dict)
 
@@ -91,10 +98,18 @@ class FrozenDependencyResolver:
         self.snapshot = snapshot
         self.config_path = Path(snapshot.config.source_path)
         self.packages = dict(snapshot.packages)
+        self.databases = snapshot.databases
+        self.ncbi_manifest_sha256 = snapshot.ncbi_manifest_sha256
 
     def resolve(self, *, stage: str, method_name: str | None = None) -> EnvSpec:
-        if method_name and method_name in self.snapshot.method_environments:
-            return self.snapshot.method_environments[method_name]
+        if method_name:
+            try:
+                return self.snapshot.method_environments[method_name]
+            except KeyError as exc:
+                raise DependencySnapshotError(
+                    "requested method is absent from the frozen dependency "
+                    f"snapshot: {method_name}"
+                ) from exc
         if stage in self.snapshot.stage_environments:
             return self.snapshot.stage_environments[stage]
         return self.snapshot.default_environment
@@ -108,6 +123,23 @@ class FrozenDependencyResolver:
             )
         return [self.packages[name] for name in spec.package_tools]
 
+    def resolve_busco_lineage(self, name: str | None = None) -> BuscoLineageSpec:
+        """Resolve a BUSCO lineage from the frozen database registry only."""
+        if self.databases is None:
+            raise DependencySnapshotError(
+                "frozen dependency contract has no databases.busco registry"
+            )
+        lineage_name = (
+            name if name is not None else self.databases.busco.default_lineage
+        )
+        try:
+            return self.databases.busco.lineages[lineage_name]
+        except KeyError as exc:
+            raise DependencySnapshotError(
+                "frozen databases.busco.lineages has no configured lineage: "
+                f"{lineage_name}"
+            ) from exc
+
 
 def capture_dependency_snapshot(
     *,
@@ -116,6 +148,7 @@ def capture_dependency_snapshot(
     methods: Iterable[str] | None = None,
     preflight_runner: Callable[..., Any] | None = None,
     probe_environments: bool | None = None,
+    resolver: EnvResolver | None = None,
 ) -> DependencySnapshot:
     """Capture resolved environments and packages from active machine config.
 
@@ -134,11 +167,20 @@ def capture_dependency_snapshot(
     its normal probe against the stored specification.
     """
 
-    source = Path(config_path or active_config_path()).expanduser().resolve(
-        strict=False
+    source = (
+        Path(config_path or active_config_path()).expanduser().resolve(strict=False)
     )
+    config_sha256: str | None = None
     try:
-        resolver = EnvResolver(source)
+        if resolver is None:
+            resolver = EnvResolver(source)
+        else:
+            resolved_source = resolver.config_path.expanduser().resolve(strict=False)
+            if resolved_source != source:
+                raise DependencySnapshotError(
+                    "provided env resolver does not match config_path"
+                )
+        config_sha256 = getattr(resolver, "config_sha256", None)
         raw = resolver._raw
         selected_stage_scope = (
             list(dict.fromkeys(str(stage).strip() for stage in stages))
@@ -178,6 +220,7 @@ def capture_dependency_snapshot(
             )
             for method in method_names
         }
+        databases = resolver.databases
     except (FileNotFoundError, OSError, ValueError, TypeError) as exc:
         raise DependencySnapshotError(
             f"could not capture dependency configuration from {source}: {exc}"
@@ -207,22 +250,36 @@ def capture_dependency_snapshot(
     )
     selected_packages = {name: resolver.packages[name] for name in package_names}
     package_results = {
-        name: package_preflight(package)
-        for name, package in selected_packages.items()
+        name: package_preflight(package) for name, package in selected_packages.items()
     }
+    ncbi_manifest_sha256 = _capture_ncbi_manifest_sha256(databases)
     return DependencySnapshot(
         captured_at=datetime.now(timezone.utc).isoformat(),
         config=DependencyConfigIdentity(
-            source_path=str(source), sha256=sha256_file(source)
+            source_path=str(source),
+            sha256=config_sha256 or sha256_file(source),
         ),
         selected_methods=selected_method_scope or [],
         default_environment=default_environment,
         stage_environments=stage_environments,
         method_environments=method_environments,
         packages=selected_packages,
+        databases=databases,
+        ncbi_manifest_sha256=ncbi_manifest_sha256,
         environment_preflight=environment_preflight,
         package_preflight=package_results,
     )
+
+
+def _capture_ncbi_manifest_sha256(
+    databases: DatabaseRegistry | None,
+) -> str | None:
+    if databases is None:
+        return None
+    manifest = Path(databases.ncbi_metazoa.reference_dir) / "reference_manifest.json"
+    if not manifest.is_file():
+        return None
+    return sha256_file(manifest)
 
 
 def dependency_snapshot_bytes(snapshot: DependencySnapshot) -> bytes:
@@ -326,10 +383,14 @@ def _snapshot_method_names(
 
     requested_names = {str(value) for value in requested}
     closure = available.intersection(requested_names)
-    if stage_scope:
-        from app.configuration import load_descriptor_registry
+    # A canonical method may intentionally inherit its tools from a stage-level
+    # env mapping. It still needs an explicit method snapshot so committed runs
+    # can request that exact identity without falling back at runtime.
+    from app.configuration import load_descriptor_registry
 
-        registry = load_descriptor_registry()
+    registry = load_descriptor_registry()
+    closure.update(requested_names.intersection(registry.methods))
+    if stage_scope:
         planner_methods = {
             method
             for stage in stage_scope

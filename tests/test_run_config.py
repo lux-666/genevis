@@ -5,44 +5,17 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from copy import deepcopy
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.schemas.run_config import RunConfig as _ProductionRunConfig
-from app.schemas.run_config import load_run_config
+from app.schemas.run_config import RunConfig, load_run_config
 
 
-def _busco_config(
-    lineage_path: str = "/data/busco/embryophyta_odb10",
-) -> dict[str, object]:
-    return {
-        "lineage_path": lineage_path,
-        "lineage_name": "embryophyta_odb10",
-        "lineage_version": "odb10",
-        "lineage_source": "test_fixture",
-        "threads": 4,
-    }
+def _busco_config(lineage: str = "embryophyta_odb10") -> dict[str, object]:
+    """Return the only BUSCO fields a user RunConfig may provide."""
 
-
-class RunConfig:
-    """Test fixture adapter that makes unrelated Review configs explicit."""
-
-    @staticmethod
-    def model_validate(payload: dict[str, object]) -> _ProductionRunConfig:
-        normalized = deepcopy(payload)
-        requests = normalized.get("requested_stages") or []
-        review_requested = any(
-            isinstance(request, dict) and request.get("stage") == "assembly_review"
-            for request in requests
-        )
-        review = normalized.get("assembly_review")
-        if review_requested or isinstance(review, dict):
-            review_block = dict(review) if isinstance(review, dict) else {}
-            review_block.setdefault("busco", _busco_config())
-            normalized["assembly_review"] = review_block
-        return _ProductionRunConfig.model_validate(normalized)
+    return {"lineage": lineage, "threads": 4}
 
 
 def _stage_requests(
@@ -158,183 +131,32 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("local_exec", str(ctx.exception))
 
-    def test_valid_config_with_flye_parameters(self):
+    def test_local_assembly_can_defer_method_and_parameters_to_stage_time(self):
         config = RunConfig.model_validate(
-            {
-                "requested_stages": _stage_requests(
-                    "read_qc",
-                    "assembly",
-                    "assembly_review",
-                    local=("read_qc", "assembly", "assembly_review"),
-                ),
-                "assembly": {
-                    "flye_parameters": {
-                        "threads": 4,
+            {"requested_stages": _local_stage_requests("assembly")}
+        )
+
+        self.assertEqual(config.requested_stage_names(), ["assembly"])
+        self.assertIsNone(config.assembly)
+
+    def test_assembly_method_and_parameters_are_stage_owned(self):
+        cases = (
+            ("assembly_method", "flye"),
+            ("flye_parameters", {"threads": 4}),
+            ("nextdenovo_parameters", {"threads": 4}),
+            ("hifiasm_parameters", {"threads": 4}),
+            ("hifiasm_ont_parameters", {"threads": 4}),
+        )
+
+        for field, value in cases:
+            with self.subTest(field=field), self.assertRaises(ValidationError) as ctx:
+                RunConfig.model_validate(
+                    {
+                        "requested_stages": _local_stage_requests("assembly"),
+                        "assembly": {field: value},
                     }
-                },
-            }
-        )
-
-        self.assertEqual(
-            [
-                request.stage
-                for request in config.requested_stages
-                if request.allow_local_execution
-            ],
-            ["read_qc", "assembly", "assembly_review"],
-        )
-        assert config.assembly is not None
-        assert config.assembly.flye_parameters is not None
-        self.assertEqual(config.assembly.flye_parameters.threads, 4)
-
-    def test_valid_config_with_nextdenovo_parameters(self):
-        config = RunConfig.model_validate(
-            {
-                "requested_stages": _local_stage_requests(
-                    "assembly", "assembly_review"
-                ),
-                "assembly": {
-                    "assembly_method": "nextdenovo",
-                    "nextdenovo_parameters": {
-                        "threads": 4,
-                    },
-                },
-            }
-        )
-
-        assert config.assembly is not None
-        self.assertEqual(config.assembly.assembly_method, "nextdenovo")
-        assert config.assembly.nextdenovo_parameters is not None
-        self.assertEqual(config.assembly.nextdenovo_parameters.threads, 4)
-
-    def test_legacy_method_fact_and_l2_fields_are_rejected(self):
-        cases = (
-            ("flye_parameters", {"threads": 4, "estimated_genome_size": 2_000_000}),
-            ("flye_parameters", {"threads": 4, "read_type": "nano-raw"}),
-            ("nextdenovo_parameters", {"threads": 4, "genome_size": 2_000_000}),
-            ("nextdenovo_parameters", {"threads": 4, "read_type": "ont"}),
-            ("nextdenovo_parameters", {"threads": 4, "read_cutoff": 1000}),
-            ("hifiasm_parameters", {"threads": 4, "read_type": "hifi"}),
-            ("hifiasm_ont_parameters", {"threads": 4, "read_type": "ont"}),
-        )
-
-        for parameter_key, parameters in cases:
-            with self.subTest(parameter_key=parameter_key, parameters=parameters):
-                with self.assertRaises(ValidationError):
-                    RunConfig.model_validate(
-                        {
-                            "requested_stages": [],
-                            "assembly": {
-                                parameter_key: parameters,
-                            },
-                        }
-                    )
-
-    def test_valid_config_with_hifiasm_parameters(self):
-        config = RunConfig.model_validate(
-            {
-                "requested_stages": _local_stage_requests(
-                    "assembly", "assembly_review"
-                ),
-                "assembly": {
-                    "assembly_method": "hifiasm",
-                    "hifiasm_parameters": {
-                        "threads": 4,
-                    },
-                },
-            }
-        )
-
-        assert config.assembly is not None
-        self.assertEqual(config.assembly.assembly_method, "hifiasm")
-        assert config.assembly.hifiasm_parameters is not None
-        self.assertEqual(config.assembly.hifiasm_parameters.threads, 4)
-
-    def test_valid_config_with_hifiasm_ont_parameters(self):
-        config = RunConfig.model_validate(
-            {
-                "requested_stages": _local_stage_requests(
-                    "assembly", "assembly_review"
-                ),
-                "assembly": {
-                    "assembly_method": "hifiasm_ont",
-                    "hifiasm_ont_parameters": {
-                        "threads": 4,
-                    },
-                },
-            }
-        )
-
-        assert config.assembly is not None
-        self.assertEqual(config.assembly.assembly_method, "hifiasm_ont")
-        assert config.assembly.hifiasm_ont_parameters is not None
-        self.assertEqual(config.assembly.hifiasm_ont_parameters.threads, 4)
-
-    def test_empty_assembly_parameter_blocks_do_not_materialize_threads(self):
-        cases = (
-            ("flye", "flye_parameters"),
-            ("nextdenovo", "nextdenovo_parameters"),
-            ("hifiasm", "hifiasm_parameters"),
-            ("hifiasm_ont", "hifiasm_ont_parameters"),
-        )
-
-        for method, parameter_key in cases:
-            payload = {
-                "requested_stages": _local_stage_requests(
-                    "assembly", "assembly_review"
-                ),
-                "assembly": {
-                    "assembly_method": method,
-                    parameter_key: {},
-                },
-            }
-            with self.subTest(method=method):
-                config = RunConfig.model_validate(payload)
-                parameters = getattr(config.assembly, parameter_key)
-                self.assertIsNotNone(parameters)
-                self.assertIsNone(parameters.threads)
-
-    def test_local_hifiasm_method_requires_hifiasm_parameters(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {
-                        "assembly_method": "hifiasm",
-                        "flye_parameters": {"threads": 4},
-                    },
-                }
-            )
-
-        self.assertIn("hifiasm_parameters", str(ctx.exception))
-
-    def test_local_hifiasm_ont_method_requires_hifiasm_ont_parameters(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {
-                        "assembly_method": "hifiasm_ont",
-                        "hifiasm_parameters": {"threads": 4},
-                    },
-                }
-            )
-
-        self.assertIn("hifiasm_ont_parameters", str(ctx.exception))
-
-    def test_local_assembly_with_two_parameter_sets_requires_explicit_method(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {
-                        "flye_parameters": {"threads": 4},
-                        "nextdenovo_parameters": {"threads": 4},
-                    },
-                }
-            )
-
-        self.assertIn("assembly_method", str(ctx.exception))
+                )
+            self.assertIn(field, str(ctx.exception))
 
     def test_assembly_phase8_fields_are_accepted(self):
         config = RunConfig.model_validate(
@@ -355,87 +177,43 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.target_level, "near_t2t")
         self.assertEqual(config.assembly.assembly_route, "hifi")
 
+    def test_assembly_recommendation_policy_defaults_and_ablation_modes(self):
+        config = RunConfig.model_validate(
+            {
+                "requested_stages": _local_stage_requests("assembly"),
+                "assembly": {
+                    "method_route_advisor": "deterministic_baseline",
+                    "parameter_advisor": "advisor",
+                },
+            }
+        )
+
+        assert config.assembly is not None
+        self.assertEqual(config.assembly.method_route_advisor, "deterministic_baseline")
+        self.assertEqual(config.assembly.parameter_advisor, "advisor")
+
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "requested_stages": _local_stage_requests("assembly"),
+                    "assembly": {"method_route_advisor": "enabled"},
+                }
+            )
+        self.assertIn("method_route_advisor", str(ctx.exception))
+
     def test_route_consistency_allows_compatible_inferred_method(self):
         config = RunConfig.model_validate(
             {
                 "requested_stages": [],
                 "assembly": {
                     "assembly_route": "hifi",
-                    "flye_parameters": {"threads": 4},
+                    "target_level": "near_t2t",
                 },
             }
         )
 
         assert config.assembly is not None
         self.assertEqual(config.assembly.assembly_route, "hifi")
-
-    def test_cyclone_route_allows_same_explicit_method_overrides_as_ont(self):
-        """run_config route compatibility is an explicit override allow-list."""
-        for route in ["ont", "cyclone"]:
-            for method, parameters_key in [
-                ("flye", "flye_parameters"),
-                ("nextdenovo", "nextdenovo_parameters"),
-                ("hifiasm_ont", "hifiasm_ont_parameters"),
-            ]:
-                with self.subTest(route=route, method=method):
-                    config = RunConfig.model_validate(
-                        {
-                            "requested_stages": [],
-                            "assembly": {
-                                "assembly_route": route,
-                                "assembly_method": method,
-                                parameters_key: {"threads": 4},
-                            },
-                        }
-                    )
-
-                    assert config.assembly is not None
-                    self.assertEqual(config.assembly.assembly_route, route)
-                    self.assertEqual(config.assembly.assembly_method, method)
-
-    def test_cyclone_route_read_type_rejects_incompatible_hifiasm(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": [],
-                    "assembly": {
-                        "assembly_route": "cyclone",
-                        "assembly_method": "hifiasm",
-                        "hifiasm_parameters": {"threads": 4},
-                    },
-                }
-            )
-
-        self.assertIn(
-            "implies read_type 'cyclone' and is incompatible with "
-            "assembly_method 'hifiasm'",
-            str(ctx.exception),
-        )
-
-    def test_local_assembly_accepts_shared_parameters_with_flye_threads_only(self):
-        config = RunConfig.model_validate(
-            {
-                "requested_stages": _local_stage_requests(
-                    "assembly", "assembly_review"
-                ),
-                "shared_parameters": {
-                    "platform": "ont",
-                    "read_type": "ont_raw",
-                },
-                "assembly": {
-                    "flye_parameters": {
-                        "threads": 4,
-                    }
-                },
-            }
-        )
-
-        assert config.shared_parameters is not None
-        assert config.assembly is not None
-        assert config.assembly.flye_parameters is not None
-        self.assertEqual(config.shared_parameters.platform, "ont")
-        self.assertEqual(config.shared_parameters.read_type, "ont_raw")
-        self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
     def test_run_config_rejects_manifest_owned_genome_size(self):
         with self.assertRaises(ValidationError) as ctx:
@@ -456,7 +234,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": _local_stage_requests("read_qc"),
                 "read_qc": {
                     "length_filter": {
-                        "method": "read_qc.length_filter.seqkit_seq",
                         "approved": True,
                         "thresholds": {"min_len": 1000},
                     }
@@ -467,7 +244,8 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.read_qc is not None
         assert config.read_qc.length_filter is not None
         self.assertEqual(
-            config.read_qc.length_filter.method, "read_qc.length_filter.seqkit_seq"
+            config.read_qc.length_filter.selected_method(),
+            "read_qc.length_filter.seqkit_seq",
         )
         self.assertEqual(config.read_qc.length_filter.thresholds, {"min_len": 1000})
 
@@ -516,7 +294,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "requested_stages": [],
                     "read_qc": {
                         "length_filter": {
-                            "method": "read_qc.length_filter.seqkit_seq",
                             "approved": True,
                             "thresholds": {},
                         }
@@ -526,14 +303,14 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("min_len", str(ctx.exception))
 
-    def test_read_qc_unsupported_filter_method_is_rejected(self):
+    def test_read_qc_method_selection_field_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
                 {
                     "requested_stages": [],
                     "read_qc": {
                         "length_filter": {
-                            "method": "read_qc.length_filter.filtlong",
+                            "method": "read_qc.length_filter.seqkit_seq",
                             "approved": True,
                             "thresholds": {"min_len": 1000},
                         }
@@ -541,7 +318,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 }
             )
 
-        self.assertIn("literal_error", str(ctx.exception))
+        self.assertIn("method", str(ctx.exception))
 
     def test_assembly_review_quast_parameters_are_accepted(self):
         config = RunConfig.model_validate(
@@ -604,146 +381,22 @@ class RunConfigSchemaTests(unittest.TestCase):
             RunConfig.model_validate(
                 {
                     "requested_stages": [],
-                    "assembly": {
-                        "flye_parameters": {
-                            "threads": 4,
-                        },
-                        "canu_parameters": {},
-                    },
+                    "assembly": {"canu_parameters": {}},
                 }
             )
 
         self.assertIn("canu_parameters", str(ctx.exception))
 
-    def test_unknown_flye_parameter_field_is_rejected(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": [],
-                    "assembly": {
-                        "flye_parameters": {
-                            "threads": 4,
-                            "min_overlap": 1000,
-                        }
-                    },
-                }
-            )
-
-        self.assertIn("min_overlap", str(ctx.exception))
-
-    def test_local_assembly_without_flye_parameters_is_rejected(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {"requested_stages": _local_stage_requests("assembly")}
-            )
-
-        self.assertIn("flye_parameters", str(ctx.exception))
-
-    def test_local_assembly_without_assembly_block_is_rejected(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {"flye_parameters": None},
-                }
-            )
-
-        self.assertIn("flye_parameters", str(ctx.exception))
-
-    def test_local_nextdenovo_method_requires_nextdenovo_parameters(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {
-                        "assembly_method": "nextdenovo",
-                        "flye_parameters": {"threads": 4},
-                    },
-                }
-            )
-
-        self.assertIn("nextdenovo_parameters", str(ctx.exception))
-
-    def test_flye_method_block_contains_only_executor_threads(self):
+    def test_local_assembly_empty_block_is_deferred(self):
         config = RunConfig.model_validate(
             {
-                "requested_stages": _local_stage_requests(
-                    "assembly", "assembly_review"
-                ),
-                "assembly": {
-                    "flye_parameters": {
-                        "threads": 4,
-                    }
-                },
+                "requested_stages": _local_stage_requests("assembly"),
+                "assembly": {},
             }
         )
 
         assert config.assembly is not None
-        assert config.assembly.flye_parameters is not None
-        self.assertEqual(config.assembly.flye_parameters.threads, 4)
-
-    def test_invalid_flye_read_type_is_rejected(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {
-                        "flye_parameters": {
-                            "read_type": "hifi",
-                            "threads": 4,
-                        }
-                    },
-                }
-            )
-
-        self.assertIn("read_type", str(ctx.exception))
-
-    def test_legacy_method_genome_size_is_rejected(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {
-                        "flye_parameters": {
-                            "estimated_genome_size": 0,
-                            "threads": 4,
-                        }
-                    },
-                }
-            )
-
-        self.assertIn("estimated_genome_size", str(ctx.exception))
-
-    def test_non_positive_threads_is_rejected(self):
-        with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate(
-                {
-                    "requested_stages": _local_stage_requests("assembly"),
-                    "assembly": {
-                        "flye_parameters": {
-                            "threads": 0,
-                        }
-                    },
-                }
-            )
-
-        self.assertIn("threads", str(ctx.exception))
-
-    def test_flye_parameters_without_local_assembly_is_allowed(self):
-        config = RunConfig.model_validate(
-            {
-                "requested_stages": _local_stage_requests("read_qc"),
-                "assembly": {
-                    "flye_parameters": {
-                        "threads": 4,
-                    }
-                },
-            }
-        )
-
-        assert config.assembly is not None
-        assert config.assembly.flye_parameters is not None
-        self.assertEqual(config.assembly.flye_parameters.threads, 4)
+        self.assertEqual(config.assembly.target_level, "draft")
 
     def test_review_policy_defaults_to_five_minute_countdown_and_stage_override(self):
         config = RunConfig.model_validate(
@@ -805,10 +458,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": _local_stage_requests("assembly_review"),
                 "assembly_review": {
                     "busco": {
-                        "lineage_path": "/data/busco/embryophyta_odb10",
-                        "lineage_name": "embryophyta_odb10",
-                        "lineage_version": "odb10",
-                        "lineage_source": "operator_offline_cache",
+                        "lineage": "embryophyta_odb10",
                         "threads": 16,
                     }
                 },
@@ -817,28 +467,27 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         assert cfg.assembly_review is not None
         assert cfg.assembly_review.busco is not None
-        self.assertEqual(cfg.assembly_review.busco.lineage_name, "embryophyta_odb10")
+        self.assertEqual(cfg.assembly_review.busco.lineage, "embryophyta_odb10")
         self.assertEqual(cfg.assembly_review.busco.threads, 16)
 
-    def test_requested_assembly_review_requires_busco_config(self):
-        with self.assertRaises(ValidationError) as ctx:
-            _ProductionRunConfig.model_validate(
-                {"requested_stages": _stage_requests("assembly_review")}
-            )
+    def test_requested_assembly_review_uses_host_default_without_busco_config(self):
+        cfg = RunConfig.model_validate(
+            {"requested_stages": _stage_requests("assembly_review")}
+        )
 
-        self.assertIn("assembly_review.busco", str(ctx.exception))
+        self.assertIsNone(cfg.assembly_review)
 
-    def test_busco_requires_all_lineage_identity_fields(self):
-        for missing in (
+    def test_busco_rejects_host_database_identity_fields(self):
+        for forbidden in (
             "lineage_path",
             "lineage_name",
             "lineage_version",
             "lineage_source",
         ):
             busco = _busco_config()
-            del busco[missing]
-            with self.subTest(missing=missing), self.assertRaises(ValidationError):
-                _ProductionRunConfig.model_validate(
+            busco[forbidden] = "host-owned-value"
+            with self.subTest(forbidden=forbidden), self.assertRaises(ValidationError):
+                RunConfig.model_validate(
                     {
                         "requested_stages": _stage_requests("assembly_review"),
                         "assembly_review": {"busco": busco},
@@ -850,27 +499,22 @@ class RunConfigSchemaTests(unittest.TestCase):
             RunConfig.model_validate(
                 {
                     "requested_stages": [],
+                    "assembly_review": {"busco": {"unknown": "x"}},
+                }
+            )
+
+    def test_assembly_review_related_species_reference_dir_rejected(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate(
+                {
+                    "requested_stages": [],
                     "assembly_review": {
-                        "busco": {"lineage_path": "/x", "unknown": "x"}
+                        "related_species_reference_dir": "/ref/ncbi_metazoa"
                     },
                 }
             )
 
-    def test_assembly_review_related_species_reference_dir_accepted(self):
-        cfg = RunConfig.model_validate(
-            {
-                "requested_stages": [],
-                "assembly_review": {
-                    "related_species_reference_dir": "/ref/ncbi_metazoa"
-                },
-            }
-        )
-        assert cfg.assembly_review is not None
-        self.assertEqual(
-            cfg.assembly_review.related_species_reference_dir, "/ref/ncbi_metazoa"
-        )
-
-    def test_skip_method_with_approved_true_is_rejected(self):
+    def test_read_qc_method_selection_is_not_user_owned(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
                 {
@@ -884,7 +528,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 }
             )
 
-        self.assertIn("skip", str(ctx.exception))
+        self.assertIn("method", str(ctx.exception))
 
     def test_approved_filter_without_local_read_qc_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
@@ -893,7 +537,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "requested_stages": _stage_requests("read_qc"),
                     "read_qc": {
                         "length_filter": {
-                            "method": "read_qc.length_filter.seqkit_seq",
                             "approved": True,
                             "thresholds": {"min_len": 1000},
                         }
@@ -909,7 +552,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": _stage_requests("read_qc"),
                 "read_qc": {
                     "length_filter": {
-                        "method": "read_qc.length_filter.seqkit_seq",
                         "approved": False,
                         "thresholds": {"min_len": 1000},
                     }
@@ -1021,11 +663,8 @@ class RunConfigLoaderTests(unittest.TestCase):
                             local=("read_qc", "assembly", "assembly_review"),
                         ),
                         "assembly": {
-                            "flye_parameters": {
-                                "threads": 4,
-                            }
+                            "assembly_route": "hifi",
                         },
-                        "assembly_review": {"busco": _busco_config()},
                     }
                 ),
                 encoding="utf-8",
@@ -1042,8 +681,7 @@ class RunConfigLoaderTests(unittest.TestCase):
             ["read_qc", "assembly", "assembly_review"],
         )
         assert config.assembly is not None
-        assert config.assembly.flye_parameters is not None
-        self.assertEqual(config.assembly.flye_parameters.threads, 4)
+        self.assertEqual(config.assembly.assembly_route, "hifi")
 
     def test_load_run_config_missing_file_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1068,17 +706,16 @@ class RunConfigLoaderTests(unittest.TestCase):
 
         self.assertIn("JSON object", str(ctx.exception))
 
-    def test_load_run_config_validation_error_raises_value_error(self):
+    def test_load_run_config_accepts_deferred_local_assembly(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run_config.json"
             path.write_text(
                 json.dumps({"requested_stages": _local_stage_requests("assembly")}),
                 encoding="utf-8",
             )
-            with self.assertRaises(ValueError) as ctx:
-                load_run_config(path)
+            config = load_run_config(path)
 
-        self.assertIn("flye_parameters", str(ctx.exception))
+        self.assertIsNone(config.assembly)
 
     def test_load_run_config_directory_path_raises_value_error(self):
         with tempfile.TemporaryDirectory() as tmp:

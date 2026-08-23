@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Server-side environment check for gene-agent.
-# Reports the current commit/branch and verifies only the selected method and
-# package closure needed by the authoritative five-stage contig template. It
-# does not run biological tools or validate the LLM endpoint, real input files,
-# or BUSCO lineage; `gene-agent run` performs those checks before freeze. Never
+# Reports the current commit/branch and verifies the fixed method/package
+# closure needed by the authoritative five-stage contig template. Assembly is
+# intentionally absent from that startup closure because its method is selected
+# only after upstream evidence exists; the selected method is checked at stage
+# entry against the frozen dependency snapshot. It
+# also validates the host BUSCO/NCBI database registry used by Assembly Review.
+# It does not run biological tools or validate the LLM endpoint or real input
+# files; `gene-agent run` performs those checks before freeze. Never
 # installs anything; never modifies the filesystem. Exits non-zero on any
 # missing piece so a server operator can fix the environment before running.
 #
@@ -37,9 +41,9 @@ ok() {
 }
 
 echo "== gene-agent server check =="
-echo "scope: orchestrator prerequisites plus selected contig tool/package closure"
+echo "scope: orchestrator prerequisites, fixed contig tool/package closure, and host databases"
 echo "environment config: ${ENVS_CONFIG}"
-echo "note: gene-agent run separately validates the LLM endpoint, real inputs, and BUSCO lineage before freeze"
+echo "note: gene-agent run separately validates the LLM endpoint and real inputs before freeze"
 
 if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
   printf 'commit: %s\n' "$(git rev-parse HEAD)"
@@ -80,6 +84,7 @@ if ! readiness_output="$(PYTHONDONTWRITEBYTECODE=1 \
 import sys
 
 from app.execution.run_readiness import (
+    assembly_candidate_method_scope,
     effective_method_closure,
     preflight_run_readiness,
 )
@@ -99,13 +104,18 @@ except (OSError, TypeError, ValueError) as exc:
     print(f"CONTIG_READINESS_ERROR: {exc}")
 else:
     print("contig methods checked: " + ", ".join(methods))
+    print("Assembly method selection: deferred to stage entry")
+    print(
+        "registered Assembly candidates (not startup-preflighted): "
+        + ", ".join(assembly_candidate_method_scope())
+    )
 ' "${CONTIG_RUN_CONFIG}" "${ENVS_CONFIG}")"; then
   fail "could not invoke the authoritative contig readiness check"
 fi
 printf '%s\n' "${readiness_output}"
 if [[ "${readiness_output}" == *"CONTIG_READINESS_ERROR:"* ]]; then
-  fail "install or remap the missing contig method requirements, then rerun"
+  fail "fix the reported host tool/package/database readiness issue, then rerun"
 fi
-ok "authoritative five-stage contig tool/package closure is ready"
+ok "fixed contig tools/packages and host databases are ready; Assembly candidate readiness is checked after stage-owned method selection"
 
 echo "== server check passed =="

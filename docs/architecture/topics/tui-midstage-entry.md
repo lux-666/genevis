@@ -56,8 +56,10 @@ resources its own contract requires.
 
 The public file-authored `gene-agent run` boundary freezes the literal
 occurrence list without applying a special existing-assembly ordering rule.
-Freeze derives each occurrence's method roster from stage configuration and the
-method catalog and stores it in the canonical frozen workflow step. Inventory
+Freeze derives fixed-stage rosters from registry defaults and stores them in the
+canonical frozen workflow steps. An Assembly occurrence may omit its roster so
+the stage can recommend and confirm `assembly_selection` after upstream
+evidence; omission is deferred binding, not an empty method list. Inventory
 registers the supplied assembly resource; stages absent from the list have no
 occurrence, and a reached stage either validates its inputs or reports its own
 input failure.

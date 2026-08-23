@@ -12,9 +12,6 @@ from typing import Any
 
 from app.integrity import sha256_file
 
-REFERENCE_DIR = (
-    Path(__file__).resolve().parents[2] / "data" / "reference" / "ncbi_metazoa"
-)
 REFERENCE_MANIFEST_FILENAME = "reference_manifest.json"
 MAX_SELECTED_RECORDS = 5
 DISPLAY_COHORT_SIZE = 25
@@ -49,11 +46,31 @@ _SPECIES_KEYS = (
     "chinese_name",
 )
 
+_REFERENCE_FILE_NAMES = frozenset(
+    {"Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage", "species_alias.tsv"}
+)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_reference_snapshot(reference_dir: Path | str) -> dict[str, Any]:
+    """Verify the configured NCBI snapshot manifest and every declared file."""
+
+    root = Path(reference_dir)
+    sources = {
+        "tsv": str(root / "Metazoa.ncbi.tsv"),
+        "lineage": str(root / "Metazoa.ncbi.lineage"),
+        "alias": str(root / "species_alias.tsv"),
+    }
+    provenance, error = _reference_provenance(root, sources)
+    if error is not None:
+        raise ValueError(error)
+    return provenance
+
 
 def build_related_species_evidence_pack(
     species_name: str | None,
     *,
-    reference_dir: Path | str = REFERENCE_DIR,
+    reference_dir: Path | str,
 ) -> dict[str, Any]:
     """Resolve a target and return non-blocking, locally sourced evidence.
 
@@ -139,7 +156,7 @@ def build_related_species_evidence_pack(
 def build_related_species_statistics_pack(
     species_name: str | None,
     *,
-    reference_dir: Path | str = REFERENCE_DIR,
+    reference_dir: Path | str,
     target_metrics: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Collect cross-tier related-species evidence for comparative statistics.
@@ -357,6 +374,10 @@ def _reference_provenance(
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         return provenance, "reference_version_manifest_invalid"
 
+    declared_names = set(manifest["files"])
+    if declared_names != _REFERENCE_FILE_NAMES:
+        return provenance, "reference_version_manifest_file_whitelist_invalid"
+
     provenance.update(
         {
             "dataset_id": manifest.get("dataset_id"),
@@ -367,19 +388,39 @@ def _reference_provenance(
         }
     )
     mismatches: list[str] = []
+    root = reference_dir.resolve(strict=False)
     for name, expected in manifest["files"].items():
-        if not isinstance(expected, dict):
+        if (
+            not isinstance(name, str)
+            or not name
+            or Path(name).is_absolute()
+            or ".." in Path(name).parts
+            or Path(name).name != name
+            or not isinstance(expected, dict)
+        ):
+            return provenance, "reference_version_manifest_invalid"
+        expected_sha256 = expected.get("sha256")
+        expected_size = expected.get("size_bytes")
+        if (
+            not isinstance(expected_sha256, str)
+            or _SHA256_RE.fullmatch(expected_sha256) is None
+            or isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+        ):
             return provenance, "reference_version_manifest_invalid"
         path = reference_dir / name
+        try:
+            path.resolve(strict=False).relative_to(root)
+        except ValueError:
+            return provenance, "reference_version_manifest_path_escape"
         actual = {
             "path": str(path),
             "sha256": sha256_file(path) if path.exists() else None,
             "size_bytes": path.stat().st_size if path.exists() else None,
         }
         provenance["files"][name] = actual
-        if actual["sha256"] != expected.get("sha256") or actual[
-            "size_bytes"
-        ] != expected.get("size_bytes"):
+        if actual["sha256"] != expected_sha256 or actual["size_bytes"] != expected_size:
             mismatches.append(name)
     if mismatches:
         provenance["verification"] = "mismatch"

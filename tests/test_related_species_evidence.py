@@ -44,6 +44,7 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         "step_id": "step-000-inventory",
         "stage": "inventory",
         "allow_local_execution": False,
+        "selected_method_names": [],
     },
     {
         "step_id": "step-001-assembly",
@@ -54,6 +55,10 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         "step_id": "step-002-assembly_review",
         "stage": "assembly_review",
         "allow_local_execution": True,
+        "selected_method_names": [
+            "assembly_review.eval.quast",
+            "assembly_review.eval.busco",
+        ],
         "review_target": {
             "resource_type": "assembly",
             "producer_step_id": "step-001-assembly",
@@ -63,6 +68,7 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         "step_id": "step-003-hic_scaffolding",
         "stage": "hic_scaffolding",
         "allow_local_execution": True,
+        "selected_method_names": ["hic_scaffolding.candidate.autohic"],
     },
 ]
 
@@ -154,6 +160,51 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                     "order": "Targetiformes",
                 }
             )
+        return root
+
+    def _review_reference_dir(self, tmpdir: str) -> Path:
+        """Create a complete local snapshot for the isolated node seams."""
+        root = self._reference_dir(tmpdir)
+        with (root / "species_alias.tsv").open(
+            "w", encoding="utf-8", newline=""
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "chinese_name",
+                    "canonical_scientific_name",
+                    "aliases",
+                    "genus",
+                    "family",
+                    "order",
+                    "notes",
+                ],
+                delimiter="\t",
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "chinese_name": "卵鳎",
+                    "canonical_scientific_name": "Solea ovata",
+                    "aliases": "tongue sole",
+                    "genus": "Solea",
+                    "family": "Soleidae",
+                    "order": "Pleuronectiformes",
+                }
+            )
+        self._write_records(
+            root,
+            [
+                self._row("GCF_000000101.1", "Solea senegalensis", "101"),
+                self._row("GCF_000000102.1", "Solea solea", "102"),
+                self._row("GCF_000000103.1", "Solea vulgaris", "103"),
+            ],
+            {
+                "101": "Metazoa;Pleuronectiformes;Soleidae;Solea;Solea senegalensis",
+                "102": "Metazoa;Pleuronectiformes;Soleidae;Solea;Solea solea",
+                "103": "Metazoa;Pleuronectiformes;Soleidae;Solea;Solea vulgaris",
+            },
+        )
         return root
 
     def _write_records(
@@ -451,11 +502,17 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
 
     def test_assembly_review_node_writes_pack_from_manifest_user_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            reference_dir = self._review_reference_dir(tmpdir)
             state = self._state(
                 tmpdir,
                 "session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n",
             )
-            state["stage_outputs"] = {"assembly_review": {"status": "evaluated"}}
+            state["stage_outputs"] = {
+                "assembly_review": {
+                    "status": "evaluated",
+                    "related_species_reference_dir": str(reference_dir),
+                }
+            }
 
             update = build_review_evidence_pack(state)
 
@@ -495,6 +552,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
 
     def test_review_report_and_llm_payload_receive_structured_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            reference_dir = self._review_reference_dir(tmpdir)
             state = self._state(
                 tmpdir,
                 "session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n",
@@ -502,6 +560,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
+                    "related_species_reference_dir": str(reference_dir),
                     "candidates": [_candidate("candidate-1")],
                     "signals": [],
                     "review_plan": {

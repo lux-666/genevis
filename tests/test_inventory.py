@@ -32,7 +32,10 @@ from app.storage.frozen_inputs import (
     validate_frozen_inputs,
 )
 from app.storage.paths import SessionPaths
-from tests.busco_fixture import assembly_review_config, ensure_busco_lineage
+from tests.busco_fixture import (
+    assembly_review_selector_config,
+    ensure_test_host_envs,
+)
 from tests.data_v2 import v2_run_dir
 
 
@@ -88,15 +91,10 @@ class InventoryStageTests(unittest.TestCase):
         if shared_parameters is not None:
             run_config_payload["shared_parameters"] = shared_parameters
         paths = SessionPaths.from_run_dir(manifest_path.parents[1])
+        envs = ensure_test_host_envs(paths.run_dir)
         if next_stage == "assembly_review":
-            lineage = ensure_busco_lineage(paths.run_dir)
-            run_config_payload["assembly_review"] = assembly_review_config(lineage)
+            run_config_payload["assembly_review"] = assembly_review_selector_config()
         run_config = RunConfig.model_validate(run_config_payload)
-        envs = paths.control_dir / "test_envs.yaml"
-        envs.write_text(
-            "default:\n  fallback_env: test-env\npackages: {}\n",
-            encoding="utf-8",
-        )
         freeze_session_inputs(
             paths,
             manifest_draft=manifest_path,

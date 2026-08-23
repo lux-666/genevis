@@ -45,7 +45,11 @@ from app.storage.frozen_inputs import (
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-from tests.busco_fixture import assembly_review_config, ensure_busco_lineage
+from tests.busco_fixture import (
+    assembly_review_config,
+    ensure_busco_lineage,
+    ensure_test_host_envs,
+)
 from tests.data_v2 import v2_run_dir
 
 
@@ -71,11 +75,6 @@ def _freeze_durable_inputs(
         ),
         encoding="utf-8",
     )
-    envs = paths.control_dir / "test_envs.yaml"
-    envs.write_text(
-        "default:\n  fallback_env: test-env\npackages: {}\n",
-        encoding="utf-8",
-    )
     requested_stages = [
         {"stage": "assembly", "allow_local_execution": False},
         {"stage": "assembly_review", "allow_local_execution": False},
@@ -85,6 +84,7 @@ def _freeze_durable_inputs(
             {"stage": "base_polish", "allow_local_execution": False}
         )
     lineage = ensure_busco_lineage(paths.run_dir)
+    envs = ensure_test_host_envs(paths.control_dir, lineage_path=lineage)
     run_config = RunConfig.model_validate(
         {
             "requested_stages": requested_stages,

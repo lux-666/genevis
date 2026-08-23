@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_env_template_purge_dups_default_tools_exclude_bam_diagnostics() -> None:
-    with (PROJECT_ROOT / "config/envs.yaml.example").open(
+    with (PROJECT_ROOT / "docs/examples/envs.yaml.example").open(
         "r", encoding="utf-8"
     ) as handle:
         document = yaml.safe_load(handle)
@@ -48,7 +48,7 @@ def test_env_template_covers_every_registered_local_method() -> None:
         for name, method in registry.methods.items()
         if method.planner.execution_kind == "local"
     }
-    with (PROJECT_ROOT / "config/envs.yaml.example").open(
+    with (PROJECT_ROOT / "docs/examples/envs.yaml.example").open(
         "r", encoding="utf-8"
     ) as handle:
         document = yaml.safe_load(handle)

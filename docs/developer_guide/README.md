@@ -29,7 +29,7 @@ contracts. Exact rules belong to the linked architecture reference owners.
 | LLM parameters, approval, or retry chains | [Parameter recommendation](../architecture/reference/parameter-recommendation.md) and the corresponding stage parameter workflow |
 | Human gates, review, or resume | [Review and resume](../architecture/topics/review-and-resume.md), then the run-data and execution references it links |
 | Package/method registration or environment capability | [Descriptor contract](../architecture/reference/descriptors.md), `descriptors/registry.yaml`, and the referenced descriptor files |
-| Bootstrap or host configuration | [Project bootstrap](../architecture/topics/bootstrap.md), then committed `config/envs.yaml.example`, ignored active `config/envs.yaml`, and the execution resolver |
+| Bootstrap or host configuration | [Project bootstrap](../architecture/topics/bootstrap.md), then committed `docs/examples/envs.yaml.example`, ignored active `config/envs.yaml`, and the execution resolver |
 
 ## Tests and contribution entry
 

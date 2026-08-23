@@ -85,24 +85,15 @@ def records_by_ordered_ids(
     for record in records:
         path = Path(record.path)
         if not path.is_file():
-            raise ValueError(
-                f"registered asset bytes are missing: {record.asset_id!r}"
-            )
-        if (
-            record.size_bytes is not None
-            and path.stat().st_size != record.size_bytes
-        ):
-            raise ValueError(
-                f"registered asset size changed: {record.asset_id!r}"
-            )
+            raise ValueError(f"registered asset bytes are missing: {record.asset_id!r}")
+        if record.size_bytes is not None and path.stat().st_size != record.size_bytes:
+            raise ValueError(f"registered asset size changed: {record.asset_id!r}")
         if (
             record.checksum_status == "ready"
             and record.checksum
             and sha256_file(path) != record.checksum
         ):
-            raise ValueError(
-                f"registered asset checksum changed: {record.asset_id!r}"
-            )
+            raise ValueError(f"registered asset checksum changed: {record.asset_id!r}")
     return records
 
 

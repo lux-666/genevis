@@ -32,6 +32,10 @@ from app.control.workflow_plan import (
     fail_workflow_step,
     workflow_step_by_id,
 )
+from app.execution.database_resolution import (
+    DatabaseResolutionError,
+    resolve_ncbi_reference_dir,
+)
 from app.reference.ncbi_metazoa import (
     build_related_species_evidence_pack as _build_related_species_evidence_pack,
 )
@@ -512,13 +516,18 @@ def build_related_species_evidence_pack(state: TopLevelState) -> StateUpdate:
         return {}
 
     species_name = _target_species_name(state)
-    reference_dir = _related_species_reference_dir(ar_out)
-    if reference_dir:
-        evidence_pack = _build_related_species_evidence_pack(
-            species_name, reference_dir=reference_dir
+    reference_dir = _related_species_reference_dir(ar_out, state=state)
+    if reference_dir is None:
+        return update_assembly_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": "frozen NCBI Metazoa database is unavailable",
+            },
         )
-    else:
-        evidence_pack = _build_related_species_evidence_pack(species_name)
+    evidence_pack = _build_related_species_evidence_pack(
+        species_name, reference_dir=reference_dir
+    )
     existing_ref = ar_out.get("related_species_evidence_pack_ref")
     if existing_ref and _json_artifact_payload_matches(existing_ref, evidence_pack):
         return {}
@@ -540,35 +549,45 @@ def build_related_species_evidence_pack(state: TopLevelState) -> StateUpdate:
 
 def _related_species_reference_dir(
     ar_out: AssemblyReviewCursor,
+    *,
+    state: TopLevelState | None = None,
 ) -> str | Path | None:
-    """Return validated NCBI reference directory path from stage output or environment.
+    """Return the NCBI reference path from the frozen database contract.
 
-    Returns None if no valid path is configured, triggering default reference directory.
+    The explicit stage-output value remains only for isolated node tests and
+    old checkpoints. A committed run always has a frozen resolver, so runtime
+    code never consults an environment variable or a module default path.
     """
-    value = ar_out.get("related_species_reference_dir") or os.environ.get(
-        "GENE_AGENT_NCBI_METAZOA_REFERENCE_DIR"
-    )
+    if state is not None:
+        try:
+            from app.execution.dependency_snapshot import (
+                load_frozen_dependency_resolver,
+            )
+
+            resolver = load_frozen_dependency_resolver(state.get("data_dir", "data"))
+            return resolve_ncbi_reference_dir(resolver)
+        except (DatabaseResolutionError, OSError, TypeError, ValueError) as exc:
+            try:
+                from app.storage.frozen_inputs import has_frozen_input_contract
+                from app.storage.paths import SessionPaths
+
+                committed = has_frozen_input_contract(
+                    SessionPaths.from_run_dir(state.get("data_dir", ""))
+                )
+            except (OSError, TypeError, ValueError):
+                committed = False
+            if committed:
+                logger.error("frozen NCBI database unavailable: %s", exc)
+                return None
+            # Explicit path is retained only for isolated pre-freeze tests and
+            # migration tooling; it is never consulted by a committed run.
+    value = ar_out.get("related_species_reference_dir")
     if not value:
         return None
-
     ref_path = Path(value)
-    manifest_path = ref_path / "reference_manifest.json"
-
-    if not ref_path.exists():
-        logger.warning(
-            f"Configured NCBI reference directory does not exist: {ref_path}. "
-            "Falling back to default reference directory."
-        )
-        return None
-
-    if not manifest_path.exists():
-        logger.warning(
-            f"NCBI reference directory missing manifest file: {manifest_path}. "
-            "Falling back to default reference directory."
-        )
-        return None
-
-    return ref_path
+    if ref_path.is_dir() and (ref_path / "reference_manifest.json").is_file():
+        return ref_path
+    return None
 
 
 def build_related_species_statistics_and_notebook(
@@ -580,18 +599,21 @@ def build_related_species_statistics_and_notebook(
         return {}
 
     species_name = _target_species_name(state)
-    reference_dir = _related_species_reference_dir(ar_out)
+    reference_dir = _related_species_reference_dir(ar_out, state=state)
+    if reference_dir is None:
+        return update_assembly_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": "frozen NCBI Metazoa database is unavailable",
+            },
+        )
 
     target_metrics = _extract_target_metrics_from_signals(ar_out)
 
-    if reference_dir:
-        statistics_pack = _build_related_species_statistics_pack(
-            species_name, reference_dir=reference_dir, target_metrics=target_metrics
-        )
-    else:
-        statistics_pack = _build_related_species_statistics_pack(
-            species_name, target_metrics=target_metrics
-        )
+    statistics_pack = _build_related_species_statistics_pack(
+        species_name, reference_dir=reference_dir, target_metrics=target_metrics
+    )
 
     existing_stats_ref = ar_out.get("related_species_statistics_pack_ref")
     statistics_pack_unchanged = existing_stats_ref and _json_artifact_payload_matches(

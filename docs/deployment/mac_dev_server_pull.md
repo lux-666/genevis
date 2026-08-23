@@ -22,11 +22,11 @@ Server-local material includes:
 
 - real FASTQ/FASTA/BAM inputs and sample metadata;
 - `.env`, API keys, and other credentials;
-- active `config/envs.yaml`; only `config/envs.yaml.example` is committed;
+- active `config/envs.yaml`; only `docs/examples/envs.yaml.example` is committed;
 - Conda environments and external package installations;
 - databases, BUSCO lineages, model files, runtime artifacts, Ledger, reports,
   and checkpoints;
-- copied run configs containing host/private paths.
+- copied run configs containing private run inputs or executor knobs.
 
 The NCBI Metazoa reference export is provisioned from a server-local source:
 
@@ -37,8 +37,10 @@ python scripts/install_ncbi_metazoa_reference.py \
 python scripts/install_ncbi_metazoa_reference.py --verify-only
 ```
 
-The installer verifies the tracked manifest hashes. Assembly Review reports a
-version mismatch instead of consuming an unverified snapshot.
+The installer resolves its destination from `databases.ncbi_metazoa` in the
+active host mapping and verifies that directory's manifest hashes. Use
+`--config PATH` when the active mapping is not the default. Assembly Review
+reports a version mismatch instead of consuming an unverified snapshot.
 
 ## First pull after the host-config split
 
@@ -64,7 +66,7 @@ The `git restore` above discards only the old tracked working copy after its
 exact host mapping has been backed up outside the checkout. After the pull, the
 copy command restores that mapping at the now-ignored path. Git should report
 `!! config/envs.yaml`; then run the normal bootstrap preview and server checks.
-A fresh clone has only `config/envs.yaml.example`; `gene-agent bootstrap
+A fresh clone has only `docs/examples/envs.yaml.example`; `gene-agent bootstrap
 --apply` creates the active file from that seed. Normal execution does not
 silently use the example when the active mapping is missing.
 
@@ -109,10 +111,12 @@ they locate the repository root themselves.
 
 Do not blur their scope:
 
-- `server_check.sh` validates orchestrator prerequisites and the tool/package
-  closure selected by the
-  authoritative five-stage contig template. It deliberately does not probe the
-  real LLM endpoint, private inputs, or the selected BUSCO lineage.
+- `server_check.sh` validates orchestrator prerequisites and the fixed-stage
+  tool/package closure plus the BUSCO/NCBI database registry used by the
+  authoritative five-stage contig template.
+  Assembly method selection and candidate readiness are deferred to stage
+  entry. The script deliberately does not probe the real LLM endpoint or
+  private inputs.
 - `server_test.sh` runs code regression/compile/diff checks. It does not execute
   Flye, Jellyfish, purge_dups, QUAST, BUSCO, or a real-data pipeline.
 - the actual `gene-agent run` preflight validates run-specific inputs and

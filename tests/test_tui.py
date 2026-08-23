@@ -42,7 +42,7 @@ from app.storage.frozen_inputs import (
 )
 from app.storage.paths import SessionPaths
 from app.workflow import MANUAL_ONLY_STAGES, recommended_workflow_template
-from tests.busco_fixture import ensure_busco_lineage
+from tests.busco_fixture import ensure_busco_lineage, ensure_test_host_envs
 
 
 class TuiWorkflowTests(unittest.TestCase):
@@ -75,6 +75,25 @@ class TuiWorkflowTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(ValueError, "JSON list"):
                     _apply_llm_plan_draft(plan, payload)
+
+    def test_llm_plan_draft_rejects_method_selection(self):
+        plan = AskPlanState(
+            session_id="s1",
+            data_dir="data",
+            entry_request={},
+            manifest_ref="test.yaml",
+        )
+
+        with self.assertRaisesRegex(ValueError, "must not choose methods"):
+            _apply_llm_plan_draft(
+                plan,
+                {
+                    "selected_stage_occurrences": [
+                        {"stage": "assembly", "allow_local_execution": True}
+                    ],
+                    "selected_methods": {"assembly": "assembly.candidate.flye"},
+                },
+            )
 
     def test_llm_plan_prompt_consumes_canonical_workflow_context(self):
         plan = AskPlanState(
@@ -605,10 +624,7 @@ class TuiWorkflowTests(unittest.TestCase):
             ).model_copy(update={"lifecycle": "ready_to_confirm"})
             save_tui_session_draft(draft)
             busco = {
-                "lineage_path": str(lineage),
-                "lineage_name": "embryophyta_odb10",
-                "lineage_version": "odb10",
-                "lineage_source": "test_fixture",
+                "lineage": lineage.name,
                 "threads": 4,
             }
             plan = AskPlanState(
@@ -730,16 +746,10 @@ class TuiWorkflowTests(unittest.TestCase):
             self.assertFalse(SessionPaths(data_dir, "s1").frozen_inputs_path.exists())
 
     def _write_envs(self, root: Path) -> Path:
-        envs = root / "envs.yaml"
-        envs.write_text(
-            "default:\n  fallback_env: test-env\n"
-            "stages: {}\nmethods: {}\npackages: {}\n",
-            encoding="utf-8",
-        )
-        return envs
+        return ensure_test_host_envs(root)
 
     def _frozen_parent(self, data_dir: Path, reads: Path, envs: Path):
-        lineage = ensure_busco_lineage(data_dir.parent)
+        lineage = envs.parent / "busco" / "embryophyta_odb10"
         parent = create_tui_session_draft(
             session_id="parent",
             data_dir=str(data_dir),
@@ -763,14 +773,12 @@ class TuiWorkflowTests(unittest.TestCase):
                     ],
                     "assembly_review": {
                         "busco": {
-                            "lineage_path": str(lineage),
-                            "lineage_name": "embryophyta_odb10",
-                            "lineage_version": "odb10",
-                            "lineage_source": "test_fixture",
+                            "lineage": lineage.name,
                             "threads": 4,
                         }
                     },
                 },
+                config_path=envs,
             )
         return parent
 

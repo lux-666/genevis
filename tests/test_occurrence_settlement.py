@@ -61,7 +61,6 @@ class OccurrenceSettlementReplayTests(unittest.TestCase):
                         "step_id": "step-001-assembly",
                         "stage": "assembly",
                         "allow_local_execution": False,
-                        "selected_method_names": ["assembly.candidate.flye"],
                     },
                 ],
                 stage_plan_ref="control/run_config.json",
@@ -88,6 +87,17 @@ class OccurrenceSettlementReplayTests(unittest.TestCase):
                             }
                         ],
                     },
+                    "stage_outputs": {
+                        "assembly": {
+                            "primary_method": "assembly.candidate.flye",
+                            "assembly_selection": {
+                                "read_type": "cyclone",
+                                "primary_method": "assembly.candidate.flye",
+                                "source": "recommendation",
+                                "rationale": "selected from upstream stage evidence",
+                            },
+                        }
+                    },
                 }
             )
             Ledger(run_dir).record_method_disposition(
@@ -108,10 +118,13 @@ class OccurrenceSettlementReplayTests(unittest.TestCase):
                     raise RuntimeError("simulated crash after delivery")
                 return original(self, *args, **kwargs)
 
-            with patch(
-                "app.control.occurrence_settlement._validate_assembly_delivery_projection",
-                return_value=(candidate.ref, primary.ref),
-            ), patch.object(Ledger, "record_stage_completed", crash_once):
+            with (
+                patch(
+                    "app.control.occurrence_settlement._validate_assembly_delivery_projection",
+                    return_value=(candidate.ref, primary.ref),
+                ),
+                patch.object(Ledger, "record_stage_completed", crash_once),
+            ):
                 with self.assertRaisesRegex(RuntimeError, "simulated crash"):
                     settle_workflow_step_outcome(state, data_dir=run_dir)
                 settle_workflow_step_outcome(state, data_dir=run_dir)

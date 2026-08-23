@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tempfile
 from copy import deepcopy
@@ -18,6 +19,8 @@ from app.execution.env_resolver import EnvResolver
 _SHARED_TARGET_KEY = "shared_conda_target"
 _AUTOHIC_TARGET_KEY = "autohic_conda_target"
 _CONDA_BIN_KEY = "conda_bin"
+_BUSCO_LINEAGE_PATH_KEY = "busco_lineage_path"
+_NCBI_REFERENCE_DIR_KEY = "ncbi_metazoa_reference_dir"
 _SHARED_TARGET_UPDATE_KEY = "default.fallback_target"
 _AUTOHIC_TARGET_UPDATE_KEY = "methods.hic_scaffolding.candidate.autohic.target"
 _PACKAGE_VALUE_KEYS = {
@@ -223,10 +226,7 @@ def build_project_bootstrap_plan(
             shared_target,
             previous_value=current_shared_target,
         )
-    elif (
-        _shared_target_overwrite_approved(approved)
-        and values.get(_SHARED_TARGET_KEY)
-    ):
+    elif _shared_target_overwrite_approved(approved) and values.get(_SHARED_TARGET_KEY):
         shared_target = values[_SHARED_TARGET_KEY]
         if current_shared_target != shared_target:
             _set_target(default, shared_target, fallback=True)
@@ -241,6 +241,14 @@ def build_project_bootstrap_plan(
         shared_target = current_shared_target or "env_geno_exec"
     if not explicit_update:
         _replace_placeholder_targets(draft, shared_target)
+    _configure_databases(
+        draft,
+        values=values,
+        config_path=config_path,
+        changes=changes,
+        unresolved=unresolved,
+        explicit_update=explicit_update,
+    )
 
     if not source_exists and not configure_autohic:
         # Package paths are optional project setup. Do not leave an invalid
@@ -327,6 +335,29 @@ def collect_project_bootstrap_plan(
             "Shared bioinformatics conda environment or prefix",
             default="env_geno_exec",
         )
+
+    # An existing pre-database envs.yaml is a migration input, not a reason to
+    # skip the new host contract. Prompt for the two database locations in the
+    # same compact group used for a fresh config.
+    databases = _mapping(inspect.get("databases"))
+    busco = _mapping(databases.get("busco"))
+    default_lineage = str(busco.get("default_lineage") or "").strip()
+    lineages = _mapping(busco.get("lineages"))
+    current_lineage = _mapping(lineages.get(default_lineage))
+    current_lineage_path = current_lineage.get("path")
+    if not current_lineage_path or _is_placeholder(current_lineage_path):
+        entered = _ask_text(
+            prompt,
+            "Default BUSCO lineage directory (basename must end in _odbN)",
+        )
+        if entered:
+            values[_BUSCO_LINEAGE_PATH_KEY] = entered
+    ncbi = _mapping(databases.get("ncbi_metazoa"))
+    current_ncbi_dir = ncbi.get("reference_dir")
+    if not current_ncbi_dir or _is_placeholder(current_ncbi_dir):
+        entered = _ask_text(prompt, "NCBI Metazoa reference directory")
+        if entered:
+            values[_NCBI_REFERENCE_DIR_KEY] = entered
 
     packages = _mapping(inspect.get("packages"))
     configure_autohic = bool(packages.get("autohic")) if source_exists else True
@@ -497,9 +528,7 @@ def _collect_project_bootstrap_update_plan(
         if choice.secret:
             entered = _ask_secret_text(secret_prompt, choice.label)
         else:
-            entered = prompt(
-                f"{choice.label} (blank keeps current value): "
-            ).strip()
+            entered = prompt(f"{choice.label} (blank keeps current value): ").strip()
         if not entered:
             continue
         approved.add(choice.approval_key)
@@ -671,9 +700,7 @@ def _validate_dotenv_plan(plan: ProjectBootstrapPlan) -> None:
     recorded: dict[str, ProjectConfigChange] = {}
     for change in dotenv_changes:
         if change.field in recorded:
-            raise ValueError(
-                f"bootstrap plan records .env field twice: {change.field}"
-            )
+            raise ValueError(f"bootstrap plan records .env field twice: {change.field}")
         recorded[change.field] = change
 
     for key, value in plan.dotenv_updates.items():
@@ -737,9 +764,7 @@ def _config_leaf_fields(value: object, *, prefix: tuple[str, ...]) -> set[str]:
     if isinstance(value, Mapping) and value:
         fields: set[str] = set()
         for key, child in value.items():
-            fields.update(
-                _config_leaf_fields(child, prefix=(*prefix, str(key)))
-            )
+            fields.update(_config_leaf_fields(child, prefix=(*prefix, str(key))))
         return fields
     return {".".join(prefix)}
 
@@ -781,9 +806,7 @@ def _recorded_config_values(
     parts = field_name.split(".")
     package_name = parts[1]
     source_package = _mapping(_mapping(source.get("packages")).get(package_name))
-    candidate_package = _mapping(
-        _mapping(candidate.get("packages")).get(package_name)
-    )
+    candidate_package = _mapping(_mapping(candidate.get("packages")).get(package_name))
     if parts[2] == "install_root":
         return source_package.get("install_root"), candidate_package.get("install_root")
     model_name = parts[3]
@@ -801,7 +824,10 @@ def _resolve_template(config_path: Path, explicit: Path | None) -> Path | None:
         candidates.extend(
             [
                 config_path.with_name(f"{config_path.name}.example"),
-                Path(__file__).resolve().parents[2] / "config" / "envs.yaml.example",
+                Path(__file__).resolve().parents[2]
+                / "docs"
+                / "examples"
+                / "envs.yaml.example",
             ]
         )
     return next((path for path in candidates if path.exists()), None)
@@ -825,6 +851,85 @@ def _minimal_config() -> dict[str, Any]:
         "stages": {},
         "methods": {},
     }
+
+
+def _configure_databases(
+    draft: dict[str, Any],
+    *,
+    values: Mapping[str, str],
+    config_path: Path,
+    changes: list[ProjectConfigChange],
+    unresolved: list[str],
+    explicit_update: bool,
+) -> None:
+    """Fill the two host database locations from one compact prompt group."""
+
+    if explicit_update:
+        return
+
+    databases = _ensure_mapping(draft, "databases")
+    busco = _ensure_mapping(databases, "busco")
+    lineages = _ensure_mapping(busco, "lineages")
+    current_name = str(busco.get("default_lineage") or "").strip()
+    current_entry = _mapping(lineages.get(current_name))
+    current_path = current_entry.get("path")
+    candidate = values.get(_BUSCO_LINEAGE_PATH_KEY)
+    if candidate:
+        lineage_name = Path(candidate.rstrip("/")).name
+        version_match = re.search(r"_(odb\d+(?:\.\d+)?)$", lineage_name)
+        if not lineage_name or version_match is None:
+            raise ValueError(
+                "default BUSCO lineage directory basename must end in _odbN or _odbN.N"
+            )
+        version = version_match.group(1)
+        if (
+            current_name
+            and current_name != lineage_name
+            and _is_placeholder(current_path)
+        ):
+            lineages.pop(current_name, None)
+        if current_name != lineage_name:
+            busco["default_lineage"] = lineage_name
+            _record(
+                changes,
+                config_path,
+                "databases.busco.default_lineage",
+                lineage_name,
+                previous_value=current_name or None,
+            )
+        entry = _ensure_mapping(lineages, lineage_name)
+        for key, value in (
+            ("path", candidate),
+            ("version", version),
+            ("source", str(entry.get("source") or "busco_downloads")),
+        ):
+            field = f"databases.busco.lineages.{lineage_name}.{key}"
+            previous = entry.get(key)
+            if previous != value:
+                entry[key] = value
+                _record(
+                    changes,
+                    config_path,
+                    field,
+                    value,
+                    previous_value=str(previous) if previous is not None else None,
+                )
+    elif not current_path or _is_placeholder(current_path):
+        unresolved.append(
+            f"databases.busco.lineages.{current_name or '<default>'}.path"
+        )
+
+    ncbi = _ensure_mapping(databases, "ncbi_metazoa")
+    _fill_field(
+        ncbi,
+        "reference_dir",
+        "databases.ncbi_metazoa.reference_dir",
+        values.get(_NCBI_REFERENCE_DIR_KEY),
+        set(),
+        config_path,
+        changes,
+        unresolved,
+    )
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -994,9 +1099,8 @@ def _configure_autohic(
         else _mapping(methods.get("hic_scaffolding.candidate.autohic"))
     )
     current_target = _target_value(method, fallback=False)
-    if (
-        (_target_missing(method, fallback=False) and not explicit_update)
-        or (target_approved and values.get(_AUTOHIC_TARGET_KEY))
+    if (_target_missing(method, fallback=False) and not explicit_update) or (
+        target_approved and values.get(_AUTOHIC_TARGET_KEY)
     ):
         target = values.get(_AUTOHIC_TARGET_KEY, "autohic")
         _set_target(method, target, fallback=False)
@@ -1264,9 +1368,7 @@ def _ask_update_choices(
         try:
             index = int(token)
         except ValueError as exc:
-            raise ValueError(
-                f"invalid bootstrap update selection: {token!r}"
-            ) from exc
+            raise ValueError(f"invalid bootstrap update selection: {token!r}") from exc
         if index < 1 or index > len(choices):
             raise ValueError(f"invalid bootstrap update selection: {index}")
         selected_indexes.add(index)

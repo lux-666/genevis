@@ -80,9 +80,9 @@ class SessionPathsTests(unittest.TestCase):
         )
         self.assertNotIn(
             "s1",
-            paths.workflow_step_artifact_path(
-                "step-001", "assembly", "outputs"
-            ).relative_to(paths.run_dir).parts,
+            paths.workflow_step_artifact_path("step-001", "assembly", "outputs")
+            .relative_to(paths.run_dir)
+            .parts,
         )
 
     def test_resume_requires_the_retained_work_script(self):
@@ -535,9 +535,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="asset_registry",
             )
 
-            with self.assertRaisesRegex(
-                DataLayoutError, "work path is outside"
-            ):
+            with self.assertRaisesRegex(DataLayoutError, "work path is outside"):
                 publish_artifact_records(paths.run_dir, "s1", [artifact])
 
             self.assertEqual(destination.read_text(encoding="utf-8"), "old bytes\n")
@@ -754,8 +752,7 @@ class ImmutablePublishTests(unittest.TestCase):
                 "session_id": "s1",
                 "data_dir": str(paths.run_dir),
                 "workflow_steps": [
-                    {"step_id": step_id, "stage": "read_qc"}
-                    for step_id in step_ids
+                    {"step_id": step_id, "stage": "read_qc"} for step_id in step_ids
                 ],
                 "workflow_step_index": 0,
             }

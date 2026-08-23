@@ -46,7 +46,11 @@ from app.storage.artifacts import publish_artifact_record
 from app.storage.frozen_inputs import freeze_session_inputs, frozen_execution_lock
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-from tests.busco_fixture import assembly_review_config, ensure_busco_lineage
+from tests.busco_fixture import (
+    assembly_review_selector_config,
+    ensure_busco_lineage,
+    ensure_test_host_envs,
+)
 from tests.data_v2 import v2_run_dir
 
 
@@ -1144,6 +1148,7 @@ class ReviewResumeTests(unittest.TestCase):
                 paths,
                 manifest_draft=manifest,
                 run_config_draft=run_config,
+                config_path=ensure_test_host_envs(root),
                 selected_methods={},
             )
             ledger = Ledger(paths.run_dir)
@@ -1291,6 +1296,7 @@ class ReviewResumeTests(unittest.TestCase):
                 paths,
                 manifest_draft=manifest,
                 run_config_draft=run_config,
+                config_path=ensure_test_host_envs(root),
                 selected_methods={},
             )
             Ledger(paths.run_dir).create_session(
@@ -1634,7 +1640,10 @@ def _freeze_review_test_inputs(
     }
     if "assembly_review" in requested_stages:
         lineage = ensure_busco_lineage(paths.run_dir)
-        run_config["assembly_review"] = assembly_review_config(lineage)
+        run_config["assembly_review"] = assembly_review_selector_config()
+        config_path = ensure_test_host_envs(paths.run_dir, lineage_path=lineage)
+    else:
+        config_path = ensure_test_host_envs(paths.run_dir)
     freeze_session_inputs(
         paths,
         manifest_draft={
@@ -1649,6 +1658,7 @@ def _freeze_review_test_inputs(
             ],
         },
         run_config_draft=run_config,
+        config_path=config_path,
         selected_methods={},
         probe_environments=False,
     )
@@ -2078,23 +2088,16 @@ def _frozen_workflow_steps(stages: list[str]) -> list[dict]:
             "step_id": step_id,
             "stage": item,
             "allow_local_execution": False,
-            "selected_method_names": (
-                ["t2t.alignment.minimap2"]
-                if item == "t2t"
-                else (
-                    ["hic_scaffolding.candidate.autohic"]
-                    if item == "hic_scaffolding"
-                    else (
-                        [
-                            "assembly_review.eval.quast",
-                            "assembly_review.eval.busco",
-                        ]
-                        if item == "assembly_review"
-                        else []
-                    )
-                )
-            ),
         }
+        if item == "t2t":
+            step["selected_method_names"] = ["t2t.alignment.minimap2"]
+        elif item == "hic_scaffolding":
+            step["selected_method_names"] = ["hic_scaffolding.candidate.autohic"]
+        elif item == "assembly_review":
+            step["selected_method_names"] = [
+                "assembly_review.eval.quast",
+                "assembly_review.eval.busco",
+            ]
         if item == "assembly_review":
             step["review_target"] = {
                 "resource_type": "assembly",

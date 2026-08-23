@@ -375,9 +375,7 @@ def publish_derived_assembly_candidate(
     session_id: str,
     *,
     workflow_step_id: str,
-    source_candidate: (
-        VerifiedExecutedCandidate | ArtifactRef | dict[str, Any]
-    ),
+    source_candidate: (VerifiedExecutedCandidate | ArtifactRef | dict[str, Any]),
     primary_output_ref: ArtifactRef | dict[str, Any],
     stage: str,
     method_name: str,
@@ -697,8 +695,7 @@ def _resolve_embedded_ref(
         return resolve_artifact_ref(data_dir, session_id, ref)
     except (OSError, TypeError, ValueError) as exc:
         raise AssemblyCandidateBundleError(
-            f"candidate {role} ref failed index/integrity validation: "
-            f"{ref.artifact_id}"
+            f"candidate {role} ref failed index/integrity validation: {ref.artifact_id}"
         ) from exc
 
 
@@ -711,8 +708,7 @@ def _registered_assembly_extension(path: Path) -> str:
     else:
         extension = suffixes[-1]
     if not all(
-        character.isalnum() or character in {".", "_", "-"}
-        for character in extension
+        character.isalnum() or character in {".", "_", "-"} for character in extension
     ):
         raise AssemblyCandidateBundleError(
             f"registered assembly has an unsafe filename extension: {extension!r}"

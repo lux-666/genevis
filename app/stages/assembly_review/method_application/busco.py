@@ -12,6 +12,10 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.attempt_owners import DIRECT_ATTEMPTS_KEY
+from app.execution.database_resolution import (
+    DatabaseResolutionError,
+    validate_frozen_busco_parameters,
+)
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
     artifact_input_dependency,
@@ -114,7 +118,7 @@ def freeze_busco_attempts(state: TopLevelState) -> StateUpdate:
             {**output, "signals": signals},
             status="evaluating",
         )
-    params, error = busco_parameters(output)
+    params, error = busco_parameters(state, output)
     candidates = output.get("candidates", [])
     signals = output.get("signals", [])
     if error:
@@ -403,29 +407,51 @@ def collect_busco_artifacts(state: TopLevelState) -> StateUpdate:
     return {"stage_outputs": outputs}
 
 
-def busco_parameters(output: AssemblyReviewCursor) -> tuple[dict[str, Any], str | None]:
+def busco_parameters(
+    state: TopLevelState,
+    output: AssemblyReviewCursor,
+) -> tuple[dict[str, Any], str | None]:
     params = output.get("busco_parameters") or {}
     if not params:
         return {}, "busco_lineage_not_supplied"
-    for key in ["lineage_path", "lineage_name", "lineage_version", "lineage_source"]:
-        if not str(params.get(key) or "").strip():
-            return {}, f"assembly_review.busco_parameters.{key} is required"
-    lineage_path = Path(str(params["lineage_path"])).expanduser()
-    if not lineage_path.exists():
-        return {}, "busco_lineage_path_missing"
-    if not lineage_path.is_dir():
-        return {}, "busco_lineage_path_not_directory"
-    threads = params.get("threads", 1)
-    if threads <= 0:
-        return {}, "assembly_review.busco_parameters.threads must be a positive integer"
-    return {
-        "lineage_path": str(lineage_path.resolve(strict=False)),
-        "lineage_name": str(params["lineage_name"]),
-        "lineage_version": str(params["lineage_version"]),
-        "lineage_source": str(params["lineage_source"]),
-        "mode": str(params.get("mode") or "genome"),
-        "threads": threads,
-    }, None
+    try:
+        from app.execution.dependency_snapshot import load_frozen_dependency_resolver
+
+        resolver = load_frozen_dependency_resolver(state.get("data_dir", "data"))
+        return validate_frozen_busco_parameters(params, resolver), None
+    except (DatabaseResolutionError, OSError, TypeError, ValueError) as exc:
+        # Isolated stage-unit tests and pre-freeze migration tooling may call
+        # this node without a committed session.  Preserve the old complete
+        # projection only in that explicit non-session seam; a real frozen
+        # execution always takes the branch above and cannot consult it.
+        try:
+            from app.storage.frozen_inputs import has_frozen_input_contract
+            from app.storage.paths import SessionPaths
+
+            frozen = has_frozen_input_contract(
+                SessionPaths.from_run_dir(state.get("data_dir", ""))
+            )
+        except (OSError, TypeError, ValueError):
+            frozen = False
+        if frozen or not str(state.get("data_dir", "")).strip():
+            return {}, str(exc)
+        required = ("lineage_path", "lineage_name", "lineage_version", "lineage_source")
+        if any(not str(params.get(key) or "").strip() for key in required):
+            return {}, str(exc)
+        lineage_path = Path(str(params["lineage_path"])).expanduser()
+        if not lineage_path.is_dir():
+            return {}, "busco_lineage_path_not_directory"
+        threads = params.get("threads", 1)
+        if not isinstance(threads, int) or threads <= 0:
+            return {}, "assembly_review.busco_parameters.threads must be positive"
+        return {
+            "lineage_path": str(lineage_path.resolve(strict=False)),
+            "lineage_name": str(params["lineage_name"]),
+            "lineage_version": str(params["lineage_version"]),
+            "lineage_source": str(params["lineage_source"]),
+            "mode": str(params.get("mode") or "genome"),
+            "threads": threads,
+        }, None
 
 
 def parse_busco_short_summary(path: Path) -> dict[str, Any]:

@@ -103,10 +103,7 @@ class AskClarificationResponse(BaseModel):
 
     @model_validator(mode="after")
     def _require_kind_payload(self) -> "AskClarificationResponse":
-        if (
-            self.kind == "stage_selection"
-            and self.selected_stage_occurrences is None
-        ):
+        if self.kind == "stage_selection" and self.selected_stage_occurrences is None:
             raise ValueError(
                 "stage_selection response requires selected_stage_occurrences"
             )

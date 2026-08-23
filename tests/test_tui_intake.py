@@ -30,7 +30,12 @@ from app.entrypoints.tui_intake import (
 from app.schemas.ask_plan import PlanStageOccurrence
 from app.schemas.manifest import InputAssetSpec, PairedReadSpec
 from app.schemas.run_config import RunConfig
-from app.schemas.tui_intake import HiCPairedReadsFact, HiCReadPair, HifiReadsFact
+from app.schemas.tui_intake import (
+    HiCPairedReadsFact,
+    HiCReadPair,
+    HifiReadsFact,
+    RecommendationPolicy,
+)
 from tests.busco_fixture import assembly_review_config
 
 
@@ -116,7 +121,7 @@ class TuiIntakeTests(unittest.TestCase):
             intent=intent,
         )
 
-        self.assertEqual(intent.requested_assembly_method, "hifiasm")
+        self.assertNotIn("requested_assembly_method", intent.model_dump())
         self.assertTrue(intent.use_ultralong_ont)
         self.assertTrue(intent.use_hic_phasing)
         self.assertEqual(
@@ -125,10 +130,9 @@ class TuiIntakeTests(unittest.TestCase):
         )
         self.assertEqual(next_intake_clarification(draft).role, "hifi_reads")
 
-    def test_hifiasm_ont_goal_is_a_distinct_ont_primary_method(self):
+    def test_hifiasm_ont_goal_collects_only_ont_primary_role(self):
         intent = deterministic_workflow_intent("用 hifiasm-ont --ont 做 assembly")
 
-        self.assertEqual(intent.requested_assembly_method, "hifiasm_ont")
         self.assertFalse(intent.use_ultralong_ont)
         self.assertFalse(intent.use_hic_phasing)
         self.assertEqual(
@@ -141,7 +145,7 @@ class TuiIntakeTests(unittest.TestCase):
             ["ont_reads"],
         )
 
-    def test_hifiasm_intent_projects_into_existing_planner_and_run_config(self):
+    def test_hifiasm_intent_does_not_preselect_runtime_assembly_method(self):
         intent = deterministic_workflow_intent(
             "Hifiasm assembly with --ul ONT and Hi-C"
         )
@@ -159,26 +163,43 @@ class TuiIntakeTests(unittest.TestCase):
         plan = _planner_state_from_tui_draft(draft)
         assembly = _build_assembly_execution_config(plan, ["assembly"])
 
-        self.assertEqual(
-            plan.selected_methods,
-            {"assembly": "assembly.candidate.hifiasm"},
+        self.assertIsNone(plan.selected_methods)
+        self.assertFalse(plan.method_parameters)
+        self.assertIsNone(assembly)
+        self.assertNotIn(
+            "requested_assembly_method",
+            plan.entry_request["intake_goal"],
         )
+
+    def test_draft_has_independent_default_recommendation_policy(self):
+        draft = create_tui_session_draft(
+            session_id="s1",
+            data_dir="data",
+            request_text="assembly",
+        )
+
         self.assertEqual(
-            plan.method_parameters["assembly.candidate.hifiasm"],
+            draft.recommendation_policy.model_dump(),
             {
-                "use_ultralong_ont": True,
-                "use_hic_phasing": True,
+                "method_route_advisor": "advisor",
+                "parameter_advisor": "advisor",
             },
         )
+
+        ablation = draft.model_copy(
+            update={
+                "recommendation_policy": RecommendationPolicy(
+                    method_route_advisor="deterministic_baseline",
+                    parameter_advisor="deterministic_baseline",
+                )
+            }
+        )
+        plan = _planner_state_from_tui_draft(ablation)
         self.assertEqual(
-            assembly,
+            plan.entry_request["recommendation_policy"],
             {
-                "assembly_method": "hifiasm",
-                "assembly_route": "hifi",
-                "hifiasm_parameters": {
-                    "use_ultralong_ont": True,
-                    "use_hic_phasing": True,
-                },
+                "method_route_advisor": "deterministic_baseline",
+                "parameter_advisor": "deterministic_baseline",
             },
         )
 
@@ -720,9 +741,7 @@ class TuiIntakeTests(unittest.TestCase):
             manifest = materialize_manifest_draft(confirmed)
             self.assertEqual(manifest.user_metadata["hic_status"], "not_provided")
             self.assertTrue(manifest.user_metadata["hic_degradation_confirmed"])
-            self.assertNotIn(
-                "target_assembly_level", manifest.model_dump(mode="json")
-            )
+            self.assertNotIn("target_assembly_level", manifest.model_dump(mode="json"))
 
     def test_rerun_child_revalidates_assets_and_resets_planning(self):
         with tempfile.TemporaryDirectory() as tmp:

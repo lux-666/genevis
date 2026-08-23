@@ -8,19 +8,17 @@ import pytest
 from app.domains.assembly.constants import FLYE_METHOD, NEXTDENOVO_METHOD
 from app.domains.genome_size import resolve_explicit_genome_size, resolve_genome_size
 from app.domains.parameter_recommendation.facts import build_canonical_facts
-from app.schemas.manifest import InputAssetSpec, InputManifest
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     RecommendationInputSnapshotV3,
 )
-from app.schemas.run_config import RunConfig, validate_genome_size_execution_plan
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import resolve_assembly_parameters
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.inventory.nodes import validate_inputs
 from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
 from app.storage.paths import SessionPaths
-from tests.busco_fixture import assembly_review_config
 
 
 def _state():
@@ -113,86 +111,19 @@ def test_dead_nested_survey_path_is_not_accepted():
     assert resolve_genome_size(state) is None
 
 
-def _manifest(*, genome_size_estimate=None):
-    return InputManifest(
-        session_id="s1",
-        genome_size_estimate=genome_size_estimate,
-        assets=[
-            InputAssetSpec(
-                asset_type="raw_long_reads", paths=["reads.fastq"], platform="ont"
-            )
-        ],
-    )
-
-
-def test_preflight_rejects_flye_when_no_stage_can_produce_genome_size():
+def test_deferred_assembly_accepts_missing_genome_size_at_freeze_boundary():
+    """The eventual method owns genome-size requirements after survey evidence."""
     config = RunConfig.model_validate(
         {
             "requested_stages": [
                 {"stage": "assembly", "allow_local_execution": True},
-                {"stage": "assembly_review", "allow_local_execution": False},
             ],
-            "assembly": {
-                "assembly_method": "flye",
-                "assembly_route": "ont",
-                "flye_parameters": {"threads": 4},
-            },
-            "assembly_review": assembly_review_config(
-                "/data/busco/embryophyta_odb10"
-            ),
+            "assembly": {"assembly_route": "auto"},
         }
     )
 
-    with pytest.raises(ValueError, match="schedule executable genome_survey"):
-        validate_genome_size_execution_plan(config, _manifest())
-
-
-def test_preflight_allows_flye_to_wait_for_an_earlier_executable_survey():
-    config = RunConfig.model_validate(
-        {
-            "requested_stages": [
-                {"stage": "genome_survey", "allow_local_execution": True},
-                {"stage": "assembly", "allow_local_execution": True},
-                {"stage": "assembly_review", "allow_local_execution": False},
-            ],
-            "genome_survey": {
-                "survey_parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4}
-            },
-            "assembly": {
-                "assembly_method": "flye",
-                "assembly_route": "ont",
-                "flye_parameters": {"threads": 4},
-            },
-            "assembly_review": assembly_review_config(
-                "/data/busco/embryophyta_odb10"
-            ),
-        }
-    )
-
-    validate_genome_size_execution_plan(config, _manifest())
-
-
-def test_preflight_allows_manifest_genome_size_without_survey():
-    config = RunConfig.model_validate(
-        {
-            "requested_stages": [
-                {"stage": "assembly", "allow_local_execution": True},
-                {"stage": "assembly_review", "allow_local_execution": False},
-            ],
-            "assembly": {
-                "assembly_method": "flye",
-                "assembly_route": "ont",
-                "flye_parameters": {"threads": 4},
-            },
-            "assembly_review": assembly_review_config(
-                "/data/busco/embryophyta_odb10"
-            ),
-        }
-    )
-
-    validate_genome_size_execution_plan(
-        config, _manifest(genome_size_estimate=2_000_000)
-    )
+    assert config.assembly is not None
+    assert config.assembly.assembly_route == "auto"
 
 
 @pytest.mark.parametrize(

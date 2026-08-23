@@ -91,6 +91,7 @@ from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.assembly.method_application.support import (
     assembly_terminal_method_outcome_policy,
 )
+from app.stages.assembly.nodes import assembly_parameter_policy
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
@@ -127,6 +128,8 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         "retry_parameters_after_execution_failure",
     }:
         return {}
+
+    policy = assembly_parameter_policy(state)
 
     method_name = _selected_parameter_method(assembly_out)
     if method_name is None:
@@ -201,6 +204,24 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 state,
                 assembly_out,
             )
+            if policy == "deterministic_baseline":
+                if task != "recommend_initial":
+                    return _retry_transition_failure(
+                        state,
+                        "deterministic_parameter_baseline_supports_initial_only",
+                    )
+                return _baseline_assembly_parameters(
+                    state=state,
+                    assembly_out=assembly_out,
+                    method_name=method_name,
+                    catalog=catalog,
+                    facts=facts,
+                    context=context,
+                    dependency_refs=dependency_refs,
+                    recommendation_id=recommendation_id,
+                    previous_attempt=previous_attempt,
+                    task=task,
+                )
         else:
             if initial_attempt is None:
                 return _retry_transition_failure(state, "missing_initial_attempt")
@@ -547,6 +568,175 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         }
     )
     return update_assembly_stage_output(state, update)
+
+
+def _baseline_assembly_parameters(
+    *,
+    state: TopLevelState,
+    assembly_out: AssemblyStageCursor,
+    method_name: str,
+    catalog: Any,
+    facts: Any,
+    context: Any,
+    dependency_refs: Any,
+    recommendation_id: int,
+    previous_attempt: dict[str, Any] | None,
+    task: Literal[
+        "recommend_initial",
+        "retry_after_execution_failure",
+        "retry_after_review_failure",
+    ],
+) -> StateUpdate:
+    """Create an approved, empty-L2 baseline attempt without model evidence."""
+
+    del assembly_out, method_name
+    try:
+        input_snapshot = RecommendationInputSnapshotV3(
+            schema_version=3,
+            method_id=catalog.method_id,
+            task=task,
+            facts=facts,
+            stage_context=context,
+            dependency_refs=dependency_refs,
+        )
+        input_snapshot_ref = write_artifact(
+            state,
+            recommendation_id,
+            "input_snapshot.json",
+            input_snapshot.model_dump(mode="json"),
+            artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
+            method_name="assembly.parameter_recommender",
+        )
+        basis_snapshot = build_parameter_basis_snapshot(
+            method_id=catalog.method_id,
+            catalog=catalog,
+            facts=facts,
+            context=context,
+        )
+        basis_ref = write_artifact(
+            state,
+            recommendation_id,
+            "basis_snapshot.json",
+            basis_snapshot,
+            artifact_type=ASSEMBLY_PARAMETER_BASIS,
+            method_name="assembly.parameter_recommender",
+        )
+        recommendation_ref = write_artifact(
+            state,
+            recommendation_id,
+            "recommendation.json",
+            {
+                "schema_version": 2,
+                "method_id": catalog.method_id,
+                "task": task,
+                "recommendation": {
+                    "parameters": {},
+                    "summary": (
+                        "Deterministic baseline: parameter advisor disabled; "
+                        "empty L2 mapping."
+                    ),
+                },
+            },
+            artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION,
+            method_name="assembly.parameter_recommender",
+        )
+        manifest = ParameterRecommendationManifestV3(
+            schema_version=3,
+            recommendation_contract="parameter_recommendation_v1",
+            stage="assembly",
+            method_id=catalog.method_id,
+            task=task,
+            recommendation_id=recommendation_id,
+            status="pending_approval",
+            previous_attempt_id=(
+                previous_attempt.get("attempt_id") if previous_attempt else None
+            ),
+            previous_attempt_manifest_ref=(
+                previous_attempt.get("attempt_manifest_ref")
+                if previous_attempt
+                else None
+            ),
+            previous_attempt_seal_hash=(
+                previous_attempt.get("seal_hash") if previous_attempt else None
+            ),
+            refs=ParameterRecommendationManifestRefsV3(
+                input_snapshot_ref=input_snapshot_ref,
+                basis_snapshot_ref=basis_ref,
+                model_request_ref=input_snapshot_ref,
+                model_response_ref=input_snapshot_ref,
+                response_parse_ref=input_snapshot_ref,
+                recommendation_ref=recommendation_ref,
+            ),
+            summary={
+                "response_parsed": True,
+                "policy": "deterministic_baseline",
+                "policy_skipped_model": True,
+            },
+        )
+        manifest_ref = write_artifact(
+            state,
+            recommendation_id,
+            "recommendation_manifest.json",
+            manifest.model_dump(mode="json"),
+            artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+            method_name="assembly.parameter_recommender",
+        )
+        attempt = ParameterAttempt(
+            schema_version=3,
+            attempt_id=recommendation_id,
+            method_id=catalog.method_id,
+            task=task,
+            status="recommended",
+            previous_attempt_id=(
+                previous_attempt.get("attempt_id") if previous_attempt else None
+            ),
+            recommendation_manifest_ref=manifest_ref,
+            approval_decision_ref=manifest_ref,
+            recommendation_contract="parameter_recommendation_v1",
+            previous_attempt_seal_hash=(
+                previous_attempt.get("seal_hash") if previous_attempt else None
+            ),
+        )
+        assembly_state = state.get("stage_outputs", {}).get("assembly") or {}
+        raw_attempts = assembly_state.get("parameter_attempts")
+        attempts = (
+            [
+                {key: item[key] for key in item}
+                for item in raw_attempts
+                if isinstance(item, dict)
+            ]
+            if isinstance(raw_attempts, list)
+            and all(isinstance(item, dict) for item in raw_attempts)
+            else []
+        )
+        attempts.append(attempt.model_dump(mode="json"))
+        return update_assembly_stage_output(
+            state,
+            {
+                "status": "parameters_approved",
+                "current_parameter_attempt_id": recommendation_id,
+                "parameter_attempts": attempts,
+                "parameter_recommendation_mode": "deterministic_baseline",
+                "current_parameter_recommendation": {
+                    "schema_version": 3,
+                    "recommendation_id": recommendation_id,
+                    "method_id": catalog.method_id,
+                    "task": task,
+                    "status": "approved",
+                    "manifest_ref": manifest_ref.model_dump(mode="json"),
+                    "recommendation_hash": manifest_ref.sha256,
+                },
+            },
+        )
+    except (
+        OSError,
+        ParameterPersistenceError,
+        ValueError,
+    ) as exc:
+        return _fail_update(
+            state,
+            f"Assembly deterministic parameter baseline failed: {exc}",
+        )
 
 
 @dataclass(frozen=True)

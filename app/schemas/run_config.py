@@ -4,10 +4,10 @@ The TUI freezes this document before execution. It supplies requested stages
 with explicit local-execution authorization, shared biological facts, and
 executor-owned settings.
 
-The schema rejects unknown stages, unknown fields, and local `assembly`
-authorization without the selected method's required parameters. It does not
-invent execution consent, does not carry descriptor or env facts, and is not a
-method catalog.
+The schema rejects unknown stages and unknown fields.  ``assembly`` carries
+only planning facts and input references: the stage selects its method and
+parameters after upstream evidence exists.  The schema does not invent
+execution consent, carry descriptor or env facts, or act as a method catalog.
 """
 
 from __future__ import annotations
@@ -30,13 +30,9 @@ from pydantic import (
     model_validator,
 )
 
-from app.domains.assembly.selection import (
-    NormalizedReadType,
-    is_method_read_type_compatible,
-    normalize_read_type,
-)
+from app.domains.assembly.selection import NormalizedReadType
 from app.review.gates import registered_review_stages
-from app.schemas.manifest import InputManifest, Platform
+from app.schemas.manifest import Platform
 from app.schemas.shared_parameters import SpeciesFacts
 from app.schemas.state import MAX_WORKFLOW_STEPS
 from app.workflow import MANUAL_ONLY_STAGES
@@ -53,8 +49,8 @@ RequestableStage = Literal[
     "base_polish",
 ]
 
-AssemblyMethod = Literal["flye", "nextdenovo", "hifiasm", "hifiasm_ont"]
 AssemblyRoute = Literal["cyclone", "ont", "hifi", "auto"]
+RecommendationMode = Literal["advisor", "deterministic_baseline"]
 ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
@@ -82,8 +78,6 @@ _BUSCO_VERSION_RE = re.compile(r"_(odb\d+(?:\.\d+)?)$")
 _RUN_CONFIG_PATH_FIELDS = (
     ("assembly", "hifi_reads_ref"),
     ("assembly", "hic_reads_ref"),
-    ("assembly_review", "busco", "lineage_path"),
-    ("assembly_review", "related_species_reference_dir"),
     ("t2t", "chromosome_list_ref"),
     ("t2t", "assembly_fasta_ref"),
 )
@@ -174,259 +168,45 @@ class ReviewPolicyConfig(BaseModel):
         return self.max_blocked_seconds
 
 
-class FlyeRunParameters(BaseModel):
-    """Flye executor-owned settings for local assembly execution."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    threads: int | None = Field(default=None, gt=0)
-
-
-class NextDenovoRunParameters(BaseModel):
-    """NextDenovo executor-owned settings for local assembly execution."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    threads: int | None = Field(default=None, gt=0)
-
-
-class HifiasmRunParameters(BaseModel):
-    """Hifiasm executor-owned settings for local assembly execution."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    threads: int | None = Field(default=None, gt=0)
-    use_ultralong_ont: bool = False
-    use_hic_phasing: bool = False
-
-
-class HifiasmOntRunParameters(BaseModel):
-    """Hifiasm ONT executor-owned settings for local assembly execution."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    threads: int | None = Field(default=None, gt=0)
-
-
-def infer_assembly_method(assembly: "AssemblyRunConfig") -> AssemblyMethod | None:
-    """Return the explicit assembly method or infer it from one parameter block."""
-    if assembly.assembly_method is not None:
-        return assembly.assembly_method
-
-    provided = _provided_assembly_parameter_methods(assembly)
-    if len(provided) == 1:
-        return provided[0]
-    return None
-
-
-def _provided_assembly_parameter_methods(
-    assembly: "AssemblyRunConfig",
-) -> list[AssemblyMethod]:
-    candidates: tuple[tuple[AssemblyMethod, BaseModel | None], ...] = (
-        ("flye", assembly.flye_parameters),
-        ("nextdenovo", assembly.nextdenovo_parameters),
-        ("hifiasm", assembly.hifiasm_parameters),
-        ("hifiasm_ont", assembly.hifiasm_ont_parameters),
-    )
-    return [name for name, value in candidates if value is not None]
-
-
 class AssemblyRunConfig(BaseModel):
-    """Run-config block for the assembly stage."""
+    """Planning facts and input selectors for deferred Assembly execution.
+
+    Method identity and method-specific parameters deliberately are not valid
+    RunConfig fields. They are recommended, approved, and frozen by Assembly
+    after read-QC/genome-survey evidence is available.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    assembly_method: AssemblyMethod | None = None
-    flye_parameters: FlyeRunParameters | None = None
-    nextdenovo_parameters: NextDenovoRunParameters | None = None
-    hifiasm_parameters: HifiasmRunParameters | None = None
-    hifiasm_ont_parameters: HifiasmOntRunParameters | None = None
     hifi_reads_ref: str | None = None
     hic_reads_ref: str | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
     assembly_route: AssemblyRoute = "auto"
-
-    @model_validator(mode="after")
-    def _validate_read_type_method_consistency(self) -> "AssemblyRunConfig":
-        """Validate explicit method/read-type compatibility for route hints."""
-        method = infer_assembly_method(self)
-        if method is None or self.assembly_route == "auto":
-            return self
-
-        read_type = normalize_read_type(self.assembly_route)
-        if read_type is None:
-            return self
-        if not is_method_read_type_compatible(method, read_type):
-            raise ValueError(
-                f"assembly_route '{self.assembly_route}' implies read_type "
-                f"'{read_type}' and is "
-                f"incompatible with assembly_method '{method}'"
-            )
-
-        return self
-
-    @model_validator(mode="after")
-    def _reject_parameter_blocks_for_other_methods(self) -> "AssemblyRunConfig":
-        if self.assembly_method is None:
-            return self
-        provided = _provided_assembly_parameter_methods(self)
-        unexpected = [method for method in provided if method != self.assembly_method]
-        if unexpected:
-            required_key = f"assembly.{self.assembly_method}_parameters"
-            raise ValueError(
-                f"assembly_method {self.assembly_method!r} requires "
-                f"{required_key} and cannot use parameter blocks for {unexpected}"
-            )
-        return self
-
-
-def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> None:
-    """Validate the method/parameter contract after all local-exec inputs merge."""
-    if assembly is None:
-        raise ValueError(
-            "run_config: requested_stages[assembly].allow_local_execution is true "
-            "but "
-            "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
-            "assembly.hifiasm_parameters, or assembly.hifiasm_ont_parameters is missing"
-        )
-
-    method = infer_assembly_method(assembly)
-    if method == "flye":
-        if not assembly.flye_parameters:
-            raise ValueError(
-                "run_config: local assembly method 'flye' requires "
-                "assembly.flye_parameters"
-            )
-        return
-    if method == "nextdenovo":
-        if not assembly.nextdenovo_parameters:
-            raise ValueError(
-                "run_config: local assembly method 'nextdenovo' requires "
-                "assembly.nextdenovo_parameters"
-            )
-        return
-    if method == "hifiasm":
-        if not assembly.hifiasm_parameters:
-            raise ValueError(
-                "run_config: local assembly method 'hifiasm' requires "
-                "assembly.hifiasm_parameters"
-            )
-        return
-    if method == "hifiasm_ont":
-        if not assembly.hifiasm_ont_parameters:
-            raise ValueError(
-                "run_config: local assembly method 'hifiasm_ont' requires "
-                "assembly.hifiasm_ont_parameters"
-            )
-        return
-
-    provided = _provided_assembly_parameter_methods(assembly)
-    if not provided:
-        raise ValueError(
-            "run_config: requested_stages[assembly].allow_local_execution is true "
-            "but "
-            "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
-            "assembly.hifiasm_parameters, or assembly.hifiasm_ont_parameters is missing"
-        )
-    if len(provided) > 1:
-        raise ValueError(
-            "run_config: local assembly has parameters for multiple methods; "
-            "set assembly.assembly_method"
-        )
-
-
-def validate_genome_size_execution_plan(
-    run_config: "RunConfig",
-    manifest: InputManifest,
-) -> None:
-    """Require a provided size unless an earlier local survey can produce it."""
-
-    if run_config.assembly is None:
-        return
-
-    def is_local(index: int) -> bool:
-        return run_config.requested_stages[index].allow_local_execution
-
-    local_assembly_indexes = [
-        index
-        for index, request in enumerate(run_config.requested_stages)
-        if request.stage == "assembly" and is_local(index)
-    ]
-    if not local_assembly_indexes:
-        return
-
-    method = infer_assembly_method(run_config.assembly)
-    if method not in {"flye", "nextdenovo"}:
-        return
-
-    if manifest.genome_size_estimate:
-        return
-
-    has_survey_reads = any(
-        asset.asset_type
-        in {
-            "raw_short_dna_reads",
-            "clean_short_dna_reads",
-            "raw_long_reads",
-            "clean_long_reads",
-        }
-        for asset in manifest.assets
-    )
-    survey_is_configured = (
-        run_config.genome_survey is not None
-        and run_config.genome_survey.survey_parameters is not None
-    )
-    every_assembly_has_prior_survey = all(
-        any(
-            earlier.stage == "genome_survey" and is_local(earlier_index)
-            for earlier_index, earlier in enumerate(
-                run_config.requested_stages[:assembly_index]
-            )
-        )
-        for assembly_index in local_assembly_indexes
-    )
-    if survey_is_configured and has_survey_reads and every_assembly_has_prior_survey:
-        return
-
-    raise ValueError(
-        f"run_config: local assembly method {method!r} requires a positive "
-        "genome size; "
-        "provide it in the manifest, or schedule executable "
-        "genome_survey before assembly with short or long genomic reads"
-    )
+    method_route_advisor: RecommendationMode = "advisor"
+    parameter_advisor: RecommendationMode = "advisor"
 
 
 class ReadQCLengthFilterConfig(BaseModel):
-    """Explicit read_qc length-filter choice."""
+    """Operator approval and thresholds for the system-owned QC filter."""
 
     model_config = ConfigDict(extra="forbid")
 
-    method: ReadQCLengthFilterMethod = "skip"
     approved: bool = False
     thresholds: dict[str, Any] = Field(default_factory=dict)
 
+    def selected_method(self) -> ReadQCLengthFilterMethod:
+        """Return the internal fixed method without exposing it in RunConfig."""
+
+        return "read_qc.length_filter.seqkit_seq" if self.approved else "skip"
+
     @model_validator(mode="after")
     def _require_thresholds_for_executable_filter(self) -> "ReadQCLengthFilterConfig":
-        if self.approved and self.method == "skip":
+        min_len = self.thresholds.get("min_len")
+        if self.approved and (not isinstance(min_len, int) or min_len <= 0):
             raise ValueError(
-                "read_qc.length_filter: approved must be false when method is 'skip'"
+                "read_qc.length_filter.thresholds.min_len must be a "
+                "positive integer when approved"
             )
-        if self.approved and self.method not in (
-            "skip",
-            "read_qc.length_filter.seqkit_seq",
-        ):
-            raise ValueError(
-                "read_qc.length_filter approved execution is currently "
-                "supported only for "
-                "read_qc.length_filter.seqkit_seq"
-            )
-        if self.method == "read_qc.length_filter.seqkit_seq":
-            min_len = self.thresholds.get("min_len")
-            if self.approved and (not isinstance(min_len, int) or min_len <= 0):
-                raise ValueError(
-                    "read_qc.length_filter.thresholds.min_len must be a "
-                    "positive integer when approved"
-                )
         return self
 
 
@@ -465,28 +245,25 @@ class GenomeSurveyRunConfig(BaseModel):
 
 
 class BuscoRunParameters(BaseModel):
-    """Explicit BUSCO parameters for assembly_review local execution."""
+    """BUSCO execution knobs plus an optional logical lineage selector.
+
+    Database paths, versions, and provenance are host-owned and therefore are
+    rejected by this RunConfig model.  The freeze boundary resolves ``lineage``
+    (or the host default) from the active ``envs.yaml`` database registry.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    lineage_path: str
-    lineage_name: str
-    lineage_version: str
-    lineage_source: str
+    lineage: str | None = None
     mode: Literal["genome"] = "genome"
-    threads: int = Field(gt=0)
+    threads: int = Field(default=4, gt=0)
 
-    @model_validator(mode="after")
-    def _lineage_path_must_not_be_empty(self) -> "BuscoRunParameters":
-        if not self.lineage_path.strip():
-            raise ValueError("assembly_review.busco.lineage_path must be non-empty")
-        if not self.lineage_name.strip():
-            raise ValueError("assembly_review.busco.lineage_name must be non-empty")
-        if not self.lineage_version.strip():
-            raise ValueError("assembly_review.busco.lineage_version must be non-empty")
-        if not self.lineage_source.strip():
-            raise ValueError("assembly_review.busco.lineage_source must be non-empty")
-        return self
+    @field_validator("lineage")
+    @classmethod
+    def _lineage_selector_must_be_non_empty(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("assembly_review.busco.lineage must be non-empty")
+        return value
 
 
 class QuastRunParameters(BaseModel):
@@ -503,8 +280,7 @@ class AssemblyReviewRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     quast: QuastRunParameters | None = None
-    busco: BuscoRunParameters
-    related_species_reference_dir: str | None = None
+    busco: BuscoRunParameters | None = None
 
 
 class AutoHiCRunParameters(BaseModel):
@@ -553,9 +329,7 @@ class RunConfig(BaseModel):
     review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
 
     @model_validator(mode="after")
-    def _require_method_parameters_when_assembly_local(self) -> "RunConfig":
-        if self.any_occurrence_allows_local_execution("assembly"):
-            validate_local_assembly_execution(self.assembly)
+    def _require_fixed_stage_execution_config(self) -> "RunConfig":
         if (
             self.any_occurrence_allows_local_execution("hic_scaffolding")
             and self.hic_scaffolding is None
@@ -583,13 +357,9 @@ class RunConfig(BaseModel):
 
     @model_validator(mode="after")
     def _require_busco_for_assembly_review(self) -> "RunConfig":
-        if "assembly_review" in self.requested_stage_names() and (
-            self.assembly_review is None or self.assembly_review.busco is None
-        ):
-            raise ValueError(
-                "run_config: every requested assembly_review requires "
-                "assembly_review.busco"
-            )
+        # BUSCO database identity is host-owned.  An omitted review block,
+        # or an omitted BUSCO block within it, receives executor defaults at
+        # stage entry; no database path is copied into the run config.
         return self
 
     @model_validator(mode="after")
@@ -618,28 +388,6 @@ class RunConfig(BaseModel):
             request.stage == stage and request.allow_local_execution
             for request in self.requested_stages
         )
-
-
-def validate_assembly_review_execution_plan(run_config: RunConfig) -> None:
-    """Validate the offline BUSCO lineage contract before inputs are frozen."""
-
-    if "assembly_review" not in run_config.requested_stage_names():
-        return
-    review = run_config.assembly_review
-    if review is None:
-        raise ValueError(
-            "run_config: every requested assembly_review requires assembly_review.busco"
-        )
-    lineage_path = Path(review.busco.lineage_path)
-    if not lineage_path.exists():
-        raise ValueError(
-            f"assembly_review.busco.lineage_path does not exist: {lineage_path}"
-        )
-    if not lineage_path.is_dir():
-        raise ValueError(
-            f"assembly_review.busco.lineage_path must be a directory: {lineage_path}"
-        )
-    _validate_busco_lineage(lineage_path, review.busco)
 
 
 def _require_nonempty_regular_file(path: Path, *, label: str) -> None:
@@ -806,35 +554,43 @@ def _parse_busco_scores_cutoff(path: Path) -> set[str]:
     return identities
 
 
-def _validate_busco_lineage(
+def validate_busco_lineage(
     lineage_path: Path,
-    parameters: BuscoRunParameters,
+    *,
+    lineage_name: str,
+    lineage_version: str,
+    lineage_source: str,
 ) -> None:
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (lineage_name, lineage_version, lineage_source)
+    ):
+        raise ValueError("BUSCO lineage identity fields must be complete")
     config = _parse_busco_dataset_config(lineage_path / "dataset.cfg")
-    lineage_name = config["name"]
-    if lineage_path.name != lineage_name or parameters.lineage_name != lineage_name:
+    dataset_name = config["name"]
+    if lineage_path.name != dataset_name or lineage_name != dataset_name:
         raise ValueError(
             "assembly_review.busco lineage identity mismatch: path basename, "
             "dataset.cfg name, and lineage_name must be identical"
         )
 
-    version_match = _BUSCO_VERSION_RE.search(lineage_name)
+    version_match = _BUSCO_VERSION_RE.search(dataset_name)
     if version_match is None:
         raise ValueError(
             "assembly_review.busco lineage name must end in a supported "
             "OrthoDB version such as _odb10 or _odb12.2"
         )
-    lineage_version = version_match.group(1)
-    contract = _BUSCO_LINEAGE_CONTRACTS.get(lineage_version)
+    expected_version = version_match.group(1)
+    contract = _BUSCO_LINEAGE_CONTRACTS.get(expected_version)
     if contract is None:
         raise ValueError(
             "assembly_review.busco lineage version is unsupported by this "
-            f"validator: {lineage_version}"
+            f"validator: {expected_version}"
         )
-    if parameters.lineage_version != lineage_version:
+    if lineage_version != expected_version:
         raise ValueError(
             "assembly_review.busco lineage_version must match the version "
-            f"derived from lineage identity: expected {lineage_version}"
+            f"derived from lineage identity: expected {expected_version}"
         )
 
     hmms_path = lineage_path / "hmms"
@@ -860,7 +616,7 @@ def _validate_busco_lineage(
     if contract["requires_lengths_cutoff"]:
         _require_nonempty_regular_file(
             lineage_path / "lengths_cutoff",
-            label=f"{lineage_version} lengths_cutoff",
+            label=f"{expected_version} lengths_cutoff",
         )
 
     ancestral = lineage_path / "ancestral"

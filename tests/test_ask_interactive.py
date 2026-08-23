@@ -19,7 +19,6 @@ from app.entrypoints.ask_interactive import (
     _render_confirm,
     _render_draft_review,
     _render_plan_summary,
-    _update_derived_defaults,
     _UserAbort,
 )
 from app.entrypoints.ask_planner import (
@@ -86,10 +85,8 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             draft = build_initial_plan_draft(plan)
             self.assertIsNotNone(draft)
             self.assertEqual(draft.selected_stage_names, ["assembly"])
-            self.assertEqual(
-                draft.selected_methods["assembly"], "assembly.candidate.flye"
-            )
-            self.assertNotIn("read_qc", draft.selected_methods)
+            self.assertNotIn("assembly", draft.selected_methods or {})
+            self.assertNotIn("read_qc", draft.selected_methods or {})
 
     def test_assembly_goal_mixed_assets_leaves_assembly_method_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,10 +154,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             draft = build_initial_plan_draft(plan)
             plan_ref = Path(tmp) / "tui_state.json"
             clarification = next_clarification(draft, ask_plan_ref=plan_ref)
-            self.assertEqual(clarification.kind, "parameter_values")
-            self.assertIn(
-                "shared_parameters.estimated_genome_size", clarification.required_fields
-            )
+            self.assertEqual(clarification.kind, "confirm")
 
 
 class InteractiveLoopTests(unittest.TestCase):
@@ -370,10 +364,6 @@ class InteractiveLoopTests(unittest.TestCase):
             method_parameters={
                 "assembly_review.eval.quast": {"threads": 4},
                 "assembly_review.eval.busco": {
-                    "lineage_path": "/data/busco/embryophyta_odb10",
-                    "lineage_name": "embryophyta_odb10",
-                    "lineage_version": "odb10",
-                    "lineage_source": "test_fixture",
                     "threads": 4,
                 },
             },
@@ -529,65 +519,6 @@ class PlannerClarificationTests(unittest.TestCase):
             self.assertIsNotNone(clarification)
             self.assertEqual(clarification.status, "clarification_required")
             self.assertEqual(clarification.ask_plan_ref, str(plan_ref.resolve()))
-
-
-class DerivedDefaultsTests(unittest.TestCase):
-    def test_busco_lineage_path_derives_name_version_source(self):
-        defaults: dict = {}
-        _update_derived_defaults(
-            "assembly_review.eval.busco",
-            "lineage_path",
-            "/db/busco/insecta_odb10",
-            defaults,
-        )
-        self.assertEqual(
-            defaults["assembly_review.eval.busco"]["lineage_name"], "insecta_odb10"
-        )
-        self.assertEqual(
-            defaults["assembly_review.eval.busco"]["lineage_version"], "odb10"
-        )
-        self.assertEqual(
-            defaults["assembly_review.eval.busco"]["lineage_source"], "local"
-        )
-
-    def test_busco_lineage_path_no_odb_version(self):
-        defaults: dict = {}
-        _update_derived_defaults(
-            "assembly_review.eval.busco", "lineage_path", "/db/custom_lineage", defaults
-        )
-        self.assertEqual(
-            defaults["assembly_review.eval.busco"]["lineage_name"], "custom_lineage"
-        )
-        self.assertNotIn("lineage_version", defaults["assembly_review.eval.busco"])
-
-    def test_busco_lineage_path_derives_dotted_odb_version(self):
-        defaults: dict = {}
-
-        _update_derived_defaults(
-            "assembly_review.eval.busco",
-            "lineage_path",
-            "/db/eukaryota_odb12.2",
-            defaults,
-        )
-
-        self.assertEqual(
-            defaults["assembly_review.eval.busco"]["lineage_version"],
-            "odb12.2",
-        )
-
-    def test_busco_does_not_overwrite_existing_defaults(self):
-        defaults: dict = {"assembly_review.eval.busco": {"lineage_name": "manual_name"}}
-        _update_derived_defaults(
-            "assembly_review.eval.busco", "lineage_path", "/db/insecta_odb10", defaults
-        )
-        self.assertEqual(
-            defaults["assembly_review.eval.busco"]["lineage_name"], "manual_name"
-        )
-
-    def test_non_busco_method_is_noop(self):
-        defaults: dict = {}
-        _update_derived_defaults("assembly.candidate.flye", "threads", "8", defaults)
-        self.assertEqual(defaults, {})
 
 
 class PlanPreviewRenderTests(unittest.TestCase):
@@ -799,11 +730,11 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn("This draft becomes the working plan.", rendered)
             self.assertIn("Execution will NOT start yet.", rendered)
             self.assertIn("Runtime-derived proposals are deferred", rendered)
-            self.assertIn("assembly.candidate.flye", rendered)
-            self.assertIn("estimated_genome_size: missing", rendered)
+            self.assertNotIn("assembly.candidate.flye", rendered)
+            self.assertIn("Route Selection: deferred", rendered)
             self.assertNotIn("[flye] threads:", rendered)
-            self.assertIn("catalog L2: asm_coverage, min_overlap", rendered)
-            self.assertIn("Needs attention:", rendered)
+            self.assertNotIn("catalog L2: asm_coverage, min_overlap", rendered)
+            self.assertNotIn("Needs attention:", rendered)
 
     def test_plan_summary_exposes_generic_deferred_human_gate_contract(self):
         plan = _base_plan(
@@ -980,7 +911,9 @@ class PlanPreviewRenderTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             attention = _draft_attention_items(draft, build_run_plan_summary(draft))
-            self.assertIn(("assembly", "estimated_genome_size is missing"), attention)
+            self.assertNotIn(
+                ("assembly", "estimated_genome_size is missing"), attention
+            )
             self.assertNotIn(("assembly", "platform must be confirmed"), attention)
             self.assertNotIn(("assembly", "threads must be confirmed"), attention)
 

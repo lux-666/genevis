@@ -35,11 +35,6 @@ from app.control.projections import (
     project_workflow_state,
 )
 from app.control.workflow_plan import workflow_steps_from_run_config
-from app.domains.assembly.selection import (
-    AssemblySelection,
-    default_primary_method,
-    resolve_read_type,
-)
 from app.graph.builder import build_graph
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
@@ -49,7 +44,6 @@ from app.review.gates import registered_review_stages
 from app.schemas.run_config import (
     AssemblyRunConfig,
     RunConfig,
-    infer_assembly_method,
 )
 from app.schemas.shared_parameters import SharedParameters
 from app.schemas.state import (
@@ -67,90 +61,28 @@ if TYPE_CHECKING:
     from app.storage.frozen_inputs import FrozenExecutionLease, FrozenInputBundle
 
 
-_ASSEMBLY_METHOD_NAMES = {
-    "flye": "assembly.candidate.flye",
-    "nextdenovo": "assembly.candidate.nextdenovo",
-    "hifiasm": "assembly.candidate.hifiasm",
-    "hifiasm_ont": "assembly.candidate.hifiasm_ont",
-}
-_ASSEMBLY_PARAMETER_ATTRS = {
-    "flye": "flye_parameters",
-    "nextdenovo": "nextdenovo_parameters",
-    "hifiasm": "hifiasm_parameters",
-    "hifiasm_ont": "hifiasm_ont_parameters",
-}
-
-
-def _assembly_parameter_dump(
-    assembly: AssemblyRunConfig,
-    method: str,
-) -> dict[str, Any] | None:
-    parameters = getattr(assembly, _ASSEMBLY_PARAMETER_ATTRS[method])
-    return (
-        parameters.model_dump(exclude_none=True, exclude_defaults=True)
-        if parameters
-        else None
-    )
-
-
 def _build_assembly_selection(
     *,
     assembly: AssemblyRunConfig,
     shared_parameters: SharedParameters | dict[str, Any] | None,
     shared_platform: Any = None,
-) -> AssemblySelection | None:
-    shared_values = (
-        shared_parameters.model_dump(exclude_none=True)
-        if isinstance(shared_parameters, SharedParameters)
-        else (shared_parameters or {})
-    )
-    assembly_method = infer_assembly_method(assembly)
-    if assembly_method:
-        read_type = resolve_read_type(
-            ("assembly.assembly_route", assembly.assembly_route),
-            ("shared_parameters.read_type", shared_values.get("read_type")),
-            ("shared_parameters.platform", None, shared_platform),
-            context="entrypoints.run.assembly_selection",
-        )
-        if read_type is None:
-            if assembly.assembly_method is not None:
-                raise ValueError(
-                    "run_config: assembly.assembly_method is set but no "
-                    "read_type could be inferred; "
-                    "set assembly.assembly_route, shared_parameters.read_type, or "
-                    "shared_parameters.platform"
-                )
-            return None
-        return AssemblySelection(
-            read_type=read_type,
-            primary_method=_ASSEMBLY_METHOD_NAMES[assembly_method],
-            source="run_config",
-            rationale="run_config explicitly selected assembly method",
-            metadata={"assembly_route": assembly.assembly_route},
-        )
+) -> None:
+    """Keep the compatibility seam explicitly non-authoritative.
 
-    if assembly.assembly_route == "auto":
-        return None
+    RunConfig cannot carry an Assembly method, so entrypoint projection must
+    never manufacture an ``AssemblySelection``.  The unused arguments keep old
+    internal callers source-compatible while durable drafts migrate.
+    """
 
-    read_type = resolve_read_type(
-        ("assembly.assembly_route", assembly.assembly_route),
-        context="entrypoints.run.assembly_route",
-    )
-    if read_type is None:
-        return None
-    return AssemblySelection(
-        read_type=read_type,
-        primary_method=default_primary_method(read_type),
-        source="run_config",
-        rationale="run_config provided assembly_route read-type hint",
-        metadata={"assembly_route": assembly.assembly_route},
-    )
+    del assembly, shared_parameters, shared_platform
+    return None
 
 
 def _stage_seeds_from_run_config(
     run_config: RunConfig,
     *,
     shared_parameters: SharedParameters | dict[str, Any] | None,
+    dependency_resolver: Any | None = None,
 ) -> StageOutputs:
     """Project shared stage configuration without occurrence-local consent.
 
@@ -168,10 +100,13 @@ def _stage_seeds_from_run_config(
         and run_config.read_qc
         and run_config.read_qc.length_filter
     ):
+        filter_config = run_config.read_qc.length_filter
+        filter_request = filter_config.model_dump(mode="json")
+        filter_request["method"] = filter_config.selected_method()
         seeds["read_qc"] = {
-            "length_filter_request": run_config.read_qc.length_filter.model_dump(
-                mode="json"
-            )
+            # Method identity is an internal fixed-stage projection. RunConfig
+            # carries only approval plus thresholds.
+            "length_filter_request": filter_request
         }
 
     if (
@@ -187,28 +122,13 @@ def _stage_seeds_from_run_config(
 
     if "assembly" in requested and run_config.assembly:
         assembly_seed: dict[str, Any] = {}
-        selection = _build_assembly_selection(
-            assembly=run_config.assembly,
-            shared_parameters=shared_parameters,
-            shared_platform=(
-                run_config.shared_parameters.platform
-                if run_config.shared_parameters
-                else None
-            ),
-        )
-        if selection:
-            assembly_seed["assembly_selection"] = selection.model_dump(mode="json")
-        for method in _ASSEMBLY_PARAMETER_ATTRS:
-            if getattr(run_config.assembly, _ASSEMBLY_PARAMETER_ATTRS[method]):
-                assembly_seed[f"{method}_parameters"] = _assembly_parameter_dump(
-                    run_config.assembly,
-                    method,
-                )
         for key in (
             "hifi_reads_ref",
             "hic_reads_ref",
             "target_level",
             "assembly_route",
+            "method_route_advisor",
+            "parameter_advisor",
         ):
             value = getattr(run_config.assembly, key)
             if value is not None:
@@ -216,20 +136,19 @@ def _stage_seeds_from_run_config(
         if assembly_seed:
             seeds["assembly"] = assembly_seed
 
-    if "assembly_review" in requested and run_config.assembly_review:
+    if "assembly_review" in requested:
         review_seed: dict[str, Any] = {}
-        if run_config.assembly_review.quast:
+        if run_config.assembly_review and run_config.assembly_review.quast:
             review_seed["quast_parameters"] = (
                 run_config.assembly_review.quast.model_dump()
             )
-        if run_config.assembly_review.busco:
-            review_seed["busco_parameters"] = (
-                run_config.assembly_review.busco.model_dump()
+        if dependency_resolver is None:
+            raise ValueError(
+                "assembly_review seed requires the frozen database contract"
             )
-        if run_config.assembly_review.related_species_reference_dir:
-            review_seed["related_species_reference_dir"] = (
-                run_config.assembly_review.related_species_reference_dir
-            )
+        from app.execution.database_resolution import validate_review_databases
+
+        review_seed.update(validate_review_databases(run_config, dependency_resolver))
         seeds["assembly_review"] = review_seed
 
     if "hic_scaffolding" in requested and run_config.hic_scaffolding:
@@ -676,9 +595,13 @@ def _execute_verified_frozen_session(
         else None
     )
     try:
+        from app.execution.dependency_snapshot import load_frozen_dependency_resolver
+
+        dependency_resolver = load_frozen_dependency_resolver(run_dir)
         stage_seeds = _stage_seeds_from_run_config(
             run_config,
             shared_parameters=shared_parameters,
+            dependency_resolver=dependency_resolver,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

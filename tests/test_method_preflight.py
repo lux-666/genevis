@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from unittest.mock import patch
 from app.entrypoints.run import _run_bootstrap
 from app.execution.env_resolver import EnvResolver
 from app.execution.method_preflight import preflight_methods
+from tests.busco_fixture import ensure_test_host_envs
 
 
 class MethodPreflightTests(unittest.TestCase):
@@ -143,15 +145,20 @@ class MethodPreflightTests(unittest.TestCase):
             conda = root / "conda"
             conda.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             conda.chmod(0o755)
-            config = root / "host-envs.yaml"
+            # Bootstrap validates the complete active host catalog, including
+            # both database families. Start from the shared self-contained
+            # fixture so this test exercises the environment override without
+            # manufacturing a second, incomplete envs.yaml shape.
+            config = ensure_test_host_envs(root)
+            config_data = json.loads(config.read_text(encoding="utf-8"))
+            config_data["default"].update(
+                {"conda_bin": str(conda), "fallback_env": "tools"}
+            )
+            config_data["methods"] = {
+                "assembly.candidate.flye": {"required_tools": ["flye"]}
+            }
             config.write_text(
-                "default:\n"
-                f"  conda_bin: {conda}\n"
-                "  fallback_env: tools\n"
-                "methods:\n"
-                "  assembly.candidate.flye:\n"
-                "    required_tools: [flye]\n"
-                "packages: {}\n",
+                json.dumps(config_data, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
             stdout = io.StringIO()
@@ -165,7 +172,9 @@ class MethodPreflightTests(unittest.TestCase):
                 code = _run_bootstrap(argparse.Namespace(config=None, apply=True))
 
             self.assertEqual(code, 0)
-            self.assertIn(f"Checking configuration: {config}", stdout.getvalue())
+            self.assertIn(
+                f"Checking configuration: {config.resolve()}", stdout.getvalue()
+            )
 
     def test_bootstrap_reports_missing_package_paths(self):
         with tempfile.TemporaryDirectory() as tmp:

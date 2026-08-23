@@ -21,13 +21,18 @@ from app.control.projections import (
     progress_projection_input,
 )
 from app.control.resume_transaction import ResumeTransactionError
+from app.execution.dependency_snapshot import (
+    FrozenDependencyResolver,
+    capture_dependency_snapshot,
+)
+from app.execution.env_resolver import EnvResolver
 from app.graph.builder import build_graph
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state as build_initial_state
 from app.storage.frozen_inputs import FrozenExecutionLease
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
-from tests.busco_fixture import ensure_busco_lineage
+from tests.busco_fixture import ensure_busco_lineage, ensure_test_host_envs
 
 
 def _capture_call(function, *args, **kwargs):
@@ -43,12 +48,18 @@ def _capture_call(function, *args, **kwargs):
 
 def _busco_config(lineage_path: str) -> dict[str, object]:
     return {
-        "lineage_path": lineage_path,
-        "lineage_name": "embryophyta_odb10",
-        "lineage_version": "odb10",
-        "lineage_source": "test_fixture",
+        "lineage": Path(lineage_path).name,
         "threads": 4,
     }
+
+
+def _frozen_resolver(root: Path, lineage: Path) -> FrozenDependencyResolver:
+    envs = ensure_test_host_envs(root, lineage_path=lineage)
+    active = EnvResolver(envs)
+    snapshot = capture_dependency_snapshot(
+        config_path=envs, resolver=active, probe_environments=False
+    )
+    return FrozenDependencyResolver(snapshot)
 
 
 def _leave_blocked(_graph, _config, result, *_args, **_kwargs):
@@ -841,6 +852,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
             proteins.write_text(">p1\nMKT\n", encoding="utf-8")
             lineage = ensure_busco_lineage(root)
+            envs = ensure_test_host_envs(root, lineage_path=lineage)
             manifest = root / "manifest.yaml"
             manifest.write_text(
                 f"session_id: {session_id}\n"
@@ -873,6 +885,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                     "app.entrypoints.run._interactive_gate_loop",
                     side_effect=_leave_blocked,
                 ),
+                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}),
             ):
                 code, stdout, stderr = _capture_call(
                     run_entry.main,
@@ -909,6 +922,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             assembly = root / "existing_assembly.fa"
             assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
             lineage = ensure_busco_lineage(root)
+            envs = ensure_test_host_envs(root, lineage_path=lineage)
 
             manifest = root / "manifest.yaml"
             manifest.write_text(
@@ -947,6 +961,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                     "app.entrypoints.run._interactive_gate_loop",
                     side_effect=_leave_blocked,
                 ),
+                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}),
             ):
                 code, stdout, stderr = _capture_call(
                     run_entry.main,
@@ -1087,6 +1102,20 @@ class FrozenExecutionBoundaryTests(unittest.TestCase):
 
 
 class FrozenHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._resolver_tmp = tempfile.TemporaryDirectory()
+        root = Path(self._resolver_tmp.name)
+        self._lineage = ensure_busco_lineage(root).resolve()
+        self._ncbi = (root / "ncbi_metazoa").resolve()
+        resolver = _frozen_resolver(root, self._lineage)
+        self.addCleanup(self._resolver_tmp.cleanup)
+        self._resolver_patch = patch(
+            "app.execution.dependency_snapshot.load_frozen_dependency_resolver",
+            return_value=resolver,
+        )
+        self._resolver_patch.start()
+        self.addCleanup(self._resolver_patch.stop)
+
     def test_frozen_run_initializes_occurrence_aware_workflow_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "frozen-session")
@@ -1107,9 +1136,7 @@ class FrozenHelperTests(unittest.TestCase):
                             },
                         ],
                         "t2t": {"mode": "manual_review"},
-                        "assembly_review": {
-                            "busco": _busco_config("/data/busco/embryophyta_odb10")
-                        },
+                        "assembly_review": {"busco": _busco_config(str(self._lineage))},
                         "review_policy": {
                             "max_blocked_seconds": 300,
                             "stages": {
@@ -1197,9 +1224,14 @@ class FrozenHelperTests(unittest.TestCase):
             {
                 "assembly_review": {
                     "busco_parameters": {
-                        **_busco_config("/data/busco/embryophyta_odb10"),
+                        "lineage_path": str(self._lineage),
+                        "lineage_name": "embryophyta_odb10",
+                        "lineage_version": "odb10",
+                        "lineage_source": "test_fixture",
                         "mode": "genome",
+                        "threads": 4,
                     },
+                    "related_species_reference_dir": str(self._ncbi),
                     "review_policy": {"max_blocked_seconds": 300},
                 },
                 "t2t": {
@@ -1501,9 +1533,7 @@ class FrozenHelperTests(unittest.TestCase):
                         {"stage": "assembly", "allow_local_execution": False},
                         {"stage": "assembly_review", "allow_local_execution": False},
                     ],
-                    assembly_review={
-                        "busco": _busco_config("/data/busco/embryophyta_odb10")
-                    },
+                    assembly_review={"busco": _busco_config(str(self._lineage))},
                 ),
             )
             graph = Mock()

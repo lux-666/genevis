@@ -291,8 +291,7 @@ def validate_frozen_attempt_for_run(
         )
     if sha256_file(declared_script_path) != attempt.script_sha256:
         raise DataLayoutError(
-            "frozen attempt work script changed after freeze: "
-            f"{declared_script_path}"
+            f"frozen attempt work script changed after freeze: {declared_script_path}"
         )
     for output in attempt.expected_outputs:
         resolved = output.expanduser().resolve(strict=False)

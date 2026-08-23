@@ -30,9 +30,10 @@ those contracts without replacing them.
 Every executable method uses the same execution and settlement boundaries:
 
 ```text
-frozen occurrence method roster
-  -> optional stage-owned recommendation and approval
-  -> freeze
+fixed-stage frozen method roster
+  -> (Assembly: upstream evidence -> method recommendation/confirmation)
+  -> (parameter recommendation and approval, where applicable)
+  -> method-attempt freeze
   -> run
   -> collect
   -> settle method outcome
@@ -58,12 +59,23 @@ attempt; a retrying method may own several attempt terminals but only one final
 disposition. The occurrence outcome answers whether the stage delivered, not
 what happened to each selected method.
 
-Selection itself is already frozen in the occurrence's
-`selected_method_names`. Runtime planning resolves applicability and parameters;
-it must not silently add a registry method, treat a displayed candidate as
-selected, or replace the roster after recovery. This distinction makes
-`not_started` meaningful and lets shared occurrence settlement prove that no
-selected method disappeared merely because a stage cursor was overwritten.
+For fixed-method stages, selection is already frozen in the occurrence's
+`selected_method_names`. Assembly is the single deferred-binding exception:
+the roster may be omitted at whole-run freeze, and the Assembly stage must
+recommend and validate `assembly_selection` from upstream QC/survey evidence
+before binding `primary_method`. Runtime must not treat a displayed candidate
+as selected or replace a fixed roster after recovery. The dynamic method must
+be resolved from the frozen dependency snapshot, pass stage-time preflight, and
+be checked at settlement against `assembly_selection.primary_method`; its
+method disposition remains a required durable fact. This distinction makes
+`not_started` meaningful without forcing Assembly to guess a method before its
+evidence exists.
+
+Method authority is therefore single-tracked. Intake text, planner hints,
+legacy drafts, and displayed candidate lists are not method selections; only a
+durable `assembly_selection`, confirmed through its required gate, binds the
+Assembly method. Any planning-era tool hint is discarded before draft build and
+freeze rather than merged into execution state.
 
 One `run` transition advances at most one frozen attempt. If an ordered direct
 batch still has pending cursors, the method graph keeps the frozen stage status,
@@ -178,10 +190,12 @@ method collection boundary decides its final result. Exact replay returns the
 existing disposition; a different result conflicts. Planner/no-attempt paths
 use the same settlement node immediately after their explicit decision; stage
 modules supply only a pure outcome policy and never call the Ledger writer.
-Before writing, shared settlement rejects any method outside the frozen roster.
-Before a stage terminal, shared occurrence settlement requires every rostered
-method, and no other method, to have exactly one durable disposition. Human
-blocking and retry continuation do not run this terminal coverage check.
+Before writing, shared settlement rejects any method outside the effective
+roster. For fixed stages this is the frozen roster; for deferred Assembly it is
+the single validated `primary_method` selected by the stage. Before a stage
+terminal, shared occurrence settlement requires every effective-roster method,
+and no other method, to have exactly one durable disposition. Human blocking
+and retry continuation do not run this terminal coverage check.
 
 The successful collect adapter also supplies the evidence required for
 `attempt_succeeded`; the run or collection failure boundary supplies
@@ -295,8 +309,9 @@ these guarantees do not imply that every stage-local path projection is an
 9. method disposition, attempt terminal, and workflow-occurrence outcome remain
    distinct facts; no cursor status, attempt result, route marker, or cursor
    advance synthesizes another domain's terminal.
-10. the frozen occurrence roster and durable disposition set are equal before
-    any occurrence terminal is appended.
+10. the effective occurrence roster and durable disposition set are equal before
+    any occurrence terminal is appended; deferred Assembly derives that roster
+    only from its validated stage-owned selection.
 
 Parameterized retries use a new attempt ID and an attempt-specific work/output
 directory. A completed predecessor remains immutable; a later attempt cannot

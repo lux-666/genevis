@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.execution.database_resolution import resolve_ncbi_reference_dir
+from app.execution.env_resolver import EnvResolver
 from app.reference.ncbi_metazoa import (
     build_related_species_evidence_pack,
     build_related_species_statistics_pack,
@@ -46,9 +48,12 @@ def main() -> None:
     print(f"Output:  {OUT_DIR}\n")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    reference_dir = resolve_ncbi_reference_dir(EnvResolver())
 
     print("Building evidence pack...")
-    evidence_pack = build_related_species_evidence_pack(SPECIES)
+    evidence_pack = build_related_species_evidence_pack(
+        SPECIES, reference_dir=reference_dir
+    )
     print(
         f"  status={evidence_pack['status']}  "
         f"matching_mode={evidence_pack.get('matching_mode')}  "
@@ -59,7 +64,7 @@ def main() -> None:
 
     print("\nBuilding statistics pack...")
     statistics_pack = build_related_species_statistics_pack(
-        SPECIES, target_metrics=TARGET_METRICS
+        SPECIES, reference_dir=reference_dir, target_metrics=TARGET_METRICS
     )
     print(f"  status={statistics_pack['status']}")
     tier_counts = statistics_pack.get("tier_counts", {})

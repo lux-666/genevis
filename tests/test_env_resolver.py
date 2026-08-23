@@ -21,6 +21,35 @@ from app.schemas.descriptors import FrozenAttemptSpec
 
 
 class EnvResolverPrecedenceTests(unittest.TestCase):
+    def test_default_active_config_is_cwd_independent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = Path.cwd()
+            try:
+                os.chdir(tmp)
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("GENE_AGENT_ENVS_CONFIG", None)
+                    active = env_resolver.active_config_path()
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(active, env_resolver.DEFAULT_CONFIG_PATH)
+        self.assertTrue(active.is_absolute())
+
+    def test_relative_active_config_override_uses_caller_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = Path.cwd()
+            try:
+                os.chdir(tmp)
+                with patch.dict(
+                    os.environ,
+                    {"GENE_AGENT_ENVS_CONFIG": "host/envs.yaml"},
+                ):
+                    active = env_resolver.active_config_path()
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(active, Path(tmp).resolve() / "host" / "envs.yaml")
+
     def test_implicit_resolver_uses_default_config_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -36,7 +65,10 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
 
     def test_env_template_loads_and_covers_core_mainline(self):
         template_path = (
-            Path(__file__).resolve().parents[1] / "config" / "envs.yaml.example"
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "examples"
+            / "envs.yaml.example"
         )
         resolver = EnvResolver(template_path)
 
@@ -84,6 +116,103 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             {pkg.name for pkg in packages}, {"autohic", "juicer", "three_d_dna"}
         )
         self.assertTrue(all(pkg.install_root for pkg in packages))
+
+    def test_typed_database_registry_resolves_default_and_named_busco_lineages(self):
+        resolver = EnvResolver(
+            config_data={
+                "default": {"fallback_env": "base"},
+                "databases": {
+                    "busco": {
+                        "default_lineage": "metazoa_odb10",
+                        "lineages": {
+                            "metazoa_odb10": {
+                                "path": "/db/busco/metazoa_odb10",
+                                "version": "odb10",
+                                "source": "busco_downloads",
+                            },
+                            "embryophyta_odb10": {
+                                "path": "/db/busco/embryophyta_odb10",
+                                "version": "odb10",
+                                "source": "busco_downloads",
+                            },
+                        },
+                    },
+                    "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+                },
+            }
+        )
+
+        self.assertIsNotNone(resolver.databases)
+        self.assertEqual(
+            resolver.resolve_busco_lineage().path, "/db/busco/metazoa_odb10"
+        )
+        self.assertEqual(
+            resolver.resolve_busco_lineage("embryophyta_odb10").version, "odb10"
+        )
+        self.assertEqual(
+            resolver.databases.ncbi_metazoa.reference_dir, "/db/ncbi_metazoa"
+        )
+
+    def test_database_registry_rejects_unknown_empty_and_missing_default_values(self):
+        base = {
+            "default": {"fallback_env": "base"},
+            "databases": {
+                "busco": {
+                    "default_lineage": "metazoa_odb10",
+                    "lineages": {
+                        "metazoa_odb10": {
+                            "path": "/db/busco/metazoa_odb10",
+                            "version": "odb10",
+                            "source": "downloads",
+                        }
+                    },
+                },
+                "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+            },
+        }
+        cases = (
+            ("unknown key", {"databases": {"extra": {}}}),
+            (
+                "empty path",
+                {
+                    "databases": {
+                        "busco": {
+                            "default_lineage": "metazoa_odb10",
+                            "lineages": {
+                                "metazoa_odb10": {
+                                    "path": "",
+                                    "version": "odb10",
+                                    "source": "downloads",
+                                }
+                            },
+                        },
+                        "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+                    }
+                },
+            ),
+            (
+                "missing default lineage",
+                {
+                    "databases": {
+                        "busco": {
+                            "default_lineage": "missing",
+                            "lineages": base["databases"]["busco"]["lineages"],
+                        },
+                        "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+                    }
+                },
+            ),
+        )
+        for label, override in cases:
+            with self.subTest(label=label):
+                payload = {**base, **override}
+                with self.assertRaisesRegex(ValueError, "databases"):
+                    EnvResolver(config_data=payload)
+
+    def test_busco_resolution_requires_a_host_registry(self):
+        resolver = EnvResolver(config_data={"default": {"fallback_env": "base"}})
+        with self.assertRaisesRegex(ValueError, "databases.busco"):
+            resolver.resolve_busco_lineage()
 
     def test_method_override_beats_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

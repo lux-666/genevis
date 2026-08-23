@@ -21,7 +21,6 @@ from app.entrypoints.ask_planner import (
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
     _default_methods_for_stage,
-    _executable_methods_for_stage,
     _fill_draft_default_methods,
     build_run_plan_summary,
     merge_clarification_response,
@@ -71,12 +70,6 @@ _ROLE_LABELS = {
 }
 
 _PARAM_HINTS: dict[str, str] = {
-    "assembly_review.eval.busco.lineage_path": (
-        "path to BUSCO lineage dir, e.g. /db/busco/insecta_odb10"
-    ),
-    "assembly_review.eval.busco.lineage_name": "auto-derived from path",
-    "assembly_review.eval.busco.lineage_version": "e.g. odb10; auto-detected from name",
-    "assembly_review.eval.busco.lineage_source": "local / busco_downloads",
     "assembly_review.eval.busco.threads": "CPU threads for BUSCO",
     "assembly_review.eval.quast.threads": "CPU threads for QUAST",
     "assembly.candidate.flye.threads": "CPU threads for Flye assembler",
@@ -265,9 +258,7 @@ def _render_draft_stage_summary(
         "   local execution: "
         + ("authorized" if occurrence.allow_local_execution else "not authorized")
     )
-    print(
-        f"   status: {_draft_stage_status(stage, plan, summary, occurrence_index)}"
-    )
+    print(f"   status: {_draft_stage_status(stage, plan, summary, occurrence_index)}")
     method_lines = _draft_stage_method_lines(stage, plan, summary)
     if method_lines:
         print("   methods:")
@@ -309,11 +300,11 @@ def _render_draft_stage_summary(
     if nested and stage in _FIXED_METHOD_STAGES:
         print("   edit: l local execution / p parameters / b back")
     elif nested:
-        print("   edit: l local execution / m method / p parameters / b back")
+        print("   edit: l local execution / p parameters / b back")
     elif stage in _FIXED_METHOD_STAGES:
         print(f"   edit: {idx} / {idx}p parameters")
     else:
-        print(f"   edit: {idx} / {idx}m method / {idx}p parameters")
+        print(f"   edit: {idx} / {idx}p parameters")
 
 
 def _draft_stage_status(
@@ -552,9 +543,9 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
     if len(raw) > 1 and raw[:-1].isdigit() and raw[-1] in {"m", "p"}:
         idx = int(raw[:-1]) - 1
         if 0 <= idx < len(stages):
-            if raw[-1] == "m" and stages[idx] in _FIXED_METHOD_STAGES:
-                return f"method:{stages[idx]}"
-            return ("method:" if raw[-1] == "m" else "params:") + stages[idx]
+            if raw[-1] == "m":
+                return f"stage:{idx}"
+            return "params:" + stages[idx]
     if raw.isdigit():
         idx = int(raw) - 1
         if 0 <= idx < len(stages):
@@ -586,8 +577,6 @@ def _edit_draft_stage(plan: AskPlanState, occurrence_index: int) -> AskPlanState
         )
         print("\nActions:")
         print("  l      change local execution authorization")
-        if stage not in _FIXED_METHOD_STAGES:
-            print("  m      change method")
         print("  p      edit parameters")
         print("  b      back to plan")
         raw = input(f"{stage}> ").strip().lower()
@@ -596,22 +585,12 @@ def _edit_draft_stage(plan: AskPlanState, occurrence_index: int) -> AskPlanState
         if raw in ("l", "local", "local-execution"):
             current = _edit_occurrence_local_execution(current, occurrence_index)
             continue
-        if raw in ("m", "method", "methods"):
-            if stage in _FIXED_METHOD_STAGES:
-                print(
-                    f"{stage} uses {_fixed_pipeline_description(stage)}; "
-                    "there is no method choice."
-                )
-                continue
-            invalid_attempts = 0
-            current = _edit_stage_methods(current, stage)
-            continue
         if raw in ("p", "param", "params", "parameters"):
             invalid_attempts = 0
             current = _edit_stage_parameters(current, stage)
             continue
         invalid_attempts += 1
-        allowed = "l, p, or b" if stage in _FIXED_METHOD_STAGES else "l, m, p, or b"
+        allowed = "l, p, or b"
         print(f"Unknown action. Use {allowed}.")
         if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
             print("Too many invalid actions; returning to the plan.")
@@ -659,9 +638,7 @@ def _edit_occurrence_local_execution(
     if _HAS_QUESTIONARY:
         allowed = bool(
             _safe_ask(
-                questionary.confirm(
-                    prompt, default=occurrence.allow_local_execution
-                )
+                questionary.confirm(prompt, default=occurrence.allow_local_execution)
             )
         )
     else:
@@ -677,47 +654,11 @@ def _edit_occurrence_local_execution(
 
 
 def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
-    if stage in _FIXED_METHOD_STAGES:
-        print(
-            f"\n{stage} uses {_fixed_pipeline_description(stage)}; "
-            "there is no method choice."
-        )
-        return plan
-    methods = _executable_methods_for_stage(stage)
-    if not methods:
-        print(f"\nNo method choices are registered for {stage}.")
-        return plan
-    current = (plan.selected_methods or {}).get(stage)
-    default = current if current else _default_methods_for_stage(stage)
-    req = AskClarificationRequest(
-        status="clarification_required",
-        kind="method_selection",
-        session_id=plan.session_id,
-        ask_plan_ref="<draft>",
-        manifest_ref=plan.manifest_ref,
-        question=f"Which methods should run for {stage}?",
-        choices={
-            "methods_by_stage": {
-                stage: [
-                    {
-                        "method_name": m["method_name"],
-                        "selection_role": m.get("selection_role"),
-                        "display_name": m.get("display_name"),
-                    }
-                    for m in methods
-                ]
-            },
-            "defaults": {stage: default} if default else {},
-        },
-        required_fields=["selected_methods"],
-        response_schema={
-            "kind": "method_selection",
-            "selected_methods": {stage: default},
-        },
-        next_action={},
+    print(
+        f"\n{stage} method selection is system-owned; Assembly is deferred "
+        "until upstream evidence is available."
     )
-    response = _prompt_method_selection(req)
-    return _refresh_draft_defaults(merge_clarification_response(plan, response))
+    return plan
 
 
 def _edit_stage_parameters(plan: AskPlanState, stage: str) -> AskPlanState:
@@ -1514,7 +1455,6 @@ def _prompt_parameter_values(
             if param_name == "estimated_genome_size" and isinstance(value, str):
                 value = _parse_genome_size(value)
             params.setdefault(method_key, {})[param_name] = value
-            _update_derived_defaults(method_key, param_name, value, defaults)
     normalized_shared = (
         SharedParameters.model_validate(
             _derive_shared_parameter_defaults(shared_params)
@@ -1701,29 +1641,6 @@ def _find_default(field: str, defaults: dict[str, Any]) -> Any:
             if param in pdict:
                 return pdict[param]
     return None
-
-
-def _update_derived_defaults(
-    method_key: str, param_name: str, value: Any, defaults: dict[str, Any]
-) -> None:
-    """Derive related defaults after the user provides a value.
-
-    For example, infer BUSCO lineage fields from its path.
-    """
-    if (
-        method_key == "assembly_review.eval.busco"
-        and param_name == "lineage_path"
-        and value
-    ):
-        from pathlib import Path as _Path
-
-        name = _Path(str(value)).name
-        bucket = defaults.setdefault(method_key, {})
-        bucket.setdefault("lineage_name", name)
-        m = re.search(r"(odb\d+(?:\.\d+)?)$", name)
-        if m:
-            bucket.setdefault("lineage_version", m.group(1))
-        bucket.setdefault("lineage_source", "local")
 
 
 def _derive_shared_parameter_defaults(shared: dict[str, Any]) -> dict[str, Any]:

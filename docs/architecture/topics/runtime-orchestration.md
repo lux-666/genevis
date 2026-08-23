@@ -29,7 +29,13 @@ does not expose session, checkpointer, local-execution, launch, or ask
 overrides. `data-dir` is the layout root and the run lives at
 `<data-dir>/runs/<session_id>/`. The handler validates and canonicalizes both
 source documents, freezes the literal operator-authored occurrence plan and its
-dependency closure, then enters the shared executor. Exact RunConfig fields,
+dependency closure, then enters the shared executor. Fixed-stage method rosters
+come from registry defaults; an Assembly roster may be omitted so Assembly can
+recommend and confirm its method after upstream QC/survey evidence. Its exact
+request/response/recommendation recovery chain is defined once in the
+[run-data contract](../reference/data-contract.md#101-assembly-method-recommendation).
+Exact
+RunConfig fields,
 occurrence identity, authorization, empty-plan, publication-order, and immutable
 workflow-step rules belong to the
 [run-data contract](../reference/data-contract.md), not this explanatory topic.
@@ -140,9 +146,10 @@ as a successor table.
 
 The recommendation is editable planning guidance rather than a RunConfig
 requirement. The controller does not inspect FASTQ contents, select an assembler,
-build commands, or interpret biological metrics. Reusable Review follows proven
-assembly-delivery provenance; its exact placement examples and future producer
-rule remain in the stage contract.
+build commands, or interpret biological metrics. Assembly selection belongs to
+the Assembly stage after its upstream evidence, not to the parent controller.
+Reusable Review follows proven assembly-delivery provenance; its exact placement
+examples and future producer rule remain in the stage contract.
 
 The controller wrapper is thin but not pure. Every settling stage path returns
 an explicit `workflow_step_outcome` for its active occurrence. A
@@ -173,11 +180,14 @@ The parent registers ten domain stages explicitly in `app/graph/builder.py`; the
 subgraphs are composable but there is no dynamic plugin registry. `gapcloser` and
 `base_polish` are manual-only placeholders and fail closed if reached. Resume
 applies only the decision bound to the interrupted immutable occurrence; it does
-not rewrite the remaining plan or method roster.
+not rewrite the remaining plan, a fixed method roster, or an already-bound
+Assembly selection.
 
 `stage_seeds` are immutable stage-scoped RunConfig projections. Every repeated
 occurrence starts from a fresh copy of the same stage seed and its own copied
-method roster; it never reuses a prior occurrence's completed cursor.
+fixed-method roster; an Assembly seed may carry no roster and lets that
+occurrence bind its method from frozen dependencies at stage entry. It never
+reuses a prior occurrence's completed cursor.
 
 When the manifest declares `assembly_fasta_registered`, Inventory registers it
 as the central assembly resource. `assembly_review` is the recommended first

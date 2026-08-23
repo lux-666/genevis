@@ -2,8 +2,8 @@
 """Install or verify the pinned local NCBI Metazoa reference snapshot.
 
 The workflow deliberately does not download biological reference data. This
-utility copies an operator-provided snapshot into the project location and
-checks it against the tracked manifest used by assembly review at runtime.
+utility copies an operator-provided snapshot into the host location declared
+by the active ``envs.yaml`` and checks it against that snapshot's manifest.
 """
 
 from __future__ import annotations
@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REFERENCE_DIR = PROJECT_ROOT / "data" / "reference" / "ncbi_metazoa"
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.execution.env_resolver import (  # noqa: E402
+    EnvResolver,
+    active_config_path,
+)
+
 MANIFEST_FILENAME = "reference_manifest.json"
 COPYABLE_FILES = ("Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage")
 
@@ -28,10 +34,12 @@ def main(argv: list[str] | None = None) -> int:
         "--source-dir", type=Path, help="Directory holding the pinned NCBI export files"
     )
     parser.add_argument(
-        "--destination",
+        "--config",
         type=Path,
-        default=DEFAULT_REFERENCE_DIR,
-        help="Project reference directory",
+        help=(
+            "Active envs.yaml; defaults to GENE_AGENT_ENVS_CONFIG, then "
+            "config/envs.yaml"
+        ),
     )
     parser.add_argument(
         "--verify-only",
@@ -44,7 +52,21 @@ def main(argv: list[str] | None = None) -> int:
     if not args.verify_only and args.source_dir is None:
         parser.error("provide --source-dir or use --verify-only")
 
-    destination = args.destination.resolve()
+    config_path = args.config or active_config_path()
+    try:
+        resolver = EnvResolver(config_path)
+        if resolver.databases is None:
+            raise ValueError("databases registry is missing")
+        destination = (
+            Path(resolver.databases.ncbi_metazoa.reference_dir)
+            .expanduser()
+            .resolve(strict=False)
+        )
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"cannot resolve databases.ncbi_metazoa.reference_dir from "
+            f"{config_path}: {exc}"
+        ) from exc
     manifest = _load_manifest(destination / MANIFEST_FILENAME)
     if args.source_dir:
         source = args.source_dir.resolve()

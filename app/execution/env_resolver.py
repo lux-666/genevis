@@ -1,8 +1,10 @@
 """Stage- and method-specific conda environment resolution for local execution.
 
-The resolver loads ``config/envs.yaml`` (the single source of truth — there is
-no local-override file), answers "what conda env should method X run in", and
-runs the small preflight probes (env exists, required tool inside the env).
+The resolver loads one active host mapping: ``GENE_AGENT_ENVS_CONFIG`` when it
+is set, otherwise the checkout-local ``config/envs.yaml``.  The override picks
+a different path; it does not create a merge/overlay hierarchy.  The resolver
+answers "what conda env should method X run in" and runs the small preflight
+probes (env exists, required tool inside the env).
 External software packages (Juicer, 3D-DNA) live in the same file under a
 top-level ``packages:`` section and are validated by filesystem checks via
 :func:`package_preflight`. Call sites pass the results into
@@ -16,25 +18,38 @@ import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-DEFAULT_CONFIG_PATH = Path("config/envs.yaml")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "envs.yaml"
 
 
 def active_config_path() -> Path:
     """Return the single active env-config path.
 
-    Honors ``GENE_AGENT_ENVS_CONFIG`` when set (absolute or repo-relative) so
-    operators can point at a host-specific mapping and tests can point at a
-    tmp fixture without threading ``config_path`` through every call site.
+    Honors ``GENE_AGENT_ENVS_CONFIG`` when set.  Relative overrides resolve
+    against the caller's current working directory, matching ordinary CLI path
+    semantics and ``server_check.sh``.  The default remains checkout-anchored,
+    so invoking the CLI from another directory does not select another file.
     """
     override = os.environ.get("GENE_AGENT_ENVS_CONFIG")
     if override:
-        return Path(override)
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path.resolve(strict=False)
     return DEFAULT_CONFIG_PATH
 
 
@@ -133,6 +148,82 @@ class PackagePreflightResult(BaseModel):
     detail: str = ""
 
 
+def _non_empty_database_text(value: object) -> str:
+    """Validate a database registry text field without silently coercing nulls."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("database registry values must be non-empty strings")
+    return value.strip()
+
+
+class BuscoLineageSpec(BaseModel):
+    """One immutable BUSCO lineage entry from the host database registry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    version: str
+    source: str
+
+    _non_empty_fields = field_validator("path", "version", "source", mode="before")(
+        _non_empty_database_text
+    )
+
+
+class BuscoDatabaseSpec(BaseModel):
+    """BUSCO database registry and its default lineage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default_lineage: str
+    lineages: dict[str, BuscoLineageSpec]
+
+    _non_empty_default = field_validator("default_lineage", mode="before")(
+        _non_empty_database_text
+    )
+
+    @field_validator("lineages", mode="before")
+    @classmethod
+    def _validate_lineages(cls, value: object) -> object:
+        if not isinstance(value, Mapping) or not value:
+            raise ValueError("databases.busco.lineages must be a non-empty mapping")
+        for name in value:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(
+                    "databases.busco.lineages names must be non-empty strings"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _default_must_exist(self) -> "BuscoDatabaseSpec":
+        if self.default_lineage not in self.lineages:
+            raise ValueError(
+                "databases.busco.default_lineage must name an entry in "
+                "databases.busco.lineages"
+            )
+        return self
+
+
+class NcbiMetazoaDatabaseSpec(BaseModel):
+    """NCBI Metazoa reference database location."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reference_dir: str
+
+    _non_empty_reference_dir = field_validator("reference_dir", mode="before")(
+        _non_empty_database_text
+    )
+
+
+class DatabaseRegistry(BaseModel):
+    """Typed host database registry frozen with a run's dependencies."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    busco: BuscoDatabaseSpec
+    ncbi_metazoa: NcbiMetazoaDatabaseSpec
+
+
 def package_preflight(package: PackageSpec) -> PackagePreflightResult:
     """Filesystem-only validation of one package's root + canary paths.
 
@@ -174,6 +265,13 @@ def package_preflight(package: PackageSpec) -> PackagePreflightResult:
 ConfigMapping = dict[str, Any]
 
 
+def _resolve_database_path(value: str, config_root: Path) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = config_root / path
+    return str(path.resolve(strict=False))
+
+
 def _load_raw(config_path: Path) -> ConfigMapping:
     if not config_path.exists():
         raise FileNotFoundError(f"env config missing: {config_path}")
@@ -183,6 +281,23 @@ def _load_raw(config_path: Path) -> ConfigMapping:
     except yaml.YAMLError as exc:
         raise ValueError(f"env config YAML is invalid: {config_path}: {exc}") from exc
     return _validated_raw(raw, source=config_path)
+
+
+def _load_raw_with_identity(config_path: Path) -> tuple[ConfigMapping, str]:
+    """Parse one byte snapshot and return its content identity."""
+    if not config_path.exists():
+        raise FileNotFoundError(f"env config missing: {config_path}")
+    try:
+        raw_bytes = config_path.read_bytes()
+        raw = yaml.safe_load(raw_bytes.decode("utf-8")) or {}
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"env config is not valid UTF-8: {config_path}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"env config YAML is invalid: {config_path}: {exc}") from exc
+    return (
+        _validated_raw(raw, source=config_path),
+        sha256(raw_bytes).hexdigest(),
+    )
 
 
 def _validated_raw(raw: object, *, source: Path) -> ConfigMapping:
@@ -214,11 +329,12 @@ class EnvResolver:
         self.config_path = (
             Path(config_path) if config_path is not None else active_config_path()
         )
-        self._raw = (
-            _load_raw(self.config_path)
-            if config_data is None
-            else _validated_raw(config_data, source=self.config_path)
-        )
+        self.config_sha256: str | None
+        if config_data is None:
+            self._raw, self.config_sha256 = _load_raw_with_identity(self.config_path)
+        else:
+            self._raw = _validated_raw(config_data, source=self.config_path)
+            self.config_sha256 = None
         default_section = self._raw.get("default") or {}
         if not isinstance(default_section, Mapping):
             raise ValueError("default config section must be a mapping")
@@ -238,11 +354,51 @@ class EnvResolver:
         self._fallback_prefix: str | None = (
             str(fallback_prefix) if fallback_prefix else None
         )
+        self.databases: DatabaseRegistry | None = self._load_database_registry()
         packages = self._raw.get("packages") or {}
         if not isinstance(packages, Mapping):
             raise ValueError("packages config section must be a mapping")
         self.packages = self._load_packages(dict(packages))
         self._validate_environment_entries()
+
+    def _load_database_registry(self) -> DatabaseRegistry | None:
+        """Load the optional host registry, rejecting malformed declarations.
+
+        Older host files may omit ``databases`` entirely.  Once the section is
+        present it is a strict contract: both supported database families are
+        required and Pydantic forbids unknown or empty fields.
+        """
+        if "databases" not in self._raw:
+            return None
+        raw_databases = self._raw["databases"]
+        if not isinstance(raw_databases, Mapping):
+            raise ValueError("databases config section must be a mapping")
+        try:
+            registry = DatabaseRegistry.model_validate(raw_databases)
+        except ValidationError as exc:
+            raise ValueError(f"databases config section is invalid: {exc}") from exc
+        # Database paths are host-local config values.  Resolve relative and
+        # ``~`` values once, against the directory containing this envs.yaml,
+        # so active and frozen resolvers share exactly the same identity.
+        config_root = self.config_path.expanduser().resolve(strict=False).parent
+        busco = registry.busco.model_copy(
+            update={
+                "lineages": {
+                    name: spec.model_copy(
+                        update={"path": _resolve_database_path(spec.path, config_root)}
+                    )
+                    for name, spec in registry.busco.lineages.items()
+                }
+            }
+        )
+        ncbi = registry.ncbi_metazoa.model_copy(
+            update={
+                "reference_dir": _resolve_database_path(
+                    registry.ncbi_metazoa.reference_dir, config_root
+                )
+            }
+        )
+        return registry.model_copy(update={"busco": busco, "ncbi_metazoa": ncbi})
 
     @staticmethod
     def _load_packages(raw: ConfigMapping) -> dict[str, PackageSpec]:
@@ -309,6 +465,25 @@ class EnvResolver:
             conda_prefix=self._fallback_prefix,
             source="default",
         )
+
+    def resolve_busco_lineage(self, name: str | None = None) -> BuscoLineageSpec:
+        """Resolve a BUSCO lineage from the typed host registry.
+
+        A missing registry is intentionally an error instead of a fallback to
+        run-config values: database paths belong to the host contract and are
+        frozen before execution.
+        """
+        if self.databases is None:
+            raise ValueError("databases.busco registry is not configured")
+        lineage_name = (
+            name if name is not None else self.databases.busco.default_lineage
+        )
+        try:
+            return self.databases.busco.lineages[lineage_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"databases.busco.lineages has no configured lineage: {lineage_name}"
+            ) from exc
 
     def configured_method_specs(self) -> list[tuple[str, EnvSpec]]:
         """Return every configured method and its effective environment spec.

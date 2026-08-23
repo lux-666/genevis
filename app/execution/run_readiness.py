@@ -9,13 +9,17 @@ from pathlib import Path
 from typing import Any
 
 from app.configuration import load_descriptor_registry
+from app.execution.database_resolution import (
+    DatabaseResolutionError,
+    validate_review_databases,
+)
 from app.execution.env_resolver import (
     EnvResolver,
     EnvSpec,
     package_preflight,
     preflight,
 )
-from app.schemas.run_config import RunConfig, infer_assembly_method
+from app.schemas.run_config import RunConfig
 
 
 class RunReadinessError(ValueError):
@@ -39,6 +43,18 @@ def _fixed_local_methods() -> dict[str, tuple[str, ...]]:
         "hic_scaffolding": tuple(registry.by_stage.get("hic_scaffolding", ())),
         "t2t": tuple(registry.by_stage.get("t2t", ())),
     }
+
+
+def assembly_candidate_method_scope() -> tuple[str, ...]:
+    """Return every registry Assembly candidate available for deferred runs.
+
+    This is a dependency-capture scope, not an execution or readiness scope.
+    In particular, callers must not interpret it as consent to preflight or
+    execute every candidate.
+    """
+
+    registry = load_descriptor_registry()
+    return tuple(registry.by_stage.get("assembly", ()))
 
 
 _NON_EXECUTABLE_METHODS = {"read_qc.length_filter.skip"}
@@ -80,23 +96,12 @@ def effective_method_closure(
                 if run_config.read_qc is not None
                 else None
             )
-            if (
-                length_filter is not None
-                and length_filter.approved
-                and length_filter.method != "skip"
-            ):
-                add(stage, length_filter.method)
+            if length_filter is not None and length_filter.approved:
+                add(stage, length_filter.selected_method())
         elif stage == "assembly":
-            method = (
-                infer_assembly_method(run_config.assembly)
-                if run_config.assembly
-                else None
-            )
-            if method is None:
-                raise RunReadinessError(
-                    "local Assembly readiness requires one selected assembler"
-                )
-            add(stage, f"assembly.candidate.{method}")
+            # Assembly candidates are captured at freeze time, but none is
+            # startup-preflighted as the selected method before recommendation.
+            pass
 
         if stage not in fixed_local_methods and stage not in {"read_qc", "assembly"}:
             for method_name in explicitly_selected.get(stage, ()):
@@ -144,6 +149,10 @@ def preflight_run_readiness(
         raise RunReadinessError(
             f"dependency configuration is not ready: {exc}"
         ) from exc
+    try:
+        review_database_projection = validate_review_databases(run_config, resolver)
+    except DatabaseResolutionError as exc:
+        raise RunReadinessError(f"database readiness failed: {exc}") from exc
     for method_name in methods:
         stage = method_name.split(".", 1)[0]
         try:
@@ -171,6 +180,14 @@ def preflight_run_readiness(
                 run_config,
                 spec=spec,
                 runner=runner,
+                lineage_version=(
+                    str(
+                        review_database_projection.get("busco_parameters", {}).get(
+                            "lineage_version", ""
+                        )
+                    )
+                    or None
+                ),
             )
             if version_failure is not None:
                 failures.append(f"{method_name}: {version_failure}")
@@ -200,16 +217,14 @@ def _busco_version_failure(
     *,
     spec: EnvSpec,
     runner: Callable[..., Any] | None,
+    lineage_version: str | None = None,
 ) -> str | None:
     """Return a run-specific BUSCO compatibility failure, if any."""
 
     from app.configuration import load_descriptor_registry
 
-    review = run_config.assembly_review
-    if review is None:
-        return "assembly_review.busco configuration is missing"
     descriptor = load_descriptor_registry().packages["busco"]
-    selector = f"lineage_version={review.busco.lineage_version}"
+    selector = f"lineage_version={lineage_version or 'unknown'}"
     constraints = [descriptor.version_constraint]
     conditional = descriptor.conditional_version_constraints.get(selector)
     if conditional is not None:

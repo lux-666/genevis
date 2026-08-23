@@ -106,11 +106,13 @@ bash scripts/server_check.sh
 bash scripts/server_test.sh
 ```
 
-`config/envs.yaml.example` 是提交到 Git 的通用种子；bootstrap 生成或更新的
+`docs/examples/envs.yaml.example` 是提交到 Git 的通用种子；bootstrap 生成或更新的
 `config/envs.yaml` 是被忽略的本机配置，不再作为仓库共享配置提交。
-`server_check.sh` 检查 orchestrator 前置条件和权威 contig 模板选中的
-工具/package closure；真实
-`gene-agent run` 还会检查输入、LLM 和 BUSCO lineage。`server_test.sh` 只做代码回归、
+`server_check.sh` 检查 orchestrator 前置条件和权威 contig 模板中固定 stage 的
+工具/package closure，以及主机配置中 BUSCO/NCBI 数据库的结构与完整性；Assembly
+方法会在上游证据产生后于 stage 内推荐，并从冻结的环境快照检查所选候选。真实
+`gene-agent run` 还会检查输入和 LLM。
+`server_test.sh` 只做代码回归、
 compile 和 diff 检查，不是真实数据生信 smoke test。
 
 ### 3. Copy the authoritative templates
@@ -120,9 +122,13 @@ cp docs/examples/contig_manifest.template.yaml /server/path/manifest.yaml
 cp docs/examples/contig_run_config.template.json /server/path/run_config.json
 ```
 
-替换 manifest 中的 session/sample、基因组大小和 reads 路径，并在 RunConfig 中填写
-真实 BUSCO lineage。当前 contig 模板选择 Flye；如果更换 assembler，必须同步安装并
-检查该方法派生出的完整工具 closure，不能只改方法名。
+替换 manifest 中的 session/sample、基因组大小、reads 路径和平台；权威 RunConfig
+模板不重复这些 manifest 事实。主机工具以及 BUSCO/NCBI
+数据库实体只在 `config/envs.yaml` 配置一次；RunConfig 对 BUSCO 至多填写
+`assembly_review.busco.lineage` 逻辑别名与执行参数（如 `threads`），不允许填写
+数据库路径、版本或来源。
+contig 模板也不预填 assembler 或 Assembly 参数：Assembly 会在 QC/survey 结果可用后
+推荐方法，再推荐参数。
 
 不要把真实输入路径、样本信息、BUSCO 数据、`.env` 或运行目录提交到 Git。
 
