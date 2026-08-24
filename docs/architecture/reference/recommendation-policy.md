@@ -26,8 +26,13 @@
 
 Each value is either `"advisor"` or `"deterministic_baseline"`. The modes are
 independent so an experiment can ablate one advisory boundary without changing
-the other. There is no generic enabled boolean and no policy that can bypass a
-human gate.
+the other. There is no generic enabled boolean.
+
+A policy may replace the *proposal source* for the two named advisors. It does
+not bypass the method/route human confirmation gate in advisor mode, and it does
+not bypass parameter approval in advisor mode. A deterministic parameter
+baseline records its own immutable policy decision and approved attempt; that is
+a distinct policy path, not an approval-gate bypass.
 
 ## Draft and freeze boundary
 
@@ -62,16 +67,29 @@ request, raw response, sparse mapping, approval gate, and approved attempt.
 
 `deterministic_baseline` builds an empty-L2 schema-3 baseline from the same
 validated facts, catalog, context, and dependency refs. It records a policy
-summary, creates an approved initial attempt without model request/response
-evidence, and lets execution resolve L0/L1 values only. Execution adapters use
-the baseline resolver and must not apply an L2 mapping in this mode. Retry is
-not supported by the initial baseline policy; a retry request fails closed
-rather than silently switching to advisor mode.
+summary, persists the exact request it would have sent plus explicit
+policy-owned response and parse records, and creates a hash-bound approved
+initial attempt with an automatic policy decision through the same schema-3
+manifest boundary. The decision metadata uses `source="policy"` and a complete
+automatic-resolution audit, so it is distinguishable from a foreground
+countdown. Execution adapters use the baseline resolver and must not apply an
+L2 mapping in this mode. Retry is not supported by the initial baseline policy;
+a retry request fails closed rather than silently switching to advisor mode.
 
 ## Readiness and evidence
 
-Readiness follows the frozen policy. A method/route baseline does not require
-the Assembly method LLM endpoint; an advisor run does. A parameter baseline
-does not invoke the parameter model. The Assembly cursor persists both policy
-modes, and downstream evidence records the decision source rather than relying
-on absent artifacts.
+Readiness follows the frozen policy. When both Assembly advisors use baselines,
+the run no longer requires the Assembly LLM endpoint before freeze; any Hi-C or
+T2T advisor still does. The Assembly cursor persists both policy modes, and the
+parameter baseline marks every skipped-model record explicitly rather than
+relying on absent artifacts.
+
+In advisor mode, the method-advisor request payload carries an explicit
+`evidence_status` map. Fields paired with `"unavailable"` upstream evidence are
+null and must not be inferred or treated as observations; the prompt rule
+requires `insufficient_data` unless available evidence supports one route. The
+model cannot recover a masked field by guessing, and a response that names a
+method without sufficient route/read-type compatibility fails closed at
+validation. See
+[Run data](data-contract.md#101-assembly-method-recommendation) for the durable
+placement of that status.

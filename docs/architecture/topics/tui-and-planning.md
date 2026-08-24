@@ -86,9 +86,11 @@ recommendation does not become validation policy.
 
 `selected_stage_occurrences` is the one editable draft sequence. Duplicate
 stages remain distinct operator choices, each with its own local-process consent.
-Method identity and parameters are not user-authored stage fields in the public
-draft and do not imply consent. Confirmation compiles the draft through the
-same canonical occurrence/freeze contract used by structured runs. Runtime
+Method identity and parameters are not user-authored or interactively collected
+draft fields. The TUI may edit only occurrence order, local-execution consent,
+and confirmation. Confirmation compiles the draft through the same canonical
+occurrence/freeze contract used by structured runs; missing required facts fail
+closed at that boundary instead of becoming a parameter prompt. Runtime
 recommendations that require upstream evidence remain deferred. If the planning
 model fails or returns an invalid draft, the planning attempt stops and the
 durable draft remains resumable; the TUI does not invent a deterministic
@@ -134,9 +136,10 @@ resolves from the snapshot rather than later edits to `config/envs.yaml`.
 Whole-run freeze does not generate every future method command. Planning-time
 shared-fact collection is derived from the declared deferred-Assembly scope:
 a local Assembly occurrence requires a normalized `read_type` when available,
-and requires an explicit genome size only when no prior local Genome Survey can
-supply it. Each selected stage later creates the narrower method-attempt freeze
-described in [Method execution](execution.md).
+and requires either a manifest genome-size prior or a prior local Genome Survey;
+otherwise planning and freeze validation fail closed. Each selected stage later
+creates the narrower method-attempt freeze described in
+[Method execution](execution.md).
 
 The mutable draft also carries the two independent recommendation modes defined
 by the [recommendation-policy contract](../reference/recommendation-policy.md).

@@ -12,14 +12,10 @@ from app.entrypoints.ask_interactive import (
     _draft_attention_items,
     _edit_draft_stage,
     _group_missing_fields_by_scope,
-    _parse_genome_size,
-    _prompt_parameter_values,
     _prompt_stage_selection,
-    _prompt_text_value,
     _render_confirm,
     _render_draft_review,
     _render_plan_summary,
-    _UserAbort,
 )
 from app.entrypoints.ask_planner import (
     build_initial_plan_draft,
@@ -292,28 +288,6 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertIn("read_type: ont_raw", rendered)
         self.assertIn("estimated_genome_size: 500000000", rendered)
 
-    def test_parameter_prompt_maps_flye_read_type_alias(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"shared_defaults": {}},
-            required_fields=["shared_parameters.read_type"],
-            response_schema={},
-            next_action={},
-        )
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch("builtins.input", return_value="nano-raw"),
-        ):
-            response = _prompt_parameter_values(req, _base_plan())
-
-        self.assertIsNotNone(response.shared_parameters)
-        self.assertEqual(response.shared_parameters.read_type, "ont_raw")
-
     def test_parameter_prompt_does_not_collect_autohic_inputs(self):
         plan = _base_plan(
             stage_names=["hic_scaffolding"],
@@ -339,14 +313,10 @@ class InteractiveLoopTests(unittest.TestCase):
         with (
             patch("builtins.input", side_effect=["m", "b"]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
-            patch(
-                "app.entrypoints.ask_interactive._edit_stage_methods"
-            ) as edit_methods,
         ):
             updated = _edit_draft_stage(plan, 0)
 
         self.assertEqual(updated, plan)
-        edit_methods.assert_not_called()
         rendered = stdout.getvalue()
         self.assertNotIn("m      change method", rendered)
         self.assertNotIn("methods:", rendered)
@@ -371,111 +341,13 @@ class InteractiveLoopTests(unittest.TestCase):
         with (
             patch("builtins.input", side_effect=["m", "b"]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
-            patch(
-                "app.entrypoints.ask_interactive._edit_stage_methods"
-            ) as edit_methods,
         ):
             updated = _edit_draft_stage(plan, 0)
 
         self.assertEqual(updated, plan)
-        edit_methods.assert_not_called()
         rendered = stdout.getvalue()
         self.assertNotIn("m      change method", rendered)
         self.assertIn("fixed QUAST and BUSCO pipeline", rendered)
-
-    def test_parameter_prompt_accepts_platform_default(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"shared_defaults": {"platform": "unknown"}},
-            required_fields=["shared_parameters.platform"],
-            response_schema={},
-            next_action={},
-        )
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch("builtins.input", return_value="ont"),
-        ):
-            response = _prompt_parameter_values(req, _base_plan())
-
-        self.assertIsNotNone(response.shared_parameters)
-        self.assertEqual(response.shared_parameters.platform, "ont")
-
-    def test_parameter_prompt_accepts_platform_number(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"shared_defaults": {"platform": "unknown"}},
-            required_fields=["shared_parameters.platform"],
-            response_schema={},
-            next_action={},
-        )
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch("builtins.input", return_value="2"),
-        ):
-            response = _prompt_parameter_values(req, _base_plan())
-
-        self.assertIsNotNone(response.shared_parameters)
-        self.assertEqual(response.shared_parameters.platform, "ont")
-
-    def test_parameter_prompt_derives_read_type_from_platform(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"shared_defaults": {"platform": "unknown"}},
-            required_fields=[
-                "shared_parameters.platform",
-                "shared_parameters.read_type",
-            ],
-            response_schema={},
-            next_action={},
-        )
-        inputs = iter(["1"])
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch("builtins.input", side_effect=lambda _: next(inputs)),
-        ):
-            response = _prompt_parameter_values(req, _base_plan())
-
-        self.assertIsNotNone(response.shared_parameters)
-        self.assertEqual(response.shared_parameters.platform, "cycloneseq")
-        self.assertEqual(response.shared_parameters.read_type, "cyclone")
-
-    def test_parameter_prompt_retries_invalid_shared_read_type(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"shared_defaults": {}},
-            required_fields=["shared_parameters.read_type"],
-            response_schema={},
-            next_action={},
-        )
-        inputs = iter(["nano-old", "pacbio-hifi"])
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch("builtins.input", side_effect=lambda _: next(inputs)),
-        ):
-            response = _prompt_parameter_values(req, _base_plan())
-
-        self.assertIsNotNone(response.shared_parameters)
-        self.assertEqual(response.shared_parameters.read_type, "pacbio_hifi")
 
     def test_edit_draft_stage_returns_after_repeated_invalid_actions(self):
         plan = _base_plan(
@@ -489,23 +361,6 @@ class InteractiveLoopTests(unittest.TestCase):
         ):
             updated = _edit_draft_stage(plan, 0)
         self.assertEqual(updated, plan)
-
-    def test_required_text_value_reprompts_then_aborts_on_empty_input(self):
-        inputs = iter(["", "", ""])
-        with (
-            patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
-            patch("builtins.input", side_effect=lambda _: next(inputs)),
-        ):
-            with self.assertRaises(_UserAbort):
-                _prompt_text_value("required field", None, required=True)
-
-
-class ValueParsingTests(unittest.TestCase):
-    def test_parse_genome_size_suffixes(self):
-        self.assertEqual(_parse_genome_size("500m"), 500_000_000)
-        self.assertEqual(_parse_genome_size("2.5g"), 2_500_000_000)
-        self.assertEqual(_parse_genome_size("100k"), 100_000)
-        self.assertEqual(_parse_genome_size("1234"), 1234)
 
 
 class PlannerClarificationTests(unittest.TestCase):
@@ -734,7 +589,13 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn("Route Selection: deferred", rendered)
             self.assertNotIn("[flye] threads:", rendered)
             self.assertNotIn("catalog L2: asm_coverage, min_overlap", rendered)
-            self.assertNotIn("Needs attention:", rendered)
+            self.assertIn("Needs attention:", rendered)
+            self.assertIn(
+                "run config is not ready: deferred Assembly requires "
+                "input_manifest.genome_size_estimate or a prior locally "
+                "executed Genome Survey occurrence",
+                rendered,
+            )
 
     def test_plan_summary_exposes_generic_deferred_human_gate_contract(self):
         plan = _base_plan(
@@ -911,8 +772,14 @@ class PlanPreviewRenderTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             attention = _draft_attention_items(draft, build_run_plan_summary(draft))
-            self.assertNotIn(
-                ("assembly", "estimated_genome_size is missing"), attention
+            self.assertIn(
+                (
+                    "assembly",
+                    "run config is not ready: deferred Assembly requires "
+                    "input_manifest.genome_size_estimate or a prior locally "
+                    "executed Genome Survey occurrence",
+                ),
+                attention,
             )
             self.assertNotIn(("assembly", "platform must be confirmed"), attention)
             self.assertNotIn(("assembly", "threads must be confirmed"), attention)

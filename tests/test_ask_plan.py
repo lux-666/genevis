@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SEQKIT,
     READ_QC_FILTER_SKIP,
@@ -99,10 +101,6 @@ class AskPlanSchemaTests(unittest.TestCase):
             "confirm",
         )
         self.assertEqual(build_run_config_payload(updated)["requested_stages"], [])
-
-    def test_method_selection_requires_selected_methods(self):
-        with self.assertRaisesRegex(ValueError, "selected_methods"):
-            AskClarificationResponse(kind="method_selection")
 
     def test_parameter_values_requires_parameter_payload(self):
         with self.assertRaisesRegex(
@@ -567,14 +565,14 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
             stage_names=["assembly_review"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "parameter_values")
+        self.assertEqual(result.kind, "confirm")
         self.assertFalse(any("lineage_" in field for field in result.required_fields))
         self.assertNotIn("methods_by_stage", result.choices)
 
-    def test_assembly_review_rejects_removing_busco(self):
+    def test_assembly_review_rejects_removed_method_selection_kind(self):
         plan = _base_plan(stage_names=["assembly_review"])
 
-        with self.assertRaisesRegex(ValueError, "BUSCO cannot be removed"):
+        with self.assertRaises(ValidationError):
             merge_clarification_response(
                 plan,
                 AskClarificationResponse(
@@ -598,86 +596,6 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "confirm")
-
-    def test_empty_method_name_rejected(self):
-        plan = _base_plan(
-            stage_names=["read_qc", "assembly"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection", selected_methods={"assembly": ""}
-        )
-        with self.assertRaisesRegex(ValueError, "empty method name"):
-            merge_clarification_response(plan, response)
-
-    def test_unknown_method_name_rejected(self):
-        plan = _base_plan(
-            stage_names=["read_qc", "assembly"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={"assembly": "assembly.candidate.unknown"},
-        )
-        with self.assertRaisesRegex(ValueError, "unknown method"):
-            merge_clarification_response(plan, response)
-
-    def test_method_name_must_belong_to_selected_stage(self):
-        plan = _base_plan(
-            stage_names=["genome_survey"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={"genome_survey": "assembly_review.eval.quast"},
-        )
-        with self.assertRaisesRegex(ValueError, "method is not valid"):
-            merge_clarification_response(plan, response)
-
-    def test_genome_survey_rejects_partial_executable_selection(self):
-        plan = _base_plan(
-            stage_names=["genome_survey"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={"genome_survey": ["genome_survey.kmer_count.jellyfish"]},
-        )
-        with self.assertRaisesRegex(ValueError, "requires both"):
-            merge_clarification_response(plan, response)
-
-    def test_read_qc_rejects_multiple_filter_choices(self):
-        plan = _base_plan(
-            stage_names=["read_qc"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={
-                "read_qc": [
-                    READ_QC_STATS_METHOD,
-                    READ_QC_FILTER_SKIP,
-                    "read_qc.length_filter.seqkit_seq",
-                ]
-            },
-        )
-        with self.assertRaisesRegex(ValueError, "exactly one length filter"):
-            merge_clarification_response(plan, response)
-
-
-class AskPlannerParameterTests(unittest.TestCase):
-    def test_flye_requests_shared_facts_without_requesting_threads(self):
-        plan = _base_plan(
-            stage_names=["read_qc", "assembly"],
-            selected_methods={
-                "read_qc": _read_qc_default_methods(),
-                "assembly": "assembly.candidate.flye",
-            },
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "parameter_values")
-        self.assertTrue(any("read_type" in f for f in result.required_fields))
-        self.assertTrue(
-            any("estimated_genome_size" in f for f in result.required_fields)
-        )
-        self.assertFalse(
-            any(field.endswith(".threads") for field in result.required_fields)
-        )
 
     def test_raw_short_read_executable_survey_defers_genome_size(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -713,12 +631,7 @@ class AskPlannerParameterTests(unittest.TestCase):
         self.assertFalse(
             any("estimated_genome_size" in field for field in result.required_fields)
         )
-        self.assertEqual(
-            result.choices["deferred_shared_parameters"]["estimated_genome_size"][
-                "status"
-            ],
-            "awaiting_genome_survey",
-        )
+        self.assertEqual(result.kind, "confirm")
 
     def test_clean_short_read_executable_survey_defers_genome_size(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -754,12 +667,7 @@ class AskPlannerParameterTests(unittest.TestCase):
         self.assertFalse(
             any("estimated_genome_size" in field for field in result.required_fields)
         )
-        self.assertEqual(
-            result.choices["deferred_shared_parameters"]["estimated_genome_size"][
-                "status"
-            ],
-            "awaiting_genome_survey",
-        )
+        self.assertEqual(result.kind, "confirm")
 
     def test_long_read_executable_survey_defers_genome_size(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -790,14 +698,9 @@ class AskPlannerParameterTests(unittest.TestCase):
         self.assertFalse(
             any("estimated_genome_size" in field for field in result.required_fields)
         )
-        self.assertEqual(
-            result.choices["deferred_shared_parameters"]["estimated_genome_size"][
-                "status"
-            ],
-            "awaiting_genome_survey",
-        )
+        self.assertEqual(result.kind, "confirm")
 
-    def test_unexecuted_survey_still_requires_genome_size(self):
+    def test_unexecuted_survey_fails_run_config_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             long_reads = Path(tmp) / "long.fq"
             short_reads = Path(tmp) / "short.fq"
@@ -828,12 +731,16 @@ class AskPlannerParameterTests(unittest.TestCase):
 
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
 
-        self.assertTrue(
+        self.assertFalse(
             any("estimated_genome_size" in field for field in result.required_fields)
         )
         self.assertNotIn("deferred_shared_parameters", result.choices)
+        with self.assertRaisesRegex(
+            ValueError, "assembly method selection is deferred"
+        ):
+            build_run_config_payload(plan.model_copy(update={"confirmed": True}))
 
-    def test_nonlocal_prior_survey_does_not_authorize_genome_size_defer(self):
+    def test_nonlocal_prior_survey_fails_run_config_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             long_reads = Path(tmp) / "long.fq"
             long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -872,12 +779,16 @@ class AskPlannerParameterTests(unittest.TestCase):
 
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
 
-        self.assertTrue(
+        self.assertFalse(
             any("estimated_genome_size" in field for field in result.required_fields)
         )
         self.assertNotIn("deferred_shared_parameters", result.choices)
+        with self.assertRaisesRegex(
+            ValueError, "assembly method selection is deferred"
+        ):
+            build_run_config_payload(plan.model_copy(update={"confirmed": True}))
 
-    def test_manifest_platform_infers_defaults_shows_parameter_step(self):
+    def test_manifest_platform_infers_defaults_without_parameter_step(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -897,17 +808,10 @@ class AskPlannerParameterTests(unittest.TestCase):
                     "assembly": "assembly.candidate.flye",
                 },
             )
-            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "parameter_values")
-        defaults = result.choices.get("defaults", {})
-        shared_defaults = result.choices.get("shared_defaults", {})
-        flye_defaults = defaults.get("assembly.candidate.flye", {})
-        self.assertIn("shared_parameters.platform", result.required_fields)
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "confirm")
         self.assertNotIn("shared_parameters.read_type", result.required_fields)
-        self.assertEqual(shared_defaults.get("platform"), "cycloneseq")
-        self.assertEqual(shared_defaults.get("read_type"), "cyclone")
-        self.assertEqual(shared_defaults.get("estimated_genome_size"), 2_000_000)
-        self.assertEqual(flye_defaults, {})
+        self.assertEqual(result.required_fields, ["confirmed"])
 
     def test_unknown_manifest_platform_is_exposed_as_optional_shared_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -932,12 +836,10 @@ class AskPlannerParameterTests(unittest.TestCase):
 
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
 
-            self.assertEqual(result.kind, "parameter_values")
-            self.assertIn("shared_parameters.platform", result.required_fields)
+            self.assertEqual(result.kind, "confirm")
             self.assertNotIn("shared_parameters.read_type", result.required_fields)
-            self.assertEqual(result.choices["shared_defaults"]["platform"], "unknown")
 
-    def test_confirmed_unknown_platform_falls_back_to_read_type_prompt(self):
+    def test_unknown_platform_does_not_fall_back_to_read_type_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -964,8 +866,8 @@ class AskPlannerParameterTests(unittest.TestCase):
 
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
 
-            self.assertEqual(result.kind, "parameter_values")
-            self.assertIn("shared_parameters.read_type", result.required_fields)
+            self.assertEqual(result.kind, "confirm")
+            self.assertNotIn("shared_parameters", result.choices or {})
 
     def test_parameter_response_derives_read_type_from_platform(self):
         plan = _base_plan(
@@ -1004,16 +906,7 @@ class AskPlannerParameterTests(unittest.TestCase):
 
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
 
-        self.assertEqual(result.kind, "parameter_values")
-        self.assertIn(
-            "genome_survey.kmer_count.jellyfish.kmer_size", result.required_fields
-        )
-        self.assertIn(
-            "genome_survey.kmer_count.jellyfish.hash_size", result.required_fields
-        )
-        self.assertIn(
-            "genome_survey.kmer_count.jellyfish.threads", result.required_fields
-        )
+        self.assertEqual(result.kind, "confirm")
         self.assertFalse(
             any(field.endswith(".read_length") for field in result.required_fields)
         )
@@ -1045,11 +938,7 @@ class AskPlannerParameterTests(unittest.TestCase):
                 },
             )
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-            self.assertEqual(result.kind, "parameter_values")
-            self.assertIn("warnings", result.choices)
-            self.assertTrue(
-                any("genome_size conflict" in w for w in result.choices["warnings"])
-            )
+            self.assertEqual(result.kind, "confirm")
 
 
 class AskPlannerConfirmTests(unittest.TestCase):
@@ -1477,20 +1366,16 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
 
 class AskPlannerBuscoFlowTests(unittest.TestCase):
-    def test_review_pipeline_is_fixed_before_parameter_collection(self):
+    def test_review_pipeline_is_fixed_before_confirmation(self):
         plan = _base_plan(
             stage_names=["assembly_review"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "parameter_values")
+        self.assertEqual(result.kind, "confirm")
         self.assertNotIn("methods_by_stage", result.choices)
-        self.assertIn(
-            "assembly_review.eval.quast.threads",
-            result.required_fields,
-        )
         self.assertFalse(any("lineage_" in field for field in result.required_fields))
 
-    def test_busco_parameter_clarification_never_asks_for_database_fields(self):
+    def test_busco_confirmation_never_asks_for_database_fields(self):
         plan = _base_plan(
             stage_names=["assembly_review"],
             selected_methods={
@@ -1501,7 +1386,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
             },
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "parameter_values")
+        self.assertEqual(result.kind, "confirm")
         self.assertFalse(any("lineage_" in field for field in result.required_fields))
 
     def test_missing_busco_database_fields_do_not_block_confirmation(self):
@@ -1515,7 +1400,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
             },
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "parameter_values")
+        self.assertEqual(result.kind, "confirm")
         self.assertFalse(any("lineage_" in field for field in result.required_fields))
 
     def test_build_run_config_payload_with_busco_after_auto_fill(self):

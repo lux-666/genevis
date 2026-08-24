@@ -326,8 +326,8 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
             {
                 "schema_version": 3,
                 "prompt_bundle_id": parameter_prompt_bundle_name(catalog.method_id),
-                "prompt_template_sha256": parameter_prompt_bundle_hash(
-                    catalog.method_id
+                "prompt_template_sha256": (
+                    parameter_prompt_bundle_hash(catalog.method_id)
                 ),
                 "parameter_request_schema_version": 3,
                 "messages": messages,
@@ -587,7 +587,12 @@ def _baseline_assembly_parameters(
         "retry_after_review_failure",
     ],
 ) -> StateUpdate:
-    """Create an approved, empty-L2 baseline attempt without model evidence."""
+    """Create a policy-owned empty-L2 baseline attempt without a model call.
+
+    The deterministic policy still persists the exact request it would have
+    sent, then records explicit policy response/parse records. This keeps the
+    strict schema-3 loader intact while making the skipped call auditable.
+    """
 
     del assembly_out, method_name
     try:
@@ -620,6 +625,58 @@ def _baseline_assembly_parameters(
             basis_snapshot,
             artifact_type=ASSEMBLY_PARAMETER_BASIS,
             method_name="assembly.parameter_recommender",
+        )
+        request_dto = build_parameter_request_dto(
+            method_id=catalog.method_id,
+            catalog=catalog,
+            facts=facts,
+            context=context,
+            task=task,
+            basis_snapshot=basis_snapshot,
+        )
+        messages = render_assembly_parameter_messages(request_dto)
+        model_request_ref = write_artifact(
+            state,
+            recommendation_id,
+            "model_request.json",
+            {
+                "schema_version": 3,
+                "prompt_bundle_id": parameter_prompt_bundle_name(catalog.method_id),
+                "prompt_template_sha256": parameter_prompt_bundle_hash(
+                    catalog.method_id
+                ),
+                "parameter_request_schema_version": 3,
+                "messages": messages,
+                "policy_skipped_model": True,
+            },
+            artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
+            method_name="assembly.parameter_recommender",
+        )
+        model_response_ref = write_artifact(
+            state,
+            recommendation_id,
+            "model_response.json",
+            {
+                "schema_version": 2,
+                "raw_response": "",
+                "validity": "parsed",
+                "error": None,
+                "model_id": "deterministic_baseline_policy",
+            },
+            artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+            method_name="assembly.parameter_recommender",
+        )
+        response_parse_ref = write_artifact(
+            state,
+            recommendation_id,
+            "response_parse.json",
+            {
+                "schema_version": 1,
+                "parsed": True,
+                "error": None,
+            },
+            artifact_type=ASSEMBLY_PARAMETER_RESPONSE_PARSE,
+            method_name="assembly.parameter_response_parser",
         )
         recommendation_ref = write_artifact(
             state,
@@ -662,15 +719,16 @@ def _baseline_assembly_parameters(
             refs=ParameterRecommendationManifestRefsV3(
                 input_snapshot_ref=input_snapshot_ref,
                 basis_snapshot_ref=basis_ref,
-                model_request_ref=input_snapshot_ref,
-                model_response_ref=input_snapshot_ref,
-                response_parse_ref=input_snapshot_ref,
+                model_request_ref=model_request_ref,
+                model_response_ref=model_response_ref,
+                response_parse_ref=response_parse_ref,
                 recommendation_ref=recommendation_ref,
             ),
             summary={
                 "response_parsed": True,
                 "policy": "deterministic_baseline",
                 "policy_skipped_model": True,
+                "policy_decision_source": "deterministic_baseline",
             },
         )
         manifest_ref = write_artifact(
@@ -680,6 +738,74 @@ def _baseline_assembly_parameters(
             manifest.model_dump(mode="json"),
             artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
             method_name="assembly.parameter_recommender",
+        )
+        bindings = {
+            "attempt_id": recommendation_id,
+            "task": task,
+            "previous_attempt_id": (
+                previous_attempt.get("attempt_id") if previous_attempt else None
+            ),
+            "recommendation_hash": manifest_ref.sha256,
+        }
+        persisted_request = persist_review_request(
+            state,
+            stage="assembly",
+            gate_id="parameter_approval",
+            reason="assembly_parameter_approval_required",
+            payload={
+                "schema_version": 2,
+                "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
+                "recommendation_manifest_hash": manifest_ref.sha256,
+                "method_id": catalog.method_id,
+                "task": task,
+                "parameters": {},
+                "rationale": (
+                    "Deterministic baseline: parameter advisor disabled; "
+                    "empty L2 mapping."
+                ),
+                "response_parse_ref": response_parse_ref.model_dump(mode="json"),
+                "recommendation_ref": recommendation_ref.model_dump(mode="json"),
+                "failure_signal_ref": (
+                    previous_attempt.get("execution_ref") if previous_attempt else None
+                ),
+                "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                "auto_decidable": False,
+            },
+            method_name="assembly.parameter_approval",
+            artifact_type="assembly.parameter_approval.request",
+            bindings=bindings,
+        )
+        decision_ref = persist_parameter_approval_decision(
+            state,
+            stage="assembly",
+            request_id=persisted_request.review_request_id,
+            request_ref=persisted_request.request_ref,
+            request=ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly",
+                gate_id="parameter_approval",
+                review_request_id=persisted_request.review_request_id,
+                review_request_hash=persisted_request.request_hash,
+                decision="approve_parameters",
+                decided_by="auto_rule",
+                notes=["approved by deterministic_baseline policy"],
+                metadata={
+                    **bindings,
+                    "source": "policy",
+                    "configured_seconds": 0,
+                    "elapsed_seconds": 0,
+                    "automatic_resolution": {
+                        "source": "policy",
+                        "configured_seconds": 0,
+                        "elapsed_seconds": 0.0,
+                        "outcome": "approve_persisted_recommendation",
+                    },
+                },
+                rationale_artifact_ref=recommendation_ref,
+            ),
+            manifest_ref=manifest_ref,
+            method_name="assembly.parameter_approval",
+            artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
         )
         attempt = ParameterAttempt(
             schema_version=3,
@@ -691,7 +817,7 @@ def _baseline_assembly_parameters(
                 previous_attempt.get("attempt_id") if previous_attempt else None
             ),
             recommendation_manifest_ref=manifest_ref,
-            approval_decision_ref=manifest_ref,
+            approval_decision_ref=decision_ref,
             recommendation_contract="parameter_recommendation_v1",
             previous_attempt_seal_hash=(
                 previous_attempt.get("seal_hash") if previous_attempt else None
@@ -710,6 +836,23 @@ def _baseline_assembly_parameters(
             else []
         )
         attempts.append(attempt.model_dump(mode="json"))
+        cursor = ParameterRecommendationCursor(
+            schema_version=3,
+            recommendation_id=recommendation_id,
+            method_id=catalog.method_id,
+            task=task,
+            status="approved",
+            previous_attempt_id=(
+                previous_attempt.get("attempt_id") if previous_attempt else None
+            ),
+            manifest_ref=manifest_ref,
+            recommendation_hash=manifest_ref.sha256,
+            review_request_id=persisted_request.review_request_id,
+            review_request_ref=persisted_request.request_ref,
+            previous_attempt_seal_hash=(
+                previous_attempt.get("seal_hash") if previous_attempt else None
+            ),
+        )
         return update_assembly_stage_output(
             state,
             {
@@ -717,15 +860,7 @@ def _baseline_assembly_parameters(
                 "current_parameter_attempt_id": recommendation_id,
                 "parameter_attempts": attempts,
                 "parameter_recommendation_mode": "deterministic_baseline",
-                "current_parameter_recommendation": {
-                    "schema_version": 3,
-                    "recommendation_id": recommendation_id,
-                    "method_id": catalog.method_id,
-                    "task": task,
-                    "status": "approved",
-                    "manifest_ref": manifest_ref.model_dump(mode="json"),
-                    "recommendation_hash": manifest_ref.sha256,
-                },
+                "current_parameter_recommendation": cursor.model_dump(mode="json"),
             },
         )
     except (

@@ -203,6 +203,13 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
+                ),
+                encoding="utf-8",
+            )
             run_config.write_text(
                 json.dumps(
                     {
@@ -351,6 +358,20 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, _ = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
+                ),
+                encoding="utf-8",
+            )
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
+                ),
+                encoding="utf-8",
+            )
             run_config.write_text(
                 json.dumps(
                     {
@@ -765,6 +786,13 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, _ = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
+                ),
+                encoding="utf-8",
+            )
             run_config.write_text(
                 json.dumps(
                     _with_busco(
@@ -797,6 +825,13 @@ class FrozenInputTests(unittest.TestCase):
             manifest.write_text(
                 manifest.read_text(encoding="utf-8").replace(
                     "platform: ont", "platform: pacbio_hifi"
+                ),
+                encoding="utf-8",
+            )
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
                 ),
                 encoding="utf-8",
             )
@@ -882,6 +917,13 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
+                ),
+                encoding="utf-8",
+            )
             manifest.write_text(
                 manifest.read_text(encoding="utf-8").replace(
                     "platform: ont",
@@ -1545,6 +1587,13 @@ class FrozenInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "assets:\n",
+                    "genome_size_estimate: 1000\nassets:\n",
+                ),
+                encoding="utf-8",
+            )
             run_config.write_text(
                 json.dumps(
                     {

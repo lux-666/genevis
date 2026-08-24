@@ -126,7 +126,23 @@ def selected_local_method_closure(
 def run_requires_llm(run_config: RunConfig) -> bool:
     """Return whether the confirmed workflow reaches a mandatory LLM boundary."""
 
-    return bool(_LLM_REQUIRED_STAGES.intersection(run_config.requested_stage_names()))
+    required_stages = _LLM_REQUIRED_STAGES.intersection(
+        run_config.requested_stage_names()
+    )
+    if "assembly" in required_stages:
+        assembly = run_config.assembly
+        method_advisor = (
+            assembly.method_route_advisor if assembly is not None else "advisor"
+        )
+        parameter_advisor = (
+            assembly.parameter_advisor if assembly is not None else "advisor"
+        )
+        if (
+            method_advisor == "deterministic_baseline"
+            and parameter_advisor == "deterministic_baseline"
+        ):
+            required_stages = set(required_stages) - {"assembly"}
+    return bool(required_stages)
 
 
 def preflight_run_readiness(

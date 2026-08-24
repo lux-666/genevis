@@ -28,7 +28,6 @@ from app.stages.assembly.command_builder import (
     parameter_sources_payload,
     render_assembly_cli,
     resolve_assembly_parameters,
-    resolve_baseline_assembly_parameters,
 )
 from app.stages.assembly.method_application.hifiasm_outputs import (
     hifiasm_native_output_declarations,
@@ -157,19 +156,15 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
     script = working_dir / "run_hifiasm_ont.sh"
     try:
         catalog = approved_bundle.chain.catalog
-        resolver = (
-            resolve_baseline_assembly_parameters
+        approved_l2 = (
+            {}
             if current_parameter_policy(output) == "deterministic_baseline"
-            else resolve_assembly_parameters
+            else approved_bundle.approved_l2
         )
-        resolved = resolver(
+        resolved = resolve_assembly_parameters(
             catalog=catalog,
             snapshot=approved_bundle.chain.input_snapshot,
-            approved_l2=(
-                {}
-                if resolver is resolve_baseline_assembly_parameters
-                else approved_bundle.approved_l2
-            ),
+            approved_l2=approved_l2,
             l0_executor_values={
                 "assembly_output_prefix": str(prefix),
                 "assembly_input_reads": [str(path) for path in read_paths],

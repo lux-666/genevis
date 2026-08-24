@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, cast
 
 from app.schemas.tui_intake import RecommendationPolicy
 
@@ -367,7 +367,7 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
                     continue
                 response = AskClarificationResponse(kind="confirm", confirmed=True)
             else:
-                response = _prompt_for_answer(clarification, plan)
+                response = _prompt_for_answer(clarification)
 
             plan = merge_clarification_response(plan, response)
             draft = _copy_planner_fields_to_draft(draft, plan, lifecycle="planning")
@@ -427,8 +427,6 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
             "target_assembly_level": (
                 "contig" if degraded else draft.intent.target_assembly_level
             ),
-            "use_ultralong_ont": draft.intent.use_ultralong_ont,
-            "use_hic_phasing": (False if degraded else draft.intent.use_hic_phasing),
         },
         "recommendation_policy": draft.recommendation_policy.model_dump(),
     }
@@ -971,10 +969,15 @@ def _edit_recommendation_policy(draft: Any) -> Any:
         f"{policy.method_route_advisor}（advisor/deterministic_baseline）"
     )
     raw = input("> ").strip().lower() or policy.method_route_advisor
-    method_route_mode: RecommendationMode = (
-        "deterministic_baseline" if raw == "deterministic_baseline" else "advisor"
+    method_route_mode = (
+        cast(
+            RecommendationMode,
+            raw if raw in {"advisor", "deterministic_baseline"} else None,
+        )
+        if raw
+        else policy.method_route_advisor
     )
-    if raw not in {"advisor", "deterministic_baseline"}:
+    if method_route_mode is None:
         print("未修改：method/route advisor 模式无效。")
         method_route_mode = policy.method_route_advisor
     print(
@@ -982,12 +985,17 @@ def _edit_recommendation_policy(draft: Any) -> Any:
         f"{policy.parameter_advisor}（advisor/deterministic_baseline）"
     )
     raw_parameters = input("> ").strip().lower() or policy.parameter_advisor
-    parameter_mode: RecommendationMode = (
-        "deterministic_baseline"
-        if raw_parameters == "deterministic_baseline"
-        else "advisor"
+    parameter_mode = (
+        cast(
+            RecommendationMode,
+            raw_parameters
+            if raw_parameters in {"advisor", "deterministic_baseline"}
+            else None,
+        )
+        if raw_parameters
+        else policy.parameter_advisor
     )
-    if raw_parameters not in {"advisor", "deterministic_baseline"}:
+    if parameter_mode is None:
         print("未修改：parameter advisor 模式无效。")
         parameter_mode = policy.parameter_advisor
     updated = draft.model_copy(
@@ -1232,7 +1240,7 @@ def _parse_goal_with_configured_llm(request_text: str) -> Mapping[str, Any]:
         "Extract only explicit workflow-goal facts. Return one JSON object with "
         "goal_text, optional sample_id/target_species, target_assembly_level "
         "(contig/scaffold/chromosome), requested_stages, and "
-        "explicit use_ultralong_ont/use_hic_phasing booleans. Do not invent paths, "
+        "Do not invent paths, "
         "parameters, methods, or machine capabilities."
     )
     return _invoke_json_model(system, request_text)

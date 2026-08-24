@@ -15,6 +15,7 @@ from app.control.lifecycle import (
     inspect_state,
     normalize_resume_review_request,
 )
+from app.execution.parameter_attempts import current_parameter_attempt
 from app.integrity import sha256_file
 from app.review.application import (
     VerifiedReviewApplication,
@@ -260,6 +261,7 @@ def _state(
                 "rationale": "test",
                 "metadata": {},
             },
+            "parameter_recommendation_mode": "advisor",
         },
     }
     return state
@@ -742,6 +744,37 @@ def test_model_request_is_durable_before_invoke_failure(tmp_path: Path) -> None:
     )
     assert chain.model_response["validity"] == "invalid"
     assert "model unavailable" in chain.model_response["error"]
+
+
+def test_deterministic_baseline_persists_policy_decision_without_model_call(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    assembly = state["stage_outputs"]["assembly"]
+    assembly["parameter_recommendation_mode"] = "deterministic_baseline"
+    state["stage_seeds"] = {"assembly": {"parameter_advisor": "deterministic_baseline"}}
+
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        side_effect=AssertionError("baseline must not call the model"),
+    ):
+        update = recommend_assembly_parameters(state)
+
+    result = update["stage_outputs"]["assembly"]
+    assert result["status"] == "parameters_approved"
+    assert result["parameter_recommendation_mode"] == "deterministic_baseline"
+    cursor = ParameterRecommendationCursor.model_validate(
+        result["current_parameter_recommendation"]
+    )
+    assert cursor.status == "approved"
+    assert cursor.review_request_id is not None
+
+    attempt = current_parameter_attempt(
+        result,
+        method_id="assembly.candidate.hifiasm_ont",
+        label="Hifiasm ONT",
+    )
+    assert attempt.approval_decision_ref is not None
 
 
 def test_stale_checkpoint_reuses_persisted_model_response(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 """Canonical genome-size resolution contract tests."""
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -12,12 +13,16 @@ from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     RecommendationInputSnapshotV3,
 )
-from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import resolve_assembly_parameters
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.inventory.nodes import validate_inputs
-from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
+from app.storage.frozen_inputs import (
+    FrozenInputValidationError,
+    freeze_session_inputs,
+    prepare_session_inputs,
+    validate_frozen_inputs,
+)
 from app.storage.paths import SessionPaths
 
 
@@ -111,19 +116,61 @@ def test_dead_nested_survey_path_is_not_accepted():
     assert resolve_genome_size(state) is None
 
 
-def test_deferred_assembly_accepts_missing_genome_size_at_freeze_boundary():
-    """The eventual method owns genome-size requirements after survey evidence."""
-    config = RunConfig.model_validate(
-        {
-            "requested_stages": [
-                {"stage": "assembly", "allow_local_execution": True},
-            ],
-            "assembly": {"assembly_route": "auto"},
-        }
-    )
+def test_frozen_inputs_reject_unsupportable_deferred_assembly_genome_size():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        reads = root / "reads.fastq"
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        manifest = root / "manifest.yaml"
+        manifest.write_text(
+            "\n".join(
+                [
+                    "session_id: s1",
+                    "genome_size_estimate: 2000000",
+                    "assets:",
+                    "  - asset_type: raw_long_reads",
+                    f"    paths: [{reads}]",
+                    "    platform: ont",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        run_config = root / "run_config.json"
+        run_config.write_text(
+            json.dumps(
+                {
+                    "requested_stages": [
+                        {"stage": "assembly", "allow_local_execution": True}
+                    ],
+                    "assembly": {"assembly_route": "auto"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
-    assert config.assembly is not None
-    assert config.assembly.assembly_route == "auto"
+        prepared = prepare_session_inputs(
+            manifest_draft=manifest,
+            run_config_draft=run_config,
+        )
+
+        assert prepared.manifest.genome_size_estimate == 2_000_000
+
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "genome_size_estimate: 2000000\n", ""
+            )
+        )
+
+        with pytest.raises(
+            FrozenInputValidationError,
+            match="deferred Assembly requires input_manifest.genome_size_estimate",
+        ):
+            prepare_session_inputs(
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+            )
 
 
 @pytest.mark.parametrize(

@@ -225,48 +225,12 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
         requested_stages = []
         target_assembly_level = "contig"
 
-    method_hint = _recognized_assembly_method_hint(text)
-    if "hifiasm" in lower:
-        ont_mode = bool(
-            re.search(
-                r"hifiasm(?:[_ -]?ont)|(?:--ont\b)|hifiasm.{0,12}(?:ont模式|ont mode)",
-                lower,
-            )
-        )
-    else:
-        ont_mode = False
-    use_ultralong_ont = (
-        method_hint == "hifiasm"
-        and not ont_mode
-        and bool(
-            re.search(
-                r"(?:--ul\b|ultra[- ]?long.{0,12}(?:ont|nanopore)|"
-                r"(?:ont|nanopore).{0,12}ultra[- ]?long|超长.{0,8}(?:ont|纳米孔)|"
-                r"(?:ont|纳米孔).{0,8}超长)",
-                lower,
-            )
-        )
-    )
-    use_hic_phasing = (
-        method_hint == "hifiasm"
-        and not ont_mode
-        and (
-            bool(_HIC_PHASING_RE.search(text))
-            and not (
-                bool(_HIC_SCAFFOLDING_ONLY_RE.search(text))
-                and not bool(re.search(r"--h[12]\b", lower))
-            )
-        )
-    )
-
     target_species = _extract_target_species(text)
     return WorkflowIntent(
         goal_text=text,
         target_species=target_species,
         target_assembly_level=target_assembly_level,
         requested_stages=requested_stages,
-        use_ultralong_ont=use_ultralong_ont,
-        use_hic_phasing=use_hic_phasing,
     )
 
 
@@ -332,16 +296,6 @@ def parse_workflow_intent(
             else parsed.target_assembly_level
         ),
         requested_stages=requested_stages,
-        use_ultralong_ont=(
-            fallback.use_ultralong_ont
-            if deterministic_scope_recognized
-            else parsed.use_ultralong_ont
-        ),
-        use_hic_phasing=(
-            fallback.use_hic_phasing
-            if deterministic_scope_recognized
-            else parsed.use_hic_phasing
-        ),
     )
 
 
@@ -353,18 +307,50 @@ def required_roles_for_intent(intent: WorkflowIntent) -> list[IntakeRole]:
         intent.target_assembly_level == "chromosome"
     )
     method_hint = _recognized_assembly_method_hint(intent.goal_text)
+    companion_hints = _companion_read_hints(intent.goal_text)
     roles: list[IntakeRole] = (
         ["hifi_reads"]
-        if method_hint == "hifiasm" or intent.use_ultralong_ont
+        if method_hint == "hifiasm" or companion_hints["use_ultralong_ont"]
         else ["ont_reads"]
     )
-    if method_hint == "hifiasm" and intent.use_ultralong_ont:
+    if method_hint == "hifiasm" and companion_hints["use_ultralong_ont"]:
         roles.append("ont_reads")
     if method_hint == "hifiasm_ont":
         roles = ["ont_reads"]
-    if requires_hic or intent.use_hic_phasing:
+    if requires_hic or companion_hints["use_hic_phasing"]:
         roles.append("hic_reads")
     return list(dict.fromkeys(roles))
+
+
+def _companion_read_hints(goal_text: str) -> dict[str, bool]:
+    """Recognize ultra-long ONT / Hi-C phasing as transient asset hints."""
+
+    lower = goal_text.lower()
+    ont_mode = bool(
+        re.search(
+            r"hifiasm(?:[_ -]?ont)|(?:--ont\b)|hifiasm.{0,12}(?:ont模式|ont mode)",
+            lower,
+        )
+    )
+    use_ultralong_ont = not ont_mode and bool(
+        re.search(
+            r"(?:--ul\b|ultra[- ]?long.{0,12}(?:ont|nanopore)|"
+            r"(?:ont|nanopore).{0,12}ultra[- ]?long|超长.{0,8}(?:ont|纳米孔)|"
+            r"(?:ont|纳米孔).{0,8}超长)",
+            lower,
+        )
+    )
+    use_hic_phasing = not ont_mode and (
+        bool(_HIC_PHASING_RE.search(goal_text))
+        and not (
+            bool(_HIC_SCAFFOLDING_ONLY_RE.search(goal_text))
+            and not bool(re.search(r"--h[12]\b", lower))
+        )
+    )
+    return {
+        "use_ultralong_ont": use_ultralong_ont,
+        "use_hic_phasing": use_hic_phasing,
+    }
 
 
 def no_hic_contig_stage_scope(stages: Sequence[str]) -> list[str]:
@@ -513,7 +499,6 @@ def confirm_no_hic_degradation(
                 draft.intent.requested_stages
             ),
             "target_assembly_level": "contig",
-            "use_hic_phasing": False,
         }
     )
     intake = draft.intake.model_copy(

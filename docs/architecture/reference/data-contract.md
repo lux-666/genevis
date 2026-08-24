@@ -533,6 +533,15 @@ refs plus the compact accepted selection/profile projection; prompt messages,
 raw responses, reasoning bodies, QC/survey evidence, and candidate catalogs
 remain in immutable artifacts.
 
+The request payload carries an explicit `evidence_status` map keyed by
+upstream producer (`read_qc`, `genome_survey`). Each value is either
+`"available"` or `"unavailable"`. A field paired with `"unavailable"`
+evidence is null and must not be treated as an observation; the prompt rule
+directs the model to return `insufficient_data` when available evidence does
+not support one route. This status is derived from completed prior workflow
+steps, not from cursor-field presence: a stale or skipped producer's output is
+masked even if its cursor still contains values.
+
 ### 10.2 Parameter recommendation
 
 [`parameter-recommendation.md`](parameter-recommendation.md) is normative for the

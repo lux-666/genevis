@@ -18,7 +18,6 @@ from app.schemas.warnings import PlanWarning as PlanWarning
 
 AskClarificationKind = Literal[
     "stage_selection",
-    "method_selection",
     "parameter_values",
     "confirm",
 ]
@@ -107,8 +106,6 @@ class AskClarificationResponse(BaseModel):
             raise ValueError(
                 "stage_selection response requires selected_stage_occurrences"
             )
-        if self.kind == "method_selection" and not self.selected_methods:
-            raise ValueError("method_selection response requires selected_methods")
         if self.kind == "parameter_values" and not (
             self.method_parameters or self.shared_parameters or self.stage_parameters
         ):

@@ -122,8 +122,8 @@ class TuiIntakeTests(unittest.TestCase):
         )
 
         self.assertNotIn("requested_assembly_method", intent.model_dump())
-        self.assertTrue(intent.use_ultralong_ont)
-        self.assertTrue(intent.use_hic_phasing)
+        self.assertNotIn("use_ultralong_ont", intent.model_dump())
+        self.assertNotIn("use_hic_phasing", intent.model_dump())
         self.assertEqual(
             draft.intake.requirements,
             ["hifi_reads", "ont_reads", "hic_reads"],
@@ -133,8 +133,8 @@ class TuiIntakeTests(unittest.TestCase):
     def test_hifiasm_ont_goal_collects_only_ont_primary_role(self):
         intent = deterministic_workflow_intent("用 hifiasm-ont --ont 做 assembly")
 
-        self.assertFalse(intent.use_ultralong_ont)
-        self.assertFalse(intent.use_hic_phasing)
+        self.assertNotIn("use_ultralong_ont", intent.model_dump())
+        self.assertNotIn("use_hic_phasing", intent.model_dump())
         self.assertEqual(
             create_tui_session_draft(
                 session_id="s1",
@@ -712,7 +712,7 @@ class TuiIntakeTests(unittest.TestCase):
             confirmed = confirm_no_hic_degradation(no_hic, confirmed=True)
             self.assertIsNone(next_intake_clarification(confirmed))
             self.assertEqual(confirmed.intent.target_assembly_level, "contig")
-            self.assertFalse(confirmed.intent.use_hic_phasing)
+            self.assertNotIn("use_hic_phasing", confirmed.intent.model_dump())
             self.assertNotIn("hic_reads", confirmed.intake.requirements)
             self.assertEqual(
                 confirmed.intent.requested_stages,

@@ -48,11 +48,11 @@ ParameterApprovalDecision = Literal["approve_parameters", "reject_parameters"]
 
 
 class ParameterApprovalAutomaticResolutionV1(BaseModel):
-    """Validated audit facts for one expired foreground countdown."""
+    """Validated audit facts for one automatic persisted-recommendation approval."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    source: Literal["foreground_countdown"]
+    source: Literal["foreground_countdown", "policy"]
     configured_seconds: int = Field(ge=0)
     elapsed_seconds: float = Field(ge=0)
     outcome: Literal["approve_persisted_recommendation"]
@@ -87,7 +87,7 @@ class ParameterApprovalMetadataV1(BaseModel):
     task: ParameterAttemptTask
     previous_attempt_id: int | None = Field(default=None, ge=0)
     recommendation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    source: Literal["foreground_countdown"] | None = None
+    source: Literal["foreground_countdown", "policy"] | None = None
     configured_seconds: int | None = Field(default=None, ge=0)
     elapsed_seconds: float | None = Field(default=None, ge=0)
     automatic_resolution: ParameterApprovalAutomaticResolutionV1 | None = None

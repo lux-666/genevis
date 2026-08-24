@@ -3,21 +3,9 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, TypedDict, cast
 
-from pydantic import ValidationError
-
-from app.domains.assembly.selection import (
-    FLYE_TO_SHARED_READ_TYPE,
-    PLATFORM_TO_SHARED_READ_TYPE,
-    SHARED_TO_METHOD_READ_TYPE,
-)
 from app.entrypoints.ask_planner import (
-    _STAGES_NEEDING_METHOD_SELECTION,
-    READ_QC_FILTER_METHODS,
-    READ_QC_FILTER_SKIP,
-    READ_QC_STATS_METHOD,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
     _default_methods_for_stage,
@@ -33,9 +21,6 @@ from app.schemas.ask_plan import (
     PlanStageOccurrence,
 )
 from app.schemas.run_config import RequestableStage
-from app.schemas.shared_parameters import (
-    SharedParameters,
-)
 
 try:
     import questionary
@@ -68,32 +53,6 @@ _ROLE_LABELS = {
     "executable": "run",
     "dependency": "dep",
 }
-
-_PARAM_HINTS: dict[str, str] = {
-    "assembly_review.eval.busco.threads": "CPU threads for BUSCO",
-    "assembly_review.eval.quast.threads": "CPU threads for QUAST",
-    "assembly.candidate.flye.threads": "CPU threads for Flye assembler",
-    "estimated_genome_size": "e.g. 500m, 2.5g",
-    "platform": "sequencing platform for raw long-read registration",
-    "read_type": "sequencing platform read type",
-    "genome_survey.kmer_count.jellyfish.kmer_size": "k-mer length, typically 21",
-    "genome_survey.kmer_count.jellyfish.hash_size": "hash table size, e.g. 1G",
-    "genome_survey.kmer_count.jellyfish.threads": "CPU threads for jellyfish",
-    "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
-    "t2t.alignment.minimap2.mode": "auto_patch / manual_review / propose_only",
-}
-
-_GENOME_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmg]?)$", re.IGNORECASE)
-_GENOME_SIZE_MULTIPLIERS = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
-_SHARED_PLATFORM_VALUES = (
-    "cycloneseq",
-    "ont",
-    "clr",
-    "pacbio_hifi",
-    "illumina",
-    "unknown",
-)
-_SHARED_READ_TYPE_VALUES = tuple(SHARED_TO_METHOD_READ_TYPE.keys())
 
 _STAGE_DESCRIPTIONS: dict[str, str] = {
     "read_qc": "quality stats and optional length filtering",
@@ -134,20 +93,6 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
         if action.startswith("stage:"):
             _, raw_index = action.split(":", 1)
             plan = _edit_draft_stage(plan, int(raw_index))
-            continue
-        if action.startswith("method:"):
-            _, stage = action.split(":", 1)
-            if stage in _FIXED_METHOD_STAGES:
-                print(
-                    f"{stage} uses {_fixed_pipeline_description(stage)}; "
-                    "there is no method choice."
-                )
-                continue
-            plan = _edit_stage_methods(plan, stage)
-            continue
-        if action.startswith("params:"):
-            _, stage = action.split(":", 1)
-            plan = _edit_stage_parameters(plan, stage)
             continue
         print(
             "Unknown action. Press Enter to continue, a stage number to edit, "
@@ -297,14 +242,10 @@ def _render_draft_stage_summary(
         print("   attention:")
         for item in attention:
             print(f"     - {item}")
-    if nested and stage in _FIXED_METHOD_STAGES:
-        print("   edit: l local execution / p parameters / b back")
-    elif nested:
-        print("   edit: l local execution / p parameters / b back")
-    elif stage in _FIXED_METHOD_STAGES:
-        print(f"   edit: {idx} / {idx}p parameters")
+    if nested:
+        print("   edit: l local execution / b back")
     else:
-        print(f"   edit: {idx} / {idx}p parameters")
+        print(f"   edit: {idx}")
 
 
 def _draft_stage_status(
@@ -319,8 +260,6 @@ def _draft_stage_status(
     selected = _selected_methods_for_stage(plan, stage)
     if stage in _FIXED_METHOD_STAGES:
         return f"will run {_fixed_pipeline_description(stage)}"
-    if stage in _STAGES_NEEDING_METHOD_SELECTION and not selected:
-        return "method needed before locking"
     if selected:
         return "will run locally"
     return "included"
@@ -332,8 +271,6 @@ def _draft_stage_method_lines(
     if stage in _FIXED_METHOD_STAGES:
         return []
     selected = _selected_methods_for_stage(plan, stage)
-    if not selected and stage in _STAGES_NEEDING_METHOD_SELECTION:
-        return ["missing"]
     return list(selected)
 
 
@@ -473,12 +410,6 @@ def _draft_blocking_items(
     for occurrence in plan.selected_stage_occurrences or []:
         if not occurrence.allow_local_execution:
             continue
-        occurrence_stage = occurrence.stage
-        if (
-            occurrence_stage in _STAGES_NEEDING_METHOD_SELECTION
-            and not _selected_methods_for_stage(plan, occurrence_stage)
-        ):
-            items.append((occurrence_stage, "method is missing"))
     for field in summary.get("missing_parameter_fields") or []:
         field_stage = _stage_for_field(str(field), plan)
         items.append((field_stage, f"{_field_label(str(field))} is missing"))
@@ -502,11 +433,6 @@ def _next_clarification_blocking_items(
         return []
     if clarification.kind == "stage_selection":
         return [("plan", "stage list is not selected")]
-    if clarification.kind == "method_selection":
-        stages = sorted((clarification.choices.get("methods_by_stage") or {}).keys())
-        return [(stage, "method is missing") for stage in stages]
-    if clarification.kind == "parameter_values":
-        return []
     return [("plan", f"{clarification.kind} is still required")]
 
 
@@ -540,12 +466,6 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
         return "stages"
     if raw in ("r", "restart", "n", "no"):
         return "restart"
-    if len(raw) > 1 and raw[:-1].isdigit() and raw[-1] in {"m", "p"}:
-        idx = int(raw[:-1]) - 1
-        if 0 <= idx < len(stages):
-            if raw[-1] == "m":
-                return f"stage:{idx}"
-            return "params:" + stages[idx]
     if raw.isdigit():
         idx = int(raw) - 1
         if 0 <= idx < len(stages):
@@ -577,7 +497,6 @@ def _edit_draft_stage(plan: AskPlanState, occurrence_index: int) -> AskPlanState
         )
         print("\nActions:")
         print("  l      change local execution authorization")
-        print("  p      edit parameters")
         print("  b      back to plan")
         raw = input(f"{stage}> ").strip().lower()
         if raw in ("", "b", "back"):
@@ -585,12 +504,8 @@ def _edit_draft_stage(plan: AskPlanState, occurrence_index: int) -> AskPlanState
         if raw in ("l", "local", "local-execution"):
             current = _edit_occurrence_local_execution(current, occurrence_index)
             continue
-        if raw in ("p", "param", "params", "parameters"):
-            invalid_attempts = 0
-            current = _edit_stage_parameters(current, stage)
-            continue
         invalid_attempts += 1
-        allowed = "l, p, or b"
+        allowed = "l or b"
         print(f"Unknown action. Use {allowed}.")
         if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
             print("Too many invalid actions; returning to the plan.")
@@ -651,97 +566,6 @@ def _edit_occurrence_local_execution(
     return plan.model_copy(
         update={"selected_stage_occurrences": occurrences, "confirmed": False}
     )
-
-
-def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
-    print(
-        f"\n{stage} method selection is system-owned; Assembly is deferred "
-        "until upstream evidence is available."
-    )
-    return plan
-
-
-def _edit_stage_parameters(plan: AskPlanState, stage: str) -> AskPlanState:
-    summary = build_run_plan_summary(plan)
-    fields = _editable_parameter_fields_for_stage(plan, stage, summary)
-    if not fields:
-        print(f"\nNo editable parameters are known for {stage}.")
-        return plan
-    req = AskClarificationRequest(
-        status="clarification_required",
-        kind="parameter_values",
-        session_id=plan.session_id,
-        ask_plan_ref="<draft>",
-        manifest_ref=plan.manifest_ref,
-        question=f"Edit parameters for {stage}.",
-        choices={
-            "defaults": _filter_method_map_for_stage(
-                summary.get("parameter_defaults") or {}, plan, stage
-            ),
-            "shared_defaults": summary.get("shared_parameter_defaults") or {},
-            "stage_defaults": {
-                stage: (summary.get("stage_parameter_defaults") or {}).get(stage) or {}
-            },
-        },
-        required_fields=fields,
-        response_schema={"kind": "parameter_values"},
-        next_action={},
-    )
-    response = _prompt_parameter_values(req, plan)
-    return _refresh_draft_defaults(merge_clarification_response(plan, response))
-
-
-def _editable_parameter_fields_for_stage(
-    plan: AskPlanState,
-    stage: str,
-    summary: dict[str, Any],
-) -> list[str]:
-    fields: list[str] = []
-    if stage == _shared_parameter_stage(plan):
-        shared_keys = set((summary.get("shared_parameter_defaults") or {}).keys())
-        shared_keys.update((summary.get("shared_parameters") or {}).keys())
-        for field in summary.get("missing_parameter_fields") or []:
-            if str(field).startswith("shared_parameters."):
-                shared_keys.add(str(field).rsplit(".", 1)[-1])
-        fields.extend(f"shared_parameters.{key}" for key in sorted(shared_keys))
-
-    defaults = summary.get("parameter_defaults") or {}
-    params = summary.get("method_parameters") or {}
-    for method in _selected_methods_for_stage(plan, stage):
-        keys = set((defaults.get(method) or {}).keys())
-        keys.update((params.get(method) or {}).keys())
-        for field in summary.get("missing_parameter_fields") or []:
-            if str(field).startswith(f"{method}."):
-                keys.add(str(field).rsplit(".", 1)[-1])
-        fields.extend(f"{method}.{key}" for key in sorted(keys))
-
-    stage_keys = set(
-        ((summary.get("stage_parameter_defaults") or {}).get(stage) or {}).keys()
-    )
-    stage_keys.update(((summary.get("stage_parameters") or {}).get(stage) or {}).keys())
-    for field in summary.get("missing_parameter_fields") or []:
-        field_text = str(field)
-        method_scoped = any(
-            field_text.startswith(f"{method}.")
-            for method in _selected_methods_for_stage(plan, stage)
-        )
-        if (
-            _stage_for_field(field_text, plan) == stage
-            and field_text.startswith(f"{stage}.")
-            and not method_scoped
-        ):
-            stage_keys.add(field_text.rsplit(".", 1)[-1])
-    fields.extend(f"{stage}.{key}" for key in sorted(stage_keys))
-    return list(dict.fromkeys(fields))
-
-
-def _filter_method_map_for_stage(
-    values: dict[str, dict[str, Any]],
-    plan: AskPlanState,
-    stage: str,
-) -> dict[str, dict[str, Any]]:
-    methods = set(_selected_methods_for_stage(plan, stage))
-    return {method: params for method, params in values.items() if method in methods}
 
 
 def _refresh_draft_defaults(plan: AskPlanState) -> AskPlanState:
@@ -1184,14 +1008,10 @@ def _safe_ask(question: Any) -> Any:
 
 
 def _prompt_for_answer(
-    req: AskClarificationRequest, plan: AskPlanState
+    req: AskClarificationRequest,
 ) -> AskClarificationResponse:
     if req.kind == "stage_selection":
         return _prompt_stage_selection(req)
-    if req.kind == "method_selection":
-        return _prompt_method_selection(req)
-    if req.kind == "parameter_values":
-        return _prompt_parameter_values(req, plan)
     raise ValueError(f"unexpected clarification kind: {req.kind}")
 
 
@@ -1268,348 +1088,6 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
     )
 
 
-def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationResponse:
-    methods_by_stage = req.choices.get("methods_by_stage", {})
-    selected: dict[str, str | list[str]] = {}
-
-    print("\n--- Step 2: Method Selection ---\n")
-
-    for stage, methods in methods_by_stage.items():
-        method_names = [m["method_name"] for m in methods]
-        if stage == "read_qc":
-            selected[stage] = _prompt_read_qc_filter_choice(
-                methods, req.choices.get("defaults", {}).get(stage)
-            )
-            continue
-        requested_default = req.choices.get("defaults", {}).get(stage)
-        if isinstance(requested_default, list):
-            default_checked = [m for m in requested_default if m in method_names]
-        elif requested_default:
-            default_checked = (
-                [requested_default] if requested_default in method_names else []
-            )
-        else:
-            default_checked = []
-        # The assembly graph executes one primary candidate at a time. Keep
-        # its interactive choice singular even though other stages may run
-        # several methods in one pass.
-        if not default_checked:
-            default_checked = method_names[:1]
-
-        if _HAS_QUESTIONARY:
-            choices = []
-            for m in methods:
-                choices.append(
-                    questionary.Choice(
-                        m["method_name"],
-                        value=m["method_name"],
-                        checked=(m["method_name"] in default_checked),
-                    )
-                )
-            if stage == "assembly":
-                selected[stage] = _safe_ask(
-                    questionary.select(
-                        f"Primary method for {stage}:",
-                        choices=choices,
-                        default=default_checked[0],
-                        instruction="(choose one primary)",
-                    )
-                )
-            else:
-                answer = _safe_ask(
-                    questionary.checkbox(
-                        f"Methods for {stage}:",
-                        choices=choices,
-                        instruction="(Space toggle, Enter confirm)",
-                    )
-                )
-                if not answer:
-                    answer = default_checked
-                selected[stage] = answer[0] if len(answer) == 1 else answer
-        else:
-            print(f"  Methods for [{stage}]:")
-            for i, m in enumerate(methods, 1):
-                marker = "*" if m["method_name"] in default_checked else " "
-                print(f"    {marker} {i}. {m['method_name']}")
-            prompt = (
-                "Choose one number or name"
-                if stage == "assembly"
-                else "Enter numbers or names"
-            )
-            print(f"\n  {prompt}. Enter = {', '.join(default_checked)}:")
-            raw = input(f"  {stage}> ").strip()
-            if not raw:
-                picks = default_checked
-            else:
-                picks = _parse_selection(raw, method_names)
-            selected[stage] = (
-                picks[0] if stage == "assembly" or len(picks) == 1 else picks
-            )
-
-    return AskClarificationResponse(kind="method_selection", selected_methods=selected)
-
-
-def _prompt_read_qc_filter_choice(
-    methods: list[dict[str, Any]], default: str | list[str] | None
-) -> list[str]:
-    default_methods = (
-        default if isinstance(default, list) else [default] if default else []
-    )
-    default_filter = next(
-        (method for method in default_methods if method in READ_QC_FILTER_METHODS),
-        READ_QC_FILTER_SKIP,
-    )
-    filters = [m for m in methods if m.get("method_name") in READ_QC_FILTER_METHODS]
-    filter_names = [m["method_name"] for m in filters]
-
-    if _HAS_QUESTIONARY:
-        choices = [
-            questionary.Choice(
-                m.get("display_name") or m["method_name"],
-                value=m["method_name"],
-            )
-            for m in filters
-        ]
-        answer = _safe_ask(
-            questionary.select(
-                "Read QC length filtering:",
-                choices=choices,
-                default=default_filter,
-                instruction="(↑↓ navigate, Enter confirm)",
-            )
-        )
-        filter_method = answer or default_filter
-    else:
-        print("  Methods for [read_qc]:")
-        print(f"    * always: {READ_QC_STATS_METHOD}")
-        print("    length filtering:")
-        for i, m in enumerate(filters, 1):
-            label = m.get("display_name") or m["method_name"]
-            marker = "*" if m["method_name"] == default_filter else " "
-            print(f"    {marker} {i}. {label}")
-        print(f"\n  Choose one length filter. Enter = {default_filter}:")
-        raw = input("  read_qc length_filter> ").strip()
-        picks = _parse_selection(raw, filter_names) if raw else [default_filter]
-        filter_method = picks[0] if picks else default_filter
-
-    return [READ_QC_STATS_METHOD, filter_method]
-
-
-def _prompt_parameter_values(
-    req: AskClarificationRequest, plan: AskPlanState
-) -> AskClarificationResponse:
-    defaults = req.choices.get("defaults", {})
-    shared_defaults = dict(req.choices.get("shared_defaults", {}))
-    stage_defaults = dict(req.choices.get("stage_defaults", {}))
-    params: dict[str, dict[str, Any]] = {}
-    stage_params: dict[str, dict[str, Any]] = stage_defaults
-    shared_params: dict[str, Any] = {}
-    print("\n--- Step 3: Parameters ---")
-    print("  Press Enter to accept [default], or type a new value.\n")
-    handled: set[str] = set()
-    for field in req.required_fields:
-        if field in handled:
-            continue
-        method_key, _, param_name = field.rpartition(".")
-        if not method_key:
-            method_key = param_name
-        short_method = method_key.rsplit(".", 1)[-1]
-        stage_name = method_key.split(".")[0] if "." in method_key else method_key
-        label = f"[{stage_name} / {short_method}] {param_name}"
-
-        hint = _PARAM_HINTS.get(f"{method_key}.{param_name}") or _PARAM_HINTS.get(
-            param_name
-        )
-        if hint:
-            label = f"{label}  ({hint})"
-
-        if method_key == "shared_parameters":
-            current_shared_defaults = _derive_shared_parameter_defaults(
-                {**shared_defaults, **shared_params}
-            )
-            default = current_shared_defaults.get(param_name)
-            if (
-                param_name == "read_type"
-                and default
-                and current_shared_defaults.get("platform")
-            ):
-                if not _shared_parameter_value_is_valid("read_type", default):
-                    default = None
-                else:
-                    print(
-                        "  [shared_parameters] read_type derived from "
-                        f"platform={current_shared_defaults.get('platform')}: "
-                        f"{default}"
-                    )
-                    shared_params[param_name] = default
-                    continue
-        else:
-            default = _find_default(field, defaults)
-
-        if method_key == "shared_parameters":
-            value = _prompt_shared_parameter(label, param_name, default)
-            shared_params[param_name] = value
-            shared_params = _derive_shared_parameter_defaults(shared_params)
-        else:
-            value = _prompt_text_value(label, default, required=True)
-            if param_name == "estimated_genome_size" and isinstance(value, str):
-                value = _parse_genome_size(value)
-            params.setdefault(method_key, {})[param_name] = value
-    normalized_shared = (
-        SharedParameters.model_validate(
-            _derive_shared_parameter_defaults(shared_params)
-        )
-        if shared_params
-        else None
-    )
-    return AskClarificationResponse(
-        kind="parameter_values",
-        shared_parameters=normalized_shared,
-        method_parameters=params or None,
-        stage_parameters=stage_params or None,
-    )
-
-
-def _prompt_text_value(label: str, default: Any, *, required: bool = False) -> Any:
-    invalid_attempts = 0
-    while True:
-        if _HAS_QUESTIONARY:
-            answer = _safe_ask(
-                questionary.text(
-                    f"{label}:",
-                    default=str(default) if default is not None else "",
-                )
-            )
-        else:
-            if default is not None:
-                answer = input(f"  {label} [{default}]: ").strip()
-            else:
-                answer = input(f"  {label}: ").strip()
-        if answer:
-            return answer
-        if default is not None:
-            return default
-        if not required:
-            return default
-        invalid_attempts += 1
-        print(f"  {label} is required.")
-        if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
-            raise _UserAbort()
-
-
-def _prompt_shared_parameter(label: str, param_name: str, default: Any) -> Any:
-    if param_name == "platform":
-        return _prompt_shared_platform(label, default)
-    if param_name == "read_type":
-        return _prompt_shared_read_type(label, default)
-
-    while True:
-        value = _prompt_text_value(label, default)
-        if param_name == "estimated_genome_size" and isinstance(value, str):
-            value = _parse_genome_size(value)
-        if _shared_parameter_value_is_valid(param_name, value):
-            return value
-
-
-def _prompt_shared_platform(label: str, default: Any) -> Any:
-    default_value = _normalize_shared_platform(default)
-    if _HAS_QUESTIONARY:
-        return _safe_ask(
-            questionary.select(
-                f"{label}:",
-                choices=list(_SHARED_PLATFORM_VALUES),
-                default=default_value
-                if default_value in _SHARED_PLATFORM_VALUES
-                else "unknown",
-                instruction="(used for asset registry platform)",
-            )
-        )
-
-    print("    platform choices:")
-    for idx, value in enumerate(_SHARED_PLATFORM_VALUES, start=1):
-        default_marker = " [default]" if value == default_value else ""
-        print(f"      {idx}. {value}{default_marker}")
-    while True:
-        value = _prompt_text_value(label, default_value)
-        normalized = _normalize_shared_platform(value)
-        if _shared_parameter_value_is_valid("platform", normalized):
-            return normalized
-
-
-def _prompt_shared_read_type(label: str, default: Any) -> Any:
-    default_value = _normalize_shared_read_type(default)
-    if _HAS_QUESTIONARY:
-        return _safe_ask(
-            questionary.select(
-                f"{label}:",
-                choices=[
-                    questionary.Choice(_read_type_choice_label(value), value=value)
-                    for value in _SHARED_READ_TYPE_VALUES
-                ],
-                default=default_value
-                if default_value in _SHARED_READ_TYPE_VALUES
-                else None,
-                instruction="(use normalized shared read type)",
-            )
-        )
-
-    alias_text = ", ".join(
-        f"{alias}->{value}" for alias, value in sorted(FLYE_TO_SHARED_READ_TYPE.items())
-    )
-    print(f"    accepted: {', '.join(_SHARED_READ_TYPE_VALUES)}")
-    print(f"    Flye aliases accepted: {alias_text}")
-    while True:
-        value = _prompt_text_value(label, default_value)
-        normalized = _normalize_shared_read_type(value)
-        if _shared_parameter_value_is_valid("read_type", normalized):
-            return normalized
-
-
-def _read_type_choice_label(value: str) -> str:
-    flye_aliases = sorted(
-        alias
-        for alias, normalized in FLYE_TO_SHARED_READ_TYPE.items()
-        if normalized == value
-    )
-    suffix = f" (Flye: {', '.join(flye_aliases)})" if flye_aliases else ""
-    return f"{value}{suffix}"
-
-
-def _normalize_shared_read_type(value: Any) -> Any:
-    if value is None:
-        return None
-    raw = str(value).strip()
-    return FLYE_TO_SHARED_READ_TYPE.get(raw, raw)
-
-
-def _normalize_shared_platform(value: Any) -> Any:
-    if value is None:
-        return None
-    raw = str(value).strip().lower().replace("-", "_")
-    if raw.isdigit():
-        index = int(raw)
-        if 1 <= index <= len(_SHARED_PLATFORM_VALUES):
-            return _SHARED_PLATFORM_VALUES[index - 1]
-    if raw in {"nanopore", "nano", "ont_hq"}:
-        return "ont"
-    if raw in {"pacbio_hifi", "pacbio_hifi_reads", "hifi", "ccs"}:
-        return "pacbio_hifi"
-    if raw in {"pacbio_clr", "pacbio_raw", "pacbio", "sequel"}:
-        return "clr"
-    if raw in {"cyclone_seq", "cyclone", "bgi_cycloneseq"}:
-        return "cycloneseq"
-    return raw
-
-
-def _shared_parameter_value_is_valid(param_name: str, value: Any) -> bool:
-    try:
-        SharedParameters.model_validate({param_name: value})
-    except ValidationError as exc:
-        print(f"  Invalid {param_name}: {exc.errors()[0]['msg']}")
-        return False
-    return True
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1632,31 +1110,3 @@ def _parse_selection(raw: str, options: list[str]) -> list[str]:
             else:
                 result.append(item)
     return result
-
-
-def _find_default(field: str, defaults: dict[str, Any]) -> Any:
-    for method_key, pdict in defaults.items():
-        if isinstance(pdict, dict):
-            param = field.rsplit(".", 1)[-1]
-            if param in pdict:
-                return pdict[param]
-    return None
-
-
-def _derive_shared_parameter_defaults(shared: dict[str, Any]) -> dict[str, Any]:
-    if "read_type" in shared:
-        return shared
-    read_type = PLATFORM_TO_SHARED_READ_TYPE.get(str(shared.get("platform") or ""))
-    if not read_type:
-        return shared
-    return {**shared, "read_type": read_type}
-
-
-def _parse_genome_size(raw: str) -> int | str:
-    m = _GENOME_SIZE_RE.match(raw.strip())
-    if not m:
-        return raw
-    number = float(m.group(1))
-    suffix = m.group(2).lower()
-    multiplier = _GENOME_SIZE_MULTIPLIERS.get(suffix, 1)
-    return int(number * multiplier)

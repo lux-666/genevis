@@ -182,6 +182,34 @@ def test_deferred_assembly_closure_waits_for_stage_recommendation() -> None:
     }
 
 
+def test_full_deterministic_assembly_does_not_require_llm() -> None:
+    run_config = RunConfig.model_validate(
+        {
+            "requested_stages": [{"stage": "assembly", "allow_local_execution": True}],
+            "assembly": {
+                "method_route_advisor": "deterministic_baseline",
+                "parameter_advisor": "deterministic_baseline",
+            },
+        }
+    )
+
+    assert not run_requires_llm(run_config)
+
+
+def test_partial_deterministic_assembly_still_requires_llm() -> None:
+    run_config = RunConfig.model_validate(
+        {
+            "requested_stages": [{"stage": "assembly", "allow_local_execution": True}],
+            "assembly": {
+                "method_route_advisor": "advisor",
+                "parameter_advisor": "deterministic_baseline",
+            },
+        }
+    )
+
+    assert run_requires_llm(run_config)
+
+
 def test_deferred_assembly_does_not_preflight_all_candidates(tmp_path: Path) -> None:
     run_config = RunConfig.model_validate(
         {"requested_stages": [{"stage": "assembly", "allow_local_execution": True}]}

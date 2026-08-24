@@ -1033,6 +1033,12 @@ def _validate_assembly_input_contract(
     assembly = run_config.assembly
     if assembly is None:
         return
+    local_assembly = any(
+        request.stage == "assembly" and request.allow_local_execution
+        for request in run_config.requested_stages
+    )
+    if not local_assembly:
+        return
     hifi_paths = {
         declaration.path
         for declaration in read_declarations
@@ -1058,6 +1064,17 @@ def _validate_assembly_input_contract(
                 "assembly.hic_reads_ref must select exactly one registered "
                 "paired-read group"
             )
+    if manifest.genome_size_estimate is not None:
+        return
+    has_usable_survey_reads = any(
+        declaration.asset_type == "clean_long_reads"
+        for declaration in read_declarations
+    )
+    if not has_usable_survey_reads:
+        raise FrozenInputValidationError(
+            "deferred Assembly requires input_manifest.genome_size_estimate or "
+            "a prior locally executed Genome Survey occurrence"
+        )
 
 
 def _load_yaml_draft(

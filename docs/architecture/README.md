@@ -73,6 +73,7 @@ Read these only when a task needs the exact contract.
 | [`reference/execution-lifecycle.md`](reference/execution-lifecycle.md) | Freeze/run/collect graph, attempt owners/terminals, method disposition, recovery routing, and stage-adapter boundary |
 | [`reference/execution-evidence.md`](reference/execution-evidence.md) | Runtime result versus durable process evidence and log refs |
 | [`reference/resource-handoff.md`](reference/resource-handoff.md) | Current logical resources, immutable assembly delivery, resolver priority, Read QC lineage, and FOFN boundary |
+| [`reference/shared-facts.md`](reference/shared-facts.md) | Cross-stage biological facts, genome-size resolution priority, planning collection rules, and conflict behavior |
 | [`reference/recommendation-policy.md`](reference/recommendation-policy.md) | Independent advisor/baseline modes for Assembly method/route and parameter recommendations |
 | [`reference/parameter-recommendation.md`](reference/parameter-recommendation.md) | Exact model DTO, schema-3 evidence, sparse response, approval, and retry semantics |
 | [`reference/stage-contracts.md`](reference/stage-contracts.md) | Biological stage inputs/outputs, stage outcomes versus method dispositions, registered method roles, QC facts, and review triggers |
