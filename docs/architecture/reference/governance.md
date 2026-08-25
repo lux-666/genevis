@@ -230,3 +230,32 @@ that owner in place; do not add phase plans, implementation summaries, handoff
 snapshots, acceptance logs, or duplicate design explanations to the working
 tree. Keep operational guides executable and current, and retain superseded
 material only in Git history.
+
+### Simplification inventory workflow
+
+Before changing code to reduce repetition or dead surface, run a read-only
+inventory and classify every candidate as `exact clone`,
+`semantic duplication`, `duplicate representation`, `dead surface`, or
+`intentional symmetry`. Use text scanning (jscpd), dead-code scanning
+(Vulture for Python), and reference search (`rg`) together; tools are evidence,
+not decisions. List every production call site and distinguish test-only,
+diagnostic, and external-entry surfaces.
+
+Prefer deleting one source of truth over adding an abstraction. Before
+extracting shared code, answer three questions in the change record:
+
+1. What invariant does each caller truly share?
+2. Which future changes must move together?
+3. Which future changes must remain independent?
+
+If the answers are unclear, leave the repetition in place and record it as an
+open candidate rather than inventing a premature boundary. When symmetry is
+intentional, name the reason at the boundary so later review does not mistake it
+for drift.
+
+Current proven examples are the immutable review candidate parser in
+`app/review/candidates.py`
+(`candidate_ids_from_review_request_payload`) and the lowercase SHA-256
+validator/pattern in `app/integrity.py` (`validate_sha256`,
+`SHA256_PATTERN`). Their tests own the contract; callers must not add
+stage-local copies.

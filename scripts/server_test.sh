@@ -28,6 +28,23 @@ echo "== pytest =="
 PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" conda run -n "${ORCHESTRATOR_ENV}" \
   pytest -q
 
+echo "== simplification scan =="
+jscpd_out="$(mktemp)"
+npx --yes jscpd@5.0.16 app --min-tokens 70 --format python --reporters silent \
+  --silent > "$jscpd_out"
+jscpd_exit=$?
+cat "$jscpd_out" >&2
+if [ "$jscpd_exit" -ne 0 ]; then
+  rm -f "$jscpd_out"
+  exit "$jscpd_exit"
+fi
+grep -q '^Duplications detection: Found [0-9][0-9]* exact clones' "$jscpd_out" || {
+  echo 'error: jscpd summary missing' >&2
+  rm -f "$jscpd_out"
+  exit 1
+}
+rm -f "$jscpd_out"
+
 echo "== compileall =="
 PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" conda run -n "${ORCHESTRATOR_ENV}" \
   python -m compileall app tests

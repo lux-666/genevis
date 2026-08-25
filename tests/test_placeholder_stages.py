@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -280,3 +281,26 @@ def test_contig_only_route_does_not_enter_placeholders() -> None:
         "assembly_dedup",
         "assembly_review",
     ]
+
+
+def test_simplification_inventory_gate_exists() -> None:
+    project = Path(__file__).resolve().parents[1]
+
+    agents = project.joinpath("AGENTS.md").read_text(encoding="utf-8")
+    governance_path = project / "docs/architecture/reference/governance.md"
+    governance = governance_path.read_text(encoding="utf-8")
+    server_test = project.joinpath("scripts/server_test.sh").read_text(encoding="utf-8")
+
+    for label in (
+        "exact clone",
+        "semantic duplication",
+        "duplicate representation",
+        "dead surface",
+        "intentional symmetry",
+    ):
+        assert f"`{label}`" in agents
+    assert "Simplification inventory workflow" in governance
+    assert "candidate_ids_from_review_request_payload" in governance
+    assert "validate_sha256" in governance
+    assert "intentional symmetry" not in server_test.lower()
+    assert "npx --yes jscpd@5.0.16 app" in server_test
