@@ -65,13 +65,18 @@ the survey stage or provide a fallback when survey reads are unavailable.
 
 Resolution priority is deterministic and single-tracked:
 
-1. `shared_parameters.estimated_genome_size` from the frozen RunConfig;
+1. `shared_parameters.estimated_genome_size` projected by runtime
+   reconciliation;
 2. `inventory.genome_size_estimate` projected from the manifest;
 3. `genome_survey.genome_size_prior` when `genome_size_source == "survey"`.
 
-An earlier source wins. A later source never overwrites an earlier one. If
-neither an explicit value nor a valid survey estimate exists when Assembly
-requires one, the workflow fails with `GENOME_SIZE_UNAVAILABLE`.
+The current `RunConfigSharedParameters` intentionally excludes this field.
+Source 1 is a runtime projection, not a frozen-file input.
+An earlier source wins, and a later source never overwrites an earlier one.
+If neither an explicit value nor a valid survey estimate exists when Genome
+Survey needs one, it fails with `GENOME_SIZE_UNAVAILABLE`. If Assembly reaches
+candidate planning without a resolved prior for a method that requires one,
+that candidate is rejected with `genome_size_required`.
 
 ### `species_facts`
 
@@ -83,7 +88,8 @@ consumed by T2T finishing; Assembly and Genome Survey do not read it.
 ## Planning and freeze validation
 
 The planner does not ask for `estimated_genome_size`. A deferred local Assembly
-must have one of two supportable sources before RunConfig construction:
+must have at least one of these three supportable sources before RunConfig
+construction:
 
 - `read_type` is required when the platform cannot uniquely determine it and
   the Assembly route is `auto`;
@@ -102,11 +108,12 @@ When a prior Survey exists, planning exposes the fact as
 
 Inventory reconciles the frozen RunConfig facts with any runtime projection:
 
-- a runtime value that conflicts with a frozen RunConfig value is an error;
+- a runtime value that conflicts with a configured RunConfig shared fact is
+  an error;
 - a manifest `genome_size_estimate` that conflicts with a runtime
   `estimated_genome_size` is an error;
-- the frozen RunConfig value always wins over a manifest value when both exist
-  and agree.
+- a configured RunConfig shared fact always wins over a manifest value when
+  both exist and agree.
 
 After reconciliation, `shared_parameters` is immutable for the remainder of
 the run. Stage outputs may add derived facts (for example, a survey
@@ -116,7 +123,7 @@ measurement), but they never mutate this block.
 
 | Source | Priority | Conflict behavior |
 |---|---|---|
-| Frozen RunConfig | 1 (highest) | authoritative; runtime must match |
+| Configured shared fact | 1 (highest) | authoritative; runtime must match |
 | Manifest | 2 | fills absence; conflicts with runtime are errors |
 | Genome Survey | 3 (lowest) | used only when no explicit value exists |
 
