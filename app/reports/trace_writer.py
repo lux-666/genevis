@@ -33,8 +33,6 @@ STAGE_STATUS_NO_EVIDENCE = "no_durable_evidence"
 # Durable-record gap vocabulary. Each gap names a fact the trace could not
 # reconstruct and why, so operators do not mistake "unavailable" for "absent".
 GAP_UNAVAILABLE = "unavailable"  # no durable record carries this fact
-GAP_CHECKPOINT_ONLY = "checkpoint_only"
-GAP_UNSUPPORTED = "unsupported"
 
 SESSION_SUMMARY_JSON_FILENAME = "session_summary.json"
 SESSION_SUMMARY_MARKDOWN_FILENAME = "session_summary.md"
@@ -598,19 +596,6 @@ def _methods_by_workflow_step(
     return by_step
 
 
-def _is_canonical_attempt_terminal(
-    event: dict[str, Any],
-    canonical_terminals: dict[str, dict[str, Any]],
-) -> bool:
-    """Match terminals by immutable event ID, never event-order overwrite."""
-
-    attempt_id = event.get("attempt_id") or event.get("subject_id")
-    if not isinstance(attempt_id, str) or not attempt_id:
-        return False
-    canonical = canonical_terminals.get(attempt_id)
-    return canonical is not None and canonical.get("event_id") == event.get("event_id")
-
-
 def _artifact_refs_by_workflow_step(
     artifacts: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -971,18 +956,6 @@ def _blocked_workflow_step_id(
             if isinstance(step_id, str) and step_id:
                 return step_id
     return None
-
-
-def _blocked_stage(summary: dict[str, Any]) -> str | None:
-    """Return the display stage for the pending-human-action summary."""
-
-    if summary.get("supervision_state") != "blocked_human":
-        return None
-    requirements = summary.get("decision_requirements") or {}
-    if requirements.get("stage"):
-        return str(requirements["stage"])
-    next_action = summary.get("next_action") or {}
-    return str(next_action["stage"]) if next_action.get("stage") else None
 
 
 def _failed_workflow_step_id(

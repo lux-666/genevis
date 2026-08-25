@@ -289,6 +289,18 @@ def test_simplification_inventory_gate_exists() -> None:
     agents = project.joinpath("AGENTS.md").read_text(encoding="utf-8")
     governance_path = project / "docs/architecture/reference/governance.md"
     governance = governance_path.read_text(encoding="utf-8")
+    recommendation_policy = project.joinpath(
+        "docs/architecture/reference/recommendation-policy.md"
+    ).read_text(encoding="utf-8")
+    parameter_contract = project.joinpath(
+        "docs/architecture/reference/parameter-recommendation.md"
+    ).read_text(encoding="utf-8")
+    stage_contract = project.joinpath(
+        "docs/architecture/reference/stage-contracts.md"
+    ).read_text(encoding="utf-8")
+    review_topic = project.joinpath(
+        "docs/architecture/topics/review-and-resume.md"
+    ).read_text(encoding="utf-8")
     server_test = project.joinpath("scripts/server_test.sh").read_text(encoding="utf-8")
 
     for label in (
@@ -302,5 +314,20 @@ def test_simplification_inventory_gate_exists() -> None:
     assert "Simplification inventory workflow" in governance
     assert "candidate_ids_from_review_request_payload" in governance
     assert "validate_sha256" in governance
+    for symbol in (
+        "parse_json_object",
+        "validate_model_response_record",
+        "_load_reference_snapshot",
+        "_parameter_evidence_location",
+        "_review_request_decision_context",
+        "Ledger.record_method_disposition_recorded",
+    ):
+        assert symbol in governance
+    assert "Content-addressed JSON publication" in governance
+    assert "schema-v1 migration behavior" in recommendation_policy
+    assert "_parameter_evidence_location" in parameter_contract
+    assert "_load_reference_snapshot" in stage_contract
+    assert "never stringifies" in review_topic
+    assert "arbitrary provider object" in review_topic
     assert "intentional symmetry" not in server_test.lower()
     assert "npx --yes jscpd@5.0.16 app" in server_test

@@ -96,10 +96,6 @@ class SessionPaths:
             )
 
     @property
-    def layout_path(self) -> Path:
-        return self.data_root / _LAYOUT_FILENAME
-
-    @property
     def run_dir(self) -> Path:
         return self.data_root / "runs" / self.session_id
 
@@ -126,10 +122,6 @@ class SessionPaths:
     @property
     def checkpoints_dir(self) -> Path:
         return self.run_dir / "checkpoints"
-
-    @property
-    def run_metadata_path(self) -> Path:
-        return self.control_dir / "run.json"
 
     @property
     def manifest_path(self) -> Path:
@@ -349,25 +341,8 @@ def locate_session_data_dir(data_root: str | Path, session_id: str) -> Path | No
     return paths.run_dir
 
 
-def is_session_run_dir(data_dir: str | Path, session_id: str) -> bool:
-    """Whether ``data_dir`` is the strict v2 run root for ``session_id``."""
-    try:
-        paths = SessionPaths.from_run_dir(data_dir)
-        paths.require_session_id(session_id)
-    except DataLayoutError:
-        return False
-    return True
-
-
 def artifact_index_path(data_dir: str | Path, session_id: str) -> Path:
     """Return the v2 artifact index, rejecting flat layout roots."""
     paths = SessionPaths.from_run_dir(data_dir)
     paths.require_session_id(session_id)
     return paths.artifact_index_path
-
-
-def ledger_session_dir(data_dir: str | Path, session_id: str) -> Path:
-    """Return the v2 ledger directory, rejecting flat layout roots."""
-    paths = SessionPaths.from_run_dir(data_dir)
-    paths.require_session_id(session_id)
-    return paths.ledger_dir

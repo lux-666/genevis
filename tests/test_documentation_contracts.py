@@ -152,6 +152,41 @@ class DocumentationContractTests(unittest.TestCase):
             + "\n".join(violations),
         )
 
+    def test_cross_cutting_semantics_stay_with_reference_owners(self) -> None:
+        reference_dir = PROJECT_ROOT / "docs" / "architecture" / "reference"
+        execution = (reference_dir / "execution-lifecycle.md").read_text(
+            encoding="utf-8"
+        )
+        run_data = (reference_dir / "data-contract.md").read_text(encoding="utf-8")
+        resources = (reference_dir / "resource-handoff.md").read_text(
+            encoding="utf-8"
+        )
+        parameters = (reference_dir / "parameter-recommendation.md").read_text(
+            encoding="utf-8"
+        )
+        stages = (reference_dir / "stage-contracts.md").read_text(encoding="utf-8")
+        shared = (reference_dir / "shared-facts.md").read_text(encoding="utf-8")
+        conformance = (reference_dir / "conformance.md").read_text(encoding="utf-8")
+        governance = (reference_dir / "governance.md").read_text(encoding="utf-8")
+
+        self.assertIn("accepts only the exact", execution)
+        self.assertIn('parsed JSON object `{"ready": true}`', execution)
+        self.assertNotIn('{"ready": true}', resources)
+        self.assertIn("ReviewPolicyConfig.max_blocked_seconds", run_data)
+        self.assertNotIn("max_blocked_seconds", parameters)
+        self.assertNotIn("max_blocked_seconds", stages)
+        self.assertIn("two frozen representations", shared)
+        self.assertIn("### Target species has two frozen representations", conformance)
+        self.assertIn(
+            "Audit finding identifiers are review-local coordinates", governance
+        )
+
+        for document in reference_dir.glob("*.md"):
+            self.assertIsNone(
+                re.search(r"\| F[1-9][0-9]* \|", document.read_text(encoding="utf-8")),
+                f"audit finding IDs must not become architecture in {document.name}",
+            )
+
     def test_server_helpers_locate_repo_root_and_document_scope(self) -> None:
         server_check = (PROJECT_ROOT / "scripts" / "server_check.sh").read_text(
             encoding="utf-8"

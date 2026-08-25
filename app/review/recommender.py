@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.llm.factory import build_chat_model
+from app.llm.json_response import parse_json_object
 from app.llm.prompts import (
     PROMPT_ROOT,
     PromptBundle,
@@ -260,23 +261,16 @@ def _normalize_recommendation(
 
 
 def _parse_json(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
     try:
-        payload = json.loads(cleaned)
+        return parse_json_object(text)
     except json.JSONDecodeError as exc:
         raise RecommendationError(
             f"review recommendation is not valid JSON: {exc}"
         ) from exc
-    if not isinstance(payload, dict):
-        raise RecommendationError("review recommendation JSON must be an object")
-    return payload
+    except ValueError as exc:
+        raise RecommendationError(
+            "review recommendation JSON must be an object"
+        ) from exc
 
 
 def _model_identifier(model: Any) -> str | None:

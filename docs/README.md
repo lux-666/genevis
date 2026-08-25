@@ -53,12 +53,14 @@ semantics.
 | Public CLI flags | `../app/entrypoints/run.py` | User/deployment command examples |
 | Stage registration and executable recommendation helpers | `../app/workflow.py` | Planner/TUI callers and explanatory docs |
 | Biological stage boundaries and canonical recommendation meaning | `architecture/reference/stage-contracts.md` | Topics, README, examples |
+| Cross-stage biological facts, source priority, and conflict behavior | `architecture/reference/shared-facts.md` | Planners and stage contracts consume these facts |
 | Package/method identity and capabilities | `../descriptors/registry.yaml` plus referenced descriptors | Method tables, environment checks, implementation map |
 | Active host environment/package/database mapping consumed by execution | `GENE_AGENT_ENVS_CONFIG` when set, otherwise ignored machine-local `../config/envs.yaml` | Bootstrap, dependency snapshot, server checks |
 | Committed bootstrap seed for a missing host mapping | `examples/envs.yaml.example` | Bootstrap only; it is not a second active resolver input |
 | Schema-valid operator inputs | `examples/` | README and operator guides link to them rather than copying JSON/YAML |
 | Run/freeze/progress/checkpoint/Ledger/report/retention contract | `architecture/reference/data-contract.md` | Runtime/data topics and operator explanations |
-| Method freeze/run/collect/settle contract | `architecture/reference/execution-lifecycle.md` | Execution topic and stage adapters |
+| Review request, foreground countdown, and durable resume semantics | `architecture/reference/data-contract.md#12-review-contract` | Governance, parameter, and operator docs link to it |
+| Whole-run execution readiness and method freeze/run/collect/settle contract | `architecture/reference/execution-lifecycle.md` | Execution/bootstrap topics and stage adapters |
 | Process result/evidence/log contract | `architecture/reference/execution-evidence.md` | Execution topic and implementation map |
 | Cross-stage logical resource handoff | `architecture/reference/resource-handoff.md` | Data/stage topics and implementation map |
 | Parameter recommendation DTO/persistence/approval/retry contract | `architecture/reference/parameter-recommendation.md` | Parameter topic and operator guide |

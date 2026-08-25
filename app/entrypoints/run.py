@@ -1471,6 +1471,14 @@ def _print_inspect_text(
             f"lock_held={lock_text}"
         )
     print(f"artifact_count: {summary.get('artifact_count', 0)}")
+    final_assembly = summary.get("final_assembly")
+    if isinstance(final_assembly, dict):
+        print(f"final_assembly: {final_assembly.get('primary_output_path')}")
+    if summary.get("final_assembly_integrity_error"):
+        print(
+            "WARNING: final_assembly_integrity_error: "
+            f"{summary['final_assembly_integrity_error']}"
+        )
     print(f"decisions_by_origin: {summary.get('decisions_by_origin', {})}")
     if summary.get("latest_review_request"):
         print(f"latest_review_request: {summary['latest_review_request']}")

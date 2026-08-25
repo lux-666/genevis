@@ -1,29 +1,56 @@
 # Method Execution Lifecycle Contract
 
 > **Status:** accepted and implemented.
-> **Read when:** exact freeze/run/collect routing, attempt ownership, recovery,
-> or failure policy matters.  
+> **Read when:** whole-run readiness, exact freeze/run/collect routing, attempt
+> ownership, recovery, or failure policy matters.
 > **Comes from:** [Execution](../topics/execution.md).  
 > **Feeds into:** stage collection, review, and durable evidence.  
 > **Related contracts:** [Run data](data-contract.md),
 > [Execution evidence](execution-evidence.md),
 > [Parameter recommendation](parameter-recommendation.md).  
-> **Code evidence:** `app/execution/lifecycle.py`,
+> **Code evidence:** `app/entrypoints/run.py`,
+> `app/storage/frozen_inputs.py`, `app/execution/run_readiness.py`,
+> `app/execution/lifecycle.py`,
 > `app/execution/method_outcomes.py`,
 > `app/execution/attempt_owners.py`, `app/control/occurrence_settlement.py`.
 
 ## Scope
 
-This specification owns the shared execution lifecycle for every executable
-method. It defines graph boundaries, attempt ownership, recovery routing,
-process-failure behavior, and the division between the execution kernel and
-stage adapters.
+This specification owns the pre-freeze run-specific readiness boundary and the
+shared execution lifecycle for every executable method. It defines graph
+boundaries, attempt ownership, recovery routing, process-failure behavior, and
+the division between the execution kernel and stage adapters.
 
 The [run data contract](data-contract.md) owns durable fact placement and
 reference rules. [Execution Evidence](execution-evidence.md) owns the canonical
 process-result body. [Parameter Recommendation](parameter-recommendation.md) owns model
 request, response, parsing, and approval behavior. This specification connects
 those contracts without replacing them.
+
+## Whole-run Readiness Boundary
+
+After the real-TTY check and before publishing any frozen session input, both
+structured run and TUI compute the canonical effective local-method closure.
+Readiness resolves every fixed local method through the active machine mapping,
+requires a non-empty tool/package probe declaration, verifies its environment,
+and probes its declared tools. The same selected closure is then captured in
+the whole-run dependency snapshot. A readiness failure creates no session.
+
+Assembly remains the deferred-binding exception: whole-run readiness captures
+its configured candidate dependency scope but does not pretend that one
+candidate is already selected. The Assembly stage selects from that frozen
+scope after upstream evidence exists and preflights the selected method before
+freezing its attempt.
+
+Whether an LLM endpoint is mandatory is owned by the selected workflow and
+[recommendation policy](recommendation-policy.md#readiness-and-evidence). When
+required, readiness invokes the configured endpoint and accepts only the exact
+parsed JSON object `{"ready": true}`. Empty output, free text, a JSON array, or
+an object with a different shape fails the probe. This is a structured-output
+capability check, not merely an authentication or network-connectivity check.
+
+This boundary is read-only. Bootstrap's broader configured-catalog validation
+and a method's later frozen-dependency verification remain distinct checks.
 
 ## Canonical Flow
 

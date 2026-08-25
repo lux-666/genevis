@@ -76,7 +76,12 @@ The manifest owns `session_id`. Output is stored below:
 
 Both stdin and stdout must be TTYs before freeze. A selected occurrence may
 start a local process only when its frozen local-execution authorization allows
-it. Parameter and review gates follow the frozen policy and registered resolver:
+it. `review_policy.max_blocked_seconds` applies to every registered review gate,
+including both Assembly gates and Assembly Review; `review_policy.stages` is
+only an optional per-stage override. Exact default and countdown semantics are
+owned by the
+[Review Contract](../architecture/reference/data-contract.md#12-review-contract).
+Parameter and review gates follow the frozen policy and registered resolver:
 depending on that policy, a gate may wait for a human or resolve through its
 eligible attached-process countdown path. An interrupted durable gate remains
 manual recovery work; a later process does not reconstruct the old countdown.
@@ -98,6 +103,11 @@ gene-agent inspect \
   --session-id <SESSION> \
   --data-dir /server/path/data
 ```
+
+After canonical completion, `final_assembly` is the verified absolute path of
+the latest assembly delivered by the workflow. The JSON form also includes its
+immutable `primary_output_ref`, candidate bundle, producer stage, and workflow
+occurrence; failed integrity checks are reported instead of returning a path.
 
 Machine-readable polling for one or many independent sessions:
 

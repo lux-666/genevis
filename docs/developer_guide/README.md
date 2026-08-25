@@ -24,8 +24,9 @@ contracts. Exact rules belong to the linked architecture reference owners.
 |---|---|
 | Parent routing, frozen occurrences, terminal behavior | [Runtime orchestration](../architecture/topics/runtime-orchestration.md), then [Run data contract](../architecture/reference/data-contract.md) |
 | Stage inputs, outputs, methods, or biological boundaries | [Stage contracts](../architecture/reference/stage-contracts.md), then the affected stage implementation under `app/stages/` |
-| Method freeze, runner, collection, or retry | [Method execution](../architecture/topics/execution.md), [Execution lifecycle](../architecture/reference/execution-lifecycle.md), and [Execution evidence](../architecture/reference/execution-evidence.md) |
+| Run-specific readiness, method freeze, runner, collection, or retry | [Method execution](../architecture/topics/execution.md), [Execution lifecycle](../architecture/reference/execution-lifecycle.md), and [Execution evidence](../architecture/reference/execution-evidence.md) |
 | Cross-stage files, resource resolution, or assembly delivery | [Resource handoff](../architecture/reference/resource-handoff.md) |
+| Genome size, platform/read type, or species identity | [Shared biological facts](../architecture/reference/shared-facts.md), then the consuming stage contract |
 | LLM parameters, approval, or retry chains | [Parameter recommendation](../architecture/reference/parameter-recommendation.md) and the corresponding stage parameter workflow |
 | Human gates, review, or resume | [Review and resume](../architecture/topics/review-and-resume.md), then the run-data and execution references it links |
 | Package/method registration or environment capability | [Descriptor contract](../architecture/reference/descriptors.md), `descriptors/registry.yaml`, and the referenced descriptor files |

@@ -180,19 +180,36 @@ Logical inputs:
 - with no usable reads, an explicit operator genome size permits the
   `skipped_no_usable_reads` evidence path; without either, the stage fails.
 
+Input completeness is declaration-owned. A manifest containing long reads but
+no short reads is a valid, intentional long-read-only survey input; the stage
+does not guess that the user omitted a file. When both families are declared,
+short reads take priority. A supplied `genome_size_estimate` remains an
+operator prior; its exact precedence over measurements is owned by the
+[Shared Biological Facts Contract](shared-facts.md#estimated_genome_size).
+
 Registered methods:
 
 - `genome_survey.kmer_count.jellyfish`;
 - `genome_survey.model.genomescope2`.
 
 The stage publishes immutable survey evidence and compact scalar observations;
-it does not create a cross-stage path resource. An explicit operator genome size
-has priority over a survey estimate. If neither an explicit value nor a valid
-estimate exists when assembly requires one, the workflow fails with
+it does not create a cross-stage path resource. If neither an explicit value nor
+a valid estimate exists when assembly requires one, the workflow fails with
 `GENOME_SIZE_UNAVAILABLE`. The checkpoint's `survey_input_family` and
 `resolved_assets` expose only the `short_reads` and `long_reads` logical
-families. Jellyfish publishes typed k-mer `ArtifactRef` objects, which
-GenomeScope2 consumes it without a path-string conversion.
+families. Each resolved read retains the registry's frozen `compression` fact;
+Jellyfish consumes `none`/`unknown` inputs directly and streams `gzip` members
+through `gzip -cd` without requiring an operator-created decompressed copy.
+Other declared compression codecs fail closed at this adapter until they have
+an explicit execution contract. Filename suffixes are not compression
+authority. Jellyfish publishes typed k-mer `ArtifactRef` objects, which
+GenomeScope2 consumes without a path-string conversion.
+
+Because the frozen Jellyfish script invokes both commands for gzip inputs, its
+selected machine-method mapping must declare `jellyfish` and `gzip` in the
+probed tool closure. The active machine mapping is frozen through the
+[whole-run readiness boundary](execution-lifecycle.md#whole-run-readiness-boundary);
+the committed `envs.yaml.example` is only a bootstrap seed.
 
 Outcome rules are explicit. With usable reads and local execution enabled, both
 methods must complete before the stage completes. With usable reads but local
@@ -325,6 +342,22 @@ but never owns database paths, versions, or provenance; those fields are
 invalid RunConfig input. Review may accept a candidate, adopt a separately
 completed polish/purge action, or stop the workflow. Decisions are bound to
 the current review request and typed candidate refs.
+
+NCBI comparative evidence and statistics verify and parse the exact same
+manifest-pinned bytes. `_load_reference_snapshot` returns named alias, assembly
+row, and lineage tables so their roles cannot be exchanged positionally. Target
+resolution and stable source-failure classification are shared; first-useful-tier
+evidence selection and all-tier statistical cohort construction remain separate
+stage contracts.
+
+Target species is optional manifest metadata, read from `user_metadata` or a
+supported top-level species key. If it is absent, the related-species packs
+record `target_species_not_provided`, publish no invented target or comparison
+cohort, and Assembly Review continues with its other evidence. An unresolved
+provided name likewise remains an explicit unavailable comparison rather than a
+stage-input failure. Ownership of species identity and the current duplicate
+representation boundary belongs to the
+[Shared Biological Facts Contract](shared-facts.md#species_facts).
 
 Signals such as duplicated BUSCO content, size inflation, abnormal depth, or
 missing/inconsistent evidence prevent unsupported automatic acceptance.

@@ -10,15 +10,19 @@
 > [TUI and planning](../topics/tui-and-planning.md).
 > **Code evidence:** `app/schemas/shared_parameters.py`,
 > `app/schemas/run_config.py`, `app/domains/genome_size.py`,
-> `app/entrypoints/ask_planner.py`, `app/stages/inventory/nodes.py`, and
-> `app/stages/assembly/nodes.py`.
+> `app/entrypoints/ask_planner.py`, `app/entrypoints/tui_intake.py`,
+> `app/stages/inventory/nodes.py`, `app/stages/assembly/nodes.py`, and
+> `app/stages/assembly_review/nodes.py`.
 
 ## Definition
 
 `SharedParameters` owns cross-stage biological facts collected once during
 planning and projected into the frozen run state. The frozen RunConfig is the
-sole authority for these values at runtime; stage outputs may supply derived
-measurements but never overwrite a frozen fact.
+sole authority for those shared values at runtime; stage outputs may supply
+derived measurements but never overwrite a frozen fact. Current Assembly
+Review comparative-species input still has a separate manifest projection,
+described under `species_facts` and tracked as conformance debt rather than
+silently treated as the same representation.
 
 The schema rejects unknown fields. Every field is optional; a stage that
 requires an absent fact must fail closed at its own boundary rather than
@@ -83,7 +87,18 @@ that candidate is rejected with `genome_size_required`.
 Caller-supplied biological identity used by parameter recommenders. All
 sub-fields are optional except `scientific_name`. `telomere_motif` is
 normalized to uppercase ACGT and requires at least two bases. This block is
-consumed by T2T finishing; Assembly and Genome Survey do not read it.
+consumed by parameter evidence and T2T finishing; Assembly and Genome Survey do
+not read it.
+
+Assembly Review related-species comparison currently reads an optional target
+label from the frozen manifest's `user_metadata` (with supported legacy
+top-level species keys), not from `shared_parameters.species_facts`. The TUI
+projects one intake species into these two frozen representations, but
+structured inputs can currently omit or disagree across them without a shared
+conflict check. Absence or failed name resolution produces an explicit
+unavailable comparison and must not invent a target species. The duplicate
+representation and its closure condition are recorded in
+[Architecture Conformance](conformance.md#target-species-has-two-frozen-representations).
 
 ## Planning and freeze validation
 

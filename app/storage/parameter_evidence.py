@@ -67,6 +67,15 @@ class ParameterEvidenceError(ValueError):
 
 
 @dataclass(frozen=True)
+class _ParameterEvidenceLocation:
+    paths: SessionPaths
+    session_id: str
+    stage: str
+    workflow_step_id: str
+    destination: Path
+
+
+@dataclass(frozen=True)
 class ParameterRecommendationArtifactTypes:
     """Stage-owned artifact types participating in the shared v3 chain."""
 
@@ -639,15 +648,12 @@ def publish_parameter_file(
     conflicting snapshot at the same logical path fails closed.
     """
 
-    if scope not in {"recommendation", "attempt"}:
-        raise ParameterEvidenceError(f"unsupported parameter evidence scope: {scope!r}")
-    if type(identifier) is not int or identifier < 0:
-        raise ParameterEvidenceError(f"{scope}_id must be a non-negative integer")
-    stage_component = _safe_component(stage, label="stage")
-    file_component = _safe_component(filename, label="filename")
-    paths, session_id = _session_paths(state)
-    workflow_step_id = current_workflow_step_id(
-        cast(TopLevelState, state), expected_stage=stage_component
+    location = _parameter_evidence_location(
+        state,
+        stage=stage,
+        scope=scope,
+        identifier=identifier,
+        filename=filename,
     )
     raw_source_path = Path(source).expanduser()
     if raw_source_path.is_symlink():
@@ -656,13 +662,13 @@ def publish_parameter_file(
         )
     source_path = raw_source_path.resolve(strict=False)
     try:
-        source_path.relative_to(paths.work_dir.resolve(strict=False))
+        source_path.relative_to(location.paths.work_dir.resolve(strict=False))
     except ValueError as exc:
         raise ParameterEvidenceError(
             "parameter evidence source must be below the run work directory"
         ) from exc
-    active_work_dir = paths.workflow_step_work_dir(
-        workflow_step_id, stage_component
+    active_work_dir = location.paths.workflow_step_work_dir(
+        location.workflow_step_id, location.stage
     ).resolve(strict=False)
     try:
         source_path.relative_to(active_work_dir)
@@ -670,29 +676,21 @@ def publish_parameter_file(
         raise ParameterEvidenceError(
             "parameter evidence source targets another workflow occurrence"
         ) from exc
-    directory = "parameter_recommendations" if scope == "recommendation" else "attempts"
-    destination = paths.workflow_step_artifact_path(
-        workflow_step_id,
-        stage_component,
-        directory,
-        f"{identifier:03d}",
-        file_component,
-    )
     artifact = ArtifactMeta.from_file(
         source_path,
-        stage=stage_component,
+        stage=location.stage,
         method_name=method_name,
         artifact_type=artifact_type,
         metadata={
             f"{scope}_id": identifier,
-            "workflow_step_id": workflow_step_id,
+            "workflow_step_id": location.workflow_step_id,
         },
     )
     return publish_artifact_record(
-        paths.run_dir,
-        session_id,
+        location.paths.run_dir,
+        location.session_id,
         artifact,
-        destination=destination,
+        destination=location.destination,
     ).ref
 
 
@@ -750,6 +748,48 @@ def recover_parameter_json(
     cannot be reconstructed from metadata alone.
     """
 
+    location = _parameter_evidence_location(
+        state,
+        stage=stage,
+        scope=scope,
+        identifier=identifier,
+        filename=filename,
+    )
+    try:
+        recovered = recover_published_artifact(
+            location.paths.run_dir,
+            location.session_id,
+            location.destination,
+            stage=location.stage,
+            method_name=method_name,
+            artifact_type=expected_type,
+            metadata={
+                f"{scope}_id": identifier,
+                "workflow_step_id": location.workflow_step_id,
+            },
+        )
+    except (OSError, ValueError) as exc:
+        raise ParameterEvidenceError(
+            "parameter artifact recovery failed: "
+            f"{location.paths.to_ref(location.destination)}"
+        ) from exc
+    if recovered is None:
+        return None
+    ref = recovered.ref
+    payload = read_parameter_json(state, ref, expected_type=expected_type)
+    return ref, payload
+
+
+def _parameter_evidence_location(
+    state: Mapping[str, Any],
+    *,
+    stage: str,
+    scope: ParameterEvidenceScope,
+    identifier: int,
+    filename: str,
+) -> _ParameterEvidenceLocation:
+    """Resolve the one logical destination shared by publish and recovery."""
+
     if scope not in {"recommendation", "attempt"}:
         raise ParameterEvidenceError(f"unsupported parameter evidence scope: {scope!r}")
     if type(identifier) is not int or identifier < 0:
@@ -768,28 +808,13 @@ def recover_parameter_json(
         f"{identifier:03d}",
         file_component,
     )
-    try:
-        recovered = recover_published_artifact(
-            paths.run_dir,
-            session_id,
-            destination,
-            stage=stage_component,
-            method_name=method_name,
-            artifact_type=expected_type,
-            metadata={
-                f"{scope}_id": identifier,
-                "workflow_step_id": workflow_step_id,
-            },
-        )
-    except (OSError, ValueError) as exc:
-        raise ParameterEvidenceError(
-            f"parameter artifact recovery failed: {paths.to_ref(destination)}"
-        ) from exc
-    if recovered is None:
-        return None
-    ref = recovered.ref
-    payload = read_parameter_json(state, ref, expected_type=expected_type)
-    return ref, payload
+    return _ParameterEvidenceLocation(
+        paths=paths,
+        session_id=session_id,
+        stage=stage_component,
+        workflow_step_id=workflow_step_id,
+        destination=destination,
+    )
 
 
 def _require_schema(record: Mapping[str, Any], expected: int, label: str) -> None:

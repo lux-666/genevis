@@ -86,16 +86,12 @@ fourth cross-stage resource source.
 
 The resolver does not scan `stage_outputs`. The calling stage owns the decision
 to fail, skip, or use an explicitly allowed fallback when a resource is absent;
-the resolver itself remains a non-throwing query for absence. Environment and
-method preflight still occurs when a method attempt is frozen. In addition, the
-confirmed-run boundary performs a read-only readiness probe over the canonical
-effective local-method closure before the whole-run freeze; this is a machine
-readiness check, not a second stage-resource planning authority. Assembly is
-the one deferred-method stage: whole-run freeze captures its candidate
-dependency scope without selecting a method, and stage entry selects a method
-only from that frozen scope before the attempt freeze. The resolver therefore
-must not re-read a live `envs.yaml` or infer method identity from a resource
-path.
+the resolver itself remains a non-throwing query for absence. It does not own
+environment/LLM readiness, method selection, or tool preflight and must not
+re-read a live `envs.yaml` or infer method identity from a resource path. Those
+checks belong to the
+[execution lifecycle](execution-lifecycle.md#whole-run-readiness-boundary) and
+the stage adapter that freezes the selected attempt.
 
 When inventory contains clean and raw assets for one logical resource,
 `ResourceSpec.asset_type_priority_groups` determines the preferred type. Once a
@@ -193,6 +189,11 @@ Assembly Review validates all of the following before candidate loading:
 Relabeling a central `ResourceRef` can no longer make an unrelated historical
 candidate satisfy Review. There is no pre-release fallback that infers a
 delivery fact from a mutable checkpoint or upgrades an old session.
+
+The operator-facing `final_assembly` field is a detached read model of these
+deliveries, not another resource record. Its terminal bounding and artifact
+verification are owned by the
+[run-data contract](data-contract.md#13-ledger-v2).
 
 ## Current assembly candidate lineage
 

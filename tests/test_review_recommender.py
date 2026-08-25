@@ -261,6 +261,31 @@ class ReviewRecommenderTests(unittest.TestCase):
                     chat_model=_RaisingChat(),
                 )
 
+    def test_recommender_rejects_non_text_provider_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
+            persisted = _persist_request(
+                run_dir,
+                ReviewPayload(
+                    stage="assembly_review",
+                    reason="review",
+                    decisions_allowed=["accept"],
+                ),
+            )
+            chat = _FakeChat("{}")
+            chat.content = {"decision": "accept"}  # type: ignore[assignment]
+
+            with self.assertRaisesRegex(RecommendationError, "empty content"):
+                recommend_review_decision(
+                    session_id="s1",
+                    stage="assembly_review",
+                    review_request_id=persisted.review_request_id,
+                    request_ref=persisted.request_ref,
+                    request_hash=persisted.request_hash,
+                    data_dir=run_dir,
+                    chat_model=chat,
+                )
+
     def test_recommender_rejects_disallowed_decision_without_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "s1")

@@ -9,7 +9,14 @@ session_id: contig-run-YYYYMMDD-a
 sample_id: sample_name
 genome_size_estimate: 500000000
 
+# Optional: enables Assembly Review related-species evidence. Omission is valid
+# and is recorded as target_species_not_provided rather than guessed.
+# user_metadata:
+#   target_species: Genus species
+
 assets:
+  # Long-read-only input is valid. If short DNA reads are also declared,
+  # Genome Survey prefers them for its k-mer survey.
   - asset_type: raw_long_reads
     paths:
       - /ABS/PATH/TO/long_reads.fastq.gz

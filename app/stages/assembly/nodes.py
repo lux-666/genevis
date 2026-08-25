@@ -52,6 +52,7 @@ from app.execution.parameter_attempts import (
     current_parameter_attempt,
 )
 from app.knowledge.packs import load_knowledge_pack
+from app.llm.json_response import model_response_record
 from app.review.application import (
     ForegroundReviewMetadataV1,
     PreparedReviewApplication,
@@ -1994,12 +1995,14 @@ def _recommend_route_with_decision_boundary(
                     state,
                     "method_model_response.json",
                     {
-                        "schema_version": 1,
                         "request_sha256": request_ref.sha256,
-                        "raw_response": decision.raw_response,
-                        "validity": "parsed" if decision.valid else "invalid",
-                        "error": decision.error,
-                        "model_id": decision.model_id,
+                        **model_response_record(
+                            schema_version=1,
+                            raw_response=decision.raw_response,
+                            valid=decision.valid,
+                            error=decision.error,
+                            model_id=decision.model_id,
+                        ),
                     },
                     artifact_type=ASSEMBLY_METHOD_MODEL_RESPONSE,
                     method_name="assembly.method_recommender",

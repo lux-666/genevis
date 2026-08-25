@@ -222,6 +222,17 @@ class LedgerV2Tests(unittest.TestCase):
                 ),
                 first,
             )
+            self.assertEqual(
+                ledger.record_method_disposition_recorded(
+                    "s1",
+                    "read_qc",
+                    "step-001-read_qc",
+                    "seqkit_stats",
+                    "skipped",
+                    reason="not selected",
+                ),
+                first,
+            )
             with self.assertRaisesRegex(LedgerConflictError, "method disposition"):
                 ledger.record_method_disposition(
                     "s1",

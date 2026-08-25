@@ -64,6 +64,8 @@ path as `GENE_AGENT_ENVS_CONFIG` for `server_check.sh` and the actual run.
 
 `server_test.sh` is a code-level regression gate. It runs pytest, compileall,
 and `git diff --check`; it is not a real-data or biological-tool smoke test.
+The still-open full-path acceptance boundary is recorded only in
+[Architecture Conformance](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated).
 
 For new-host installation see [`migration.md`](migration.md). For the Mac/Git
 handoff see [`mac_dev_server_pull.md`](mac_dev_server_pull.md). For starting or

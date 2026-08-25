@@ -43,7 +43,7 @@ from app.schemas.state import (
     TopLevelState,
     validate_top_level_state,
 )
-from app.storage.artifacts import read_artifact_records
+from app.storage.artifacts import read_artifact_records, resolve_artifact_ref
 from app.storage.ledger import (
     Ledger,
     LedgerConflictError,
@@ -650,6 +650,16 @@ def inspect_session(
     latest_blocked_report = (
         latest_operator_report if supervision_state == "blocked_human" else None
     )
+    final_assembly: dict[str, Any] | None = None
+    final_assembly_integrity_error: str | None = None
+    if supervision_state == "completed":
+        final_assembly, final_assembly_integrity_error = (
+            _latest_verified_assembly_delivery(
+                authoritative_events,
+                paths=paths,
+                session_id=session_id,
+            )
+        )
     stage_terminals, stage_terminal_integrity = project_stage_terminal_events(
         authoritative_events
     )
@@ -737,6 +747,7 @@ def inspect_session(
         # Reports are optional, derived views. Their contents are never lifecycle truth.
         "latest_operator_report_payload": None,
         "latest_final_report": latest_final_report,
+        "final_assembly": final_assembly,
         "latest_relevant_artifacts": _latest_relevant_artifacts(artifacts),
         "decision_requirements": decision_requirements,
         "artifact_count": len(artifacts),
@@ -746,6 +757,8 @@ def inspect_session(
     }
     if decision_requirements_error:
         summary["review_request_verification_error"] = decision_requirements_error
+    if final_assembly_integrity_error:
+        summary["final_assembly_integrity_error"] = final_assembly_integrity_error
     if (
         latest_unresolved_review_request
         and latest_active_review is not None
@@ -1101,6 +1114,31 @@ def _latest_artifact_refs(state: Mapping[str, Any]) -> dict[str, Any]:
     return refs
 
 
+def _review_request_decision_context(
+    record: Mapping[str, Any],
+    *,
+    request_ref: Any,
+    request_hash: Any,
+    review_request_artifact_ref: Any,
+) -> dict[str, Any]:
+    """Project one verified request record into the decision-context contract."""
+
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        raise ResumeValidationError("review request artifact payload is invalid")
+    return {
+        **payload,
+        **dict(record.get("bindings") or {}),
+        "stage": record.get("stage"),
+        "workflow_step_id": record.get("workflow_step_id"),
+        "gate_id": record.get("gate_id"),
+        "review_request_id": record.get("review_request_id"),
+        "request_ref": request_ref,
+        "request_hash": request_hash,
+        "review_request_artifact_ref": review_request_artifact_ref,
+    }
+
+
 def _decision_requirements_from_state(
     state: Mapping[str, Any],
     active_interrupt: Mapping[str, Any] | None,
@@ -1109,24 +1147,16 @@ def _decision_requirements_from_state(
         return None
     _validate_active_interrupt_workflow_step(state, active_interrupt)
     _ref, record = load_verified_interrupt_request(state, active_interrupt)
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        raise ResumeValidationError("review request artifact payload is invalid")
-    context = {
-        **payload,
-        **dict(record.get("bindings") or {}),
-        "stage": record.get("stage"),
-        "workflow_step_id": record.get("workflow_step_id"),
-        "gate_id": record.get("gate_id"),
-        "review_request_id": record.get("review_request_id"),
-        "request_ref": active_interrupt.get("request_ref"),
-        "request_hash": active_interrupt.get("request_hash"),
-        "review_request_artifact_ref": (
+    context = _review_request_decision_context(
+        record,
+        request_ref=active_interrupt.get("request_ref"),
+        request_hash=active_interrupt.get("request_hash"),
+        review_request_artifact_ref=(
             (active_interrupt.get("request_ref") or {}).get("path_ref")
             if isinstance(active_interrupt.get("request_ref"), dict)
             else None
         ),
-    }
+    )
     return _decision_requirements(context)
 
 
@@ -1346,6 +1376,57 @@ def _event_ref(event: dict[str, Any], role: str) -> dict[str, Any] | None:
         if isinstance(ref, dict) and ref.get("role") == role:
             return ref
     return None
+
+
+def _latest_verified_assembly_delivery(
+    events: list[dict[str, Any]],
+    *,
+    paths: SessionPaths,
+    session_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Project the latest index-verified delivered assembly for a completed run."""
+
+    for event in reversed(events):
+        if event.get("event_type") != "resource_delivered":
+            continue
+        summary = event.get("summary")
+        if (
+            not isinstance(summary, Mapping)
+            or summary.get("resource_type") != "assembly"
+        ):
+            continue
+        candidate_event_ref = _event_ref(event, "candidate_bundle_ref")
+        primary_event_ref = _event_ref(event, "primary_output_ref")
+        try:
+            candidate_ref = _artifact_ref_from_event_ref(candidate_event_ref)
+            primary_ref = _artifact_ref_from_event_ref(primary_event_ref)
+            candidate_path = resolve_artifact_ref(
+                paths.run_dir, session_id, candidate_ref
+            )
+            primary_path = resolve_artifact_ref(paths.run_dir, session_id, primary_ref)
+        except (OSError, ValueError) as exc:
+            return None, f"delivered assembly artifact verification failed: {exc}"
+        return (
+            {
+                "stage": event.get("stage"),
+                "workflow_step_id": event.get("workflow_step_id"),
+                "delivery_mode": summary.get("delivery_mode"),
+                "candidate_bundle_ref": candidate_ref.model_dump(mode="json"),
+                "candidate_bundle_path": str(candidate_path),
+                "primary_output_ref": primary_ref.model_dump(mode="json"),
+                "primary_output_path": str(primary_path),
+            },
+            None,
+        )
+    return None, None
+
+
+def _artifact_ref_from_event_ref(value: object) -> ArtifactRef:
+    if not isinstance(value, Mapping):
+        raise ValueError("resource delivery is missing an artifact ref")
+    return ArtifactRef.model_validate(
+        {key: value[key] for key in ArtifactRef.model_fields if key in value}
+    )
 
 
 def _latest_relevant_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2196,18 +2277,10 @@ def _decision_requirements_from_artifact(
         raise ResumeValidationError(
             "ledger workflow_step_id does not match the request artifact"
         )
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        raise ResumeValidationError("review request artifact payload is invalid")
-    context = {
-        **payload,
-        **dict(record.get("bindings") or {}),
-        "stage": record.get("stage"),
-        "workflow_step_id": record.get("workflow_step_id"),
-        "gate_id": record.get("gate_id"),
-        "review_request_id": expected_request_id,
-        "request_ref": ref.model_dump(mode="json"),
-        "request_hash": ref.sha256,
-        "review_request_artifact_ref": ref.path_ref,
-    }
+    context = _review_request_decision_context(
+        record,
+        request_ref=ref.model_dump(mode="json"),
+        request_hash=ref.sha256,
+        review_request_artifact_ref=ref.path_ref,
+    )
     return _decision_requirements(context)

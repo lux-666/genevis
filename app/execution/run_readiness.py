@@ -291,20 +291,24 @@ def _pad_version(version: tuple[int, ...], size: int) -> tuple[int, ...]:
 
 
 def probe_llm_endpoint() -> None:
-    """Perform a minimal authenticated model call to prove endpoint connectivity."""
+    """Prove the configured model can return the structured output we consume."""
 
     from app.llm.factory import build_chat_model
-    from app.llm.json_response import response_text
+    from app.llm.json_response import parse_json_object, response_text
 
     model = build_chat_model()
     response = model.invoke(
         [
-            ("system", "This is a connectivity probe. Reply with READY."),
-            ("human", "READY"),
+            (
+                "system",
+                'This is a structured-output probe. Reply exactly {"ready":true}.',
+            ),
+            ("human", "Return the requested JSON object."),
         ]
     )
-    if not response_text(response).strip():
-        raise ValueError("LLM endpoint returned an empty response")
+    payload = parse_json_object(response_text(response))
+    if payload != {"ready": True}:
+        raise ValueError("LLM endpoint failed the structured-output probe")
 
 
 def _normalize_selected_methods(
