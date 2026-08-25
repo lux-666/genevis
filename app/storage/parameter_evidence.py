@@ -116,8 +116,7 @@ class ApprovedParameterBundleV3:
                 "approved recommendation has no parameters mapping"
             )
         if (
-            self.chain.manifest.summary.get("policy")
-            == "deterministic_baseline"
+            self.chain.manifest.summary.get("policy") == "deterministic_baseline"
             and parameters
         ):
             raise ParameterEvidenceError(

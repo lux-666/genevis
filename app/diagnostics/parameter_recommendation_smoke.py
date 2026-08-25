@@ -14,20 +14,20 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from app.domains.parameter_recommendation.resolution import resolve_parameters
 from app.entrypoints.environment import load_dotenv_without_override
 from app.llm.config import load_llm_profile
 from app.llm.parameters.assembly.recommender import (
     AssemblyParameterDecision,
     recommend_assembly_parameters,
 )
-from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.schemas.artifacts import ASSEMBLY_PARAMETER_MODEL_REQUEST
 from app.schemas.parameter_recommendation import (
-    RecommendationInputSnapshotV3,
     RecommendationDependencyRefs,
+    RecommendationInputSnapshotV3,
 )
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.storage.parameter_evidence import read_parameter_json
-from app.domains.parameter_recommendation.resolution import resolve_parameters
 from app.storage.paths import SessionPaths
 
 
@@ -122,9 +122,7 @@ def evaluate_parameter_request(
                     catalog,
                     l0_executor_values={
                         "assembly_output_prefix": "diagnostic_replay",
-                        "assembly_input_reads": [
-                            "/tmp/diagnostic_replay/reads.fastq"
-                        ],
+                        "assembly_input_reads": ["/tmp/diagnostic_replay/reads.fastq"],
                     },
                     snapshot=snapshot,
                     approved_l2=parameters,
@@ -180,7 +178,13 @@ def evaluate_parameter_request(
                 validation = {
                     "valid": False,
                     "method_id": catalog.method_id,
-                    "violations": [{"parameter": None, "value": None, "reason": "resolution missing"}],
+                    "violations": [
+                        {
+                            "parameter": None,
+                            "value": None,
+                            "reason": "resolution missing",
+                        }
+                    ],
                     "warnings": [],
                 }
 

@@ -24,10 +24,6 @@ import yaml
 from langchain_core.runnables import RunnableConfig
 
 from app.config import default_data_root
-from app.entrypoints.environment import (
-    candidate_dotenv_paths,
-    load_dotenv_without_override,
-)
 from app.control.lifecycle import (
     TerminalFinalizationError,
     finalize_authoritative_terminal,
@@ -39,6 +35,9 @@ from app.control.projections import (
     project_workflow_state,
 )
 from app.control.workflow_plan import workflow_steps_from_run_config
+from app.entrypoints.environment import (
+    load_dotenv_without_override,
+)
 from app.graph.builder import build_graph
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,

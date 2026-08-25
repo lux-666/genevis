@@ -4,15 +4,15 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.diagnostics.parameter_recommendation_smoke import (
     evaluate_parameter_request,
     load_request_artifact,
 )
 from app.llm.config import load_llm_profile
-from tests.test_parameter_persistence_v2 import _Model, _Response, _state
 from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
-from unittest.mock import patch
+from tests.test_parameter_persistence_v2 import _Model, _state
 
 
 def _make_request(tmp_path: Path, *, minimal_facts: bool = False) -> Path:
@@ -28,8 +28,8 @@ def _make_request(tmp_path: Path, *, minimal_facts: bool = False) -> Path:
     assembly = update["stage_outputs"]["assembly"]
     cursor = assembly["current_parameter_recommendation"]
     manifest_ref = cursor["manifest_ref"]
-    from app.storage.parameter_evidence import read_parameter_json
     from app.schemas.artifacts import ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST
+    from app.storage.parameter_evidence import read_parameter_json
     from app.storage.paths import SessionPaths
 
     merged_state = {**state, "stage_outputs": update["stage_outputs"]}
@@ -67,6 +67,7 @@ def _make_request(tmp_path: Path, *, minimal_facts: bool = False) -> Path:
         encoding="utf-8",
     )
     return minimal_path
+
 
 def test_live_smoke_replays_request_without_approval_or_execution(
     tmp_path: Path, monkeypatch
@@ -119,9 +120,7 @@ def test_live_smoke_rejects_unknown_parameter(tmp_path: Path, monkeypatch) -> No
     class Model:
         def invoke(self, _messages):
             return SimpleNamespace(
-                content=json.dumps(
-                    {"parameters": {"not_a_parameter": 1}}
-                )
+                content=json.dumps({"parameters": {"not_a_parameter": 1}})
             )
 
     def decide(request):
@@ -138,8 +137,9 @@ def test_live_smoke_rejects_unknown_parameter(tmp_path: Path, monkeypatch) -> No
     result = evaluate_parameter_request(request_dto, decision_maker=decide)
 
     assert result["passed"] is False
-    assert "is not cataloged as L2-adjustable" in (
-        result["validation"]["violations"][0]["reason"]
+    assert (
+        "is not cataloged as L2-adjustable"
+        in (result["validation"]["violations"][0]["reason"])
     )
 
 
