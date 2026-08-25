@@ -817,8 +817,7 @@ class FrozenInputTests(unittest.TestCase):
             self.assertFalse(paths.data_root.exists())
             self.assertFalse(paths.run_dir.exists())
 
-    def test_freeze_defers_assembly_read_role_validation_until_stage_time(self) -> None:
-        """A route/read-type mismatch is not a freeze-time method decision."""
+    def test_freeze_rejects_explicit_route_read_type_platform_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
@@ -850,16 +849,16 @@ class FrozenInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            bundle = freeze_session_inputs(
-                paths,
-                manifest_draft=manifest,
-                run_config_draft=run_config,
-                config_path=envs,
-            )
-
-            assert bundle.run_config.assembly is not None
-            self.assertEqual(bundle.run_config.assembly.assembly_route, "ont")
-            self.assertNotIn("assembly_method", bundle.run_config.assembly.model_dump())
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "read_type conflicts with the registered long-read platform",
+            ):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                    config_path=envs,
+                )
 
     def test_prepare_accepts_registered_read_type_families(self) -> None:
         cases = (
@@ -911,9 +910,7 @@ class FrozenInputTests(unittest.TestCase):
                 )
                 self.assertFalse(paths.data_root.exists())
 
-    def test_freeze_defers_method_read_type_compatibility_until_stage_time(
-        self,
-    ) -> None:
+    def test_freeze_rejects_auto_route_read_type_platform_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
@@ -946,15 +943,16 @@ class FrozenInputTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            bundle = freeze_session_inputs(
-                paths,
-                manifest_draft=manifest,
-                run_config_draft=run_config,
-                config_path=envs,
-            )
-
-            assert bundle.run_config.assembly is not None
-            self.assertEqual(bundle.run_config.assembly.assembly_route, "auto")
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "read_type conflicts with the registered long-read platform",
+            ):
+                freeze_session_inputs(
+                    paths,
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                    config_path=envs,
+                )
 
     def test_run_config_occurrences_are_the_only_dependency_stage_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

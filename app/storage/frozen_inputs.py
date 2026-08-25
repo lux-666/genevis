@@ -25,6 +25,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.domains.assembly.selection import PLATFORMS_BY_SHARED_READ_TYPE
 from app.integrity import sha256_file, validate_sha256
 from app.schemas.manifest import (
     AssetEntryInference,
@@ -1037,6 +1038,24 @@ def _validate_assembly_input_contract(
     )
     if not local_assembly:
         return
+    shared_read_type = (
+        run_config.shared_parameters.read_type
+        if run_config.shared_parameters is not None
+        else None
+    )
+    registered_platforms = {
+        declaration.platform
+        for declaration in read_declarations
+        if declaration.platform != "unknown"
+    }
+    if shared_read_type is not None and len(registered_platforms) == 1:
+        registered_platform = next(iter(registered_platforms))
+        if registered_platform not in PLATFORMS_BY_SHARED_READ_TYPE[shared_read_type]:
+            raise FrozenInputValidationError(
+                "shared_parameters.read_type conflicts with the registered "
+                f"long-read platform: {shared_read_type!r} versus "
+                f"{registered_platform!r}"
+            )
     hifi_paths = {
         declaration.path
         for declaration in read_declarations
@@ -1065,10 +1084,33 @@ def _validate_assembly_input_contract(
     if manifest.genome_size_estimate is not None:
         return
     has_usable_survey_reads = any(
-        declaration.asset_type == "clean_long_reads"
-        for declaration in read_declarations
+        asset.asset_type
+        in {
+            "raw_short_dna_reads",
+            "clean_short_dna_reads",
+            "raw_long_reads",
+            "clean_long_reads",
+        }
+        for asset in manifest.assets
     )
-    if not has_usable_survey_reads:
+    local_assembly_indexes = [
+        index
+        for index, request in enumerate(run_config.requested_stages)
+        if request.stage == "assembly" and request.allow_local_execution
+    ]
+    survey_is_configured = (
+        run_config.genome_survey is not None
+        and run_config.genome_survey.survey_parameters is not None
+    )
+    every_assembly_has_prior_survey = all(
+        survey_is_configured
+        and any(
+            earlier.stage == "genome_survey" and earlier.allow_local_execution
+            for earlier in run_config.requested_stages[:assembly_index]
+        )
+        for assembly_index in local_assembly_indexes
+    )
+    if not has_usable_survey_reads or not every_assembly_has_prior_survey:
         raise FrozenInputValidationError(
             "deferred Assembly requires input_manifest.genome_size_estimate or "
             "a prior locally executed Genome Survey occurrence"

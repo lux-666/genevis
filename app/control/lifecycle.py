@@ -43,7 +43,8 @@ from app.schemas.state import (
     TopLevelState,
     validate_top_level_state,
 )
-from app.storage.artifacts import read_artifact_records, resolve_artifact_ref
+from app.storage.artifacts import read_artifact_records
+from app.storage.assembly_candidates import load_executed_candidate_bundle
 from app.storage.ledger import (
     Ledger,
     LedgerConflictError,
@@ -1384,8 +1385,9 @@ def _latest_verified_assembly_delivery(
     paths: SessionPaths,
     session_id: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Project the latest index-verified delivered assembly for a completed run."""
+    """Project the latest canonically completed Assembly delivery."""
 
+    terminals, diagnostics = project_stage_terminal_events(events)
     for event in reversed(events):
         if event.get("event_type") != "resource_delivered":
             continue
@@ -1395,26 +1397,58 @@ def _latest_verified_assembly_delivery(
             or summary.get("resource_type") != "assembly"
         ):
             continue
+        stage = event.get("stage")
+        workflow_step_id = event.get("workflow_step_id")
+        if not isinstance(stage, str) or not isinstance(workflow_step_id, str):
+            return None, "delivered assembly is missing its occurrence identity"
+        if any(
+            diagnostic.get("workflow_step_id") == workflow_step_id
+            for diagnostic in diagnostics
+        ):
+            return None, "delivered assembly has non-authoritative terminal history"
+        terminal = terminals.get((workflow_step_id, stage))
+        if terminal is None or terminal.get("event_type") != "stage_completed":
+            return None, "delivered assembly occurrence is not canonically completed"
+        if events.index(event) >= events.index(terminal):
+            return None, "delivered assembly was not settled before stage completion"
+        matching_deliveries = [
+            candidate
+            for candidate in events
+            if candidate.get("event_type") == "resource_delivered"
+            and candidate.get("stage") == stage
+            and candidate.get("workflow_step_id") == workflow_step_id
+            and isinstance(candidate.get("summary"), Mapping)
+            and candidate["summary"].get("resource_type") == "assembly"
+        ]
+        if len(matching_deliveries) != 1:
+            return None, "completed assembly occurrence must have exactly one delivery"
+        if summary.get("delivery_mode") not in {"materialized", "reused"}:
+            return None, "delivered assembly has an invalid delivery mode"
         candidate_event_ref = _event_ref(event, "candidate_bundle_ref")
         primary_event_ref = _event_ref(event, "primary_output_ref")
         try:
             candidate_ref = _artifact_ref_from_event_ref(candidate_event_ref)
             primary_ref = _artifact_ref_from_event_ref(primary_event_ref)
-            candidate_path = resolve_artifact_ref(
-                paths.run_dir, session_id, candidate_ref
+            verified = load_executed_candidate_bundle(
+                paths.run_dir,
+                session_id,
+                candidate_ref,
             )
-            primary_path = resolve_artifact_ref(paths.run_dir, session_id, primary_ref)
+            if verified.primary_output_ref != primary_ref:
+                raise ValueError(
+                    "delivery primary output differs from its executed candidate"
+                )
         except (OSError, ValueError) as exc:
             return None, f"delivered assembly artifact verification failed: {exc}"
         return (
             {
-                "stage": event.get("stage"),
-                "workflow_step_id": event.get("workflow_step_id"),
+                "stage": stage,
+                "workflow_step_id": workflow_step_id,
                 "delivery_mode": summary.get("delivery_mode"),
                 "candidate_bundle_ref": candidate_ref.model_dump(mode="json"),
-                "candidate_bundle_path": str(candidate_path),
+                "candidate_bundle_path": str(verified.path),
                 "primary_output_ref": primary_ref.model_dump(mode="json"),
-                "primary_output_path": str(primary_path),
+                "primary_output_path": str(verified.primary_output_path),
             },
             None,
         )

@@ -30,6 +30,7 @@ from app.domains.assembly.constants import (
 )
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
+    PLATFORMS_BY_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
     AssemblySelection,
     AssemblySelectionSource,
@@ -520,14 +521,7 @@ def _members_for_read_type(
     members: list[RuntimeReadMember],
     read_type: NormalizedReadType,
 ) -> list[RuntimeReadMember]:
-    platforms_by_read_type: dict[NormalizedReadType, set[str]] = {
-        "pacbio_hifi": {"pacbio_hifi"},
-        "pacbio_clr": {"clr"},
-        "ont_raw": {"ont"},
-        "ont_hq": {"ont"},
-        "cyclone": {"cycloneseq"},
-    }
-    allowed = platforms_by_read_type[read_type]
+    allowed = PLATFORMS_BY_SHARED_READ_TYPE[read_type]
     return [member for member in members if member.platform in allowed]
 
 

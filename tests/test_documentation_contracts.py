@@ -158,9 +158,7 @@ class DocumentationContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         run_data = (reference_dir / "data-contract.md").read_text(encoding="utf-8")
-        resources = (reference_dir / "resource-handoff.md").read_text(
-            encoding="utf-8"
-        )
+        resources = (reference_dir / "resource-handoff.md").read_text(encoding="utf-8")
         parameters = (reference_dir / "parameter-recommendation.md").read_text(
             encoding="utf-8"
         )

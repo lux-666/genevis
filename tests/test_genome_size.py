@@ -173,6 +173,104 @@ def test_frozen_inputs_reject_unsupportable_deferred_assembly_genome_size():
             )
 
 
+@pytest.mark.parametrize("asset_type", ["raw_long_reads", "clean_long_reads"])
+def test_frozen_inputs_accept_prior_local_survey_with_usable_reads(asset_type):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        reads = root / "reads.fastq"
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        prepared = prepare_session_inputs(
+            manifest_draft={
+                "session_id": "s1",
+                "assets": [
+                    {
+                        "asset_type": asset_type,
+                        "paths": [str(reads)],
+                        "platform": "ont",
+                    }
+                ],
+            },
+            run_config_draft={
+                "requested_stages": [
+                    {"stage": "genome_survey", "allow_local_execution": True},
+                    {"stage": "assembly", "allow_local_execution": True},
+                ],
+                "genome_survey": {
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "1G",
+                        "threads": 4,
+                    }
+                },
+                "assembly": {"assembly_route": "auto"},
+            },
+        )
+
+        assert prepared.manifest.genome_size_estimate is None
+
+
+def test_frozen_inputs_reject_prior_local_survey_without_execution_parameters():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        reads = root / "reads.fastq"
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        with pytest.raises(
+            FrozenInputValidationError,
+            match="prior locally executed Genome Survey occurrence",
+        ):
+            prepare_session_inputs(
+                manifest_draft={
+                    "session_id": "s1",
+                    "assets": [
+                        {
+                            "asset_type": "raw_long_reads",
+                            "paths": [str(reads)],
+                            "platform": "ont",
+                        }
+                    ],
+                },
+                run_config_draft={
+                    "requested_stages": [
+                        {"stage": "genome_survey", "allow_local_execution": True},
+                        {"stage": "assembly", "allow_local_execution": True},
+                    ],
+                    "assembly": {"assembly_route": "auto"},
+                },
+            )
+
+
+def test_frozen_inputs_reject_clean_reads_without_prior_local_survey():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        reads = root / "reads.fastq"
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        with pytest.raises(
+            FrozenInputValidationError,
+            match="prior locally executed Genome Survey occurrence",
+        ):
+            prepare_session_inputs(
+                manifest_draft={
+                    "session_id": "s1",
+                    "assets": [
+                        {
+                            "asset_type": "clean_long_reads",
+                            "paths": [str(reads)],
+                            "platform": "ont",
+                        }
+                    ],
+                },
+                run_config_draft={
+                    "requested_stages": [
+                        {"stage": "assembly", "allow_local_execution": True}
+                    ],
+                    "assembly": {"assembly_route": "auto"},
+                },
+            )
+
+
 @pytest.mark.parametrize(
     ("method_id", "l0_executor_values"),
     [

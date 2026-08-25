@@ -30,6 +30,14 @@ PLATFORM_TO_SHARED_READ_TYPE: dict[str, NormalizedReadType] = {
     "pacbio_hifi": "pacbio_hifi",
 }
 
+PLATFORMS_BY_SHARED_READ_TYPE: dict[NormalizedReadType, frozenset[str]] = {
+    "cyclone": frozenset({"cycloneseq"}),
+    "ont_raw": frozenset({"ont"}),
+    "ont_hq": frozenset({"ont"}),
+    "pacbio_clr": frozenset({"clr"}),
+    "pacbio_hifi": frozenset({"pacbio_hifi"}),
+}
+
 FLYE_TO_SHARED_READ_TYPE: dict[str, NormalizedReadType] = {
     "nano-raw": "ont_raw",
     "nano-hq": "ont_hq",
