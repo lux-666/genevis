@@ -530,12 +530,6 @@ def load_current_approved_recommendation(
     return bundle, None
 
 
-def current_parameter_policy(output: AssemblyStageCursor) -> str:
-    """Return the frozen parameter-advisor mode for the active Assembly cursor."""
-
-    return str(output.get("parameter_recommendation_mode") or "advisor")
-
-
 def approved_method_read_type(
     bundle: ApprovedParameterBundleV3,
     *,

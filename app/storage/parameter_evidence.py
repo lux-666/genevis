@@ -115,6 +115,14 @@ class ApprovedParameterBundleV3:
             raise ParameterEvidenceError(
                 "approved recommendation has no parameters mapping"
             )
+        if (
+            self.chain.manifest.summary.get("policy")
+            == "deterministic_baseline"
+            and parameters
+        ):
+            raise ParameterEvidenceError(
+                "deterministic baseline approval must not contain L2 mappings"
+            )
         return dict(parameters)
 
 

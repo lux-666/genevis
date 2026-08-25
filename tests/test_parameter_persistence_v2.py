@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -49,6 +50,7 @@ from app.stages.assembly.parameters.storage import (
 from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
 from app.storage.artifacts import read_artifact_records
 from app.storage.parameter_evidence import (
+    ApprovedParameterBundleV3,
     ParameterEvidenceError,
     load_approved_parameter_chain_v3,
     load_parameter_recommendation_chain_v3,
@@ -775,6 +777,136 @@ def test_deterministic_baseline_persists_policy_decision_without_model_call(
         label="Hifiasm ONT",
     )
     assert attempt.approval_decision_ref is not None
+
+    approved_bundle = load_approved_parameter_chain_v3(
+        {**state, **update},
+        attempt=attempt,
+        expected_stage="assembly",
+        expected_method_id="assembly.candidate.hifiasm_ont",
+    )
+    assert isinstance(approved_bundle, ApprovedParameterBundleV3)
+    assert approved_bundle.chain.manifest.summary["policy"] == "deterministic_baseline"
+    assert approved_bundle.chain.manifest.summary["policy_skipped_model"] is True
+    assert approved_bundle.approved_l2 == {}
+
+
+def test_baseline_freeze_uses_empty_l2_without_policy_branch(tmp_path: Path) -> None:
+    state = _state(tmp_path, genome_size=1_000_000)
+    reads = tmp_path / "reads.fastq"
+    reads.write_text("@read\nACGT\n+\nIIII\n", encoding="utf-8")
+    assembly = state["stage_outputs"]["assembly"]
+    assembly.update(
+        {
+            "parameter_recommendation_mode": "deterministic_baseline",
+            "input_ref": str(reads.resolve()),
+            "hifiasm_ont_parameters": {"threads": 4},
+            "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
+            "assembly_input_member_platforms": {"primary": ["ont"]},
+        }
+    )
+    state["stage_seeds"] = {
+        **(state.get("stage_seeds") or {}),
+        "assembly": {"parameter_advisor": "deterministic_baseline"},
+    }
+
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        side_effect=AssertionError("baseline must not call the model"),
+    ):
+        recommendation_update = recommend_assembly_parameters(state)
+    approved_state = {
+        **state,
+        **recommendation_update,
+        "stage_outputs": recommendation_update["stage_outputs"],
+    }
+
+    plan_update = plan_candidate_attempts(approved_state)
+    planned_state = {
+        **approved_state,
+        **plan_update,
+        "stage_outputs": plan_update["stage_outputs"],
+    }
+    with (
+        patch(
+            "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+            return_value=(None, [], None),
+        ),
+        patch(
+            "app.stages.assembly.method_application.hifiasm_ont.build_read_input_dependencies",
+            return_value=[],
+        ),
+    ):
+        freeze_update = freeze_hifiasm_ont_attempt(planned_state)
+    frozen_state = {
+        **planned_state,
+        **freeze_update,
+        "stage_outputs": freeze_update["stage_outputs"],
+    }
+    frozen_output = frozen_state["stage_outputs"]["assembly"]
+    attempt = ParameterAttempt.model_validate(frozen_output["parameter_attempts"][0])
+    frozen_parameters = read_parameter_json(
+        frozen_state,
+        attempt.frozen_parameters_ref,
+        expected_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+    )
+    command = read_parameter_json(
+        frozen_state,
+        attempt.command_ref,
+        expected_type=ASSEMBLY_PARAMETER_COMMAND,
+    )
+
+    assert frozen_output["status"] == "hifiasm_ont_frozen"
+    assert frozen_parameters["l2_approved"] == {}
+    assert "l2" not in frozen_parameters["effective_source_by_parameter"].values()
+    assert "--hg-size" not in command["argv"] or (
+        command["argv"][command["argv"].index("--hg-size") + 1] == "1m"
+    )
+
+
+def test_approved_baseline_rejects_nonempty_l2_evidence(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    assembly = state["stage_outputs"]["assembly"]
+    assembly["parameter_recommendation_mode"] = "deterministic_baseline"
+    state["stage_seeds"] = {"assembly": {"parameter_advisor": "deterministic_baseline"}}
+
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        side_effect=AssertionError("baseline must not call the model"),
+    ):
+        update = recommend_assembly_parameters(state)
+    merged_state = {**state, **update}
+    result = merged_state["stage_outputs"]["assembly"]
+    attempt = current_parameter_attempt(
+        result,
+        method_id="assembly.candidate.hifiasm_ont",
+        label="Hifiasm ONT",
+    )
+    bundle = load_approved_parameter_chain_v3(
+        merged_state,
+        attempt=attempt,
+        expected_stage="assembly",
+        expected_method_id="assembly.candidate.hifiasm_ont",
+    )
+
+    tampered_chain = replace(
+        bundle.chain,
+        recommendation={"recommendation": {"parameters": {"purge_level": 1}}},
+        manifest=bundle.chain.manifest.model_copy(
+            update={
+                "summary": {
+                    **bundle.chain.manifest.summary,
+                    "policy": "deterministic_baseline",
+                }
+            }
+        ),
+    )
+    tampered_bundle = ApprovedParameterBundleV3(
+        attempt=attempt,
+        chain=tampered_chain,
+        approval_decision=bundle.approval_decision,
+    )
+    with pytest.raises(ParameterEvidenceError, match="deterministic baseline"):
+        _ = tampered_bundle.approved_l2
 
 
 def test_stale_checkpoint_reuses_persisted_model_response(tmp_path: Path) -> None:

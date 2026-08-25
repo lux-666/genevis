@@ -34,7 +34,6 @@ from app.stages.assembly.method_application.support import (
     assembly_primary_method_outcome_policy,
     build_read_input_dependencies,
     collect_method_artifacts,
-    current_parameter_policy,
     fail_update,
     freeze_parameterized_attempt,
     load_assembly_execution_contract,
@@ -142,15 +141,10 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
     script = working_dir / "run_nextdenovo.sh"
     try:
         catalog = approved_bundle.chain.catalog
-        approved_l2 = (
-            {}
-            if current_parameter_policy(output) == "deterministic_baseline"
-            else approved_bundle.approved_l2
-        )
         resolved = resolve_assembly_parameters(
             catalog=catalog,
             snapshot=approved_bundle.chain.input_snapshot,
-            approved_l2=approved_l2,
+            approved_l2=approved_bundle.approved_l2,
             l0_executor_values={
                 "assembly_method_read_type": read_type,
                 "assembly_input_reads": str(fofn),
