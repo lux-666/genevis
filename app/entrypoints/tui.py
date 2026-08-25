@@ -427,8 +427,6 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
             "target_assembly_level": (
                 "contig" if degraded else draft.intent.target_assembly_level
             ),
-            "use_ultralong_ont": draft.intent.use_ultralong_ont,
-            "use_hic_phasing": (False if degraded else draft.intent.use_hic_phasing),
         },
         "recommendation_policy": draft.recommendation_policy.model_dump(),
     }
@@ -1232,7 +1230,7 @@ def _parse_goal_with_configured_llm(request_text: str) -> Mapping[str, Any]:
         "Extract only explicit workflow-goal facts. Return one JSON object with "
         "goal_text, optional sample_id/target_species, target_assembly_level "
         "(contig/scaffold/chromosome), requested_stages, and "
-        "explicit use_ultralong_ont/use_hic_phasing booleans. Do not invent paths, "
+        "Do not invent paths, "
         "parameters, methods, or machine capabilities."
     )
     return _invoke_json_model(system, request_text)

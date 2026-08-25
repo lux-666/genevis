@@ -99,12 +99,6 @@ def _build_assembly_review_config(plan: AskPlanState) -> dict[str, Any]:
     return ar_config
 
 
-# Kept as a compatibility export for older callers.  New planning never asks
-# the operator to choose methods; fixed stages receive system defaults and
-# Assembly is bound after upstream evidence is available.
-_STAGES_NEEDING_METHOD_SELECTION: set[str] = set()
-
-
 def _get_method_descriptor(method_name: str) -> dict[str, Any] | None:
     return load_planner_method_catalog().descriptor_for_method(method_name)
 
@@ -208,40 +202,9 @@ def _fill_draft_default_methods(plan: AskPlanState) -> AskPlanState:
     interactive flow would do the same.
     """
     filled = _fill_missing_method_defaults(plan, dict(plan.selected_methods or {}))
-    for stage in _locally_enabled_stage_names(plan):
-        if stage in filled or stage not in _STAGES_NEEDING_METHOD_SELECTION:
-            continue
-        default = _draft_default_methods_for_stage(plan, stage)
-        if default:
-            filled[stage] = default
     if filled == (plan.selected_methods or {}):
         return plan
-    return plan.model_copy(
-        update={"selected_methods": _normalize_selected_methods(filled) or None}
-    )
-
-
-def _draft_default_methods_for_stage(
-    plan: AskPlanState, stage: str
-) -> str | list[str] | None:
-    if stage == "assembly":
-        return None
-    default = _default_methods_for_stage(stage)
-    if default:
-        return default
-    executable = [
-        method["method_name"] for method in _executable_methods_for_stage(stage)
-    ]
-    return executable[0] if len(executable) == 1 else executable or None
-
-
-def _draft_assembly_method(plan: AskPlanState) -> str | None:
-    """Compatibility helper for callers inspecting old draft behavior.
-
-    New plans never materialize an Assembly method during planning.  Runtime
-    recommendation owns that decision after upstream evidence exists.
-    """
-    return None
+    return plan.model_copy(update={"selected_methods": filled or None})
 
 
 def next_clarification(
@@ -250,8 +213,6 @@ def next_clarification(
     ref = str(Path(str(ask_plan_ref)).expanduser().resolve(strict=False))
     if plan.selected_stage_names is None:
         return _stage_selection_request(plan, ref)
-    if _needs_method_selection(plan):
-        return _method_selection_request(plan, ref)
     if _needs_parameter_values(plan):
         return _parameter_values_request(plan, ref)
     plan = _auto_fill_inferred_defaults(plan)
@@ -270,22 +231,6 @@ def merge_clarification_response(
             update={
                 "selected_stage_occurrences": occurrences,
                 "selected_methods": pipeline_methods or None,
-                "method_parameters": None,
-                "stage_parameters": None,
-                "confirmed": False,
-            }
-        )
-    if response.kind == "method_selection":
-        methods = _fill_missing_method_defaults(
-            plan, dict(response.selected_methods or {})
-        )
-        existing = dict(plan.selected_methods or {})
-        existing.update(methods)
-        _validate_selected_methods(existing, plan)
-        existing = _normalize_selected_methods(existing)
-        return plan.model_copy(
-            update={
-                "selected_methods": existing,
                 "method_parameters": None,
                 "stage_parameters": None,
                 "confirmed": False,
@@ -441,17 +386,6 @@ def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
                 "suggested_stage_occurrences", []
             ),
         }
-    if request.kind == "method_selection":
-        methods_by_stage = request.choices.get("methods_by_stage", {})
-        selected = {}
-        for stage, methods in methods_by_stage.items():
-            default = request.choices.get("defaults", {}).get(stage)
-            if default:
-                selected[stage] = default
-                continue
-            executable = [m["method_name"] for m in methods]
-            selected[stage] = executable[0] if executable else ""
-        return {"kind": "method_selection", "selected_methods": selected}
     if request.kind == "parameter_values":
         defaults = dict(request.choices.get("defaults", {}))
         return {
@@ -494,44 +428,6 @@ def _stage_selection_request(
             "selected_stage_occurrences": [
                 occurrence.model_dump(mode="json") for occurrence in suggested
             ],
-        },
-        next_action=_next_action(ask_plan_ref),
-    )
-
-
-def _method_selection_request(
-    plan: AskPlanState, ask_plan_ref: str
-) -> AskClarificationRequest:
-    methods_by_stage: dict[str, list[dict[str, Any]]] = {}
-    defaults: dict[str, str | list[str]] = {}
-    for stage in _locally_enabled_stage_names(plan):
-        if stage not in _STAGES_NEEDING_METHOD_SELECTION:
-            continue
-        stage_methods = _executable_methods_for_stage(stage)
-        if stage_methods:
-            methods_by_stage[stage] = [
-                {
-                    "method_name": m["method_name"],
-                    "selection_role": m.get("selection_role"),
-                    "display_name": m.get("display_name"),
-                }
-                for m in stage_methods
-            ]
-            default = _default_methods_for_stage(stage)
-            if default:
-                defaults[stage] = default
-    return AskClarificationRequest(
-        status="clarification_required",
-        kind="method_selection",
-        session_id=plan.session_id,
-        ask_plan_ref=ask_plan_ref,
-        manifest_ref=plan.manifest_ref,
-        question="Which methods should run for the selected stages?",
-        choices={"methods_by_stage": methods_by_stage, "defaults": defaults},
-        required_fields=["selected_methods"],
-        response_schema={
-            "kind": "method_selection",
-            "selected_methods": defaults or {stage: "" for stage in methods_by_stage},
         },
         next_action=_next_action(ask_plan_ref),
     )
@@ -956,8 +852,6 @@ def _stage_plan_details(
 
 
 def _stage_without_method_status(stage: str) -> str:
-    if stage in _STAGES_NEEDING_METHOD_SELECTION:
-        return "method pending"
     if stage in load_planner_method_catalog().by_stage:
         return "pipeline/internal"
     return "no registered method yet"
@@ -1043,13 +937,6 @@ def _check_conditional_requirements(
     return missing
 
 
-def _needs_method_selection(plan: AskPlanState) -> bool:
-    # Method selection is no longer a planning clarification.  Explicit
-    # selected_methods from older AskPlan documents remain readable and are
-    # validated when merged, but new plans use defaults plus deferred Assembly.
-    return False
-
-
 def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
     """Yield selected local methods plus any explicitly selected Review pipeline."""
 
@@ -1073,76 +960,6 @@ def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
             if item not in yielded:
                 yielded.add(item)
                 yield item
-
-
-def _validate_selected_methods(
-    methods: dict[str, str | list[str]], plan: AskPlanState
-) -> None:
-    known = _all_known_methods()
-    for stage, value in methods.items():
-        method_list = value if isinstance(value, list) else [value]
-        stage_methods = {m["method_name"] for m in _executable_methods_for_stage(stage)}
-        for method in method_list:
-            if not method or not method.strip():
-                raise ValueError(f"empty method name for stage {stage!r}")
-            if method not in stage_methods:
-                reason = (
-                    "unknown method" if method not in known else "method is not valid"
-                )
-                raise ValueError(
-                    f"{reason} {method!r} for stage {stage!r}; "
-                    f"known methods: {sorted(stage_methods)}"
-                )
-        if stage == "read_qc":
-            filters = [
-                method for method in method_list if method in READ_QC_FILTER_METHODS
-            ]
-            if len(filters) != 1:
-                raise ValueError(
-                    "read_qc method selection requires exactly one length filter choice"
-                )
-            if READ_QC_STATS_METHOD not in method_list:
-                raise ValueError(
-                    f"read_qc method selection requires {READ_QC_STATS_METHOD}"
-                )
-        if stage == "genome_survey":
-            executable = set(method_list)
-            if executable and executable != GENOME_SURVEY_EXECUTABLE_METHODS:
-                raise ValueError(
-                    "genome_survey executable selection requires both "
-                    "genome_survey.kmer_count.jellyfish and "
-                    "genome_survey.model.genomescope2"
-                )
-        if stage == "assembly_review":
-            required = {
-                "assembly_review.eval.quast",
-                "assembly_review.eval.busco",
-            }
-            if set(method_list) != required:
-                raise ValueError(
-                    "assembly_review uses the fixed QUAST and BUSCO pipeline; "
-                    "BUSCO cannot be removed"
-                )
-
-
-def _normalize_selected_methods(
-    methods: dict[str, str | list[str]],
-) -> dict[str, str | list[str]]:
-    normalized = dict(methods)
-    if "read_qc" in normalized:
-        selected = normalized["read_qc"]
-        method_list = selected if isinstance(selected, list) else [selected]
-        filter_method = next(
-            (method for method in method_list if method in READ_QC_FILTER_METHODS),
-            READ_QC_FILTER_SKIP,
-        )
-        normalized["read_qc"] = [READ_QC_STATS_METHOD, filter_method]
-    if "assembly_review" in normalized:
-        normalized["assembly_review"] = [
-            "assembly_review.eval.quast",
-            "assembly_review.eval.busco",
-        ]
-    return normalized
 
 
 def _fill_missing_method_defaults(

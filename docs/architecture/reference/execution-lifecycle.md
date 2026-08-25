@@ -77,6 +77,24 @@ durable `assembly_selection`, confirmed through its required gate, binds the
 Assembly method. Any planning-era tool hint is discarded before draft build and
 freeze rather than merged into execution state.
 
+This single track is structural, not advisory. The planning schema does not
+carry a `method_selection` clarification kind, a user-facing method roster, or
+a method-selection stage in its draft lifecycle. Legacy documents that contain
+those fields fail schema validation rather than being silently reinterpreted.
+The planner never asks which Assembly tool to use and never materializes a new
+method choice during drafting. A durable draft may retain an explicit legacy
+method roster as an opaque passthrough; it is not synthesized from intake and
+is not treated as a recommendation authority. That decision belongs exclusively
+to the stage-time recommendation boundary described above.
+
+Intake may recognize a named assembly tool as a transient asset-collection
+hint: it decides whether HiFi, ONT, or both read roles should be collected.
+That hint lives inside the intake function's local scope only. It is not a
+`WorkflowIntent` field, is not persisted to any durable document, and does not
+reach the Plan Draft model or runtime execution state. Companion-read flags
+such as ultra-long ONT inclusion or Hi-C phasing are likewise asset-collection
+hints; they do not preselect an Assembly method or parameter block.
+
 One `run` transition advances at most one frozen attempt. If an ordered direct
 batch still has pending cursors, the method graph keeps the frozen stage status,
 checkpoints the completed prefix, and routes back to `run`. Collection begins

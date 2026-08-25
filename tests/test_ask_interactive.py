@@ -154,7 +154,11 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             draft = build_initial_plan_draft(plan)
             plan_ref = Path(tmp) / "tui_state.json"
             clarification = next_clarification(draft, ask_plan_ref=plan_ref)
-            self.assertEqual(clarification.kind, "confirm")
+            self.assertEqual(clarification.kind, "parameter_values")
+            self.assertIn(
+                "shared_parameters.estimated_genome_size",
+                clarification.required_fields,
+            )
 
 
 class InteractiveLoopTests(unittest.TestCase):
@@ -734,7 +738,8 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn("Route Selection: deferred", rendered)
             self.assertNotIn("[flye] threads:", rendered)
             self.assertNotIn("catalog L2: asm_coverage, min_overlap", rendered)
-            self.assertNotIn("Needs attention:", rendered)
+            self.assertIn("Needs attention:", rendered)
+            self.assertIn("estimated_genome_size is missing", rendered)
 
     def test_plan_summary_exposes_generic_deferred_human_gate_contract(self):
         plan = _base_plan(
@@ -911,9 +916,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             attention = _draft_attention_items(draft, build_run_plan_summary(draft))
-            self.assertNotIn(
-                ("assembly", "estimated_genome_size is missing"), attention
-            )
+            self.assertIn(("assembly", "estimated_genome_size is missing"), attention)
             self.assertNotIn(("assembly", "platform must be confirmed"), attention)
             self.assertNotIn(("assembly", "threads must be confirmed"), attention)
 

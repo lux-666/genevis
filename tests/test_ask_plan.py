@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SEQKIT,
     READ_QC_FILTER_SKIP,
@@ -100,8 +102,8 @@ class AskPlanSchemaTests(unittest.TestCase):
         )
         self.assertEqual(build_run_config_payload(updated)["requested_stages"], [])
 
-    def test_method_selection_requires_selected_methods(self):
-        with self.assertRaisesRegex(ValueError, "selected_methods"):
+    def test_method_selection_kind_is_rejected(self):
+        with self.assertRaises(ValidationError):
             AskClarificationResponse(kind="method_selection")
 
     def test_parameter_values_requires_parameter_payload(self):
@@ -574,7 +576,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
     def test_assembly_review_rejects_removing_busco(self):
         plan = _base_plan(stage_names=["assembly_review"])
 
-        with self.assertRaisesRegex(ValueError, "BUSCO cannot be removed"):
+        with self.assertRaises(ValidationError):
             merge_clarification_response(
                 plan,
                 AskClarificationResponse(
@@ -598,66 +600,6 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "confirm")
-
-    def test_empty_method_name_rejected(self):
-        plan = _base_plan(
-            stage_names=["read_qc", "assembly"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection", selected_methods={"assembly": ""}
-        )
-        with self.assertRaisesRegex(ValueError, "empty method name"):
-            merge_clarification_response(plan, response)
-
-    def test_unknown_method_name_rejected(self):
-        plan = _base_plan(
-            stage_names=["read_qc", "assembly"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={"assembly": "assembly.candidate.unknown"},
-        )
-        with self.assertRaisesRegex(ValueError, "unknown method"):
-            merge_clarification_response(plan, response)
-
-    def test_method_name_must_belong_to_selected_stage(self):
-        plan = _base_plan(
-            stage_names=["genome_survey"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={"genome_survey": "assembly_review.eval.quast"},
-        )
-        with self.assertRaisesRegex(ValueError, "method is not valid"):
-            merge_clarification_response(plan, response)
-
-    def test_genome_survey_rejects_partial_executable_selection(self):
-        plan = _base_plan(
-            stage_names=["genome_survey"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={"genome_survey": ["genome_survey.kmer_count.jellyfish"]},
-        )
-        with self.assertRaisesRegex(ValueError, "requires both"):
-            merge_clarification_response(plan, response)
-
-    def test_read_qc_rejects_multiple_filter_choices(self):
-        plan = _base_plan(
-            stage_names=["read_qc"],
-        )
-        response = AskClarificationResponse(
-            kind="method_selection",
-            selected_methods={
-                "read_qc": [
-                    READ_QC_STATS_METHOD,
-                    READ_QC_FILTER_SKIP,
-                    "read_qc.length_filter.seqkit_seq",
-                ]
-            },
-        )
-        with self.assertRaisesRegex(ValueError, "exactly one length filter"):
-            merge_clarification_response(plan, response)
 
 
 class AskPlannerParameterTests(unittest.TestCase):

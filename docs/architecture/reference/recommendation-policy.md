@@ -41,6 +41,12 @@ The policy never reintroduces an Assembly method or parameter into RunConfig.
 Method identity remains stage-owned. A policy selects who proposes the method
 or parameter mapping, not an executable answer.
 
+The planning schema carries no `method_selection` clarification kind. There is
+no user-facing method roster in a draft; fixed stages receive system defaults,
+and Assembly is bound at its stage-time recommendation boundary. Intake
+tool-name recognition and companion-read hints are transient asset-collection
+hints scoped to intake-function locals, not durable planning fields.
+
 ## Method/route advisor
 
 `advisor` is the normal transaction: after QC/survey evidence, the exact model

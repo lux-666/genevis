@@ -43,8 +43,6 @@ class WorkflowIntent(BaseModel):
     target_species: str | None = Field(default=None, min_length=1)
     target_assembly_level: Literal["contig", "scaffold", "chromosome"] = "contig"
     requested_stages: list[str] = Field(default_factory=list)
-    use_ultralong_ont: bool = False
-    use_hic_phasing: bool = False
     # Intake staging fields for T2T batched collection.  ``telomere_motif``
     # holds the operator-supplied DNA motif before it is projected into
     # ``SharedParameters.species_facts``; it is validated on assignment.

@@ -221,6 +221,15 @@ discarded before a plan draft is built or persisted and must never reach the
 frozen RunConfig, Plan Draft model input, or Assembly recommendation context as
 a selection fact.
 
+This is structural: the planning schema does not carry a `method_selection`
+clarification kind. Legacy documents containing that kind fail validation
+rather than being silently reinterpreted. Companion-read hints (ultra-long ONT,
+Hi-C phasing) live inside intake-function scope as asset-collection decisions;
+they are not `WorkflowIntent` fields and do not reach durable state.
+A durable TUI draft may carry a legacy `selected_methods` mapping as opaque
+passthrough; the planner does not synthesize or extend it, and Assembly method
+identity is still owned exclusively by the stage-time gate.
+
 These domains are orthogonal. A stage may complete after a method is skipped
 when it still delivers its stage contract, may fail before a method starts,
 and may complete without a process when it delivers provided or reviewed

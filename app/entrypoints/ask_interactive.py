@@ -14,10 +14,6 @@ from app.domains.assembly.selection import (
     SHARED_TO_METHOD_READ_TYPE,
 )
 from app.entrypoints.ask_planner import (
-    _STAGES_NEEDING_METHOD_SELECTION,
-    READ_QC_FILTER_METHODS,
-    READ_QC_FILTER_SKIP,
-    READ_QC_STATS_METHOD,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
     _default_methods_for_stage,
@@ -319,8 +315,6 @@ def _draft_stage_status(
     selected = _selected_methods_for_stage(plan, stage)
     if stage in _FIXED_METHOD_STAGES:
         return f"will run {_fixed_pipeline_description(stage)}"
-    if stage in _STAGES_NEEDING_METHOD_SELECTION and not selected:
-        return "method needed before locking"
     if selected:
         return "will run locally"
     return "included"
@@ -332,8 +326,6 @@ def _draft_stage_method_lines(
     if stage in _FIXED_METHOD_STAGES:
         return []
     selected = _selected_methods_for_stage(plan, stage)
-    if not selected and stage in _STAGES_NEEDING_METHOD_SELECTION:
-        return ["missing"]
     return list(selected)
 
 
@@ -470,15 +462,6 @@ def _draft_blocking_items(
     plan: AskPlanState, summary: dict[str, Any]
 ) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
-    for occurrence in plan.selected_stage_occurrences or []:
-        if not occurrence.allow_local_execution:
-            continue
-        occurrence_stage = occurrence.stage
-        if (
-            occurrence_stage in _STAGES_NEEDING_METHOD_SELECTION
-            and not _selected_methods_for_stage(plan, occurrence_stage)
-        ):
-            items.append((occurrence_stage, "method is missing"))
     for field in summary.get("missing_parameter_fields") or []:
         field_stage = _stage_for_field(str(field), plan)
         items.append((field_stage, f"{_field_label(str(field))} is missing"))
@@ -502,9 +485,6 @@ def _next_clarification_blocking_items(
         return []
     if clarification.kind == "stage_selection":
         return [("plan", "stage list is not selected")]
-    if clarification.kind == "method_selection":
-        stages = sorted((clarification.choices.get("methods_by_stage") or {}).keys())
-        return [(stage, "method is missing") for stage in stages]
     if clarification.kind == "parameter_values":
         return []
     return [("plan", f"{clarification.kind} is still required")]
@@ -1188,8 +1168,6 @@ def _prompt_for_answer(
 ) -> AskClarificationResponse:
     if req.kind == "stage_selection":
         return _prompt_stage_selection(req)
-    if req.kind == "method_selection":
-        return _prompt_method_selection(req)
     if req.kind == "parameter_values":
         return _prompt_parameter_values(req, plan)
     raise ValueError(f"unexpected clarification kind: {req.kind}")
@@ -1266,133 +1244,6 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
     return AskClarificationResponse(
         kind="stage_selection", selected_stage_occurrences=occurrences
     )
-
-
-def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationResponse:
-    methods_by_stage = req.choices.get("methods_by_stage", {})
-    selected: dict[str, str | list[str]] = {}
-
-    print("\n--- Step 2: Method Selection ---\n")
-
-    for stage, methods in methods_by_stage.items():
-        method_names = [m["method_name"] for m in methods]
-        if stage == "read_qc":
-            selected[stage] = _prompt_read_qc_filter_choice(
-                methods, req.choices.get("defaults", {}).get(stage)
-            )
-            continue
-        requested_default = req.choices.get("defaults", {}).get(stage)
-        if isinstance(requested_default, list):
-            default_checked = [m for m in requested_default if m in method_names]
-        elif requested_default:
-            default_checked = (
-                [requested_default] if requested_default in method_names else []
-            )
-        else:
-            default_checked = []
-        # The assembly graph executes one primary candidate at a time. Keep
-        # its interactive choice singular even though other stages may run
-        # several methods in one pass.
-        if not default_checked:
-            default_checked = method_names[:1]
-
-        if _HAS_QUESTIONARY:
-            choices = []
-            for m in methods:
-                choices.append(
-                    questionary.Choice(
-                        m["method_name"],
-                        value=m["method_name"],
-                        checked=(m["method_name"] in default_checked),
-                    )
-                )
-            if stage == "assembly":
-                selected[stage] = _safe_ask(
-                    questionary.select(
-                        f"Primary method for {stage}:",
-                        choices=choices,
-                        default=default_checked[0],
-                        instruction="(choose one primary)",
-                    )
-                )
-            else:
-                answer = _safe_ask(
-                    questionary.checkbox(
-                        f"Methods for {stage}:",
-                        choices=choices,
-                        instruction="(Space toggle, Enter confirm)",
-                    )
-                )
-                if not answer:
-                    answer = default_checked
-                selected[stage] = answer[0] if len(answer) == 1 else answer
-        else:
-            print(f"  Methods for [{stage}]:")
-            for i, m in enumerate(methods, 1):
-                marker = "*" if m["method_name"] in default_checked else " "
-                print(f"    {marker} {i}. {m['method_name']}")
-            prompt = (
-                "Choose one number or name"
-                if stage == "assembly"
-                else "Enter numbers or names"
-            )
-            print(f"\n  {prompt}. Enter = {', '.join(default_checked)}:")
-            raw = input(f"  {stage}> ").strip()
-            if not raw:
-                picks = default_checked
-            else:
-                picks = _parse_selection(raw, method_names)
-            selected[stage] = (
-                picks[0] if stage == "assembly" or len(picks) == 1 else picks
-            )
-
-    return AskClarificationResponse(kind="method_selection", selected_methods=selected)
-
-
-def _prompt_read_qc_filter_choice(
-    methods: list[dict[str, Any]], default: str | list[str] | None
-) -> list[str]:
-    default_methods = (
-        default if isinstance(default, list) else [default] if default else []
-    )
-    default_filter = next(
-        (method for method in default_methods if method in READ_QC_FILTER_METHODS),
-        READ_QC_FILTER_SKIP,
-    )
-    filters = [m for m in methods if m.get("method_name") in READ_QC_FILTER_METHODS]
-    filter_names = [m["method_name"] for m in filters]
-
-    if _HAS_QUESTIONARY:
-        choices = [
-            questionary.Choice(
-                m.get("display_name") or m["method_name"],
-                value=m["method_name"],
-            )
-            for m in filters
-        ]
-        answer = _safe_ask(
-            questionary.select(
-                "Read QC length filtering:",
-                choices=choices,
-                default=default_filter,
-                instruction="(↑↓ navigate, Enter confirm)",
-            )
-        )
-        filter_method = answer or default_filter
-    else:
-        print("  Methods for [read_qc]:")
-        print(f"    * always: {READ_QC_STATS_METHOD}")
-        print("    length filtering:")
-        for i, m in enumerate(filters, 1):
-            label = m.get("display_name") or m["method_name"]
-            marker = "*" if m["method_name"] == default_filter else " "
-            print(f"    {marker} {i}. {label}")
-        print(f"\n  Choose one length filter. Enter = {default_filter}:")
-        raw = input("  read_qc length_filter> ").strip()
-        picks = _parse_selection(raw, filter_names) if raw else [default_filter]
-        filter_method = picks[0] if picks else default_filter
-
-    return [READ_QC_STATS_METHOD, filter_method]
 
 
 def _prompt_parameter_values(
