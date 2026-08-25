@@ -36,6 +36,7 @@ from app.execution.database_resolution import (
     DatabaseResolutionError,
     resolve_ncbi_reference_dir,
 )
+from app.integrity import SHA256_PATTERN
 from app.reference.ncbi_metazoa import (
     build_related_species_evidence_pack as _build_related_species_evidence_pack,
 )
@@ -51,6 +52,7 @@ from app.review.application import (
     VerifiedReviewApplication,
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
+from app.review.candidates import candidate_ids_from_review_request_payload
 from app.review.persistence import (
     ReviewPersistenceError,
     load_review_request,
@@ -1048,7 +1050,7 @@ class AssemblyReviewEffectV1(BaseModel):
         "stop_human_review",
     ]
     review_request_id: str = Field(min_length=1)
-    review_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_request_hash: str = Field(pattern=SHA256_PATTERN)
     review_request_ref: ArtifactRef
     rejected_candidates: tuple[str, ...] = ()
     selected_candidate_id: str | None = None
@@ -1333,7 +1335,7 @@ def validate_assembly_review_intent_request(
             }
         )
     payload = request_record.get("payload")
-    immutable_candidate_ids = _candidate_ids_from_review_request_payload(payload)
+    immutable_candidate_ids = candidate_ids_from_review_request_payload(payload)
     state_candidates = [
         candidate
         for candidate in assembly_review_output(state).get("candidates") or []
@@ -1385,20 +1387,6 @@ def validate_assembly_review_intent_request(
         str(selected.primary_output_path),
     )
     return canonical
-
-
-def _candidate_ids_from_review_request_payload(payload: Any) -> set[str]:
-    if not isinstance(payload, Mapping):
-        raise ResumeValidationError("review request payload is invalid")
-    candidates = payload.get("candidates")
-    if not isinstance(candidates, list):
-        raise ResumeValidationError("review request candidate collection is invalid")
-    return {
-        cast(str, candidate.get("candidate_id"))
-        for candidate in candidates
-        if isinstance(candidate, Mapping)
-        and isinstance(candidate.get("candidate_id"), str)
-    }
 
 
 def apply_assembly_review_application(

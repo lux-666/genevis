@@ -28,7 +28,7 @@ from app.execution.env_resolver import (
     package_preflight,
     preflight,
 )
-from app.integrity import sha256_file
+from app.integrity import sha256_file, validate_sha256
 from app.storage.paths import SessionPaths
 
 DEPENDENCY_MANIFEST_SCHEMA_VERSION = 2
@@ -49,9 +49,7 @@ class DependencyConfigIdentity(BaseModel):
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, value: str) -> str:
-        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-            raise ValueError("sha256 must be a lowercase SHA-256 digest")
-        return value
+        return validate_sha256(value)
 
 
 class DependencySnapshot(BaseModel):

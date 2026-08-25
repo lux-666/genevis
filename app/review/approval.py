@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import current_workflow_step_id
+from app.integrity import SHA256_PATTERN
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -86,7 +87,7 @@ class ParameterApprovalMetadataV1(BaseModel):
     attempt_id: int = Field(ge=0)
     task: ParameterAttemptTask
     previous_attempt_id: int | None = Field(default=None, ge=0)
-    recommendation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recommendation_hash: str = Field(pattern=SHA256_PATTERN)
     source: Literal["foreground_countdown", "policy"] | None = None
     configured_seconds: int | None = Field(default=None, ge=0)
     elapsed_seconds: float | None = Field(default=None, ge=0)

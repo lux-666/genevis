@@ -11,6 +11,7 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.integrity import SHA256_PATTERN
 from app.schemas.artifacts import ArtifactRef
 
 ExecutionFailureStatus = Literal["failed", "blocked_env", "missing_tool"]
@@ -27,7 +28,7 @@ class AssetInputDependency(BaseModel):
     asset_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: str = Field(pattern=SHA256_PATTERN)
 
 
 class ArtifactInputDependency(BaseModel):
@@ -48,7 +49,7 @@ class FileInputDependency(BaseModel):
     kind: Literal["file"] = "file"
     path: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: str = Field(pattern=SHA256_PATTERN)
 
 
 class DirectoryInputDependency(BaseModel):
@@ -60,7 +61,7 @@ class DirectoryInputDependency(BaseModel):
     path: str = Field(min_length=1)
     file_count: int = Field(ge=0)
     total_size_bytes: int = Field(ge=0)
-    tree_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tree_sha256: str = Field(pattern=SHA256_PATTERN)
 
 
 InputDependency: TypeAlias = Annotated[

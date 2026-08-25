@@ -25,7 +25,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from app.integrity import sha256_file
+from app.integrity import sha256_file, validate_sha256
 from app.schemas.manifest import (
     AssetEntryInference,
     Compression,
@@ -96,9 +96,7 @@ class FrozenInputFile(BaseModel):
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, value: str) -> str:
-        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-            raise ValueError("sha256 must be a lowercase SHA-256 digest")
-        return value
+        return validate_sha256(value)
 
 
 class FrozenInputsMarker(BaseModel):

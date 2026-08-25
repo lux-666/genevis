@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domains.assembly.selection import NormalizedReadType
+from app.integrity import SHA256_PATTERN
 from app.schemas.artifacts import (
     ArtifactRef,
     ParameterAttemptStatus,
@@ -595,7 +596,7 @@ class ParameterRecommendationManifestV3(BaseModel):
     previous_attempt_manifest_ref: ArtifactRef | None = None
     previous_attempt_seal_hash: str | None = Field(
         default=None,
-        pattern=r"^[0-9a-f]{64}$",
+        pattern=SHA256_PATTERN,
     )
     refs: ParameterRecommendationManifestRefsV3
     summary: dict[str, Any] = Field(default_factory=dict)

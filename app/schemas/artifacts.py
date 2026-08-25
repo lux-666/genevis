@@ -15,7 +15,7 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
-from app.integrity import sha256_file
+from app.integrity import SHA256_PATTERN, sha256_file
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_LONG_READ_AGGREGATE_STATS = "read_qc.long_read_aggregate_stats"
@@ -155,7 +155,7 @@ class ArtifactRef(BaseModel):
     schema_version: Literal[2] = 2
     artifact_id: str = Field(min_length=1)
     path_ref: str = Field(min_length=1)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: str = Field(pattern=SHA256_PATTERN)
     size_bytes: int = Field(ge=0)
     artifact_type: str = Field(min_length=1)
 
@@ -250,12 +250,12 @@ class ParameterRecommendationCursor(BaseModel):
     status: ParameterRecommendationStatus
     previous_attempt_id: int | None = Field(default=None, ge=0)
     manifest_ref: ArtifactRef
-    recommendation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recommendation_hash: str = Field(pattern=SHA256_PATTERN)
     review_request_id: str | None = None
     review_request_ref: ArtifactRef | None = None
     previous_attempt_seal_hash: str | None = Field(
         default=None,
-        pattern=r"^[0-9a-f]{64}$",
+        pattern=SHA256_PATTERN,
     )
 
     @model_validator(mode="after")
@@ -291,10 +291,10 @@ class ParameterAttempt(BaseModel):
     )
     previous_attempt_seal_hash: str | None = Field(
         default=None,
-        pattern=r"^[0-9a-f]{64}$",
+        pattern=SHA256_PATTERN,
     )
     sealed_at: str | None = None
-    seal_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    seal_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
 
     @model_validator(mode="after")
     def validate_attempt_kind_for_task(self) -> "ParameterAttempt":

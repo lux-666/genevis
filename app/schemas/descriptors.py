@@ -8,6 +8,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.integrity import SHA256_PATTERN
 from app.schemas.execution import InputDependency
 
 
@@ -96,7 +97,7 @@ class FrozenAttemptSpec(BaseModel):
     stage: str
     method_name: str
     script_path: Path
-    script_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    script_sha256: str = Field(pattern=SHA256_PATTERN)
     working_dir: Path
     interpreter: str = "bash"
     expected_outputs: list[Path]

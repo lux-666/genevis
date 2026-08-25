@@ -18,6 +18,7 @@ from app.control.workflow_plan import (
     fail_workflow_step,
 )
 from app.execution.method_outcomes import settle_method_outcomes
+from app.integrity import SHA256_PATTERN
 from app.review.application import (
     PreparedReviewApplication,
     ReviewIntentV1,
@@ -105,7 +106,7 @@ class HiCReviewRetryRequestEffectV1(BaseModel):
 
     origin: Literal["autohic_review"]
     previous_attempt_id: int = Field(ge=0)
-    previous_attempt_seal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    previous_attempt_seal_hash: str = Field(pattern=SHA256_PATTERN)
     failure_ref: ArtifactRef
 
 

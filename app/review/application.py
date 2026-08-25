@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from app.control.workflow_plan import current_workflow_step_id
+from app.integrity import SHA256_PATTERN
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.review.persistence import (
@@ -125,7 +126,7 @@ class ReviewApplicationIdentity(BaseModel):
     stage: DomainStage
     gate_id: str = Field(min_length=1)
     review_request_id: str = Field(min_length=1)
-    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_hash: str = Field(pattern=SHA256_PATTERN)
 
     @classmethod
     def from_intent(cls, intent: "ReviewIntentV1") -> "ReviewApplicationIdentity":
@@ -150,7 +151,7 @@ class ReviewIntentV1(BaseModel):
     stage: DomainStage
     gate_id: str = Field(min_length=1)
     review_request_id: str = Field(min_length=1)
-    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_hash: str = Field(pattern=SHA256_PATTERN)
     request_ref: ArtifactRef
     source: str = Field(min_length=1, max_length=128)
     blocked_timeout_seconds: float | None = Field(default=None, ge=0)
@@ -185,7 +186,7 @@ class ReviewApplicationV1(BaseModel):
     stage: DomainStage
     gate_id: str = Field(min_length=1)
     review_request_id: str = Field(min_length=1)
-    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_hash: str = Field(pattern=SHA256_PATTERN)
     intent_ref: ArtifactRef
     decision_ref: ArtifactRef
     effect_kind: str = Field(min_length=1, max_length=160)

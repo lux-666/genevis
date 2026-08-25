@@ -44,12 +44,14 @@ from app.execution.lifecycle import (
 from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import current_parameter_attempt
+from app.integrity import SHA256_PATTERN
 from app.review.application import (
     PreparedReviewApplication,
     ReviewIntentV1,
     VerifiedReviewApplication,
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.candidates import candidate_ids_from_review_request_payload
 from app.review.persistence import (
     ReviewPersistenceError,
     load_review_request,
@@ -1273,7 +1275,7 @@ class T2TReviewEffectV1(BaseModel):
         "accept_selected_candidates", "continue_without_patch", "stop_pipeline"
     ]
     review_request_id: str = Field(min_length=1)
-    review_request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_request_hash: str = Field(pattern=SHA256_PATTERN)
     review_request_ref: ArtifactRef
     selected_candidate_ids: tuple[str, ...] = ()
     decision_ref: ArtifactRef
@@ -1702,7 +1704,7 @@ def validate_t2t_intent_request(
         raise ResumeValidationError(
             "t2t accept_selected_candidates requires candidate_ids"
         )
-    immutable_candidate_ids = _candidate_ids_from_review_request_payload(
+    immutable_candidate_ids = candidate_ids_from_review_request_payload(
         request_record.get("payload")
     )
     unknown_immutable = sorted(set(candidate_ids).difference(immutable_candidate_ids))
@@ -1719,20 +1721,6 @@ def validate_t2t_intent_request(
             f"{', '.join(unknown_selectable)}"
         )
     return request.model_copy(update={"candidate_ids": candidate_ids})
-
-
-def _candidate_ids_from_review_request_payload(payload: Any) -> set[str]:
-    if not isinstance(payload, Mapping):
-        raise ResumeValidationError("review request payload is invalid")
-    candidates = payload.get("candidates")
-    if not isinstance(candidates, list):
-        raise ResumeValidationError("review request candidate collection is invalid")
-    return {
-        cast(str, candidate.get("candidate_id"))
-        for candidate in candidates
-        if isinstance(candidate, Mapping)
-        and isinstance(candidate.get("candidate_id"), str)
-    }
 
 
 def _selectable_t2t_candidate_ids(state: TopLevelState) -> set[str]:
