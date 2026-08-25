@@ -24,6 +24,10 @@ import yaml
 from langchain_core.runnables import RunnableConfig
 
 from app.config import default_data_root
+from app.entrypoints.environment import (
+    candidate_dotenv_paths,
+    load_dotenv_without_override,
+)
 from app.control.lifecycle import (
     TerminalFinalizationError,
     finalize_authoritative_terminal,
@@ -1548,22 +1552,7 @@ def _filter_review_decisions(
 
 
 def _load_dotenv_without_override(paths: list[Path] | None = None) -> None:
-    for path in paths if paths is not None else _candidate_dotenv_paths():
-        if not path.exists():
-            continue
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-        return
-
-
-def _candidate_dotenv_paths() -> list[Path]:
-    cwd = Path(os.getcwd()).resolve()
-    repo_root = Path(__file__).resolve().parents[2]
-    return list(dict.fromkeys([cwd / ".env", repo_root / ".env"]))
+    load_dotenv_without_override(paths)
 
 
 def _snapshot_resume_decision(
