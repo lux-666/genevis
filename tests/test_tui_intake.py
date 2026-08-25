@@ -14,6 +14,7 @@ from app.entrypoints.tui import (
 from app.entrypoints.tui_intake import (
     TuiDraftConflictError,
     apply_asset_answer,
+    apply_batch_t2t_facts,
     confirm_no_hic_degradation,
     create_rerun_tui_session_draft,
     create_tui_session_draft,
@@ -710,6 +711,11 @@ class TuiIntakeTests(unittest.TestCase):
             self.assertEqual(clarification.kind, "degradation_confirmation")
             self.assertFalse(no_hic.degradation_decision)
             confirmed = confirm_no_hic_degradation(no_hic, confirmed=True)
+            self.assertEqual(next_intake_clarification(confirmed).role, "t2t_facts")
+            confirmed = apply_batch_t2t_facts(
+                confirmed,
+                answer='物种："Solea ovata"',
+            ).draft
             self.assertIsNone(next_intake_clarification(confirmed))
             self.assertEqual(confirmed.intent.target_assembly_level, "contig")
             self.assertNotIn("use_hic_phasing", confirmed.intent.model_dump())

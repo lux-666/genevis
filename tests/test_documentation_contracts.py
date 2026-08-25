@@ -173,8 +173,8 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("ReviewPolicyConfig.max_blocked_seconds", run_data)
         self.assertNotIn("max_blocked_seconds", parameters)
         self.assertNotIn("max_blocked_seconds", stages)
-        self.assertIn("two frozen representations", shared)
-        self.assertIn("### Target species has two frozen representations", conformance)
+        self.assertIn("Manifest-owned target species", shared)
+        self.assertNotIn("Target species has two frozen representations", conformance)
         self.assertIn(
             "Audit finding identifiers are review-local coordinates", governance
         )

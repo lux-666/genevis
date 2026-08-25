@@ -118,10 +118,11 @@ GENE_AGENT_LLM_TIMEOUT_SECONDS=180
 
 Do not commit it. Assembly method and parameter recommendation requires a
 reachable LLM.
-Assembly Review requires a real BUSCO lineage whose identity and contents match
-`databases.busco` in the active host mapping; its NCBI snapshot comes from
-`databases.ncbi_metazoa` in that same file. RunConfig does not repeat either
-database path. AutoHiC additionally needs its declared external package roots,
+Assembly Review requires the target species in the manifest and at least one
+matching BUSCO lineage under `databases.busco`; selection is derived from the
+verified `databases.ncbi_metazoa` snapshot and fails if it is absent or
+ambiguous. RunConfig does not repeat either database path. AutoHiC additionally
+needs its declared external package roots,
 Juicer/3D-DNA/JAR layout, and model files.
 
 Bootstrap catalog validation is not a substitute for the contig-specific

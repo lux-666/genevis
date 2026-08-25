@@ -33,12 +33,16 @@ default:
 # and records the compact resolved projection below.
 databases:
   busco:
-    default_lineage: embryophyta_odb10
+    # Compatibility fallback only. Assembly Review normally selects from the
+    # installed lineages below using the manifest target species.
+    default_lineage: metazoa_odb10
     lineages:
-      embryophyta_odb10:
-        path: /path/to/busco/embryophyta_odb10
+      metazoa_odb10:
+        path: /path/to/busco/metazoa_odb10
         version: odb10
         source: busco_downloads
+      # Add every target-appropriate lineage that automatic selection may
+      # resolve on this host, for example actinopterygii_odb10 for ray-finned fish.
   ncbi_metazoa:
     reference_dir: /path/to/ncbi_metazoa
 

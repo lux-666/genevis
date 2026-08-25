@@ -516,6 +516,7 @@ def prepare_session_inputs(
                 + "; ".join(declarations.manifest_report["errors"])
             )
         manifest = declarations.manifest
+        _validate_review_input_contract(manifest, run_config)
         _validate_assembly_input_contract(
             manifest,
             run_config,
@@ -632,7 +633,11 @@ def freeze_session_inputs(
 
             try:
                 resolver = EnvResolver(config_path)
-                validate_review_databases(run_config, resolver)
+                validate_review_databases(
+                    run_config,
+                    resolver,
+                    species_name=_manifest_species_name(manifest),
+                )
             except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
                 raise FrozenInputValidationError(
                     f"host database contract is not ready: {exc}"
@@ -1020,6 +1025,39 @@ def _load_run_config_draft(
         raise FrozenInputValidationError(
             f"run-config draft failed validation: {exc}"
         ) from exc
+
+
+def _manifest_species_name(manifest: InputManifest) -> str | None:
+    from app.reference.ncbi_metazoa import species_name_from_metadata
+
+    return species_name_from_metadata(manifest.user_metadata)
+
+
+def _validate_review_input_contract(
+    manifest: InputManifest,
+    run_config: RunConfig,
+) -> None:
+    if "assembly_review" not in run_config.requested_stage_names():
+        return
+    species_name = _manifest_species_name(manifest)
+    if species_name is None:
+        review = run_config.assembly_review
+        if review is not None and review.busco is not None and review.busco.lineage:
+            return
+        raise FrozenInputValidationError(
+            "assembly_review requires input_manifest.user_metadata.target_species"
+        )
+    configured_species = None
+    if (
+        run_config.shared_parameters is not None
+        and run_config.shared_parameters.species_facts is not None
+    ):
+        configured_species = run_config.shared_parameters.species_facts.scientific_name
+    if configured_species is not None and configured_species != species_name:
+        raise FrozenInputValidationError(
+            "shared_parameters.species_facts.scientific_name conflicts with "
+            "input_manifest.user_metadata.target_species"
+        )
 
 
 def _validate_assembly_input_contract(

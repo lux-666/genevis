@@ -527,6 +527,36 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             params = draft.method_parameters["t2t.alignment.minimap2"]
             self.assertEqual(params, {})
 
+    def test_mixed_long_read_platforms_defer_shared_read_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ont = root / "ont.fastq"
+            hifi = root / "hifi.fastq"
+            ont.write_text("@ont\nACGT\n+\n!!!!\n", encoding="utf-8")
+            hifi.write_text("@hifi\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\ngenome_size_estimate: 2000000\nassets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths: [{ont}]\n"
+                "    format: fastq\n    platform: ont\n"
+                "  - asset_type: clean_long_reads\n"
+                f"    paths: [{hifi}]\n"
+                "    format: fastq\n    platform: pacbio_hifi\n",
+                encoding="utf-8",
+            )
+
+            draft = build_initial_plan_draft(
+                _base_plan(
+                    manifest_ref=str(manifest),
+                    entry_request={"requested_stages": ["assembly"]},
+                )
+            )
+
+            self.assertIsNotNone(draft.shared_parameters)
+            self.assertIsNone(draft.shared_parameters.platform)
+            self.assertIsNone(draft.shared_parameters.read_type)
+
 
 class AskPlannerMethodSelectionTests(unittest.TestCase):
     def test_stage_methods_match_descriptor_registry(self):

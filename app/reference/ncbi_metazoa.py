@@ -341,6 +341,50 @@ def species_name_from_metadata(metadata: dict[str, Any]) -> str | None:
     return None
 
 
+def resolve_busco_lineage_for_species(
+    species_name: str,
+    *,
+    reference_dir: Path | str,
+    configured_lineages: set[str],
+) -> str:
+    """Resolve one configured BUSCO lineage from verified related-species data."""
+
+    pack = build_related_species_evidence_pack(
+        species_name,
+        reference_dir=reference_dir,
+    )
+    if pack["status"] != "available":
+        notes = ", ".join(pack.get("notes") or ["no related-species evidence"])
+        raise ValueError(
+            f"cannot resolve BUSCO lineage for species {species_name!r}: {notes}"
+        )
+    observed = {
+        str(record["busco"]["lineage"])
+        for record in pack["selected_records"]
+        if record.get("busco") and record["busco"].get("lineage")
+    }
+    exact = observed & configured_lineages
+    if len(exact) == 1:
+        return next(iter(exact))
+    observed_families = {_busco_lineage_family(name) for name in observed}
+    compatible = {
+        name
+        for name in configured_lineages
+        if _busco_lineage_family(name) in observed_families
+    }
+    if len(compatible) == 1:
+        return next(iter(compatible))
+    raise ValueError(
+        f"cannot resolve one configured BUSCO lineage for species {species_name!r}; "
+        f"reference lineages={sorted(observed)}, "
+        f"configured matches={sorted(compatible)}"
+    )
+
+
+def _busco_lineage_family(name: str) -> str:
+    return _normalise(name).partition("_odb")[0]
+
+
 def _empty_pack(species_name: str | None, sources: dict[str, str]) -> dict[str, Any]:
     return {
         "schema_version": 1,

@@ -285,6 +285,30 @@ class InventoryStageTests(unittest.TestCase):
                 )
             )
 
+    def test_inventory_projects_manifest_species_into_shared_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "reads.fastq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = {
+                "session_id": "species-projection",
+                "user_metadata": {"target_species": "Solea ovata"},
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(fq)],
+                        "platform": "ont",
+                    }
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+
+            _, result = self._invoke_inventory("species-projection", path)
+
+            self.assertEqual(
+                result["shared_parameters"]["species_facts"]["scientific_name"],
+                "Solea ovata",
+            )
+
     def test_inventory_registers_cycloneseq_fastq_as_raw_long_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "BGI_CycloneSEQ_sample.fastq.gz"

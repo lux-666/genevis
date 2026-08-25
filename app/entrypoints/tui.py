@@ -767,10 +767,15 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
             prepared.run_config,
             selected_methods=plan.selected_methods or {},
         )
-        preflight_run_readiness(
-            prepared.run_config,
-            effective_methods=effective_methods,
+        from app.reference.ncbi_metazoa import species_name_from_metadata
+
+        species_name = species_name_from_metadata(
+            getattr(prepared.manifest, "user_metadata", {})
         )
+        readiness_kwargs: dict[str, Any] = {"effective_methods": effective_methods}
+        if species_name is not None:
+            readiness_kwargs["species_name"] = species_name
+        preflight_run_readiness(prepared.run_config, **readiness_kwargs)
         freeze_session_inputs(
             paths,
             prepared_inputs=prepared,

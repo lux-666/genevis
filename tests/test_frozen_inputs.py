@@ -96,9 +96,15 @@ def _write_database_registry(root: Path) -> Path:
     reference = root / "ncbi_metazoa"
     reference.mkdir(parents=True, exist_ok=True)
     files = {
-        "Metazoa.ncbi.tsv": "accession\n",
-        "Metazoa.ncbi.lineage": "taxid\tlineage\n",
-        "species_alias.tsv": "alias\tscientific_name\n",
+        "Metazoa.ncbi.tsv": (
+            "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
+            "Annotation BUSCO Lineage\n"
+            "GCF_000000001.1\tFixture species\t1\tembryophyta_odb10\n"
+        ),
+        "Metazoa.ncbi.lineage": (
+            "Organism Taxonomic ID\tLineage\n1\tEukaryota;Fixture species\n"
+        ),
+        "species_alias.tsv": ("alias\tscientific_name\nfixture\tFixture species\n"),
     }
     manifest_files: dict[str, dict[str, object]] = {}
     for name, content in files.items():
@@ -326,6 +332,8 @@ class FrozenInputTests(unittest.TestCase):
         manifest = root / "manifest_draft.yaml"
         manifest.write_text(
             "session_id: s1\n"
+            "user_metadata:\n"
+            "  target_species: Fixture species\n"
             "assets:\n"
             "  - asset_type: raw_long_reads\n"
             "    paths: [reads.fastq]\n"
@@ -460,7 +468,7 @@ class FrozenInputTests(unittest.TestCase):
             self.assertEqual(bundle.manifest, prepared.manifest)
             self.assertEqual(bundle.run_config, prepared.run_config)
 
-    def test_requested_review_without_busco_uses_registry_default(self) -> None:
+    def test_requested_review_without_busco_uses_species_derived_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths, manifest, run_config, envs = self._fixture(root)
@@ -489,6 +497,64 @@ class FrozenInputTests(unittest.TestCase):
             )
 
             self.assertTrue(paths.run_dir.exists())
+
+    def test_requested_review_requires_target_species(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _paths, manifest, run_config, _envs = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "user_metadata:\n  target_species: Fixture species\n", ""
+                ),
+                encoding="utf-8",
+            )
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "requested_stages": [
+                            {
+                                "stage": "assembly_review",
+                                "allow_local_execution": False,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "user_metadata.target_species",
+            ):
+                prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+
+    def test_requested_review_rejects_conflicting_species_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _paths, manifest, run_config, _envs = self._fixture(root)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        **_review_run_config(root / "embryophyta_odb10"),
+                        "shared_parameters": {
+                            "species_facts": {"scientific_name": "Different species"}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "scientific_name conflicts",
+            ):
+                prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
 
     def test_busco_lineage_must_be_existing_directory_before_freeze(self) -> None:
         for kind in ("missing", "file"):
@@ -587,7 +653,7 @@ class FrozenInputTests(unittest.TestCase):
             "missing_lengths": "odb10 lengths_cutoff must be a non-empty",
             "missing_ancestral": "eukaryota ancestral must be a non-empty",
             "missing_refseq": "eukaryota refseq_db.faa.gz must be a non-empty",
-            "declared_identity_mismatch": "BUSCO lineage is not configured",
+            "declared_identity_mismatch": "conflicts with the species-derived lineage",
             "declared_version_mismatch": "lineage_version must match",
         }
         for kind, expected in cases.items():

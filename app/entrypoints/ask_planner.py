@@ -1115,16 +1115,13 @@ def _infer_shared_parameter_defaults(
     if manifest is None:
         manifest = _load_manifest(plan.manifest_ref)
     if manifest:
-        platforms = _raw_long_read_platforms(manifest, include_unknown=False)
-        all_platforms = _raw_long_read_platforms(manifest, include_unknown=True)
+        all_platforms = _long_read_platforms(manifest, include_unknown=True)
         if len(all_platforms) == 1:
-            inferred.setdefault("platform", next(iter(all_platforms)))
-        elif len(platforms) == 1:
-            inferred.setdefault("platform", next(iter(platforms)))
-        for platform, read_type in PLATFORM_TO_SHARED_READ_TYPE.items():
-            if platform in platforms:
+            platform = next(iter(all_platforms))
+            inferred.setdefault("platform", platform)
+            read_type = PLATFORM_TO_SHARED_READ_TYPE.get(platform)
+            if read_type is not None:
                 inferred.setdefault("read_type", read_type)
-                break
         if manifest.genome_size_estimate:
             inferred.setdefault("estimated_genome_size", manifest.genome_size_estimate)
     entry = plan.entry_request or {}
@@ -1158,11 +1155,11 @@ def _has_raw_long_reads(plan: AskPlanState) -> bool:
     )
 
 
-def _raw_long_read_platforms(manifest: Any, *, include_unknown: bool) -> set[str]:
+def _long_read_platforms(manifest: Any, *, include_unknown: bool) -> set[str]:
     return {
         str(asset.platform)
         for asset in manifest.assets
-        if asset.asset_type == "raw_long_reads"
+        if asset.asset_type in {"raw_long_reads", "clean_long_reads"}
         and (include_unknown or asset.platform != "unknown")
     }
 

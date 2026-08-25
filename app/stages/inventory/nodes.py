@@ -536,6 +536,20 @@ def _canonical_shared_parameters(
             )
         shared[key] = configured_value
 
+    from app.reference.ncbi_metazoa import species_name_from_metadata
+
+    manifest_species = species_name_from_metadata(manifest.user_metadata)
+    if manifest_species is not None:
+        species_facts = dict(shared.get("species_facts") or {})
+        configured_species = species_facts.get("scientific_name")
+        if configured_species is not None and configured_species != manifest_species:
+            raise ValueError(
+                "runtime shared_parameters.species_facts.scientific_name conflicts "
+                "with manifest target_species"
+            )
+        species_facts["scientific_name"] = manifest_species
+        shared["species_facts"] = species_facts
+
     manifest_size = manifest.genome_size_estimate
     if manifest_size is not None:
         existing_size = shared.get("estimated_genome_size")

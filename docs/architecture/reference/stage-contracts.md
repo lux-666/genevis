@@ -336,10 +336,15 @@ Registered methods:
 
 QUAST and BUSCO evidence is collected through an ordered shared lifecycle.
 BUSCO and NCBI reference data resolve only from the host database registry
-captured in the frozen dependency manifest. RunConfig may carry executor knobs
-and an optional logical BUSCO lineage alias in `assembly_review.busco.lineage`,
-but never owns database paths, versions, or provenance; those fields are
-invalid RunConfig input. Review may accept a candidate, adopt a separately
+captured in the frozen dependency manifest. Assembly Review requires
+`input_manifest.user_metadata.target_species`; the verified NCBI snapshot maps
+that name to related-species BUSCO annotations, and exactly one compatible
+host-installed lineage must resolve before freeze. A legacy
+`assembly_review.busco.lineage` value is only a consistency assertion and may
+not override the species-derived lineage. Species-less historical RunConfigs
+that already freeze an explicit lineage remain readable during migration, but
+new templates and TUI intake do not create them. RunConfig never owns database paths,
+versions, or provenance. Review may accept a candidate, adopt a separately
 completed polish/purge action, or stop the workflow. Decisions are bound to
 the current review request and typed candidate refs.
 
@@ -350,14 +355,12 @@ resolution and stable source-failure classification are shared; first-useful-tie
 evidence selection and all-tier statistical cohort construction remain separate
 stage contracts.
 
-Target species is optional manifest metadata, read from `user_metadata` or a
-supported top-level species key. If it is absent, the related-species packs
-record `target_species_not_provided`, publish no invented target or comparison
-cohort, and Assembly Review continues with its other evidence. An unresolved
-provided name likewise remains an explicit unavailable comparison rather than a
-stage-input failure. Ownership of species identity and the current duplicate
-representation boundary belongs to the
-[Shared Biological Facts Contract](shared-facts.md#species_facts).
+Target species is manifest-owned metadata. Inventory projects the same frozen
+name into shared biological facts for Assembly method and parameter
+recommendation, and rejects a conflicting RunConfig copy. An absent or
+unresolved name, an ambiguous BUSCO mapping, or a lineage unavailable in the
+host registry blocks Assembly Review before execution; the system never invents
+a target or falls back to an unrelated global lineage.
 
 Signals such as duplicated BUSCO content, size inflation, abnormal depth, or
 missing/inconsistent evidence prevent unsupported automatic acceptance.

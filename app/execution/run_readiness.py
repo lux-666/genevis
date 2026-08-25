@@ -149,6 +149,7 @@ def preflight_run_readiness(
     run_config: RunConfig,
     *,
     effective_methods: Mapping[str, str | Sequence[str]],
+    species_name: str | None = None,
     config_path: str | Path | None = None,
     runner: Callable[..., Any] | None = None,
     llm_probe: Callable[[], None] | None = None,
@@ -166,7 +167,11 @@ def preflight_run_readiness(
             f"dependency configuration is not ready: {exc}"
         ) from exc
     try:
-        review_database_projection = validate_review_databases(run_config, resolver)
+        review_database_projection = validate_review_databases(
+            run_config,
+            resolver,
+            species_name=species_name,
+        )
     except DatabaseResolutionError as exc:
         raise RunReadinessError(f"database readiness failed: {exc}") from exc
     for method_name in methods:

@@ -2128,6 +2128,9 @@ def _route_selector_payload(
     evidence_status = _route_selector_evidence_status(state)
     read_qc_available = evidence_status["read_qc"] == "available"
     survey_available = evidence_status["genome_survey"] == "available"
+    shared = _shared_parameters(state)
+    species_facts = shared.get("species_facts")
+    available_read_types = sorted(_assembly_observed_read_types(assembly_out))
     data_profile = {
         "session_id": state.get("session_id"),
         "ont_reads_ref": assembly_out.get("ont_reads_ref"),
@@ -2156,6 +2159,8 @@ def _route_selector_payload(
                 "primary", []
             )
         ),
+        "available_read_types": available_read_types,
+        "species_facts": species_facts if isinstance(species_facts, Mapping) else None,
         "evidence_status": evidence_status,
     }
     allowed_methods = _assembly_method_candidates(assembly_out)
@@ -2200,6 +2205,23 @@ def _route_selector_evidence_status(state: TopLevelState) -> dict[str, str]:
 def _assembly_method_candidates(assembly_out: AssemblyStageCursor) -> list[str]:
     """Return descriptor-backed methods compatible with observed read inputs."""
 
+    observed = _assembly_observed_read_types(assembly_out)
+    registry = load_descriptor_registry()
+    compatible = {
+        method for read_type in observed for method in compatible_methods(read_type)
+    }
+    return [
+        method
+        for method in registry.by_stage.get("assembly", ())
+        if method in compatible
+    ]
+
+
+def _assembly_observed_read_types(
+    assembly_out: AssemblyStageCursor,
+) -> set[NormalizedReadType]:
+    """Return every read type available to both routing and candidate filtering."""
+
     observed: set[NormalizedReadType] = set()
     if assembly_out.get("hifi_reads_ref") or assembly_out.get("has_hifi"):
         observed.add("pacbio_hifi")
@@ -2216,15 +2238,7 @@ def _assembly_method_candidates(assembly_out: AssemblyStageCursor) -> list[str]:
         observed.add(prior)
     if not observed:
         observed = {"cyclone", "ont_raw", "pacbio_clr", "pacbio_hifi"}
-    registry = load_descriptor_registry()
-    compatible = {
-        method for read_type in observed for method in compatible_methods(read_type)
-    }
-    return [
-        method
-        for method in registry.by_stage.get("assembly", ())
-        if method in compatible
-    ]
+    return observed
 
 
 def _recommended_read_type(

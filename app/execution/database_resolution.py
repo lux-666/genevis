@@ -62,12 +62,15 @@ def _busco_request(run_config: RunConfig) -> BuscoRunParameters:
 def resolve_busco_parameters(
     run_config: RunConfig,
     resolver: DatabaseResolver,
+    *,
+    species_name: str | None = None,
+    related_species_reference_dir: str | None = None,
 ) -> dict[str, Any]:
     """Return a complete, validated BUSCO execution projection.
 
-    RunConfig provides only ``lineage`` (or omits it for the registry default).
-    Filesystem paths, version, and provenance come exclusively from the host
-    registry and are never accepted as per-run inputs.
+    The manifest species selects one compatible host lineage. A legacy RunConfig
+    ``lineage`` may assert that identity but cannot override it. Filesystem paths,
+    version, and provenance come exclusively from the host registry.
     """
 
     registry = _require_registry(resolver)
@@ -76,6 +79,26 @@ def resolve_busco_parameters(
     if busco_registry is None:
         raise DatabaseResolutionError("databases.busco is not configured")
     logical_name = request.lineage
+    if species_name is not None:
+        from app.reference.ncbi_metazoa import resolve_busco_lineage_for_species
+
+        reference_dir = related_species_reference_dir or resolve_ncbi_reference_dir(
+            resolver
+        )
+        try:
+            derived_lineage = resolve_busco_lineage_for_species(
+                species_name,
+                reference_dir=reference_dir,
+                configured_lineages=set(busco_registry.lineages),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise DatabaseResolutionError(str(exc)) from exc
+        if logical_name is not None and logical_name != derived_lineage:
+            raise DatabaseResolutionError(
+                "assembly_review.busco.lineage conflicts with the species-derived "
+                f"lineage: {logical_name!r} versus {derived_lineage!r}"
+            )
+        logical_name = derived_lineage
     if logical_name is None:
         logical_name = str(getattr(busco_registry, "default_lineage", "")).strip()
     if not logical_name:
@@ -223,13 +246,20 @@ def validate_frozen_busco_parameters(
 def validate_review_databases(
     run_config: RunConfig,
     resolver: DatabaseResolver,
+    *,
+    species_name: str | None = None,
 ) -> dict[str, Any]:
     """Validate all Assembly Review databases and return compact projections."""
 
     if "assembly_review" not in run_config.requested_stage_names():
         return {}
-    busco = resolve_busco_parameters(run_config, resolver)
     ncbi = resolve_ncbi_reference_dir(resolver)
+    busco = resolve_busco_parameters(
+        run_config,
+        resolver,
+        species_name=species_name,
+        related_species_reference_dir=ncbi,
+    )
     return {"busco_parameters": busco, "related_species_reference_dir": ncbi}
 
 

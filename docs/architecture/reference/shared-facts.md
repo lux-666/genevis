@@ -16,13 +16,11 @@
 
 ## Definition
 
-`SharedParameters` owns cross-stage biological facts collected once during
-planning and projected into the frozen run state. The frozen RunConfig is the
-sole authority for those shared values at runtime; stage outputs may supply
-derived measurements but never overwrite a frozen fact. Current Assembly
-Review comparative-species input still has a separate manifest projection,
-described under `species_facts` and tracked as conformance debt rather than
-silently treated as the same representation.
+`SharedParameters` owns cross-stage biological facts projected into runtime
+state. Manifest-owned target species and genome-size priors are reconciled once
+by Inventory; configured RunConfig values may supply the remaining facts but
+may not conflict with those manifest identities. Stage outputs may add derived
+measurements but never overwrite a frozen fact.
 
 The schema rejects unknown fields. Every field is optional; a stage that
 requires an absent fact must fail closed at its own boundary rather than
@@ -84,21 +82,12 @@ that candidate is rejected with `genome_size_required`.
 
 ### `species_facts`
 
-Caller-supplied biological identity used by parameter recommenders. All
-sub-fields are optional except `scientific_name`. `telomere_motif` is
-normalized to uppercase ACGT and requires at least two bases. This block is
-consumed by parameter evidence and T2T finishing; Assembly and Genome Survey do
-not read it.
-
-Assembly Review related-species comparison currently reads an optional target
-label from the frozen manifest's `user_metadata` (with supported legacy
-top-level species keys), not from `shared_parameters.species_facts`. The TUI
-projects one intake species into these two frozen representations, but
-structured inputs can currently omit or disagree across them without a shared
-conflict check. Absence or failed name resolution produces an explicit
-unavailable comparison and must not invent a target species. The duplicate
-representation and its closure condition are recorded in
-[Architecture Conformance](conformance.md#target-species-has-two-frozen-representations).
+Biological identity used by method and parameter recommenders. The canonical
+scientific name belongs to `input_manifest.user_metadata.target_species` and is
+required when Assembly Review is requested. Inventory projects that frozen name
+into `species_facts.scientific_name`; a conflicting RunConfig copy fails before
+execution. `telomere_motif` is normalized to uppercase ACGT and requires at
+least two bases.
 
 ## Planning and freeze validation
 
@@ -106,8 +95,9 @@ The planner does not ask for `estimated_genome_size`. A deferred local Assembly
 must have at least one of these three supportable sources before RunConfig
 construction:
 
-- `read_type` is required when the platform cannot uniquely determine it and
-  the Assembly route is `auto`;
+- one registered platform may produce one derived shared `read_type`; mixed or
+  partly unknown platforms remain a set of Assembly inputs and are deferred to
+  the method recommendation gate;
 - `input_manifest.genome_size_estimate` is an explicit operator prior; or
 - every local Assembly occurrence has a prior locally executed Genome Survey
   occurrence with usable survey reads.

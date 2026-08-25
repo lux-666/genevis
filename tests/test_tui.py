@@ -253,7 +253,10 @@ class TuiWorkflowTests(unittest.TestCase):
                 return updated, object()
 
             with (
-                patch("builtins.input", side_effect=["", str(reads)]),
+                patch(
+                    "builtins.input",
+                    side_effect=["", str(reads), '物种："Solea ovata"'],
+                ),
                 patch(
                     "app.entrypoints.tui._parse_assets_with_configured_llm",
                     side_effect=RuntimeError("offline"),

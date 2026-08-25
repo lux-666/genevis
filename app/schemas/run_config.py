@@ -245,18 +245,18 @@ class GenomeSurveyRunConfig(BaseModel):
 
 
 class BuscoRunParameters(BaseModel):
-    """BUSCO execution knobs plus an optional logical lineage selector.
+    """BUSCO execution knobs plus a legacy lineage consistency assertion.
 
     Database paths, versions, and provenance are host-owned and therefore are
-    rejected by this RunConfig model.  The freeze boundary resolves ``lineage``
-    (or the host default) from the active ``envs.yaml`` database registry.
+    rejected by this RunConfig model. The freeze boundary derives ``lineage``
+    from the manifest target species and the active host database registry.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     lineage: str | None = None
     mode: Literal["genome"] = "genome"
-    threads: int = Field(default=4, gt=0)
+    threads: int = Field(default=8, gt=0)
 
     @field_validator("lineage")
     @classmethod

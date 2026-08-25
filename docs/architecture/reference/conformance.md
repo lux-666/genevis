@@ -127,25 +127,6 @@ execution evidence, and neither may be cited as a successful contig run.
   five settled analytical occurrences, and a hash-verified `final_assembly`
   from detached inspection. Focused stubbed tests do not satisfy this condition.
 
-### Target species has two frozen representations
-
-`shared_parameters.species_facts.scientific_name` is the shared biological fact
-used by recommendation/T2T paths, while Assembly Review related-species
-comparison independently reads `input_manifest.user_metadata.target_species`
-or a supported legacy top-level key. TUI intake projects one value into both,
-but structured manifest and RunConfig callers can omit one side or supply
-conflicting names. Inventory reconciliation does not currently reject that
-conflict, and Assembly Review does not consume the shared fact.
-
-- Current evidence: `app/schemas/shared_parameters.py`,
-  `app/entrypoints/tui_intake.py`, `app/stages/inventory/nodes.py`, and
-  `app/stages/assembly_review/nodes.py::_target_species_name`.
-- Contract owner: [Shared biological facts](shared-facts.md#species_facts).
-- Closure condition: choose one frozen canonical species identity and make both
-  T2T/recommendation and Assembly Review consume it, or freeze a validated
-  explicit projection from that identity into each consumer; conflicting
-  structured inputs must fail before execution.
-
 ## Update rule
 
 Every entry must identify the accepted owner, current code evidence, and an

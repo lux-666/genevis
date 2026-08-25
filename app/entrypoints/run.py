@@ -86,6 +86,7 @@ def _stage_seeds_from_run_config(
     *,
     shared_parameters: SharedParameters | dict[str, Any] | None,
     dependency_resolver: Any | None = None,
+    species_name: str | None = None,
 ) -> StageOutputs:
     """Project shared stage configuration without occurrence-local consent.
 
@@ -151,7 +152,13 @@ def _stage_seeds_from_run_config(
             )
         from app.execution.database_resolution import validate_review_databases
 
-        review_seed.update(validate_review_databases(run_config, dependency_resolver))
+        review_seed.update(
+            validate_review_databases(
+                run_config,
+                dependency_resolver,
+                species_name=species_name,
+            )
+        )
         seeds["assembly_review"] = review_seed
 
     if "hic_scaffolding" in requested and run_config.hic_scaffolding:
@@ -485,10 +492,15 @@ def _run(args: argparse.Namespace) -> int:
         )
 
         effective_methods = effective_method_closure(prepared.run_config)
-        preflight_run_readiness(
-            prepared.run_config,
-            effective_methods=effective_methods,
+        from app.reference.ncbi_metazoa import species_name_from_metadata
+
+        species_name = species_name_from_metadata(
+            getattr(prepared.manifest, "user_metadata", {})
         )
+        readiness_kwargs: dict[str, Any] = {"effective_methods": effective_methods}
+        if species_name is not None:
+            readiness_kwargs["species_name"] = species_name
+        preflight_run_readiness(prepared.run_config, **readiness_kwargs)
         freeze_session_inputs(
             paths,
             prepared_inputs=prepared,
@@ -601,10 +613,17 @@ def _execute_verified_frozen_session(
         from app.execution.dependency_snapshot import load_frozen_dependency_resolver
 
         dependency_resolver = load_frozen_dependency_resolver(run_dir)
+        from app.reference.ncbi_metazoa import species_name_from_metadata
+
+        declarations = getattr(bundle, "declarations", None)
+        manifest = getattr(declarations, "manifest", None)
         stage_seeds = _stage_seeds_from_run_config(
             run_config,
             shared_parameters=shared_parameters,
             dependency_resolver=dependency_resolver,
+            species_name=species_name_from_metadata(
+                getattr(manifest, "user_metadata", {})
+            ),
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
