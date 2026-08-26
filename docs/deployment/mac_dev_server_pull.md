@@ -28,19 +28,11 @@ Server-local material includes:
   and checkpoints;
 - copied run configs containing private run inputs or executor knobs.
 
-The NCBI Metazoa reference export is provisioned from a server-local source:
-
-```bash
-python scripts/install_ncbi_metazoa_reference.py \
-  --source-dir /shared/reference/ncbi_metazoa
-
-python scripts/install_ncbi_metazoa_reference.py --verify-only
-```
-
-The installer resolves its destination from `databases.ncbi_metazoa` in the
-active host mapping and verifies that directory's manifest hashes. Use
-`--config PATH` when the active mapping is not the default. Assembly Review
-reports a version mismatch instead of consuming an unverified snapshot.
+Acquire and install the NCBI Metazoa snapshot only through its
+[snapshot authority](../../data/reference/ncbi_metazoa/README.md). The installer
+resolves its destination from `databases.ncbi_metazoa` in the active host
+mapping; use `--config PATH` when that mapping is not the default. Assembly
+Review reports a version mismatch instead of consuming an unverified snapshot.
 
 ## First pull after the host-config split
 
@@ -66,8 +58,9 @@ The `git restore` above discards only the old tracked working copy after its
 exact host mapping has been backed up outside the checkout. After the pull, the
 copy command restores that mapping at the now-ignored path. Git should report
 `!! config/envs.yaml`; then run the normal bootstrap preview and server checks.
-A fresh clone has only `docs/examples/envs.yaml.example`; `gene-agent bootstrap
---apply` creates the active file from that seed. Normal execution does not
+A fresh clone has only `docs/examples/envs.yaml.example`; interactive
+`gene-agent bootstrap` creates the active file from that seed after displaying
+the exact plan and receiving confirmation. Normal execution does not
 silently use the example when the active mapping is missing.
 
 ## Mac workflow
@@ -75,7 +68,7 @@ silently use the example when the active mapping is missing.
 ```bash
 git status --short
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache \
-  conda run -n gene_agent pytest -q
+  python -m pytest -q
 git diff --check
 git add ...
 git commit -m "..."
@@ -102,8 +95,8 @@ Then update and verify:
 ```bash
 git status --short
 git pull --ff-only
-bash scripts/server_check.sh
 bash scripts/server_test.sh
+bash scripts/server_check.sh
 ```
 
 The two scripts may be called by absolute path from another directory because

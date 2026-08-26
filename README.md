@@ -90,21 +90,26 @@ Mac 开发机负责编辑和代码测试；真实生信工具在 Linux 服务器
 
 ```bash
 conda create -n gene_agent python=3.11 -y
-conda run -n gene_agent pip install -e '.[dev]'
+conda activate gene_agent
+python -m pip install -e '.[dev]'
+bash scripts/server_test.sh
 ```
 
-Python 依赖的唯一权威是 [pyproject.toml](pyproject.toml)。
+Python 依赖的唯一权威是 [pyproject.toml](pyproject.toml)。`gene_agent` 是本文档
+约定的编排器环境名，不从 `config/envs.yaml` 读取；激活后所有操作命令都直接使用
+当前环境。生信工具的 Conda 环境才由 `config/envs.yaml` 解析。
 
 ### 2. Prepare and check the host
 
 ```bash
-conda run -n gene_agent gene-agent bootstrap
-# 审阅计划后，需要写入配置时再执行：
-conda run -n gene_agent gene-agent bootstrap --apply
+gene-agent bootstrap
 
 bash scripts/server_check.sh
-bash scripts/server_test.sh
 ```
+
+先按 [New Host Setup](docs/deployment/migration.md) 安装种子中声明的工具、数据库和
+AutoHiC 资源。`bootstrap` 在同一次调用中展示候选计划并等待确认，确认后才写入并
+检查完整主机 catalog；不会重新收集第二份计划。
 
 `docs/examples/envs.yaml.example` 是提交到 Git 的通用种子；bootstrap 生成或更新的
 `config/envs.yaml` 是被忽略的本机配置，不再作为仓库共享配置提交。

@@ -21,7 +21,8 @@ handoff clarity.
 
 The coordinator owns these responsibilities:
 
-- Apply direct user instructions and the repository instructions in `AGENTS.md`.
+- Apply direct user instructions and preserve the repository engineering policy
+  defined by this page.
 - Keep architecture documents current before large implementation work.
 - Split large work into testable slices with explicit exit criteria.
 - Make sure state, ledger, artifact, runner, review, and descriptor boundaries
@@ -55,9 +56,9 @@ rationale, and coordination procedure into one linear ranking:
 - Code and tests are the evidence for what is implemented now. They do not
   silently amend an accepted design; a mismatch is recorded as conformance
   debt.
-- Repository instructions in `AGENTS.md` govern repository-local engineering
-  procedure. They are not architecture contract owners and cannot silently
-  amend accepted product behavior.
+- This page is the single owner of repository-local engineering procedure. Its
+  process rules cannot silently amend product behavior owned by another
+  architecture contract.
 - Git history retains superseded biological rationale; it is not a runtime
   storage or software-state fact.
 - Git history retains superseded implementation and design records; the working

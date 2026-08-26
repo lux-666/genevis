@@ -57,6 +57,7 @@ semantics.
 | Package/method identity and capabilities | `../descriptors/registry.yaml` plus referenced descriptors | Method tables, environment checks, implementation map |
 | Active host environment/package/database mapping consumed by execution | `GENE_AGENT_ENVS_CONFIG` when set, otherwise ignored machine-local `../config/envs.yaml` | Bootstrap, dependency snapshot, server checks |
 | Committed bootstrap seed for a missing host mapping | `examples/envs.yaml.example` | Bootstrap only; it is not a second active resolver input |
+| NCBI Metazoa snapshot acquisition, installation, and pinned file set | `../data/reference/ncbi_metazoa/README.md` | Deployment pages link to it; Assembly Review behavior remains owned by the stage contract |
 | Schema-valid operator inputs | `examples/` | README and operator guides link to them rather than copying JSON/YAML |
 | Run/freeze/progress/checkpoint/Ledger/report/retention contract | `architecture/reference/data-contract.md` | Runtime/data topics and operator explanations |
 | Review request, foreground countdown, and durable resume semantics | `architecture/reference/data-contract.md#12-review-contract` | Governance, parameter, and operator docs link to it |

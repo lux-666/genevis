@@ -5,13 +5,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from app.execution.env_resolver import active_config_path
+from app.execution.project_bootstrap import project_root_for_config
+
 
 def candidate_dotenv_paths() -> list[Path]:
-    """Return deterministic project-local dotenv candidates."""
+    """Return the one dotenv owned by the active host configuration."""
 
-    cwd = Path(os.getcwd()).resolve()
-    repo_root = Path(__file__).resolve().parents[2]
-    return list(dict.fromkeys([cwd / ".env", repo_root / ".env"]))
+    return [project_root_for_config(active_config_path()) / ".env"]
 
 
 def load_dotenv_without_override(paths: list[Path] | None = None) -> Path | None:

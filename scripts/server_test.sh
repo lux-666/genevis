@@ -3,7 +3,8 @@
 # Mirrors the Mac developer test loop so a server operator can confirm the
 # checkout before running real data. It runs Python regression and compile
 # checks only; it is not a real-data or biological-tool smoke test. Stops on
-# the first non-zero exit. Never installs packages.
+# the first non-zero exit. Run it from the activated orchestrator environment;
+# it never selects an environment or installs packages.
 #
 # Usage:
 #   bash scripts/server_test.sh
@@ -13,11 +14,10 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 cd "${REPO_ROOT}"
 
-ORCHESTRATOR_ENV="gene_agent"
 PYCACHE_PREFIX="/tmp/gene_agent_pycache"
 
-if ! command -v conda >/dev/null 2>&1; then
-  printf 'error: conda not found on PATH\n' >&2
+if ! command -v python >/dev/null 2>&1; then
+  printf 'error: python not found; activate the orchestrator environment first\n' >&2
   exit 1
 fi
 
@@ -25,29 +25,10 @@ echo "scope: server-side code regression and compile checks only"
 echo "note: this does not run real biological tools or real-data smoke tests"
 
 echo "== pytest =="
-PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" conda run -n "${ORCHESTRATOR_ENV}" \
-  pytest -q
-
-echo "== simplification scan =="
-jscpd_out="$(mktemp)"
-npx --yes jscpd@5.0.16 app --min-tokens 70 --format python --reporters silent \
-  --silent > "$jscpd_out"
-jscpd_exit=$?
-cat "$jscpd_out" >&2
-if [ "$jscpd_exit" -ne 0 ]; then
-  rm -f "$jscpd_out"
-  exit "$jscpd_exit"
-fi
-grep -q '^Duplications detection: Found [0-9][0-9]* exact clones' "$jscpd_out" || {
-  echo 'error: jscpd summary missing' >&2
-  rm -f "$jscpd_out"
-  exit 1
-}
-rm -f "$jscpd_out"
+PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" python -m pytest -q
 
 echo "== compileall =="
-PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" conda run -n "${ORCHESTRATOR_ENV}" \
-  python -m compileall app tests
+PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" python -m compileall app tests
 
 echo "== git diff --check =="
 git diff --check

@@ -18,7 +18,12 @@ from uuid import uuid4
 import yaml
 from pydantic import ValidationError
 
-from app.schemas.manifest import InputAssetSpec, InputManifest, PairedReadSpec
+from app.schemas.manifest import (
+    InputAssetSpec,
+    InputManifest,
+    PairedReadSpec,
+    normalize_target_species,
+)
 from app.schemas.shared_parameters import (
     SharedParameters,
     SpeciesFacts,
@@ -98,16 +103,15 @@ _NO_HIC_RE = re.compile(
     re.IGNORECASE,
 )
 _TARGET_SPECIES_PATTERNS = (
-    re.compile(r"以(?P<species>[^，,。；;\s]{1,80}?)为目标物种"),
-    re.compile(r"目标物种(?:是|为|[:：])(?P<species>[^，,。；;\s]{1,80})"),
+    re.compile(r"以(?P<species>[^，,。；;\n\r]{1,80}?)为目标物种"),
+    re.compile(r"目标物种(?:是|为|[:：])(?P<species>[^，,。；;\n\r]{1,80})"),
 )
 
 # Batch T2T answer patterns (species / motif / scope switch).
-# ASCII quotes only; smart/curly quotes not expected in user-typed input.
 _BATCH_SPECIES_RE = re.compile(
-    r"(?:物种|species)\s*[:\uff1a]\s*[\"']?"
-    r"(?P<species>[^\"'\uff0c,。\uff1b;\n\r]{1,80})"
-    r"[\"']?",
+    r"(?:物种|species)\s*[:\uff1a]\s*[\"'“”‘’]?"
+    r"(?P<species>[^\"'“”‘’\uff0c,。\uff1b;\n\r]{1,80})"
+    r"[\"'“”‘’]?",
     re.IGNORECASE,
 )
 _BATCH_MOTIF_RE = re.compile(
@@ -473,7 +477,7 @@ def _build_t2t_batch_question(draft: TuiSessionDraft) -> str:
             'R2="/data/hic_2.fastq.gz"'
         )
     if species_missing:
-        parts.append('物种："人类"')
+        parts.append('物种（NCBI 拉丁学名）："Solea ovata"')
     if show_motif:
         parts.append('motif（可选）："TTAGGG"')
     if "t2t" in stages:
@@ -517,10 +521,9 @@ def confirm_no_hic_degradation(
 def parse_batch_t2t_answer(answer: str) -> BatchT2TParseResult:
     """Extract species, motif, and scope-switch signals from a batch T2T answer.
 
-    Deterministic labelled extraction is used.  Species and motif values are
-    taken verbatim (after stripping surrounding syntax from the prompt labels
-    and matching quotation marks).  An invalid motif is reported as an issue
-    without setting ``motif_raw``; it does not convert to deferred resolution.
+    Deterministic labelled extraction is used. Species must satisfy the same
+    Latin-name contract as the public manifest. Invalid biological facts are
+    reported without being stored.
     """
 
     issues: list[str] = []
@@ -532,9 +535,12 @@ def parse_batch_t2t_answer(answer: str) -> BatchT2TParseResult:
     species: str | None = None
     species_match = _BATCH_SPECIES_RE.search(answer)
     if species_match:
-        raw_species = species_match.group("species").strip().strip("\"'''")
+        raw_species = species_match.group("species").strip().strip("\"'“”‘’")
         if raw_species:
-            species = raw_species
+            try:
+                species = normalize_target_species(raw_species)
+            except ValueError as exc:
+                issues.append(f"invalid target species {raw_species!r}: {exc}")
 
     # Motif extraction: validate against DNA motif rules.
     motif_raw: str | None = None
@@ -1793,7 +1799,10 @@ def _extract_target_species(text: str) -> str | None:
         if match:
             value = match.group("species").strip().strip("""'\""“”‘’""")
             if value:
-                return value
+                try:
+                    return normalize_target_species(value)
+                except ValueError:
+                    return None
     return None
 
 

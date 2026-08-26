@@ -16,7 +16,6 @@ Provision a Linux/server checkout with
 
 ```bash
 bash scripts/server_check.sh
-bash scripts/server_test.sh
 ```
 
 These checks have deliberately different scope:
@@ -28,8 +27,8 @@ These checks have deliberately different scope:
   checked at stage entry. It also validates the host BUSCO/NCBI database
   registry needed by Assembly Review. The script does not validate real input
   files or the LLM endpoint.
-- `server_test.sh` runs the Python regression/compile/diff checks. It is not a
-  real-data bioinformatics smoke test.
+- `server_test.sh` is the earlier code-only gate run immediately after installing
+  the orchestrator; New Host Setup owns that command and its position.
 - `gene-agent run` performs run-specific input, fixed tool/package, database,
   and LLM checks before it publishes frozen inputs; a deferred Assembly method
   is checked later from that frozen dependency snapshot.

@@ -40,8 +40,6 @@ contracts. Exact rules belong to the linked architecture reference owners.
 - [Project scaffold tests](../../tests/test_project_scaffold.py) — structural
   checks for stage order, storage boundaries, architecture roots, and removal
   of retired planning tracks.
-- [Project instructions](../../AGENTS.md) — repository-local scope and safety
-  rules.
 - [Python/development metadata](../../pyproject.toml) — dependency and tool
   configuration owner.
 - [Server verification helpers](../../scripts/) — host checks and regression

@@ -46,6 +46,26 @@ _NON_SPECIFIC_EPITHETS = frozenset(
 )
 
 
+def normalize_target_species(value: Any) -> str:
+    """Return one normalized NCBI Latin scientific name or fail closed."""
+
+    if not isinstance(value, str):
+        raise ValueError(
+            "target_species must be an NCBI Latin scientific name such as 'Solea ovata'"
+        )
+    species = " ".join(value.split())
+    tokens = species.split()
+    if not _SCIENTIFIC_NAME_RE.fullmatch(species) or any(
+        token.lower() in _NON_SPECIFIC_EPITHETS for token in tokens[1:]
+    ):
+        raise ValueError(
+            "target_species must be an NCBI Latin scientific name such as "
+            "'Solea ovata'; common names, abbreviations, and unspecified "
+            "species are not accepted"
+        )
+    return species
+
+
 class InputAssetSpec(BaseModel):
     """One or more regular files declared by the user in the input manifest."""
 
@@ -127,22 +147,10 @@ class InputManifest(BaseModel):
         raw_species = self.user_metadata.get("target_species")
         if raw_species is None:
             return self
-        if not isinstance(raw_species, str):
-            raise ValueError(
-                "input_manifest.user_metadata.target_species must be an NCBI "
-                "Latin scientific name such as 'Solea ovata'"
-            )
-        species = " ".join(raw_species.split())
-        tokens = species.split()
-        if (
-            not _SCIENTIFIC_NAME_RE.fullmatch(species)
-            or any(token.lower() in _NON_SPECIFIC_EPITHETS for token in tokens[1:])
-        ):
-            raise ValueError(
-                "input_manifest.user_metadata.target_species must be an NCBI "
-                "Latin scientific name such as 'Solea ovata'; common names, "
-                "abbreviations, and unspecified species are not accepted"
-            )
+        try:
+            species = normalize_target_species(raw_species)
+        except ValueError as exc:
+            raise ValueError(f"input_manifest.user_metadata.{exc}") from exc
         self.user_metadata["target_species"] = species
         return self
 

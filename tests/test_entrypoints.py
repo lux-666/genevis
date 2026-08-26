@@ -790,6 +790,11 @@ class EntrypointTests(unittest.TestCase):
     def test_dotenv_loader_uses_gene_agent_local_env_without_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            other = root / "other"
+            other.mkdir()
+            (other / ".env").write_text(
+                "GENE_AGENT_LLM_MODEL=from-cwd\n", encoding="utf-8"
+            )
             (root / ".env").write_text(
                 "GENE_AGENT_LLM_API_KEY=sk-from-dotenv\nGENE_AGENT_LLM_MODEL=from-dotenv\n",
                 encoding="utf-8",
@@ -799,10 +804,18 @@ class EntrypointTests(unittest.TestCase):
             try:
                 os.environ["GENE_AGENT_LLM_API_KEY"] = "sk-existing"
                 os.environ.pop("GENE_AGENT_LLM_MODEL", None)
-                with patch("os.getcwd", return_value=str(root)):
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"GENE_AGENT_ENVS_CONFIG": str(root / "config" / "envs.yaml")},
+                    ),
+                    patch("os.getcwd", return_value=str(other)),
+                ):
                     _load_dotenv_without_override()
-                self.assertEqual(os.environ["GENE_AGENT_LLM_API_KEY"], "sk-existing")
-                self.assertEqual(os.environ["GENE_AGENT_LLM_MODEL"], "from-dotenv")
+                    self.assertEqual(
+                        os.environ["GENE_AGENT_LLM_API_KEY"], "sk-existing"
+                    )
+                    self.assertEqual(os.environ["GENE_AGENT_LLM_MODEL"], "from-dotenv")
             finally:
                 if old_key is None:
                     os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
@@ -825,7 +838,10 @@ class EntrypointTests(unittest.TestCase):
             old = os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE")
             os.environ.pop("GENE_AGENT_DOTENV_RESUME_PROBE", None)
             try:
-                with patch("os.getcwd", return_value=str(root)):
+                with patch.dict(
+                    os.environ,
+                    {"GENE_AGENT_ENVS_CONFIG": str(root / "config" / "envs.yaml")},
+                ):
                     # Resume will exit non-zero (no decision file etc.) — we
                     # only care that .env was loaded before _run_resume runs.
                     main(
@@ -841,14 +857,32 @@ class EntrypointTests(unittest.TestCase):
                             "sqlite",
                         ]
                     )
-                self.assertEqual(
-                    os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE"), "from-dotenv"
-                )
+                    self.assertEqual(
+                        os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE"),
+                        "from-dotenv",
+                    )
             finally:
                 if old is None:
                     os.environ.pop("GENE_AGENT_DOTENV_RESUME_PROBE", None)
                 else:
                     os.environ["GENE_AGENT_DOTENV_RESUME_PROBE"] = old
+
+    def test_bootstrap_explicit_config_selects_only_its_project_dotenv(self):
+        from app.entrypoints.run import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
+            with (
+                patch(
+                    "app.entrypoints.run._load_dotenv_without_override"
+                ) as load_dotenv,
+                patch("app.entrypoints.run._run_bootstrap", return_value=0),
+            ):
+                code = main(["bootstrap", "--config", str(config_path)])
+
+            self.assertEqual(code, 0)
+            load_dotenv.assert_called_once_with([root.resolve() / ".env"])
 
 
 class FrozenRunConfigSeedingTests(unittest.TestCase):

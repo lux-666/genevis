@@ -3,11 +3,11 @@
 # override the default fallback.
 #
 # SETUP INSTRUCTIONS:
-# 1. Run bootstrap; it creates the one active host file at config/envs.yaml:
-#    python -m app.entrypoints.run bootstrap --apply
-# 2. In that file, replace the tool/package/database placeholders once. Database
-#    paths are never copied into individual RunConfig files.
-# 3. Rerun bootstrap to validate the full host catalog and conform Juicer.
+# 1. Install the tool/package/database paths represented below.
+# 2. Run `gene-agent bootstrap`; it collects concrete values, prints one plan,
+#    and writes that same plan only after confirmation.
+# 3. Rerun bootstrap to validate the full host catalog or use --update to repair
+#    an existing bootstrap-owned value. Database paths never enter RunConfig.
 #
 # Two mutually exclusive target forms are supported on any entry:
 #   conda_env: env_geno_exec          # named env  → conda run -n env_geno_exec
@@ -51,7 +51,7 @@ databases:
 # `packages:` with `install_root` (absolute repo path) and `canary_paths`
 # (files relative to install_root). Preflight validates root + canary by
 # filesystem checks only — no PATH, no conda. `package_tools` on a method
-# references these keys by name. Run `gene-agent bootstrap --apply` once after
+# references these keys by name. Confirm `gene-agent bootstrap` once after
 # filling to conform Juicer (build scripts -> CPU symlink, link in juicer_tools.jar).
 #
 # Tested versions:
