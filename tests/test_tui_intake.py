@@ -14,6 +14,7 @@ from app.entrypoints.tui import (
 from app.entrypoints.tui_intake import (
     TuiDraftConflictError,
     apply_asset_answer,
+    apply_batch_t2t_facts,
     confirm_no_hic_degradation,
     create_rerun_tui_session_draft,
     create_tui_session_draft,
@@ -24,6 +25,7 @@ from app.entrypoints.tui_intake import (
     next_intake_clarification,
     parse_asset_answer_deterministically,
     parse_asset_answer_with_fallback,
+    parse_batch_t2t_answer,
     parse_workflow_intent,
     save_tui_session_draft,
 )
@@ -58,6 +60,23 @@ class TuiIntakeTests(unittest.TestCase):
         self.assertEqual(draft.intake.requirements, ["ont_reads", "hic_reads"])
         self.assertIsNone(draft.intake.ont_reads)
         self.assertEqual(next_intake_clarification(draft).role, "ont_reads")
+
+    def test_goal_extracts_complete_latin_species_name(self):
+        intent = deterministic_workflow_intent(
+            "以 Solea ovata 为目标物种进行染色体级组装"
+        )
+
+        self.assertEqual(intent.target_species, "Solea ovata")
+
+    def test_tui_rejects_common_species_name_before_manifest(self):
+        self.assertIsNone(
+            deterministic_workflow_intent("以人类为目标物种进行组装").target_species
+        )
+        parsed = parse_batch_t2t_answer('物种："人类"')
+        self.assertIsNone(parsed.species)
+        self.assertTrue(
+            any("Latin scientific name" in issue for issue in parsed.issues)
+        )
 
     def test_t2t_goal_recommends_complete_chain_and_finish_review(self):
         intent = deterministic_workflow_intent("为该样本做 T2T 组装")
@@ -710,6 +729,11 @@ class TuiIntakeTests(unittest.TestCase):
             self.assertEqual(clarification.kind, "degradation_confirmation")
             self.assertFalse(no_hic.degradation_decision)
             confirmed = confirm_no_hic_degradation(no_hic, confirmed=True)
+            self.assertEqual(next_intake_clarification(confirmed).role, "t2t_facts")
+            confirmed = apply_batch_t2t_facts(
+                confirmed,
+                answer='物种："Solea ovata"',
+            ).draft
             self.assertIsNone(next_intake_clarification(confirmed))
             self.assertEqual(confirmed.intent.target_assembly_level, "contig")
             self.assertNotIn("use_hic_phasing", confirmed.intent.model_dump())

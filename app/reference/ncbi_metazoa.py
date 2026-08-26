@@ -6,11 +6,12 @@ import csv
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
+from hashlib import sha256
+from io import StringIO
 from pathlib import Path
 from statistics import median, quantiles
 from typing import Any
-
-from app.integrity import sha256_file
 
 REFERENCE_MANIFEST_FILENAME = "reference_manifest.json"
 MAX_SELECTED_RECORDS = 5
@@ -37,31 +38,95 @@ _ALTERNATE_METADATA_RE = re.compile(
     r"\b(?:alternate|maternal|paternal|hap[._ -]?[12])\b",
     re.IGNORECASE,
 )
-_SPECIES_KEYS = (
-    "target_species",
-    "species_name",
-    "scientific_name",
-    "organism",
-    "species",
-    "chinese_name",
-)
-
 _REFERENCE_FILE_NAMES = frozenset(
     {"Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage", "species_alias.tsv"}
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+@dataclass(frozen=True)
+class _ReferenceTables:
+    aliases: list[dict[str, str]]
+    rows: list[dict[str, str]]
+    lineage_by_taxid: dict[str, set[str]]
+
+
+def _reference_sources(reference_dir: Path) -> dict[str, str]:
+    return {
+        "tsv": str(reference_dir / "Metazoa.ncbi.tsv"),
+        "lineage": str(reference_dir / "Metazoa.ncbi.lineage"),
+        "alias": str(reference_dir / "species_alias.tsv"),
+    }
+
+
+def _load_reference_snapshot(
+    reference_dir: Path,
+    sources: dict[str, str],
+) -> tuple[dict[str, Any], _ReferenceTables | None, str | None]:
+    """Load one verified snapshot with shared, stable failure classification."""
+
+    provenance, source_bytes, provenance_error = _reference_provenance(
+        reference_dir, sources
+    )
+    if provenance_error:
+        return provenance, None, provenance_error
+    assert source_bytes is not None
+    try:
+        tables = _ReferenceTables(
+            aliases=_load_tsv(source_bytes["species_alias.tsv"]),
+            rows=_load_tsv(source_bytes["Metazoa.ncbi.tsv"]),
+            lineage_by_taxid=_load_lineage(source_bytes["Metazoa.ncbi.lineage"]),
+        )
+    except OSError as exc:
+        return provenance, None, f"reference_source_unavailable:{exc.filename or exc}"
+    except (csv.Error, UnicodeDecodeError, ValueError) as exc:
+        return provenance, None, f"reference_source_unreadable:{type(exc).__name__}"
+    return provenance, tables, None
+
+
+def _prepare_reference_pack(
+    species_name: str | None,
+    *,
+    reference_dir: Path,
+    sources: dict[str, str],
+    base: dict[str, Any],
+) -> (
+    tuple[
+        dict[str, Any],
+        str,
+        list[dict[str, str]],
+        dict[str, set[str]],
+    ]
+    | None
+):
+    """Populate the failure/target prefix shared by both evidence packs."""
+
+    if not species_name or not str(species_name).strip():
+        base["notes"].append("target_species_not_provided")
+        return None
+    provenance, tables, provenance_error = _load_reference_snapshot(
+        reference_dir, sources
+    )
+    base["source"] = provenance
+    if provenance_error:
+        base["notes"].append(provenance_error)
+        return None
+    assert tables is not None
+    target = _resolve_target(str(species_name), tables.aliases)
+    base["target"] = target
+    canonical = target["canonical_scientific_name"]
+    if not canonical:
+        base["notes"].append("target_species_unresolved")
+        return None
+    return target, canonical, tables.rows, tables.lineage_by_taxid
+
+
 def validate_reference_snapshot(reference_dir: Path | str) -> dict[str, Any]:
     """Verify the configured NCBI snapshot manifest and every declared file."""
 
     root = Path(reference_dir)
-    sources = {
-        "tsv": str(root / "Metazoa.ncbi.tsv"),
-        "lineage": str(root / "Metazoa.ncbi.lineage"),
-        "alias": str(root / "species_alias.tsv"),
-    }
-    provenance, error = _reference_provenance(root, sources)
+    sources = _reference_sources(root)
+    provenance, _source_bytes, error = _reference_provenance(root, sources)
     if error is not None:
         raise ValueError(error)
     return provenance
@@ -79,38 +144,17 @@ def build_related_species_evidence_pack(
     absent or incomplete.
     """
     reference_dir = Path(reference_dir)
-    sources = {
-        "tsv": str(reference_dir / "Metazoa.ncbi.tsv"),
-        "lineage": str(reference_dir / "Metazoa.ncbi.lineage"),
-        "alias": str(reference_dir / "species_alias.tsv"),
-    }
+    sources = _reference_sources(reference_dir)
     base = _empty_pack(species_name, sources)
-    if not species_name or not str(species_name).strip():
-        base["notes"].append("target_species_not_provided")
+    prepared = _prepare_reference_pack(
+        species_name,
+        reference_dir=reference_dir,
+        sources=sources,
+        base=base,
+    )
+    if prepared is None:
         return base
-    provenance, provenance_error = _reference_provenance(reference_dir, sources)
-    base["source"] = provenance
-    if provenance_error:
-        base["notes"].append(provenance_error)
-        return base
-
-    try:
-        aliases = _load_aliases(Path(sources["alias"]))
-        rows = _load_tsv(Path(sources["tsv"]))
-        lineage_by_taxid = _load_lineage(Path(sources["lineage"]))
-    except OSError as exc:
-        base["notes"].append(f"reference_source_unavailable:{exc.filename or exc}")
-        return base
-    except (csv.Error, UnicodeDecodeError, ValueError) as exc:
-        base["notes"].append(f"reference_source_unreadable:{type(exc).__name__}")
-        return base
-
-    target = _resolve_target(str(species_name), aliases)
-    base["target"] = target
-    canonical = target["canonical_scientific_name"]
-    if not canonical:
-        base["notes"].append("target_species_unresolved")
-        return base
+    target, canonical, rows, lineage_by_taxid = prepared
 
     exact = _select_evidence(
         [
@@ -168,38 +212,17 @@ def build_related_species_statistics_pack(
     "unavailable" pack.
     """
     reference_dir = Path(reference_dir)
-    sources = {
-        "tsv": str(reference_dir / "Metazoa.ncbi.tsv"),
-        "lineage": str(reference_dir / "Metazoa.ncbi.lineage"),
-        "alias": str(reference_dir / "species_alias.tsv"),
-    }
+    sources = _reference_sources(reference_dir)
     base = _empty_statistics_pack(species_name, sources, target_metrics)
-    if not species_name or not str(species_name).strip():
-        base["notes"].append("target_species_not_provided")
+    prepared = _prepare_reference_pack(
+        species_name,
+        reference_dir=reference_dir,
+        sources=sources,
+        base=base,
+    )
+    if prepared is None:
         return base
-    provenance, provenance_error = _reference_provenance(reference_dir, sources)
-    base["source"] = provenance
-    if provenance_error:
-        base["notes"].append(provenance_error)
-        return base
-
-    try:
-        aliases = _load_aliases(Path(sources["alias"]))
-        rows = _load_tsv(Path(sources["tsv"]))
-        lineage_by_taxid = _load_lineage(Path(sources["lineage"]))
-    except OSError as exc:
-        base["notes"].append(f"reference_source_unavailable:{exc.filename or exc}")
-        return base
-    except (csv.Error, UnicodeDecodeError, ValueError) as exc:
-        base["notes"].append(f"reference_source_unreadable:{type(exc).__name__}")
-        return base
-
-    target = _resolve_target(str(species_name), aliases)
-    base["target"] = target
-    canonical = target["canonical_scientific_name"]
-    if not canonical:
-        base["notes"].append("target_species_unresolved")
-        return base
+    target, canonical, rows, lineage_by_taxid = prepared
 
     seen_taxids: set[str] = set()
     tier_rows: dict[str, list[dict[str, str]]] = {}
@@ -296,17 +319,55 @@ def build_related_species_statistics_pack(
 
 
 def species_name_from_metadata(metadata: dict[str, Any]) -> str | None:
-    """Return the first supported target-species value from manifest metadata."""
-    for key in _SPECIES_KEYS:
-        value = metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        if isinstance(value, dict):
-            for nested_key in ("name", "scientific_name", "chinese_name"):
-                nested = value.get(nested_key)
-                if isinstance(nested, str) and nested.strip():
-                    return nested.strip()
+    """Return the sole manifest-owned target-species value."""
+    value = metadata.get("target_species")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
+
+
+def resolve_busco_lineage_for_species(
+    species_name: str,
+    *,
+    reference_dir: Path | str,
+    configured_lineages: set[str],
+) -> str:
+    """Resolve one configured BUSCO lineage from verified related-species data."""
+
+    pack = build_related_species_evidence_pack(
+        species_name,
+        reference_dir=reference_dir,
+    )
+    if pack["status"] != "available":
+        notes = ", ".join(pack.get("notes") or ["no related-species evidence"])
+        raise ValueError(
+            f"cannot resolve BUSCO lineage for species {species_name!r}: {notes}"
+        )
+    observed = {
+        str(record["busco"]["lineage"])
+        for record in pack["selected_records"]
+        if record.get("busco") and record["busco"].get("lineage")
+    }
+    exact = observed & configured_lineages
+    if len(exact) == 1:
+        return next(iter(exact))
+    observed_families = {_busco_lineage_family(name) for name in observed}
+    compatible = {
+        name
+        for name in configured_lineages
+        if _busco_lineage_family(name) in observed_families
+    }
+    if len(compatible) == 1:
+        return next(iter(compatible))
+    raise ValueError(
+        f"cannot resolve one configured BUSCO lineage for species {species_name!r}; "
+        f"reference lineages={sorted(observed)}, "
+        f"configured matches={sorted(compatible)}"
+    )
+
+
+def _busco_lineage_family(name: str) -> str:
+    return _normalise(name).partition("_odb")[0]
 
 
 def _empty_pack(species_name: str | None, sources: dict[str, str]) -> dict[str, Any]:
@@ -348,17 +409,11 @@ def _complete_pack(
     }
 
 
-def _load_aliases(path: Path) -> list[dict[str, str]]:
-    if not path.exists():
-        raise OSError(2, "species alias table not found", str(path))
-    return _load_tsv(path)
-
-
 def _reference_provenance(
     reference_dir: Path,
     sources: dict[str, str],
-) -> tuple[dict[str, Any], str | None]:
-    """Load and verify the tracked snapshot manifest before using its data."""
+) -> tuple[dict[str, Any], dict[str, bytes] | None, str | None]:
+    """Read and verify the exact snapshot bytes later consumed by parsers."""
     manifest_path = reference_dir / REFERENCE_MANIFEST_FILENAME
     provenance: dict[str, Any] = {
         **sources,
@@ -366,17 +421,17 @@ def _reference_provenance(
         "verification": "unverified",
     }
     if not manifest_path.exists():
-        return provenance, "reference_version_manifest_missing"
+        return provenance, None, "reference_version_manifest_missing"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return provenance, "reference_version_manifest_unreadable"
+        return provenance, None, "reference_version_manifest_unreadable"
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
-        return provenance, "reference_version_manifest_invalid"
+        return provenance, None, "reference_version_manifest_invalid"
 
     declared_names = set(manifest["files"])
     if declared_names != _REFERENCE_FILE_NAMES:
-        return provenance, "reference_version_manifest_file_whitelist_invalid"
+        return provenance, None, "reference_version_manifest_file_whitelist_invalid"
 
     provenance.update(
         {
@@ -388,6 +443,7 @@ def _reference_provenance(
         }
     )
     mismatches: list[str] = []
+    source_bytes: dict[str, bytes] = {}
     root = reference_dir.resolve(strict=False)
     for name, expected in manifest["files"].items():
         if (
@@ -398,7 +454,7 @@ def _reference_provenance(
             or Path(name).name != name
             or not isinstance(expected, dict)
         ):
-            return provenance, "reference_version_manifest_invalid"
+            return provenance, None, "reference_version_manifest_invalid"
         expected_sha256 = expected.get("sha256")
         expected_size = expected.get("size_bytes")
         if (
@@ -408,37 +464,41 @@ def _reference_provenance(
             or not isinstance(expected_size, int)
             or expected_size < 0
         ):
-            return provenance, "reference_version_manifest_invalid"
+            return provenance, None, "reference_version_manifest_invalid"
         path = reference_dir / name
         try:
             path.resolve(strict=False).relative_to(root)
         except ValueError:
-            return provenance, "reference_version_manifest_path_escape"
+            return provenance, None, "reference_version_manifest_path_escape"
+        try:
+            contents = path.read_bytes()
+        except OSError:
+            contents = None
         actual = {
             "path": str(path),
-            "sha256": sha256_file(path) if path.exists() else None,
-            "size_bytes": path.stat().st_size if path.exists() else None,
+            "sha256": sha256(contents).hexdigest() if contents is not None else None,
+            "size_bytes": len(contents) if contents is not None else None,
         }
         provenance["files"][name] = actual
         if actual["sha256"] != expected_sha256 or actual["size_bytes"] != expected_size:
             mismatches.append(name)
+        elif contents is not None:
+            source_bytes[name] = contents
     if mismatches:
         provenance["verification"] = "mismatch"
         provenance["mismatched_files"] = mismatches
-        return provenance, f"reference_version_mismatch:{','.join(mismatches)}"
+        return provenance, None, f"reference_version_mismatch:{','.join(mismatches)}"
     provenance["verification"] = "verified"
-    return provenance, None
+    return provenance, source_bytes, None
 
 
-def _load_tsv(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8", newline="") as handle:
+def _load_tsv(contents: bytes) -> list[dict[str, str]]:
+    with StringIO(contents.decode("utf-8"), newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle, delimiter="\t")]
 
 
-def _load_lineage(path: Path) -> dict[str, set[str]]:
-    if not path.exists():
-        raise OSError(2, "NCBI lineage table not found", str(path))
-    with path.open("r", encoding="utf-8", newline="") as handle:
+def _load_lineage(contents: bytes) -> dict[str, set[str]]:
+    with StringIO(contents.decode("utf-8"), newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         fieldnames = reader.fieldnames or []
         if not fieldnames or fieldnames[0] != "Organism Taxonomic ID":

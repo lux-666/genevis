@@ -46,6 +46,7 @@ class DocumentationContractTests(unittest.TestCase):
             "../descriptors/registry.yaml",
             "../config/envs.yaml",
             "examples/envs.yaml.example",
+            "../data/reference/ncbi_metazoa/README.md",
             "examples/",
             "architecture/reference/data-contract.md",
             "architecture/reference/parameter-recommendation.md",
@@ -57,6 +58,21 @@ class DocumentationContractTests(unittest.TestCase):
         )
         missing = [entry for entry in required if entry not in authority_map]
         self.assertFalse(missing, f"documentation authority map is missing: {missing}")
+
+    def test_governance_is_the_single_repository_engineering_policy(self) -> None:
+        governance = (
+            PROJECT_ROOT / "docs" / "architecture" / "reference" / "governance.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "single owner of repository-local engineering procedure", governance
+        )
+        stale = [
+            str(path.relative_to(PROJECT_ROOT))
+            for path in _markdown_files()
+            if "AGENTS.md" in path.read_text(encoding="utf-8")
+        ]
+        self.assertFalse(stale, f"deleted AGENTS.md is still cited by: {stale}")
 
     def test_audience_indexes_preserve_one_architecture_entry(self) -> None:
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
@@ -152,6 +168,39 @@ class DocumentationContractTests(unittest.TestCase):
             + "\n".join(violations),
         )
 
+    def test_cross_cutting_semantics_stay_with_reference_owners(self) -> None:
+        reference_dir = PROJECT_ROOT / "docs" / "architecture" / "reference"
+        execution = (reference_dir / "execution-lifecycle.md").read_text(
+            encoding="utf-8"
+        )
+        run_data = (reference_dir / "data-contract.md").read_text(encoding="utf-8")
+        resources = (reference_dir / "resource-handoff.md").read_text(encoding="utf-8")
+        parameters = (reference_dir / "parameter-recommendation.md").read_text(
+            encoding="utf-8"
+        )
+        stages = (reference_dir / "stage-contracts.md").read_text(encoding="utf-8")
+        shared = (reference_dir / "shared-facts.md").read_text(encoding="utf-8")
+        conformance = (reference_dir / "conformance.md").read_text(encoding="utf-8")
+        governance = (reference_dir / "governance.md").read_text(encoding="utf-8")
+
+        self.assertIn("accepts only the exact", execution)
+        self.assertIn('parsed JSON object `{"ready": true}`', execution)
+        self.assertNotIn('{"ready": true}', resources)
+        self.assertIn("ReviewPolicyConfig.max_blocked_seconds", run_data)
+        self.assertNotIn("max_blocked_seconds", parameters)
+        self.assertNotIn("max_blocked_seconds", stages)
+        self.assertIn("Manifest-owned target species", shared)
+        self.assertNotIn("Target species has two frozen representations", conformance)
+        self.assertIn(
+            "Audit finding identifiers are review-local coordinates", governance
+        )
+
+        for document in reference_dir.glob("*.md"):
+            self.assertIsNone(
+                re.search(r"\| F[1-9][0-9]* \|", document.read_text(encoding="utf-8")),
+                f"audit finding IDs must not become architecture in {document.name}",
+            )
+
     def test_server_helpers_locate_repo_root_and_document_scope(self) -> None:
         server_check = (PROJECT_ROOT / "scripts" / "server_check.sh").read_text(
             encoding="utf-8"
@@ -181,10 +230,14 @@ class DocumentationContractTests(unittest.TestCase):
             "Assembly method selection: deferred to stage entry", server_check
         )
         self.assertIn("stage-owned method selection", server_check)
+        self.assertNotIn("ORCHESTRATOR_ENV", server_check)
+        self.assertNotIn("conda run", server_check)
         self.assertIn("code regression and compile checks only", server_test)
         self.assertIn("not a real-data or biological-tool smoke test", server_test)
         self.assertIn("pytest -q", server_test)
         self.assertNotIn("unittest discover", server_test)
+        self.assertNotIn("npx", server_test)
+        self.assertNotIn("conda run", server_test)
 
     def test_server_check_derives_tools_without_hardcoded_tool_closure(self) -> None:
         server_check = (PROJECT_ROOT / "scripts" / "server_check.sh").read_text(
@@ -218,3 +271,46 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("fixed-stage method/package closure", deployment_map)
         self.assertIn("Assembly method selection remains deferred", deployment_map)
         self.assertIn("not a proof that `server_check.sh` will pass", deployment_map)
+
+    def test_host_guides_run_code_gate_before_host_gate(self) -> None:
+        commands = {
+            "README.md": (
+                "bash scripts/server_test.sh",
+                "bash scripts/server_check.sh",
+            ),
+            "docs/deployment/README.md": (
+                "bash /path/to/gene_agent/scripts/server_test.sh",
+                "bash /path/to/gene_agent/scripts/server_check.sh",
+            ),
+            "docs/deployment/migration.md": (
+                "bash /path/to/gene_agent/scripts/server_test.sh",
+                "bash /path/to/gene_agent/scripts/server_check.sh",
+            ),
+            "docs/deployment/mac_dev_server_pull.md": (
+                "bash scripts/server_test.sh",
+                "bash scripts/server_check.sh",
+            ),
+        }
+        for relative_path, (code_gate, host_gate) in commands.items():
+            document = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertLess(
+                document.index(code_gate),
+                document.index(host_gate),
+                f"{relative_path} must run the code gate before the host gate",
+            )
+
+    def test_ncbi_snapshot_install_commands_have_one_operator_owner(self) -> None:
+        authority = (
+            PROJECT_ROOT / "data" / "reference" / "ncbi_metazoa" / "README.md"
+        ).read_text(encoding="utf-8")
+        installer_name = "install_ncbi_metazoa_reference.py"
+
+        self.assertIn("sole operator authority", authority)
+        self.assertIn(installer_name, authority)
+        for relative_path in (
+            "docs/deployment/migration.md",
+            "docs/deployment/mac_dev_server_pull.md",
+        ):
+            document = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn("../../data/reference/ncbi_metazoa/README.md", document)
+            self.assertNotIn(installer_name, document)

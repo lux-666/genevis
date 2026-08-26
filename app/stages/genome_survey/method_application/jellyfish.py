@@ -177,7 +177,16 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
     kmer_db = working_dir / "jellyfish_kmers.jf"
     kmer_hist = working_dir / "kmer_hist.tsv"
     script_path = working_dir / "run_jellyfish.sh"
-    reads_arg = " ".join(shlex.quote(path) for path in read_paths)
+    try:
+        reads_arg = " ".join(
+            _jellyfish_read_arg(asset, path)
+            for asset, path in zip(assets, read_paths, strict=True)
+        )
+    except ValueError as exc:
+        return update_survey_output(
+            state,
+            {"status": "failed", "reason": f"jellyfish input compression error: {exc}"},
+        )
     script_path.write_text(
         "set -e\n"
         f"jellyfish count -C -m {int(params['kmer_size'])} "
@@ -308,3 +317,14 @@ def _assets_for_family(
     family: SurveyInputFamily,
 ) -> list[SurveyAssetCursor]:
     return list(assets.get(family) or [])
+
+
+def _jellyfish_read_arg(asset: SurveyAssetCursor, path: str) -> str:
+    """Render one Jellyfish input from its frozen compression fact."""
+
+    compression = str(asset.get("compression") or "unknown")
+    if compression == "gzip":
+        return f"<(gzip -cd -- {shlex.quote(path)})"
+    if compression in {"none", "unknown"}:
+        return shlex.quote(path)
+    raise ValueError(f"unsupported compression {compression!r} for {path}")

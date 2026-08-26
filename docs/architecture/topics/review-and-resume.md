@@ -11,7 +11,8 @@
 > [execution lifecycle](../reference/execution-lifecycle.md), and
 > [stage contracts](../reference/stage-contracts.md).  
 > **Code evidence:** `app/review/gates.py`, `app/review/persistence.py`,
-> `app/review/approval.py`, `app/control/resume_transaction.py`, and
+> `app/review/approval.py`, `app/review/recommender.py`,
+> `app/llm/json_response.py`, `app/control/resume_transaction.py`, and
 > `app/control/lifecycle.py`.
 
 ## Durable gate model
@@ -48,6 +49,21 @@ inputs are missing, invalid, or disagree with the request's stage/occurrence,
 it may expose the raw Ledger request for diagnosis but must suppress the
 current occurrence, active interrupt, decision requirements, and actionable
 review next step. An unverified Ledger projection cannot authorize resume.
+
+The optional LLM review recommender accepts only non-empty string content or a
+provider text-block list at its provider boundary. It never stringifies an
+arbitrary provider object into apparent model output. After that boundary,
+Markdown-fence removal and JSON-object-only parsing use the shared
+`parse_json_object` contract. Provider-content validation remains review-owned
+because its failure is a recommendation invocation error, not a generic JSON
+shape error.
+
+Both attached-state and detached-artifact inspection project a verified review
+request through `_review_request_decision_context`. Payload, bindings, stage,
+workflow step, gate, and review-request identity must project identically. The
+two callers keep their independent trust checks: attached inspection verifies
+the active interrupt and frozen occurrence, while detached inspection verifies
+the indexed immutable ref and Ledger-bound request identity before projection.
 
 The review registry centralizes gate declarations, allowed decisions,
 occurrence validation, typed prepare/apply dispatch, and timing metadata. The

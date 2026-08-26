@@ -6,6 +6,8 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -14,10 +16,26 @@ from app.execution.run_readiness import (
     assembly_candidate_method_scope,
     effective_method_closure,
     preflight_run_readiness,
+    probe_llm_endpoint,
     run_requires_llm,
 )
 from app.schemas.run_config import RunConfig
 from tests.busco_fixture import ensure_busco_lineage
+
+
+def test_llm_probe_requires_the_structured_response_contract() -> None:
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content='{"ready":true}')
+    )
+    with patch("app.llm.factory.build_chat_model", return_value=model):
+        probe_llm_endpoint()
+
+
+def test_llm_probe_rejects_non_json_connectivity_text() -> None:
+    model = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(content="READY"))
+    with patch("app.llm.factory.build_chat_model", return_value=model):
+        with pytest.raises(ValueError):
+            probe_llm_endpoint()
 
 
 def _write_ncbi_reference(root: Path) -> Path:

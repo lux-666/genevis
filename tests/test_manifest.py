@@ -67,6 +67,22 @@ class ManifestSchemaTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 InputManifest(session_id="invalid-size", genome_size_estimate=value)
 
+    def test_target_species_requires_full_latin_scientific_name(self):
+        manifest = InputManifest(
+            session_id="scientific-name",
+            user_metadata={"target_species": "  Solea   ovata  "},
+        )
+        self.assertEqual(manifest.user_metadata["target_species"], "Solea ovata")
+
+        for value in ("卵鳎", "S. ovata", "Solea sp.", 123):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "user_metadata.target_species"
+            ):
+                InputManifest(
+                    session_id="invalid-scientific-name",
+                    user_metadata={"target_species": value},
+                )
+
     def test_manifest_supports_all_expected_asset_types(self):
         types = [
             "raw_long_reads",

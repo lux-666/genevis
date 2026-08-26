@@ -180,19 +180,36 @@ Logical inputs:
 - with no usable reads, an explicit operator genome size permits the
   `skipped_no_usable_reads` evidence path; without either, the stage fails.
 
+Input completeness is declaration-owned. A manifest containing long reads but
+no short reads is a valid, intentional long-read-only survey input; the stage
+does not guess that the user omitted a file. When both families are declared,
+short reads take priority. A supplied `genome_size_estimate` remains an
+operator prior; its exact precedence over measurements is owned by the
+[Shared Biological Facts Contract](shared-facts.md#estimated_genome_size).
+
 Registered methods:
 
 - `genome_survey.kmer_count.jellyfish`;
 - `genome_survey.model.genomescope2`.
 
 The stage publishes immutable survey evidence and compact scalar observations;
-it does not create a cross-stage path resource. An explicit operator genome size
-has priority over a survey estimate. If neither an explicit value nor a valid
-estimate exists when assembly requires one, the workflow fails with
+it does not create a cross-stage path resource. If neither an explicit value nor
+a valid estimate exists when assembly requires one, the workflow fails with
 `GENOME_SIZE_UNAVAILABLE`. The checkpoint's `survey_input_family` and
 `resolved_assets` expose only the `short_reads` and `long_reads` logical
-families. Jellyfish publishes typed k-mer `ArtifactRef` objects, which
-GenomeScope2 consumes it without a path-string conversion.
+families. Each resolved read retains the registry's frozen `compression` fact;
+Jellyfish consumes `none`/`unknown` inputs directly and streams `gzip` members
+through `gzip -cd` without requiring an operator-created decompressed copy.
+Other declared compression codecs fail closed at this adapter until they have
+an explicit execution contract. Filename suffixes are not compression
+authority. Jellyfish publishes typed k-mer `ArtifactRef` objects, which
+GenomeScope2 consumes without a path-string conversion.
+
+Because the frozen Jellyfish script invokes both commands for gzip inputs, its
+selected machine-method mapping must declare `jellyfish` and `gzip` in the
+probed tool closure. The active machine mapping is frozen through the
+[whole-run readiness boundary](execution-lifecycle.md#whole-run-readiness-boundary);
+the committed `envs.yaml.example` is only a bootstrap seed.
 
 Outcome rules are explicit. With usable reads and local execution enabled, both
 methods must complete before the stage completes. With usable reads but local
@@ -319,12 +336,42 @@ Registered methods:
 
 QUAST and BUSCO evidence is collected through an ordered shared lifecycle.
 BUSCO and NCBI reference data resolve only from the host database registry
-captured in the frozen dependency manifest. RunConfig may carry executor knobs
-and an optional logical BUSCO lineage alias in `assembly_review.busco.lineage`,
-but never owns database paths, versions, or provenance; those fields are
-invalid RunConfig input. Review may accept a candidate, adopt a separately
-completed polish/purge action, or stop the workflow. Decisions are bound to
-the current review request and typed candidate refs.
+captured in the frozen dependency manifest. Assembly Review requires
+`input_manifest.user_metadata.target_species` as an NCBI Latin scientific name
+(for example, `Solea ovata`). It is the only accepted run-owned species input:
+common names, LLM-derived names, alternate metadata keys, and unspecified names
+such as `Genus sp.` do not participate in resolution. Missing or malformed
+values fail input preparation with the manifest field path; unresolved names
+fail database readiness against the frozen NCBI snapshot.
+
+The verified snapshot maps that scientific name to related-species
+`Annotation BUSCO Lineage` values. The runtime intersects those annotations
+with the host registry and requires exactly one compatible installed lineage
+before freeze. Snapshot creation/installation owns producing and validating
+that mapping; the user does not inspect snapshot rows or choose a lineage.
+`assembly_review.busco.lineage` is not a public selection surface. If retained
+in a historical RunConfig, it is only a consistency assertion and a mismatch
+with the species-derived lineage fails with the RunConfig field path. New
+templates and TUI intake do not create it. RunConfig never owns database paths,
+versions, or provenance, and the host `default_lineage` is not a fallback for
+an unresolved Assembly Review species. Review may accept a candidate, adopt a
+separately completed polish/purge action, or stop the workflow. Decisions are
+bound to the current review request and typed candidate refs.
+
+NCBI comparative evidence and statistics verify and parse the exact same
+manifest-pinned bytes. `_load_reference_snapshot` returns named alias, assembly
+row, and lineage tables so their roles cannot be exchanged positionally. Target
+resolution and stable source-failure classification are shared; first-useful-tier
+evidence selection and all-tier statistical cohort construction remain separate
+stage contracts.
+
+Target species is manifest-owned metadata. Inventory projects the same frozen
+Latin scientific name into shared biological facts for Assembly method and
+parameter recommendation, and rejects a conflicting RunConfig copy. An absent,
+malformed, or unresolved name, an ambiguous BUSCO mapping, or a lineage
+unavailable in the host registry blocks Assembly Review before execution; the
+system never invents a target, asks an LLM to resolve a common name, or falls
+back to an unrelated global lineage.
 
 Signals such as duplicated BUSCO content, size inflation, abnormal depth, or
 missing/inconsistent evidence prevent unsupported automatic acceptance.

@@ -10,14 +10,16 @@
 > [TUI and planning](../topics/tui-and-planning.md).
 > **Code evidence:** `app/schemas/shared_parameters.py`,
 > `app/schemas/run_config.py`, `app/domains/genome_size.py`,
-> `app/entrypoints/ask_planner.py`, `app/stages/inventory/nodes.py`, and
-> `app/stages/assembly/nodes.py`.
+> `app/entrypoints/ask_planner.py`, `app/entrypoints/tui_intake.py`,
+> `app/stages/inventory/nodes.py`, `app/stages/assembly/nodes.py`, and
+> `app/stages/assembly_review/nodes.py`.
 
 ## Definition
 
-`SharedParameters` owns cross-stage biological facts collected once during
-planning and projected into the frozen run state. The frozen RunConfig is the
-sole authority for these values at runtime; stage outputs may supply derived
+`SharedParameters` owns cross-stage biological facts projected into runtime
+state. Manifest-owned target species and genome-size priors are reconciled once
+by Inventory; configured RunConfig values may supply the remaining facts but
+may not conflict with those manifest identities. Stage outputs may add derived
 measurements but never overwrite a frozen fact.
 
 The schema rejects unknown fields. Every field is optional; a stage that
@@ -80,10 +82,15 @@ that candidate is rejected with `genome_size_required`.
 
 ### `species_facts`
 
-Caller-supplied biological identity used by parameter recommenders. All
-sub-fields are optional except `scientific_name`. `telomere_motif` is
-normalized to uppercase ACGT and requires at least two bases. This block is
-consumed by T2T finishing; Assembly and Genome Survey do not read it.
+Biological identity used by method and parameter recommenders. The canonical
+scientific name belongs to `input_manifest.user_metadata.target_species` and is
+required when Assembly Review is requested. The value must be an NCBI Latin
+scientific name; no common-name or LLM resolution path exists. Inventory
+projects that frozen name into `species_facts.scientific_name`; a conflicting
+RunConfig copy fails before execution. The schema-retained RunConfig copy is a
+legacy consistency assertion, not a public species-input surface; templates and
+TUI planning do not emit it. `telomere_motif` is normalized to uppercase ACGT
+and requires at least two bases.
 
 ## Planning and freeze validation
 
@@ -91,8 +98,9 @@ The planner does not ask for `estimated_genome_size`. A deferred local Assembly
 must have at least one of these three supportable sources before RunConfig
 construction:
 
-- `read_type` is required when the platform cannot uniquely determine it and
-  the Assembly route is `auto`;
+- one registered platform may produce one derived shared `read_type`; mixed or
+  partly unknown platforms remain a set of Assembly inputs and are deferred to
+  the method recommendation gate;
 - `input_manifest.genome_size_estimate` is an explicit operator prior; or
 - every local Assembly occurrence has a prior locally executed Genome Survey
   occurrence with usable survey reads.

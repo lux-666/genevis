@@ -40,7 +40,7 @@ from app.stages.assembly.method_application import nextdenovo as nextdenovo_grap
 from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
-from app.stages.assembly.nodes import infer_input_profile
+from app.stages.assembly.nodes import _route_selector_payload, infer_input_profile
 from app.stages.assembly.routing import route_after_commit
 from app.storage.artifacts import publish_artifact_record, resolve_artifact_ref
 from app.storage.assembly_candidates import (
@@ -238,6 +238,29 @@ class _AssemblyMethodModel:
 
 
 class AssemblyDescriptorTests(unittest.TestCase):
+    def test_method_advisor_sees_all_read_types_and_species(self):
+        payload = _route_selector_payload(
+            {
+                "session_id": "s1",
+                "workflow_step_index": 0,
+                "workflow_steps": [],
+                "shared_parameters": {
+                    "species_facts": {"scientific_name": "Solea ovata"}
+                },
+                "stage_outputs": {},
+            },
+            {
+                "assembly_input_member_platforms": {"primary": ["ont", "pacbio_hifi"]},
+                "has_hifi": True,
+                "ont_reads_ref": "ont.fastq",
+            },
+            {},
+        )
+
+        profile = payload["data_profile"]
+        self.assertEqual(profile["available_read_types"], ["ont_raw", "pacbio_hifi"])
+        self.assertEqual(profile["species_facts"], {"scientific_name": "Solea ovata"})
+
     def test_descriptor_registry_loads_assembly_candidates(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 

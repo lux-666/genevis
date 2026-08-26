@@ -271,11 +271,6 @@ class Ledger:
     def events_path(self) -> Path:
         return self.paths.ledger_events_path
 
-    def session_dir(self, session_id: str) -> Path:
-        """Return the run-local ledger directory after identity validation."""
-        self.paths.require_session_id(session_id)
-        return self.paths.ledger_dir
-
     def create_session(self, session_id: str, input_manifest_ref: str) -> None:
         """Idempotently record creation in the event stream.
 
@@ -294,32 +289,6 @@ class Ledger:
             subject_id=session_id,
             refs=refs,
             idempotency_key=f"session:{session_id}:created",
-        )
-
-    def record_attempt(
-        self,
-        session_id: str,
-        attempt: FrozenAttemptSpec,
-        *,
-        status: str,
-        artifacts: list[dict[str, Any]] | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Record an attempt status without copying its execution manifest."""
-        workflow_step_id = _workflow_step_id_from_attempt(attempt)
-        self.record_event(
-            session_id,
-            "attempt_recorded",
-            {
-                "method_name": attempt.method_name,
-                "status": status,
-                "error": error,
-            },
-            stage=attempt.stage,
-            workflow_step_id=workflow_step_id,
-            subject_id=attempt.attempt_id,
-            refs=self._artifact_refs(artifacts or []),
-            idempotency_key=f"attempt:{attempt.attempt_id}:recorded:{status}",
         )
 
     def record_attempt_started(
@@ -1763,13 +1732,6 @@ class Ledger:
     def _artifact_refs(self, artifacts: Iterable[Any]) -> list[dict[str, Any]]:
         return [self._artifact_ref(artifact) for artifact in artifacts]
 
-    def _workflow_step_id_for_artifact_ref(self, ref: Mapping[str, Any]) -> str:
-        record = self._indexed_artifact_record(ref)
-        return _require_workflow_step_id(record.get("workflow_step_id"))
-
-    def _review_request_id_for_artifact_ref(self, ref: Mapping[str, Any]) -> str:
-        return _require_review_request_id(self._indexed_artifact_record(ref))
-
     def _indexed_artifact_record(self, ref: Mapping[str, Any]) -> dict[str, Any]:
         path_ref = ref.get("path_ref")
         if not isinstance(path_ref, str) or not path_ref:
@@ -2007,39 +1969,6 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"expected an artifact/ref mapping, got {type(value).__name__}")
     return dict(value)
-
-
-def _reference_identity(value: Any) -> str:
-    if value is None:
-        return ""
-    if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    if isinstance(value, Mapping):
-        return str(
-            value.get("artifact_id")
-            or value.get("path_ref")
-            or value.get("file_path")
-            or ""
-        )
-    return str(value)
-
-
-def _review_request_id_from_ref(ref: dict[str, Any] | None) -> str | None:
-    if not ref or not ref.get("path_ref"):
-        return None
-    parts = Path(str(ref["path_ref"])).parts
-    try:
-        reviews_index = parts.index("reviews")
-    except ValueError:
-        return None
-    if reviews_index + 1 >= len(parts):
-        return None
-    request_id = parts[reviews_index + 1]
-    return request_id if request_id.startswith("review_") else None
-
-
-def _stable_subject(*parts: str) -> str:
-    return f"{parts[0]}_{_sha256_text(':'.join(parts))[0:20]}"
 
 
 def _sha256_text(value: str) -> str:

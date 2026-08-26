@@ -6,6 +6,8 @@
 # valid when every reached stage can satisfy its own input contract.
 session_id: existing-assembly-review-YYYYMMDD-a
 sample_id: existing_assembly_sample
+user_metadata:
+  target_species: Solea ovata  # REPLACE with the real NCBI scientific name
 assets:
   - asset_type: assembly_fasta_registered
     paths:

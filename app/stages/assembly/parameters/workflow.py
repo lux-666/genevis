@@ -28,6 +28,7 @@ from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
+from app.llm.json_response import model_response_record
 from app.llm.parameters.assembly.prompt import (
     parameter_prompt_bundle_hash,
     parameter_prompt_bundle_name,
@@ -380,13 +381,13 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 state,
                 recommendation_id,
                 "model_response.json",
-                {
-                    "schema_version": 2,
-                    "raw_response": decision.raw_response,
-                    "validity": "parsed" if decision.valid else "invalid",
-                    "error": decision.error,
-                    "model_id": decision.model_id,
-                },
+                model_response_record(
+                    schema_version=2,
+                    raw_response=decision.raw_response,
+                    valid=decision.valid,
+                    error=decision.error,
+                    model_id=decision.model_id,
+                ),
                 artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
                 method_name="assembly.parameter_recommender",
             )
@@ -656,13 +657,13 @@ def _baseline_assembly_parameters(
             state,
             recommendation_id,
             "model_response.json",
-            {
-                "schema_version": 2,
-                "raw_response": "",
-                "validity": "parsed",
-                "error": None,
-                "model_id": "deterministic_baseline_policy",
-            },
+            model_response_record(
+                schema_version=2,
+                raw_response="",
+                valid=True,
+                error=None,
+                model_id="deterministic_baseline_policy",
+            ),
             artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
             method_name="assembly.parameter_recommender",
         )

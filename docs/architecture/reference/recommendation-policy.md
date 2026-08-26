@@ -10,6 +10,8 @@
 > [TUI and planning](../topics/tui-and-planning.md).  
 > **Code evidence:** `app/schemas/tui_intake.py`, `app/schemas/run_config.py`,
 > `app/entrypoints/ask_planner.py`, `app/entrypoints/run.py`,
+> `app/llm/json_response.py`, `app/stages/assembly/decision.py`,
+> `app/llm/parameters/assembly/recommender.py`,
 > `app/stages/assembly/nodes.py`, and
 > `app/stages/assembly/parameters/workflow.py`.
 
@@ -34,6 +36,21 @@ not bypass parameter approval in advisor mode. A deterministic parameter
 baseline records its own immutable policy decision and approved attempt; that is
 a distinct policy path, not an approval-gate bypass.
 
+## Persisted advisor-response envelope
+
+New Assembly route and parameter-advisor writes share the envelope keys
+`schema_version`, `raw_response`, `validity`, `error`, and `model_id`.
+`app/llm/json_response.py` owns construction and validation of that common wire
+shape, including `validity` values `parsed` and `invalid`. It does not own
+version-specific replay compatibility.
+
+The route restorer retains schema-v1 migration behavior: an absent or
+non-string historical `model_id` is normalized to `null`. The Assembly
+parameter restorer for schema v2 rejects a non-string `model_id`. Changing
+either rule requires an explicit schema/migration decision; a shared helper
+must not silently make the two restore policies identical. New writes always
+emit a string or `null` in both schemas.
+
 ## Draft and freeze boundary
 
 A mutable TUI draft carries `recommendation_policy` before planning. It is
@@ -45,6 +62,13 @@ changed after freeze.
 The policy never reintroduces an Assembly method or parameter into RunConfig.
 Method identity remains stage-owned. A policy selects who proposes the method
 or parameter mapping, not an executable answer.
+
+The planning schema carries no `method_selection` clarification kind. There is
+no user-editable Assembly method roster in a draft; fixed stages receive system
+defaults, and Assembly is bound at its stage-time recommendation boundary.
+Intake tool-name recognition and companion-read hints are transient
+asset-collection hints scoped to intake-function locals, not durable planning
+fields.
 
 ## Method/route advisor
 
@@ -80,7 +104,10 @@ a retry request fails closed rather than silently switching to advisor mode.
 
 Readiness follows the frozen policy. When both Assembly advisors use baselines,
 the run no longer requires the Assembly LLM endpoint before freeze; any Hi-C or
-T2T advisor still does. The Assembly cursor persists both policy modes, and the
+T2T advisor still does. The exact structured endpoint probe and no-session-on-
+failure behavior are owned by the
+[execution lifecycle](execution-lifecycle.md#whole-run-readiness-boundary). The
+Assembly cursor persists both policy modes, and the
 parameter baseline marks every skipped-model record explicitly rather than
 relying on absent artifacts.
 

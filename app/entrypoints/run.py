@@ -86,6 +86,7 @@ def _stage_seeds_from_run_config(
     *,
     shared_parameters: SharedParameters | dict[str, Any] | None,
     dependency_resolver: Any | None = None,
+    species_name: str | None = None,
 ) -> StageOutputs:
     """Project shared stage configuration without occurrence-local consent.
 
@@ -151,7 +152,13 @@ def _stage_seeds_from_run_config(
             )
         from app.execution.database_resolution import validate_review_databases
 
-        review_seed.update(validate_review_databases(run_config, dependency_resolver))
+        review_seed.update(
+            validate_review_databases(
+                run_config,
+                dependency_resolver,
+                species_name=species_name,
+            )
+        )
         seeds["assembly_review"] = review_seed
 
     if "hic_scaffolding" in requested and run_config.hic_scaffolding:
@@ -343,14 +350,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "bootstrap",
         help=("Auxiliary machine configuration initialization and validation"),
     )
-    bootstrap_mode = bootstrap_parser.add_mutually_exclusive_group()
-    bootstrap_mode.add_argument(
-        "--apply",
-        action="store_true",
-        default=False,
-        help="Apply planned project configuration and package conformance actions.",
-    )
-    bootstrap_mode.add_argument(
+    bootstrap_parser.add_argument(
         "--update",
         action="store_true",
         default=False,
@@ -485,10 +485,15 @@ def _run(args: argparse.Namespace) -> int:
         )
 
         effective_methods = effective_method_closure(prepared.run_config)
-        preflight_run_readiness(
-            prepared.run_config,
-            effective_methods=effective_methods,
+        from app.reference.ncbi_metazoa import species_name_from_metadata
+
+        species_name = species_name_from_metadata(
+            getattr(prepared.manifest, "user_metadata", {})
         )
+        readiness_kwargs: dict[str, Any] = {"effective_methods": effective_methods}
+        if species_name is not None:
+            readiness_kwargs["species_name"] = species_name
+        preflight_run_readiness(prepared.run_config, **readiness_kwargs)
         freeze_session_inputs(
             paths,
             prepared_inputs=prepared,
@@ -601,10 +606,17 @@ def _execute_verified_frozen_session(
         from app.execution.dependency_snapshot import load_frozen_dependency_resolver
 
         dependency_resolver = load_frozen_dependency_resolver(run_dir)
+        from app.reference.ncbi_metazoa import species_name_from_metadata
+
+        declarations = getattr(bundle, "declarations", None)
+        manifest = getattr(declarations, "manifest", None)
         stage_seeds = _stage_seeds_from_run_config(
             run_config,
             shared_parameters=shared_parameters,
             dependency_resolver=dependency_resolver,
+            species_name=species_name_from_metadata(
+                getattr(manifest, "user_metadata", {})
+            ),
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1471,6 +1483,14 @@ def _print_inspect_text(
             f"lock_held={lock_text}"
         )
     print(f"artifact_count: {summary.get('artifact_count', 0)}")
+    final_assembly = summary.get("final_assembly")
+    if isinstance(final_assembly, dict):
+        print(f"final_assembly: {final_assembly.get('primary_output_path')}")
+    if summary.get("final_assembly_integrity_error"):
+        print(
+            "WARNING: final_assembly_integrity_error: "
+            f"{summary['final_assembly_integrity_error']}"
+        )
     print(f"decisions_by_origin: {summary.get('decisions_by_origin', {})}")
     if summary.get("latest_review_request"):
         print(f"latest_review_request: {summary['latest_review_request']}")
@@ -1745,6 +1765,19 @@ def _run_tui(args: argparse.Namespace) -> int:
     return run_tui(data_dir, resume_session=getattr(args, "resume_session", None))
 
 
+def _bootstrap_config_path(value: str | None) -> Path:
+    """Resolve bootstrap's one active host mapping with ordinary CLI semantics."""
+
+    from app.execution.env_resolver import active_config_path
+
+    if value is None:
+        return active_config_path()
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve(strict=False)
+
+
 def _run_bootstrap(args: argparse.Namespace) -> int:
     """Initialize project config, then validate and conform packages."""
     from app.execution import env_resolver
@@ -1762,25 +1795,15 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
 
     # Keep bootstrap on the same active-config selection used by run/freeze:
     # explicit CLI path > GENE_AGENT_ENVS_CONFIG > repository default.
-    config_path = (
-        Path(args.config) if args.config else env_resolver.active_config_path()
-    )
+    config_path = _bootstrap_config_path(args.config)
 
     update_requested = bool(getattr(args, "update", False))
-    apply_requested = bool(getattr(args, "apply", False))
-    conformance_packages = {"juicer"} if apply_requested else set()
-    if update_requested and apply_requested:
-        print(
-            "error: bootstrap --update commits interactively and cannot be "
-            "combined with --apply",
-            file=sys.stderr,
-        )
-        return 1
+    conformance_packages: set[str] = set() if update_requested else {"juicer"}
 
     print(f"Checking configuration: {config_path}")
     existing_issues = verify_envs_yaml(config_path) if config_path.exists() else []
     interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
-    effective_apply = apply_requested
+    effective_apply = False
     needs_initialization = (
         not config_path.exists()
         or interactive
@@ -1806,6 +1829,18 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
 
         if update_requested:
             conformance_packages = set(init_plan.conformance_packages)
+        else:
+            conformance_packages.update(init_plan.conformance_packages)
+        candidate_packages = init_plan.config_data.get("packages", {})
+        if not isinstance(candidate_packages, dict):
+            candidate_packages = {}
+        planned_conformance = sorted(
+            name
+            for name, spec in candidate_packages.items()
+            if isinstance(spec, dict)
+            and bool(spec.get("conform_on_bootstrap"))
+            and (not update_requested or name in conformance_packages)
+        )
 
         if init_plan.unresolved_fields:
             print("\n❌ Missing project configuration values:")
@@ -1837,27 +1872,23 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                         f"{change.display_previous_value()} -> "
                         f"{change.display_value()}"
                     )
+            for package_name in planned_conformance:
+                print(f"  - package conformance: {package_name}")
         print("✓ Candidate configuration is valid")
         if init_plan.has_changes:
-            if update_requested:
-                while True:
-                    try:
-                        confirmation = input(
-                            "\nPress Enter to apply these changes "
-                            "(Ctrl-C/Ctrl-D cancels): "
-                        )
-                    except (KeyboardInterrupt, EOFError):
-                        print("\nBootstrap update cancelled; no changes were written.")
-                        return 1
-                    if confirmation == "":
-                        effective_apply = True
-                        break
-                    print(
-                        "Type nothing and press Enter to apply, or interrupt to cancel."
+            while True:
+                try:
+                    confirmation = input(
+                        "\nPress Enter to apply this exact plan "
+                        "(Ctrl-C/Ctrl-D cancels): "
                     )
-            elif not apply_requested:
-                print("\nRun with --apply to write these project configuration changes")
-                return 0
+                except (KeyboardInterrupt, EOFError):
+                    print("\nBootstrap cancelled; no changes were written.")
+                    return 1
+                if confirmation == "":
+                    effective_apply = True
+                    break
+                print("Type nothing and press Enter to apply, or interrupt to cancel.")
             try:
                 apply_project_bootstrap_plan(init_plan)
                 _load_dotenv_without_override([init_plan.dotenv_path])
@@ -1891,6 +1922,28 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
         print(f"\n❌ Failed to load configuration: {e}", file=sys.stderr)
         return 1
 
+    conformable = [
+        name
+        for name, spec in resolver.packages.items()
+        if spec.conform_on_bootstrap
+        and (not update_requested or name in conformance_packages)
+    ]
+    if conformable and not effective_apply and interactive and not update_requested:
+        print("\nPackage conformance plan:")
+        for package_name in conformable:
+            print(f"  - conform {package_name}")
+        try:
+            confirmation = input(
+                "\nPress Enter to apply this exact plan (Ctrl-C/Ctrl-D cancels): "
+            )
+        except (KeyboardInterrupt, EOFError):
+            print("\nBootstrap cancelled; no package changes were written.")
+            return 1
+        if confirmation != "":
+            print("Bootstrap cancelled; no package changes were written.")
+            return 1
+        effective_apply = True
+
     # Step 3: Run conformance for packages that need it (Juicer)
     conformance_results = []
     for package_name, package_spec in resolver.packages.items():
@@ -1919,12 +1972,8 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                     if juicer_tools_spec:
                         print("    - Link juicer_tools.jar into scripts/common/")
 
-    if (
-        not update_requested
-        and not effective_apply
-        and any(pkg.conform_on_bootstrap for pkg in resolver.packages.values())
-    ):
-        print("\n💡 Run with --apply to execute conformance actions")
+    if not effective_apply and conformable:
+        print("\n💡 Run bootstrap in an interactive terminal to confirm conformance")
 
     # Step 4: Strictly verify and preflight all packages after conformance.
     post_conformance_issues = verify_envs_yaml(config_path)
@@ -2011,9 +2060,16 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
-    # Load .env once so all public commands share setdefault-style configuration.
-    _load_dotenv_without_override()
     args = _parse_args(argv)
+    # Parse first so an explicit bootstrap config selects its own project .env;
+    # every other command derives the same single source from the active mapping.
+    if args.command == "bootstrap" and args.config:
+        from app.execution.project_bootstrap import project_root_for_config
+
+        config_path = _bootstrap_config_path(args.config)
+        _load_dotenv_without_override([project_root_for_config(config_path) / ".env"])
+    else:
+        _load_dotenv_without_override()
     if args.command == "run":
         return _run(args)
     if args.command == "inspect":

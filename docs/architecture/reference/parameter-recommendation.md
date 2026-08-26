@@ -101,14 +101,13 @@ validator, or automatic biological approval between parsing and the immutable
 approval gate. Unknown names and unusual values are preserved if they satisfy
 the declared JSON shape. A claiming operator sees the exact parsed mapping.
 
-The gate's frozen `max_blocked_seconds` controls only the default decision for
-that persisted mapping. `-1` requires manual approve/reject, `0` immediately
-approves it, and a positive value allows Enter to claim manual review before
-expiry approves it. The timeout path submits `approve_parameters` for the
-same request and recommendation hash, then follows the registered typed
-intent/application transaction. It may not edit the mapping, call the
-recommender, select a fallback, or bypass request, occurrence, manifest,
-predecessor, or attempt-chain validation.
+Foreground timing, defaults, stage inheritance, and countdown triggering are
+owned by the [Review Contract](data-contract.md#12-review-contract). At a
+parameter-approval gate, its registered timeout resolver submits
+`approve_parameters` for the same persisted mapping, request, and
+recommendation hash, then follows the typed intent/application transaction. It
+may not edit the mapping, call the recommender, select a fallback, or bypass
+request, occurrence, manifest, predecessor, or attempt-chain validation.
 
 Execution is a separate boundary. After approval, command construction may
 still reject a parameter that cannot be represented safely by the selected
@@ -206,6 +205,14 @@ input snapshot, basis, or model-request body.
 `model_response.json` owns the raw provider response. `recommendation.json`
 owns the parsed recommendation. `response_parse.json` records only whether the
 declared response shape parsed and, on failure, the parser error.
+
+Every recommendation- or attempt-scoped parameter evidence destination is
+derived once from the active `workflow_step_id`, normalized stage, scope,
+non-negative identifier, and safe filename. `_parameter_evidence_location`
+owns that identity for both publish and crash recovery, so those paths cannot
+drift. Publication independently enforces that its mutable source is inside the
+active occurrence's work tree; recovery independently verifies the immutable
+artifact type, method, metadata, hash, and indexed destination.
 
 The v3 loader verifies artifact type, hash, schema, stage, method, task, and
 attempt-chain identity before returning the chain. Pre-v3 roots, pre-v3 ref

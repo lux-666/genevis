@@ -62,6 +62,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                     "y",
                     "",
                     "",
+                    "",
                 ]
                 with (
                     patch("builtins.input", side_effect=answers),
@@ -69,9 +70,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                     contextlib.redirect_stdout(stdout),
                     contextlib.redirect_stderr(stderr),
                 ):
-                    code = _run_bootstrap(
-                        argparse.Namespace(config=str(config_path), apply=True)
-                    )
+                    code = _run_bootstrap(argparse.Namespace(config=str(config_path)))
 
                 self.assertEqual(code, 0, stderr.getvalue())
                 self.assertTrue(config_path.is_file())
@@ -108,6 +107,11 @@ class ProjectBootstrapTests(unittest.TestCase):
                 )
                 self.assertNotIn("sk-bootstrap-secret", stdout.getvalue())
                 self.assertIn("<redacted>", stdout.getvalue())
+                self.assertIn("package conformance: juicer", stdout.getvalue())
+                self.assertLess(
+                    stdout.getvalue().index("package conformance: juicer"),
+                    stdout.getvalue().index("Candidate configuration is valid"),
+                )
                 self.assertEqual(
                     os.environ["GENE_AGENT_LLM_API_KEY"], "sk-bootstrap-secret"
                 )
@@ -133,9 +137,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                 "builtins.input",
                 side_effect=AssertionError("valid config must not prompt"),
             ):
-                code = _run_bootstrap(
-                    argparse.Namespace(config=str(config_path), apply=True)
-                )
+                code = _run_bootstrap(argparse.Namespace(config=str(config_path)))
 
             self.assertEqual(code, 0)
             self.assertEqual(config_path.read_bytes(), before)
@@ -154,12 +156,10 @@ class ProjectBootstrapTests(unittest.TestCase):
                 # no AutoHiC package setup, create .env, no URL/model overrides
                 with (
                     patch("sys.stdin.isatty", return_value=True),
-                    patch("builtins.input", side_effect=["n", "y", "", ""]),
+                    patch("builtins.input", side_effect=["n", "y", "", "", ""]),
                     patch("getpass.getpass", return_value="sk-existing-project"),
                 ):
-                    code = _run_bootstrap(
-                        argparse.Namespace(config=str(config_path), apply=True)
-                    )
+                    code = _run_bootstrap(argparse.Namespace(config=str(config_path)))
 
                 self.assertEqual(code, 0)
                 self.assertEqual(
@@ -257,7 +257,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -299,7 +298,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -351,7 +349,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -370,7 +367,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -400,7 +396,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -441,7 +436,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -477,7 +471,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -512,7 +505,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                     code = _run_bootstrap(
                         argparse.Namespace(
                             config=str(config_path),
-                            apply=False,
                             update=True,
                         )
                     )
@@ -545,7 +537,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                     code = _run_bootstrap(
                         argparse.Namespace(
                             config=str(config_path),
-                            apply=False,
                             update=True,
                         )
                     )
@@ -565,38 +556,13 @@ class ProjectBootstrapTests(unittest.TestCase):
                 else:
                     os.environ["GENE_AGENT_LLM_API_KEY"] = previous_key
 
-    def test_update_apply_conflict_is_rejected_before_prompt_or_write(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config" / "envs.yaml"
-            config_path.parent.mkdir()
-            config_path.write_text(
-                "default:\n  fallback_env: existing\npackages: {}\n",
-                encoding="utf-8",
-            )
-            before = config_path.read_bytes()
-            with patch(
-                "builtins.input",
-                side_effect=AssertionError("conflicting flags must not prompt"),
-            ):
-                code = _run_bootstrap(
-                    argparse.Namespace(
-                        config=str(config_path),
-                        apply=True,
-                        update=True,
-                    )
-                )
-
-            self.assertEqual(code, 1)
-            self.assertEqual(config_path.read_bytes(), before)
-
-    def test_bootstrap_parser_makes_apply_and_update_mutually_exclusive(self):
-        self.assertTrue(_parse_args(["bootstrap", "--apply"]).apply)
+    def test_bootstrap_parser_has_one_confirmed_write_flow(self):
         self.assertTrue(_parse_args(["bootstrap", "--update"]).update)
         with (
             contextlib.redirect_stderr(io.StringIO()),
             self.assertRaises(SystemExit),
         ):
-            _parse_args(["bootstrap", "--update", "--apply"])
+            _parse_args(["bootstrap", "--apply"])
 
     def test_update_invalid_package_path_is_rejected_without_write(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -639,7 +605,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                 code = _run_bootstrap(
                     argparse.Namespace(
                         config=str(config_path),
-                        apply=False,
                         update=True,
                     )
                 )
@@ -671,7 +636,6 @@ class ProjectBootstrapTests(unittest.TestCase):
                     code = _run_bootstrap(
                         argparse.Namespace(
                             config=str(config_path),
-                            apply=False,
                             update=True,
                         )
                     )

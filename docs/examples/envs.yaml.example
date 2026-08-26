@@ -3,11 +3,11 @@
 # override the default fallback.
 #
 # SETUP INSTRUCTIONS:
-# 1. Run bootstrap; it creates the one active host file at config/envs.yaml:
-#    python -m app.entrypoints.run bootstrap --apply
-# 2. In that file, replace the tool/package/database placeholders once. Database
-#    paths are never copied into individual RunConfig files.
-# 3. Rerun bootstrap to validate the full host catalog and conform Juicer.
+# 1. Install the tool/package/database paths represented below.
+# 2. Run `gene-agent bootstrap`; it collects concrete values, prints one plan,
+#    and writes that same plan only after confirmation.
+# 3. Rerun bootstrap to validate the full host catalog or use --update to repair
+#    an existing bootstrap-owned value. Database paths never enter RunConfig.
 #
 # Two mutually exclusive target forms are supported on any entry:
 #   conda_env: env_geno_exec          # named env  → conda run -n env_geno_exec
@@ -28,17 +28,21 @@ default:
   fallback_env: your_tool_env              # REPLACE: e.g., env_geno_exec
   # fallback_prefix: /path/to/your/env    # alternative: use abs path
 
-# Host-owned databases. RunConfig never carries these paths; it may optionally
-# name one logical BUSCO alias when overriding the host default. Freeze validates
-# and records the compact resolved projection below.
+# Host-owned databases. RunConfig never carries these paths or selects a BUSCO
+# lineage. Assembly Review derives one installed lineage from the manifest NCBI
+# scientific name; freeze validates and records the compact projection below.
 databases:
   busco:
-    default_lineage: embryophyta_odb10
+    # Registry/bootstrap compatibility default only; Assembly Review does not
+    # fall back to it when species-based resolution fails.
+    default_lineage: metazoa_odb10
     lineages:
-      embryophyta_odb10:
-        path: /path/to/busco/embryophyta_odb10
+      metazoa_odb10:
+        path: /path/to/busco/metazoa_odb10
         version: odb10
         source: busco_downloads
+      # Add every target-appropriate lineage that automatic selection may
+      # resolve on this host, for example actinopterygii_odb10 for ray-finned fish.
   ncbi_metazoa:
     reference_dir: /path/to/ncbi_metazoa
 
@@ -47,7 +51,7 @@ databases:
 # `packages:` with `install_root` (absolute repo path) and `canary_paths`
 # (files relative to install_root). Preflight validates root + canary by
 # filesystem checks only — no PATH, no conda. `package_tools` on a method
-# references these keys by name. Run `gene-agent bootstrap --apply` once after
+# references these keys by name. Confirm `gene-agent bootstrap` once after
 # filling to conform Juicer (build scripts -> CPU symlink, link in juicer_tools.jar).
 #
 # Tested versions:
@@ -121,6 +125,7 @@ methods:
     conda_env: your_tool_env
     required_tools:
       - jellyfish
+      - gzip
   genome_survey.model.genomescope2:
     conda_env: your_tool_env
     required_tools:

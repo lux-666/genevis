@@ -40,6 +40,30 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
 _NON_EMPTY_INPUT_ASSET_TYPES: frozenset[AssetType] = frozenset(
     _ACCEPTED_MANIFEST_ASSET_TYPES
 )
+_SCIENTIFIC_NAME_RE = re.compile(r"^[A-Z][A-Za-z-]+(?: [a-z][A-Za-z.-]+)+$")
+_NON_SPECIFIC_EPITHETS = frozenset(
+    {"aff", "aff.", "cf", "cf.", "sp", "sp.", "spp", "spp."}
+)
+
+
+def normalize_target_species(value: Any) -> str:
+    """Return one normalized NCBI Latin scientific name or fail closed."""
+
+    if not isinstance(value, str):
+        raise ValueError(
+            "target_species must be an NCBI Latin scientific name such as 'Solea ovata'"
+        )
+    species = " ".join(value.split())
+    tokens = species.split()
+    if not _SCIENTIFIC_NAME_RE.fullmatch(species) or any(
+        token.lower() in _NON_SPECIFIC_EPITHETS for token in tokens[1:]
+    ):
+        raise ValueError(
+            "target_species must be an NCBI Latin scientific name such as "
+            "'Solea ovata'; common names, abbreviations, and unspecified "
+            "species are not accepted"
+        )
+    return species
 
 
 class InputAssetSpec(BaseModel):
@@ -117,6 +141,18 @@ class InputManifest(BaseModel):
     assets: list[InputAssetSpec] = Field(default_factory=list)
     user_metadata: dict[str, Any] = Field(default_factory=dict)
     genome_size_estimate: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_target_species(self) -> InputManifest:
+        raw_species = self.user_metadata.get("target_species")
+        if raw_species is None:
+            return self
+        try:
+            species = normalize_target_species(raw_species)
+        except ValueError as exc:
+            raise ValueError(f"input_manifest.user_metadata.{exc}") from exc
+        self.user_metadata["target_species"] = species
+        return self
 
     @model_validator(mode="after")
     def _detect_ambiguous_long_reads(self) -> InputManifest:

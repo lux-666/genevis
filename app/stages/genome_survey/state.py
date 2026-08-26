@@ -9,6 +9,7 @@ from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import TypeAliasType, TypedDict
 
 from app.schemas.artifacts import ArtifactRefJson
+from app.schemas.manifest import Compression
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import (
     update_validated_stage_output,
@@ -53,6 +54,7 @@ class SurveyAssetCursor(TypedDict, total=False):
     path: str
     platform: str | None
     format: str | None
+    compression: Compression
     source: str
     read_artifact_ref: ArtifactRefJson
 

@@ -15,9 +15,5 @@ class ResumeValidationError(LifecycleError):
     """Raised when a resume request cannot be applied."""
 
 
-class DurableResumeUnavailableError(LifecycleError):
-    """Raised when a durable cross-process resume is requested."""
-
-
 class UnsupportedLifecycleOperationError(LifecycleError):
     """Raised for lifecycle operations outside the current task scope."""

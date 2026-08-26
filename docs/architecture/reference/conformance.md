@@ -88,18 +88,44 @@ conformance gap.
 
 The data contract defines `fully_materialized`,
 `verified_external_dependencies`, and `audit_only` as the run-level execution
-replay vocabulary. `SessionPaths` exposes `control/run.json`, but no production
-writer creates that file and no current loader consumes a replay-capability
-field. Frozen control inputs and per-attempt dependency records provide the
-underlying evidence, but there is no single durable declaration to query.
+replay vocabulary and reserves `control/run.json` as its future owner, but no
+production path API, writer, or loader currently implements that record.
+Frozen control inputs and per-attempt dependency records provide the underlying
+evidence, but there is no single durable declaration to query.
 
-- Current evidence: `app/storage/paths.py`, `app/storage/frozen_inputs.py`, and
-  `app/execution/dependency_snapshot.py`; repository search finds no writer or
-  reader of `run_metadata_path` outside its property definition.
+- Current evidence: `app/storage/frozen_inputs.py` and
+  `app/execution/dependency_snapshot.py`; repository search finds no
+  `control/run.json` path API, writer, or reader.
 - Contract owner: [Run data](data-contract.md).
 - Closure condition: publish and validate a run metadata record whose replay
   enum is derived from the frozen dependency/materialization facts, or remove
   the enum and `run.json` target from the accepted contract and path API.
+
+### Five-stage real-tool contig acceptance is not automated
+
+The five-stage raw-read contig path has focused unit and integration coverage,
+including whole-graph lifecycle tests, but it does not have one automated
+acceptance run that invokes the real SeqKit, Jellyfish, GenomeScope2, selected
+assembler, purge_dups, QUAST, BUSCO, and configured LLM endpoint on one
+representative input through canonical completion. Most method tests isolate
+their stage with fixtures, stubs, or patched external boundaries. The existing
+real-tool Read QC smoke does not close the whole-path gap.
+
+`server_check.sh` proves the fixed host tool/package/database closure and
+`server_test.sh` proves code regression only. Neither command is biological
+execution evidence, and neither may be cited as a successful contig run.
+
+- Current evidence: `tests/test_read_qc.py`, `tests/test_genome_survey.py`,
+  `tests/test_assembly.py`, `tests/test_assembly_dedup.py`,
+  `tests/test_assembly_review.py`, `scripts/server_check.sh`, and
+  `scripts/server_test.sh`.
+- Contract owners: [Stage contracts](stage-contracts.md) and the
+  [deployment boundary](../../deployment/README.md).
+- Closure condition: add an explicit server acceptance harness that uses the
+  canonical contig templates, installed real tools, a configured live LLM, and
+  representative server-local reads; require a canonical completed terminal,
+  five settled analytical occurrences, and a hash-verified `final_assembly`
+  from detached inspection. Focused stubbed tests do not satisfy this condition.
 
 ## Update rule
 

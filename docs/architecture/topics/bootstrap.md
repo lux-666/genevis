@@ -50,13 +50,13 @@ evidence. Putting them in `.env` or `config/envs.yaml` would cross the boundary.
 
 ## Modes and write behavior
 
-The default command builds and validates a plan. If changes are needed it
-prints them and exits without writing, directing the operator to `--apply`.
-`--apply` writes the approved initialization plan and may execute declared
-package conformance. `--update` is the interactive repair path for existing
-bootstrap-owned fields: the operator selects fields, sees `old -> new`, and an
-empty final confirmation commits only that plan. The CLI makes `--apply` and
-`--update` mutually exclusive.
+The default command builds and validates one plan, prints every configuration
+change and declared package-conformance action it will perform, and waits for
+an empty Enter confirmation before applying that same in-memory plan. It does
+not exit and reconstruct a second plan in a later invocation. `--update` is the
+interactive repair path for existing bootstrap-owned fields: the operator
+selects fields, sees `old -> new`, and uses the same final confirmation rule.
+There is no separate `--apply` mode.
 
 Existing valid values are preserved unless explicitly selected for update.
 Candidate configuration is loaded through the same `EnvResolver` used by
@@ -98,15 +98,22 @@ frozen executor resolves from that snapshot, not from later bootstrap edits.
 Each executable method then creates its narrower method-attempt freeze from the
 approved inputs and frozen dependency selection.
 
+The only implicit dotenv source is `.env` beside the project selected by the
+active host mapping: for `config/envs.yaml` it is the repository-root `.env`;
+for an explicit/`GENE_AGENT_ENVS_CONFIG` path under another `config/` directory
+it is that project's root `.env`. A caller's current-directory `.env` is never
+an alternate source. Already exported variables still win through setdefault
+loading.
+
 Bootstrap probes every package and method entry declared in the active machine
 mapping. Separately, after a
 run's final confirmation and TTY check, both structured run and TUI perform a
 read-only readiness probe for only the canonical effective method closure (and
 the mandatory LLM endpoint when the chosen workflow reaches one). The exact
 same closure is then frozen into the dependency snapshot. A failed run-specific
-probe creates no session. A first-run bootstrap preview with no persisted config
-cannot probe a configuration that has not been written yet; the first `--apply`
-performs validation and preflight immediately after writing it.
+probe creates no session. A first-run bootstrap validates its candidate before
+confirmation, then performs persisted validation and preflight immediately
+after publishing that same plan.
 
 Every locally executable method in that selected closure must resolve through
 the active config to a non-empty `required_tools` and/or `package_tools`

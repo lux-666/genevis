@@ -9,9 +9,12 @@
 > [Review and resume](../topics/review-and-resume.md).  
 > **Related contracts:** [Resource handoff](resource-handoff.md),
 > [Execution evidence](execution-evidence.md).  
-> **Code evidence:** `app/storage/paths.py`, `app/storage/frozen_inputs.py`,
+> **Code evidence:** `app/entrypoints/run.py`, `app/storage/paths.py`,
+> `app/storage/frozen_inputs.py`,
 > `app/storage/artifacts.py`, `app/storage/ledger.py`, `app/schemas/state.py`,
-> `app/graph/checkpoint_compaction.py`, `app/reports/`, and
+> `app/schemas/run_config.py`, `app/review/gates.py`,
+> `app/review/persistence.py`, `app/graph/checkpoint_compaction.py`,
+> `app/reports/`, and
 > `app/storage/audit.py`.
 
 **Scope:** Current workflow sessions
@@ -220,6 +223,16 @@ a non-authoritative routing hint for clarifying questions; that hint must be
 discarded before a plan draft is built or persisted and must never reach the
 frozen RunConfig, Plan Draft model input, or Assembly recommendation context as
 a selection fact.
+
+This is structural: the planning schema does not carry a `method_selection`
+clarification kind. Legacy documents containing that kind fail validation
+rather than being silently reinterpreted. Companion-read hints (ultra-long ONT,
+Hi-C phasing) live inside intake-function scope as asset-collection decisions;
+they are not `WorkflowIntent` fields and do not reach durable state.
+A durable TUI draft may carry `selected_methods` for fixed, system-owned stage
+pipelines or as legacy passthrough. The planner may fill and normalize those
+fixed defaults, but it never writes an Assembly method identity; that identity
+is owned exclusively by the stage-time gate.
 
 These domains are orthogonal. A stage may complete after a method is skipped
 when it still delivers its stage contract, may fail before a method starts,
@@ -676,24 +689,34 @@ ref. Resume validates request identity, request hash, decision schema, and any
 bound recommendation/attempt hash before applying the decision.
 
 `payload.max_blocked_seconds` is the effective frozen RunConfig review-policy
-value: the default is `300`, and a per-stage override is valid only for a stage
-registered in the review registry. It records foreground behavior, not a
-durable deadline. Every new run verifies stdin/stdout TTY capability before
-freeze and enters the same attached executor. `-1` means indefinitely wait;
-`0` immediately triggers the gate's registered eligible resolver; and a
-positive value means an Enter-claim countdown that triggers the same resolver
-at expiry.
+value. `ReviewPolicyConfig.max_blocked_seconds` is the run-wide setting and
+defaults to `300`; `review_policy.stages[stage].max_blocked_seconds` is the only
+override and is valid only for a stage registered in the review registry. The
+effective value is frozen into every requested review-owning stage. One stage
+override applies to every gate registered for that stage—including both
+Assembly parameter approval and Assembly route selection—so there is no
+gate-specific timeout configuration. Assembly Review receives the same global
+value unless `review_policy.stages.assembly_review` explicitly overrides it.
+
+The value records foreground behavior, not a durable deadline. Every new run
+verifies stdin/stdout TTY capability before freeze and enters the same attached
+executor. `-1` means indefinitely wait; `0` immediately triggers the gate's
+registered eligible resolver; and a positive value means an Enter-claim
+countdown that triggers the same resolver at expiry. The foreground countdown
+loop is shared; the decision produced at expiry remains gate-specific and is
+declared by the review registry.
 
 The timer starts only after the immutable request exists. For
 `parameter_approval`, timeout resolution means approving the exact persisted
 recommendation bound by the request; it does not generate, edit, merge, or
 replace parameter values. Resolver eligibility, immutable request and
 recommendation bindings, rationale artifacts, and the registered typed
-intent/application lifecycle remain authoritative. A countdown-triggered automatic decision additionally
-requires the internal resume transaction source and bound countdown metadata to
-identify the current `foreground_countdown`; its decision origin remains
-resolver-owned (`llm_provisional` or `auto_rule`), and request metadata cannot
-authorize itself.
+intent/application lifecycle remain authoritative. A countdown-triggered
+automatic decision additionally requires the internal resume transaction
+source and bound countdown metadata to identify the current
+`foreground_countdown`; its decision origin remains resolver-owned
+(`llm_provisional` or `auto_rule`), and request metadata cannot authorize
+itself.
 
 Ctrl-C, EOF, or process exit leaves the checkpoint `blocked_human`; no
 background/daemon timer is persisted or started. Re-executing the same frozen
@@ -817,6 +840,14 @@ Detached inspection also withholds the current occurrence, `active_interrupt`,
 `decision_requirements`, and any actionable review `next_action` until the
 frozen workflow inputs verify; raw Ledger events remain visible for diagnosis
 but cannot authorize a resume.
+
+For a canonically completed session, detached inspection projects
+`final_assembly` only from the latest terminal-bounded `resource_delivered`
+event whose `resource_type` is `assembly`. Both its candidate bundle and primary
+output refs must match the artifact index and pass file size and SHA-256
+verification. If either check fails, inspection withholds the final assembly and
+reports `final_assembly_integrity_error`; a checkpoint field or report path is
+never sufficient to declare the final contig.
 
 Legacy duplicate/conflicting stage or attempt terminals are never resolved by
 "last event wins". Their conservative read model emits integrity diagnostics;

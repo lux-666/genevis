@@ -149,6 +149,7 @@ def preflight_run_readiness(
     run_config: RunConfig,
     *,
     effective_methods: Mapping[str, str | Sequence[str]],
+    species_name: str | None = None,
     config_path: str | Path | None = None,
     runner: Callable[..., Any] | None = None,
     llm_probe: Callable[[], None] | None = None,
@@ -166,7 +167,11 @@ def preflight_run_readiness(
             f"dependency configuration is not ready: {exc}"
         ) from exc
     try:
-        review_database_projection = validate_review_databases(run_config, resolver)
+        review_database_projection = validate_review_databases(
+            run_config,
+            resolver,
+            species_name=species_name,
+        )
     except DatabaseResolutionError as exc:
         raise RunReadinessError(f"database readiness failed: {exc}") from exc
     for method_name in methods:
@@ -291,20 +296,24 @@ def _pad_version(version: tuple[int, ...], size: int) -> tuple[int, ...]:
 
 
 def probe_llm_endpoint() -> None:
-    """Perform a minimal authenticated model call to prove endpoint connectivity."""
+    """Prove the configured model can return the structured output we consume."""
 
     from app.llm.factory import build_chat_model
-    from app.llm.json_response import response_text
+    from app.llm.json_response import parse_json_object, response_text
 
     model = build_chat_model()
     response = model.invoke(
         [
-            ("system", "This is a connectivity probe. Reply with READY."),
-            ("human", "READY"),
+            (
+                "system",
+                'This is a structured-output probe. Reply exactly {"ready":true}.',
+            ),
+            ("human", "Return the requested JSON object."),
         ]
     )
-    if not response_text(response).strip():
-        raise ValueError("LLM endpoint returned an empty response")
+    payload = parse_json_object(response_text(response))
+    if payload != {"ready": True}:
+        raise ValueError("LLM endpoint failed the structured-output probe")
 
 
 def _normalize_selected_methods(

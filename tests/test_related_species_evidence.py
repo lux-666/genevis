@@ -500,6 +500,43 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 "reference_version_mismatch:Metazoa.ncbi.tsv", mismatch["notes"]
             )
 
+    def test_verified_snapshot_uses_the_exact_hashed_bytes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._reference_dir(tmpdir)
+            original_accession = "GCA_000000020.1"
+            changed_accession = "GCA_000000099.1"
+            self._write_records(
+                root,
+                [self._row(original_accession, "Targetus absentus", "20")],
+                {"20": "Metazoa;Targetiformes;Targetidae;Targetus"},
+            )
+            from app.reference import ncbi_metazoa
+
+            verify = ncbi_metazoa._reference_provenance
+
+            def mutate_after_verification(*args, **kwargs):
+                result = verify(*args, **kwargs)
+                tsv = root / "Metazoa.ncbi.tsv"
+                tsv.write_text(
+                    tsv.read_text(encoding="utf-8").replace(
+                        original_accession, changed_accession
+                    ),
+                    encoding="utf-8",
+                )
+                return result
+
+            with patch(
+                "app.reference.ncbi_metazoa._reference_provenance",
+                side_effect=mutate_after_verification,
+            ):
+                pack = build_related_species_evidence_pack(
+                    "Targetus absentus", reference_dir=root
+                )
+
+            self.assertEqual(
+                pack["selected_records"][0]["accession"], original_accession
+            )
+
     def test_assembly_review_node_writes_pack_from_manifest_user_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reference_dir = self._review_reference_dir(tmpdir)

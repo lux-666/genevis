@@ -23,12 +23,7 @@
   ],
 
   "review_policy": {
-    "max_blocked_seconds": 300,
-    "stages": {
-      "assembly_review": {
-        "max_blocked_seconds": -1
-      }
-    }
+    "max_blocked_seconds": 300
   },
 
   "genome_survey": {
@@ -41,6 +36,9 @@
 
   "assembly_review": {
     "quast": {
+      "threads": 8
+    },
+    "busco": {
       "threads": 8
     }
   }

@@ -78,7 +78,7 @@ Mac 开发机负责编辑和代码测试；真实生信工具在 Linux 服务器
 - Python 3.11+ 的 `gene_agent` orchestrator 环境；
 - 所选方法对应的 Conda 工具环境；
 - Assembly 参数推荐所需的可达 LLM endpoint；
-- Assembly Review 所需的有效 BUSCO lineage；
+- Assembly Review 所需的 NCBI 快照和至少一个匹配的已安装 BUSCO lineage；
 - 足够的 CPU、内存和存储。GPU 只在所选方法本身需要时才是要求。
 
 新主机安装见 [New Host Setup](docs/deployment/migration.md)。Mac/server 的 Git
@@ -90,21 +90,26 @@ Mac 开发机负责编辑和代码测试；真实生信工具在 Linux 服务器
 
 ```bash
 conda create -n gene_agent python=3.11 -y
-conda run -n gene_agent pip install -e '.[dev]'
+conda activate gene_agent
+python -m pip install -e '.[dev]'
+bash scripts/server_test.sh
 ```
 
-Python 依赖的唯一权威是 [pyproject.toml](pyproject.toml)。
+Python 依赖的唯一权威是 [pyproject.toml](pyproject.toml)。`gene_agent` 是本文档
+约定的编排器环境名，不从 `config/envs.yaml` 读取；激活后所有操作命令都直接使用
+当前环境。生信工具的 Conda 环境才由 `config/envs.yaml` 解析。
 
 ### 2. Prepare and check the host
 
 ```bash
-conda run -n gene_agent gene-agent bootstrap
-# 审阅计划后，需要写入配置时再执行：
-conda run -n gene_agent gene-agent bootstrap --apply
+gene-agent bootstrap
 
 bash scripts/server_check.sh
-bash scripts/server_test.sh
 ```
+
+先按 [New Host Setup](docs/deployment/migration.md) 安装种子中声明的工具、数据库和
+AutoHiC 资源。`bootstrap` 在同一次调用中展示候选计划并等待确认，确认后才写入并
+检查完整主机 catalog；不会重新收集第二份计划。
 
 `docs/examples/envs.yaml.example` 是提交到 Git 的通用种子；bootstrap 生成或更新的
 `config/envs.yaml` 是被忽略的本机配置，不再作为仓库共享配置提交。
@@ -123,10 +128,10 @@ cp docs/examples/contig_run_config.template.json /server/path/run_config.json
 ```
 
 替换 manifest 中的 session/sample、基因组大小、reads 路径和平台；权威 RunConfig
-模板不重复这些 manifest 事实。主机工具以及 BUSCO/NCBI
-数据库实体只在 `config/envs.yaml` 配置一次；RunConfig 对 BUSCO 至多填写
-`assembly_review.busco.lineage` 逻辑别名与执行参数（如 `threads`），不允许填写
-数据库路径、版本或来源。
+模板不重复这些 manifest 事实。`user_metadata.target_species` 必须填写完整的
+NCBI 拉丁学名，不能填写俗名或缩写。主机工具以及 BUSCO/NCBI 数据库实体只在
+`config/envs.yaml` 配置一次；系统从物种名自动选择 BUSCO lineage，RunConfig
+只填写执行参数（如 `threads`），不填写 lineage、数据库路径、版本或来源。
 contig 模板也不预填 assembler 或 Assembly 参数：Assembly 会在 QC/survey 结果可用后
 推荐方法，再推荐参数。
 

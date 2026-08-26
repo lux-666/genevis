@@ -30,6 +30,7 @@ from app.domains.assembly.constants import (
 )
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
+    PLATFORMS_BY_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
     AssemblySelection,
     AssemblySelectionSource,
@@ -52,6 +53,7 @@ from app.execution.parameter_attempts import (
     current_parameter_attempt,
 )
 from app.knowledge.packs import load_knowledge_pack
+from app.llm.json_response import model_response_record
 from app.review.application import (
     ForegroundReviewMetadataV1,
     PreparedReviewApplication,
@@ -519,14 +521,7 @@ def _members_for_read_type(
     members: list[RuntimeReadMember],
     read_type: NormalizedReadType,
 ) -> list[RuntimeReadMember]:
-    platforms_by_read_type: dict[NormalizedReadType, set[str]] = {
-        "pacbio_hifi": {"pacbio_hifi"},
-        "pacbio_clr": {"clr"},
-        "ont_raw": {"ont"},
-        "ont_hq": {"ont"},
-        "cyclone": {"cycloneseq"},
-    }
-    allowed = platforms_by_read_type[read_type]
+    allowed = PLATFORMS_BY_SHARED_READ_TYPE[read_type]
     return [member for member in members if member.platform in allowed]
 
 
@@ -1994,12 +1989,14 @@ def _recommend_route_with_decision_boundary(
                     state,
                     "method_model_response.json",
                     {
-                        "schema_version": 1,
                         "request_sha256": request_ref.sha256,
-                        "raw_response": decision.raw_response,
-                        "validity": "parsed" if decision.valid else "invalid",
-                        "error": decision.error,
-                        "model_id": decision.model_id,
+                        **model_response_record(
+                            schema_version=1,
+                            raw_response=decision.raw_response,
+                            valid=decision.valid,
+                            error=decision.error,
+                            model_id=decision.model_id,
+                        ),
                     },
                     artifact_type=ASSEMBLY_METHOD_MODEL_RESPONSE,
                     method_name="assembly.method_recommender",
@@ -2131,6 +2128,9 @@ def _route_selector_payload(
     evidence_status = _route_selector_evidence_status(state)
     read_qc_available = evidence_status["read_qc"] == "available"
     survey_available = evidence_status["genome_survey"] == "available"
+    shared = _shared_parameters(state)
+    species_facts = shared.get("species_facts")
+    available_read_types = sorted(_assembly_observed_read_types(assembly_out))
     data_profile = {
         "session_id": state.get("session_id"),
         "ont_reads_ref": assembly_out.get("ont_reads_ref"),
@@ -2159,6 +2159,8 @@ def _route_selector_payload(
                 "primary", []
             )
         ),
+        "available_read_types": available_read_types,
+        "species_facts": species_facts if isinstance(species_facts, Mapping) else None,
         "evidence_status": evidence_status,
     }
     allowed_methods = _assembly_method_candidates(assembly_out)
@@ -2203,6 +2205,23 @@ def _route_selector_evidence_status(state: TopLevelState) -> dict[str, str]:
 def _assembly_method_candidates(assembly_out: AssemblyStageCursor) -> list[str]:
     """Return descriptor-backed methods compatible with observed read inputs."""
 
+    observed = _assembly_observed_read_types(assembly_out)
+    registry = load_descriptor_registry()
+    compatible = {
+        method for read_type in observed for method in compatible_methods(read_type)
+    }
+    return [
+        method
+        for method in registry.by_stage.get("assembly", ())
+        if method in compatible
+    ]
+
+
+def _assembly_observed_read_types(
+    assembly_out: AssemblyStageCursor,
+) -> set[NormalizedReadType]:
+    """Return every read type available to both routing and candidate filtering."""
+
     observed: set[NormalizedReadType] = set()
     if assembly_out.get("hifi_reads_ref") or assembly_out.get("has_hifi"):
         observed.add("pacbio_hifi")
@@ -2219,15 +2238,7 @@ def _assembly_method_candidates(assembly_out: AssemblyStageCursor) -> list[str]:
         observed.add(prior)
     if not observed:
         observed = {"cyclone", "ont_raw", "pacbio_clr", "pacbio_hifi"}
-    registry = load_descriptor_registry()
-    compatible = {
-        method for read_type in observed for method in compatible_methods(read_type)
-    }
-    return [
-        method
-        for method in registry.by_stage.get("assembly", ())
-        if method in compatible
-    ]
+    return observed
 
 
 def _recommended_read_type(

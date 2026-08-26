@@ -71,6 +71,13 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                 config = load_run_config(EXAMPLES_DIR / run_config_name)
 
                 self.assertEqual(config.requested_stage_names(), expected_stages)
+                self.assertIn("target_species", manifest.user_metadata)
+                self.assertNotIn(
+                    "lineage",
+                    json.loads(
+                        (EXAMPLES_DIR / run_config_name).read_text(encoding="utf-8")
+                    ).get("assembly_review", {}).get("busco", {}),
+                )
                 if needs_genome_size:
                     self.assertIsNotNone(manifest.genome_size_estimate)
                     self.assertIsNotNone(config.genome_survey)
@@ -114,6 +121,13 @@ class PublishedConfigurationContractTests(unittest.TestCase):
 
         self.assertIsNone(config.assembly)
         self.assertNotIn("shared_parameters", payload)
+        self.assertEqual(
+            config.review_policy.effective_max_blocked_seconds("assembly"), 300
+        )
+        self.assertEqual(
+            config.review_policy.effective_max_blocked_seconds("assembly_review"),
+            300,
+        )
 
     def test_database_paths_live_only_in_the_host_seed(self):
         forbidden = {
@@ -133,6 +147,12 @@ class PublishedConfigurationContractTests(unittest.TestCase):
         )
         self.assertIn("busco", host_seed["databases"])
         self.assertIn("ncbi_metazoa", host_seed["databases"])
+        self.assertIn(
+            "gzip",
+            host_seed["methods"]["genome_survey.kmer_count.jellyfish"][
+                "required_tools"
+            ],
+        )
 
     def test_readme_points_to_authoritative_contig_template(self):
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")

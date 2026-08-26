@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import gzip
 import json
 import os
 import tempfile
@@ -908,6 +909,53 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 GENOME_SURVEY_KMER_HIST,
             )
             self.assertTrue(Path(survey["genomescope2_summary_ref"]).exists())
+
+    def test_jellyfish_automatically_decompresses_registered_gzip_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            long_reads = Path(tmpdir) / "reads.fastq.gz"
+            with gzip.open(long_reads, "wt", encoding="utf-8") as handle:
+                handle.write("@r1\nACGT\n+\n!!!!\n")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads.fastq.gz",
+                        "asset_type": "raw_long_reads",
+                        "path": str(long_reads),
+                        "platform": "ont",
+                        "format": "fastq",
+                        "metadata": {"compression": "gzip"},
+                    }
+                ],
+            )
+            fake_bin = self._fake_survey_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(
+                result["stage_outputs"]["genome_survey"]["status"], "completed"
+            )
+            script = (
+                SessionPaths.from_run_dir(result["data_dir"])
+                .workflow_step_work_dir("step-001-genome_survey", "genome_survey")
+                .joinpath("jellyfish", "run_jellyfish.sh")
+            )
+            self.assertIn("gzip -cd --", script.read_text(encoding="utf-8"))
 
     def test_prefers_read_qc_filtered_long_reads_over_raw_registry(self):
         """Consume post-QC long reads like assembly, not raw manifest paths."""

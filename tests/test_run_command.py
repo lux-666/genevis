@@ -856,6 +856,8 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
             manifest = root / "manifest.yaml"
             manifest.write_text(
                 f"session_id: {session_id}\n"
+                "user_metadata:\n"
+                "  target_species: Fixture species\n"
                 "assets:\n"
                 "  - asset_type: assembly_fasta_registered\n"
                 f"    paths: [{assembly}]\n"
@@ -930,6 +932,8 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                     [
                         f"session_id: {session_id}",
                         "sample_id: sqlite-gate-sample",
+                        "user_metadata:",
+                        "  target_species: Fixture species",
                         "assets:",
                         "  - asset_type: assembly_fasta_registered",
                         f"    paths: [{assembly}]",

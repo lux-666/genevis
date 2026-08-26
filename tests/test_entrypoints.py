@@ -43,10 +43,16 @@ from app.review.persistence import (
     load_review_request,
     persist_review_request,
 )
-from app.schemas.artifacts import ArtifactRef
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_DRAFT_ASSEMBLY,
+    ArtifactMeta,
+    ArtifactRef,
+    AssemblyCandidateBundle,
+)
 from app.schemas.run_config import AssemblyRunConfig, RunConfig
 from app.schemas.state import initial_state
-from app.storage.artifacts import read_artifact_records
+from app.storage.artifacts import publish_artifact_record, read_artifact_records
 from app.storage.frozen_inputs import FrozenExecutionLease, freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
@@ -135,6 +141,74 @@ def _artifact_ref_json(
     ).model_dump(mode="json")
 
 
+def _publish_executed_assembly_candidate(
+    paths: SessionPaths,
+    *,
+    workflow_step_id: str,
+    stage: str,
+):
+    work_dir = paths.workflow_step_work_dir(workflow_step_id, stage)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    method_name = "assembly_review.contract"
+    candidate_id = "flye"
+
+    assembly_source = work_dir / "final.fasta"
+    assembly_source.write_text(">contig1\nACGT\n", encoding="utf-8")
+    assembly = publish_artifact_record(
+        paths.run_dir,
+        paths.session_id,
+        ArtifactMeta.from_file(
+            assembly_source,
+            stage=stage,
+            method_name=method_name,
+            artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
+        ),
+    )
+    planned = AssemblyCandidateBundle(
+        session_id=paths.session_id,
+        candidate_id=candidate_id,
+        method_name=method_name,
+        status="planned",
+        input_type="clean_long_reads",
+        input_member_ids={"primary": ["reads-1"]},
+        input_member_platforms={"primary": ["ont"]},
+        parameter_attempt_id=0,
+        expected_outputs=["primary_assembly"],
+    )
+    planned_source = work_dir / "candidate.planned.json"
+    planned_source.write_text(planned.model_dump_json(), encoding="utf-8")
+    planned_artifact = publish_artifact_record(
+        paths.run_dir,
+        paths.session_id,
+        ArtifactMeta.from_file(
+            planned_source,
+            stage=stage,
+            method_name=method_name,
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+    )
+    executed = planned.model_copy(
+        update={
+            "status": "executed",
+            "plan_ref": planned_artifact.ref,
+            "primary_output": assembly.ref,
+        }
+    )
+    executed_source = work_dir / "candidate.executed.json"
+    executed_source.write_text(executed.model_dump_json(), encoding="utf-8")
+    executed_artifact = publish_artifact_record(
+        paths.run_dir,
+        paths.session_id,
+        ArtifactMeta.from_file(
+            executed_source,
+            stage=stage,
+            method_name=method_name,
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        ),
+    )
+    return executed_artifact, assembly
+
+
 def _write_assembly_review_request(
     data_root: Path,
     session_id: str,
@@ -150,6 +224,7 @@ def _write_assembly_review_request(
         paths,
         manifest_draft={
             "session_id": session_id,
+            "user_metadata": {"target_species": "Fixture species"},
             "assets": [
                 {
                     "asset_type": "raw_long_reads",
@@ -283,7 +358,7 @@ class EntrypointTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("目标物种", stdout.getvalue())
-        self.assertIn("卵鳎", stdout.getvalue())
+        self.assertIn("Solea ovata", stdout.getvalue())
 
     def test_tui_request_interrupt_reports_phase(self):
         stdout = io.StringIO()
@@ -601,9 +676,125 @@ class EntrypointTests(unittest.TestCase):
             )
         )
 
+    def test_inspect_completed_session_exposes_verified_final_assembly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            paths = SessionPaths.from_run_dir(run_dir)
+            ensure_run_layout(paths)
+            workflow_step_id = "step-001-assembly_review"
+            candidate, assembly = _publish_executed_assembly_candidate(
+                paths,
+                workflow_step_id=workflow_step_id,
+                stage="assembly_review",
+            )
+            ledger = Ledger(run_dir)
+            ledger.create_session("s1", paths.to_ref(paths.manifest_path))
+            ledger.record_resource_delivered(
+                "s1",
+                stage="assembly_review",
+                workflow_step_id=workflow_step_id,
+                resource_type="assembly",
+                delivery_mode="reused",
+                candidate_bundle_ref=candidate.ref,
+                primary_output_ref=assembly.ref,
+            )
+            ledger.record_stage_completed(
+                "s1",
+                "assembly_review",
+                workflow_step_id=workflow_step_id,
+            )
+            ledger.record_session_terminal(
+                "s1", outcome="completed", stage="assembly_review"
+            )
+
+            code, stdout, stderr = _capture_cli(
+                _run_inspect,
+                argparse.Namespace(session_id="s1", data_dir=str(data_root), json=True),
+            )
+            summary = json.loads(stdout)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertIsNotNone(summary["final_assembly"], summary)
+            self.assertEqual(
+                summary["final_assembly"]["primary_output_path"], str(assembly.path)
+            )
+            self.assertEqual(
+                summary["final_assembly"]["primary_output_ref"],
+                assembly.ref.model_dump(mode="json"),
+            )
+
+            code, stdout, stderr = _capture_cli(
+                _run_inspect,
+                argparse.Namespace(session_id="s1", data_dir=str(data_root)),
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertIn(f"final_assembly: {assembly.path}", stdout)
+
+            assembly.path.write_text(">tampered\nAAAA\n", encoding="utf-8")
+            code, stdout, stderr = _capture_cli(
+                _run_inspect,
+                argparse.Namespace(session_id="s1", data_dir=str(data_root), json=True),
+            )
+            summary = json.loads(stdout)
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertIsNone(summary["final_assembly"])
+            self.assertIn(
+                "integrity validation", summary["final_assembly_integrity_error"]
+            )
+
+    def test_inspect_rejects_delivery_without_completed_occurrence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            paths = SessionPaths.from_run_dir(run_dir)
+            ensure_run_layout(paths)
+            workflow_step_id = "step-001-assembly_review"
+            candidate, assembly = _publish_executed_assembly_candidate(
+                paths,
+                workflow_step_id=workflow_step_id,
+                stage="assembly_review",
+            )
+            ledger = Ledger(run_dir)
+            ledger.create_session("s1", paths.to_ref(paths.manifest_path))
+            ledger.record_resource_delivered(
+                "s1",
+                stage="assembly_review",
+                workflow_step_id=workflow_step_id,
+                resource_type="assembly",
+                delivery_mode="reused",
+                candidate_bundle_ref=candidate.ref,
+                primary_output_ref=assembly.ref,
+            )
+            ledger.record_session_terminal(
+                "s1", outcome="completed", stage="assembly_review"
+            )
+
+            code, stdout, stderr = _capture_cli(
+                _run_inspect,
+                argparse.Namespace(session_id="s1", data_dir=str(data_root), json=True),
+            )
+            summary = json.loads(stdout)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertIsNone(summary["final_assembly"])
+            self.assertIn(
+                "not canonically completed",
+                summary["final_assembly_integrity_error"],
+            )
+
     def test_dotenv_loader_uses_gene_agent_local_env_without_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            other = root / "other"
+            other.mkdir()
+            (other / ".env").write_text(
+                "GENE_AGENT_LLM_MODEL=from-cwd\n", encoding="utf-8"
+            )
             (root / ".env").write_text(
                 "GENE_AGENT_LLM_API_KEY=sk-from-dotenv\nGENE_AGENT_LLM_MODEL=from-dotenv\n",
                 encoding="utf-8",
@@ -613,10 +804,18 @@ class EntrypointTests(unittest.TestCase):
             try:
                 os.environ["GENE_AGENT_LLM_API_KEY"] = "sk-existing"
                 os.environ.pop("GENE_AGENT_LLM_MODEL", None)
-                with patch("os.getcwd", return_value=str(root)):
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"GENE_AGENT_ENVS_CONFIG": str(root / "config" / "envs.yaml")},
+                    ),
+                    patch("os.getcwd", return_value=str(other)),
+                ):
                     _load_dotenv_without_override()
-                self.assertEqual(os.environ["GENE_AGENT_LLM_API_KEY"], "sk-existing")
-                self.assertEqual(os.environ["GENE_AGENT_LLM_MODEL"], "from-dotenv")
+                    self.assertEqual(
+                        os.environ["GENE_AGENT_LLM_API_KEY"], "sk-existing"
+                    )
+                    self.assertEqual(os.environ["GENE_AGENT_LLM_MODEL"], "from-dotenv")
             finally:
                 if old_key is None:
                     os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
@@ -639,7 +838,10 @@ class EntrypointTests(unittest.TestCase):
             old = os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE")
             os.environ.pop("GENE_AGENT_DOTENV_RESUME_PROBE", None)
             try:
-                with patch("os.getcwd", return_value=str(root)):
+                with patch.dict(
+                    os.environ,
+                    {"GENE_AGENT_ENVS_CONFIG": str(root / "config" / "envs.yaml")},
+                ):
                     # Resume will exit non-zero (no decision file etc.) — we
                     # only care that .env was loaded before _run_resume runs.
                     main(
@@ -655,14 +857,32 @@ class EntrypointTests(unittest.TestCase):
                             "sqlite",
                         ]
                     )
-                self.assertEqual(
-                    os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE"), "from-dotenv"
-                )
+                    self.assertEqual(
+                        os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE"),
+                        "from-dotenv",
+                    )
             finally:
                 if old is None:
                     os.environ.pop("GENE_AGENT_DOTENV_RESUME_PROBE", None)
                 else:
                     os.environ["GENE_AGENT_DOTENV_RESUME_PROBE"] = old
+
+    def test_bootstrap_explicit_config_selects_only_its_project_dotenv(self):
+        from app.entrypoints.run import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
+            with (
+                patch(
+                    "app.entrypoints.run._load_dotenv_without_override"
+                ) as load_dotenv,
+                patch("app.entrypoints.run._run_bootstrap", return_value=0),
+            ):
+                code = main(["bootstrap", "--config", str(config_path)])
+
+            self.assertEqual(code, 0)
+            load_dotenv.assert_called_once_with([root.resolve() / ".env"])
 
 
 class FrozenRunConfigSeedingTests(unittest.TestCase):
@@ -790,6 +1010,13 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
         # method selection or method-specific parameter block.
         self.assertNotIn("assembly_selection", stage_seeds["assembly"])
         self.assertNotIn("flye_parameters", stage_seeds["assembly"])
+        self.assertEqual(
+            stage_seeds["assembly"]["review_policy"], {"max_blocked_seconds": 300}
+        )
+        self.assertEqual(
+            stage_seeds["assembly_review"]["review_policy"],
+            {"max_blocked_seconds": 300},
+        )
         self.assertEqual(
             stage_seeds["assembly_review"]["quast_parameters"],
             {"threads": 2},

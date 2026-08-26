@@ -310,7 +310,7 @@ def collect_project_bootstrap_plan(
     if update and not source_exists:
         raise FileNotFoundError(
             "bootstrap --update requires an existing config/envs.yaml; "
-            "initialize it first with bootstrap --apply"
+            "initialize it first with interactive bootstrap"
         )
     source_path = (
         config_path if source_exists else _resolve_template(config_path, template_path)

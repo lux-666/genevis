@@ -253,7 +253,10 @@ class TuiWorkflowTests(unittest.TestCase):
                 return updated, object()
 
             with (
-                patch("builtins.input", side_effect=["", str(reads)]),
+                patch(
+                    "builtins.input",
+                    side_effect=["", str(reads), '物种："Solea ovata"'],
+                ),
                 patch(
                     "app.entrypoints.tui._parse_assets_with_configured_llm",
                     side_effect=RuntimeError("offline"),
@@ -754,7 +757,9 @@ class TuiWorkflowTests(unittest.TestCase):
             session_id="parent",
             data_dir=str(data_dir),
             request_text="assembly",
-            intent=deterministic_workflow_intent("assembly"),
+            intent=deterministic_workflow_intent("assembly").model_copy(
+                update={"target_species": "Fixture species"}
+            ),
         )
         parent = apply_asset_answer(
             parent,

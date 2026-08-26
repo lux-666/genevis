@@ -1,29 +1,56 @@
 # Method Execution Lifecycle Contract
 
 > **Status:** accepted and implemented.
-> **Read when:** exact freeze/run/collect routing, attempt ownership, recovery,
-> or failure policy matters.  
+> **Read when:** whole-run readiness, exact freeze/run/collect routing, attempt
+> ownership, recovery, or failure policy matters.
 > **Comes from:** [Execution](../topics/execution.md).  
 > **Feeds into:** stage collection, review, and durable evidence.  
 > **Related contracts:** [Run data](data-contract.md),
 > [Execution evidence](execution-evidence.md),
 > [Parameter recommendation](parameter-recommendation.md).  
-> **Code evidence:** `app/execution/lifecycle.py`,
+> **Code evidence:** `app/entrypoints/run.py`,
+> `app/storage/frozen_inputs.py`, `app/execution/run_readiness.py`,
+> `app/execution/lifecycle.py`,
 > `app/execution/method_outcomes.py`,
 > `app/execution/attempt_owners.py`, `app/control/occurrence_settlement.py`.
 
 ## Scope
 
-This specification owns the shared execution lifecycle for every executable
-method. It defines graph boundaries, attempt ownership, recovery routing,
-process-failure behavior, and the division between the execution kernel and
-stage adapters.
+This specification owns the pre-freeze run-specific readiness boundary and the
+shared execution lifecycle for every executable method. It defines graph
+boundaries, attempt ownership, recovery routing, process-failure behavior, and
+the division between the execution kernel and stage adapters.
 
 The [run data contract](data-contract.md) owns durable fact placement and
 reference rules. [Execution Evidence](execution-evidence.md) owns the canonical
 process-result body. [Parameter Recommendation](parameter-recommendation.md) owns model
 request, response, parsing, and approval behavior. This specification connects
 those contracts without replacing them.
+
+## Whole-run Readiness Boundary
+
+After the real-TTY check and before publishing any frozen session input, both
+structured run and TUI compute the canonical effective local-method closure.
+Readiness resolves every fixed local method through the active machine mapping,
+requires a non-empty tool/package probe declaration, verifies its environment,
+and probes its declared tools. The same selected closure is then captured in
+the whole-run dependency snapshot. A readiness failure creates no session.
+
+Assembly remains the deferred-binding exception: whole-run readiness captures
+its configured candidate dependency scope but does not pretend that one
+candidate is already selected. The Assembly stage selects from that frozen
+scope after upstream evidence exists and preflights the selected method before
+freezing its attempt.
+
+Whether an LLM endpoint is mandatory is owned by the selected workflow and
+[recommendation policy](recommendation-policy.md#readiness-and-evidence). When
+required, readiness invokes the configured endpoint and accepts only the exact
+parsed JSON object `{"ready": true}`. Empty output, free text, a JSON array, or
+an object with a different shape fails the probe. This is a structured-output
+capability check, not merely an authentication or network-connectivity check.
+
+This boundary is read-only. Bootstrap's broader configured-catalog validation
+and a method's later frozen-dependency verification remain distinct checks.
 
 ## Canonical Flow
 
@@ -76,6 +103,25 @@ legacy drafts, and displayed candidate lists are not method selections; only a
 durable `assembly_selection`, confirmed through its required gate, binds the
 Assembly method. Any planning-era tool hint is discarded before draft build and
 freeze rather than merged into execution state.
+
+This single track is structural, not advisory. The planning schema does not
+carry a `method_selection` clarification kind, a user-editable Assembly method
+roster, or a method-selection stage in its draft lifecycle. Legacy
+clarification documents with `kind: method_selection` fail schema validation
+rather than being silently reinterpreted.
+The planner never asks which Assembly tool to use and never materializes an
+Assembly method choice during drafting. A durable draft may retain legacy
+method entries and may contain normalized system defaults for fixed-stage
+pipelines; neither is an Assembly recommendation authority. That decision
+belongs exclusively to the stage-time recommendation boundary described above.
+
+Intake may recognize a named assembly tool as a transient asset-collection
+hint: it decides whether HiFi, ONT, or both read roles should be collected.
+That hint lives inside the intake function's local scope only. It is not a
+`WorkflowIntent` field, is not persisted to any durable document, and does not
+reach the Plan Draft model or runtime execution state. Companion-read flags
+such as ultra-long ONT inclusion or Hi-C phasing are likewise asset-collection
+hints; they do not preselect an Assembly method or parameter block.
 
 One `run` transition advances at most one frozen attempt. If an ordered direct
 batch still has pending cursors, the method graph keeps the frozen stage status,

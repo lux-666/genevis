@@ -36,49 +36,25 @@ The following remain machine-local:
 
 ```bash
 conda create -n gene_agent python=3.11 -y
-conda run -n gene_agent pip install -e '.[dev]'
+conda activate gene_agent
+python -m pip install -e '.[dev]'
 ```
 
 The quotes around `'.[dev]'` prevent shell glob expansion. Python runtime and
 development dependencies are declared only in [`../../pyproject.toml`](../../pyproject.toml).
+`gene_agent` is the documented orchestrator-environment convention; it is not
+read from `config/envs.yaml`. All commands below assume it remains activated.
 
-## Configure the active host mapping
+## Verify the code checkout
 
-Execution reads the active environment mapping: `GENE_AGENT_ENVS_CONFIG` when
-set, otherwise `config/envs.yaml`. Use an absolute override when invoking tools
-from different current directories; relative overrides resolve from the caller's
-current directory, while the default stays checkout-anchored.
-`docs/examples/envs.yaml.example` is the generic
-bootstrap seed; it is not a second active resolver input. Inspect the proposed
-changes first and write only after review:
+Run the code-only gate before installing biological tools or editing host paths:
 
 ```bash
-conda run -n gene_agent gene-agent bootstrap
-conda run -n gene_agent gene-agent bootstrap --apply
+bash /path/to/gene_agent/scripts/server_test.sh
 ```
 
-Fill the single `databases:` block in that active file once: register available
-BUSCO lineage aliases (including one default) and the NCBI Metazoa snapshot.
-Per-run RunConfig files do not repeat database paths, versions, or provenance.
-For Assembly Review, a RunConfig may only select a registered BUSCO alias with
-`assembly_review.busco.lineage` and set executor knobs such as `threads`; host
-database identity and location remain in this active mapping and other fields
-are rejected.
-Running bootstrap interactively against a pre-database `envs.yaml` now proposes
-this migration instead of treating the missing block as an intentionally empty
-catalog.
-
-Bootstrap does not install arbitrary packages or Conda environments. It
-initializes/validates host mappings, verifies declared package canaries, performs
-the bounded Juicer conformance action when configured, and probes every method
-entry declared in the active mapping. That declared-catalog scope can be broader
-than the fixed-stage contig check below.
-
-The precise bootstrap boundary is maintained in
-[Project Bootstrap](../architecture/topics/bootstrap.md). Method identity and
-capability come from [`../../descriptors/registry.yaml`](../../descriptors/registry.yaml)
-and its referenced descriptors; installation prose must not become another
-method registry.
+It uses the currently activated Python and never selects another Conda
+environment, invokes Node/npm, or downloads packages.
 
 ## Provision the contig tool set
 
@@ -118,32 +94,72 @@ GENE_AGENT_LLM_TIMEOUT_SECONDS=180
 
 Do not commit it. Assembly method and parameter recommendation requires a
 reachable LLM.
-Assembly Review requires a real BUSCO lineage whose identity and contents match
-`databases.busco` in the active host mapping; its NCBI snapshot comes from
-`databases.ncbi_metazoa` in that same file. RunConfig does not repeat either
-database path. AutoHiC additionally needs its declared external package roots,
+Assembly Review requires an NCBI Latin scientific name in manifest
+`user_metadata.target_species` and at least one matching BUSCO lineage under
+`databases.busco`; selection is derived from the verified
+`databases.ncbi_metazoa` snapshot and fails if the name is malformed,
+unresolved, absent, or ambiguous. RunConfig does not repeat either database
+path or select the lineage. AutoHiC additionally
+needs its declared external package roots,
 Juicer/3D-DNA/JAR layout, and model files.
+
+Install the NCBI snapshot through its single
+[snapshot authority](../../data/reference/ncbi_metazoa/README.md). Install all
+AutoHiC/Juicer/3D-DNA/JAR/model resources declared by the generic host seed;
+this version intentionally validates that full catalog rather than shrinking
+fresh bootstrap to the contig-only subset.
+
+## Configure the active host mapping
+
+Execution reads `GENE_AGENT_ENVS_CONFIG` when set, otherwise
+`config/envs.yaml`. Use an absolute override when commands may start in
+different directories. `docs/examples/envs.yaml.example` is only the generic
+bootstrap seed, never a second runtime input.
+
+After the declared tool, database, and AutoHiC resources exist, run one
+interactive command:
+
+```bash
+gene-agent bootstrap
+```
+
+Bootstrap collects missing host values, prints one exact plan, and waits for an
+empty Enter confirmation before writing that same plan. `bootstrap --update`
+is the repair mode for selecting existing bootstrap-owned fields. Neither mode
+uses a separate `--apply` invocation.
+
+Fill the single `databases:` block once: register installed BUSCO lineage
+aliases and the NCBI snapshot. Per-run RunConfig does not repeat database paths,
+versions, provenance, or lineage selection. For Assembly Review, the manifest
+supplies the NCBI Latin scientific name in `user_metadata.target_species`; the
+system derives lineage from the frozen NCBI snapshot and installed host
+registry. A historical `assembly_review.busco.lineage` is consistency-only.
+
+Bootstrap does not install arbitrary packages or Conda environments. It
+validates package canaries, performs the bounded declared Juicer conformance,
+and probes every method entry in the active mapping. Its full-catalog scope is
+intentionally broader than the fixed contig check below. The precise boundary
+is maintained in [Project Bootstrap](../architecture/topics/bootstrap.md).
 
 Bootstrap catalog validation is not a substitute for the contig-specific
 database and tool checks below.
 
-## Verify the checkout
+## Verify host readiness
 
-The scripts resolve the repository root from their own file location, so they
-may be invoked from any current directory:
+The readiness script resolves the repository root from its own file location,
+so it may be invoked from any current directory:
 
 ```bash
 bash /path/to/gene_agent/scripts/server_check.sh
-bash /path/to/gene_agent/scripts/server_test.sh
 ```
 
 Scope:
 
 - `server_check.sh`: orchestrator prerequisites plus the fixed contig template
   tool/package closure; deferred Assembly-candidate readiness is stage-owned;
-- `server_test.sh`: Python regression, compile, and diff checks only;
+- `server_test.sh`: earlier Python regression, compile, and diff gate;
 - real-data smoke: an explicit operator run using server-local inputs, described
   in [Run and Recovery](../user_guide/run-and-recovery.md).
 
-Do not call either script successful unless it exits zero and prints its expected
+Do not call either gate successful unless it exits zero and prints its expected
 completion evidence.

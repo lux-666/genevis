@@ -22,6 +22,7 @@ from app.schemas.artifacts import (
     ArtifactRefJson,
     GenomeSurveyResult,
 )
+from app.schemas.manifest import Compression
 from app.schemas.state import StateUpdate, TopLevelState, validate_stage_outputs
 from app.stages.base import (
     append_route_trace,
@@ -201,8 +202,10 @@ def _resolution_assets(
     ]
     platforms = [str(value) for value in (metadata.get("platforms") or [])]
     formats = [str(value) for value in (metadata.get("formats") or [])]
+    compressions = [str(value) for value in (metadata.get("compressions") or [])]
     platform = platforms[0] if platforms else _optional_string(metadata.get("platform"))
     file_format = formats[0] if formats else _optional_string(metadata.get("format"))
+    compression = str(metadata.get("compression") or "unknown")
     assets: list[SurveyAssetCursor] = []
     for index, path in enumerate(resolution.paths):
         assets.append(
@@ -214,6 +217,10 @@ def _resolution_assets(
                 "path": path,
                 "platform": platform,
                 "format": file_format,
+                "compression": cast(
+                    Compression,
+                    compressions[index] if index < len(compressions) else compression,
+                ),
                 "source": resolution.source,
             }
         )
@@ -231,6 +238,7 @@ def _runtime_read_assets(
             "path": member.path,
             "platform": member.platform,
             "format": member.format,
+            "compression": member.compression,
             "source": source,
         }
         if member.read_artifact_ref is not None:

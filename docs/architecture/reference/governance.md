@@ -21,7 +21,8 @@ handoff clarity.
 
 The coordinator owns these responsibilities:
 
-- Apply direct user instructions and the repository instructions in `AGENTS.md`.
+- Apply direct user instructions and preserve the repository engineering policy
+  defined by this page.
 - Keep architecture documents current before large implementation work.
 - Split large work into testable slices with explicit exit criteria.
 - Make sure state, ledger, artifact, runner, review, and descriptor boundaries
@@ -55,9 +56,9 @@ rationale, and coordination procedure into one linear ranking:
 - Code and tests are the evidence for what is implemented now. They do not
   silently amend an accepted design; a mismatch is recorded as conformance
   debt.
-- Repository instructions in `AGENTS.md` govern repository-local engineering
-  procedure. They are not architecture contract owners and cannot silently
-  amend accepted product behavior.
+- This page is the single owner of repository-local engineering procedure. Its
+  process rules cannot silently amend product behavior owned by another
+  architecture contract.
 - Git history retains superseded biological rationale; it is not a runtime
   storage or software-state fact.
 - Git history retains superseded implementation and design records; the working
@@ -231,6 +232,14 @@ snapshots, acceptance logs, or duplicate design explanations to the working
 tree. Keep operational guides executable and current, and retain superseded
 material only in Git history.
 
+Audit finding identifiers are review-local coordinates, not architecture
+categories. Never create an `F1`/`F2`-style contract, table, or navigation path.
+Route each accepted semantic rule into its existing owner; record only a real
+implementation-versus-contract gap in `conformance.md`, named by the missing
+capability or conflicting representation rather than by the review that found
+it. Operator guides and examples may summarize usage, but must link back to the
+owner for defaults, precedence, and lifecycle semantics.
+
 ### Simplification inventory workflow
 
 Before changing code to reduce repetition or dead surface, run a read-only
@@ -259,3 +268,38 @@ Current proven examples are the immutable review candidate parser in
 validator/pattern in `app/integrity.py` (`validate_sha256`,
 `SHA256_PATTERN`). Their tests own the contract; callers must not add
 stage-local copies.
+
+The same rule applies to the following proven boundaries:
+
+- `parse_json_object` owns optional Markdown-fence removal and object-only JSON
+  parsing. Review recommendation provider-content validation remains stricter
+  and independent; its exact boundary is owned by
+  [Review and resume](../topics/review-and-resume.md).
+- `validate_model_response_record` owns the common persisted advisor-response
+  wire shape, while each schema-version restorer owns migration compatibility.
+  The distinct v1/v2 `model_id` policies are owned by
+  [Recommendation policy](recommendation-policy.md).
+- `_load_reference_snapshot` owns one verified set of named NCBI alias,
+  assembly-row, and lineage tables. Evidence-tier selection and statistical
+  cohort construction remain independent in the
+  [stage contract](stage-contracts.md).
+- `_parameter_evidence_location` owns the shared publish/recovery destination;
+  source containment and immutable recovery verification remain independent in
+  the [parameter recommendation contract](parameter-recommendation.md).
+- `_review_request_decision_context` owns projection of an already verified
+  review record. Attached-interrupt and detached-index verification remain
+  independent in [Review and resume](../topics/review-and-resume.md).
+
+`Ledger.record_method_disposition_recorded` is an explicit compatibility alias
+for `record_method_disposition`, not an unreferenced duplicate implementation.
+Do not delete compatibility-marked entry surfaces solely because repository
+reference search finds no internal caller; retire them only through an explicit
+compatibility-policy change.
+
+Content-addressed JSON publication in `app/stages/assembly/nodes.py`
+(`_write_assembly_json_artifact`) and
+`app/stages/assembly_review/method_application/support.py`
+(`write_json_artifact`) is intentional symmetry, not a shared persistence
+contract: the review publisher also appends the causal Ledger registration
+event and returns a filesystem path, while the assembly publisher returns an
+`ArtifactRef` and leaves that event to its owning transaction.

@@ -7,7 +7,11 @@ from typing import Any, Mapping
 from pydantic import BaseModel
 
 from app.llm.factory import build_chat_model
-from app.llm.json_response import parse_json_object, response_text
+from app.llm.json_response import (
+    parse_json_object,
+    response_text,
+    validate_model_response_record,
+)
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 from app.llm.parameters.assembly.response import normalize_parameter_recommendation
 
@@ -69,33 +73,26 @@ def restore_assembly_parameter_decision(
 ) -> AssemblyParameterDecision:
     """Rehydrate a decision from immutable model-response evidence."""
 
-    if record.get("schema_version") != 2:
-        raise ValueError("persisted Assembly model response is not schema v2")
-    raw_response = record.get("raw_response")
-    validity = record.get("validity")
-    error = record.get("error")
-    model_id = record.get("model_id")
-    if not isinstance(raw_response, str) or validity not in {"parsed", "invalid"}:
-        raise ValueError("persisted Assembly model response is malformed")
-    if error is not None and not isinstance(error, str):
-        raise ValueError("persisted Assembly model response has an invalid error")
-    if model_id is not None and not isinstance(model_id, str):
-        raise ValueError("persisted Assembly model response has an invalid model_id")
-    if validity == "invalid":
+    envelope = validate_model_response_record(
+        record,
+        expected_schema_version=2,
+        label="persisted Assembly model response",
+    )
+    if envelope["validity"] == "invalid":
         return AssemblyParameterDecision(
-            raw_response=raw_response,
+            raw_response=envelope["raw_response"],
             valid=False,
-            error=error,
-            model_id=model_id,
+            error=envelope["error"],
+            model_id=envelope["model_id"],
         )
     parsed = normalize_parameter_recommendation(
-        parse_json_object(raw_response),
+        parse_json_object(envelope["raw_response"]),
         dict(request_dto),
     )
     return AssemblyParameterDecision(
-        raw_response=raw_response,
+        raw_response=envelope["raw_response"],
         parsed=parsed,
         valid=True,
-        error=error,
-        model_id=model_id,
+        error=envelope["error"],
+        model_id=envelope["model_id"],
     )

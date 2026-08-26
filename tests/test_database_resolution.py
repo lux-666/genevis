@@ -40,6 +40,36 @@ def _write_reference_manifest(reference: Path) -> None:
     )
 
 
+def _write_species_reference(
+    reference: Path,
+    *,
+    species_name: str,
+    lineage_name: str,
+) -> None:
+    files = {
+        "Metazoa.ncbi.tsv": (
+            "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
+            "Annotation BUSCO Lineage\n"
+            f"GCF_000000001.1\t{species_name}\t1\t{lineage_name}\n"
+        ),
+        "Metazoa.ncbi.lineage": (
+            f"Organism Taxonomic ID\tLineage\n1\tMetazoa;{species_name}\n"
+        ),
+        "species_alias.tsv": (f"alias\tscientific_name\ntarget\t{species_name}\n"),
+    }
+    entries = {}
+    for name, content in files.items():
+        (reference / name).write_text(content, encoding="utf-8")
+        payload = content.encode()
+        entries[name] = {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
+    (reference / "reference_manifest.json").write_text(
+        json.dumps({"files": entries}, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def _config(lineage: Path, ncbi: Path) -> dict[str, object]:
     return {
         "default": {"conda_bin": "/usr/bin/true", "fallback_env": "tools"},
@@ -88,6 +118,51 @@ def test_logical_lineage_resolves_to_complete_projection(tmp_path: Path) -> None
     assert projection["lineage_name"] == lineage.name
     assert projection["threads"] == 6
     assert resolve_ncbi_reference_dir(resolver) == str(ncbi.resolve())
+
+
+def test_species_name_selects_configured_busco_lineage(tmp_path: Path) -> None:
+    lineage = ensure_busco_lineage(
+        tmp_path / "busco", lineage_name="actinopterygii_odb10"
+    )
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    _write_species_reference(
+        ncbi,
+        species_name="Solea ovata",
+        lineage_name="actinopterygii_odb10",
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    projection = resolve_busco_parameters(
+        _run_config(threads=6),
+        resolver,
+        species_name="Solea ovata",
+    )
+
+    assert projection["lineage_name"] == "actinopterygii_odb10"
+    assert projection["threads"] == 6
+
+
+def test_unresolved_species_error_points_to_manifest_field(tmp_path: Path) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    _write_species_reference(
+        ncbi,
+        species_name="Fixture species",
+        lineage_name=lineage.name,
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    with pytest.raises(
+        DatabaseResolutionError,
+        match="input_manifest.user_metadata.target_species",
+    ):
+        resolve_busco_parameters(
+            _run_config(),
+            resolver,
+            species_name="Absent species",
+        )
 
 
 @pytest.mark.parametrize(

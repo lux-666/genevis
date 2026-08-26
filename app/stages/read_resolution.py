@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.assets import ReadSetManifest
+from app.schemas.manifest import Compression
 from app.schemas.state import TopLevelState
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import LONG_READS_SPEC
@@ -26,6 +28,7 @@ class RuntimeReadMember(BaseModel):
     path: str = Field(min_length=1)
     platform: str = Field(min_length=1)
     format: str = Field(min_length=1)
+    compression: Compression = "unknown"
     source_asset_id: str = Field(min_length=1)
     read_artifact_ref: ArtifactRef | None = None
     manifest_entry_ordinal: int | None = Field(default=None, ge=0)
@@ -69,6 +72,9 @@ def resolve_long_read_members(
                 path=str(record.path),
                 platform=str(record.platform or "unknown"),
                 format=str(record.format or "unknown"),
+                compression=cast(
+                    Compression, str(record.metadata.get("compression") or "unknown")
+                ),
                 source_asset_id=record.asset_id,
                 manifest_entry_ordinal=_metadata_int(
                     record.metadata, "manifest_entry_ordinal"
@@ -132,6 +138,9 @@ def resolve_hic_pairs(
             path=str(record.path),
             platform=str(record.platform or "unknown"),
             format=str(record.format or "unknown"),
+            compression=cast(
+                Compression, str(record.metadata.get("compression") or "unknown")
+            ),
             source_asset_id=record.asset_id,
             manifest_entry_ordinal=entry,
             path_ordinal=_metadata_int(record.metadata, "path_ordinal"),
@@ -218,6 +227,7 @@ def _members_from_read_set(
             path=actual_paths[index],
             platform=member.platform,
             format=member.format,
+            compression="none",
             source_asset_id=member.source_asset_id,
             read_artifact_ref=member.output_ref,
         )

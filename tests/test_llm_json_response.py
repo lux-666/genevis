@@ -1,0 +1,80 @@
+"""Contract tests for provider-neutral JSON response helpers."""
+
+from __future__ import annotations
+
+import pytest
+
+from app.llm.json_response import (
+    model_response_record,
+    parse_json_object,
+    validate_model_response_record,
+)
+from app.llm.parameters.assembly.recommender import (
+    restore_assembly_parameter_decision,
+)
+from app.stages.assembly.decision import (
+    AssemblyDecisionRequest,
+    restore_assembly_decision,
+)
+
+
+def test_parse_json_object_accepts_one_fenced_object() -> None:
+    assert parse_json_object('```json\n{"decision": "accept"}\n```') == {
+        "decision": "accept"
+    }
+
+
+def test_model_response_record_round_trips_through_one_envelope() -> None:
+    record = model_response_record(
+        schema_version=2,
+        raw_response='{"parameters": {}}',
+        valid=True,
+        error=None,
+        model_id="model-v1",
+    )
+
+    assert record == {
+        "schema_version": 2,
+        "raw_response": '{"parameters": {}}',
+        "validity": "parsed",
+        "error": None,
+        "model_id": "model-v1",
+    }
+    assert (
+        validate_model_response_record(
+            record,
+            expected_schema_version=2,
+            label="persisted Assembly model response",
+        )
+        == record
+    )
+
+
+def test_assembly_restorers_preserve_versioned_model_id_compatibility() -> None:
+    parameter_record = model_response_record(
+        schema_version=2,
+        raw_response="",
+        valid=False,
+        error="model unavailable",
+        model_id=None,
+    )
+    route_record = model_response_record(
+        schema_version=1,
+        raw_response="",
+        valid=False,
+        error="model unavailable",
+        model_id=None,
+    )
+    parameter_record["model_id"] = 42  # type: ignore[typeddict-item]
+    route_record["model_id"] = 42  # type: ignore[typeddict-item]
+    route_request = AssemblyDecisionRequest(
+        kind="route_selection",
+        session_id="s1",
+        prompt_payload={},
+        system_prompt="Select a route.",
+    )
+
+    with pytest.raises(ValueError, match="invalid model_id"):
+        restore_assembly_parameter_decision(parameter_record, {})
+    restored_route = restore_assembly_decision(route_record, route_request)
+    assert restored_route.model_id is None

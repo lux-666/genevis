@@ -240,8 +240,17 @@ def _metadata_from_records(
         {
             "platform": first.platform if first is not None else None,
             "format": first.format if first is not None else None,
+            "compression": (
+                str(first.metadata.get("compression") or "unknown")
+                if first is not None
+                else None
+            ),
             "asset_type": first.asset_type if first is not None else None,
             "asset_ids": [record.asset_id for record in records],
+            "compressions": [
+                str(record.metadata.get("compression") or "unknown")
+                for record in records
+            ],
             "platforms": list(
                 dict.fromkeys(
                     str(record.platform) for record in records if record.platform

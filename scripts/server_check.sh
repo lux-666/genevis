@@ -21,7 +21,6 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 cd "${REPO_ROOT}"
 
-ORCHESTRATOR_ENV="gene_agent"
 CONTIG_RUN_CONFIG="docs/examples/contig_run_config.template.json"
 if [[ -z "${ENV_CONFIG_OVERRIDE}" ]]; then
   ENVS_CONFIG="config/envs.yaml"
@@ -57,17 +56,20 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 ok "conda present at $(command -v conda)"
 
-if ! conda run -n "${ORCHESTRATOR_ENV}" python -c 'import sys; print(sys.version)' >/dev/null 2>&1; then
-  fail "conda env '${ORCHESTRATOR_ENV}' cannot run python; create or repair it (see docs/deployment/README.md)"
+if ! command -v python >/dev/null 2>&1; then
+  fail "python not found; activate the orchestrator environment first"
 fi
-ok "${ORCHESTRATOR_ENV} runs python"
+if ! python -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+  fail "active orchestrator environment requires Python 3.11 or newer"
+fi
+ok "active orchestrator Python is 3.11 or newer"
 
 # The TUI uses sqlite checkpoints for durable execution and review, so the
 # orchestrator environment must carry langgraph-checkpoint-sqlite.
-if ! conda run -n "${ORCHESTRATOR_ENV}" python -c 'from langgraph.checkpoint.sqlite import SqliteSaver' >/dev/null 2>&1; then
-  fail "conda env '${ORCHESTRATOR_ENV}' is missing langgraph-checkpoint-sqlite; run 'pip install -e .' inside that env (see docs/deployment/README.md)"
+if ! python -c 'from langgraph.checkpoint.sqlite import SqliteSaver' >/dev/null 2>&1; then
+  fail "active orchestrator environment is missing langgraph-checkpoint-sqlite; run 'python -m pip install -e .' (see docs/deployment/README.md)"
 fi
-ok "${ORCHESTRATOR_ENV} has langgraph-checkpoint-sqlite"
+ok "active orchestrator environment has langgraph-checkpoint-sqlite"
 
 if [[ ! -f "${CONTIG_RUN_CONFIG}" ]]; then
   fail "authoritative contig run config not found: ${CONTIG_RUN_CONFIG}"
@@ -78,9 +80,7 @@ fi
 
 readiness_output=""
 if ! readiness_output="$(PYTHONDONTWRITEBYTECODE=1 \
-  GENE_AGENT_ENVS_CONFIG="${ENVS_CONFIG}" conda run \
-  -n "${ORCHESTRATOR_ENV}" \
-  python -c '
+  GENE_AGENT_ENVS_CONFIG="${ENVS_CONFIG}" python -c '
 import sys
 
 from app.execution.run_readiness import (

@@ -93,6 +93,10 @@ class InventoryStageTests(unittest.TestCase):
         paths = SessionPaths.from_run_dir(manifest_path.parents[1])
         envs = ensure_test_host_envs(paths.run_dir)
         if next_stage == "assembly_review":
+            manifest.setdefault("user_metadata", {}).setdefault(
+                "target_species", "Fixture species"
+            )
+            manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
             run_config_payload["assembly_review"] = assembly_review_selector_config()
         run_config = RunConfig.model_validate(run_config_payload)
         freeze_session_inputs(
@@ -283,6 +287,30 @@ class InventoryStageTests(unittest.TestCase):
                     "platform unknown" in warning
                     for warning in result["stage_outputs"]["inventory"]["warnings"]
                 )
+            )
+
+    def test_inventory_projects_manifest_species_into_shared_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "reads.fastq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = {
+                "session_id": "species-projection",
+                "user_metadata": {"target_species": "Solea ovata"},
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(fq)],
+                        "platform": "ont",
+                    }
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+
+            _, result = self._invoke_inventory("species-projection", path)
+
+            self.assertEqual(
+                result["shared_parameters"]["species_facts"]["scientific_name"],
+                "Solea ovata",
             )
 
     def test_inventory_registers_cycloneseq_fastq_as_raw_long_reads(self):

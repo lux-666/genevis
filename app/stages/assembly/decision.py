@@ -8,7 +8,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.llm.factory import build_chat_model
-from app.llm.json_response import parse_json_object, response_text
+from app.llm.json_response import (
+    parse_json_object,
+    response_text,
+    validate_model_response_record,
+)
 
 AssemblyDecisionKind = Literal["route_selection"]
 
@@ -122,31 +126,29 @@ def restore_assembly_decision(
 ) -> AssemblyDecisionResult:
     """Rehydrate one immutable Assembly decision without invoking the model."""
 
-    if record.get("schema_version") != 1:
-        raise ValueError("persisted Assembly model response is not schema v1")
-    raw_response = record.get("raw_response")
-    validity = record.get("validity")
-    error = record.get("error")
-    model_id = record.get("model_id")
-    if not isinstance(raw_response, str) or validity not in {"parsed", "invalid"}:
-        raise ValueError("persisted Assembly model response is malformed")
-    if error is not None and not isinstance(error, str):
-        raise ValueError("persisted Assembly model response has an invalid error")
-    if validity == "invalid":
+    normalized_record = dict(record)
+    if not isinstance(normalized_record.get("model_id"), str):
+        normalized_record["model_id"] = None
+    envelope = validate_model_response_record(
+        normalized_record,
+        expected_schema_version=1,
+        label="persisted Assembly model response",
+    )
+    if envelope["validity"] == "invalid":
         return AssemblyDecisionResult(
             kind=request.kind,
-            raw_response=raw_response,
+            raw_response=envelope["raw_response"],
             valid=False,
-            error=error,
-            model_id=model_id if isinstance(model_id, str) else None,
+            error=envelope["error"],
+            model_id=envelope["model_id"],
         )
-    parsed = parse_json_object(raw_response)
+    parsed = parse_json_object(envelope["raw_response"])
     _validate_route_selection(parsed, request.allowed_actions, request.allowed_methods)
     return AssemblyDecisionResult(
         kind=request.kind,
-        raw_response=raw_response,
+        raw_response=envelope["raw_response"],
         parsed=parsed,
         valid=True,
-        error=error,
-        model_id=model_id if isinstance(model_id, str) else None,
+        error=envelope["error"],
+        model_id=envelope["model_id"],
     )

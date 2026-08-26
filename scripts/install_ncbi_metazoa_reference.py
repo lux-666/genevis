@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Install or verify the pinned local NCBI Metazoa reference snapshot.
-
-The workflow deliberately does not download biological reference data. This
-utility copies an operator-provided snapshot into the host location declared
-by the active ``envs.yaml`` and checks it against that snapshot's manifest.
-"""
+"""Download, install, or verify the pinned NCBI Metazoa snapshot."""
 
 from __future__ import annotations
 
@@ -13,6 +8,10 @@ import hashlib
 import json
 import shutil
 import sys
+import tempfile
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -25,13 +24,23 @@ from app.execution.env_resolver import (  # noqa: E402
 )
 
 MANIFEST_FILENAME = "reference_manifest.json"
-COPYABLE_FILES = ("Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage")
+PINNED_REFERENCE_DIR = PROJECT_ROOT / "data" / "reference" / "ncbi_metazoa"
+REFERENCE_FILES = (
+    "Metazoa.ncbi.tsv",
+    "Metazoa.ncbi.lineage",
+    "species_alias.tsv",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
         "--source-dir", type=Path, help="Directory holding the pinned NCBI export files"
+    )
+    source.add_argument(
+        "--source-url",
+        help="URL of a ZIP containing the pinned manifest and all reference files",
     )
     parser.add_argument(
         "--config",
@@ -47,10 +56,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Only validate files already in destination",
     )
     args = parser.parse_args(argv)
-    if args.verify_only and args.source_dir:
-        parser.error("--verify-only cannot be combined with --source-dir")
-    if not args.verify_only and args.source_dir is None:
-        parser.error("provide --source-dir or use --verify-only")
+    if args.verify_only and (args.source_dir or args.source_url):
+        parser.error("--verify-only cannot be combined with a source")
+    if not args.verify_only and args.source_dir is None and args.source_url is None:
+        parser.error("provide --source-dir, --source-url, or use --verify-only")
 
     config_path = args.config or active_config_path()
     try:
@@ -67,17 +76,19 @@ def main(argv: list[str] | None = None) -> int:
             f"cannot resolve databases.ncbi_metazoa.reference_dir from "
             f"{config_path}: {exc}"
         ) from exc
-    manifest = _load_manifest(destination / MANIFEST_FILENAME)
-    if args.source_dir:
-        source = args.source_dir.resolve()
-        for filename in COPYABLE_FILES:
-            source_path = source / filename
-            if not source_path.is_file():
-                raise SystemExit(f"source file is missing: {source_path}")
-            destination.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, destination / filename)
-
-    errors = _verify(destination, manifest)
+    pinned_manifest = _load_manifest(PINNED_REFERENCE_DIR / MANIFEST_FILENAME)
+    if args.verify_only:
+        errors = _verify_pinned_destination(destination, pinned_manifest)
+    elif args.source_dir:
+        errors = _install_from_source(
+            args.source_dir.resolve(), destination, pinned_manifest
+        )
+    else:
+        assert args.source_url is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "snapshot"
+            _download_snapshot(args.source_url, source_dir)
+            errors = _install_from_source(source_dir, destination, pinned_manifest)
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
@@ -95,7 +106,64 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         raise SystemExit(f"reference manifest is unreadable: {path}: {exc}") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("files"), dict):
         raise SystemExit(f"reference manifest is invalid: {path}")
+    if set(payload["files"]) != set(REFERENCE_FILES):
+        raise SystemExit(
+            f"reference manifest must declare exactly {', '.join(REFERENCE_FILES)}: "
+            f"{path}"
+        )
     return payload
+
+
+def _install_from_source(
+    source: Path,
+    destination: Path,
+    pinned_manifest: dict[str, Any],
+) -> list[str]:
+    source_manifest = _load_manifest(source / MANIFEST_FILENAME)
+    if source_manifest != pinned_manifest:
+        return ["source manifest does not match the repository-pinned snapshot"]
+    errors = _verify(source, pinned_manifest)
+    if errors:
+        return [f"source {error}" for error in errors]
+    if source != destination:
+        destination.mkdir(parents=True, exist_ok=True)
+        for filename in REFERENCE_FILES:
+            shutil.copy2(source / filename, destination / filename)
+        shutil.copy2(source / MANIFEST_FILENAME, destination / MANIFEST_FILENAME)
+    return _verify_pinned_destination(destination, pinned_manifest)
+
+
+def _verify_pinned_destination(
+    destination: Path,
+    pinned_manifest: dict[str, Any],
+) -> list[str]:
+    installed_manifest = _load_manifest(destination / MANIFEST_FILENAME)
+    if installed_manifest != pinned_manifest:
+        return ["installed manifest does not match the repository-pinned snapshot"]
+    return _verify(destination, pinned_manifest)
+
+
+def _download_snapshot(url: str, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    archive = destination.parent / "snapshot.zip"
+    try:
+        with (
+            urllib.request.urlopen(url, timeout=300) as response,
+            archive.open("wb") as handle,
+        ):
+            shutil.copyfileobj(response, handle)
+        with zipfile.ZipFile(archive) as bundle:
+            for filename in (*REFERENCE_FILES, MANIFEST_FILENAME):
+                try:
+                    source = bundle.open(filename)
+                except KeyError as exc:
+                    raise SystemExit(
+                        f"snapshot ZIP is missing root file: {filename}"
+                    ) from exc
+                with source, (destination / filename).open("wb") as target:
+                    shutil.copyfileobj(source, target)
+    except (OSError, urllib.error.URLError, zipfile.BadZipFile) as exc:
+        raise SystemExit(f"cannot download NCBI snapshot from {url}: {exc}") from exc
 
 
 def _verify(destination: Path, manifest: dict[str, Any]) -> list[str]:

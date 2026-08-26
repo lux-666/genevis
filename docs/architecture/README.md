@@ -70,7 +70,7 @@ Read these only when a task needs the exact contract.
 | Contract owner | Owns |
 |---|---|
 | [`reference/data-contract.md`](reference/data-contract.md) | Run ownership, lifecycle-fact identity/uniqueness, shared progress reduction, checkpoint bounds, artifact refs, ledger/report authority, retention, and crash rules |
-| [`reference/execution-lifecycle.md`](reference/execution-lifecycle.md) | Freeze/run/collect graph, attempt owners/terminals, method disposition, recovery routing, and stage-adapter boundary |
+| [`reference/execution-lifecycle.md`](reference/execution-lifecycle.md) | Whole-run execution readiness, freeze/run/collect graph, attempt owners/terminals, method disposition, recovery routing, and stage-adapter boundary |
 | [`reference/execution-evidence.md`](reference/execution-evidence.md) | Runtime result versus durable process evidence and log refs |
 | [`reference/resource-handoff.md`](reference/resource-handoff.md) | Current logical resources, immutable assembly delivery, resolver priority, Read QC lineage, and FOFN boundary |
 | [`reference/shared-facts.md`](reference/shared-facts.md) | Cross-stage biological facts, genome-size resolution priority, planning collection rules, and conflict behavior |
