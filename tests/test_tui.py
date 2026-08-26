@@ -757,7 +757,9 @@ class TuiWorkflowTests(unittest.TestCase):
             session_id="parent",
             data_dir=str(data_dir),
             request_text="assembly",
-            intent=deterministic_workflow_intent("assembly"),
+            intent=deterministic_workflow_intent("assembly").model_copy(
+                update={"target_species": "Fixture species"}
+            ),
         )
         parent = apply_asset_answer(
             parent,

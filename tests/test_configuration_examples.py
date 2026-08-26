@@ -71,6 +71,13 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                 config = load_run_config(EXAMPLES_DIR / run_config_name)
 
                 self.assertEqual(config.requested_stage_names(), expected_stages)
+                self.assertIn("target_species", manifest.user_metadata)
+                self.assertNotIn(
+                    "lineage",
+                    json.loads(
+                        (EXAMPLES_DIR / run_config_name).read_text(encoding="utf-8")
+                    ).get("assembly_review", {}).get("busco", {}),
+                )
                 if needs_genome_size:
                     self.assertIsNotNone(manifest.genome_size_estimate)
                     self.assertIsNotNone(config.genome_survey)

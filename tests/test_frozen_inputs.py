@@ -531,6 +531,30 @@ class FrozenInputTests(unittest.TestCase):
                     run_config_draft=run_config,
                 )
 
+    def test_explicit_legacy_lineage_does_not_replace_target_species(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _paths, manifest, run_config, _envs = self._fixture(root)
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "user_metadata:\n  target_species: Fixture species\n", ""
+                ),
+                encoding="utf-8",
+            )
+            run_config.write_text(
+                json.dumps(_review_run_config(root / "embryophyta_odb10")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError,
+                "user_metadata.target_species",
+            ):
+                prepare_session_inputs(
+                    manifest_draft=manifest,
+                    run_config_draft=run_config,
+                )
+
     def test_requested_review_rejects_conflicting_species_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

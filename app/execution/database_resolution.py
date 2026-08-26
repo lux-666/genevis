@@ -1,10 +1,10 @@
 """Resolve and validate host-owned databases at the freeze/execution boundary.
 
-``RunConfig`` may select a logical BUSCO lineage, but it must never carry the
-host's full database paths as the authority.  This module is the narrow
-adapter shared by readiness, freeze, and stage consumers.  It accepts both the
-active and frozen dependency resolver interfaces and returns only the compact
-execution projection needed by BUSCO/NCBI.
+``RunConfig`` may retain a legacy logical BUSCO lineage assertion, but the
+manifest scientific name selects the lineage for new runs. This module is the
+narrow adapter shared by readiness, freeze, and stage consumers. It accepts
+both the active and frozen dependency resolver interfaces and returns only the
+compact execution projection needed by BUSCO/NCBI.
 """
 
 from __future__ import annotations
@@ -92,7 +92,10 @@ def resolve_busco_parameters(
                 configured_lineages=set(busco_registry.lineages),
             )
         except (OSError, TypeError, ValueError) as exc:
-            raise DatabaseResolutionError(str(exc)) from exc
+            raise DatabaseResolutionError(
+                "input_manifest.user_metadata.target_species cannot resolve a "
+                f"unique installed BUSCO lineage: {exc}"
+            ) from exc
         if logical_name is not None and logical_name != derived_lineage:
             raise DatabaseResolutionError(
                 "assembly_review.busco.lineage conflicts with the species-derived "

@@ -60,10 +60,13 @@ conda run -n gene_agent gene-agent bootstrap --apply
 Fill the single `databases:` block in that active file once: register available
 BUSCO lineage aliases (including one default) and the NCBI Metazoa snapshot.
 Per-run RunConfig files do not repeat database paths, versions, or provenance.
-For Assembly Review, a RunConfig may only select a registered BUSCO alias with
-`assembly_review.busco.lineage` and set executor knobs such as `threads`; host
-database identity and location remain in this active mapping and other fields
-are rejected.
+For Assembly Review, the manifest must supply an NCBI Latin scientific name in
+`user_metadata.target_species`; the system derives the lineage from the frozen
+NCBI snapshot and the installed host registry. New RunConfigs set only executor
+knobs such as `threads`. A historical `assembly_review.busco.lineage` is checked
+for consistency but cannot select or override the derived lineage; host database
+identity and location remain in this active mapping and other fields are
+rejected.
 Running bootstrap interactively against a pre-database `envs.yaml` now proposes
 this migration instead of treating the missing block as an intentionally empty
 catalog.
@@ -118,10 +121,12 @@ GENE_AGENT_LLM_TIMEOUT_SECONDS=180
 
 Do not commit it. Assembly method and parameter recommendation requires a
 reachable LLM.
-Assembly Review requires the target species in the manifest and at least one
-matching BUSCO lineage under `databases.busco`; selection is derived from the
-verified `databases.ncbi_metazoa` snapshot and fails if it is absent or
-ambiguous. RunConfig does not repeat either database path. AutoHiC additionally
+Assembly Review requires an NCBI Latin scientific name in manifest
+`user_metadata.target_species` and at least one matching BUSCO lineage under
+`databases.busco`; selection is derived from the verified
+`databases.ncbi_metazoa` snapshot and fails if the name is malformed,
+unresolved, absent, or ambiguous. RunConfig does not repeat either database
+path or select the lineage. AutoHiC additionally
 needs its declared external package roots,
 Juicer/3D-DNA/JAR layout, and model files.
 

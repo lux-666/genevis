@@ -1648,6 +1648,11 @@ def _freeze_review_test_inputs(
         paths,
         manifest_draft={
             "session_id": paths.session_id,
+            **(
+                {"user_metadata": {"target_species": "Fixture species"}}
+                if "assembly_review" in requested_stages
+                else {}
+            ),
             "assets": [
                 {
                     "asset_type": "raw_long_reads",

@@ -143,6 +143,28 @@ def test_species_name_selects_configured_busco_lineage(tmp_path: Path) -> None:
     assert projection["threads"] == 6
 
 
+def test_unresolved_species_error_points_to_manifest_field(tmp_path: Path) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    _write_species_reference(
+        ncbi,
+        species_name="Fixture species",
+        lineage_name=lineage.name,
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    with pytest.raises(
+        DatabaseResolutionError,
+        match="input_manifest.user_metadata.target_species",
+    ):
+        resolve_busco_parameters(
+            _run_config(),
+            resolver,
+            species_name="Absent species",
+        )
+
+
 @pytest.mark.parametrize(
     "forbidden_field",
     ("lineage_path", "lineage_name", "lineage_version", "lineage_source"),

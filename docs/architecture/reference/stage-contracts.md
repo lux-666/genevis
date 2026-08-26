@@ -337,16 +337,26 @@ Registered methods:
 QUAST and BUSCO evidence is collected through an ordered shared lifecycle.
 BUSCO and NCBI reference data resolve only from the host database registry
 captured in the frozen dependency manifest. Assembly Review requires
-`input_manifest.user_metadata.target_species`; the verified NCBI snapshot maps
-that name to related-species BUSCO annotations, and exactly one compatible
-host-installed lineage must resolve before freeze. A legacy
-`assembly_review.busco.lineage` value is only a consistency assertion and may
-not override the species-derived lineage. Species-less historical RunConfigs
-that already freeze an explicit lineage remain readable during migration, but
-new templates and TUI intake do not create them. RunConfig never owns database paths,
-versions, or provenance. Review may accept a candidate, adopt a separately
-completed polish/purge action, or stop the workflow. Decisions are bound to
-the current review request and typed candidate refs.
+`input_manifest.user_metadata.target_species` as an NCBI Latin scientific name
+(for example, `Solea ovata`). It is the only accepted run-owned species input:
+common names, LLM-derived names, alternate metadata keys, and unspecified names
+such as `Genus sp.` do not participate in resolution. Missing or malformed
+values fail input preparation with the manifest field path; unresolved names
+fail database readiness against the frozen NCBI snapshot.
+
+The verified snapshot maps that scientific name to related-species
+`Annotation BUSCO Lineage` values. The runtime intersects those annotations
+with the host registry and requires exactly one compatible installed lineage
+before freeze. Snapshot creation/installation owns producing and validating
+that mapping; the user does not inspect snapshot rows or choose a lineage.
+`assembly_review.busco.lineage` is not a public selection surface. If retained
+in a historical RunConfig, it is only a consistency assertion and a mismatch
+with the species-derived lineage fails with the RunConfig field path. New
+templates and TUI intake do not create it. RunConfig never owns database paths,
+versions, or provenance, and the host `default_lineage` is not a fallback for
+an unresolved Assembly Review species. Review may accept a candidate, adopt a
+separately completed polish/purge action, or stop the workflow. Decisions are
+bound to the current review request and typed candidate refs.
 
 NCBI comparative evidence and statistics verify and parse the exact same
 manifest-pinned bytes. `_load_reference_snapshot` returns named alias, assembly
@@ -356,11 +366,12 @@ evidence selection and all-tier statistical cohort construction remain separate
 stage contracts.
 
 Target species is manifest-owned metadata. Inventory projects the same frozen
-name into shared biological facts for Assembly method and parameter
-recommendation, and rejects a conflicting RunConfig copy. An absent or
-unresolved name, an ambiguous BUSCO mapping, or a lineage unavailable in the
-host registry blocks Assembly Review before execution; the system never invents
-a target or falls back to an unrelated global lineage.
+Latin scientific name into shared biological facts for Assembly method and
+parameter recommendation, and rejects a conflicting RunConfig copy. An absent,
+malformed, or unresolved name, an ambiguous BUSCO mapping, or a lineage
+unavailable in the host registry blocks Assembly Review before execution; the
+system never invents a target, asks an LLM to resolve a common name, or falls
+back to an unrelated global lineage.
 
 Signals such as duplicated BUSCO content, size inflation, abnormal depth, or
 missing/inconsistent evidence prevent unsupported automatic acceptance.

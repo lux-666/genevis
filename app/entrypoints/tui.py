@@ -41,7 +41,8 @@ def _tui_main(data_dir: str) -> int:
         print(
             "请描述本次运行目标（例如："
             "\u201c我想对 T2T-CHM13 做 T2T 级组装\u201d或"
-            "\u201c以卵鳎为目标物种进行染色体级组装\u201d）。"
+            "\u201c以 Solea ovata 为目标物种进行染色体级组装\u201d；"
+            "目标物种必须使用完整拉丁学名）。"
         )
         print("输入 /resume 可继续草稿、处理 review gate 或创建重跑草稿。")
         try:

@@ -37,6 +37,9 @@
   "assembly_review": {
     "quast": {
       "threads": 8
+    },
+    "busco": {
+      "threads": 8
     }
   }
 }

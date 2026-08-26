@@ -63,6 +63,7 @@ def _freeze_durable_inputs(
         json.dumps(
             {
                 "session_id": paths.session_id,
+                "user_metadata": {"target_species": "Fixture species"},
                 "assets": [
                     {
                         "asset_type": "raw_long_reads",

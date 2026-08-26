@@ -111,8 +111,14 @@ def ensure_test_host_envs(
     reference = root_path / "ncbi_metazoa"
     reference.mkdir(parents=True, exist_ok=True)
     source_contents = {
-        "Metazoa.ncbi.tsv": "accession\nfixture\n",
-        "Metazoa.ncbi.lineage": "taxid\tlineage\nfixture\tfixture\n",
+        "Metazoa.ncbi.tsv": (
+            "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
+            "Annotation BUSCO Lineage\n"
+            "GCF_000000001.1\tFixture species\t1\tembryophyta_odb10\n"
+        ),
+        "Metazoa.ncbi.lineage": (
+            "Organism Taxonomic ID\tLineage\n1\tEukaryota;Fixture species\n"
+        ),
         "species_alias.tsv": "alias\tscientific_name\nfixture\tFixture species\n",
     }
     files: dict[str, dict[str, int | str]] = {}

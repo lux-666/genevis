@@ -84,10 +84,11 @@ that candidate is rejected with `genome_size_required`.
 
 Biological identity used by method and parameter recommenders. The canonical
 scientific name belongs to `input_manifest.user_metadata.target_species` and is
-required when Assembly Review is requested. Inventory projects that frozen name
-into `species_facts.scientific_name`; a conflicting RunConfig copy fails before
-execution. `telomere_motif` is normalized to uppercase ACGT and requires at
-least two bases.
+required when Assembly Review is requested. The value must be an NCBI Latin
+scientific name; no common-name or LLM resolution path exists. Inventory
+projects that frozen name into `species_facts.scientific_name`; a conflicting
+RunConfig copy fails before execution. `telomere_motif` is normalized to
+uppercase ACGT and requires at least two bases.
 
 ## Planning and freeze validation
 

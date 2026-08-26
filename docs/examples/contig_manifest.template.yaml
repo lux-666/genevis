@@ -9,11 +9,12 @@ session_id: contig-run-YYYYMMDD-a
 sample_id: sample_name
 genome_size_estimate: 500000000
 
-# Required for Assembly Review. The frozen NCBI snapshot resolves this name and
-# the runtime selects one matching, host-installed BUSCO lineage; users do not
+# Required for Assembly Review. Use the full NCBI Latin scientific name, not a
+# common name or abbreviation. The frozen NCBI snapshot resolves it and the
+# runtime selects one matching, host-installed BUSCO lineage; users do not
 # choose the lineage manually.
 user_metadata:
-  target_species: Genus species  # REPLACE with the real scientific name
+  target_species: Solea ovata  # REPLACE with the real NCBI scientific name
 
 assets:
   # Long-read-only input is valid. If short DNA reads are also declared,

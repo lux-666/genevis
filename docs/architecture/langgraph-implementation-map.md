@@ -189,7 +189,7 @@ settlement debt above.
 | `assembly.candidate.nextdenovo` | registered with catalog | `executable` | implemented | `tests/test_assembly.py` | catalog exists; no equivalent literature case corpus |
 | `assembly_dedup.purge_dups` | registered | `executable` | implemented | `tests/test_assembly_dedup.py` | durable `completed`, `skipped`, or `not_started` disposition is orthogonal to the delivered occurrence and its immutable delivery |
 | `assembly_review.eval.quast` | registered | `executable` | implemented | `tests/test_assembly_review.py` | stage-local review, not final integrated QA |
-| `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py`, `tests/test_database_resolution.py` | RunConfig supplies only an optional logical lineage alias; path/version/provenance resolve from the frozen host database registry |
+| `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py`, `tests/test_database_resolution.py` | manifest NCBI scientific name selects one compatible host-installed lineage; a legacy RunConfig lineage is assertion-only; path/version/provenance resolve from the frozen host registry |
 | `hic_scaffolding.candidate.autohic` | registered with catalog | `executable` | implemented | `tests/test_hic_scaffolding.py` | all four review products are mandatory at collection |
 | `t2t.alignment.minimap2` | registered with catalog | `executable` | implemented | `tests/test_t2t.py` | none |
 `tests/test_registry_executable_invariant.py` derives local IDs from imported

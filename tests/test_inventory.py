@@ -93,6 +93,10 @@ class InventoryStageTests(unittest.TestCase):
         paths = SessionPaths.from_run_dir(manifest_path.parents[1])
         envs = ensure_test_host_envs(paths.run_dir)
         if next_stage == "assembly_review":
+            manifest.setdefault("user_metadata", {}).setdefault(
+                "target_species", "Fixture species"
+            )
+            manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
             run_config_payload["assembly_review"] = assembly_review_selector_config()
         run_config = RunConfig.model_validate(run_config_payload)
         freeze_session_inputs(

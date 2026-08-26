@@ -38,15 +38,6 @@ _ALTERNATE_METADATA_RE = re.compile(
     r"\b(?:alternate|maternal|paternal|hap[._ -]?[12])\b",
     re.IGNORECASE,
 )
-_SPECIES_KEYS = (
-    "target_species",
-    "species_name",
-    "scientific_name",
-    "organism",
-    "species",
-    "chinese_name",
-)
-
 _REFERENCE_FILE_NAMES = frozenset(
     {"Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage", "species_alias.tsv"}
 )
@@ -328,16 +319,10 @@ def build_related_species_statistics_pack(
 
 
 def species_name_from_metadata(metadata: dict[str, Any]) -> str | None:
-    """Return the first supported target-species value from manifest metadata."""
-    for key in _SPECIES_KEYS:
-        value = metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        if isinstance(value, dict):
-            for nested_key in ("name", "scientific_name", "chinese_name"):
-                nested = value.get(nested_key)
-                if isinstance(nested, str) and nested.strip():
-                    return nested.strip()
+    """Return the sole manifest-owned target-species value."""
+    value = metadata.get("target_species")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 

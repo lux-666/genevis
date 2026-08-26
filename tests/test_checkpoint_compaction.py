@@ -303,6 +303,8 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             paths.manifest_path.write_text(
                 "session_id: s1\n"
+                "user_metadata:\n"
+                "  target_species: Fixture species\n"
                 "assets:\n"
                 "  - asset_type: raw_long_reads\n"
                 f"    paths: [{reads}]\n"

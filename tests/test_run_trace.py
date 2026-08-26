@@ -85,6 +85,11 @@ def _run(
             paths,
             manifest_draft={
                 "session_id": session_id,
+                **(
+                    {"user_metadata": {"target_species": "Fixture species"}}
+                    if "assembly_review" in requested_stages
+                    else {}
+                ),
                 "assets": [
                     {
                         "asset_type": "raw_long_reads",

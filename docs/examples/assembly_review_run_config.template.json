@@ -16,6 +16,9 @@
   "assembly_review": {
     "quast": {
       "threads": 16
+    },
+    "busco": {
+      "threads": 16
     }
   }
 }

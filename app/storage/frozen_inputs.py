@@ -1041,11 +1041,9 @@ def _validate_review_input_contract(
         return
     species_name = _manifest_species_name(manifest)
     if species_name is None:
-        review = run_config.assembly_review
-        if review is not None and review.busco is not None and review.busco.lineage:
-            return
         raise FrozenInputValidationError(
-            "assembly_review requires input_manifest.user_metadata.target_species"
+            "assembly_review requires input_manifest.user_metadata.target_species "
+            "to contain an NCBI Latin scientific name"
         )
     configured_species = None
     if (

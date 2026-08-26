@@ -1894,16 +1894,6 @@ def _target_species_name(state: TopLevelState) -> str | None:
     if not isinstance(raw, dict):
         return None
     metadata = dict(raw.get("user_metadata") or {})
-    for key in (
-        "target_species",
-        "species_name",
-        "scientific_name",
-        "organism",
-        "species",
-        "chinese_name",
-    ):
-        if key in raw:
-            metadata.setdefault(key, raw[key])
     return species_name_from_metadata(metadata)
 
 

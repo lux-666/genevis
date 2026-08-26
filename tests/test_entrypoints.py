@@ -224,6 +224,7 @@ def _write_assembly_review_request(
         paths,
         manifest_draft={
             "session_id": session_id,
+            "user_metadata": {"target_species": "Fixture species"},
             "assets": [
                 {
                     "asset_type": "raw_long_reads",
@@ -357,7 +358,7 @@ class EntrypointTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("目标物种", stdout.getvalue())
-        self.assertIn("卵鳎", stdout.getvalue())
+        self.assertIn("Solea ovata", stdout.getvalue())
 
     def test_tui_request_interrupt_reports_phase(self):
         stdout = io.StringIO()
