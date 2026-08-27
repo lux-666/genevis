@@ -3,11 +3,14 @@
 # override the default fallback.
 #
 # SETUP INSTRUCTIONS:
-# 1. Install the tool/package/database paths represented below.
-# 2. Run `gene-agent bootstrap`; it collects concrete values, prints one plan,
-#    and writes that same plan only after confirmation.
-# 3. Rerun bootstrap to validate the full host catalog or use --update to repair
-#    an existing bootstrap-owned value. Database paths never enter RunConfig.
+# 1. Either edit a machine-local config/envs.yaml manually or run
+#    `gene-agent bootstrap` as an optional assistant.
+# 2. Database and AutoHiC groups may be omitted until their resources are
+#    installed. Omit all of `databases` for the former; for the latter omit the
+#    four package entries and `methods.hic_scaffolding.candidate.autohic`.
+# 3. After installing a skipped resource, add its complete group manually or
+#    rerun ordinary bootstrap. Use --update to replace an existing managed
+#    value. Database paths never enter RunConfig.
 #
 # Two mutually exclusive target forms are supported on any entry:
 #   conda_env: env_geno_exec          # named env  → conda run -n env_geno_exec

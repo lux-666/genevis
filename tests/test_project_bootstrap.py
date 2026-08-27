@@ -51,8 +51,10 @@ class ProjectBootstrapTests(unittest.TestCase):
             try:
                 answers = [
                     "tools",
+                    "y",
                     str(database_paths["busco"]),
                     str(database_paths["ncbi"]),
+                    "y",
                     str(package_roots["autohic"]),
                     str(package_roots["juicer"]),
                     str(package_roots["three_d_dna"]),
@@ -114,6 +116,55 @@ class ProjectBootstrapTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     os.environ["GENE_AGENT_LLM_API_KEY"], "sk-bootstrap-secret"
+                )
+            finally:
+                os.environ["PATH"] = previous_path
+                if previous_key is None:
+                    os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
+                else:
+                    os.environ["GENE_AGENT_LLM_API_KEY"] = previous_key
+
+    def test_cli_can_initialize_before_optional_resources_are_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_conda = fake_bin / "conda"
+            fake_conda.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_conda.chmod(0o755)
+            previous_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{fake_bin}{os.pathsep}{previous_path}"
+            previous_key = os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
+            try:
+                with (
+                    patch(
+                        "builtins.input",
+                        side_effect=[
+                            "tools",
+                            "n",
+                            "n",
+                            "y",
+                            "https://llm.example/v1",
+                            "test-model",
+                            "",
+                        ],
+                    ),
+                    patch("getpass.getpass", return_value="sk-later-resources"),
+                ):
+                    code = _run_bootstrap(argparse.Namespace(config=str(config_path)))
+
+                self.assertEqual(code, 0)
+                document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                self.assertNotIn("databases", document)
+                self.assertEqual(document["packages"], {})
+                self.assertNotIn(
+                    "hic_scaffolding.candidate.autohic",
+                    document["methods"],
+                )
+                self.assertIn(
+                    "GENE_AGENT_LLM_MODEL=test-model",
+                    (root / ".env").read_text(encoding="utf-8"),
                 )
             finally:
                 os.environ["PATH"] = previous_path
@@ -210,6 +261,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             databases = _database_fixture(root)
             answers = iter(
                 [
+                    "y",
                     str(databases["busco"]),
                     str(databases["ncbi"]),
                     "n",
@@ -230,6 +282,47 @@ class ProjectBootstrapTests(unittest.TestCase):
             self.assertEqual(
                 plan.config_data["databases"]["ncbi_metazoa"]["reference_dir"],
                 str(databases["ncbi"]),
+            )
+
+    def test_plain_bootstrap_can_add_databases_to_manual_partial_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "envs.yaml"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                "default:\n"
+                "  conda_bin: /usr/bin/true\n"
+                "  fallback_env: tools\n"
+                "packages: {}\n"
+                "stages: {}\n"
+                "methods: {}\n",
+                encoding="utf-8",
+            )
+            databases = _database_fixture(root)
+
+            with (
+                patch("sys.stdin.isatty", return_value=True),
+                patch(
+                    "builtins.input",
+                    side_effect=[
+                        "y",
+                        str(databases["busco"]),
+                        str(databases["ncbi"]),
+                        "n",
+                        "n",
+                        "",
+                    ],
+                ),
+            ):
+                code = _run_bootstrap(argparse.Namespace(config=str(config_path)))
+
+            self.assertEqual(code, 0)
+            resolver = EnvResolver(config_path)
+            self.assertIsNotNone(resolver.databases)
+            assert resolver.databases is not None
+            self.assertEqual(
+                resolver.databases.busco.default_lineage,
+                "metazoa_odb10",
             )
 
     def test_update_replaces_only_selected_existing_field_on_final_enter(self):

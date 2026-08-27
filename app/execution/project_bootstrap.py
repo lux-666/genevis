@@ -137,6 +137,7 @@ def build_project_bootstrap_plan(
     *,
     config_values: Mapping[str, str] | None = None,
     dotenv_values: Mapping[str, str] | None = None,
+    configure_databases: bool | None = None,
     configure_autohic: bool | None = None,
     approved_overwrites: set[str] | None = None,
     template_path: Path | None = None,
@@ -171,14 +172,27 @@ def build_project_bootstrap_plan(
         template = _resolve_template(config_path, template_path)
         draft = _read_yaml(template) if template is not None else _minimal_config()
 
+    if configure_databases is None:
+        configure_databases = (
+            "databases" in draft
+            if source_exists
+            else bool(
+                values.get(_BUSCO_LINEAGE_PATH_KEY)
+                or values.get(_NCBI_REFERENCE_DIR_KEY)
+            )
+        )
     if configure_autohic is None:
-        # A newly generated project config must already contain the setup that
-        # the AutoHiC execution path consumes. Existing projects remain
-        # unchanged unless they already declare AutoHiC or explicitly opt in.
         configure_autohic = (
             bool(_mapping(draft.get("packages")).get("autohic"))
             if source_exists
-            else True
+            else any(
+                values.get(key)
+                for key in (
+                    _AUTOHIC_TARGET_KEY,
+                    *_PACKAGE_VALUE_KEYS,
+                    *_MODEL_VALUE_KEYS,
+                )
+            )
         )
 
     changes: list[ProjectConfigChange] = []
@@ -241,19 +255,26 @@ def build_project_bootstrap_plan(
         shared_target = current_shared_target or "env_geno_exec"
     if not explicit_update:
         _replace_placeholder_targets(draft, shared_target)
-    _configure_databases(
-        draft,
-        values=values,
-        config_path=config_path,
-        changes=changes,
-        unresolved=unresolved,
-        explicit_update=explicit_update,
-    )
+    if not source_exists and not configure_databases:
+        draft.pop("databases", None)
+    elif configure_databases:
+        _configure_databases(
+            draft,
+            values=values,
+            config_path=config_path,
+            changes=changes,
+            unresolved=unresolved,
+            explicit_update=explicit_update,
+        )
 
     if not source_exists and not configure_autohic:
         # Package paths are optional project setup. Do not leave an invalid
         # collection of example placeholders in a newly initialized project.
         draft["packages"] = {}
+        _mapping(draft.get("methods")).pop(
+            "hic_scaffolding.candidate.autohic",
+            None,
+        )
     elif configure_autohic:
         if not explicit_update:
             _ensure_autohic_shape(draft)
@@ -336,32 +357,36 @@ def collect_project_bootstrap_plan(
             default="env_geno_exec",
         )
 
-    # An existing pre-database envs.yaml is a migration input, not a reason to
-    # skip the new host contract. Prompt for the two database locations in the
-    # same compact group used for a fresh config.
     databases = _mapping(inspect.get("databases"))
-    busco = _mapping(databases.get("busco"))
-    default_lineage = str(busco.get("default_lineage") or "").strip()
-    lineages = _mapping(busco.get("lineages"))
-    current_lineage = _mapping(lineages.get(default_lineage))
-    current_lineage_path = current_lineage.get("path")
-    if not current_lineage_path or _is_placeholder(current_lineage_path):
-        entered = _ask_text(
+    configure_databases = bool(databases)
+    if not source_exists or not configure_databases:
+        configure_databases = _ask_yes_no(
             prompt,
-            "Default BUSCO lineage directory (basename must end in _odbN)",
+            "Configure Assembly Review database paths now?",
         )
-        if entered:
-            values[_BUSCO_LINEAGE_PATH_KEY] = entered
-    ncbi = _mapping(databases.get("ncbi_metazoa"))
-    current_ncbi_dir = ncbi.get("reference_dir")
-    if not current_ncbi_dir or _is_placeholder(current_ncbi_dir):
-        entered = _ask_text(prompt, "NCBI Metazoa reference directory")
-        if entered:
-            values[_NCBI_REFERENCE_DIR_KEY] = entered
+    if configure_databases:
+        busco = _mapping(databases.get("busco"))
+        default_lineage = str(busco.get("default_lineage") or "").strip()
+        lineages = _mapping(busco.get("lineages"))
+        current_lineage = _mapping(lineages.get(default_lineage))
+        current_lineage_path = current_lineage.get("path")
+        if not current_lineage_path or _is_placeholder(current_lineage_path):
+            entered = _ask_text(
+                prompt,
+                "Default BUSCO lineage directory (basename must end in _odbN)",
+            )
+            if entered:
+                values[_BUSCO_LINEAGE_PATH_KEY] = entered
+        ncbi = _mapping(databases.get("ncbi_metazoa"))
+        current_ncbi_dir = ncbi.get("reference_dir")
+        if not current_ncbi_dir or _is_placeholder(current_ncbi_dir):
+            entered = _ask_text(prompt, "NCBI Metazoa reference directory")
+            if entered:
+                values[_NCBI_REFERENCE_DIR_KEY] = entered
 
     packages = _mapping(inspect.get("packages"))
-    configure_autohic = bool(packages.get("autohic")) if source_exists else True
-    if source_exists and not configure_autohic:
+    configure_autohic = bool(packages.get("autohic"))
+    if not source_exists or not configure_autohic:
         configure_autohic = _ask_yes_no(
             prompt,
             "Configure AutoHiC, Juicer, and 3D-DNA paths now?",
@@ -431,6 +456,7 @@ def collect_project_bootstrap_plan(
         config_path,
         config_values=values,
         dotenv_values=dotenv_values,
+        configure_databases=configure_databases,
         configure_autohic=configure_autohic,
         template_path=template_path,
     )

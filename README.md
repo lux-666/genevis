@@ -107,16 +107,19 @@ gene-agent bootstrap
 bash scripts/server_check.sh
 ```
 
-先按 [New Host Setup](docs/deployment/migration.md) 安装种子中声明的工具、数据库和
-AutoHiC 资源。`bootstrap` 在同一次调用中展示候选计划并等待确认，确认后才写入并
-检查完整主机 catalog；不会重新收集第二份计划。
+`config/envs.yaml` 和 `.env` 可以直接手动维护；`bootstrap` 是可选的生成、补填和
+校验助手。数据库或 AutoHiC 尚未安装时，可以先运行 bootstrap 并跳过对应配置组，
+以后安装完成后再手动补入，或重新运行普通 `gene-agent bootstrap` 选择补填。每次
+bootstrap 都在同一次调用中展示候选计划并等待确认，确认后才写入；不会重新收集
+第二份计划。
 
 `docs/examples/envs.yaml.example` 是提交到 Git 的通用种子；bootstrap 生成或更新的
 `config/envs.yaml` 是被忽略的本机配置，不再作为仓库共享配置提交。
 `server_check.sh` 检查 orchestrator 前置条件和权威 contig 模板中固定 stage 的
 工具/package closure，以及主机配置中 BUSCO/NCBI 数据库的结构与完整性；Assembly
 方法会在上游证据产生后于 stage 内推荐，并从冻结的环境快照检查所选候选。真实
-`gene-agent run` 还会检查输入和 LLM。
+`gene-agent run` 还会检查输入和 LLM。因此部分 bootstrap 成功不代表完整 contig
+环境已经就绪。
 `server_test.sh` 只做代码回归、
 compile 和 diff 检查，不是真实数据生信 smoke test。
 

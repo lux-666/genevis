@@ -58,9 +58,11 @@ The `git restore` above discards only the old tracked working copy after its
 exact host mapping has been backed up outside the checkout. After the pull, the
 copy command restores that mapping at the now-ignored path. Git should report
 `!! config/envs.yaml`; then run the normal bootstrap preview and server checks.
-A fresh clone has only `docs/examples/envs.yaml.example`; interactive
-`gene-agent bootstrap` creates the active file from that seed after displaying
-the exact plan and receiving confirmation. Normal execution does not
+A fresh clone has only `docs/examples/envs.yaml.example`; the operator may
+create the active file manually or use interactive `gene-agent bootstrap`.
+Bootstrap may skip database or AutoHiC setup until those resources are
+installed, and creates the selected plan only after displaying it and receiving
+confirmation. Normal execution does not
 silently use the example when the active mapping is missing.
 
 ## Mac workflow

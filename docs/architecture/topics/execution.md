@@ -47,7 +47,8 @@ method closure and any mandatory LLM endpoint. The same closure is then used by
 the whole-run dependency snapshot, and a failure creates no session. Broader
 machine-catalog readiness remains the responsibility of
 [bootstrap](bootstrap.md); execution still verifies the frozen dependency
-selection at the boundary where it is used.
+selection at the boundary where it is used. The active mapping may be prepared
+manually; bootstrap is its optional configured-catalog validation assistant.
 
 ## Shared method flow
 

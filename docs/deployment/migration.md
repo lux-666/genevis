@@ -104,10 +104,10 @@ needs its declared external package roots,
 Juicer/3D-DNA/JAR layout, and model files.
 
 Install the NCBI snapshot through its single
-[snapshot authority](../../data/reference/ncbi_metazoa/README.md). Install all
-AutoHiC/Juicer/3D-DNA/JAR/model resources declared by the generic host seed;
-this version intentionally validates that full catalog rather than shrinking
-fresh bootstrap to the contig-only subset.
+[snapshot authority](../../data/reference/ncbi_metazoa/README.md). Install
+AutoHiC/Juicer/3D-DNA/JAR/model resources only when this host will expose that
+capability. A skipped optional capability can be added to the host mapping
+later.
 
 ## Configure the active host mapping
 
@@ -116,30 +116,44 @@ Execution reads `GENE_AGENT_ENVS_CONFIG` when set, otherwise
 different directories. `docs/examples/envs.yaml.example` is only the generic
 bootstrap seed, never a second runtime input.
 
-After the declared tool, database, and AutoHiC resources exist, run one
-interactive command:
+The active mapping may be written manually or with the optional assistant:
 
 ```bash
 gene-agent bootstrap
 ```
 
-Bootstrap collects missing host values, prints one exact plan, and waits for an
-empty Enter confirmation before writing that same plan. `bootstrap --update`
-is the repair mode for selecting existing bootstrap-owned fields. Neither mode
-uses a separate `--apply` invocation.
+On a fresh host, bootstrap can create the core Conda mapping before databases or
+AutoHiC are installed: answer no for either optional group. After installing a
+skipped resource, either add its complete YAML group manually or rerun ordinary
+`gene-agent bootstrap` and choose to configure it. `bootstrap --update` replaces
+selected values that are already managed; it is not required for adding an
+absent optional group. Every assisted change prints one exact plan and waits for
+an empty Enter confirmation before writing it.
 
-Fill the single `databases:` block once: register installed BUSCO lineage
-aliases and the NCBI snapshot. Per-run RunConfig does not repeat database paths,
-versions, provenance, or lineage selection. For Assembly Review, the manifest
-supplies the NCBI Latin scientific name in `user_metadata.target_species`; the
-system derives lineage from the frozen NCBI snapshot and installed host
-registry. A historical `assembly_review.busco.lineage` is consistency-only.
+Manual edits are equally valid. When copying the generic seed by hand, replace
+all retained placeholders and delete any optional group that is not yet
+configured; do not leave a half-filled database or package group. Skipping
+AutoHiC means removing its four package entries and
+`methods.hic_scaffolding.candidate.autohic` together.
+
+When the databases are installed, fill the single `databases:` block: register
+installed BUSCO lineage aliases and the NCBI snapshot. Per-run RunConfig does
+not repeat database paths, versions, provenance, or lineage selection. For
+Assembly Review, the manifest supplies the NCBI Latin scientific name in
+`user_metadata.target_species`; the system derives lineage from the frozen NCBI
+snapshot and installed host registry. A historical
+`assembly_review.busco.lineage` is consistency-only.
+
+The NCBI installer resolves its destination from the active mapping. If using
+that installer before the snapshot exists, manually add the intended database
+destination first, run the installer, and then use bootstrap or
+`--verify-only` to validate the completed installation.
 
 Bootstrap does not install arbitrary packages or Conda environments. It
 validates package canaries, performs the bounded declared Juicer conformance,
-and probes every method entry in the active mapping. Its full-catalog scope is
-intentionally broader than the fixed contig check below. The precise boundary
-is maintained in [Project Bootstrap](../architecture/topics/bootstrap.md).
+and probes every declared method entry in the active mapping. The precise
+boundary is maintained in
+[Project Bootstrap](../architecture/topics/bootstrap.md).
 
 Bootstrap catalog validation is not a substitute for the contig-specific
 database and tool checks below.
@@ -156,7 +170,8 @@ bash /path/to/gene_agent/scripts/server_check.sh
 Scope:
 
 - `server_check.sh`: orchestrator prerequisites plus the fixed contig template
-  tool/package closure; deferred Assembly-candidate readiness is stage-owned;
+  tool/package/database closure; deferred Assembly-candidate readiness is
+  stage-owned;
 - `server_test.sh`: earlier Python regression, compile, and diff gate;
 - real-data smoke: an explicit operator run using server-local inputs, described
   in [Run and Recovery](../user_guide/run-and-recovery.md).

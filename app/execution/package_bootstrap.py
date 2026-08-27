@@ -298,15 +298,9 @@ def verify_envs_yaml(
             elif model_path is None or not model_path.is_file():
                 issues.append(f"{field} does not exist: {model_path}")
 
-    # Database declarations are part of the same host configuration lifecycle.
-    # Bootstrap validates every configured entry, while run readiness later
-    # narrows that catalog to the databases required by the selected workflow.
-    if resolver.databases is None:
-        issues.append(
-            "databases registry is missing; configure databases.busco and "
-            "databases.ncbi_metazoa in the active envs.yaml"
-        )
-    else:
+    # Database declarations are optional host capabilities. Bootstrap validates
+    # them when configured; run readiness requires them for Assembly Review.
+    if resolver.databases is not None:
         from app.execution.database_resolution import canonical_database_path
         from app.reference.ncbi_metazoa import validate_reference_snapshot
         from app.schemas.run_config import validate_busco_lineage

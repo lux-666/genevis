@@ -8,7 +8,7 @@ contract owned by [`user_guide/run-and-recovery.md`](../user_guide/run-and-recov
 
 | Operation | Authoritative entry | Owns | Does not own |
 |---|---|---|---|
-| Bootstrap | `gene-agent bootstrap` / `bootstrap --update` | machine configuration lifecycle, the active environment mapping, declared package canaries, and every method entry declared in that mapping | package installation, biological inputs, or a run session |
+| Bootstrap | optional `gene-agent bootstrap` / `bootstrap --update` assistant | generating, extending, and validating the active environment mapping, declared package canaries, and every method entry declared in that mapping | exclusive authorship of the mapping, package installation, biological inputs, or a run session |
 | Contig acceptance | [`scripts/server_check.sh`](../../scripts/server_check.sh) | read-only orchestrator prerequisites, fixed-stage method/package closure, and host BUSCO/NCBI database integrity derived from the authoritative five-stage contig template | deferred Assembly-candidate readiness, LLM reachability, private inputs, or biological execution |
 | Code verification | [`scripts/server_test.sh`](../../scripts/server_test.sh) | pytest regression, compileall, and diff check | Conda tool readiness, real-data smoke, or any biological command |
 
@@ -23,13 +23,21 @@ otherwise the repository default is used. Use an absolute override when commands
 may start outside the checkout; a relative override is resolved from the caller's
 current directory, while the default path is anchored to the checkout.
 
-The default bootstrap command collects missing values, previews and validates
-one plan—including declared package-conformance actions—then waits for
-confirmation before applying that same plan. `--update` selects existing
-bootstrap-owned fields for the same preview/confirmation flow.
-Bootstrap then checks every package and method entry declared in the active
-mapping, including any Assembly candidates the host exposes. That catalog scope
-may be broader than the fixed methods checked for one contig run.
+Operators may create and edit the active mapping and project `.env` directly;
+bootstrap is optional. Manual and assisted edits use the same runtime format,
+and either route may be followed by bootstrap validation.
+
+The default bootstrap command collects the core Conda target and asks whether
+to configure the optional Assembly Review database and AutoHiC groups. A group
+may be skipped until its resources are installed; bootstrap still previews and
+publishes the valid remaining plan. Rerun the ordinary command later to add a
+missing group, or edit the YAML manually. `--update` replaces selected existing
+managed fields through the same preview/confirmation flow.
+
+Bootstrap checks every package, method, and database entry declared in the
+active mapping, including any Assembly candidates the host exposes. An omitted
+optional group is not a bootstrap error. `server_check.sh` or confirmed-run
+readiness still fails closed when its workflow requires that group.
 
 Bootstrap does not install Conda environments, tools, databases, BUSCO lineages,
 models, or an LLM service. Those are provisioned by the operator and referenced
@@ -43,6 +51,10 @@ the mapping.
 ```bash
 gene-agent bootstrap
 ```
+
+This command is an assisted configuration route, not a mandatory predecessor
+to execution. A manually prepared active mapping may proceed directly to the
+appropriate readiness check.
 
 ## Verification sequence
 

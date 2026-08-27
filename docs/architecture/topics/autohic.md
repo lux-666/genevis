@@ -8,7 +8,7 @@
 > **Comes from:** parent-stage selection in
 > [runtime orchestration](runtime-orchestration.md), current resources from
 > [data and storage](data-and-storage.md), machine setup from
-> [bootstrap](bootstrap.md), and schema-3
+> the active host mapping described by [bootstrap](bootstrap.md), and schema-3
 > [parameter recommendation](parameter-recommendation.md).
 >
 > **Feeds into:** the adopted `assembly` resource, downstream stages, durable
@@ -78,10 +78,11 @@ frozen parameter evidence, AutoHiC configuration, retained script, command
 record, exact output paths, and typed dependencies for the shared lifecycle.
 
 Machine-level AutoHiC, Juicer, 3D-DNA, Python, and model locations come from
-the dependency selection prepared through [bootstrap](bootstrap.md) and frozen
-for the run. The assembly, Hi-C read pairs, and any supplied restriction enzyme
-are run-level facts. The adapter refuses to freeze when those boundaries cannot
-produce a complete executable attempt.
+the active host mapping, whether maintained manually or through
+[bootstrap](bootstrap.md), and are frozen for the run. The assembly, Hi-C read
+pairs, and any supplied restriction enzyme are run-level facts. The adapter
+refuses to freeze when those boundaries cannot produce a complete executable
+attempt.
 
 Execution uses the production local subprocess Runner described in
 [method execution](execution.md). The generated wrapper invokes the configured

@@ -5,7 +5,8 @@
 > **Read when:** changing conversational intake, Plan Draft behavior,
 > whole-run freeze, or draft recovery.  
 > **Comes from:** operator goal text, confirmed sample facts, descriptor-derived
-> method catalog, and machine configuration prepared by [bootstrap](bootstrap.md).  
+> method catalog, and machine configuration maintained manually or with the
+> optional [bootstrap assistant](bootstrap.md).
 > **Authority:** the frozen RunConfig owns stage occurrence and local-execution
 > consent; the Assembly stage owns method identity and method parameters after
 > upstream evidence exists. Intake text is a routing hint, never an execution
