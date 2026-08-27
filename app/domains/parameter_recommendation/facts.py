@@ -518,6 +518,9 @@ def resolve_canonical_fact(key: str, facts: CanonicalRecommendationFacts) -> Any
     if key == "effective_genome_size_bp":
         f = facts.genome.effective_genome_size
         return f.value if f is not None else None
+    if key == "species_ploidy":
+        f = facts.species.ploidy
+        return f.value if f is not None else None
     if key == "read_n50_bp":
         f = facts.reads.read_n50
         return f.value if f is not None else None

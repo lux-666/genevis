@@ -131,7 +131,8 @@ cp docs/examples/contig_run_config.template.json /server/path/run_config.json
 模板不重复这些 manifest 事实。`user_metadata.target_species` 必须填写完整的
 NCBI 拉丁学名，不能填写俗名或缩写。主机工具以及 BUSCO/NCBI 数据库实体只在
 `config/envs.yaml` 配置一次；系统从物种名自动选择 BUSCO lineage，RunConfig
-只填写执行参数（如 `threads`），不填写 lineage、数据库路径、版本或来源。
+只填写执行参数（如 `threads`）和非 manifest 生物学事实（如 `ploidy`），不填写
+lineage、数据库路径、版本或来源。运行前按样品核对模板中的 ploidy 和各阶段线程数。
 contig 模板也不预填 assembler 或 Assembly 参数：Assembly 会在 QC/survey 结果可用后
 推荐方法，再推荐参数。
 

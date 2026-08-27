@@ -71,8 +71,11 @@ duplicated here; use the reference contract when debugging or changing them.
 Species identity belongs only to manifest `user_metadata.target_species` as an
 NCBI Latin scientific name. RunConfig does not repeat
 `shared_parameters.species_facts.scientific_name`; runtime projects the manifest
-identity into canonical recommendation facts. Explicit Hi-C settings, retry
-policy, and T2T read declarations remain in their schema-owned authored inputs.
+identity into canonical recommendation facts. RunConfig may independently
+supply remaining facts such as `shared_parameters.species_facts.ploidy`; that
+value drives GenomeScope and Hifiasm's `--n-hap` while the scientific name still
+comes from the manifest. Explicit Hi-C settings, retry policy, and T2T read
+declarations remain in their schema-owned authored inputs.
 Start from the schema-valid files in [`../examples/`](../examples/) and validate
 them through the normal `gene-agent run` boundary. Recommendations and example
 values must never silently become additional RunConfig validation rules.

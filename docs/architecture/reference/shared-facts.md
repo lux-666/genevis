@@ -89,8 +89,11 @@ scientific name; no common-name or LLM resolution path exists. Inventory
 projects that frozen name into `species_facts.scientific_name`; a conflicting
 RunConfig copy fails before execution. The schema-retained RunConfig copy is a
 legacy consistency assertion, not a public species-input surface; templates and
-TUI planning do not emit it. `telomere_motif` is normalized to uppercase ACGT
-and requires at least two bases.
+TUI planning do not emit it. Other species facts remain valid without that
+legacy copy: for example, RunConfig may supply only `species_facts.ploidy`, and
+Inventory adds the manifest-owned scientific name during reconciliation.
+`telomere_motif` is normalized to uppercase ACGT and requires at least two
+bases.
 
 ## Planning and freeze validation
 

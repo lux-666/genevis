@@ -5,9 +5,10 @@ with explicit local-execution authorization, shared biological facts, and
 executor-owned settings.
 
 The schema rejects unknown stages and unknown fields.  ``assembly`` carries
-only planning facts and input references: the stage selects its method and
-parameters after upstream evidence exists.  The schema does not invent
-execution consent, carry descriptor or env facts, or act as a method catalog.
+only planning facts, method-independent resources, and input references: the
+stage selects its method and parameters after upstream evidence exists.  The
+schema does not invent execution consent, carry descriptor or env facts, or act
+as a method catalog.
 """
 
 from __future__ import annotations
@@ -169,7 +170,7 @@ class ReviewPolicyConfig(BaseModel):
 
 
 class AssemblyRunConfig(BaseModel):
-    """Planning facts and input selectors for deferred Assembly execution.
+    """Planning facts, resources, and inputs for deferred Assembly execution.
 
     Method identity and method-specific parameters deliberately are not valid
     RunConfig fields. They are recommended, approved, and frozen by Assembly
@@ -178,6 +179,7 @@ class AssemblyRunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    threads: int = Field(default=32, gt=0)
     hifi_reads_ref: str | None = None
     hic_reads_ref: str | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"

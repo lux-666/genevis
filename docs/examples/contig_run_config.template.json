@@ -26,12 +26,22 @@
     "max_blocked_seconds": 300
   },
 
+  "shared_parameters": {
+    "species_facts": {
+      "ploidy": 2
+    }
+  },
+
   "genome_survey": {
     "survey_parameters": {
       "kmer_size": 21,
       "hash_size": "1G",
       "threads": 8
     }
+  },
+
+  "assembly": {
+    "threads": 8
   },
 
   "assembly_dedup": {

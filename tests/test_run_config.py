@@ -276,7 +276,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": _local_stage_requests("genome_survey"),
                 "shared_parameters": {
                     "species_facts": {
-                        "scientific_name": "Solea ovata",
                         "ploidy": 4,
                     }
                 },
@@ -289,6 +288,31 @@ class RunConfigSchemaTests(unittest.TestCase):
         seeds = _stage_seeds_from_run_config(config, shared_parameters=None)
 
         self.assertEqual(seeds["genome_survey"]["survey_parameters"]["ploidy"], 4)
+
+    def test_assembly_threads_are_method_independent(self):
+        config = RunConfig.model_validate(
+            {
+                "requested_stages": _local_stage_requests("assembly"),
+                "assembly": {"threads": 12},
+            }
+        )
+
+        assert config.assembly is not None
+        self.assertEqual(config.assembly.threads, 12)
+        self.assertEqual(
+            _stage_seeds_from_run_config(config, shared_parameters=None)["assembly"][
+                "threads"
+            ],
+            12,
+        )
+
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate(
+                {
+                    "requested_stages": _local_stage_requests("assembly"),
+                    "assembly": {"threads": 0},
+                }
+            )
 
     def test_genome_survey_read_length_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:

@@ -288,6 +288,10 @@ external directories freeze a deterministic tree hash, file count, and total
 byte count. The shared run node verifies every dependency immediately before
 invoking the Runner, including after resume. Missing, re-registered,
 path-drifted, or byte-drifted input fails without starting the process.
+Within one process, repeated SHA-256 requests reuse a bounded digest only while
+canonical path, device, inode, size, nanosecond mtime, and nanosecond ctime are
+unchanged; any fingerprint change forces a byte rehash. A resumed process
+starts with an empty cache.
 
 `run_frozen_attempt` owns Runner invocation, stdout/stderr publication,
 artifact-index registration, output cleanup policy, and attempt-started or

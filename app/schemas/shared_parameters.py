@@ -29,7 +29,7 @@ class SpeciesFacts(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    scientific_name: str
+    scientific_name: str | None = None
     taxon_id: int | None = Field(default=None, gt=0)
     clade: str | None = None
     ploidy: int | None = Field(default=None, gt=0)

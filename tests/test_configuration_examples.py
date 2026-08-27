@@ -118,13 +118,19 @@ class PublishedConfigurationContractTests(unittest.TestCase):
             ],
         )
 
-    def test_contig_template_defers_assembly_and_does_not_repeat_manifest_facts(self):
+    def test_contig_template_defers_method_and_sets_shared_execution_inputs(self):
         path = EXAMPLES_DIR / "contig_run_config.template.json"
         config = load_run_config(path)
         payload = json.loads(path.read_text(encoding="utf-8"))
 
-        self.assertIsNone(config.assembly)
-        self.assertNotIn("shared_parameters", payload)
+        assert config.assembly is not None
+        assert config.shared_parameters is not None
+        assert config.shared_parameters.species_facts is not None
+        self.assertEqual(config.assembly.threads, 8)
+        self.assertEqual(config.shared_parameters.species_facts.ploidy, 2)
+        self.assertNotIn(
+            "scientific_name", payload["shared_parameters"]["species_facts"]
+        )
         self.assertEqual(
             config.review_policy.effective_max_blocked_seconds("assembly"), 300
         )

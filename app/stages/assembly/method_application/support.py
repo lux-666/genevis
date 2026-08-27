@@ -333,13 +333,21 @@ def build_assembly_execution_contract(
         raw_parameters = {}
     if not isinstance(raw_parameters, dict):
         raise ValueError(f"{parameter_key} must be a mapping")
-    thread_value = raw_parameters.get("threads")
+    public_thread_value = output.get("threads")
+    thread_value = (
+        public_thread_value
+        if public_thread_value is not None
+        else raw_parameters.get("threads")
+    )
     threads = None
     if thread_value is not None:
         invalid: list[dict[str, Any]] = []
+        thread_field = (
+            "threads" if public_thread_value is not None else f"{parameter_key}.threads"
+        )
         threads = positive_int(
             thread_value,
-            f"{parameter_key}.threads",
+            thread_field,
             [],
             invalid,
         )

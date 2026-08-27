@@ -105,6 +105,7 @@ ExecutorSourceKind = Literal["fixed", "runtime", "materialized_default"]
 # Valid L1 fact keys (closed enum for catalog validation).
 CanonicalFactKey = Literal[
     "effective_genome_size_bp",
+    "species_ploidy",
     "read_n50_bp",
     "raw_coverage_x",
     "hic_provided_restriction_enzyme",

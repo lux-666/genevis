@@ -264,7 +264,9 @@ parameters:
       l0:
         kind: materialized_default
         value: 2
-    description: "Assumed haplotype count; omitted unless a future typed producer is added."
+      l1:
+        fact: species_ploidy
+    description: "Assumed haplotype count; supplied species ploidy overrides the diploid default."
 
   kmer_length:
     value_type: int

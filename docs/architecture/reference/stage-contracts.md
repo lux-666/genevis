@@ -263,6 +263,10 @@ The exact fact placement is owned by the
 [run-data contract](data-contract.md#101-assembly-method-recommendation).
 Each recommendation is an attempt-local sparse mapping; retries do not inherit
 omitted values or route around approval through model output.
+`assembly.threads` is the method-independent RunConfig execution resource and
+is frozen into the selected method's L0 execution contract. For Hifiasm and
+Hifiasm-ONT, a supplied `species_facts.ploidy` binds `--n-hap` as an L1 fact;
+when absent, the catalog retains its diploid default of `2`.
 
 Missing required parameters, incompatible read types, execution failure, and
 missing expected outputs are explicit failures rather than planning success.
@@ -293,6 +297,13 @@ so Assembly Review can compare or retain it. Without explicit automatic-purge
 approval, the stage safely passes the original candidate through. Missing
 materialized inputs are represented explicitly; the stage does not synthesize
 a successful purge.
+
+The current approval authorizes the complete automatic `calcuts` path; there is
+no separate operator gate for inspecting the depth histogram or derived cutoff
+values before purge execution. Such a cutoff-review gate remains a design
+candidate rather than a current requirement. Preserving the raw candidate and
+comparing raw/purged candidates in Assembly Review are the implemented
+safeguards.
 
 The authoritative outcome table is:
 

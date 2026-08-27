@@ -55,6 +55,7 @@ from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     CanonicalGenomeFacts,
     CanonicalRecommendationFacts,
+    CanonicalSpeciesFacts,
     ParameterRecommendationManifestV3,
     QuantityFact,
     QuantityOrigin,
@@ -263,6 +264,7 @@ def _snapshot(
     method_id: str,
     *,
     genome_size: int = 2_000_000,
+    ploidy: int | None = None,
 ) -> RecommendationInputSnapshotV3:
     if method_id == "assembly.candidate.hifiasm":
         route = "hifi"
@@ -278,13 +280,24 @@ def _snapshot(
         method_id=method_id,
         task="recommend_initial",
         facts=CanonicalRecommendationFacts(
+            species=CanonicalSpeciesFacts(
+                ploidy=(
+                    QuantityFact(
+                        value=ploidy,
+                        unit="count",
+                        origin=QuantityOrigin(kind="provided", producer="run_config"),
+                    )
+                    if ploidy is not None
+                    else None
+                )
+            ),
             genome=CanonicalGenomeFacts(
                 effective_genome_size=QuantityFact(
                     value=genome_size,
                     unit="bp",
                     origin=QuantityOrigin(kind="provided", producer="run_config"),
                 )
-            )
+            ),
         ),
         stage_context=AssemblyRecommendationContext(
             stage="assembly",
@@ -660,6 +673,7 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
         self.assertTrue(catalog.parameters["ont_mode"].layers.l0.value)
         self.assertIsNotNone(catalog.parameters["hg_size"].layers.l1)
         self.assertIsNotNone(catalog.parameters["n_hap"].layers.l0)
+        self.assertIsNotNone(catalog.parameters["n_hap"].layers.l1)
         for name in (
             "hom_cov",
             "purge_level",
@@ -1066,6 +1080,14 @@ class CommandBuilderTests(unittest.TestCase):
         self.catalog = load_parameter_catalog(self.method_id)
         self.snapshot = _snapshot(self.method_id, genome_size=1_000_000_000)
 
+    def test_execution_contract_uses_public_assembly_threads(self):
+        contract = build_assembly_execution_contract(
+            {"threads": 8},
+            method_id="assembly.candidate.hifiasm_ont",
+        )
+
+        self.assertEqual(contract.l0_executor_values(), {"assembly_threads": 8})
+
     def test_hifiasm_ont_resolver_and_renderer_preserve_source_ownership(self):
         resolved = resolve_assembly_parameters(
             catalog=self.catalog,
@@ -1177,6 +1199,25 @@ class CommandBuilderTests(unittest.TestCase):
 
                 self.assertEqual(resolved.l0_executor["threads"], 32)
                 self.assertEqual(argv[argv.index("-t") + 1], "32")
+
+    def test_species_ploidy_overrides_hifiasm_diploid_default(self):
+        for method_id in (
+            "assembly.candidate.hifiasm",
+            "assembly.candidate.hifiasm_ont",
+        ):
+            with self.subTest(method_id=method_id):
+                catalog = load_parameter_catalog(method_id)
+                resolved = resolve_assembly_parameters(
+                    catalog=catalog,
+                    snapshot=_snapshot(method_id, ploidy=4),
+                    approved_l2={},
+                    l0_executor_values=_l0_executor_values(method_id),
+                )
+                argv = render_assembly_cli(catalog, resolved)
+
+                self.assertEqual(resolved.l1_facts["n_hap"], 4)
+                self.assertEqual(resolved.effective_source_by_parameter["n_hap"], "l1")
+                self.assertEqual(argv[argv.index("--n-hap") + 1], "4")
 
     def test_hifiasm_genome_size_fact_transform_is_rendered(self):
         cases = [
