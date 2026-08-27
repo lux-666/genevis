@@ -83,6 +83,7 @@ from app.schemas.state import (
     ActiveInterrupt,
     StateUpdate,
     TopLevelState,
+    validate_workflow_steps,
 )
 from app.stages.assembly.method_application.support import (
     ASSEMBLY_EXECUTION_CONTRACT_KEY,
@@ -841,8 +842,8 @@ def _phase10_review_metrics(
                 pass
     if quast.get("n50") is not None:
         metrics["contig_n50"] = quast.get("n50")
-    if quast.get("num_contigs") is not None:
-        metrics["contig_count"] = quast.get("num_contigs")
+    if quast.get("contig_count") is not None:
+        metrics["contig_count"] = quast.get("contig_count")
     if busco.get("complete_percent") is not None:
         metrics["busco_complete"] = busco.get("complete_percent")
     if busco.get("duplicated_percent") is not None:
@@ -928,6 +929,21 @@ def _as_ratio(value: float | None) -> float | None:
     return value / 100.0 if value > 1 else value
 
 
+def _assembly_review_accept_note(state: TopLevelState) -> str:
+    """Describe the actual frozen continuation after this review occurrence."""
+
+    steps = validate_workflow_steps(state.get("workflow_steps"))
+    index = state.get("workflow_step_index")
+    if type(index) is not int or not 0 <= index < len(steps):
+        raise ValueError("workflow_step_index is outside workflow_steps")
+    if index + 1 < len(steps):
+        return (
+            "Accept continues with the selected assembly to the frozen next stage: "
+            f"{steps[index + 1]['stage']}."
+        )
+    return "Accept completes the frozen workflow with the selected assembly."
+
+
 def human_review_gate(state: TopLevelState) -> StateUpdate:
     """Set an active interrupt for unresolved assembly review decisions."""
     ar_out = assembly_review_output(state)
@@ -952,10 +968,7 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
         ],
         notes=[
             "Thresholds for BUSCO and QUAST require human approval before application.",
-            (
-                "Accept continues with the selected assembly to Hi-C scaffolding "
-                "and then T2T."
-            ),
+            _assembly_review_accept_note(state),
             (
                 "Assembly execution-failure retries use the v3 recommendation, "
                 "approval, and frozen-attempt workflow before this gate."

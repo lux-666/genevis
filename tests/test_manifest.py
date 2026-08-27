@@ -75,8 +75,9 @@ class ManifestSchemaTests(unittest.TestCase):
         self.assertEqual(manifest.user_metadata["target_species"], "Solea ovata")
 
         for value in ("卵鳎", "S. ovata", "Solea sp.", 123):
-            with self.subTest(value=value), self.assertRaisesRegex(
-                ValueError, "user_metadata.target_species"
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "user_metadata.target_species"),
             ):
                 InputManifest(
                     session_id="invalid-scientific-name",
@@ -270,53 +271,59 @@ class ManifestValidationTests(unittest.TestCase):
                     )
 
     def test_validate_rejects_logically_empty_and_corrupt_compressed_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for kind, contents, expected in (
+                ("empty", gzip.compress(b""), "logically empty"),
+                ("corrupt", b"not-a-compressed-stream", "unreadable"),
+            ):
+                with self.subTest(codec="gzip", kind=kind):
+                    path = root / f"gzip-{kind}.fastq.gz"
+                    path.write_bytes(contents)
+                    report = validate_manifest(
+                        InputManifest(
+                            session_id=f"gzip-{kind}",
+                            assets=[
+                                InputAssetSpec(
+                                    asset_type="raw_long_reads",
+                                    paths=[str(path)],
+                                )
+                            ],
+                        )
+                    )
+                    self.assertFalse(report["valid"])
+                    self.assertTrue(
+                        any(expected in error for error in report["errors"]),
+                        report["errors"],
+                    )
+
+    def test_validate_accepts_non_empty_compressed_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "reads.fastq.gz"
+            path.write_bytes(gzip.compress(b"@r\nACGT\n+\n!!!!\n"))
+            report = validate_manifest(
+                InputManifest(
+                    session_id="gzip",
+                    assets=[
+                        InputAssetSpec(asset_type="raw_long_reads", paths=[str(path)])
+                    ],
+                )
+            )
+            self.assertTrue(report["valid"], report["errors"])
+
+    def test_validate_rejects_compression_not_supported_by_execution_stages(self):
         codecs = (
-            ("gzip", ".fastq.gz", gzip.compress),
             ("bzip2", ".fastq.bz2", bz2.compress),
             ("xz", ".fastq.xz", lzma.compress),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            for name, suffix, compress in codecs:
-                for kind, contents, expected in (
-                    ("empty", compress(b""), "logically empty"),
-                    ("corrupt", b"not-a-compressed-stream", "unreadable"),
-                ):
-                    with self.subTest(codec=name, kind=kind):
-                        path = root / f"{name}-{kind}{suffix}"
-                        path.write_bytes(contents)
-                        report = validate_manifest(
-                            InputManifest(
-                                session_id=f"{name}-{kind}",
-                                assets=[
-                                    InputAssetSpec(
-                                        asset_type="raw_long_reads",
-                                        paths=[str(path)],
-                                    )
-                                ],
-                            )
-                        )
-                        self.assertFalse(report["valid"])
-                        self.assertTrue(
-                            any(expected in error for error in report["errors"]),
-                            report["errors"],
-                        )
-
-    def test_validate_accepts_non_empty_compressed_inputs(self):
-        codecs = (
-            (".fastq.gz", gzip.compress),
-            (".fastq.bz2", bz2.compress),
-            (".fastq.xz", lzma.compress),
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            for suffix, compress in codecs:
-                with self.subTest(suffix=suffix):
-                    path = root / f"reads{suffix}"
+            for compression, suffix, compress in codecs:
+                with self.subTest(compression=compression):
+                    path = Path(tmpdir) / f"reads{suffix}"
                     path.write_bytes(compress(b"@r\nACGT\n+\n!!!!\n"))
                     report = validate_manifest(
                         InputManifest(
-                            session_id=suffix,
+                            session_id=compression,
                             assets=[
                                 InputAssetSpec(
                                     asset_type="raw_long_reads", paths=[str(path)]
@@ -324,14 +331,17 @@ class ManifestValidationTests(unittest.TestCase):
                             ],
                         )
                     )
-                    self.assertTrue(report["valid"], report["errors"])
+                    self.assertFalse(report["valid"])
+                    self.assertTrue(
+                        any(
+                            "support only gzip or uncompressed" in error
+                            for error in report["errors"]
+                        ),
+                        report["errors"],
+                    )
 
     def test_declared_compression_controls_logical_content_probe_without_suffix(self):
-        codecs = (
-            ("gzip", gzip.compress),
-            ("bzip2", bz2.compress),
-            ("xz", lzma.compress),
-        )
+        codecs = (("gzip", gzip.compress),)
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             for compression, compress in codecs:
@@ -407,6 +417,52 @@ class ManifestValidationTests(unittest.TestCase):
             ),
             report["errors"],
         )
+
+    def test_declared_format_is_authoritative_without_filename_suffix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "reads.data"
+            path.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+            report = validate_manifest(
+                InputManifest(
+                    session_id="declared-format",
+                    assets=[
+                        InputAssetSpec(
+                            asset_type="raw_long_reads",
+                            paths=[str(path)],
+                            platform="ont",
+                            format="fastq",
+                        )
+                    ],
+                )
+            )
+        self.assertTrue(report["valid"], report["errors"])
+        self.assertEqual(report["inferred"][0]["path_facts"][0]["format"], "fastq")
+        self.assertFalse(report["warnings"])
+
+    def test_declared_format_rejects_conflicting_filename_suffix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "reads.fasta"
+            path.write_text(">r\nACGT\n", encoding="utf-8")
+            report = validate_manifest(
+                InputManifest(
+                    session_id="conflicting-format",
+                    assets=[
+                        InputAssetSpec(
+                            asset_type="raw_long_reads",
+                            paths=[str(path)],
+                            format="fastq",
+                        )
+                    ],
+                )
+            )
+        self.assertFalse(report["valid"])
+        self.assertTrue(
+            any("declared format conflicts" in error for error in report["errors"]),
+            report["errors"],
+        )
+
+    def test_format_inference_is_case_insensitive(self):
+        self.assertEqual(_detect_format(Path("reads.FASTQ.GZ")), "fastq")
 
     def test_validate_warns_unknown_format(self):
         with tempfile.TemporaryDirectory() as tmpdir:

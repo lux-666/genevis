@@ -34,6 +34,12 @@
     }
   },
 
+  "assembly_dedup": {
+    "automatic_purge_approved": true,
+    "threads": 8,
+    "get_seqs_exclude_haplotigs": true
+  },
+
   "assembly_review": {
     "quast": {
       "threads": 8

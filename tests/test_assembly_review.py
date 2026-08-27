@@ -45,7 +45,11 @@ from app.stages.assembly_review.method_application.quast import (
     freeze_quast_attempts,
     quast_method_outcome,
 )
-from app.stages.assembly_review.nodes import resolve_candidates
+from app.stages.assembly_review.nodes import (
+    _assembly_review_accept_note,
+    _phase10_review_metrics,
+    resolve_candidates,
+)
 from app.storage.artifacts import publish_artifact_record
 from app.storage.assembly_candidates import (
     publish_derived_assembly_candidate,
@@ -81,6 +85,44 @@ class AssemblyReviewDescriptorTests(unittest.TestCase):
 
 
 class AssemblyReviewStageTests(unittest.TestCase):
+    def test_phase10_metrics_use_canonical_quast_contig_count(self):
+        metrics = _phase10_review_metrics(
+            {
+                "candidates": [{"candidate_id": "candidate-1"}],
+                "signals": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "signal_name": "quast",
+                        "status": "available",
+                        "metadata": {
+                            "metrics": {
+                                "contig_count": 731,
+                                "n50": 250_000,
+                            }
+                        },
+                    }
+                ],
+            },
+            {},
+        )
+
+        self.assertEqual(metrics["contig_count"], 731)
+
+    def test_review_accept_note_reflects_frozen_next_stage_or_completion(self):
+        state = self._build_state(entry_mode="raw_inputs")
+
+        self.assertEqual(
+            _assembly_review_accept_note(state),
+            "Accept continues with the selected assembly to the frozen next stage: "
+            "hic_scaffolding.",
+        )
+
+        state["workflow_steps"] = state["workflow_steps"][:3]
+        self.assertEqual(
+            _assembly_review_accept_note(state),
+            "Accept completes the frozen workflow with the selected assembly.",
+        )
+
     def test_outer_graph_routes_to_metric_subgraphs(self):
         outer_nodes = set(build_stage().get_graph().nodes)
         quast_nodes = set(build_quast_graph().get_graph().nodes)

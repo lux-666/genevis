@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from app.entrypoints.run import _stage_seeds_from_run_config
 from app.schemas.run_config import RunConfig, load_run_config
 
 
@@ -269,6 +270,26 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.genome_survey.survey_parameters.hash_size, "1G")
         self.assertEqual(config.genome_survey.survey_parameters.threads, 4)
 
+    def test_genome_survey_seed_freezes_shared_ploidy(self):
+        config = RunConfig.model_validate(
+            {
+                "requested_stages": _local_stage_requests("genome_survey"),
+                "shared_parameters": {
+                    "species_facts": {
+                        "scientific_name": "Solea ovata",
+                        "ploidy": 4,
+                    }
+                },
+                "genome_survey": {
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "1G"}
+                },
+            }
+        )
+
+        seeds = _stage_seeds_from_run_config(config, shared_parameters=None)
+
+        self.assertEqual(seeds["genome_survey"]["survey_parameters"]["ploidy"], 4)
+
     def test_genome_survey_read_length_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
@@ -337,6 +358,47 @@ class RunConfigSchemaTests(unittest.TestCase):
             {"requested_stages": _local_stage_requests("assembly_dedup")}
         )
         self.assertTrue(config.requested_stages[0].allow_local_execution)
+
+    def test_assembly_dedup_requires_explicit_automatic_purge_approval(self):
+        default = RunConfig.model_validate(
+            {
+                "requested_stages": _local_stage_requests("assembly_dedup"),
+                "assembly_dedup": {},
+            }
+        )
+        approved = RunConfig.model_validate(
+            {
+                "requested_stages": _local_stage_requests("assembly_dedup"),
+                "assembly_dedup": {
+                    "automatic_purge_approved": True,
+                    "threads": 12,
+                    "get_seqs_exclude_haplotigs": False,
+                },
+            }
+        )
+
+        assert default.assembly_dedup is not None
+        self.assertFalse(default.assembly_dedup.automatic_purge_approved)
+        self.assertEqual(
+            _stage_seeds_from_run_config(approved, shared_parameters=None)[
+                "assembly_dedup"
+            ],
+            {
+                "automatic_purge_approved": True,
+                "threads": 12,
+                "get_seqs_exclude_haplotigs": False,
+            },
+        )
+
+        with self.assertRaisesRegex(
+            ValidationError, "automatic_purge_approved.*allow_local_execution"
+        ):
+            RunConfig.model_validate(
+                {
+                    "requested_stages": _stage_requests("assembly_dedup"),
+                    "assembly_dedup": {"automatic_purge_approved": True},
+                }
+            )
 
     def test_invalid_shared_read_type_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:

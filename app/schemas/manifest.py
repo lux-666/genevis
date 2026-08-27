@@ -7,9 +7,7 @@ assets without transforming the files.
 
 from __future__ import annotations
 
-import bz2
 import gzip
-import lzma
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -252,23 +250,13 @@ def _resolve_compression(path: Path, declared: Compression) -> Compression:
 
 def _detect_format(path: Path) -> Format:
     name = path.name.lower()
-    if (
-        name.endswith(".fastq")
-        or name.endswith(".fq")
-        or name.endswith(".fastq.gz")
-        or name.endswith(".fq.gz")
-    ):
+    for compression_suffix in (".gzip", ".bzip2", ".gz", ".bz2", ".xz"):
+        if name.endswith(compression_suffix):
+            name = name[: -len(compression_suffix)]
+            break
+    if name.endswith((".fastq", ".fq")):
         return "fastq"
-    if (
-        name.endswith(".fasta")
-        or name.endswith(".fa")
-        or name.endswith(".fna")
-        or name.endswith(".faa")
-        or name.endswith(".fasta.gz")
-        or name.endswith(".fa.gz")
-        or name.endswith(".fna.gz")
-        or name.endswith(".faa.gz")
-    ):
+    if name.endswith((".fasta", ".fa", ".fna", ".faa")):
         return "fasta"
     if name.endswith(".bam"):
         return "bam"
@@ -279,6 +267,20 @@ def _detect_format(path: Path) -> Format:
     if name.endswith(".assembly"):
         return "assembly"
     return "unknown"
+
+
+def _resolve_format(path: Path, declared: Format) -> Format:
+    """Resolve format from an authoritative declaration or a compatible suffix."""
+
+    suffix_format = _detect_format(path)
+    if declared == "unknown":
+        return suffix_format
+    if suffix_format != "unknown" and suffix_format != declared:
+        raise ValueError(
+            "declared format conflicts with filename suffix: "
+            f"declared {declared!r}, suffix implies {suffix_format!r}"
+        )
+    return declared
 
 
 def _metadata_indicates_cycloneseq(metadata: dict[str, Any]) -> bool:
@@ -354,7 +356,7 @@ def _infer_asset_properties(
                 is_regular_file=is_regular_file,
                 size_bytes=path.stat().st_size if is_regular_file else None,
                 compression=_resolve_compression(path, spec.compression),
-                format=_detect_format(path),
+                format=_resolve_format(path, spec.format),
                 platform=platform,
                 platform_resolution_source=platform_source,
             )
@@ -389,15 +391,9 @@ def _logical_non_empty_error(fact: AssetPathInference) -> str | None:
         if fact.compression == "gzip":
             with gzip.open(path, "rb") as handle:
                 non_empty = bool(handle.read(1))
-        elif fact.compression == "bzip2":
-            with bz2.open(path, "rb") as handle:
-                non_empty = bool(handle.read(1))
-        elif fact.compression == "xz":
-            with lzma.open(path, "rb") as handle:
-                non_empty = bool(handle.read(1))
         else:
             return None
-    except (OSError, EOFError, lzma.LZMAError) as exc:
+    except (OSError, EOFError) as exc:
         return f"compressed input is unreadable ({exc.__class__.__name__})"
     if non_empty:
         return None
@@ -449,10 +445,23 @@ def validate_manifest(
             )
 
         if spec.asset_type in _NON_EMPTY_INPUT_ASSET_TYPES:
+            unsupported_compression = [
+                fact.declared_path
+                for fact in entry.path_facts
+                if fact.compression in {"bzip2", "xz"}
+            ]
+            if unsupported_compression:
+                errors.append(
+                    f"{spec.asset_type}: executable workflows support only gzip "
+                    "or uncompressed inputs; unsupported compression for "
+                    f"{unsupported_compression}"
+                )
             non_empty_errors = {
                 fact.declared_path: _logical_non_empty_error(fact)
                 for fact in entry.path_facts
-                if fact.exists and fact.is_regular_file
+                if fact.exists
+                and fact.is_regular_file
+                and fact.compression not in {"bzip2", "xz"}
             }
             invalid_inputs = {
                 path: reason

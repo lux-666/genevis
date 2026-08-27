@@ -54,6 +54,8 @@ class AssemblyDedupCursor(TypedDict, total=False):
     input_member_ids: list[str]
     input_member_platforms: list[str]
     cutoffs_strategy: Literal["calcuts_auto"]
+    automatic_purge_approved: bool
+    threads: int
     get_seqs_exclude_haplotigs: bool
 
     execution_attempts: list[MethodExecutionAttemptJson]

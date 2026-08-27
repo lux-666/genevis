@@ -118,11 +118,20 @@ def _stage_seeds_from_run_config(
         and run_config.genome_survey
         and run_config.genome_survey.survey_parameters
     ):
-        seeds["genome_survey"] = {
-            "survey_parameters": run_config.genome_survey.survey_parameters.model_dump(
-                exclude_none=True
-            )
-        }
+        survey_parameters = run_config.genome_survey.survey_parameters.model_dump(
+            exclude_none=True
+        )
+        species_facts = (
+            run_config.shared_parameters.species_facts
+            if run_config.shared_parameters is not None
+            else None
+        )
+        survey_parameters["ploidy"] = (
+            species_facts.ploidy
+            if species_facts is not None and species_facts.ploidy is not None
+            else 2
+        )
+        seeds["genome_survey"] = {"survey_parameters": survey_parameters}
 
     if "assembly" in requested and run_config.assembly:
         assembly_seed: dict[str, Any] = {}
@@ -139,6 +148,9 @@ def _stage_seeds_from_run_config(
                 assembly_seed[key] = value
         if assembly_seed:
             seeds["assembly"] = assembly_seed
+
+    if "assembly_dedup" in requested and run_config.assembly_dedup:
+        seeds["assembly_dedup"] = run_config.assembly_dedup.model_dump(mode="json")
 
     if "assembly_review" in requested:
         review_seed: dict[str, Any] = {}

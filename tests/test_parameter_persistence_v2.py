@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -698,6 +699,10 @@ def test_freeze_uses_approved_snapshot_after_mutable_genome_state_changes(
             "app.stages.assembly.method_application.hifiasm_ont.build_read_input_dependencies",
             return_value=[],
         ),
+        patch(
+            "app.stages.assembly.method_application.hifiasm_ont.resolve_long_read_members",
+            return_value=[SimpleNamespace(path=str(reads), format="fastq")],
+        ),
     ):
         freeze_update = freeze_hifiasm_ont_attempt(planned_state)
     frozen_state = {
@@ -834,6 +839,10 @@ def test_baseline_freeze_uses_empty_l2_without_policy_branch(tmp_path: Path) -> 
         patch(
             "app.stages.assembly.method_application.hifiasm_ont.build_read_input_dependencies",
             return_value=[],
+        ),
+        patch(
+            "app.stages.assembly.method_application.hifiasm_ont.resolve_long_read_members",
+            return_value=[SimpleNamespace(path=str(reads), format="fastq")],
         ),
     ):
         freeze_update = freeze_hifiasm_ont_attempt(planned_state)

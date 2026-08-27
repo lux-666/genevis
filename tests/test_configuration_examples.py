@@ -76,13 +76,17 @@ class PublishedConfigurationContractTests(unittest.TestCase):
                     "lineage",
                     json.loads(
                         (EXAMPLES_DIR / run_config_name).read_text(encoding="utf-8")
-                    ).get("assembly_review", {}).get("busco", {}),
+                    )
+                    .get("assembly_review", {})
+                    .get("busco", {}),
                 )
                 if needs_genome_size:
                     self.assertIsNotNone(manifest.genome_size_estimate)
                     self.assertIsNotNone(config.genome_survey)
                     assert config.genome_survey is not None
                     self.assertIsNotNone(config.genome_survey.survey_parameters)
+                    assert config.assembly_dedup is not None
+                    self.assertTrue(config.assembly_dedup.automatic_purge_approved)
                 else:
                     self.assertEqual(
                         [asset.asset_type for asset in manifest.assets],

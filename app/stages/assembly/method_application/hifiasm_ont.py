@@ -48,6 +48,7 @@ from app.stages.assembly.state import (
     validated_assembly_stage_payload,
 )
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.read_resolution import resolve_long_read_members
 from app.storage.publish import shell_publish_file
 
 LIFECYCLE = MethodExecutionLifecycle(
@@ -84,17 +85,6 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
         )
     except AssemblyInputError as exc:
         return fail_update(state, f"Hifiasm ONT local execution {exc}")
-    non_fastq = [
-        str(path)
-        for path in read_paths
-        if not str(path).endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz"))
-    ]
-    if non_fastq:
-        return fail_update(
-            state,
-            "Hifiasm ONT mode requires FASTQ format (not FASTA). "
-            f"Non-FASTQ files: {non_fastq}",
-        )
     try:
         execution_contract = load_assembly_execution_contract(
             output,
@@ -133,6 +123,26 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
         read_type = approved_assembly_read_type(approved_bundle)
     except ValueError as exc:
         return fail_update(state, f"Hifiasm ONT approved read type is invalid: {exc}")
+    try:
+        read_members = resolve_long_read_members(
+            state,
+            override_paths=[str(path) for path in read_paths],
+        )
+    except ValueError as exc:
+        return fail_update(state, f"Hifiasm ONT local execution {exc}")
+    if len(read_members) != len(read_paths):
+        return fail_update(
+            state,
+            "Hifiasm ONT local execution requires registered format facts for "
+            "every input read file",
+        )
+    non_fastq = [member.path for member in read_members if member.format != "fastq"]
+    if non_fastq:
+        return fail_update(
+            state,
+            "Hifiasm ONT mode requires FASTQ format (not FASTA). "
+            f"Non-FASTQ files: {non_fastq}",
+        )
     thread_binding = execution_contract.l0_executor_values()
     approved_attempt = approved_bundle.attempt
     parameter_attempt_id = approved_attempt.attempt_id

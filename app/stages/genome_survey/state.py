@@ -68,6 +68,7 @@ class SurveyParametersCursor(TypedDict, total=False):
     kmer_size: int
     hash_size: str
     threads: int
+    ploidy: int
 
 
 class SurveySubstepCursor(TypedDict, total=False):

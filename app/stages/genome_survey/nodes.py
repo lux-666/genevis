@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from typing_extensions import TypedDict
 
@@ -449,11 +449,17 @@ def write_full_survey_result(state: TopLevelState) -> StateUpdate:
         estimate_sources=estimate_sources,
         estimate_source_paths=estimate_source_paths,
     )
+    input_family = survey_out.get("survey_input_family")
+    confidence: Literal["high", "low"] = (
+        "high" if input_family == "short_reads" else "low"
+    )
     notes = [
         "full_mode_uses_available_short_or_long_genomic_reads",
         "executed_jellyfish_and_genomescope2",
         *parse_notes,
     ]
+    if input_family == "long_reads":
+        notes.append("long_read_kmer_survey_low_confidence")
     if provided_overrides:
         notes.append("provided_values_override_corresponding_survey_estimates")
 
@@ -461,7 +467,7 @@ def write_full_survey_result(state: TopLevelState) -> StateUpdate:
         session_id=state["session_id"],
         mode="full",
         status="completed",
-        confidence="high",
+        confidence=confidence,
         input_asset_refs=survey_out.get("survey_input_refs", []),
         candidate_methods=FULL_SURVEY_METHODS,
         estimates=estimates,
@@ -474,7 +480,7 @@ def write_full_survey_result(state: TopLevelState) -> StateUpdate:
         genome_size_source_path=prior_update.get("genome_size_source_path"),
         notes=notes,
         metadata={
-            "input_family": survey_out.get("survey_input_family"),
+            "input_family": input_family,
             "executed_methods": EXECUTED_FULL_SURVEY_METHODS,
             "kmer_hist_ref": survey_out.get("kmer_hist_artifact_ref"),
             "genomescope2_summary_ref": survey_out.get("genomescope2_summary_ref"),
@@ -696,15 +702,29 @@ def _survey_parameters(
             "survey_parameters.hash_size",
         )
     threads = raw_params.get("threads", 1)
-    if kmer_size <= 0 or threads <= 0:
+    ploidy = raw_params.get("ploidy", 2)
+    if (
+        not isinstance(kmer_size, int)
+        or isinstance(kmer_size, bool)
+        or not isinstance(threads, int)
+        or isinstance(threads, bool)
+        or kmer_size <= 0
+        or threads <= 0
+    ):
         return (
             {},
             "genome_survey local execution requires positive kmer_size and threads",
+        )
+    if not isinstance(ploidy, int) or isinstance(ploidy, bool) or not 1 <= ploidy <= 6:
+        return (
+            {},
+            "genome_survey local execution requires integer ploidy between 1 and 6",
         )
     return {
         "kmer_size": kmer_size,
         "threads": threads,
         "hash_size": hash_size,
+        "ploidy": ploidy,
     }, None
 
 
@@ -751,11 +771,12 @@ def _parse_genomescope_summary(path: Path) -> tuple[EstimateMap, list[str]]:
             if not values:
                 continue
             value = values[0].replace(",", "")
+            raw_value = value + ("%" if "%" in line_text else "")
             if "genome haploid length" in lower_line:
                 key = "genome haploid length"
             elif "genome repeat length" in lower_line:
                 key = "genome repeat length"
-            elif "heterozygosity" in lower_line:
+            elif "heterozygosity" in lower_line or "heterozygous (" in lower_line:
                 key = "heterozygosity"
             else:
                 continue
@@ -770,11 +791,11 @@ def _parse_genomescope_summary(path: Path) -> tuple[EstimateMap, list[str]]:
             }:
                 estimates["genome_size"] = int(float(value))
                 parsed = True
-            elif key in {"heterozygosity", "het"}:
-                estimates["heterozygosity"] = float(value)
+            elif key in {"heterozygosity", "het"} or key.startswith("heterozygous ("):
+                estimates["heterozygosity"] = _parse_genomescope_fraction(raw_value)
                 parsed = True
             elif key in {"repeat_fraction", "repeat", "repetitiveness"}:
-                estimates["repeat_fraction"] = float(value)
+                estimates["repeat_fraction"] = _parse_genomescope_fraction(raw_value)
                 parsed = True
             elif key == "genome repeat length":
                 repeat_length = float(value)
@@ -792,6 +813,19 @@ def _parse_genomescope_summary(path: Path) -> tuple[EstimateMap, list[str]]:
     if not parsed:
         notes.append("genomescope2_estimates_unparsed")
     return estimates, notes
+
+
+def _parse_genomescope_fraction(raw_value: str) -> float:
+    """Parse one GenomeScope ratio, normalizing percent-valued summaries."""
+
+    match = re.fullmatch(
+        r"\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(%)?\s*",
+        raw_value.replace(",", ""),
+    )
+    if match is None:
+        raise ValueError("invalid GenomeScope fraction")
+    value = float(match.group(1))
+    return value / 100.0 if match.group(2) else value
 
 
 def _asset_ids(assets: list[SurveyAssetCursor]) -> list[str]:

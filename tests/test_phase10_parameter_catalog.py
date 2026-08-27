@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -2097,9 +2098,20 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             state["stage_outputs"]["assembly"]["parameter_attempts"].append(
                 {"attempt_id": 1}
             )
-            with patch(
-                "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
-                return_value=(None, [], None),
+            with (
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.resolve_long_read_members",
+                    return_value=[
+                        SimpleNamespace(
+                            path=state["stage_outputs"]["assembly"]["input_ref"],
+                            format="fastq",
+                        )
+                    ],
+                ),
             ):
                 result = freeze_hifiasm_ont_attempt(state)
 
@@ -2113,9 +2125,20 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             state = self._state(
                 tmpdir, method="hifiasm_ont", recommended_params={"purge_level": 1}
             )
-            with patch(
-                "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
-                return_value=(None, [], None),
+            with (
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.resolve_long_read_members",
+                    return_value=[
+                        SimpleNamespace(
+                            path=state["stage_outputs"]["assembly"]["input_ref"],
+                            format="fastq",
+                        )
+                    ],
+                ),
             ):
                 result = freeze_hifiasm_ont_attempt(state)
             artifact_records = read_artifact_records(Path(state["data_dir"]), "s1")
@@ -2136,6 +2159,27 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 "assembly.parameter.command",
                 {record["artifact_type"] for record in artifact_records},
             )
+
+    def test_hifiasm_ont_freeze_uses_registered_format_fact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir, method="hifiasm_ont", recommended_params={"purge_level": 1}
+            )
+            with (
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.assembly.method_application.hifiasm_ont.resolve_long_read_members",
+                    return_value=[SimpleNamespace(path="reads.fastq", format="fasta")],
+                ),
+            ):
+                result = freeze_hifiasm_ont_attempt(state)
+
+        assembly = result["stage_outputs"]["assembly"]
+        self.assertEqual(assembly["status"], "failed")
+        self.assertIn("requires FASTQ format", assembly["reason"])
 
     def test_nextdenovo_freeze_rejects_l2_override_of_l0_parameter(self):
         with tempfile.TemporaryDirectory() as tmpdir:

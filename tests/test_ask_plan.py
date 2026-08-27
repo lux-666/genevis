@@ -613,7 +613,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
                 ),
             )
 
-    def test_assembly_dedup_is_default_auto_without_method_or_parameter_questions(self):
+    def test_assembly_dedup_fixed_method_needs_no_method_or_parameter_questions(self):
         plan = _base_plan(
             stage_names=["assembly_dedup"],
         )
@@ -1142,6 +1142,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         self.assertEqual(_local_execution_stage_names(payload), ["assembly_dedup"])
         self.assertEqual(_requested_stage_names(payload), ["assembly_dedup"])
+        self.assertNotIn("assembly_dedup", payload)
 
     def test_build_run_config_preserves_selected_stage_occurrences_and_order(self):
         plan = _base_plan(

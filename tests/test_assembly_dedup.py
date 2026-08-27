@@ -21,6 +21,7 @@ from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.assembly_dedup.builder import build_stage as build_dedup_stage
+from app.stages.assembly_dedup.nodes import plan_purge_dups
 from app.stages.assembly_review.nodes import resolve_candidates
 from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
@@ -505,7 +506,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertEqual(candidates[0]["primary_output_ref"], purged_primary_ref)
             self.assertEqual(candidates[1]["source"], "assembly_dedup:raw")
 
-    def test_default_auto_purge_dups_writes_purged_candidate_without_overwriting_raw(
+    def test_explicitly_approved_purge_dups_writes_candidate_without_overwriting_raw(
         self,
     ):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -605,6 +606,9 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 "assembly": {"status": "completed"},
                 "assembly_dedup": {
                     "execution_mode": "local",
+                    "automatic_purge_approved": True,
+                    "threads": 3,
+                    "get_seqs_exclude_haplotigs": False,
                     "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
                 },
             }
@@ -659,6 +663,8 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertNotIn("samtools", script)
             self.assertNotIn(".bam", script)
             self.assertEqual(script.count("-x map-ont"), 1)
+            self.assertEqual(script.count("minimap2 -t 3"), 2)
+            self.assertNotIn("get_seqs -e", script)
             events = Ledger(run_dir).read_events("s1")
             event_types = [event["event_type"] for event in events]
             self.assertIn("attempt_started", event_types)
@@ -674,6 +680,45 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 result["workflow_step_outcome"]["deliveries"][0]["delivery_mode"],
                 "materialized",
             )
+
+    def test_local_dedup_without_explicit_purge_approval_passes_through(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">contig1\nACGT\n", encoding="utf-8")
+            state = self._state(tmpdir)
+            member_id = "s1:clean_long_reads:reads.fastq"
+            raw_bundle_ref, raw_primary_ref = self._publish_candidate(
+                state,
+                candidate_id="s1:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft=draft,
+                member_id=member_id,
+            )
+            raw_path = SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(
+                raw_primary_ref["path_ref"]
+            )
+            self._set_assembly_resource(
+                state,
+                primary_path=raw_path,
+                candidate_bundle_ref=raw_bundle_ref,
+                primary_output_ref=raw_primary_ref,
+                source_stage="assembly",
+                workflow_step_id="step-001-assembly",
+            )
+            state["stage_outputs"] = {
+                "assembly": {"status": "completed"},
+                "assembly_dedup": {"execution_mode": "local"},
+            }
+
+            update = plan_purge_dups(state)
+            dedup = update["stage_outputs"]["assembly_dedup"]
+
+            self.assertEqual(dedup["status"], "pass_through")
+            self.assertEqual(dedup["purge_dups_status"], "skipped")
+            self.assertEqual(
+                dedup["purge_dups_skip_reason"], "automatic_purge_not_approved"
+            )
+            self.assertFalse(dedup["automatic_purge_approved"])
 
 
 if __name__ == "__main__":

@@ -286,12 +286,13 @@ an object `compact` are not sufficient.
 
 Every declared biological input member is validated before whole-run freeze as
 a regular file with non-empty logical content. For uncompressed inputs this is
-a positive file size. For gzip, bzip2, and xz inputs the validator must open the
-declared compression stream and observe at least one decompressed byte;
-container headers/trailers do not count. A truncated or unreadable compressed
-stream is invalid. This is a lightweight content-boundary check, not a complete
-FASTQ/FASTA/BAM semantic parser; stage adapters still own format-specific
-validation.
+a positive file size. For gzip inputs the validator must open the declared
+compression stream and observe at least one decompressed byte; container
+headers/trailers do not count. A truncated or unreadable gzip stream is invalid.
+Bzip2 and xz declarations fail preflight because the executable stage chain has
+no end-to-end contract for them. This is a lightweight content-boundary check,
+not a complete FASTQ/FASTA/BAM semantic parser; stage adapters still own
+format-specific validation.
 
 This intake invariant applies to user-declared inputs. A run-owned filtering
 attempt may validly produce a zero-read result and a zero-valued aggregate

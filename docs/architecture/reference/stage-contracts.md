@@ -200,10 +200,13 @@ a valid estimate exists when assembly requires one, the workflow fails with
 families. Each resolved read retains the registry's frozen `compression` fact;
 Jellyfish consumes `none`/`unknown` inputs directly and streams `gzip` members
 through `gzip -cd` without requiring an operator-created decompressed copy.
-Other declared compression codecs fail closed at this adapter until they have
-an explicit execution contract. Filename suffixes are not compression
-authority. Jellyfish publishes typed k-mer `ArtifactRef` objects, which
-GenomeScope2 consumes without a path-string conversion.
+Other declared compression codecs fail manifest validation until they have an
+explicit execution contract. Filename suffixes are not compression authority.
+GenomeScope2 receives the frozen `shared_parameters.species_facts.ploidy`, or
+diploid `2` when it is absent. Long-read-only k-mer estimates are recorded with
+low confidence; short-read estimates are high confidence. Jellyfish publishes
+typed k-mer `ArtifactRef` objects, which GenomeScope2 consumes without a
+path-string conversion.
 
 Because the frozen Jellyfish script invokes both commands for gzip inputs, its
 selected machine-method mapping must declare `jellyfish` and `gzip` in the
@@ -283,19 +286,23 @@ Registered method:
 
 - `assembly_dedup.purge_dups`.
 
-The stage materializes depth, cutoff, self-alignment, duplicate-region, and
-purged-sequence evidence. It preserves the raw candidate so Assembly Review can
-compare or retain it. Missing materialized inputs are represented explicitly;
-the stage does not synthesize a successful purge.
+When both local execution and `assembly_dedup.automatic_purge_approved` are
+frozen in RunConfig, the stage materializes depth, cutoff, self-alignment,
+duplicate-region, and purged-sequence evidence. It preserves the raw candidate
+so Assembly Review can compare or retain it. Without explicit automatic-purge
+approval, the stage safely passes the original candidate through. Missing
+materialized inputs are represented explicitly; the stage does not synthesize
+a successful purge.
 
 The authoritative outcome table is:
 
-| Input candidate | Local purge_dups | Occurrence outcome | Stage delivery | `purge_dups` disposition | Assembly delivery |
-|---|---|---|---|---|---|
-| materialized | succeeds | `completed` | `executed` | `completed` | `materialized`, new purged candidate |
-| materialized | not authorized | `completed` | `pass_through` | `skipped` with `local_execution_not_enabled` | `reused`, original candidate |
-| absent or non-materialized | not applicable | `failed` | none | `not_started` with `no_materialized_assembly` | none |
-| materialized | starts but fails or collection fails | `failed` | none | `failed` with cause | none |
+| Input candidate | Local execution | Automatic purge approved | Occurrence outcome | Stage delivery | `purge_dups` disposition | Assembly delivery |
+|---|---|---|---|---|---|---|
+| materialized | authorized | yes; succeeds | `completed` | `executed` | `completed` | `materialized`, new purged candidate |
+| materialized | authorized | no | `completed` | `pass_through` | `skipped` with `automatic_purge_not_approved` | `reused`, original candidate |
+| materialized | not authorized | any | `completed` | `pass_through` | `skipped` with `local_execution_not_enabled` | `reused`, original candidate |
+| absent or non-materialized | any | any | `failed` | none | `not_started` with `no_materialized_assembly` | none |
+| materialized | authorized | yes; execution or collection fails | `failed` | none | `failed` with cause | none |
 
 Pass-through is deliberately not `stage_skipped`: the Dedup occurrence delivers
 a verified assembly relation, even though the method does not run. Conversely,

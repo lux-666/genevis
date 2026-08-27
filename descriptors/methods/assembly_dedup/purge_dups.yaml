@@ -15,10 +15,13 @@ expected_outputs:
     description: "Purged assembly FASTA for downstream review."
 review_rules:
   - purged_assembly_exists
+  - automatic_purge_explicitly_approved
 human_review_triggers:
-  - purge_depth_distribution_uncertain
+  - automatic_purge_not_explicitly_approved
 defaults:
+  automatic_purge_approved: false
   cutoffs_strategy: calcuts_auto
+  threads: 8
   get_seqs_exclude_haplotigs: true
 resource_hints:
   cpu_cores: 8

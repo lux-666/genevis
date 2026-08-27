@@ -244,6 +244,16 @@ class GenomeSurveyRunConfig(BaseModel):
     survey_parameters: GenomeSurveyRunParameters | None = None
 
 
+class AssemblyDedupRunConfig(BaseModel):
+    """Explicit authorization and frozen executor knobs for purge_dups."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    automatic_purge_approved: StrictBool = False
+    threads: int = Field(default=8, gt=0)
+    get_seqs_exclude_haplotigs: StrictBool = True
+
+
 class BuscoRunParameters(BaseModel):
     """BUSCO execution knobs plus a legacy lineage consistency assertion.
 
@@ -323,6 +333,7 @@ class RunConfig(BaseModel):
     read_qc: ReadQCRunConfig | None = None
     genome_survey: GenomeSurveyRunConfig | None = None
     assembly: AssemblyRunConfig | None = None
+    assembly_dedup: AssemblyDedupRunConfig | None = None
     assembly_review: AssemblyReviewRunConfig | None = None
     hic_scaffolding: HiCScaffoldingRunConfig | None = None
     t2t: T2TRunConfig | None = None
@@ -373,6 +384,19 @@ class RunConfig(BaseModel):
             raise ValueError(
                 "run_config: read_qc.length_filter.approved is true but "
                 "requested_stages[read_qc].allow_local_execution is not true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_local_execution_for_approved_purge(self) -> "RunConfig":
+        if (
+            self.assembly_dedup
+            and self.assembly_dedup.automatic_purge_approved
+            and not self.any_occurrence_allows_local_execution("assembly_dedup")
+        ):
+            raise ValueError(
+                "run_config: assembly_dedup.automatic_purge_approved is true but "
+                "requested_stages[assembly_dedup].allow_local_execution is not true"
             )
         return self
 

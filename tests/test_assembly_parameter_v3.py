@@ -673,6 +673,18 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                             return_value=[Path("/reads/long.fastq.gz")],
                         )
                     )
+                    if adapter is hifiasm_ont_adapter:
+                        stack.enter_context(
+                            patch.object(
+                                adapter,
+                                "resolve_long_read_members",
+                                return_value=[
+                                    SimpleNamespace(
+                                        path="/reads/long.fastq.gz", format="fastq"
+                                    )
+                                ],
+                            )
+                        )
                     stack.enter_context(
                         patch.object(
                             adapter,
@@ -820,6 +832,18 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                             return_value=[Path("/reads/long.fastq.gz")],
                         )
                     )
+                    if adapter is hifiasm_ont_adapter:
+                        stack.enter_context(
+                            patch.object(
+                                adapter,
+                                "resolve_long_read_members",
+                                return_value=[
+                                    SimpleNamespace(
+                                        path="/reads/long.fastq.gz", format="fastq"
+                                    )
+                                ],
+                            )
+                        )
                     stack.enter_context(
                         patch.object(
                             adapter,

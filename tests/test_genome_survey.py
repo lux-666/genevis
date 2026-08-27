@@ -408,6 +408,10 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIsInstance(dependency, ArtifactInputDependency)
             self.assertEqual(dependency.artifact_ref, histogram_artifact.ref)
             self.assertEqual(dependency.path, str(histogram_artifact.path))
+            self.assertIn(
+                "-p 2",
+                Path(attempt.script_path).read_text(encoding="utf-8"),
+            )
 
     def test_string_kmer_artifact_refs_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -859,6 +863,38 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(estimates["repeat_fraction"], 88419 / 108518)
             self.assertEqual(notes, [])
 
+    def test_parse_real_genomescope2_percent_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary = Path(tmpdir) / "summary.txt"
+            summary.write_text(
+                "property                      min               max\n"
+                "Genome Haploid Length         108,518 bp        113,750 bp\n"
+                "Genome Repeat Length          88,419 bp         92,682 bp\n"
+                "Heterozygosity                0.471783%         0.502001%\n",
+                encoding="utf-8",
+            )
+
+            estimates, notes = _parse_genomescope_summary(summary)
+
+            self.assertEqual(estimates["genome_size"], 108518)
+            self.assertAlmostEqual(estimates["heterozygosity"], 0.00471783)
+            self.assertEqual(estimates["repeat_fraction"], 88419 / 108518)
+            self.assertEqual(notes, [])
+
+    def test_parse_current_genomescope2_heterozygous_label(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary = Path(tmpdir) / "summary.txt"
+            summary.write_text(
+                "Genome Haploid Length         100,000 bp\n"
+                "Heterozygous (ab)             0.09%\n",
+                encoding="utf-8",
+            )
+
+            estimates, notes = _parse_genomescope_summary(summary)
+
+            self.assertEqual(estimates["heterozygosity"], 0.0009)
+            self.assertEqual(notes, [])
+
     def test_local_mode_with_long_reads_only_runs_jellyfish_and_genomescope2(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             long_reads = Path(tmpdir) / "reads.fastq"
@@ -902,6 +938,8 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["estimates"]["genome_size"], 12345)
             self.assertEqual(survey["genome_size_prior"], 12345)
             self.assertEqual(survey["genome_size_source"], "survey")
+            self.assertEqual(survey["confidence"], "low")
+            self.assertIn("long_read_kmer_survey_low_confidence", survey["notes"])
             self.assertEqual(
                 ArtifactRef.model_validate(
                     survey["kmer_hist_artifact_ref"]

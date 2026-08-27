@@ -141,7 +141,8 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> StateUpdate:
         "set -e\n"
         f"mkdir -p {shlex.quote(str(output_dir))}\n"
         f"genomescope2 -i {shlex.quote(str(Path(output['kmer_hist_path'])))} "
-        f"-o {shlex.quote(str(output_dir))} -k {int(params['kmer_size'])}\n"
+        f"-o {shlex.quote(str(output_dir))} -k {int(params['kmer_size'])} "
+        f"-p {int(params.get('ploidy', 2))}\n"
         f"test -f {shlex.quote(str(summary_path))}\n",
         encoding="utf-8",
     )

@@ -184,7 +184,7 @@ def purge_dups_planner_outcome_policy(state: TopLevelState) -> MethodOutcome | N
     return MethodOutcome(
         method_name=ASSEMBLY_DEDUP_METHOD,
         disposition="skipped",
-        reason="local_execution_not_enabled",
+        reason=str(output.get("purge_dups_skip_reason") or "purge_dups_skipped"),
         refs=(
             ArtifactRef.model_validate(output.get("candidate_bundle_ref")),
             ArtifactRef.model_validate(output.get("input_primary_output_ref")),
@@ -217,6 +217,7 @@ def enter_assembly_dedup(state: TopLevelState) -> StateUpdate:
 
 
 def plan_purge_dups(state: TopLevelState) -> StateUpdate:
+    output = _output(state)
     try:
         candidate = _selected_assembly_candidate(state)
     except (OSError, TypeError, ValueError) as exc:
@@ -232,6 +233,13 @@ def plan_purge_dups(state: TopLevelState) -> StateUpdate:
             purge_dups_status="not_started",
         )
 
+    threads = output.get("threads", 8)
+    if not isinstance(threads, int) or isinstance(threads, bool) or threads <= 0:
+        return _fail(
+            state,
+            "assembly_dedup.threads must be a positive integer",
+            purge_dups_status="not_started",
+        )
     candidate_payload: dict[str, object] = {
         "candidate_bundle_ref": candidate.ref.model_dump(mode="json"),
         "candidate_id": candidate.bundle.candidate_id,
@@ -245,9 +253,13 @@ def plan_purge_dups(state: TopLevelState) -> StateUpdate:
             candidate.bundle.input_member_platforms["primary"]
         ),
         "cutoffs_strategy": "calcuts_auto",
-        "get_seqs_exclude_haplotigs": True,
+        "automatic_purge_approved": bool(output.get("automatic_purge_approved", False)),
+        "threads": threads,
+        "get_seqs_exclude_haplotigs": bool(
+            output.get("get_seqs_exclude_haplotigs", True)
+        ),
     }
-    if _output(state).get("execution_mode") != "local":
+    if output.get("execution_mode") != "local":
         return _update_output(
             state,
             {
@@ -255,6 +267,16 @@ def plan_purge_dups(state: TopLevelState) -> StateUpdate:
                 "status": "pass_through",
                 "purge_dups_status": "skipped",
                 "purge_dups_skip_reason": "local_execution_not_enabled",
+            },
+        )
+    if not candidate_payload["automatic_purge_approved"]:
+        return _update_output(
+            state,
+            {
+                **candidate_payload,
+                "status": "pass_through",
+                "purge_dups_status": "skipped",
+                "purge_dups_skip_reason": "automatic_purge_not_approved",
             },
         )
 
@@ -339,6 +361,10 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         for index in range(len(selected_members))
     ]
     mapping_presets = [_minimap2_preset(member.platform) for member in selected_members]
+    threads = int(dedup_out.get("threads", 8))
+    get_seqs_exclude_flag = (
+        "-e " if dedup_out.get("get_seqs_exclude_haplotigs", True) else ""
+    )
     mapping_commands: list[str] = []
     for member, preset, member_paf in zip(
         selected_members,
@@ -347,7 +373,7 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         strict=True,
     ):
         mapping_commands.append(
-            f"minimap2 -t 8 -x {shlex.quote(preset)} "
+            f"minimap2 -t {threads} -x {shlex.quote(preset)} "
             f"{shlex.quote(str(input_assembly_ref))} "
             f"{shlex.quote(member.path)} "
             f"| gzip -c > {shlex.quote(str(member_paf))}"
@@ -375,12 +401,12 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         f"split_fa {shlex.quote(str(input_assembly_ref))} > "
         f"{shlex.quote(str(split_assembly))}\n"
         f"test -s {shlex.quote(str(split_assembly))}\n"
-        f"minimap2 -t 8 -x asm5 -DP {shlex.quote(str(split_assembly))} "
+        f"minimap2 -t {threads} -x asm5 -DP {shlex.quote(str(split_assembly))} "
         f"{shlex.quote(str(split_assembly))} "
         f"| gzip -c > {shlex.quote(str(self_paf))}\n"
         f"purge_dups -2 -T {shlex.quote(str(cutoffs))} -c {shlex.quote(str(base_cov))} "
         f"{shlex.quote(str(self_paf))} > {shlex.quote(str(dups_bed))}\n"
-        f"get_seqs -e -p {shlex.quote(str(get_seqs_prefix))} "
+        f"get_seqs {get_seqs_exclude_flag}-p {shlex.quote(str(get_seqs_prefix))} "
         f"{shlex.quote(str(dups_bed))} "
         f"{shlex.quote(str(input_assembly_ref))}\n"
         f"{shell_publish_file(get_seqs_primary, output_assembly_ref)}\n"
@@ -445,6 +471,10 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             "input_member_ids": [member.member_id for member in selected_members],
             "input_member_platforms": [member.platform for member in selected_members],
             "read_mapping_presets": mapping_presets,
+            "threads": threads,
+            "get_seqs_exclude_haplotigs": bool(
+                dedup_out.get("get_seqs_exclude_haplotigs", True)
+            ),
             "read_paf_ref": str(read_paf),
             "split_assembly_ref": str(split_assembly),
             "base_cov_ref": str(base_cov),
