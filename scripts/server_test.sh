@@ -21,6 +21,11 @@ if ! command -v python >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! python -c 'import pytest' >/dev/null 2>&1; then
+  printf "error: pytest is missing; install all project and test dependencies with: python -m pip install -e '.[dev]'\n" >&2
+  exit 1
+fi
+
 echo "scope: server-side code regression and compile checks only"
 echo "note: this does not run real biological tools or real-data smoke tests"
 
