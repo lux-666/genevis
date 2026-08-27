@@ -24,6 +24,7 @@ from app.storage.frozen_inputs import (
     validate_frozen_inputs,
 )
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import ensure_test_host_envs
 
 
 def _state():
@@ -323,10 +324,12 @@ def test_manifest_only_genome_size_reaches_assembly_l1_freeze(
             encoding="utf-8",
         )
         paths = SessionPaths(root / "data", "s1")
+        envs = ensure_test_host_envs(root)
         freeze_session_inputs(
             paths,
             manifest_draft=source_manifest,
             run_config_draft=source_config,
+            config_path=envs,
             selected_methods={},
         )
         state = initial_state(

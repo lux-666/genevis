@@ -29,6 +29,7 @@ from app.storage.artifacts import artifact_ref_for_path, register_artifact_recor
 from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths
+from tests.busco_fixture import ensure_test_host_envs
 from tests.data_v2 import v2_run_dir
 
 
@@ -56,11 +57,13 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             paths = SessionPaths(root / "data", "s1")
+            envs = ensure_test_host_envs(root)
 
             freeze_session_inputs(
                 paths,
                 manifest_draft=source_manifest,
                 run_config_draft=source_config,
+                config_path=envs,
                 selected_methods={},
             )
 
@@ -137,11 +140,13 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             paths = SessionPaths(root / "data", "s1")
+            envs = ensure_test_host_envs(root)
 
             freeze_session_inputs(
                 paths,
                 manifest_draft=source_manifest,
                 run_config_draft=source_config,
+                config_path=envs,
                 selected_methods={},
             )
 

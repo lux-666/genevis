@@ -67,7 +67,7 @@ ok "active orchestrator Python is 3.11 or newer"
 # The TUI uses sqlite checkpoints for durable execution and review, so the
 # orchestrator environment must carry langgraph-checkpoint-sqlite.
 if ! python -c 'from langgraph.checkpoint.sqlite import SqliteSaver' >/dev/null 2>&1; then
-  fail "active orchestrator environment is missing langgraph-checkpoint-sqlite; run 'python -m pip install -e .' (see docs/deployment/README.md)"
+  fail "active orchestrator environment is missing langgraph-checkpoint-sqlite; run \"python -m pip install -e '.[dev]'\" (see docs/deployment/README.md)"
 fi
 ok "active orchestrator environment has langgraph-checkpoint-sqlite"
 

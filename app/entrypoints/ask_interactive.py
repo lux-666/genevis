@@ -22,12 +22,14 @@ from app.schemas.ask_plan import (
 )
 from app.schemas.run_config import RequestableStage
 
+questionary: Any = None
 try:
-    import questionary
-
-    _HAS_QUESTIONARY = True
+    import questionary as _questionary
 except ImportError:
     _HAS_QUESTIONARY = False
+else:
+    questionary = _questionary
+    _HAS_QUESTIONARY = True
 
 
 logger = logging.getLogger(__name__)

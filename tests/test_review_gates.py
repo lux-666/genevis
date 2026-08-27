@@ -44,6 +44,7 @@ from app.schemas.artifacts import ArtifactRef
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import ensure_test_host_envs
 from tests.data_v2 import v2_run_dir
 
 
@@ -646,6 +647,7 @@ def _blocked_unit_session(tmp: str) -> tuple[str, str]:
             ],
         },
         run_config_draft={"requested_stages": []},
+        config_path=ensure_test_host_envs(Path(tmp)),
         selected_methods={},
         probe_environments=False,
     )

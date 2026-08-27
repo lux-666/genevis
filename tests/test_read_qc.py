@@ -1920,8 +1920,9 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             session_id = "phase4-readqc-smoke"
-            _fixture, manifest = _write_phase4_smoke_fixture(Path(tmpdir))
-            run_config = Path(tmpdir) / "read_qc_only_run_config.json"
+            root = Path(tmpdir)
+            _fixture, manifest = _write_phase4_smoke_fixture(root)
+            run_config = root / "read_qc_only_run_config.json"
             run_config.write_text(
                 json.dumps(
                     {
@@ -1930,6 +1931,17 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
                         ],
                     }
                 ),
+                encoding="utf-8",
+            )
+            envs = root / "envs.yaml"
+            envs.write_text(
+                "default:\n"
+                "  fallback_env: env_geno_exec\n"
+                "stages:\n"
+                "  read_qc:\n"
+                "    conda_env: env_geno_exec\n"
+                "    required_tools: [seqkit]\n"
+                "packages: {}\n",
                 encoding="utf-8",
             )
             argv = [
@@ -1941,9 +1953,12 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
                 "--run-config",
                 str(run_config),
             ]
-            with patch(
-                "app.entrypoints.run._foreground_review_available",
-                return_value=True,
+            with (
+                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}),
+                patch(
+                    "app.entrypoints.run._foreground_review_available",
+                    return_value=True,
+                ),
             ):
                 rc = run_main(argv)
             self.assertEqual(rc, 0)

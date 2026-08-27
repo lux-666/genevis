@@ -21,8 +21,25 @@ if ! command -v python >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ ! -f "docs/examples/envs.yaml.example" ]]; then
+  printf 'error: checkout is missing docs/examples/envs.yaml.example; restore a complete checkout before testing\n' >&2
+  exit 1
+fi
+
+INSTALL_COMMAND="python -m pip install -e '.[dev]'"
+
+if ! python -c 'from importlib.metadata import version; version("gene-agent")' >/dev/null 2>&1; then
+  printf "error: gene-agent is not installed in this Python environment; run: %s\n" "${INSTALL_COMMAND}" >&2
+  exit 1
+fi
+
+if ! python -m pip check >/dev/null 2>&1; then
+  printf "error: this Python environment has unresolved package dependencies; run: %s\n" "${INSTALL_COMMAND}" >&2
+  exit 1
+fi
+
 if ! python -c 'import pytest' >/dev/null 2>&1; then
-  printf "error: pytest is missing; install all project and test dependencies with: python -m pip install -e '.[dev]'\n" >&2
+  printf "error: pytest is missing; install all project and test dependencies with: %s\n" "${INSTALL_COMMAND}" >&2
   exit 1
 fi
 

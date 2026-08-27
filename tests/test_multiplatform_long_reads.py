@@ -23,7 +23,7 @@ from app.stages.t2t.parameters.execution import (
 from app.storage.artifacts import resolve_artifact_ref
 from app.storage.frozen_inputs import freeze_session_inputs, validate_frozen_inputs
 from app.storage.paths import SessionPaths
-from tests.busco_fixture import assembly_review_config
+from tests.busco_fixture import assembly_review_config, ensure_test_host_envs
 from tests.data_v2 import v2_run_dir
 
 
@@ -93,6 +93,7 @@ class MultiplatformLongReadTests(unittest.TestCase):
                 SessionPaths.from_run_dir(run_dir),
                 manifest_draft=manifest_path,
                 run_config_draft=run_config_path,
+                config_path=ensure_test_host_envs(root),
                 selected_methods={},
             )
             state = initial_state(

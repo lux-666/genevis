@@ -8,6 +8,7 @@ from app.control.lifecycle import inspect_session
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import ensure_test_host_envs
 from tests.data_v2 import v2_run_dir
 
 
@@ -38,6 +39,7 @@ def test_corrupt_checkpoint_file_is_not_reported_as_durable_resume(tmp_path) -> 
         paths,
         manifest_draft=manifest,
         run_config_draft=run_config,
+        config_path=ensure_test_host_envs(tmp_path),
         selected_methods={},
     )
     Ledger(run_dir).create_session(session_id, "control/input_manifest.yaml")
