@@ -66,9 +66,8 @@ class DependencySnapshot(BaseModel):
     method_environments: dict[str, EnvSpec] = Field(default_factory=dict)
     packages: dict[str, PackageSpec] = Field(default_factory=dict)
     databases: DatabaseRegistry | None = None
-    # The NCBI manifest is an external directory, so its content identity is
-    # frozen separately from the registry path.  This remains optional for
-    # old schema-2 snapshots and for non-review runs.
+    # NCBI snapshots are external directories, so their content identities are
+    # frozen separately from the registry path.
     ncbi_manifest_sha256: str | None = None
     ncbi_manifest_sha256s: dict[str, str] = Field(default_factory=dict)
     environment_preflight: dict[str, PreflightResult] = Field(default_factory=dict)
@@ -276,7 +275,10 @@ def _capture_ncbi_manifest_sha256s(
 ) -> dict[str, str]:
     if databases is None:
         return {}
-    from app.reference.ncbi import discover_reference_snapshots
+    from app.reference.ncbi import (
+        discover_reference_snapshots,
+        reference_snapshot_sha256,
+    )
 
     hashes: dict[str, str] = {}
     try:
@@ -284,9 +286,10 @@ def _capture_ncbi_manifest_sha256s(
     except (OSError, TypeError, ValueError):
         return hashes
     for name, reference in references.items():
-        manifest = reference / "reference_manifest.json"
-        if manifest.is_file():
-            hashes[name] = sha256_file(manifest)
+        try:
+            hashes[name] = reference_snapshot_sha256(reference)
+        except (OSError, TypeError, ValueError):
+            continue
     return hashes
 
 

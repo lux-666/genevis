@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,23 +40,13 @@ def _write_ncbi_reference(root: Path) -> Path:
     reference = root / "ncbi_metazoa"
     reference.mkdir(parents=True, exist_ok=True)
     files = {
+        "Metazoa.ncbi.json": "{}\n",
         "Metazoa.ncbi.tsv": "accession\n",
-        "Metazoa.ncbi.lineage": "taxid\tlineage\n",
-        "species_alias.tsv": "alias\tscientific_name\n",
+        "Metazoa.ncbi.lineage": "Organism Taxonomic ID\n",
+        "Metazoa.ncbi.lineage2": "Organism Taxonomic ID\n",
     }
     for name, content in files.items():
         (reference / name).write_text(content, encoding="utf-8")
-    manifest_files = {
-        name: {
-            "sha256": hashlib.sha256(content.encode()).hexdigest(),
-            "size_bytes": len(content.encode()),
-        }
-        for name, content in files.items()
-    }
-    (reference / "reference_manifest.json").write_text(
-        json.dumps({"files": manifest_files}, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
     return reference
 
 

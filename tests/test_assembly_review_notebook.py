@@ -167,7 +167,7 @@ def _make_statistics_pack(
         "target": {
             "input_name": "Targetus absentus",
             "canonical_scientific_name": "Targetus absentus",
-            "resolution": "alias_table",
+            "resolution": "scientific_name_input",
             "taxonomic_hints": {
                 "genus": "Targetus",
                 "family": "Targetidae",
@@ -175,10 +175,10 @@ def _make_statistics_pack(
             },
         },
         "source": {
+            "json": "Metazoa.ncbi.json",
             "tsv": "Metazoa.ncbi.tsv",
             "lineage": "Metazoa.ncbi.lineage",
-            "alias": "species_alias.tsv",
-            "manifest": "reference_manifest.json",
+            "lineage2": "Metazoa.ncbi.lineage2",
             "verification": "verified",
             "dataset_id": "ncbi_metazoa_test",
             "source_provider": "test",
@@ -254,10 +254,10 @@ def _unavailable_statistics_pack() -> dict:
             "taxonomic_hints": {},
         },
         "source": {
+            "json": "Metazoa.ncbi.json",
             "tsv": "Metazoa.ncbi.tsv",
             "lineage": "Metazoa.ncbi.lineage",
-            "alias": "species_alias.tsv",
-            "manifest": "reference_manifest.json",
+            "lineage2": "Metazoa.ncbi.lineage2",
             "verification": "unverified",
             "dataset_id": None,
             "source_provider": None,

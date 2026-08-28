@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import tempfile
 import unittest
 import zipfile
@@ -18,32 +16,13 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
     def _snapshot(self, root: Path, prefix: str) -> tuple[str, ...]:
         root.mkdir(parents=True)
         contents = {
+            f"{prefix}.ncbi.json": '{"assembly": 1}\n{"assembly": 2}\n',
             f"{prefix}.ncbi.tsv": "Organism Name\tOrganism Taxonomic ID\n",
-            f"{prefix}.ncbi.lineage": "Organism Taxonomic ID\tLineage\n",
-            "species_alias.tsv": "alias\tcanonical_scientific_name\n",
+            f"{prefix}.ncbi.lineage": "Organism Taxonomic ID\n",
+            f"{prefix}.ncbi.lineage2": "Organism Taxonomic ID\n",
         }
-        files = {}
         for name, content in contents.items():
-            path = root / name
-            path.write_text(content, encoding="utf-8")
-            raw = path.read_bytes()
-            files[name] = {
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "size_bytes": len(raw),
-            }
-        (root / installer.MANIFEST_FILENAME).write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "dataset_id": "fixture",
-                    "source_provider": "tests",
-                    "source_version": "1",
-                    "exported_at": "2026-08-26T00:00:00Z",
-                    "files": files,
-                }
-            ),
-            encoding="utf-8",
-        )
+            (root / name).write_text(content, encoding="utf-8")
         return tuple(contents)
 
     def _config(self, root: Path, destination: Path) -> Path:
@@ -73,7 +52,7 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
         )
         return config
 
-    def test_fresh_destination_installs_every_manifest_file(self) -> None:
+    def test_fresh_destination_installs_all_four_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source"
@@ -96,7 +75,7 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(
                 {path.name for path in destination.iterdir()},
-                {*files, installer.MANIFEST_FILENAME},
+                set(files),
             )
 
     def test_source_url_installs_one_complete_zip(self) -> None:
@@ -109,7 +88,7 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
             files = self._snapshot(source, "Metazoa")
             config = self._config(root, destination_root)
             with zipfile.ZipFile(archive, "w") as bundle:
-                for name in (*files, installer.MANIFEST_FILENAME):
+                for name in files:
                     bundle.write(source / name, arcname=name)
 
             code = installer.main(
@@ -124,10 +103,7 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
             )
 
             self.assertEqual(code, 0)
-            self.assertEqual(
-                (destination / installer.MANIFEST_FILENAME).read_bytes(),
-                (source / installer.MANIFEST_FILENAME).read_bytes(),
-            )
+            self.assertEqual({path.name for path in destination.iterdir()}, set(files))
 
 
 if __name__ == "__main__":

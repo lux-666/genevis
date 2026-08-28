@@ -13,7 +13,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.integrity import sha256_file
 from app.schemas.run_config import (
     BuscoRunParameters,
     RunConfig,
@@ -163,6 +162,7 @@ def resolve_ncbi_reference(
         MATCHING_TIER_RANK,
         build_related_species_evidence_pack,
         discover_reference_snapshots,
+        reference_snapshot_sha256,
         validate_reference_snapshot,
     )
 
@@ -177,7 +177,6 @@ def resolve_ncbi_reference(
     matches: list[tuple[int, int, str, Path]] = []
     failures: list[str] = []
     for name, path in sorted(references.items()):
-        manifest = path / "reference_manifest.json"
         try:
             validate_reference_snapshot(path)
             expected_hashes = getattr(resolver, "ncbi_manifest_sha256s", {})
@@ -188,9 +187,12 @@ def resolve_ncbi_reference(
             )
             if expected_hash is None and name == "metazoa":
                 expected_hash = getattr(resolver, "ncbi_manifest_sha256", None)
-            if expected_hash is not None and sha256_file(manifest) != expected_hash:
+            if (
+                expected_hash is not None
+                and reference_snapshot_sha256(path) != expected_hash
+            ):
                 raise ValueError(
-                    "NCBI reference manifest changed after dependency freeze"
+                    "NCBI reference snapshot changed after dependency freeze"
                 )
         except (OSError, TypeError, ValueError) as exc:
             raise DatabaseResolutionError(

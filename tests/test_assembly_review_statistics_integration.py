@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,10 +49,14 @@ def _candidate(candidate_id: str, method_name: str = "flye") -> dict:
 def _empty_reference(root: str | Path) -> Path:
     reference = Path(root) / "empty_reference"
     reference.mkdir()
-    (reference / "reference_manifest.json").write_text(
-        json.dumps({"snapshot_date": "2024-01-01", "record_count": 0}),
-        encoding="utf-8",
-    )
+    files = {
+        "Metazoa.ncbi.json": "{}\n",
+        "Metazoa.ncbi.lineage": "Organism Taxonomic ID\n",
+        "Metazoa.ncbi.lineage2": "Organism Taxonomic ID\n",
+        "Metazoa.ncbi.tsv": "Organism Name\tOrganism Taxonomic ID\n",
+    }
+    for name, contents in files.items():
+        (reference / name).write_text(contents, encoding="utf-8")
     return reference
 
 
@@ -99,10 +102,10 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
         )
         return state
 
-    def test_statistics_and_notebook_node_with_unavailable_snapshot(self):
-        """Node handles an unavailable snapshot and writes valid fallback outputs."""
+    def test_statistics_and_notebook_node_with_empty_snapshot(self):
+        """Node handles a valid snapshot with no assembly rows."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create an empty reference directory with manifest but no data files
+            # Create a valid reference snapshot with no assembly rows.
             empty_ref_dir = _empty_reference(tmpdir)
 
             state = self._state(
@@ -116,8 +119,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
                     "status": "evaluated",
                     "candidates": [_candidate("c1")],
                     "signals": [],
-                    # Point to an empty reference dir with a manifest but no
-                    # TSV or lineage files.
+                    # Point to an empty but structurally valid snapshot.
                     "related_species_reference_dir": str(empty_ref_dir),
                 }
             }
@@ -127,7 +129,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             ar_out = update["stage_outputs"]["assembly_review"]
             self.assertIn("related_species_statistics_pack", ar_out)
             self.assertEqual(
-                ar_out["related_species_statistics_pack"]["status"], "unavailable"
+                ar_out["related_species_statistics_pack"]["status"], "available"
             )
             self.assertIn("related_species_statistics_pack_ref", ar_out)
             self.assertIn("assembly_review_comparative_notebook_ref", ar_out)
@@ -138,10 +140,10 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             notebook = nbformat.read(notebook_path, as_version=4)
             nbformat.validate(notebook)
 
-            # Notebook has at least a title cell and an unavailable-status explanation
+            # Notebook has a title and explains that the cohort is empty.
             cell_sources = " ".join(cell.get("source", "") for cell in notebook.cells)
             self.assertIn("Assembly Review", cell_sources)
-            self.assertIn("unavailable", cell_sources.lower())
+            self.assertIn("no related-species assemblies", cell_sources.lower())
 
     def test_statistics_and_notebook_node_with_metrics_available(self):
         """Node passes extracted metrics to the statistics percentile pack."""

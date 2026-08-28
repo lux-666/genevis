@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import gzip
-import hashlib
 import io
 import json
 import shutil
@@ -96,29 +95,21 @@ def _write_database_registry(root: Path) -> Path:
     reference = root / "ncbi_metazoa"
     reference.mkdir(parents=True, exist_ok=True)
     files = {
+        "Metazoa.ncbi.json": "{}\n",
         "Metazoa.ncbi.tsv": (
             "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
             "Annotation BUSCO Lineage\n"
             "GCF_000000001.1\tFixture species\t1\tembryophyta_odb10\n"
         ),
         "Metazoa.ncbi.lineage": (
-            "Organism Taxonomic ID\tLineage\n1\tEukaryota;Fixture species\n"
+            "Organism Taxonomic ID\n1 Eukaryota;Fixture species\n"
         ),
-        "species_alias.tsv": ("alias\tscientific_name\nfixture\tFixture species\n"),
+        "Metazoa.ncbi.lineage2": (
+            "Organism Taxonomic ID\n1 Eukaryota;Fixture;Fixture species\n"
+        ),
     }
-    manifest_files: dict[str, dict[str, object]] = {}
     for name, content in files.items():
-        path = reference / name
-        path.write_text(content, encoding="utf-8")
-        data = content.encode()
-        manifest_files[name] = {
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "size_bytes": len(data),
-        }
-    (reference / "reference_manifest.json").write_text(
-        json.dumps({"files": manifest_files}, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+        (reference / name).write_text(content, encoding="utf-8")
     return lineage
 
 

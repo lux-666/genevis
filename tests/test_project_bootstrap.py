@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import io
-import json
 import os
 import stat
 import tempfile
@@ -1037,31 +1035,13 @@ def _database_fixture(root: Path) -> dict[str, Path]:
 def _ncbi_fixture(root: Path, prefix: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     files = {
+        f"{prefix}.ncbi.json": "{}\n",
         f"{prefix}.ncbi.tsv": "Organism Name\tAssembly Accession\n",
-        f"{prefix}.ncbi.lineage": "Organism Taxonomic ID\tLineage\n",
-        "species_alias.tsv": "alias\tscientific_name\n",
+        f"{prefix}.ncbi.lineage": "Organism Taxonomic ID\n",
+        f"{prefix}.ncbi.lineage2": "Organism Taxonomic ID\n",
     }
-    manifest_files: dict[str, dict[str, int | str]] = {}
     for name, content in files.items():
-        path = root / name
-        path.write_text(content, encoding="utf-8")
-        raw = path.read_bytes()
-        manifest_files[name] = {
-            "sha256": hashlib.sha256(raw).hexdigest(),
-            "size_bytes": len(raw),
-        }
-    (root / "reference_manifest.json").write_text(
-        json.dumps(
-            {
-                "dataset_id": "fixture",
-                "source_provider": "tests",
-                "source_version": "1",
-                "exported_at": "2024-01-01T00:00:00Z",
-                "files": manifest_files,
-            }
-        ),
-        encoding="utf-8",
-    )
+        (root / name).write_text(content, encoding="utf-8")
     return root
 
 

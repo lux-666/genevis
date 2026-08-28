@@ -204,7 +204,7 @@ class BuscoDatabaseSpec(BaseModel):
 
 
 class NcbiDatabaseSpec(BaseModel):
-    """Root containing manifest-verified NCBI taxonomy snapshots."""
+    """Root containing NCBI taxonomy snapshots."""
 
     model_config = ConfigDict(extra="forbid")
 

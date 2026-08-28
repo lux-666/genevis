@@ -13,7 +13,8 @@ from pathlib import Path
 from statistics import median, quantiles
 from typing import Any
 
-REFERENCE_MANIFEST_FILENAME = "reference_manifest.json"
+from app.integrity import sha256_file
+
 MAX_SELECTED_RECORDS = 5
 DISPLAY_COHORT_SIZE = 25
 ANALYSIS_COHORT_SIZE = 150
@@ -39,55 +40,46 @@ _ALTERNATE_METADATA_RE = re.compile(
     r"\b(?:alternate|maternal|paternal|hap[._ -]?[12])\b",
     re.IGNORECASE,
 )
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_NCBI_TSV_RE = re.compile(r"^(?P<prefix>[A-Za-z0-9_-]+)\.ncbi\.tsv$")
-_NCBI_LINEAGE_RE = re.compile(r"^(?P<prefix>[A-Za-z0-9_-]+)\.ncbi\.lineage$")
 
 
 @dataclass(frozen=True)
 class _ReferenceTables:
-    aliases: list[dict[str, str]]
     rows: list[dict[str, str]]
     lineage_by_taxid: dict[str, set[str]]
+    ranked_lineage_by_taxid: dict[str, list[str]]
+
+
+_NATIVE_REFERENCE_SUFFIXES = {
+    "json": ".ncbi.json",
+    "lineage": ".ncbi.lineage",
+    "lineage2": ".ncbi.lineage2",
+    "tsv": ".ncbi.tsv",
+}
+_FOUR_FILE_SET_INVALID = (
+    "reference_four_file_set_invalid: expected exactly one same-prefix "
+    "*.ncbi.json, *.ncbi.lineage, *.ncbi.lineage2, and *.ncbi.tsv"
+)
+
+
+def _native_reference_names(reference_dir: Path) -> dict[str, str] | None:
+    names: dict[str, str] = {}
+    prefixes: set[str] = set()
+    for role, suffix in _NATIVE_REFERENCE_SUFFIXES.items():
+        matches = sorted(reference_dir.glob(f"*{suffix}"))
+        if len(matches) != 1:
+            return None
+        names[role] = matches[0].name
+        prefixes.add(matches[0].name.removesuffix(suffix))
+    return names if len(prefixes) == 1 else None
 
 
 def _reference_sources(reference_dir: Path) -> dict[str, str]:
-    tsv = sorted(reference_dir.glob("*.ncbi.tsv"))
-    lineage = sorted(reference_dir.glob("*.ncbi.lineage"))
+    native = _native_reference_names(reference_dir)
+    if native is not None:
+        return {role: str(reference_dir / name) for role, name in native.items()}
     return {
-        "tsv": str(tsv[0]) if len(tsv) == 1 else str(reference_dir / "*.ncbi.tsv"),
-        "lineage": (
-            str(lineage[0])
-            if len(lineage) == 1
-            else str(reference_dir / "*.ncbi.lineage")
-        ),
-        "alias": str(reference_dir / "species_alias.tsv"),
-    }
-
-
-def _declared_reference_names(manifest: dict[str, Any]) -> dict[str, str] | None:
-    files = manifest.get("files")
-    if not isinstance(files, dict):
-        return None
-    names = set(files)
-    tsv_names = [name for name in names if _NCBI_TSV_RE.fullmatch(str(name))]
-    lineage_names = [name for name in names if _NCBI_LINEAGE_RE.fullmatch(str(name))]
-    if (
-        len(names) != 3
-        or "species_alias.tsv" not in names
-        or len(tsv_names) != 1
-        or len(lineage_names) != 1
-    ):
-        return None
-    tsv_match = _NCBI_TSV_RE.fullmatch(str(tsv_names[0]))
-    lineage_match = _NCBI_LINEAGE_RE.fullmatch(str(lineage_names[0]))
-    assert tsv_match is not None and lineage_match is not None
-    if tsv_match.group("prefix") != lineage_match.group("prefix"):
-        return None
-    return {
-        "tsv": str(tsv_names[0]),
-        "lineage": str(lineage_names[0]),
-        "alias": "species_alias.tsv",
+        role: str(reference_dir / f"*{suffix}")
+        for role, suffix in _NATIVE_REFERENCE_SUFFIXES.items()
     }
 
 
@@ -106,10 +98,15 @@ def _load_reference_snapshot(
     try:
         tsv_name = Path(str(provenance["tsv"])).name
         lineage_name = Path(str(provenance["lineage"])).name
+        lineage2_name = Path(str(provenance.get("lineage2") or "")).name
         tables = _ReferenceTables(
-            aliases=_load_tsv(source_bytes["species_alias.tsv"]),
             rows=_load_tsv(source_bytes[tsv_name]),
             lineage_by_taxid=_load_lineage(source_bytes[lineage_name]),
+            ranked_lineage_by_taxid=(
+                _load_lineage_terms(source_bytes[lineage2_name])
+                if lineage2_name in source_bytes
+                else {}
+            ),
         )
     except OSError as exc:
         return provenance, None, f"reference_source_unavailable:{exc.filename or exc}"
@@ -146,7 +143,7 @@ def _prepare_reference_pack(
         base["notes"].append(provenance_error)
         return None
     assert tables is not None
-    target = _resolve_target(str(species_name), tables.aliases)
+    target = _resolve_target(str(species_name), tables.ranked_lineage_by_taxid)
     base["target"] = target
     canonical = target["canonical_scientific_name"]
     if not canonical:
@@ -156,7 +153,7 @@ def _prepare_reference_pack(
 
 
 def validate_reference_snapshot(reference_dir: Path | str) -> dict[str, Any]:
-    """Verify the configured NCBI snapshot manifest and every declared file."""
+    """Verify one same-prefix NCBI four-file snapshot."""
 
     root = Path(reference_dir)
     sources = _reference_sources(root)
@@ -166,27 +163,42 @@ def validate_reference_snapshot(reference_dir: Path | str) -> dict[str, Any]:
     return provenance
 
 
-def declared_reference_files(manifest: dict[str, Any]) -> tuple[str, str, str]:
-    """Return the three source filenames allowed by one snapshot manifest."""
+def reference_snapshot_sha256(reference_dir: Path | str) -> str:
+    """Hash the verified source-file identity for dependency freezing."""
 
-    declared = _declared_reference_names(manifest)
-    if declared is None:
-        raise ValueError("reference_version_manifest_file_whitelist_invalid")
-    return declared["tsv"], declared["lineage"], declared["alias"]
+    provenance = validate_reference_snapshot(reference_dir)
+    files = provenance.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("reference source identity is unavailable")
+    identity = [
+        (name, entry.get("sha256"), entry.get("size_bytes"))
+        for name, entry in sorted(files.items())
+        if isinstance(entry, dict)
+    ]
+    return sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+
+
+def reference_files(reference_dir: Path | str) -> tuple[str, ...]:
+    """Return the four source files copied for one supported snapshot."""
+
+    root = Path(reference_dir)
+    native = _native_reference_names(root)
+    if native is not None:
+        return tuple(native.values())
+    raise ValueError(_FOUR_FILE_SET_INVALID)
 
 
 def discover_reference_snapshots(reference_root: Path | str) -> dict[str, Path]:
     """Return immediate, non-hidden snapshot directories under one NCBI root."""
 
     root = Path(reference_root)
-    if (root / REFERENCE_MANIFEST_FILENAME).is_file():
-        manifest = json.loads(
-            (root / REFERENCE_MANIFEST_FILENAME).read_text(encoding="utf-8")
-        )
-        tsv_name, _lineage_name, _alias_name = declared_reference_files(manifest)
-        return {tsv_name.partition(".ncbi.tsv")[0].lower(): root}
+    native = _native_reference_names(root)
+    if native is not None:
+        return {native["tsv"].removesuffix(".ncbi.tsv").lower(): root}
     if not root.is_dir():
         raise ValueError(f"NCBI reference root is not a directory: {root}")
+    if any(root.glob("*.ncbi.*")):
+        raise ValueError(_FOUR_FILE_SET_INVALID)
     snapshots = {
         path.name: path
         for path in sorted(root.iterdir())
@@ -476,82 +488,42 @@ def _reference_provenance(
     sources: dict[str, str],
 ) -> tuple[dict[str, Any], dict[str, bytes] | None, str | None]:
     """Read and verify the exact snapshot bytes later consumed by parsers."""
-    manifest_path = reference_dir / REFERENCE_MANIFEST_FILENAME
     provenance: dict[str, Any] = {
         **sources,
-        "manifest": str(manifest_path),
         "verification": "unverified",
     }
-    if not manifest_path.exists():
-        return provenance, None, "reference_version_manifest_missing"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return provenance, None, "reference_version_manifest_unreadable"
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
-        return provenance, None, "reference_version_manifest_invalid"
-
-    declared = _declared_reference_names(manifest)
-    if declared is None:
-        return provenance, None, "reference_version_manifest_file_whitelist_invalid"
-    sources = {role: str(reference_dir / name) for role, name in declared.items()}
-    provenance.update(sources)
-
+    native = _native_reference_names(reference_dir)
+    if native is None:
+        return provenance, None, _FOUR_FILE_SET_INVALID
+    sources = {role: str(reference_dir / name) for role, name in native.items()}
     provenance.update(
         {
-            "dataset_id": manifest.get("dataset_id"),
-            "source_provider": manifest.get("source_provider"),
-            "source_version": manifest.get("source_version"),
-            "exported_at": manifest.get("exported_at"),
+            **sources,
+            "dataset_id": native["tsv"].removesuffix(".ncbi.tsv").lower(),
+            "source_provider": "NCBI export",
             "files": {},
         }
     )
-    mismatches: list[str] = []
     source_bytes: dict[str, bytes] = {}
-    root = reference_dir.resolve(strict=False)
-    for name, expected in manifest["files"].items():
-        if (
-            not isinstance(name, str)
-            or not name
-            or Path(name).is_absolute()
-            or ".." in Path(name).parts
-            or Path(name).name != name
-            or not isinstance(expected, dict)
-        ):
-            return provenance, None, "reference_version_manifest_invalid"
-        expected_sha256 = expected.get("sha256")
-        expected_size = expected.get("size_bytes")
-        if (
-            not isinstance(expected_sha256, str)
-            or _SHA256_RE.fullmatch(expected_sha256) is None
-            or isinstance(expected_size, bool)
-            or not isinstance(expected_size, int)
-            or expected_size < 0
-        ):
-            return provenance, None, "reference_version_manifest_invalid"
+    for role, name in native.items():
         path = reference_dir / name
         try:
-            path.resolve(strict=False).relative_to(root)
-        except ValueError:
-            return provenance, None, "reference_version_manifest_path_escape"
-        try:
-            contents = path.read_bytes()
+            size = path.stat().st_size
+            if role == "json":
+                digest = sha256_file(path)
+            else:
+                contents = path.read_bytes()
+                source_bytes[name] = contents
+                digest = sha256(contents).hexdigest()
         except OSError:
-            contents = None
-        actual = {
+            return provenance, None, f"reference_source_unavailable:{name}"
+        if not size:
+            return provenance, None, f"reference_source_empty:{name}"
+        provenance["files"][name] = {
             "path": str(path),
-            "sha256": sha256(contents).hexdigest() if contents is not None else None,
-            "size_bytes": len(contents) if contents is not None else None,
+            "sha256": digest,
+            "size_bytes": size,
         }
-        provenance["files"][name] = actual
-        if actual["sha256"] != expected_sha256 or actual["size_bytes"] != expected_size:
-            mismatches.append(name)
-        elif contents is not None:
-            source_bytes[name] = contents
-    if mismatches:
-        provenance["verification"] = "mismatch"
-        provenance["mismatched_files"] = mismatches
-        return provenance, None, f"reference_version_mismatch:{','.join(mismatches)}"
     provenance["verification"] = "verified"
     return provenance, source_bytes, None
 
@@ -562,53 +534,64 @@ def _load_tsv(contents: bytes) -> list[dict[str, str]]:
 
 
 def _load_lineage(contents: bytes) -> dict[str, set[str]]:
-    with StringIO(contents.decode("utf-8"), newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        fieldnames = reader.fieldnames or []
-        if not fieldnames or fieldnames[0] != "Organism Taxonomic ID":
-            raise ValueError("NCBI lineage table has an invalid taxid header")
-        if len(fieldnames) < 2 or fieldnames[1] not in ("Lineage", ""):
-            raise ValueError("NCBI lineage table has an invalid lineage header")
-
-        lineage_column = fieldnames[1]
-        result: dict[str, set[str]] = {}
-        for row in reader:
-            taxid = str(row.get("Organism Taxonomic ID") or "").strip()
-            lineage = str(row.get(lineage_column) or "")
-            if taxid:
-                result[taxid] = {
-                    _normalise(term) for term in lineage.split(";") if term.strip()
-                }
-        return result
+    return {
+        taxid: {_normalise(term) for term in terms}
+        for taxid, terms in _load_lineage_terms(contents).items()
+    }
 
 
-def _resolve_target(species_name: str, aliases: list[dict[str, str]]) -> dict[str, Any]:
-    query = _normalise(species_name)
-    for row in aliases:
-        canonical = _value(row, "canonical_scientific_name", "scientific_name")
-        aliases_text = _value(row, "aliases", "alias")
-        names = [
-            _value(row, "chinese_name", "中文名"),
-            canonical,
-            *re.split(r"[;,|]", aliases_text or ""),
+def _load_lineage_terms(contents: bytes) -> dict[str, list[str]]:
+    lines = contents.decode("utf-8").splitlines()
+    if not lines or lines[0].split("\t", 1)[0].strip() != "Organism Taxonomic ID":
+        raise ValueError("NCBI lineage table has an invalid taxid header")
+    result: dict[str, list[str]] = {}
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2:
+            raise ValueError("NCBI lineage row has no lineage value")
+        result[fields[0]] = [
+            term.strip() for term in fields[1].split(";") if term.strip()
         ]
-        if any(query == _normalise(name) for name in names if name):
-            return {
-                "input_name": species_name,
-                "canonical_scientific_name": canonical or species_name,
-                "resolution": "alias_table",
-                "taxonomic_hints": {
-                    key: value
-                    for key in ("genus", "family", "order")
-                    if (value := _value(row, key))
-                },
-            }
+    return result
+
+
+def _resolve_target(
+    species_name: str,
+    ranked_lineage_by_taxid: dict[str, list[str]],
+) -> dict[str, Any]:
     tokens = species_name.split()
+    hints = {"genus": tokens[0]} if len(tokens) >= 2 else {}
+    if hints:
+        genus = _normalise(tokens[0])
+        species = _normalise(species_name)
+        ranked = list(ranked_lineage_by_taxid.values())
+        terms = next(
+            (
+                values
+                for values in ranked
+                if values and _normalise(values[-1]) == species
+            ),
+            None,
+        ) or next(
+            (values for values in ranked if genus in map(_normalise, values)), None
+        )
+        if terms:
+            normalised = [_normalise(term) for term in terms]
+            genus_index = max(
+                (index for index, value in enumerate(normalised) if value == genus),
+                default=-1,
+            )
+            if genus_index >= 1:
+                hints["family"] = terms[genus_index - 1]
+            if genus_index >= 2:
+                hints["order"] = terms[genus_index - 2]
     return {
         "input_name": species_name,
         "canonical_scientific_name": species_name if len(tokens) >= 2 else None,
         "resolution": "scientific_name_input" if len(tokens) >= 2 else "unresolved",
-        "taxonomic_hints": {"genus": tokens[0]} if len(tokens) >= 2 else {},
+        "taxonomic_hints": hints,
     }
 
 

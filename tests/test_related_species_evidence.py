@@ -133,65 +133,11 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
     def _reference_dir(self, tmpdir: str) -> Path:
         root = Path(tmpdir) / "ncbi_metazoa"
         root.mkdir()
-        with (root / "species_alias.tsv").open(
-            "w", encoding="utf-8", newline=""
-        ) as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "chinese_name",
-                    "canonical_scientific_name",
-                    "aliases",
-                    "genus",
-                    "family",
-                    "order",
-                    "notes",
-                ],
-                delimiter="\t",
-            )
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "chinese_name": "目标鱼",
-                    "canonical_scientific_name": "Targetus absentus",
-                    "aliases": "target fish",
-                    "genus": "Targetus",
-                    "family": "Targetidae",
-                    "order": "Targetiformes",
-                }
-            )
         return root
 
     def _review_reference_dir(self, tmpdir: str) -> Path:
         """Create a complete local snapshot for the isolated node seams."""
         root = self._reference_dir(tmpdir)
-        with (root / "species_alias.tsv").open(
-            "w", encoding="utf-8", newline=""
-        ) as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "chinese_name",
-                    "canonical_scientific_name",
-                    "aliases",
-                    "genus",
-                    "family",
-                    "order",
-                    "notes",
-                ],
-                delimiter="\t",
-            )
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "chinese_name": "卵鳎",
-                    "canonical_scientific_name": "Solea ovata",
-                    "aliases": "tongue sole",
-                    "genus": "Solea",
-                    "family": "Soleidae",
-                    "order": "Pleuronectiformes",
-                }
-            )
         self._write_records(
             root,
             [
@@ -213,7 +159,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
         rows: list[dict[str, str]],
         lineage: dict[str, str],
         *,
-        lineage_header: str = "Lineage",
+        lineage_header: str = "Organism Taxonomic ID",
     ) -> None:
         with (root / "Metazoa.ncbi.tsv").open(
             "w", encoding="utf-8", newline=""
@@ -221,44 +167,18 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             writer = csv.DictWriter(handle, fieldnames=_HEADERS, delimiter="\t")
             writer.writeheader()
             writer.writerows(rows)
-        with (root / "Metazoa.ncbi.lineage").open(
-            "w", encoding="utf-8", newline=""
-        ) as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=["Organism Taxonomic ID", lineage_header],
-                delimiter="\t",
-            )
-            writer.writeheader()
-            for taxid, value in lineage.items():
-                writer.writerow({"Organism Taxonomic ID": taxid, lineage_header: value})
-        self._write_manifest(root)
-
-    def _write_manifest(self, root: Path) -> None:
-        files = {
-            name: {
-                "sha256": self._sha256(root / name),
-                "size_bytes": (root / name).stat().st_size,
-            }
-            for name in (
-                "Metazoa.ncbi.tsv",
-                "Metazoa.ncbi.lineage",
-                "species_alias.tsv",
-            )
-        }
-        (root / "reference_manifest.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "dataset_id": "test_ncbi_metazoa",
-                    "source_provider": "test",
-                    "source_version": "test-v1",
-                    "exported_at": "2026-06-23T00:00:00Z",
-                    "files": files,
-                },
-            ),
+        lineage_text = (
+            lineage_header
+            + "\n"
+            + "".join(f"{taxid} {value}\n" for taxid, value in lineage.items())
+        )
+        (root / "Metazoa.ncbi.lineage").write_text(lineage_text, encoding="utf-8")
+        (root / "Metazoa.ncbi.lineage2").write_text(
+            lineage_text
+            + "0 Metazoa;Targetiformes;Targetidae;Targetus;Targetus absentus\n",
             encoding="utf-8",
         )
+        (root / "Metazoa.ncbi.json").write_text("{}\n", encoding="utf-8")
 
     def _sha256(self, path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -314,7 +234,9 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 {"1": "Metazoa;Targetiformes;Targetidae;Targetus;Targetus relative"},
             )
 
-            pack = build_related_species_evidence_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_evidence_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(pack["matching_mode"], "same_genus")
             self.assertEqual(
@@ -407,7 +329,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 metadata_record["alternate_haplotype_reason"], "assembly_metadata"
             )
 
-    def test_alias_reverse_lookup_supplies_family_and_order_fallback_hints(self):
+    def test_ranked_lineage_supplies_family_and_order_fallback_hints(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._reference_dir(tmpdir)
             self._write_records(
@@ -422,7 +344,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 "Targetus absentus", reference_dir=root
             )
 
-            self.assertEqual(pack["target"]["resolution"], "alias_table")
+            self.assertEqual(pack["target"]["resolution"], "scientific_name_input")
             self.assertEqual(pack["matching_mode"], "same_family")
             self.assertEqual(pack["selected_records"][0]["taxid"], "2")
 
@@ -437,12 +359,14 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 {"3": "Metazoa;Targetiformes;Otheridae;Otherus;Otherus ordermember"},
             )
 
-            pack = build_related_species_evidence_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_evidence_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(pack["matching_mode"], "same_order")
             self.assertEqual(pack["selected_records"][0]["taxid"], "3")
 
-    def test_blank_second_header_supports_family_fallback(self):
+    def test_single_field_header_supports_family_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._reference_dir(tmpdir)
             self._write_records(
@@ -451,7 +375,6 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                     self._row("GCA_000000003.1", "Otherus familymember", "2"),
                 ],
                 {"2": "Metazoa;Targetiformes;Targetidae;Otherus;Otherus familymember"},
-                lineage_header="",
             )
 
             pack = build_related_species_evidence_pack(
@@ -484,9 +407,10 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 {"20": "Metazoa;Targetiformes;Targetidae;Targetus;Targetus relative"},
             )
 
-            verified = build_related_species_evidence_pack("目标鱼", reference_dir=root)
+            verified = build_related_species_evidence_pack(
+                "Targetus absentus", reference_dir=root
+            )
             self.assertEqual(verified["source"]["verification"], "verified")
-            self.assertEqual(verified["source"]["source_version"], "test-v1")
             self.assertEqual(
                 verified["source"]["files"]["Metazoa.ncbi.tsv"]["sha256"],
                 self._sha256(root / "Metazoa.ncbi.tsv"),
@@ -494,10 +418,12 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
 
             with (root / "Metazoa.ncbi.tsv").open("a", encoding="utf-8") as handle:
                 handle.write("\n")
-            mismatch = build_related_species_evidence_pack("目标鱼", reference_dir=root)
-            self.assertEqual(mismatch["status"], "unavailable")
-            self.assertIn(
-                "reference_version_mismatch:Metazoa.ncbi.tsv", mismatch["notes"]
+            changed = build_related_species_evidence_pack(
+                "Targetus absentus", reference_dir=root
+            )
+            self.assertNotEqual(
+                verified["source"]["files"]["Metazoa.ncbi.tsv"]["sha256"],
+                changed["source"]["files"]["Metazoa.ncbi.tsv"]["sha256"],
             )
 
     def test_verified_snapshot_uses_the_exact_hashed_bytes(self):
@@ -542,7 +468,8 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             reference_dir = self._review_reference_dir(tmpdir)
             state = self._state(
                 tmpdir,
-                "session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n",
+                "session_id: s1\nuser_metadata:\n"
+                "  target_species: Solea ovata\nassets: []\n",
             )
             state["stage_outputs"] = {
                 "assembly_review": {
@@ -592,7 +519,8 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             reference_dir = self._review_reference_dir(tmpdir)
             state = self._state(
                 tmpdir,
-                "session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n",
+                "session_id: s1\nuser_metadata:\n"
+                "  target_species: Solea ovata\nassets: []\n",
             )
             state["stage_outputs"] = {
                 "assembly_review": {

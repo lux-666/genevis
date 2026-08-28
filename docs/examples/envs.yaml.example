@@ -48,7 +48,7 @@ databases:
       # resolve on this host, for example actinopterygii_odb10 for ray-finned fish.
   ncbi:
     # Root whose immediate children are snapshots such as metazoa/ and
-    # viridiplantae/. Each child owns its four manifest-verified files.
+    # viridiplantae/. Each child owns one same-prefix four-file NCBI export.
     reference_dir: /path/to/databases/ncbi
 
 # AutoHiC, Juicer, and 3D-DNA are standalone git-clone

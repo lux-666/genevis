@@ -591,9 +591,14 @@ def _related_species_reference_dir(
     if not value:
         return None
     ref_path = Path(value)
-    if ref_path.is_dir() and (ref_path / "reference_manifest.json").is_file():
+    try:
+        from app.reference.ncbi import validate_reference_snapshot
+
+        validate_reference_snapshot(ref_path)
+    except (OSError, TypeError, ValueError):
+        return None
+    else:
         return ref_path
-    return None
 
 
 def build_related_species_statistics_and_notebook(

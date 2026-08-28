@@ -329,7 +329,7 @@ def test_documentation_and_simplification_policy_is_final_state_only() -> None:
     assert "Content-addressed JSON publication" not in governance
     assert "schema-v1 route restorer" in recommendation_policy
     assert "_parameter_evidence_location" in parameter_contract
-    assert "_load_reference_snapshot" in stage_contract
+    assert "_load_reference_snapshot" not in stage_contract
     assert "never stringifies" in review_topic
     assert "arbitrary provider object" in review_topic
     assert "intentional symmetry" not in server_test.lower()

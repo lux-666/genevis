@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -111,28 +110,21 @@ def ensure_test_host_envs(
     reference = root_path / "ncbi" / "viridiplantae"
     reference.mkdir(parents=True, exist_ok=True)
     source_contents = {
+        "Viridiplantae.ncbi.json": "{}\n",
         "Viridiplantae.ncbi.tsv": (
             "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
             "Annotation BUSCO Lineage\n"
             "GCF_000000001.1\tFixture species\t1\tembryophyta_odb10\n"
         ),
         "Viridiplantae.ncbi.lineage": (
-            "Organism Taxonomic ID\tLineage\n1\tEukaryota;Fixture species\n"
+            "Organism Taxonomic ID\n1 Eukaryota;Fixture species\n"
         ),
-        "species_alias.tsv": "alias\tscientific_name\nfixture\tFixture species\n",
+        "Viridiplantae.ncbi.lineage2": (
+            "Organism Taxonomic ID\n1 Eukaryota;Fixture;Fixture species\n"
+        ),
     }
-    files: dict[str, dict[str, int | str]] = {}
     for name, content in source_contents.items():
-        payload = content.encode("utf-8")
-        (reference / name).write_bytes(payload)
-        files[name] = {
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "size_bytes": len(payload),
-        }
-    (reference / "reference_manifest.json").write_text(
-        json.dumps({"files": files}, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+        (reference / name).write_text(content, encoding="utf-8")
     config_path = root_path / "envs.yaml"
     config_path.write_text(
         json.dumps(

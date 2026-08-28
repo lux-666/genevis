@@ -363,13 +363,14 @@ values fail input preparation with the manifest field path; unresolved names
 fail database readiness against the configured NCBI snapshots.
 
 The host registry owns one `databases.ncbi.reference_dir`. Each immediate child
-is a manifest-verified taxonomy snapshot with one same-prefix `*.ncbi.tsv`, one
-same-prefix `*.ncbi.lineage`, and `species_alias.tsv`. Readiness searches the
-target scientific name across all installed children using the existing exact,
-same-genus, same-family, then same-order fallback. It selects the snapshot with
-the best available tier; equal tiers prefer more primary records and then the
-snapshot directory name. Readiness fails only when no child provides useful
-evidence. The selected snapshot maps that scientific name to related-species
+is one same-prefix `*.ncbi.json`, `*.ncbi.lineage`, `*.ncbi.lineage2`, and
+`*.ncbi.tsv` snapshot. Readiness searches the target scientific name across all
+installed children using the existing exact, same-genus, same-family, then
+same-order fallback. The full lineage supplies matching terms and `lineage2`
+supplies ranked taxonomic hints. Selection uses the best available tier; equal
+tiers prefer more primary records and then the snapshot directory name.
+Readiness fails only when no child provides useful evidence. The selected
+snapshot maps that scientific name to related-species
 `Annotation BUSCO Lineage` values. The runtime intersects those annotations
 with the host registry and requires exactly one compatible installed lineage
 before freeze. Snapshot creation/installation owns producing and validating
@@ -384,10 +385,9 @@ separately completed polish/purge action, or stop the workflow. Decisions are
 bound to the current review request and typed candidate refs.
 
 NCBI comparative evidence and statistics verify and parse the exact same
-manifest-pinned bytes. Dependency freeze records the manifest hash for every
-installed child snapshot. `_load_reference_snapshot` returns named alias, assembly
-row, and lineage tables so their roles cannot be exchanged positionally. Target
-resolution and stable source-failure classification are shared; first-useful-tier
+snapshot bytes. Dependency freeze records the combined four-file identity for
+every installed child snapshot. Target resolution and stable source-failure
+classification are shared; first-useful-tier
 evidence selection and all-tier statistical cohort construction remain separate
 stage contracts.
 

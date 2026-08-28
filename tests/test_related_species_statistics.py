@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,33 +34,6 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
     def _reference_dir(self, tmpdir: str) -> Path:
         root = Path(tmpdir) / "ncbi_metazoa"
         root.mkdir()
-        with (root / "species_alias.tsv").open(
-            "w", encoding="utf-8", newline=""
-        ) as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "chinese_name",
-                    "canonical_scientific_name",
-                    "aliases",
-                    "genus",
-                    "family",
-                    "order",
-                    "notes",
-                ],
-                delimiter="\t",
-            )
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "chinese_name": "目标鱼",
-                    "canonical_scientific_name": "Targetus absentus",
-                    "aliases": "target fish",
-                    "genus": "Targetus",
-                    "family": "Targetidae",
-                    "order": "Targetiformes",
-                }
-            )
         return root
 
     def _write_records(
@@ -71,7 +42,7 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
         rows: list[dict[str, str]],
         lineage: dict[str, str],
         *,
-        lineage_header: str = "Lineage",
+        lineage_header: str = "Organism Taxonomic ID",
     ) -> None:
         with (root / "Metazoa.ncbi.tsv").open(
             "w", encoding="utf-8", newline=""
@@ -79,47 +50,14 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
             writer = csv.DictWriter(handle, fieldnames=_HEADERS, delimiter="\t")
             writer.writeheader()
             writer.writerows(rows)
-        with (root / "Metazoa.ncbi.lineage").open(
-            "w", encoding="utf-8", newline=""
-        ) as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=["Organism Taxonomic ID", lineage_header],
-                delimiter="\t",
-            )
-            writer.writeheader()
-            for taxid, value in lineage.items():
-                writer.writerow({"Organism Taxonomic ID": taxid, lineage_header: value})
-        self._write_manifest(root)
-
-    def _write_manifest(self, root: Path) -> None:
-        files = {
-            name: {
-                "sha256": self._sha256(root / name),
-                "size_bytes": (root / name).stat().st_size,
-            }
-            for name in (
-                "Metazoa.ncbi.tsv",
-                "Metazoa.ncbi.lineage",
-                "species_alias.tsv",
-            )
-        }
-        (root / "reference_manifest.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "dataset_id": "test_ncbi_metazoa",
-                    "source_provider": "test",
-                    "source_version": "test-v1",
-                    "exported_at": "2026-06-23T00:00:00Z",
-                    "files": files,
-                },
-            ),
-            encoding="utf-8",
+        lineage_text = (
+            lineage_header
+            + "\n"
+            + "".join(f"{taxid} {value}\n" for taxid, value in lineage.items())
         )
-
-    def _sha256(self, path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        (root / "Metazoa.ncbi.lineage").write_text(lineage_text, encoding="utf-8")
+        (root / "Metazoa.ncbi.lineage2").write_text(lineage_text, encoding="utf-8")
+        (root / "Metazoa.ncbi.json").write_text("{}\n", encoding="utf-8")
 
     def _row(
         self,
@@ -154,34 +92,44 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
             "Assembly Level": assembly_level,
         }
 
-    def test_manifest_missing_is_unavailable_with_empty_cohorts(self):
+    def test_four_file_set_missing_is_unavailable_with_empty_cohorts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "ncbi_metazoa"
             root.mkdir()
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(pack["status"], "unavailable")
             self.assertEqual(pack["display_cohort"]["records"], [])
             self.assertEqual(pack["analysis_cohort"]["records"], [])
-            self.assertIn("reference_version_manifest_missing", pack["notes"])
+            self.assertTrue(
+                any(
+                    note.startswith("reference_four_file_set_invalid")
+                    for note in pack["notes"]
+                )
+            )
             self.assertEqual(
                 pack["tier_counts"],
                 {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0},
             )
 
-    def test_manifest_invalid_json_is_unavailable(self):
+    def test_json_lines_source_is_not_parsed_as_one_json_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._reference_dir(tmpdir)
-            self._write_records(root, [], {})
-            (root / "reference_manifest.json").write_text(
-                "{not valid json", encoding="utf-8"
+            self._write_records(
+                root,
+                [self._row("GCA_000000001.1", "Targetus absentus", "1")],
+                {"1": "Metazoa;Targetiformes;Targetidae;Targetus;Targetus absentus"},
+            )
+            (root / "Metazoa.ncbi.json").write_text("{}\n{}\n", encoding="utf-8")
+
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
             )
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
-
-            self.assertEqual(pack["status"], "unavailable")
-            self.assertIn("reference_version_manifest_unreadable", pack["notes"])
+            self.assertEqual(pack["status"], "available")
 
     def test_alias_resolution_and_cross_tier_collection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -207,10 +155,12 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                 },
             )
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(pack["status"], "available")
-            self.assertEqual(pack["target"]["resolution"], "alias_table")
+            self.assertEqual(pack["target"]["resolution"], "scientific_name_input")
             self.assertEqual(
                 pack["tier_counts"],
                 {"exact": 1, "same_genus": 1, "same_family": 1, "same_order": 1},
@@ -228,7 +178,7 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                 },
             )
 
-    def test_blank_second_header_preserves_cross_tier_collection(self):
+    def test_single_field_header_preserves_cross_tier_collection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._reference_dir(tmpdir)
             self._write_records(
@@ -250,10 +200,11 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                         "Yetanother ordermember"
                     ),
                 },
-                lineage_header="",
             )
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(
                 pack["tier_counts"],
@@ -269,24 +220,26 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                 {"3": "Metazoa;Otheridae;Otherus"},
             )
             (root / "Metazoa.ncbi.lineage").write_text(
-                "Organism Taxonomic ID\tLineage\n"
-                "3\tMetazoa;Targetiformes;Targetidae;Otherus\n"
-                "3\t\n",
+                "Organism Taxonomic ID\n"
+                "3 Metazoa;Targetiformes;Targetidae;Otherus\n"
+                "3 Metazoa;Otheridae;Otherus\n",
                 encoding="utf-8",
             )
-            self._write_manifest(root)
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(pack["tier_counts"]["same_family"], 0)
             self.assertEqual(pack["tier_counts"]["same_order"], 0)
 
     def test_malformed_lineage_headers_are_unreadable(self):
         malformed_headers = {
-            "empty_file": "",
-            "wrong_first_header": "Wrong Taxonomic ID\tLineage\n",
-            "missing_second_header": "Organism Taxonomic ID\n",
-            "unsupported_second_header": "Organism Taxonomic ID\tUnexpected\n",
+            "empty_file": ("", "reference_source_empty:Metazoa.ncbi.lineage"),
+            "wrong_first_header": (
+                "Wrong Taxonomic ID\n",
+                "reference_source_unreadable:ValueError",
+            ),
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._reference_dir(tmpdir)
@@ -295,21 +248,17 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                 [self._row("GCA_000000003.1", "Otherus familymember", "3")],
                 {"3": "Metazoa;Targetiformes;Targetidae;Otherus"},
             )
-            for label, contents in malformed_headers.items():
+            for label, (contents, expected_note) in malformed_headers.items():
                 with self.subTest(header=label):
                     (root / "Metazoa.ncbi.lineage").write_text(
                         contents, encoding="utf-8"
                     )
-                    self._write_manifest(root)
-
                     pack = build_related_species_statistics_pack(
-                        "目标鱼", reference_dir=root
+                        "Targetus absentus", reference_dir=root
                     )
 
                     self.assertEqual(pack["status"], "unavailable")
-                    self.assertIn(
-                        "reference_source_unreadable:ValueError", pack["notes"]
-                    )
+                    self.assertIn(expected_note, pack["notes"])
 
     def test_taxid_priority_dedup_across_tiers(self):
         # Taxid 2 organism name also matches genus criterion; it must be assigned to
@@ -328,7 +277,9 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
                 },
             )
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(
                 pack["tier_counts"],
@@ -425,7 +376,9 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
             }
             self._write_records(root, rows, lineage)
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             self.assertEqual(len(pack["display_cohort"]["records"]), 25)
             self.assertEqual(len(pack["analysis_cohort"]["records"]), 30)
@@ -469,7 +422,9 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
             }
             self._write_records(root, rows, lineage)
 
-            pack = build_related_species_statistics_pack("目标鱼", reference_dir=root)
+            pack = build_related_species_statistics_pack(
+                "Targetus absentus", reference_dir=root
+            )
 
             values = [100, 200, 300, 400]
             expected_q1, expected_median, expected_q3 = self._hand_quantiles(values)
@@ -533,7 +488,7 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
             self._write_records(root, rows, lineage)
 
             pack_no_metrics = build_related_species_statistics_pack(
-                "目标鱼", reference_dir=root
+                "Targetus absentus", reference_dir=root
             )
             self.assertFalse(pack_no_metrics["target_position"]["available"])
             self.assertIn(
@@ -543,7 +498,7 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
 
             # target n50 of 25 -> 2 values below (10, 20), 0 equal, out of 4 -> 50.0
             pack = build_related_species_statistics_pack(
-                "目标鱼",
+                "Targetus absentus",
                 reference_dir=root,
                 target_metrics={"n50_bp": 25},
             )

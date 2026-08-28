@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -24,26 +22,25 @@ from tests.busco_fixture import ensure_busco_lineage
 
 
 def _write_reference(reference: Path, files: dict[str, str]) -> None:
-    entries = {}
-    for name, content in files.items():
+    tsv_name = next(name for name in files if name.endswith(".ncbi.tsv"))
+    prefix = tsv_name.removesuffix(".ncbi.tsv")
+    lineage = files[f"{prefix}.ncbi.lineage"]
+    native = {
+        f"{prefix}.ncbi.json": "{}\n",
+        f"{prefix}.ncbi.lineage": lineage,
+        f"{prefix}.ncbi.lineage2": lineage,
+        tsv_name: files[tsv_name],
+    }
+    for name, content in native.items():
         (reference / name).write_text(content, encoding="utf-8")
-        payload = content.encode()
-        entries[name] = {
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "size_bytes": len(payload),
-        }
-    (reference / "reference_manifest.json").write_text(
-        json.dumps({"files": entries}, sort_keys=True) + "\n", encoding="utf-8"
-    )
 
 
-def _write_reference_manifest(reference: Path) -> None:
+def _write_reference_files(reference: Path) -> None:
     _write_reference(
         reference,
         {
             "Metazoa.ncbi.tsv": "accession\n",
-            "Metazoa.ncbi.lineage": "taxid\tlineage\n",
-            "species_alias.tsv": "alias\tscientific_name\n",
+            "Metazoa.ncbi.lineage": "Organism Taxonomic ID\n",
         },
     )
 
@@ -66,7 +63,6 @@ def _write_species_reference(
             f"{prefix}.ncbi.lineage": (
                 f"Organism Taxonomic ID\tLineage\n1\tMetazoa;{species_name}\n"
             ),
-            "species_alias.tsv": (f"alias\tscientific_name\ntarget\t{species_name}\n"),
         },
     )
 
@@ -143,7 +139,7 @@ def test_logical_lineage_resolves_to_complete_projection(tmp_path: Path) -> None
     lineage = ensure_busco_lineage(tmp_path / "busco")
     ncbi = tmp_path / "ncbi"
     ncbi.mkdir()
-    _write_reference_manifest(ncbi)
+    _write_reference_files(ncbi)
     resolver = EnvResolver(config_data=_config(lineage, ncbi))
 
     projection = resolve_busco_parameters(
@@ -274,7 +270,7 @@ def test_database_paths_are_relative_to_env_config(tmp_path: Path) -> None:
     lineage = ensure_busco_lineage(config_dir / "db" / "busco")
     ncbi = config_dir / "db" / "ncbi"
     ncbi.mkdir(parents=True)
-    _write_reference_manifest(ncbi)
+    _write_reference_files(ncbi)
     envs = config_dir / "envs.yaml"
     envs.write_text(
         "default:\n  fallback_env: tools\n"
@@ -297,11 +293,11 @@ def test_database_paths_are_relative_to_env_config(tmp_path: Path) -> None:
     assert resolve_ncbi_reference_dir(resolver) == str(ncbi.resolve())
 
 
-def test_frozen_ncbi_manifest_identity_rejects_replacement(tmp_path: Path) -> None:
+def test_frozen_ncbi_snapshot_identity_rejects_replacement(tmp_path: Path) -> None:
     lineage = ensure_busco_lineage(tmp_path / "busco")
     ncbi = tmp_path / "ncbi"
     ncbi.mkdir()
-    _write_reference_manifest(ncbi)
+    _write_reference_files(ncbi)
     envs = tmp_path / "envs.yaml"
     envs.write_text(
         "default:\n  fallback_env: tools\n"
@@ -318,16 +314,6 @@ def test_frozen_ncbi_manifest_identity_rejects_replacement(tmp_path: Path) -> No
 
     changed = "accession\tchanged\n"
     (ncbi / "Metazoa.ncbi.tsv").write_text(changed, encoding="utf-8")
-    entries = {}
-    for name in ("Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage", "species_alias.tsv"):
-        content = (ncbi / name).read_bytes()
-        entries[name] = {
-            "sha256": hashlib.sha256(content).hexdigest(),
-            "size_bytes": len(content),
-        }
-    (ncbi / "reference_manifest.json").write_text(
-        json.dumps({"files": entries}, sort_keys=True) + "\n", encoding="utf-8"
-    )
 
     with pytest.raises(
         DatabaseResolutionError, match="changed after dependency freeze"
@@ -335,19 +321,13 @@ def test_frozen_ncbi_manifest_identity_rejects_replacement(tmp_path: Path) -> No
         resolve_ncbi_reference_dir(frozen)
 
 
-def test_ncbi_manifest_requires_exact_files_and_hash_metadata(tmp_path: Path) -> None:
+def test_ncbi_snapshot_requires_one_same_prefix_four_file_set(tmp_path: Path) -> None:
     lineage = ensure_busco_lineage(tmp_path / "busco")
     ncbi = tmp_path / "ncbi"
     ncbi.mkdir()
-    _write_reference_manifest(ncbi)
+    _write_reference_files(ncbi)
     resolver = EnvResolver(config_data=_config(lineage, ncbi))
-    manifest_path = ncbi / "reference_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["files"]["unexpected.txt"] = {
-        "sha256": hashlib.sha256(b"x").hexdigest(),
-        "size_bytes": 1,
-    }
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (ncbi / "Metazoa.ncbi.lineage2").rename(ncbi / "Viridiplantae.ncbi.lineage2")
 
-    with pytest.raises(DatabaseResolutionError, match="whitelist"):
+    with pytest.raises(DatabaseResolutionError, match="four_file_set_invalid"):
         resolve_ncbi_reference_dir(resolver)

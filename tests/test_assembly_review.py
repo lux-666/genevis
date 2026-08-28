@@ -680,10 +680,17 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
     @staticmethod
     def _test_reference_dir(state: dict) -> Path:
-        """Provide an explicit incomplete snapshot for isolated stage seams."""
+        """Provide an empty valid snapshot for isolated stage seams."""
         root = Path(state["data_dir"]) / "isolated_ncbi_metazoa"
         root.mkdir(parents=True, exist_ok=True)
-        (root / "reference_manifest.json").write_text("{}", encoding="utf-8")
+        files = {
+            "Metazoa.ncbi.json": "{}\n",
+            "Metazoa.ncbi.lineage": "Organism Taxonomic ID\n",
+            "Metazoa.ncbi.lineage2": "Organism Taxonomic ID\n",
+            "Metazoa.ncbi.tsv": "Organism Name\tOrganism Taxonomic ID\n",
+        }
+        for name, contents in files.items():
+            (root / name).write_text(contents, encoding="utf-8")
         return root
 
     def _write_candidate_bundle(

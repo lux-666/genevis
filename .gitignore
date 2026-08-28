@@ -22,10 +22,6 @@ data/reference/*
 !data/reference/ncbi/
 data/reference/ncbi/*
 !data/reference/ncbi/README.md
-!data/reference/ncbi/metazoa/
-data/reference/ncbi/metazoa/*
-!data/reference/ncbi/metazoa/reference_manifest.json
-!data/reference/ncbi/metazoa/species_alias.tsv
 logs/
 /reports/
 pid*.log.info
