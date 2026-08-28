@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download, install, or verify the pinned NCBI Metazoa snapshot."""
+"""Download, install, or verify one configured NCBI reference snapshot."""
 
 from __future__ import annotations
 
@@ -22,18 +22,21 @@ from app.execution.env_resolver import (  # noqa: E402
     EnvResolver,
     active_config_path,
 )
+from app.reference.ncbi import (  # noqa: E402
+    declared_reference_files,
+    validate_reference_snapshot,
+)
 
 MANIFEST_FILENAME = "reference_manifest.json"
-PINNED_REFERENCE_DIR = PROJECT_ROOT / "data" / "reference" / "ncbi_metazoa"
-REFERENCE_FILES = (
-    "Metazoa.ncbi.tsv",
-    "Metazoa.ncbi.lineage",
-    "species_alias.tsv",
-)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--reference",
+        required=True,
+        help="Snapshot child directory name under databases.ncbi.reference_dir",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--source-dir", type=Path, help="Directory holding the pinned NCBI export files"
@@ -67,33 +70,30 @@ def main(argv: list[str] | None = None) -> int:
         if resolver.databases is None:
             raise ValueError("databases registry is missing")
         destination = (
-            Path(resolver.databases.ncbi_metazoa.reference_dir)
+            Path(resolver.databases.ncbi.reference_dir)
             .expanduser()
             .resolve(strict=False)
+            / args.reference
         )
     except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
         raise SystemExit(
-            f"cannot resolve databases.ncbi_metazoa.reference_dir from "
-            f"{config_path}: {exc}"
+            f"cannot resolve databases.ncbi.reference_dir from {config_path}: {exc}"
         ) from exc
-    pinned_manifest = _load_manifest(PINNED_REFERENCE_DIR / MANIFEST_FILENAME)
     if args.verify_only:
-        errors = _verify_pinned_destination(destination, pinned_manifest)
+        errors = _verify_destination(destination)
     elif args.source_dir:
-        errors = _install_from_source(
-            args.source_dir.resolve(), destination, pinned_manifest
-        )
+        errors = _install_from_source(args.source_dir.resolve(), destination)
     else:
         assert args.source_url is not None
         with tempfile.TemporaryDirectory() as tmp:
             source_dir = Path(tmp) / "snapshot"
             _download_snapshot(args.source_url, source_dir)
-            errors = _install_from_source(source_dir, destination, pinned_manifest)
+            errors = _install_from_source(source_dir, destination)
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
-    print(f"Verified NCBI Metazoa reference snapshot: {destination}")
+    print(f"Verified NCBI {args.reference} reference snapshot: {destination}")
     return 0
 
 
@@ -106,41 +106,35 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         raise SystemExit(f"reference manifest is unreadable: {path}: {exc}") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("files"), dict):
         raise SystemExit(f"reference manifest is invalid: {path}")
-    if set(payload["files"]) != set(REFERENCE_FILES):
-        raise SystemExit(
-            f"reference manifest must declare exactly {', '.join(REFERENCE_FILES)}: "
-            f"{path}"
-        )
+    try:
+        declared_reference_files(payload)
+    except ValueError as exc:
+        raise SystemExit(f"reference manifest is invalid: {path}: {exc}") from exc
     return payload
 
 
 def _install_from_source(
     source: Path,
     destination: Path,
-    pinned_manifest: dict[str, Any],
 ) -> list[str]:
     source_manifest = _load_manifest(source / MANIFEST_FILENAME)
-    if source_manifest != pinned_manifest:
-        return ["source manifest does not match the repository-pinned snapshot"]
-    errors = _verify(source, pinned_manifest)
+    errors = _verify(source, source_manifest)
     if errors:
         return [f"source {error}" for error in errors]
     if source != destination:
         destination.mkdir(parents=True, exist_ok=True)
-        for filename in REFERENCE_FILES:
+        for filename in declared_reference_files(source_manifest):
             shutil.copy2(source / filename, destination / filename)
         shutil.copy2(source / MANIFEST_FILENAME, destination / MANIFEST_FILENAME)
-    return _verify_pinned_destination(destination, pinned_manifest)
+    return _verify_destination(destination)
 
 
-def _verify_pinned_destination(
-    destination: Path,
-    pinned_manifest: dict[str, Any],
-) -> list[str]:
-    installed_manifest = _load_manifest(destination / MANIFEST_FILENAME)
-    if installed_manifest != pinned_manifest:
-        return ["installed manifest does not match the repository-pinned snapshot"]
-    return _verify(destination, pinned_manifest)
+def _verify_destination(destination: Path) -> list[str]:
+    try:
+        validate_reference_snapshot(destination)
+    except (OSError, TypeError, ValueError) as exc:
+        return [str(exc)]
+    return []
 
 
 def _download_snapshot(url: str, destination: Path) -> None:
@@ -153,7 +147,20 @@ def _download_snapshot(url: str, destination: Path) -> None:
         ):
             shutil.copyfileobj(response, handle)
         with zipfile.ZipFile(archive) as bundle:
-            for filename in (*REFERENCE_FILES, MANIFEST_FILENAME):
+            try:
+                manifest_bytes = bundle.read(MANIFEST_FILENAME)
+                manifest = json.loads(manifest_bytes.decode("utf-8"))
+                filenames = declared_reference_files(manifest)
+            except (
+                KeyError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as exc:
+                raise SystemExit(
+                    f"snapshot ZIP has an invalid manifest: {exc}"
+                ) from exc
+            for filename in (*filenames, MANIFEST_FILENAME):
                 try:
                     source = bundle.open(filename)
                 except KeyError as exc:

@@ -72,8 +72,8 @@ shell list of tools. Assembly method selection remains deferred until upstream
 evidence is available. The selected candidate is resolved and checked from the
 frozen dependency snapshot at Assembly stage entry. Because the authoritative
 contig template includes Assembly Review, the check also validates the BUSCO
-lineage and NCBI snapshot declared in the active host mapping. The actual run
-additionally validates its manifest and selected LLM endpoint.
+lineage and NCBI snapshots under the root declared in the active host mapping.
+The actual run additionally validates its manifest and selected LLM endpoint.
 
 A successful bootstrap is not a proof that `server_check.sh` will pass, and a
 successful `server_check.sh` is not a proof that every declaration in the active

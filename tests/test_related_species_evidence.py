@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.reference.ncbi_metazoa import build_related_species_evidence_pack
+from app.reference.ncbi import build_related_species_evidence_pack
 from app.review.persistence import load_review_request
 from app.schemas.state import initial_state
 from app.stages.assembly_review.nodes import (
@@ -510,9 +510,9 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 [self._row(original_accession, "Targetus absentus", "20")],
                 {"20": "Metazoa;Targetiformes;Targetidae;Targetus"},
             )
-            from app.reference import ncbi_metazoa
+            from app.reference import ncbi
 
-            verify = ncbi_metazoa._reference_provenance
+            verify = ncbi._reference_provenance
 
             def mutate_after_verification(*args, **kwargs):
                 result = verify(*args, **kwargs)
@@ -526,7 +526,7 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                 return result
 
             with patch(
-                "app.reference.ncbi_metazoa._reference_provenance",
+                "app.reference.ncbi._reference_provenance",
                 side_effect=mutate_after_verification,
             ):
                 pack = build_related_species_evidence_pack(

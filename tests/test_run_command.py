@@ -1110,7 +1110,7 @@ class FrozenHelperTests(unittest.TestCase):
         self._resolver_tmp = tempfile.TemporaryDirectory()
         root = Path(self._resolver_tmp.name)
         self._lineage = ensure_busco_lineage(root).resolve()
-        self._ncbi = (root / "ncbi_metazoa").resolve()
+        self._ncbi = (root / "ncbi" / "viridiplantae").resolve()
         resolver = _frozen_resolver(root, self._lineage)
         self.addCleanup(self._resolver_tmp.cleanup)
         self._resolver_patch = patch(

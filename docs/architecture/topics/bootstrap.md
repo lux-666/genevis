@@ -111,7 +111,8 @@ After a persisted candidate is available, bootstrap:
 3. verifies every declared package canary;
 4. groups configured method entries by Conda target and probes their required
    executables;
-5. verifies every declared BUSCO lineage and NCBI snapshot manifest; and
+5. verifies every declared BUSCO lineage and every snapshot directly under the
+   configured NCBI reference root; and
 6. reports every configured package, method, database, target, missing
    executable, and repair hint before returning.
 

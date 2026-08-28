@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.execution.database_resolution import resolve_ncbi_reference_dir
 from app.execution.env_resolver import EnvResolver
-from app.reference.ncbi_metazoa import (
+from app.reference.ncbi import (
     build_related_species_evidence_pack,
     build_related_species_statistics_pack,
 )

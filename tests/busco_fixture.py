@@ -108,15 +108,15 @@ def ensure_test_host_envs(
         if lineage_path is not None
         else ensure_busco_lineage(root_path / "busco")
     )
-    reference = root_path / "ncbi_metazoa"
+    reference = root_path / "ncbi" / "viridiplantae"
     reference.mkdir(parents=True, exist_ok=True)
     source_contents = {
-        "Metazoa.ncbi.tsv": (
+        "Viridiplantae.ncbi.tsv": (
             "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
             "Annotation BUSCO Lineage\n"
             "GCF_000000001.1\tFixture species\t1\tembryophyta_odb10\n"
         ),
-        "Metazoa.ncbi.lineage": (
+        "Viridiplantae.ncbi.lineage": (
             "Organism Taxonomic ID\tLineage\n1\tEukaryota;Fixture species\n"
         ),
         "species_alias.tsv": "alias\tscientific_name\nfixture\tFixture species\n",
@@ -152,7 +152,7 @@ def ensure_test_host_envs(
                             }
                         },
                     },
-                    "ncbi_metazoa": {"reference_dir": str(reference)},
+                    "ncbi": {"reference_dir": str(root_path / "ncbi")},
                 },
             },
             indent=2,

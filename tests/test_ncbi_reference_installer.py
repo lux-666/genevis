@@ -1,4 +1,4 @@
-"""Contracts for the pinned NCBI Metazoa snapshot installer."""
+"""Contracts for the generic NCBI reference snapshot installer."""
 
 from __future__ import annotations
 
@@ -8,19 +8,18 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
 
 import yaml
 
-from scripts import install_ncbi_metazoa_reference as installer
+from scripts import install_ncbi_reference as installer
 
 
 class NcbiReferenceInstallerTests(unittest.TestCase):
-    def _snapshot(self, root: Path) -> None:
+    def _snapshot(self, root: Path, prefix: str) -> tuple[str, ...]:
         root.mkdir(parents=True)
         contents = {
-            "Metazoa.ncbi.tsv": "Organism Name\tOrganism Taxonomic ID\n",
-            "Metazoa.ncbi.lineage": "Organism Taxonomic ID\tLineage\n",
+            f"{prefix}.ncbi.tsv": "Organism Name\tOrganism Taxonomic ID\n",
+            f"{prefix}.ncbi.lineage": "Organism Taxonomic ID\tLineage\n",
             "species_alias.tsv": "alias\tcanonical_scientific_name\n",
         }
         files = {}
@@ -45,6 +44,7 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        return tuple(contents)
 
     def _config(self, root: Path, destination: Path) -> Path:
         config = root / "config" / "envs.yaml"
@@ -64,7 +64,7 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
                                 }
                             },
                         },
-                        "ncbi_metazoa": {"reference_dir": str(destination)},
+                        "ncbi": {"reference_dir": str(destination)},
                     },
                 },
                 sort_keys=False,
@@ -73,41 +73,55 @@ class NcbiReferenceInstallerTests(unittest.TestCase):
         )
         return config
 
-    def test_fresh_destination_installs_every_pinned_file(self) -> None:
+    def test_fresh_destination_installs_every_manifest_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source"
-            destination = root / "installed"
-            self._snapshot(source)
-            config = self._config(root, destination)
+            destination_root = root / "installed"
+            destination = destination_root / "metazoa"
+            files = self._snapshot(source, "Metazoa")
+            config = self._config(root, destination_root)
 
-            with patch.object(installer, "PINNED_REFERENCE_DIR", source):
-                code = installer.main(
-                    ["--config", str(config), "--source-dir", str(source)]
-                )
+            code = installer.main(
+                [
+                    "--reference",
+                    "metazoa",
+                    "--config",
+                    str(config),
+                    "--source-dir",
+                    str(source),
+                ]
+            )
 
             self.assertEqual(code, 0)
             self.assertEqual(
                 {path.name for path in destination.iterdir()},
-                {*installer.REFERENCE_FILES, installer.MANIFEST_FILENAME},
+                {*files, installer.MANIFEST_FILENAME},
             )
 
     def test_source_url_installs_one_complete_zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source"
-            destination = root / "installed"
+            destination_root = root / "installed"
+            destination = destination_root / "metazoa"
             archive = root / "snapshot.zip"
-            self._snapshot(source)
-            config = self._config(root, destination)
+            files = self._snapshot(source, "Metazoa")
+            config = self._config(root, destination_root)
             with zipfile.ZipFile(archive, "w") as bundle:
-                for name in (*installer.REFERENCE_FILES, installer.MANIFEST_FILENAME):
+                for name in (*files, installer.MANIFEST_FILENAME):
                     bundle.write(source / name, arcname=name)
 
-            with patch.object(installer, "PINNED_REFERENCE_DIR", source):
-                code = installer.main(
-                    ["--config", str(config), "--source-url", archive.as_uri()]
-                )
+            code = installer.main(
+                [
+                    "--reference",
+                    "metazoa",
+                    "--config",
+                    str(config),
+                    "--source-url",
+                    archive.as_uri(),
+                ]
+            )
 
             self.assertEqual(code, 0)
             self.assertEqual(

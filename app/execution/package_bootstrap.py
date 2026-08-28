@@ -302,7 +302,10 @@ def verify_envs_yaml(
     # them when configured; run readiness requires them for Assembly Review.
     if resolver.databases is not None:
         from app.execution.database_resolution import canonical_database_path
-        from app.reference.ncbi_metazoa import validate_reference_snapshot
+        from app.reference.ncbi import (
+            discover_reference_snapshots,
+            validate_reference_snapshot,
+        )
         from app.schemas.run_config import validate_busco_lineage
 
         for lineage_name, lineage in resolver.databases.busco.lineages.items():
@@ -324,16 +327,22 @@ def verify_envs_yaml(
             except (OSError, TypeError, ValueError) as exc:
                 issues.append(f"{field} failed validation: {exc}")
 
-        ncbi_path = resolver.databases.ncbi_metazoa.reference_dir
-        ncbi_field = "databases.ncbi_metazoa.reference_dir"
+        ncbi_path = resolver.databases.ncbi.reference_dir
+        ncbi_field = "databases.ncbi.reference_dir"
         if "/path/to/" in ncbi_path:
             issues.append(f"{ncbi_field} is still a placeholder: {ncbi_path}")
         else:
             try:
-                validate_reference_snapshot(
+                snapshots = discover_reference_snapshots(
                     canonical_database_path(ncbi_path, resolver)
                 )
             except (OSError, TypeError, ValueError) as exc:
                 issues.append(f"{ncbi_field} failed validation: {exc}")
+            else:
+                for name, snapshot in snapshots.items():
+                    try:
+                        validate_reference_snapshot(snapshot)
+                    except (OSError, TypeError, ValueError) as exc:
+                        issues.append(f"{ncbi_field}.{name} failed validation: {exc}")
 
     return issues

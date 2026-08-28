@@ -1137,7 +1137,7 @@ def build_assembly_review_notebook(
     )
     cells.append(
         new_markdown_cell_typed(
-            f"# Assembly Review — Comparative NCBI Metazoa Notebook\n\n"
+            f"# Assembly Review — Comparative NCBI Notebook\n\n"
             f"Session: `{session_id}`\n\n"
             f"{disclaimer_block}"
         )

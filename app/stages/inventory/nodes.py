@@ -536,7 +536,7 @@ def _canonical_shared_parameters(
             )
         shared[key] = configured_value
 
-    from app.reference.ncbi_metazoa import species_name_from_metadata
+    from app.reference.ncbi import species_name_from_metadata
 
     manifest_species = species_name_from_metadata(manifest.user_metadata)
     if manifest_species is not None:

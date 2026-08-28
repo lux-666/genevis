@@ -156,13 +156,45 @@ class PublishedConfigurationContractTests(unittest.TestCase):
             (EXAMPLES_DIR / "envs.yaml.example").read_text(encoding="utf-8")
         )
         self.assertIn("busco", host_seed["databases"])
-        self.assertIn("ncbi_metazoa", host_seed["databases"])
+        self.assertEqual(
+            host_seed["databases"]["ncbi"]["reference_dir"],
+            "/path/to/databases/ncbi",
+        )
         self.assertIn(
             "gzip",
             host_seed["methods"]["genome_survey.kmer_count.jellyfish"][
                 "required_tools"
             ],
         )
+
+    def test_new_host_conda_command_covers_shared_method_catalog(self):
+        migration = (PROJECT_ROOT / "docs/deployment/migration.md").read_text(
+            encoding="utf-8"
+        )
+        command = migration.split("conda create -n env_geno_exec", 1)[1].split(
+            "```", 1
+        )[0]
+        tokens = set(command.replace("\\", " ").split())
+        expected_packages = {
+            "seqkit",
+            "kmer-jellyfish",
+            "genomescope2",
+            "flye",
+            "nextdenovo",
+            "hifiasm",
+            "minimap2",
+            "purge_dups",
+            "gzip",
+            "quast",
+            "busco",
+        }
+
+        self.assertEqual(expected_packages - tokens, set())
+        self.assertNotIn("jellyfish", tokens)
+        self.assertIn("--channel conda-forge", command)
+        self.assertIn("--channel bioconda", command)
+        self.assertIn("--strict-channel-priority", command)
+        self.assertIn("conda-forge::jellyfish", migration)
 
     def test_readme_points_to_authoritative_contig_template(self):
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")

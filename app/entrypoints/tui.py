@@ -768,7 +768,7 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
             prepared.run_config,
             selected_methods=plan.selected_methods or {},
         )
-        from app.reference.ncbi_metazoa import species_name_from_metadata
+        from app.reference.ncbi import species_name_from_metadata
 
         species_name = species_name_from_metadata(
             getattr(prepared.manifest, "user_metadata", {})

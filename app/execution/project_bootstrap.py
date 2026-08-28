@@ -20,7 +20,7 @@ _SHARED_TARGET_KEY = "shared_conda_target"
 _AUTOHIC_TARGET_KEY = "autohic_conda_target"
 _CONDA_BIN_KEY = "conda_bin"
 _BUSCO_LINEAGE_PATH_KEY = "busco_lineage_path"
-_NCBI_REFERENCE_DIR_KEY = "ncbi_metazoa_reference_dir"
+_NCBI_REFERENCE_DIR_KEY = "ncbi_reference_dir"
 _SHARED_TARGET_UPDATE_KEY = "default.fallback_target"
 _AUTOHIC_TARGET_UPDATE_KEY = "methods.hic_scaffolding.candidate.autohic.target"
 _PACKAGE_VALUE_KEYS = {
@@ -377,10 +377,12 @@ def collect_project_bootstrap_plan(
             )
             if entered:
                 values[_BUSCO_LINEAGE_PATH_KEY] = entered
-        ncbi = _mapping(databases.get("ncbi_metazoa"))
-        current_ncbi_dir = ncbi.get("reference_dir")
-        if not current_ncbi_dir or _is_placeholder(current_ncbi_dir):
-            entered = _ask_text(prompt, "NCBI Metazoa reference directory")
+        ncbi = _mapping(databases.get("ncbi")) or _mapping(
+            databases.get("ncbi_metazoa")
+        )
+        current_dir = ncbi.get("reference_dir")
+        if not current_dir or _is_placeholder(current_dir):
+            entered = _ask_text(prompt, "NCBI reference root directory")
             if entered:
                 values[_NCBI_REFERENCE_DIR_KEY] = entered
 
@@ -945,11 +947,22 @@ def _configure_databases(
             f"databases.busco.lineages.{current_name or '<default>'}.path"
         )
 
-    ncbi = _ensure_mapping(databases, "ncbi_metazoa")
+    legacy = databases.pop("ncbi_metazoa", None)
+    if isinstance(legacy, dict) and "ncbi" not in databases:
+        databases["ncbi"] = legacy
+        legacy_path = str(legacy.get("reference_dir") or "")
+        _record(
+            changes,
+            config_path,
+            "databases.ncbi.reference_dir",
+            legacy_path,
+            previous_value=legacy_path or None,
+        )
+    ncbi = _ensure_mapping(databases, "ncbi")
     _fill_field(
         ncbi,
         "reference_dir",
-        "databases.ncbi_metazoa.reference_dir",
+        "databases.ncbi.reference_dir",
         values.get(_NCBI_REFERENCE_DIR_KEY),
         set(),
         config_path,

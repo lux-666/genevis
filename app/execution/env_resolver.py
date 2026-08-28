@@ -203,8 +203,8 @@ class BuscoDatabaseSpec(BaseModel):
         return self
 
 
-class NcbiMetazoaDatabaseSpec(BaseModel):
-    """NCBI Metazoa reference database location."""
+class NcbiDatabaseSpec(BaseModel):
+    """Root containing manifest-verified NCBI taxonomy snapshots."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -221,7 +221,28 @@ class DatabaseRegistry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     busco: BuscoDatabaseSpec
-    ncbi_metazoa: NcbiMetazoaDatabaseSpec
+    ncbi: NcbiDatabaseSpec
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_ncbi_metazoa(cls, value: object) -> object:
+        """Accept the former single-reference shape without emitting it."""
+        if not isinstance(value, Mapping):
+            return value
+        migrated = dict(value)
+        legacy = migrated.pop("ncbi_metazoa", None)
+        if legacy is not None:
+            if "ncbi" in migrated:
+                raise ValueError(
+                    "databases cannot declare both ncbi and legacy ncbi_metazoa"
+                )
+            migrated["ncbi"] = legacy
+        return migrated
+
+    @property
+    def ncbi_metazoa(self) -> NcbiDatabaseSpec:
+        """Read-only compatibility view for callers loading an old host file."""
+        return self.ncbi
 
 
 def package_preflight(package: PackageSpec) -> PackagePreflightResult:
@@ -391,14 +412,14 @@ class EnvResolver:
                 }
             }
         )
-        ncbi = registry.ncbi_metazoa.model_copy(
+        ncbi = registry.ncbi.model_copy(
             update={
                 "reference_dir": _resolve_database_path(
-                    registry.ncbi_metazoa.reference_dir, config_root
+                    registry.ncbi.reference_dir, config_root
                 )
             }
         )
-        return registry.model_copy(update={"busco": busco, "ncbi_metazoa": ncbi})
+        return registry.model_copy(update={"busco": busco, "ncbi": ncbi})
 
     @staticmethod
     def _load_packages(raw: ConfigMapping) -> dict[str, PackageSpec]:

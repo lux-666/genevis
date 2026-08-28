@@ -46,7 +46,7 @@ class DocumentationContractTests(unittest.TestCase):
             "../descriptors/registry.yaml",
             "../config/envs.yaml",
             "examples/envs.yaml.example",
-            "../data/reference/ncbi_metazoa/README.md",
+            "../data/reference/ncbi/README.md",
             "examples/",
             "architecture/reference/data-contract.md",
             "architecture/reference/parameter-recommendation.md",
@@ -58,6 +58,18 @@ class DocumentationContractTests(unittest.TestCase):
         )
         missing = [entry for entry in required if entry not in authority_map]
         self.assertFalse(missing, f"documentation authority map is missing: {missing}")
+
+    def test_ncbi_reference_authority_owns_multi_snapshot_examples(self) -> None:
+        authority = (
+            PROJECT_ROOT / "data" / "reference" / "ncbi" / "README.md"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "reference_dir: /home/lux/databases/ncbi",
+            "Metazoa.ncbi.tsv",
+            "Viridiplantae.ncbi.tsv",
+            "exact species,\nsame genus, same family, then same order",
+        ):
+            self.assertIn(required, authority)
 
     def test_governance_is_the_single_repository_engineering_policy(self) -> None:
         governance = (
@@ -301,9 +313,9 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_ncbi_snapshot_install_commands_have_one_operator_owner(self) -> None:
         authority = (
-            PROJECT_ROOT / "data" / "reference" / "ncbi_metazoa" / "README.md"
+            PROJECT_ROOT / "data" / "reference" / "ncbi" / "README.md"
         ).read_text(encoding="utf-8")
-        installer_name = "install_ncbi_metazoa_reference.py"
+        installer_name = "install_ncbi_reference.py"
 
         self.assertIn("sole operator authority", authority)
         self.assertIn(installer_name, authority)
@@ -312,5 +324,5 @@ class DocumentationContractTests(unittest.TestCase):
             "docs/deployment/mac_dev_server_pull.md",
         ):
             document = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
-            self.assertIn("../../data/reference/ncbi_metazoa/README.md", document)
+            self.assertIn("../../data/reference/ncbi/README.md", document)
             self.assertNotIn(installer_name, document)

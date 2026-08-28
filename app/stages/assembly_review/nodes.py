@@ -37,13 +37,13 @@ from app.execution.database_resolution import (
     resolve_ncbi_reference_dir,
 )
 from app.integrity import SHA256_PATTERN
-from app.reference.ncbi_metazoa import (
+from app.reference.ncbi import (
     build_related_species_evidence_pack as _build_related_species_evidence_pack,
 )
-from app.reference.ncbi_metazoa import (
+from app.reference.ncbi import (
     build_related_species_statistics_pack as _build_related_species_statistics_pack,
 )
-from app.reference.ncbi_metazoa import species_name_from_metadata
+from app.reference.ncbi import species_name_from_metadata
 from app.review.application import (
     ForegroundReviewMetadataV1,
     PreparedReviewApplication,
@@ -525,7 +525,7 @@ def build_related_species_evidence_pack(state: TopLevelState) -> StateUpdate:
             state,
             {
                 "status": "failed",
-                "reason": "frozen NCBI Metazoa database is unavailable",
+                "reason": "frozen NCBI reference database is unavailable",
             },
         )
     evidence_pack = _build_related_species_evidence_pack(
@@ -568,7 +568,10 @@ def _related_species_reference_dir(
             )
 
             resolver = load_frozen_dependency_resolver(state.get("data_dir", "data"))
-            return resolve_ncbi_reference_dir(resolver)
+            return resolve_ncbi_reference_dir(
+                resolver,
+                species_name=_target_species_name(state),
+            )
         except (DatabaseResolutionError, OSError, TypeError, ValueError) as exc:
             try:
                 from app.storage.frozen_inputs import has_frozen_input_contract
@@ -608,7 +611,7 @@ def build_related_species_statistics_and_notebook(
             state,
             {
                 "status": "failed",
-                "reason": "frozen NCBI Metazoa database is unavailable",
+                "reason": "frozen NCBI reference database is unavailable",
             },
         )
 

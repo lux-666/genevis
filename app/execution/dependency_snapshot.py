@@ -70,6 +70,7 @@ class DependencySnapshot(BaseModel):
     # frozen separately from the registry path.  This remains optional for
     # old schema-2 snapshots and for non-review runs.
     ncbi_manifest_sha256: str | None = None
+    ncbi_manifest_sha256s: dict[str, str] = Field(default_factory=dict)
     environment_preflight: dict[str, PreflightResult] = Field(default_factory=dict)
     package_preflight: dict[str, PackagePreflightResult] = Field(default_factory=dict)
 
@@ -98,6 +99,7 @@ class FrozenDependencyResolver:
         self.packages = dict(snapshot.packages)
         self.databases = snapshot.databases
         self.ncbi_manifest_sha256 = snapshot.ncbi_manifest_sha256
+        self.ncbi_manifest_sha256s = dict(snapshot.ncbi_manifest_sha256s)
 
     def resolve(self, *, stage: str, method_name: str | None = None) -> EnvSpec:
         if method_name:
@@ -250,7 +252,7 @@ def capture_dependency_snapshot(
     package_results = {
         name: package_preflight(package) for name, package in selected_packages.items()
     }
-    ncbi_manifest_sha256 = _capture_ncbi_manifest_sha256(databases)
+    ncbi_manifest_sha256s = _capture_ncbi_manifest_sha256s(databases)
     return DependencySnapshot(
         captured_at=datetime.now(timezone.utc).isoformat(),
         config=DependencyConfigIdentity(
@@ -263,21 +265,29 @@ def capture_dependency_snapshot(
         method_environments=method_environments,
         packages=selected_packages,
         databases=databases,
-        ncbi_manifest_sha256=ncbi_manifest_sha256,
+        ncbi_manifest_sha256s=ncbi_manifest_sha256s,
         environment_preflight=environment_preflight,
         package_preflight=package_results,
     )
 
 
-def _capture_ncbi_manifest_sha256(
+def _capture_ncbi_manifest_sha256s(
     databases: DatabaseRegistry | None,
-) -> str | None:
+) -> dict[str, str]:
     if databases is None:
-        return None
-    manifest = Path(databases.ncbi_metazoa.reference_dir) / "reference_manifest.json"
-    if not manifest.is_file():
-        return None
-    return sha256_file(manifest)
+        return {}
+    from app.reference.ncbi import discover_reference_snapshots
+
+    hashes: dict[str, str] = {}
+    try:
+        references = discover_reference_snapshots(databases.ncbi.reference_dir)
+    except (OSError, TypeError, ValueError):
+        return hashes
+    for name, reference in references.items():
+        manifest = reference / "reference_manifest.json"
+        if manifest.is_file():
+            hashes[name] = sha256_file(manifest)
+    return hashes
 
 
 def dependency_snapshot_bytes(snapshot: DependencySnapshot) -> bytes:

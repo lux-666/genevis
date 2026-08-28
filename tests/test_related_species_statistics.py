@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.reference.ncbi_metazoa import build_related_species_statistics_pack
+from app.reference.ncbi import build_related_species_statistics_pack
 
 _HEADERS = [
     "Assembly Accession",

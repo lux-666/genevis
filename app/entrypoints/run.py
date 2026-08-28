@@ -498,7 +498,7 @@ def _run(args: argparse.Namespace) -> int:
         )
 
         effective_methods = effective_method_closure(prepared.run_config)
-        from app.reference.ncbi_metazoa import species_name_from_metadata
+        from app.reference.ncbi import species_name_from_metadata
 
         species_name = species_name_from_metadata(
             getattr(prepared.manifest, "user_metadata", {})
@@ -619,7 +619,7 @@ def _execute_verified_frozen_session(
         from app.execution.dependency_snapshot import load_frozen_dependency_resolver
 
         dependency_resolver = load_frozen_dependency_resolver(run_dir)
-        from app.reference.ncbi_metazoa import species_name_from_metadata
+        from app.reference.ncbi import species_name_from_metadata
 
         declarations = getattr(bundle, "declarations", None)
         manifest = getattr(declarations, "manifest", None)

@@ -59,11 +59,28 @@ environment, invokes Node/npm, or downloads packages.
 ## Provision the contig tool set
 
 The checked-in five-stage contig example deliberately does not bind an
-assembler. A convenient CycloneSeq-first shared environment is:
+assembler. The following shared environment covers every method declared by
+the generic host seed except the optional AutoHiC candidate:
 
 ```bash
-conda create -n env_geno_exec -c conda-forge -c bioconda \
-  seqkit jellyfish genomescope2 flye minimap2 purge_dups gzip quast busco -y
+# Package name matters: conda-forge::jellyfish is an unrelated Python string-
+# matching library and does not provide the required executable.
+conda create -n env_geno_exec \
+  --channel conda-forge \
+  --channel bioconda \
+  --strict-channel-priority \
+  seqkit \
+  kmer-jellyfish \
+  genomescope2 \
+  flye \
+  nextdenovo \
+  hifiasm \
+  minimap2 \
+  purge_dups \
+  gzip \
+  quast \
+  busco \
+  -y
 ```
 
 This command is a provisioning convenience, not the requirement authority.
@@ -77,6 +94,8 @@ Assembly chooses its method after upstream evidence exists. Declare and install
 every Assembly candidate that a run may select on this host; `bootstrap` checks
 that declared catalog. The selected candidate receives a second,
 stage-time preflight from the frozen dependency snapshot before execution.
+AutoHiC, Juicer, 3D-DNA, their models, and biological databases are external
+resources and remain separate from this Conda environment.
 
 ## Conditional services and data
 
@@ -96,15 +115,15 @@ Do not commit it. Assembly method and parameter recommendation requires a
 reachable LLM.
 Assembly Review requires an NCBI Latin scientific name in manifest
 `user_metadata.target_species` and at least one matching BUSCO lineage under
-`databases.busco`; selection is derived from the verified
-`databases.ncbi_metazoa` snapshot and fails if the name is malformed,
-unresolved, absent, or ambiguous. RunConfig does not repeat either database
-path or select the lineage. AutoHiC additionally
+`databases.busco`; selection is derived from the verified snapshots under
+`databases.ncbi.reference_dir` and fails if the name is malformed,
+unresolved, or has no exact/same-genus/same-family/same-order evidence.
+RunConfig does not repeat either database path or select the lineage. AutoHiC additionally
 needs its declared external package roots,
 Juicer/3D-DNA/JAR layout, and model files.
 
 Install the NCBI snapshot through its single
-[snapshot authority](../../data/reference/ncbi_metazoa/README.md). Install
+[snapshot authority](../../data/reference/ncbi/README.md). Install
 AutoHiC/Juicer/3D-DNA/JAR/model resources only when this host will expose that
 capability. A skipped optional capability can be added to the host mapping
 later.
@@ -137,16 +156,16 @@ AutoHiC means removing its four package entries and
 `methods.hic_scaffolding.candidate.autohic` together.
 
 When the databases are installed, fill the single `databases:` block: register
-installed BUSCO lineage aliases and the NCBI snapshot. Per-run RunConfig does
-not repeat database paths, versions, provenance, or lineage selection. For
+installed BUSCO lineage aliases and the NCBI snapshot root. Per-run RunConfig
+does not repeat database paths, versions, provenance, or lineage selection. For
 Assembly Review, the manifest supplies the NCBI Latin scientific name in
 `user_metadata.target_species`; the system derives lineage from the frozen NCBI
-snapshot and installed host registry. A historical
+snapshot selected from that root and the installed host registry. A historical
 `assembly_review.busco.lineage` is consistency-only.
 
-The NCBI installer resolves its destination from the active mapping. If using
-that installer before the snapshot exists, manually add the intended database
-destination first, run the installer, and then use bootstrap or
+The NCBI installer resolves its root destination from the active mapping and
+writes one named child directory. If using it before the root exists, manually
+add the intended root first, run the installer, and then use bootstrap or
 `--verify-only` to validate the completed installation.
 
 Bootstrap does not install arbitrary packages or Conda environments. It

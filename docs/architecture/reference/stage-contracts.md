@@ -360,9 +360,16 @@ captured in the frozen dependency manifest. Assembly Review requires
 common names, LLM-derived names, alternate metadata keys, and unspecified names
 such as `Genus sp.` do not participate in resolution. Missing or malformed
 values fail input preparation with the manifest field path; unresolved names
-fail database readiness against the frozen NCBI snapshot.
+fail database readiness against the configured NCBI snapshots.
 
-The verified snapshot maps that scientific name to related-species
+The host registry owns one `databases.ncbi.reference_dir`. Each immediate child
+is a manifest-verified taxonomy snapshot with one same-prefix `*.ncbi.tsv`, one
+same-prefix `*.ncbi.lineage`, and `species_alias.tsv`. Readiness searches the
+target scientific name across all installed children using the existing exact,
+same-genus, same-family, then same-order fallback. It selects the snapshot with
+the best available tier; equal tiers prefer more primary records and then the
+snapshot directory name. Readiness fails only when no child provides useful
+evidence. The selected snapshot maps that scientific name to related-species
 `Annotation BUSCO Lineage` values. The runtime intersects those annotations
 with the host registry and requires exactly one compatible installed lineage
 before freeze. Snapshot creation/installation owns producing and validating
@@ -377,7 +384,8 @@ separately completed polish/purge action, or stop the workflow. Decisions are
 bound to the current review request and typed candidate refs.
 
 NCBI comparative evidence and statistics verify and parse the exact same
-manifest-pinned bytes. `_load_reference_snapshot` returns named alias, assembly
+manifest-pinned bytes. Dependency freeze records the manifest hash for every
+installed child snapshot. `_load_reference_snapshot` returns named alias, assembly
 row, and lineage tables so their roles cannot be exchanged positionally. Target
 resolution and stable source-failure classification are shared; first-useful-tier
 evidence selection and all-tier statistical cohort construction remain separate

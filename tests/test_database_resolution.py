@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.execution.database_resolution import (
     DatabaseResolutionError,
     resolve_busco_parameters,
+    resolve_ncbi_reference,
     resolve_ncbi_reference_dir,
 )
 from app.execution.dependency_snapshot import (
@@ -17,16 +18,12 @@ from app.execution.dependency_snapshot import (
     capture_dependency_snapshot,
 )
 from app.execution.env_resolver import EnvResolver
+from app.reference.ncbi import MATCHING_TIER_RANK, MATCHING_TIERS
 from app.schemas.run_config import RunConfig
 from tests.busco_fixture import ensure_busco_lineage
 
 
-def _write_reference_manifest(reference: Path) -> None:
-    files = {
-        "Metazoa.ncbi.tsv": "accession\n",
-        "Metazoa.ncbi.lineage": "taxid\tlineage\n",
-        "species_alias.tsv": "alias\tscientific_name\n",
-    }
+def _write_reference(reference: Path, files: dict[str, str]) -> None:
     entries = {}
     for name, content in files.items():
         (reference / name).write_text(content, encoding="utf-8")
@@ -40,33 +37,37 @@ def _write_reference_manifest(reference: Path) -> None:
     )
 
 
+def _write_reference_manifest(reference: Path) -> None:
+    _write_reference(
+        reference,
+        {
+            "Metazoa.ncbi.tsv": "accession\n",
+            "Metazoa.ncbi.lineage": "taxid\tlineage\n",
+            "species_alias.tsv": "alias\tscientific_name\n",
+        },
+    )
+
+
 def _write_species_reference(
     reference: Path,
     *,
     species_name: str,
     lineage_name: str,
+    prefix: str = "Metazoa",
 ) -> None:
-    files = {
-        "Metazoa.ncbi.tsv": (
-            "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
-            "Annotation BUSCO Lineage\n"
-            f"GCF_000000001.1\t{species_name}\t1\t{lineage_name}\n"
-        ),
-        "Metazoa.ncbi.lineage": (
-            f"Organism Taxonomic ID\tLineage\n1\tMetazoa;{species_name}\n"
-        ),
-        "species_alias.tsv": (f"alias\tscientific_name\ntarget\t{species_name}\n"),
-    }
-    entries = {}
-    for name, content in files.items():
-        (reference / name).write_text(content, encoding="utf-8")
-        payload = content.encode()
-        entries[name] = {
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "size_bytes": len(payload),
-        }
-    (reference / "reference_manifest.json").write_text(
-        json.dumps({"files": entries}, sort_keys=True) + "\n", encoding="utf-8"
+    _write_reference(
+        reference,
+        {
+            f"{prefix}.ncbi.tsv": (
+                "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
+                "Annotation BUSCO Lineage\n"
+                f"GCF_000000001.1\t{species_name}\t1\t{lineage_name}\n"
+            ),
+            f"{prefix}.ncbi.lineage": (
+                f"Organism Taxonomic ID\tLineage\n1\tMetazoa;{species_name}\n"
+            ),
+            "species_alias.tsv": (f"alias\tscientific_name\ntarget\t{species_name}\n"),
+        },
     )
 
 
@@ -101,6 +102,41 @@ def _run_config(**busco: object) -> RunConfig:
             "assembly_review": {"busco": busco},
         }
     )
+
+
+def _multi_reference_resolver(
+    tmp_path: Path, lineage: Path
+) -> tuple[EnvResolver, Path, Path]:
+    root = tmp_path / "ncbi"
+    metazoa = root / "metazoa"
+    viridiplantae = root / "viridiplantae"
+    metazoa.mkdir(parents=True)
+    viridiplantae.mkdir(parents=True)
+    _write_species_reference(
+        metazoa,
+        species_name="Solea ovata",
+        lineage_name=lineage.name,
+    )
+    _write_species_reference(
+        viridiplantae,
+        species_name="Arabidopsis thaliana",
+        lineage_name="embryophyta_odb10",
+        prefix="Viridiplantae",
+    )
+    config = _config(lineage, metazoa)
+    config["databases"] = {
+        **config["databases"],
+        "ncbi": {"reference_dir": str(root)},
+    }
+    config["databases"].pop("ncbi_metazoa")
+    return EnvResolver(config_data=config), metazoa, viridiplantae
+
+
+def test_matching_tier_order_has_one_canonical_contract() -> None:
+    assert MATCHING_TIERS == ("exact", "same_genus", "same_family", "same_order")
+    assert MATCHING_TIER_RANK == {
+        tier: rank for rank, tier in enumerate(MATCHING_TIERS)
+    }
 
 
 def test_logical_lineage_resolves_to_complete_projection(tmp_path: Path) -> None:
@@ -141,6 +177,60 @@ def test_species_name_selects_configured_busco_lineage(tmp_path: Path) -> None:
 
     assert projection["lineage_name"] == "actinopterygii_odb10"
     assert projection["threads"] == 6
+
+
+def test_species_name_selects_one_of_multiple_ncbi_references(tmp_path: Path) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    resolver, metazoa, viridiplantae = _multi_reference_resolver(tmp_path, lineage)
+
+    assert resolve_ncbi_reference(resolver, species_name="Solea ovata") == (
+        "metazoa",
+        str(metazoa.resolve()),
+    )
+    assert resolve_ncbi_reference(resolver, species_name="Arabidopsis thaliana") == (
+        "viridiplantae",
+        str(viridiplantae.resolve()),
+    )
+
+
+def test_species_name_does_not_require_one_snapshot_match(tmp_path: Path) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    ncbi_root = tmp_path / "ncbi"
+    metazoa = ncbi_root / "metazoa"
+    viridiplantae = ncbi_root / "viridiplantae"
+    metazoa.mkdir(parents=True)
+    viridiplantae.mkdir(parents=True)
+    for reference, prefix in (
+        (metazoa, "Metazoa"),
+        (viridiplantae, "Viridiplantae"),
+    ):
+        _write_species_reference(
+            reference,
+            species_name="Duplicated species",
+            lineage_name=lineage.name,
+            prefix=prefix,
+        )
+    config = _config(lineage, metazoa)
+    config["databases"].pop("ncbi_metazoa")
+    config["databases"]["ncbi"] = {"reference_dir": str(ncbi_root)}
+    resolver = EnvResolver(config_data=config)
+
+    assert resolve_ncbi_reference(resolver, species_name="Duplicated species") == (
+        "metazoa",
+        str(metazoa.resolve()),
+    )
+
+
+def test_species_name_keeps_related_species_fallback_across_snapshots(
+    tmp_path: Path,
+) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    resolver, metazoa, _viridiplantae = _multi_reference_resolver(tmp_path, lineage)
+
+    assert resolve_ncbi_reference(resolver, species_name="Solea senegalensis") == (
+        "metazoa",
+        str(metazoa.resolve()),
+    )
 
 
 def test_unresolved_species_error_points_to_manifest_field(tmp_path: Path) -> None:

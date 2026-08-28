@@ -46,8 +46,10 @@ databases:
         source: busco_downloads
       # Add every target-appropriate lineage that automatic selection may
       # resolve on this host, for example actinopterygii_odb10 for ray-finned fish.
-  ncbi_metazoa:
-    reference_dir: /path/to/ncbi_metazoa
+  ncbi:
+    # Root whose immediate children are snapshots such as metazoa/ and
+    # viridiplantae/. Each child owns its four manifest-verified files.
+    reference_dir: /path/to/databases/ncbi
 
 # AutoHiC, Juicer, and 3D-DNA are standalone git-clone
 # installs, not conda-env PATH tools. Declare each as a top-level entry under
@@ -126,6 +128,8 @@ methods:
       - seqkit
   genome_survey.kmer_count.jellyfish:
     conda_env: your_tool_env
+    # Executable name only. Its Conda package is Bioconda `kmer-jellyfish`;
+    # conda-forge `jellyfish` is an unrelated Python string-matching library.
     required_tools:
       - jellyfish
       - gzip

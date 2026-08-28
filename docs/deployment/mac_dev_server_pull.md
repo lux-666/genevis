@@ -28,9 +28,9 @@ Server-local material includes:
   and checkpoints;
 - copied run configs containing private run inputs or executor knobs.
 
-Acquire and install the NCBI Metazoa snapshot only through its
-[snapshot authority](../../data/reference/ncbi_metazoa/README.md). The installer
-resolves its destination from `databases.ncbi_metazoa` in the active host
+Acquire and install NCBI snapshots only through their
+[snapshot authority](../../data/reference/ncbi/README.md). The installer
+resolves its root destination from `databases.ncbi` in the active host
 mapping; use `--config PATH` when that mapping is not the default. Assembly
 Review reports a version mismatch instead of consuming an unverified snapshot.
 

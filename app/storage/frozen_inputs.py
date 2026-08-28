@@ -1028,7 +1028,7 @@ def _load_run_config_draft(
 
 
 def _manifest_species_name(manifest: InputManifest) -> str | None:
-    from app.reference.ncbi_metazoa import species_name_from_metadata
+    from app.reference.ncbi import species_name_from_metadata
 
     return species_name_from_metadata(manifest.user_metadata)
 

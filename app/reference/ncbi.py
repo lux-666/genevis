@@ -1,4 +1,4 @@
-"""Build bounded related-species evidence from local NCBI Metazoa exports."""
+"""Build bounded related-species evidence from local NCBI taxonomy exports."""
 
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ MAX_SELECTED_RECORDS = 5
 DISPLAY_COHORT_SIZE = 25
 ANALYSIS_COHORT_SIZE = 150
 
-_STATISTICS_TIER_RANK = {"exact": 0, "same_genus": 1, "same_family": 2, "same_order": 3}
+MATCHING_TIERS = ("exact", "same_genus", "same_family", "same_order")
+MATCHING_TIER_RANK = {tier: rank for rank, tier in enumerate(MATCHING_TIERS)}
 _STATISTICS_BASIS = {
     "n50": "contig_n50_bp",
     "assembly_size": "total_sequence_length_bp",
@@ -38,10 +39,9 @@ _ALTERNATE_METADATA_RE = re.compile(
     r"\b(?:alternate|maternal|paternal|hap[._ -]?[12])\b",
     re.IGNORECASE,
 )
-_REFERENCE_FILE_NAMES = frozenset(
-    {"Metazoa.ncbi.tsv", "Metazoa.ncbi.lineage", "species_alias.tsv"}
-)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_NCBI_TSV_RE = re.compile(r"^(?P<prefix>[A-Za-z0-9_-]+)\.ncbi\.tsv$")
+_NCBI_LINEAGE_RE = re.compile(r"^(?P<prefix>[A-Za-z0-9_-]+)\.ncbi\.lineage$")
 
 
 @dataclass(frozen=True)
@@ -52,10 +52,42 @@ class _ReferenceTables:
 
 
 def _reference_sources(reference_dir: Path) -> dict[str, str]:
+    tsv = sorted(reference_dir.glob("*.ncbi.tsv"))
+    lineage = sorted(reference_dir.glob("*.ncbi.lineage"))
     return {
-        "tsv": str(reference_dir / "Metazoa.ncbi.tsv"),
-        "lineage": str(reference_dir / "Metazoa.ncbi.lineage"),
+        "tsv": str(tsv[0]) if len(tsv) == 1 else str(reference_dir / "*.ncbi.tsv"),
+        "lineage": (
+            str(lineage[0])
+            if len(lineage) == 1
+            else str(reference_dir / "*.ncbi.lineage")
+        ),
         "alias": str(reference_dir / "species_alias.tsv"),
+    }
+
+
+def _declared_reference_names(manifest: dict[str, Any]) -> dict[str, str] | None:
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        return None
+    names = set(files)
+    tsv_names = [name for name in names if _NCBI_TSV_RE.fullmatch(str(name))]
+    lineage_names = [name for name in names if _NCBI_LINEAGE_RE.fullmatch(str(name))]
+    if (
+        len(names) != 3
+        or "species_alias.tsv" not in names
+        or len(tsv_names) != 1
+        or len(lineage_names) != 1
+    ):
+        return None
+    tsv_match = _NCBI_TSV_RE.fullmatch(str(tsv_names[0]))
+    lineage_match = _NCBI_LINEAGE_RE.fullmatch(str(lineage_names[0]))
+    assert tsv_match is not None and lineage_match is not None
+    if tsv_match.group("prefix") != lineage_match.group("prefix"):
+        return None
+    return {
+        "tsv": str(tsv_names[0]),
+        "lineage": str(lineage_names[0]),
+        "alias": "species_alias.tsv",
     }
 
 
@@ -72,10 +104,12 @@ def _load_reference_snapshot(
         return provenance, None, provenance_error
     assert source_bytes is not None
     try:
+        tsv_name = Path(str(provenance["tsv"])).name
+        lineage_name = Path(str(provenance["lineage"])).name
         tables = _ReferenceTables(
             aliases=_load_tsv(source_bytes["species_alias.tsv"]),
-            rows=_load_tsv(source_bytes["Metazoa.ncbi.tsv"]),
-            lineage_by_taxid=_load_lineage(source_bytes["Metazoa.ncbi.lineage"]),
+            rows=_load_tsv(source_bytes[tsv_name]),
+            lineage_by_taxid=_load_lineage(source_bytes[lineage_name]),
         )
     except OSError as exc:
         return provenance, None, f"reference_source_unavailable:{exc.filename or exc}"
@@ -130,6 +164,37 @@ def validate_reference_snapshot(reference_dir: Path | str) -> dict[str, Any]:
     if error is not None:
         raise ValueError(error)
     return provenance
+
+
+def declared_reference_files(manifest: dict[str, Any]) -> tuple[str, str, str]:
+    """Return the three source filenames allowed by one snapshot manifest."""
+
+    declared = _declared_reference_names(manifest)
+    if declared is None:
+        raise ValueError("reference_version_manifest_file_whitelist_invalid")
+    return declared["tsv"], declared["lineage"], declared["alias"]
+
+
+def discover_reference_snapshots(reference_root: Path | str) -> dict[str, Path]:
+    """Return immediate, non-hidden snapshot directories under one NCBI root."""
+
+    root = Path(reference_root)
+    if (root / REFERENCE_MANIFEST_FILENAME).is_file():
+        manifest = json.loads(
+            (root / REFERENCE_MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        tsv_name, _lineage_name, _alias_name = declared_reference_files(manifest)
+        return {tsv_name.partition(".ncbi.tsv")[0].lower(): root}
+    if not root.is_dir():
+        raise ValueError(f"NCBI reference root is not a directory: {root}")
+    snapshots = {
+        path.name: path
+        for path in sorted(root.iterdir())
+        if path.is_dir() and not path.name.startswith(".")
+    }
+    if not snapshots:
+        raise ValueError(f"NCBI reference root contains no snapshots: {root}")
+    return snapshots
 
 
 def build_related_species_evidence_pack(
@@ -260,13 +325,10 @@ def build_related_species_statistics_pack(
         tier_rows["same_order"] = []
         base["notes"].append("same_order_unavailable_without_taxonomic_hint")
 
-    tier_counts = {
-        tier: len(tier_rows[tier])
-        for tier in ("exact", "same_genus", "same_family", "same_order")
-    }
+    tier_counts = {tier: len(tier_rows[tier]) for tier in MATCHING_TIERS}
 
     condensed: list[dict[str, Any]] = []
-    for tier in ("exact", "same_genus", "same_family", "same_order"):
+    for tier in MATCHING_TIERS:
         for row in tier_rows[tier]:
             record = _condense_record(row)
             record["assembly_level"] = (
@@ -429,9 +491,11 @@ def _reference_provenance(
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         return provenance, None, "reference_version_manifest_invalid"
 
-    declared_names = set(manifest["files"])
-    if declared_names != _REFERENCE_FILE_NAMES:
+    declared = _declared_reference_names(manifest)
+    if declared is None:
         return provenance, None, "reference_version_manifest_file_whitelist_invalid"
+    sources = {role: str(reference_dir / name) for role, name in declared.items()}
+    provenance.update(sources)
 
     provenance.update(
         {
@@ -710,7 +774,7 @@ def _empty_statistics_pack(
             "taxonomic_hints": {},
         },
         "source": sources,
-        "tier_counts": {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0},
+        "tier_counts": {tier: 0 for tier in MATCHING_TIERS},
         "display_cohort": empty_cohort,
         "analysis_cohort": analysis_cohort,
         "computed_summary": {
@@ -784,7 +848,7 @@ def _statistics_sort_key(record: dict[str, Any]) -> tuple[Any, ...]:
         else record["contig_n50_bp"]
     )
     return (
-        _STATISTICS_TIER_RANK[record["tier"]],
+        MATCHING_TIER_RANK[record["tier"]],
         0 if record["accession"].upper().startswith("GCF_") else 1,
         _assembly_level_rank(record.get("assembly_level")),
         -_metrics_completeness_score(record),
@@ -874,7 +938,7 @@ def _statistics_computed_summary(
         }
     )
 
-    by_tier = {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0}
+    by_tier = {tier: 0 for tier in MATCHING_TIERS}
     by_accession_type = {"GCF": 0, "GCA": 0}
     by_assembly_level = {"chromosome": 0, "scaffold": 0, "contig": 0, "unknown": 0}
     level_bucket_by_rank = {0: "chromosome", 1: "scaffold", 2: "contig", 3: "unknown"}

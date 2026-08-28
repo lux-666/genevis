@@ -280,7 +280,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                 "metazoa_odb10",
             )
             self.assertEqual(
-                plan.config_data["databases"]["ncbi_metazoa"]["reference_dir"],
+                plan.config_data["databases"]["ncbi"]["reference_dir"],
                 str(databases["ncbi"]),
             )
 
@@ -915,7 +915,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                                 }
                             },
                         },
-                        "ncbi_metazoa": {"reference_dir": "/path/to/ncbi_metazoa"},
+                        "ncbi": {"reference_dir": "/path/to/databases/ncbi"},
                     },
                 },
             )
@@ -927,7 +927,7 @@ class ProjectBootstrapTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            any("databases.ncbi_metazoa.reference_dir" in issue for issue in issues)
+            any("databases.ncbi.reference_dir" in issue for issue in issues)
         )
 
     def test_verify_envs_yaml_deep_validates_database_contents(self):
@@ -955,7 +955,7 @@ class ProjectBootstrapTests(unittest.TestCase):
                                 }
                             },
                         },
-                        "ncbi_metazoa": {
+                        "ncbi": {
                             "reference_dir": str(paths["ncbi"]),
                         },
                     },
@@ -1024,23 +1024,33 @@ def _database_fixture(root: Path) -> dict[str, Path]:
     (busco / "lengths_cutoff").write_text("BUSCO1 10\n", encoding="utf-8")
     (busco / "refseq_db.faa.gz").write_bytes(b"fixture")
 
-    ncbi = root / "ncbi_metazoa"
-    ncbi.mkdir(parents=True, exist_ok=True)
+    ncbi_metazoa = _ncbi_fixture(root / "ncbi" / "metazoa", "Metazoa")
+    ncbi_viridiplantae = _ncbi_fixture(root / "ncbi" / "viridiplantae", "Viridiplantae")
+    return {
+        "busco": busco,
+        "ncbi": root / "ncbi",
+        "ncbi_metazoa": ncbi_metazoa,
+        "ncbi_viridiplantae": ncbi_viridiplantae,
+    }
+
+
+def _ncbi_fixture(root: Path, prefix: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     files = {
-        "Metazoa.ncbi.tsv": "Organism Name\tAssembly Accession\n",
-        "Metazoa.ncbi.lineage": "Organism Taxonomic ID\tLineage\n",
+        f"{prefix}.ncbi.tsv": "Organism Name\tAssembly Accession\n",
+        f"{prefix}.ncbi.lineage": "Organism Taxonomic ID\tLineage\n",
         "species_alias.tsv": "alias\tscientific_name\n",
     }
     manifest_files: dict[str, dict[str, int | str]] = {}
     for name, content in files.items():
-        path = ncbi / name
+        path = root / name
         path.write_text(content, encoding="utf-8")
         raw = path.read_bytes()
         manifest_files[name] = {
             "sha256": hashlib.sha256(raw).hexdigest(),
             "size_bytes": len(raw),
         }
-    (ncbi / "reference_manifest.json").write_text(
+    (root / "reference_manifest.json").write_text(
         json.dumps(
             {
                 "dataset_id": "fixture",
@@ -1052,14 +1062,14 @@ def _database_fixture(root: Path) -> dict[str, Path]:
         ),
         encoding="utf-8",
     )
-    return {"busco": busco, "ncbi": ncbi}
+    return root
 
 
 def _database_values(root: Path) -> dict[str, str]:
     paths = _database_fixture(root)
     return {
         "busco_lineage_path": str(paths["busco"]),
-        "ncbi_metazoa_reference_dir": str(paths["ncbi"]),
+        "ncbi_reference_dir": str(paths["ncbi"]),
     }
 
 
@@ -1080,7 +1090,9 @@ def _minimal_host_config(root: Path) -> dict[str, object]:
                     }
                 },
             },
-            "ncbi_metazoa": {"reference_dir": str(paths["ncbi"])},
+            "ncbi": {
+                "reference_dir": str(paths["ncbi"]),
+            },
         },
     }
 

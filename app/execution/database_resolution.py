@@ -37,7 +37,7 @@ def _require_registry(resolver: DatabaseResolver) -> Any:
     if registry is None:
         raise DatabaseResolutionError(
             "host database registry is missing; configure databases.busco and "
-            "databases.ncbi_metazoa in envs.yaml"
+            "databases.ncbi.reference_dir in envs.yaml"
         )
     return registry
 
@@ -80,10 +80,10 @@ def resolve_busco_parameters(
         raise DatabaseResolutionError("databases.busco is not configured")
     logical_name = request.lineage
     if species_name is not None:
-        from app.reference.ncbi_metazoa import resolve_busco_lineage_for_species
+        from app.reference.ncbi import resolve_busco_lineage_for_species
 
         reference_dir = related_species_reference_dir or resolve_ncbi_reference_dir(
-            resolver
+            resolver, species_name=species_name
         )
         try:
             derived_lineage = resolve_busco_lineage_for_species(
@@ -146,49 +146,99 @@ def resolve_busco_parameters(
     }
 
 
-def resolve_ncbi_reference_dir(resolver: DatabaseResolver) -> str:
-    """Return the validated NCBI Metazoa reference directory from the registry."""
+def resolve_ncbi_reference(
+    resolver: DatabaseResolver,
+    *,
+    species_name: str | None,
+) -> tuple[str, str]:
+    """Select the snapshot with the best available related-species evidence."""
 
     registry = _require_registry(resolver)
-    ncbi = getattr(registry, "ncbi_metazoa", None)
-    reference_dir = str(getattr(ncbi, "reference_dir", "")).strip()
-    if not reference_dir:
-        raise DatabaseResolutionError("databases.ncbi_metazoa.reference_dir is empty")
-    path = canonical_database_path(reference_dir, resolver)
-    manifest = path / "reference_manifest.json"
-    required_sources = (
-        path / "Metazoa.ncbi.tsv",
-        path / "Metazoa.ncbi.lineage",
-        path / "species_alias.tsv",
-    )
-    if (
-        not path.is_dir()
-        or not manifest.is_file()
-        or any(
-            not source.is_file() or source.stat().st_size <= 0
-            for source in required_sources
-        )
-    ):
-        raise DatabaseResolutionError(
-            "NCBI Metazoa reference directory is missing required manifest/source "
-            f"files: {path}"
-        )
-    try:
-        from app.reference.ncbi_metazoa import validate_reference_snapshot
+    ncbi = getattr(registry, "ncbi", None)
+    reference_root = str(getattr(ncbi, "reference_dir", "")).strip()
+    if not reference_root:
+        raise DatabaseResolutionError("databases.ncbi.reference_dir is empty")
 
-        validate_reference_snapshot(path)
-        expected_manifest_sha256 = getattr(resolver, "ncbi_manifest_sha256", None)
-        if expected_manifest_sha256 is not None:
-            actual_manifest_sha256 = sha256_file(manifest)
-            if actual_manifest_sha256 != expected_manifest_sha256:
+    from app.reference.ncbi import (
+        MATCHING_TIER_RANK,
+        build_related_species_evidence_pack,
+        discover_reference_snapshots,
+        validate_reference_snapshot,
+    )
+
+    root = canonical_database_path(reference_root, resolver)
+    try:
+        references = discover_reference_snapshots(root)
+    except (OSError, TypeError, ValueError) as exc:
+        raise DatabaseResolutionError(
+            f"NCBI reference root failed discovery: {exc}"
+        ) from exc
+
+    matches: list[tuple[int, int, str, Path]] = []
+    failures: list[str] = []
+    for name, path in sorted(references.items()):
+        manifest = path / "reference_manifest.json"
+        try:
+            validate_reference_snapshot(path)
+            expected_hashes = getattr(resolver, "ncbi_manifest_sha256s", {})
+            expected_hash = (
+                expected_hashes.get(name)
+                if isinstance(expected_hashes, Mapping)
+                else None
+            )
+            if expected_hash is None and name == "metazoa":
+                expected_hash = getattr(resolver, "ncbi_manifest_sha256", None)
+            if expected_hash is not None and sha256_file(manifest) != expected_hash:
                 raise ValueError(
                     "NCBI reference manifest changed after dependency freeze"
                 )
-    except (OSError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError) as exc:
+            raise DatabaseResolutionError(
+                f"NCBI reference {name!r} failed integrity validation: {exc}"
+            ) from exc
+
+        if species_name is None and len(references) == 1:
+            matches.append((0, 0, str(name), path))
+            continue
+        pack = build_related_species_evidence_pack(
+            str(species_name), reference_dir=path
+        )
+        if pack.get("status") == "available":
+            mode = str(pack.get("matching_mode") or "")
+            records = pack.get("selected_records")
+            matches.append(
+                (
+                    MATCHING_TIER_RANK.get(mode, len(MATCHING_TIER_RANK)),
+                    -len(records) if isinstance(records, list) else 0,
+                    str(name),
+                    path,
+                )
+            )
+        else:
+            failures.append(
+                f"{name}={','.join(str(note) for note in pack.get('notes') or [])}"
+            )
+
+    if not matches:
         raise DatabaseResolutionError(
-            f"NCBI Metazoa reference snapshot failed integrity validation: {exc}"
-        ) from exc
-    return str(path.resolve(strict=False))
+            "input_manifest.user_metadata.target_species "
+            f"{species_name!r} found no usable exact, same-genus, same-family, "
+            "or same-order evidence in the configured NCBI references; "
+            f"reference results={'; '.join(failures)}"
+        )
+    _rank, _record_count, name, path = min(matches)
+    return name, str(path.resolve(strict=False))
+
+
+def resolve_ncbi_reference_dir(
+    resolver: DatabaseResolver,
+    *,
+    species_name: str | None = None,
+) -> str:
+    """Return the selected, verified NCBI reference directory."""
+
+    _name, path = resolve_ncbi_reference(resolver, species_name=species_name)
+    return path
 
 
 def validate_frozen_busco_parameters(
@@ -256,14 +306,17 @@ def validate_review_databases(
 
     if "assembly_review" not in run_config.requested_stage_names():
         return {}
-    ncbi = resolve_ncbi_reference_dir(resolver)
+    _ncbi_name, ncbi = resolve_ncbi_reference(resolver, species_name=species_name)
     busco = resolve_busco_parameters(
         run_config,
         resolver,
         species_name=species_name,
         related_species_reference_dir=ncbi,
     )
-    return {"busco_parameters": busco, "related_species_reference_dir": ncbi}
+    return {
+        "busco_parameters": busco,
+        "related_species_reference_dir": ncbi,
+    }
 
 
 def frozen_database_projection(
