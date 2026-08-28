@@ -1,141 +1,28 @@
 # Parameter Recommendation
 
-> **Status:** implemented for Assembly, AutoHiC, and T2T using schema-3 roots
-> and timeout-controlled approval.
->
-> **Read when:** changing model-visible parameter inputs, approval behavior,
-> retries, or the handoff from a recommendation to an executable attempt.
->
-> **Comes from:** stage-owned method selection, canonical upstream facts,
-> [data and storage](data-and-storage.md), and immutable predecessor evidence.
->
-> **Feeds into:** a hash-bound parameter approval gate,
-> [method execution](execution.md),
-> stage-specific collection, and paths such as [AutoHiC](autohic.md).
->
-> **Contract dependencies:** [parameter recommendation](../reference/parameter-recommendation.md),
-> [run data](../reference/data-contract.md),
-> [method execution lifecycle](../reference/execution-lifecycle.md), and
-> [execution evidence](../reference/execution-evidence.md).
->
-> **Code evidence:** `app/domains/parameter_recommendation/facts.py`,
-> `app/domains/parameter_recommendation/resolution.py`,
-> `app/schemas/parameter_recommendation.py`, `app/schemas/artifacts.py`,
-> `app/llm/parameters/base.py`, `app/llm/parameters/assembly/`,
-> `app/llm/parameters/hic/`, `app/llm/parameters/t2t/`,
-> `app/storage/parameter_evidence.py`, and the three
-> `app/stages/*/parameters/workflow.py` implementations.
+> **Status:** implemented for Assembly, AutoHiC, and T2T.
+> **Contracts:** [parameter recommendation](../reference/parameter-recommendation.md),
+> [review](../reference/data-contract.md#12-review-contract), and
+> [execution lifecycle](../reference/execution-lifecycle.md).
+> **Code evidence:** `app/domains/parameter_recommendation/`,
+> `app/llm/parameters/`, `app/storage/parameter_evidence.py`, and
+> `app/stages/*/parameters/workflow.py`.
 
-## What the recommender does
+A recommender runs after method selection. Assembly waits for its confirmed
+`assembly_selection`; fixed-method stages already know their method. Canonical
+facts and the selected method produce a stage-specific request, immutable model
+evidence, a sparse recommendation, an approval request, and finally the approved
+`ParameterAttempt` consumed by execution.
 
-A recommender starts only after a method is known. For Assembly, the method is
-known only after the stage has consumed upstream QC/survey evidence and
-persisted/confirmed `assembly_selection`; the recommender then uses its
-validated `primary_method`. It builds a strict model-facing request, calls the
-model, parses one sparse parameter mapping, persists the evidence chain, and
-opens a human approval gate. It does not select a method, route the parent
-graph, approve its own output, or fabricate a fallback when the model call or
-response shape fails.
+Assembly, AutoHiC, and T2T share evidence, approval, and attempt ownership but
+retain stage-specific biological inputs:
 
-The implemented flow is:
+- Assembly supplies route, read type, target level, and method guidance.
+- AutoHiC supplies species facts, Hi-C context, restriction-enzyme evidence,
+  and its adjustable catalog.
+- T2T supplies species facts, resolved telomere motif, long-read context, and
+  its threshold catalog.
 
-```text
-authoritative run facts + fixed-stage selected method
-  or validated Assembly `assembly_selection`
-  -> canonical typed facts and stage context
-  -> schema-3 input and basis snapshots
-  -> exact persisted model messages
-  -> raw response + parse record + sparse recommendation
-  -> schema-3 recommendation manifest
-  -> immutable parameter approval gate
-  -> schema-3 ParameterAttempt
-  -> method-attempt freeze and execution
-```
-
-The manifest is the integrity root for the recommendation chain. “Schema-3
-parameter recommendation” does not mean every leaf file has version `3`:
-input, basis, manifest, cursor, and approved attempt are the v3 boundary, while
-raw-response, parsed-recommendation, and parse-result leaves retain their own
-declared versions. The strict loader verifies those mixed leaf versions and
-rejects a pre-v3 root or mixed identity.
-
-## Timeout-controlled approval
-
-The implemented flow keeps the recommendation evidence boundary intact:
-
-```text
-persisted sparse recommendation + verified schema-3 manifest
-  -> immutable parameter_approval request
-  -> -1: manual approve/reject
-  ->  0: immediately approve this exact recommendation
-  -> >0: Enter claims manual review; expiry approves this exact recommendation
-  -> approved ParameterAttempt
-```
-
-The timer starts after persistence and request binding. It never calls the
-recommender, edits the mapping, merges defaults, or selects a different
-proposal. The operator sees the same exact mapping when claiming the gate, and
-the automatic path approves it unchanged through the same typed
-intent/application lifecycle as a manual decision.
-
-## Shared lifecycle, stage-specific biology
-
-Assembly, AutoHiC, and T2T share canonical fact models, evidence placement,
-manifest verification, approval binding, and attempt ownership. They do not
-share one universal prompt DTO:
-
-- Assembly adds its route, read type, target level, and bounded literature or
-  method guidance.
-- AutoHiC exposes species facts, Hi-C library context, an optional provided
-  restriction enzyme, and its adjustable catalog.
-- T2T exposes species facts, the resolved telomere motif, its source, and the
-  long-read input count. Motif resolution is a separate evidence-producing
-  step only when a supplied fact is unavailable.
-
-All DTOs reject undeclared audit and storage fields. Session IDs, filesystem
-locators, artifact IDs and hashes, credentials, and unrestricted registry
-metadata stay in durable audit evidence rather than model messages.
-
-## Sparse proposal and approval
-
-The accepted model response is an attempt-local sparse mapping plus an
-optional explanation. An empty mapping is valid. Parsing checks the response
-shape, not biological quality or whether a value is a sensible catalog value.
-Every shape-valid mapping goes to the immutable approval gate unchanged.
-
-After approval, parameter resolution keeps three sources distinguishable:
-executor-owned values, canonical provided or measured facts, and the approved
-model mapping. Command construction may still reject a value that cannot be
-represented safely by the selected tool. That is an execution-definition
-failure; it is not permission to silently repair the model answer.
-
-The exact DTO fields, response schema, source precedence, and validation
-invariants are owned by the
-[parameter-recommendation contract](../reference/parameter-recommendation.md),
-not repeated here.
-
-## Attempts, retries, and ownership
-
-Approval creates the compact `ParameterAttempt`; no execution attempt exists
-before approval. That cursor is the sole relation owner for the recommendation
-root, approval decision, frozen parameters, command, frozen runner input,
-execution, and later review evidence. Stage cursors select the current attempt
-and must not mirror those refs in method-specific keys. The compact Assembly
-cursor may retain only the validated selection/primary-method cursor and
-immutable refs needed to resume; the recommendation, approval, command, and
-execution evidence remain in artifacts and Ledger facts.
-
-For retry-capable Assembly and AutoHiC flows, a retry first seals its
-predecessor and then builds a new schema-3 recommendation chain. The prompt
-receives a bounded chronological projection of earlier recommendations,
-effective values, execution outcomes, and review outcomes. That history is
-evidence only: the application does not score it, derive a delta, or merge
-omitted keys from the preceding mapping. The implemented T2T threshold request
-is initial-only; this page does not imply a T2T parameter-retry route.
-
-There is no automatic fallback recommendation, parameter-patch semantics, or
-silent default synthesis at the model boundary. Model failure becomes
-`response_invalid`; human rejection creates no execution attempt. Timeout
-approval is limited to the exact persisted recommendation. The shared
-intent/application transaction then performs registered stage validation,
-durable preparation, and verified pure checkpoint application.
+Exact DTO fields, sparse-response validation, persistence, approval timing,
+retry semantics, and command-resolution precedence remain in the linked
+reference contracts.

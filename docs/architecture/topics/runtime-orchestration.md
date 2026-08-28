@@ -78,7 +78,7 @@ blocked checkpoint remains recoverable through `inspect`, `review`, and
 Foreground gates use the frozen review policy and registered resolver while the
 originating executor remains attached. Process interruption preserves a durable
 manual block rather than a daemon deadline; later `review` and `resume` do not
-recreate the old countdown. Exact values, resolver eligibility, immutable
+reconstruct elapsed countdown time. Exact values, resolver eligibility, immutable
 bindings, and recovery states are owned by the
 [review contract](../reference/data-contract.md#12-review-contract) and explained
 operationally in [Review and resume](review-and-resume.md).

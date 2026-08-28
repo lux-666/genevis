@@ -112,24 +112,5 @@ statuses above.
 6. Verify behavior claims against the `Code evidence` paths on the topic page
    and implementation map.
 
-## Synchronization rules
-
-The maintenance direction follows implementation ownership rather than the
-reading order:
-
-```text
-code or behavior change
-  -> owning reference contract
-  -> each affected topic
-  -> implementation map when wiring, status, evidence, or debt changes
-  -> this router or docs/README.md only when navigation changes
-```
-
-Synchronize the implementation map in the same change when a graph node,
-registered stage, registered method, execution adapter, collection boundary,
-parameter flow, human gate, resource commit, verification classification, or
-cited conformance status changes.
-
-Git history retains superseded designs and implementation records. The working
-tree keeps current topics, accepted planned nodes, explicit conformance debt,
-and operational documentation only.
+Maintenance and synchronization rules are owned by
+[Architecture Governance](reference/governance.md).

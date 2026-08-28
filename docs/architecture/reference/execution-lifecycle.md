@@ -98,30 +98,11 @@ method disposition remains a required durable fact. This distinction makes
 `not_started` meaningful without forcing Assembly to guess a method before its
 evidence exists.
 
-Method authority is therefore single-tracked. Intake text, planner hints,
-legacy drafts, and displayed candidate lists are not method selections; only a
-durable `assembly_selection`, confirmed through its required gate, binds the
-Assembly method. Any planning-era tool hint is discarded before draft build and
-freeze rather than merged into execution state.
-
-This single track is structural, not advisory. The planning schema does not
-carry a `method_selection` clarification kind, a user-editable Assembly method
-roster, or a method-selection stage in its draft lifecycle. Legacy
-clarification documents with `kind: method_selection` fail schema validation
-rather than being silently reinterpreted.
-The planner never asks which Assembly tool to use and never materializes an
-Assembly method choice during drafting. A durable draft may retain legacy
-method entries and may contain normalized system defaults for fixed-stage
-pipelines; neither is an Assembly recommendation authority. That decision
-belongs exclusively to the stage-time recommendation boundary described above.
-
-Intake may recognize a named assembly tool as a transient asset-collection
-hint: it decides whether HiFi, ONT, or both read roles should be collected.
-That hint lives inside the intake function's local scope only. It is not a
-`WorkflowIntent` field, is not persisted to any durable document, and does not
-reach the Plan Draft model or runtime execution state. Companion-read flags
-such as ultra-long ONT inclusion or Hi-C phasing are likewise asset-collection
-hints; they do not preselect an Assembly method or parameter block.
+Only a durable, confirmed `assembly_selection` binds the Assembly method. The
+planning schema has no `method_selection` clarification or user-editable
+Assembly roster. Named tools and companion-read hints may guide transient asset
+collection, but are discarded before draft persistence and never reach runtime
+as selection facts.
 
 One `run` transition advances at most one frozen attempt. If an ordered direct
 batch still has pending cursors, the method graph keeps the frozen stage status,
@@ -257,8 +238,8 @@ pending frozen attempt to name the exact active `workflow_step_id` for the
 lifecycle stage. A missing or stale occurrence identity becomes the lifecycle's
 bounded failure update. It does not search for recoverable execution evidence,
 invoke the Runner, publish logs, or append attempt lifecycle events. Generic
-artifact loaders may inspect historical attempts, but execution may not
-reinterpret a historical attempt as the active occurrence.
+artifact loaders may inspect non-active attempts, but execution may not treat
+one as the active occurrence.
 
 Only after that gate does the run node load the next frozen attempt through its
 verified ref. Stage, method, session, and attempt identities must match. The
@@ -269,7 +250,7 @@ every expected output must resolve inside the run. The retained script must
 exist and match its frozen SHA-256. The Runner executes that exact declared path
 with the frozen working directory as cwd. Production local dispatch is direct
 argv execution: either `<interpreter> <script_path>` or a `conda run` wrapper
-followed by that pair, always with `shell=False`. A non-empty legacy
+followed by that pair, always with `shell=False`. A non-empty
 `FrozenAttemptSpec.env_setup` is unsupported and must fail before either
 dispatch path; environment overrides use the typed `env` mapping or a dedicated
 frozen setup script instead.
@@ -330,14 +311,11 @@ The Ledger append boundary permits exactly one of `attempt_succeeded` and
 `attempt_failed` per immutable attempt ID under its exclusive append lock.
 Checking for an earlier success in application code is only an optimization;
 it is not the invariant. Exact replay returns the existing terminal, while a
-different outcome, identity binding, summary, or ref set conflicts. Legacy
-conflicting rows are conservatively projected as failed with an integrity
+different outcome, identity binding, summary, or ref set conflicts. Conflicting
+rows are conservatively projected as failed with an integrity
 diagnostic, never by last-event overwrite.
 
 ## Conformance
-
-There is no legacy cursor reader, dual write, checkpoint migration, or
-stage-local lifecycle compatibility layer.
 
 The current implementation requires the following for methods using the shared
 lifecycle. The central checkpoint still supplies the common JSON/size boundary;

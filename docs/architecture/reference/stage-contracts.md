@@ -374,10 +374,10 @@ evidence. The selected snapshot maps that scientific name to related-species
 with the host registry and requires exactly one compatible installed lineage
 before freeze. Snapshot creation/installation owns producing and validating
 that mapping; the user does not inspect snapshot rows or choose a lineage.
-`assembly_review.busco.lineage` is not a public selection surface. If retained
-in a historical RunConfig, it is only a consistency assertion and a mismatch
-with the species-derived lineage fails with the RunConfig field path. New
-templates and TUI intake do not create it. RunConfig never owns database paths,
+`assembly_review.busco.lineage` is not a public selection surface. When present
+in RunConfig, it is only a consistency assertion; a mismatch with the
+species-derived lineage fails with the RunConfig field path. Templates and TUI
+intake do not create it. RunConfig never owns database paths,
 versions, or provenance, and the host `default_lineage` is not a fallback for
 an unresolved Assembly Review species. Review may accept a candidate, adopt a
 separately completed polish/purge action, or stop the workflow. Decisions are
@@ -451,6 +451,14 @@ leave an earlier product indexed as an orphan. That orphan has neither
 `attempt_succeeded` nor `artifact_registered` semantic ledger evidence, does
 not create a review gate, and does not cause automatic retry or rollback.
 
+## Shared placeholder boundary
+
+GapCloser and Base Polish are parent-graph placeholders. Each has no registered
+method, descriptor, local-execution configuration, artifact contract, or
+resource handoff. A requested occurrence writes `blocked_not_implemented` and
+terminates through the failed boundary; an absent occurrence has no runtime
+behavior. Neither placeholder reads or updates the central `assembly` resource.
+
 ## 8. GapCloser Placeholder
 
 Intended purpose: fill structural sequence gaps in an assembly when an operator
@@ -464,22 +472,8 @@ Accepted placement and handoff design:
 - successful adoption will publish an occurrence-owned assembly candidate and
   replace the central `assembly` handoff consumed by T2T or a later Review.
 
-Current contract:
-
-- `gapcloser` is wired into the parent graph but has no registered method,
-  descriptor, local-execution configuration, artifact contract, or resource
-  handoff;
-- the complete-genome and manifest-derived recommendations include its intended
-  position with local execution disabled, while generic prefix expansion omits
-  it;
-- a frozen occurrence writes only a strict `blocked_not_implemented` cursor and
-  terminates through the existing failed boundary;
-- an absent occurrence has no runtime behavior. `None` is only an unfinished
-  planner/TUI draft, and public `gene-agent run` rejects JSON `null` before freeze.
-
-This placeholder does not read or update the central `assembly` resource. Tool
-selection, input reads, expected products, validation, adoption, and provenance
-remain future contracts.
+The complete workflow recommendation includes this position with local
+execution disabled; generic prefix expansion omits it.
 
 ## 9. T2T Finishing
 
@@ -549,19 +543,5 @@ Accepted placement and handoff design:
 - the following finish `assembly_review` occurrence will bind to that exact Base
   Polish producer step.
 
-Current contract:
-
-- `base_polish` is wired into the parent graph but has no registered method,
-  descriptor, local-execution configuration, artifact contract, or resource
-  handoff;
-- the complete-genome and manifest-derived recommendations include its intended
-  position with local execution disabled, while generic prefix expansion omits
-  it;
-- a frozen occurrence writes only a strict `blocked_not_implemented` cursor and
-  terminates through the existing failed boundary;
-- an absent occurrence has no runtime behavior. `None` is only an unfinished
-  planner/TUI draft, and public `gene-agent run` rejects JSON `null` before freeze.
-
-This placeholder does not read or update the central `assembly` resource.
-Polishing-read choice, method selection, expected products, validation,
-adoption, and provenance remain future contracts.
+The complete workflow recommendation includes this position with local
+execution disabled; generic prefix expansion omits it.

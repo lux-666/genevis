@@ -32,7 +32,7 @@ interchangeable copies of one database.
 
 | Layer | Authoritative for | Not authoritative for |
 |---|---|---|
-| `resource_refs` | The current logical cross-stage routing projection, such as the adopted `assembly` or current `long_reads` | Historical proof that a named occurrence delivered it, input-member provenance, execution history, or large evidence bodies |
+| `resource_refs` | The current logical cross-stage routing projection, such as the adopted `assembly` or current `long_reads` | Immutable proof that a named occurrence delivered it, input-member provenance, execution history, or large evidence bodies |
 | Asset registry | Identity, declaration provenance, platform/format, path, and verification facts for inventory-registered external input members | Which derived output is currently adopted by later stages |
 | Immutable artifacts | Exact evidence and produced file bytes for recommendations, reviews, commands, executions, and biological outputs | Causal ordering by themselves |
 | Artifact index | Run-local artifact location, type, hash, size, producer identity, and compact dependency metadata | Business status, review decisions, model reasoning, or workflow routing |

@@ -19,7 +19,7 @@
 
 **Scope:** Current workflow sessions
 
-**Release boundary:** Current pre-release sessions use one representation.
+**Compatibility boundary:** Each session uses one representation.
 
 ## 1. Purpose
 
@@ -29,27 +29,22 @@ must make those workflows auditable without allowing the same mutable fact to
 spread through artifacts, the artifact index, ledger events, checkpoints, and
 reports.
 
-The current data contract establishes one shared representation for all stages. The implemented
-Assembly, AutoHiC, and T2T parameter-recommendation loops use the same
-persistence contract rather than stage-specific audit envelopes.
-
-This specification supersedes earlier data-layout and persistence assumptions.
-Biological and stage contracts remain governed by their current specifications.
+The current data contract establishes one shared representation for all stages.
+The implemented Assembly, AutoHiC, and T2T parameter-recommendation loops use
+the same persistence contract rather than stage-specific audit envelopes.
 
 ## 2. Product Decisions
 
-1. The project is still in development. New sessions use the current
-   representation only.
-2. Each `runs/<session_id>/` directory is the logical ownership boundary. Its
+1. Each `runs/<session_id>/` directory is the logical ownership boundary. Its
    run-owned audit and decision evidence must not depend on another session or
    a global content-addressed object store; external inputs remain explicit
    dependencies.
-3. Durable resume targets the latest safe frontier, especially a blocked human
-   gate. Arbitrary historical-node time travel is not a product requirement.
-4. Report filenames and artifact types are internal implementation details.
-5. “Planner” in current parameter code means a stage parameter recommender. It
+2. Durable resume targets the latest safe frontier, especially a blocked human
+   gate.
+3. Report filenames and artifact types are internal implementation details.
+4. “Planner” in current parameter code means a stage parameter recommender. It
    does not mean parent-graph planning or the separate Assembly method advisor.
-6. Public deterministic runs use `gene-agent run --manifest PATH --run-config
+5. Public deterministic runs use `gene-agent run --manifest PATH --run-config
    PATH --data-dir PATH`. The manifest solely owns the
    session identity; `data-dir` owns layout placement at
    `runs/<session_id>/`. The run config must explicitly contain a
@@ -58,13 +53,11 @@ Biological and stage contracts remain governed by their current specifications.
    descriptor registry's defaults and stores it only in the frozen
    `workflow_steps` projection. Assembly is the one stage-owned exception:
    `selected_method_names` may be omitted so the stage can recommend and
-   confirm its method after upstream QC/survey evidence exists. Omission is
-   deferred binding, not an empty roster. The reader still accepts an explicit
-   legacy `[]`, but that remains an unbound old occurrence and must not be
-   silently upgraded into the new deferred contract.
-   New workflow projection always writes fixed-stage rosters. The state reader
-   still accepts a missing fixed-stage roster only to reopen older checkpoints;
-   that recovery compatibility is not a second current plan-generation path.
+   confirm its method after upstream QC/survey evidence exists. Omission means
+   deferred binding; an explicit empty roster is readable but inert. Workflow
+   projection always writes fixed-stage rosters. The state reader accepts a
+   missing fixed-stage roster for checkpoint recovery but plan generation does
+   not produce one.
    The list preserves literal order and repeated stage occurrences; `stage` is
    one occurrence's routing choice and `allow_local_execution` is its
    process authorization. There is no separate local-execution array.
@@ -75,12 +68,12 @@ Biological and stage contracts remain governed by their current specifications.
    `workflow_steps`, beginning with implicit `step-000-inventory` followed by
    position-derived IDs such as `step-001-t2t`. Runtime cannot append, reorder,
    or replace that sequence.
-7. Review placement remains literal RunConfig data: Assembly and T2T do not
+6. Review placement remains literal RunConfig data: Assembly and T2T do not
    create mandatory Review occurrences, and freeze never synthesizes one. Each
    explicitly requested Review step carries
    `review_target = {resource_type: "assembly", producer_step_id: "..."}` for
    the exact nearest earlier assembly-handoff occurrence it must consume.
-8. Gene Agent is a single-operator local pip tool and trusts the operating-system
+7. Gene Agent is a single-operator local pip tool and trusts the operating-system
    account controlling the run directory. Integrity validation addresses partial
    writes, crashes, incompatible versions, and accidental corruption; adversarial
    isolation from that same operator is outside the product scope.
@@ -210,29 +203,15 @@ present in the frozen dependency snapshot and pass stage-time preflight; it is
 not read from live configuration. At settlement, the dynamic method is valid
 only when `primary_method` equals `assembly_selection.primary_method` and its
 method disposition is recorded. A present empty roster is rejected for
-new plan generation, but remains readable as an inert legacy roster and is
-never equivalent to this deferred state. Retries remain attempts of the same
-bound method.
+   plan generation, but remains readable as an inert roster and is never
+   equivalent to deferred binding. Retries remain attempts of the same bound
+   method.
 
-Planners, TUI drafts, committed examples, and direct CLI input must not emit an
-Assembly method or method-parameter block in RunConfig. The schema rejects that
-shape: an old document must be edited to remove those fields before it can be
-frozen. There is no migration execution path that bypasses stage-time
-recommendation. Conversational intake may retain a recognized tool name only as
-a non-authoritative routing hint for clarifying questions; that hint must be
-discarded before a plan draft is built or persisted and must never reach the
-frozen RunConfig, Plan Draft model input, or Assembly recommendation context as
-a selection fact.
-
-This is structural: the planning schema does not carry a `method_selection`
-clarification kind. Legacy documents containing that kind fail validation
-rather than being silently reinterpreted. Companion-read hints (ultra-long ONT,
-Hi-C phasing) live inside intake-function scope as asset-collection decisions;
-they are not `WorkflowIntent` fields and do not reach durable state.
-A durable TUI draft may carry `selected_methods` for fixed, system-owned stage
-pipelines or as legacy passthrough. The planner may fill and normalize those
-fixed defaults, but it never writes an Assembly method identity; that identity
-is owned exclusively by the stage-time gate.
+RunConfig and durable planning records do not carry an Assembly method or
+method-parameter block. The planning schema rejects the `method_selection`
+clarification kind. Conversational tool and companion-read hints are transient
+asset-collection inputs and are discarded before draft persistence. The sole
+durable Assembly method authority is the stage-time `assembly_selection`.
 
 These domains are orthogonal. A stage may complete after a method is skipped
 when it still delivers its stage contract, may fail before a method starts,
@@ -327,8 +306,8 @@ matching `stage_failed`, with no terminal after that failed occurrence.
 prefix containing only `stage_completed | stage_skipped`; the authoritative
 finalizer may write that scope only after proving from the terminal checkpoint
 that the preceding occurrence settled and the next occurrence was never
-entered. A legacy or malformed failed terminal without a supported scope is
-degraded rather than guessed.
+entered. A failed terminal without a supported scope is degraded rather than
+guessed.
 
 The presentation value `finished` is always `completed + skipped`. Renderers do
 not reinterpret a current index, a missing current occurrence, or a terminal
@@ -420,7 +399,7 @@ data/
 
 Rules:
 
-- `layout.json` declares `schema_version: 2` and prevents old and new layouts
+- `layout.json` declares `schema_version: 2` and prevents incompatible layouts
   from being mixed silently.
 - Both public structured runs and confirmed TUI plans execute only from frozen
   `input_manifest.yaml` and `run_config.json`. TUI-only `manifest_draft.yaml`
@@ -487,8 +466,8 @@ Each row contains the full `ArtifactRef` plus:
 - direct dependency refs when needed for reachability analysis.
 
 The index does not own business status, human decisions, model reasoning, or
-execution results. It must never contain two historical hashes for one mutable
-path. Because artifacts are immutable, a registered path cannot change bytes.
+execution results. It must never contain two hashes for one registered path.
+Because artifacts are immutable, a registered path cannot change bytes.
 
 Derived reports are not registered in the artifact index. If an externally
 delivered report must itself become a retained record, export it to a new,
@@ -850,7 +829,7 @@ verification. If either check fails, inspection withholds the final assembly and
 reports `final_assembly_integrity_error`; a checkpoint field or report path is
 never sufficient to declare the final contig.
 
-Legacy duplicate/conflicting stage or attempt terminals are never resolved by
+Duplicate or conflicting stage and attempt terminals are never resolved by
 "last event wins". Their conservative read model emits integrity diagnostics;
 workflow progress is marked degraded, and method failure lists contain only the
 canonical attempt projection so one method cannot be reported as both succeeded
@@ -938,7 +917,7 @@ cursor field. It does enforce JSON shape, known stage names, per-cursor and
 aggregate byte limits, and artifact-body/frozen-attempt embedding guards.
 The map represents only the active/latest cursor for each stage name. Entering
 a repeated occurrence replaces that stage slot from immutable `stage_seeds`;
-it must never be used as cross-occurrence history. Historical identity and
+it must never be used as cross-occurrence history. Occurrence identity and
 evidence are keyed by `workflow_step_id` in artifacts, reviews, attempts, and
 ledger events.
 Bounded stage-owned review summaries are routing projections, not durable
@@ -954,11 +933,10 @@ Initial budgets:
 A budget increase requires an architecture change with measured evidence. It
 must not be used to accommodate an embedded artifact.
 
-While a run is active or blocked, retain the latest resumable checkpoint.
-Intermediate historical checkpoints are not a supported API. After a terminal
-event is committed and ledger reconstruction plus checkpoint-free artifact
-reachability pass, the database is compacted to one standalone terminal
-checkpoint.
+While a run is active or blocked, only the latest resumable checkpoint is a
+supported API. After a terminal event is committed and ledger reconstruction
+plus checkpoint-free artifact reachability pass, the database is compacted to
+one standalone terminal checkpoint.
 
 ## 15. Reports v2
 
@@ -1112,69 +1090,19 @@ cache cannot break those references. External-input manifests and stage-local
 absolute paths remain explicit dependencies and may still make execution replay
 unavailable after relocation or source removal.
 
-## 20. Current Representation
+## 20. Session Representation
 
-Each pre-release session has one representation:
-
-- no dual write;
-- no fallback path or hash-only payload/profile runtime branch;
-- no runtime migration or alternate-layout lookup;
-- no aliases for report filenames or artifact types;
-- runtime code does not mix layouts within one run root.
-
-There is no checkpoint migration for this pre-release representation. A code
-upgrade can make an older checkpoint unreadable; complete active sessions before
-upgrading or retain the matching older checkout to resume them.
+Runtime reads and writes one representation per run root. It does not mix
+layouts, dual-write formats, resolve alternate layouts, or alias report and
+artifact identities. A session resumes only with code compatible with its
+checkpoint representation; complete active sessions before an incompatible
+upgrade or retain the matching checkout.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus
 artifact ref, and JSON report plus regenerable Markdown.
 
-## 21. Current Conformance
+## 21. Conformance
 
-The current implementation enforces the following:
-
-- A new run contains no repeated session ID below its run root.
-- Storage-owned ArtifactRefs are session-relative and hash-verifiable; external
-  input manifests and some stage cursors retain canonical absolute paths.
-- Inventory emits a typed asset-registry `ArtifactRef`; new checkpoints and
-  resource metadata do not use an absolute registry path or embedded asset
-  records.
-- Sequencing files retain per-member identity and platform provenance even
-  when several manifest entries share one `asset_type`.
-- Assembly publishes one assembler-origin backbone. Planned bundles contain no
-  output refs; executed bundles reference their plan, primary FASTA, and
-  adapter-declared native outputs.
-- Copying a run preserves run-owned audit artifacts, but is not a universal
-  portability guarantee for external dependencies or absolute cursor paths.
-- A blocked review resumes from the latest frontier using the checkpoint plus
-  verified run-local refs and any declared external dependencies required by
-  the stage.
-- Terminal compaction preserves reconstruction of frozen occurrence order,
-  explicit stage-local skip reasons, decisions, failures, and terminal outcome
-  while retaining one standalone checkpoint.
-- Corrupting a referenced artifact causes replay/resume to fail closed.
-- Replaying a node does not duplicate ledger effects or artifact-index rows.
-- Recommendation rejection creates no execution attempt and consumes no retry
-  budget.
-- Assembly and Hi-C parameter recommenders share persistence and artifact
-  cursors without sharing one biological/model DTO.
-- Checkpoint size budgets are enforced in tests.
-- Deleting reports does not change audit facts. Session summaries can be
-  regenerated from the Ledger and artifact index; current-status and Assembly
-  Review reconstruction limitations are listed in conformance debt.
-- The storage-audit command reports bytes by layer, largest checkpoint fields,
-  duplicate content, unreachable artifacts, retained work bytes, and
-  reclaimable report data.
-
-The deletion portion of section 19 is not implemented. `storage-audit` is
-read-only and has no `--apply` option. Its optional cleanup manifest is a
-dry-run projection: it currently labels every file under `reports/` as a
-regenerable deletion candidate, even though only session summaries meet the
-durable-record-only regeneration boundary; `work/` is reported but explicitly
-retained. There is no filesystem deletion executor for unreachable immutable
-artifacts and no post-GC artifact-index compaction. These gaps are conformance
-debt, not a reduction of the current data contract.
-Genome Survey k-mer handoffs are typed `ArtifactRef` values in the checkpoint
-cursor and in frozen method dependencies; plain path strings are rejected at
-the stage boundary.
+Implemented behavior and open gaps are tracked only in
+[Architecture conformance](conformance.md).

@@ -66,8 +66,8 @@ Intent parsing may recognize a named assembly tool as a transient asset-role
 hint only. It asks whether HiFi, ONT, or both roles should be collected; the
 hint is not a durable `WorkflowIntent` field and must not create a second
 execution path, preselect `assembly_selection`, or feed a method name to the
-Plan Draft model. Legacy durable intake documents that still contain a method
-field fail schema validation rather than being silently reinterpreted.
+Plan Draft model. Durable intake documents containing a method field fail
+schema validation.
 
 Assembly Review is a recommendation, not a completion rule. The default
 Assembly recommendation may append `assembly_dedup -> assembly_review`. The

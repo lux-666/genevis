@@ -17,10 +17,9 @@
 > `app/stages/*/builder.py`, `app/execution/`, `descriptors/registry.yaml`, and
 > the focused test files named below.
 
-This page answers a narrower question than the
-[system map](topics/system-map.md): **what is wired, executable, verified, partial, or
-absent in the current tree?** It is not a roadmap or a historical progress log.
-Exact behavioral rules remain owned by the linked reference contracts.
+This page projects what is wired, executable, verified, partial, or absent in
+the current tree. Exact behavioral rules remain owned by the linked reference
+contracts.
 
 ## How to read status
 
@@ -50,36 +49,6 @@ the [run-data contract](reference/data-contract.md) and
 [stage contracts](reference/stage-contracts.md); this implementation map records
 only the current wiring and evidence for those rules.
 
-```mermaid
-flowchart TB
-    start([START]) --> controller["route_controller"]
-    controller --> boundary{"terminal boundary?"}
-    boundary -->|"completed / failed_terminal / blocked_human"| finish([END])
-    boundary -->|"continue"| selector{"active frozen workflow step"}
-
-    selector --> inventory["inventory_stage"]
-    selector --> readqc["read_qc_stage"]
-    selector --> survey["genome_survey_stage"]
-    selector --> assembly["assembly_stage"]
-    selector --> dedup["assembly_dedup_stage"]
-    selector --> review["assembly_review_stage"]
-    selector --> hic["hic_scaffolding_stage"]
-    selector --> gapcloser["gapcloser_stage"]
-    selector --> t2t["t2t_stage"]
-    selector --> basepolish["base_polish_stage"]
-
-    inventory --> controller
-    readqc --> controller
-    survey --> controller
-    assembly --> controller
-    dedup --> controller
-    review --> controller
-    hic --> controller
-    gapcloser --> controller
-    t2t --> controller
-    basepolish --> controller
-```
-
 There are no direct parent edges from one biological stage to the next. Every
 compiled stage returns to `route_controller`. Stage subgraphs own biological
 selection and evidence; the parent records stage entry and invokes shared
@@ -107,9 +76,9 @@ the exact behavioral contract.
 |---|---|---|---|
 | Public structured-run preflight and whole-run freeze | Structured/TUI paths validate and freeze the literal occurrence sequence. Fixed-stage method rosters derive from registry defaults; Assembly may omit its roster for stage-owned deferred selection. Manifest validation probes one logical byte from uncompressed and gzip content before frozen publication, rejecting empty or unreadable members; bzip2/xz fail preflight until execution support is end-to-end. | `app/entrypoints/run.py`, `app/entrypoints/tui.py`, `app/schemas/manifest.py`, `app/storage/frozen_inputs.py`; `tests/test_run_command.py`, `tests/test_frozen_inputs.py`, `tests/test_manifest.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
 | Attached and detached progress | One pure reducer consumes only the frozen plan, canonical occurrence terminals, and a matching active gate. Attached rendering invokes it after settlement; detached inspection invokes the same reducer. Cursor, route-tail order, and skip-reason fields are not progress inputs. Detached resumability additionally requires verified frozen inputs and a readable checkpoint row for the inspected session, not SQLite-file existence alone. | `app/control/projections.py`, `app/control/lifecycle.py`, `app/graph/builder.py`; `tests/test_projections.py`, `tests/test_graph_routing.py`, `tests/test_run_command.py`, `tests/test_review_resume.py`, `tests/test_inspect_read_model.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
-| Verified frozen context and trace authority | Production run and resume validate one frozen transaction and pass its in-memory `FrozenInputBundle` into the Inventory subgraph. Inventory validation/registration consume its canonical manifest, RunConfig, declarations, and paths; no production disk-reload fallback remains. Trace derives workflow steps from a freshly validated bundle, otherwise only occurrence-bearing Ledger/artifact facts. | `app/entrypoints/run.py`, `app/graph/builder.py`, `app/stages/inventory/nodes.py`, `app/reports/trace_writer.py`; `tests/test_frozen_inputs.py`, `tests/test_run_trace.py`, `tests/test_resource_resolution.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
-| Occurrence, method, and attempt fact integrity | Occurrence settlement is explicit and stage terminals are append singletons. Attempt terminals are likewise mutually exclusive under the Ledger append lock; trace projects only the conservative canonical terminal and exposes integrity diagnostics for legacy conflicts. Shared lifecycle and planner settlement record one typed durable method disposition per effective method and occurrence; deferred Assembly validates `primary_method == assembly_selection.primary_method` before settlement. | `app/execution/lifecycle.py`, `app/execution/method_outcomes.py`, `app/control/occurrence_settlement.py`, `app/storage/ledger.py`, `app/graph/builder.py`, `app/reports/trace_writer.py`; `tests/test_execution_lifecycle.py`, `tests/test_terminal_finalizer.py`, `tests/test_ledger_v2.py`, `tests/test_graph_routing.py`, `tests/test_run_trace.py`, `tests/test_read_qc.py`, `tests/test_genome_survey.py` | [Execution lifecycle](reference/execution-lifecycle.md), [Data contract](reference/data-contract.md) |
-| Local process dispatch | `LocalRunner` invokes the frozen interpreter/script as argv, optionally wrapped by `conda run`, always with `shell=False`. Legacy `env_setup` shell fragments fail closed on both dispatch paths. | `app/execution/local_runner.py`; `tests/test_execution_runner.py`, `tests/test_env_resolver.py` | [Execution](topics/execution.md), [Execution lifecycle](reference/execution-lifecycle.md) |
+| Verified frozen context and trace authority | Production run and resume validate one frozen transaction and pass its in-memory `FrozenInputBundle` into the Inventory subgraph. Inventory validation and registration consume its canonical manifest, RunConfig, declarations, and paths. Trace derives workflow steps from a freshly validated bundle, otherwise only occurrence-bearing Ledger/artifact facts. | `app/entrypoints/run.py`, `app/graph/builder.py`, `app/stages/inventory/nodes.py`, `app/reports/trace_writer.py`; `tests/test_frozen_inputs.py`, `tests/test_run_trace.py`, `tests/test_resource_resolution.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
+| Occurrence, method, and attempt fact integrity | Occurrence settlement is explicit and stage terminals are append singletons. Attempt terminals are mutually exclusive under the Ledger append lock; trace projects the conservative canonical terminal and exposes integrity diagnostics for conflicts. Shared lifecycle and planner settlement record one typed durable method disposition per effective method and occurrence; deferred Assembly validates `primary_method == assembly_selection.primary_method` before settlement. | `app/execution/lifecycle.py`, `app/execution/method_outcomes.py`, `app/control/occurrence_settlement.py`, `app/storage/ledger.py`, `app/graph/builder.py`, `app/reports/trace_writer.py`; `tests/test_execution_lifecycle.py`, `tests/test_terminal_finalizer.py`, `tests/test_ledger_v2.py`, `tests/test_graph_routing.py`, `tests/test_run_trace.py`, `tests/test_read_qc.py`, `tests/test_genome_survey.py` | [Execution lifecycle](reference/execution-lifecycle.md), [Data contract](reference/data-contract.md) |
+| Local process dispatch | `LocalRunner` invokes the frozen interpreter/script as argv, optionally wrapped by `conda run`, always with `shell=False`. Non-empty `env_setup` shell fragments fail closed on both dispatch paths. | `app/execution/local_runner.py`; `tests/test_execution_runner.py`, `tests/test_env_resolver.py` | [Execution](topics/execution.md), [Execution lifecycle](reference/execution-lifecycle.md) |
 | Interactive Inventory-only planning | Ask/TUI distinguish an unanswered selection (`None`) from an explicit empty occurrence list. Plain-text, questionary, and LLM Plan Draft paths accept `[]`, skip biological planning questions, render `Inventory only`, and freeze `requested_stages: []`. | `app/schemas/ask_plan.py`, `app/entrypoints/ask_interactive.py`, `app/entrypoints/tui.py`; `tests/test_ask_plan.py`, `tests/test_ask_interactive.py`, `tests/test_tui.py` | [TUI and planning](topics/tui-and-planning.md), [Runtime orchestration](topics/runtime-orchestration.md) |
 | Current assembly candidate continuity and immutable delivery | Every implemented assembly-handoff producer declares an occurrence-bound delivery. Shared settlement verifies its candidate/primary artifact ownership before appending `resource_delivered`; Review requires the frozen producer terminal, its single delivery, the current projection, and the resolved candidate bundle to agree. Reused candidates are valid only through an explicit reused delivery. | `app/control/workflow_plan.py`, `app/control/occurrence_settlement.py`, `app/graph/builder.py`, `app/storage/ledger.py`, `app/storage/assembly_candidates.py`, `app/stages/{inventory,assembly,assembly_dedup,assembly_review,hic_scaffolding,t2t}/nodes.py`; `tests/test_inventory.py`, `tests/test_assembly.py`, `tests/test_assembly_dedup.py`, `tests/test_assembly_review.py`, `tests/test_hic_scaffolding.py`, `tests/test_t2t.py` | [Resource handoff](reference/resource-handoff.md), [Stage contracts](reference/stage-contracts.md) |
 | Read QC closed evidence package | SeqKit publishes one direct whole-read-set aggregate for each cardinality; that aggregate owns length and quality metrics, while retained per-file rows serve only as consistency checks. Aggregate and summary provenance reference their real read inputs/aggregate. Input provenance freezes through the resource registry, and zero-retained filtering preserves evidence but fails the occurrence instead of replacing `long_reads`. | `app/stages/read_qc/method_application/support.py`, `app/stages/read_qc/method_application/seqkit_stats.py`, `app/stages/read_qc/method_application/seqkit_length_filter.py`, `app/stages/read_qc/nodes.py`; `tests/test_read_qc.py`, `tests/test_frozen_inputs.py` | [Stage contracts](reference/stage-contracts.md), [Resource handoff](reference/resource-handoff.md) |
@@ -189,7 +158,7 @@ settlement debt above.
 | `assembly.candidate.nextdenovo` | registered with catalog | `executable` | implemented | `tests/test_assembly.py` | catalog exists; no equivalent literature case corpus |
 | `assembly_dedup.purge_dups` | registered | `executable` | implemented | `tests/test_assembly_dedup.py` | durable `completed`, `skipped`, or `not_started` disposition is orthogonal to the delivered occurrence and its immutable delivery |
 | `assembly_review.eval.quast` | registered | `executable` | implemented | `tests/test_assembly_review.py` | stage-local review, not final integrated QA |
-| `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py`, `tests/test_database_resolution.py` | manifest NCBI scientific name selects one compatible host-installed lineage; a legacy RunConfig lineage is assertion-only; path/version/provenance resolve from the frozen host registry |
+| `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py`, `tests/test_database_resolution.py` | manifest NCBI scientific name selects one compatible host-installed lineage; a RunConfig lineage, when present, is assertion-only; path/version/provenance resolve from the frozen host registry |
 | `hic_scaffolding.candidate.autohic` | registered with catalog | `executable` | implemented | `tests/test_hic_scaffolding.py` | all four review products are mandatory at collection |
 | `t2t.alignment.minimap2` | registered with catalog | `executable` | implemented | `tests/test_t2t.py` | none |
 `tests/test_registry_executable_invariant.py` derives local IDs from imported
@@ -228,11 +197,11 @@ Some items now have an explicit parent position without an executable closed
 loop. `placeholder` means the graph can represent and fail the request
 truthfully; it does not mean the biological capability runs.
 
-| Product capability | Wiring | Implementation | Verification | Debt | Exact current boundary |
+| Product capability | Wiring | Implementation | Verification | Debt | Evidence and owner |
 |---|---|---|---|---|---|
-| Gap closing after chromosome scaffolding | `wired` | `placeholder` | `tested` | `known-gap` | The accepted complete recommendation places `gapcloser` between Hi-C Scaffolding and T2T. Its parent subgraph currently has only a strict not-implemented cursor and skip/failure evidence; it has no method descriptor, executable adapter, artifact contract, or central assembly handoff |
-| Automated base polishing | `wired` | `placeholder` | `tested` | `known-gap` | The accepted complete recommendation places `base_polish` after T2T. Its current parent-only boundary has no NextPolish, Racon, Medaka, Pilon, or other executor and publishes no polished central assembly handoff |
-| Finish Review after Base Polish | recommended placement is wired; Base Polish handoff is not | `implemented-no-process` Review after a placeholder position | `partially-tested` | `known-gap` | Planners place the reusable `assembly_review` after Base Polish. Until Base Polish implements the central handoff, frozen nearest-producer binding remains on T2T and execution terminates at the Base Polish placeholder before reaching Review; implementing Base Polish moves the binding to that producer |
+| Gap closing after chromosome scaffolding | `wired` | `placeholder` | `tested` | `known-gap` | `app/stages/gapcloser/`; `tests/test_placeholder_stages.py`; [stage contract](reference/stage-contracts.md#8-gapcloser-placeholder) |
+| Automated base polishing | `wired` | `placeholder` | `tested` | `known-gap` | `app/stages/base_polish/`; `tests/test_placeholder_stages.py`; [stage contract](reference/stage-contracts.md#10-base-polish-placeholder) |
+| Finish Review after Base Polish | placement wired; producer handoff absent | unreachable after the Base Polish placeholder | `partially-tested` | `known-gap` | [stage contract](reference/stage-contracts.md#10-base-polish-placeholder) |
 | TUI midstage entry from clean reads or an existing assembly | `unwired` in the public TUI | `placeholder` as accepted design | `partially-tested` | `known-gap` | See [TUI midstage entry](topics/tui-midstage-entry.md) |
 
 The finish Review is a second occurrence of the reusable `assembly_review`
@@ -240,25 +209,5 @@ stage, not a separate “final QA” stage. The Base Polish placeholder or an
 operator-provided polished assembly must not be counted as an automated
 polishing method.
 
-## Maintenance rule
-
-Follow this synchronization order for behavior changes: update code, then the
-unique owning reference contract, each affected topic, and this map when its
-wiring, status, evidence, or debt projection changes. Update `docs/README.md`
-or the architecture router only when navigation relationships change.
-
-Update this page in the same change whenever code adds, removes, or rewires any
-of the following:
-
-- a parent graph node or canonical stage;
-- a stage builder node or conditional route;
-- a registered method or planner execution kind;
-- a method adapter, collection contract, or registered execution-class invariant;
-- a parameter catalog, recommender, approval gate, retry, or attempt binding;
-- a human review gate or cross-stage resource commit;
-- a conformance entry cited by a status row.
-
-Every new `tested` label must name focused test evidence. Closed gaps disappear
-from this map in the same change that removes their conformance entry.
-Historical states belong in Git history; do not append phase logs or completion
-percentages here.
+Maintenance rules are owned by
+[Architecture Governance](reference/governance.md).

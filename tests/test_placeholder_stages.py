@@ -283,7 +283,7 @@ def test_contig_only_route_does_not_enter_placeholders() -> None:
     ]
 
 
-def test_simplification_inventory_gate_exists() -> None:
+def test_documentation_and_simplification_policy_is_final_state_only() -> None:
     project = Path(__file__).resolve().parents[1]
 
     governance_path = project / "docs/architecture/reference/governance.md"
@@ -309,11 +309,15 @@ def test_simplification_inventory_gate_exists() -> None:
         "dead surface",
         "intentional symmetry",
     ):
-        assert f"`{label}`" in governance
-    assert "Simplification inventory workflow" in governance
-    assert "candidate_ids_from_review_request_payload" in governance
-    assert "validate_sha256" in governance
+        assert label in governance
+    assert "Comments record only non-obvious rationale" in governance
+    assert "omit intermediate attempts" in governance
+    assert "never-merged states" in governance
+    assert "## Boundary Rules" not in governance
+    assert "## Review Gate Policy" not in governance
     for symbol in (
+        "candidate_ids_from_review_request_payload",
+        "validate_sha256",
         "parse_json_object",
         "validate_model_response_record",
         "_load_reference_snapshot",
@@ -321,9 +325,9 @@ def test_simplification_inventory_gate_exists() -> None:
         "_review_request_decision_context",
         "Ledger.record_method_disposition_recorded",
     ):
-        assert symbol in governance
-    assert "Content-addressed JSON publication" in governance
-    assert "schema-v1 migration behavior" in recommendation_policy
+        assert symbol not in governance
+    assert "Content-addressed JSON publication" not in governance
+    assert "schema-v1 route restorer" in recommendation_policy
     assert "_parameter_evidence_location" in parameter_contract
     assert "_load_reference_snapshot" in stage_contract
     assert "never stringifies" in review_topic

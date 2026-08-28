@@ -54,7 +54,7 @@ cp -p "$host_config_backup" config/envs.yaml
 git status --short --ignored -- config/envs.yaml
 ```
 
-The `git restore` above discards only the old tracked working copy after its
+The `git restore` above discards only the tracked working copy after its
 exact host mapping has been backed up outside the checkout. After the pull, the
 copy command restores that mapping at the now-ignored path. Git should report
 `!! config/envs.yaml`; then run the normal bootstrap preview and server checks.
@@ -83,9 +83,9 @@ local regression tests but do not replace a server real-data run.
 
 ## Server update workflow
 
-Before pulling, inspect whether the checkout has active sessions. The current
-pre-release runtime has no checkpoint migration; finish those sessions or keep
-the old checkout and environment available for their resumes.
+Before pulling, inspect whether the checkout has active sessions. Sessions
+resume only with a compatible checkpoint representation; finish them before an
+incompatible update or keep the matching checkout and environment available.
 
 The ordinary update sequence below applies only after this host has completed
 the `config/envs.yaml` tracking split above. If

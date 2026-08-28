@@ -38,17 +38,15 @@ a distinct policy path, not an approval-gate bypass.
 
 ## Persisted advisor-response envelope
 
-New Assembly route and parameter-advisor writes share the envelope keys
+Assembly route and parameter-advisor writes share the envelope keys
 `schema_version`, `raw_response`, `validity`, `error`, and `model_id`.
 `app/llm/json_response.py` owns construction and validation of that common wire
 shape, including `validity` values `parsed` and `invalid`. It does not own
 version-specific replay compatibility.
 
-The route restorer retains schema-v1 migration behavior: an absent or
-non-string historical `model_id` is normalized to `null`. The Assembly
-parameter restorer for schema v2 rejects a non-string `model_id`. Changing
-either rule requires an explicit schema/migration decision; a shared helper
-must not silently make the two restore policies identical. New writes always
+The schema-v1 route restorer normalizes an absent or non-string `model_id` to
+`null`; the schema-v2 Assembly parameter restorer rejects a non-string
+`model_id`. Their schema-specific restore policies must remain distinct. Writes
 emit a string or `null` in both schemas.
 
 ## Draft and freeze boundary
@@ -103,7 +101,7 @@ a retry request fails closed rather than silently switching to advisor mode.
 ## Readiness and evidence
 
 Readiness follows the frozen policy. When both Assembly advisors use baselines,
-the run no longer requires the Assembly LLM endpoint before freeze; any Hi-C or
+the run does not require the Assembly LLM endpoint before freeze; any Hi-C or
 T2T advisor still does. The exact structured endpoint probe and no-session-on-
 failure behavior are owned by the
 [execution lifecycle](execution-lifecycle.md#whole-run-readiness-boundary). The

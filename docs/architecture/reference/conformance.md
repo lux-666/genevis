@@ -27,9 +27,8 @@ mypy app
 pytest -q
 ```
 
-The working tree must not be described as passing a gate unless that command
-returns zero in the revision being described. Historical error counts are not
-retained here because they become stale immediately.
+The working tree passes a gate only when that command returns zero for the
+revision being described; the command output is the evidence.
 
 - Policy owner: [Governance](governance.md).
 - Current evidence: `pyproject.toml` plus the command output for the checked
@@ -129,6 +128,5 @@ execution evidence, and neither may be cited as a successful contig run.
 
 ## Update rule
 
-Every entry must identify the accepted owner, current code evidence, and an
-objective closure condition. Delete an entry in the same change that closes it;
-do not turn this page into a backlog, phase report, or historical status log.
+Every entry identifies the accepted owner, current code evidence, and an
+objective closure condition. Delete an entry in the same change that closes it.

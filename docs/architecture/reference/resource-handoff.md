@@ -136,10 +136,10 @@ a second cross-stage file table.
 
 `resource_refs["assembly"]` is a replaceable current-routing projection. Its
 `source_stage` and `workflow_step_id` labels are necessary for dispatch, but
-they are not historical proof that the named occurrence delivered the
-candidate relation. Assembly delivery history is owned by one immutable,
-occurrence-bound `resource_delivered` Ledger fact written by the shared
-settlement boundary before that occurrence's `stage_completed` terminal.
+they are not immutable proof that the named occurrence delivered the candidate
+relation. That proof is one occurrence-bound `resource_delivered` Ledger fact
+written by the shared settlement boundary before the occurrence's
+`stage_completed` terminal.
 
 The current v1 delivery schema is deliberately assembly-specific:
 
@@ -186,9 +186,8 @@ Assembly Review validates all of the following before candidate loading:
    path equal that immutable delivery; and
 5. the executed candidate bundle and its embedded primary output verify.
 
-Relabeling a central `ResourceRef` can no longer make an unrelated historical
-candidate satisfy Review. There is no pre-release fallback that infers a
-delivery fact from a mutable checkpoint or upgrades an old session.
+Review accepts only an occurrence-bound, verified delivery fact. Relabeling a
+mutable `ResourceRef` cannot satisfy that requirement.
 
 The operator-facing `final_assembly` field is a detached read model of these
 deliveries, not another resource record. Its terminal bounding and artifact
@@ -267,11 +266,9 @@ adapter-declared native outputs. Native graphs, alternate contigs, reports,
 logs, or configs remain inside that executed bundle and do not become peer
 assembly candidates or downstream assembly paths.
 
-New Assembly checkpoints hold singular typed
-`planned_candidate_bundle_ref` and `executed_candidate_bundle_ref` values.
-Former plural and absolute-path candidate cursor fields are rejected. Data v2
-does not read or migrate legacy checkpoints, and no run writes those fields
-into checkpoints or resource handoffs.
+Assembly checkpoints hold singular typed `planned_candidate_bundle_ref` and
+`executed_candidate_bundle_ref` values. Plural and absolute-path candidate
+cursor fields are rejected.
 
 ## FOFN boundary
 

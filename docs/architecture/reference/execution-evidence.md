@@ -78,7 +78,7 @@ authoritative process output.
 - A stage may wrap the canonical result body in a stage-specific immutable
   record, but it may not change or extend the body schema.
 - For model-recommended parameterized execution after human approval, current
-  and historical execution-record refs live only on the corresponding
+  and prior-attempt execution-record refs live only on the corresponding
   `ParameterAttempt`; the stage cursor selects an attempt by ID and does not
   duplicate a method-specific execution cursor. Ordinary methods and ordered
   batches bind their frozen and execution refs through the shared typed
@@ -108,12 +108,10 @@ For model-recommended Assembly, AutoHiC, and T2T execution, the same
 so advancing the current attempt during a retry cannot erase which runner input
 produced an earlier result.
 
-## Compatibility Boundary
+## Loader Boundary
 
-Data v2 has no legacy-session read or migration contract. Loaders therefore
-fail closed on an old path-based result. They do not infer refs from paths, add
-dual reads, or write both formats. A workflow that must preserve an old run does
-so outside the v2 resume contract.
+Loaders accept only ArtifactRef-based execution evidence and fail closed on
+path-based results. Resume never infers refs or rewrites evidence formats.
 
 ## Enforced Constraints
 

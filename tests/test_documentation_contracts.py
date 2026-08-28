@@ -48,13 +48,11 @@ class DocumentationContractTests(unittest.TestCase):
             "examples/envs.yaml.example",
             "../data/reference/ncbi/README.md",
             "examples/",
-            "architecture/reference/data-contract.md",
-            "architecture/reference/parameter-recommendation.md",
+            "architecture/README.md",
+            "architecture/reference/governance.md",
             "user_guide/run-and-recovery.md",
             "deployment/migration.md",
             "deployment/mac_dev_server_pull.md",
-            "architecture/langgraph-implementation-map.md",
-            "architecture/reference/conformance.md",
         )
         missing = [entry for entry in required if entry not in authority_map]
         self.assertFalse(missing, f"documentation authority map is missing: {missing}")
@@ -67,7 +65,7 @@ class DocumentationContractTests(unittest.TestCase):
             "reference_dir: /home/lux/databases/ncbi",
             "Metazoa.ncbi.tsv",
             "Viridiplantae.ncbi.tsv",
-            "exact species,\nsame genus, same family, then same order",
+            "../../../docs/architecture/reference/stage-contracts.md#6-assembly-review",
         ):
             self.assertIn(required, authority)
 

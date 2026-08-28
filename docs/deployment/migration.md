@@ -113,13 +113,11 @@ GENE_AGENT_LLM_TIMEOUT_SECONDS=180
 
 Do not commit it. Assembly method and parameter recommendation requires a
 reachable LLM.
-Assembly Review requires an NCBI Latin scientific name in manifest
-`user_metadata.target_species` and at least one matching BUSCO lineage under
-`databases.busco`; selection is derived from the verified snapshots under
-`databases.ncbi.reference_dir` and fails if the name is malformed,
-unresolved, or has no exact/same-genus/same-family/same-order evidence.
-RunConfig does not repeat either database path or select the lineage. AutoHiC additionally
-needs its declared external package roots,
+Assembly Review additionally requires `user_metadata.target_species`, the NCBI
+snapshot root, and a compatible installed BUSCO lineage; runtime selection is
+defined by the
+[Assembly Review stage contract](../architecture/reference/stage-contracts.md#6-assembly-review).
+AutoHiC additionally needs its declared external package roots,
 Juicer/3D-DNA/JAR layout, and model files.
 
 Install the NCBI snapshot through its single
@@ -160,8 +158,8 @@ installed BUSCO lineage aliases and the NCBI snapshot root. Per-run RunConfig
 does not repeat database paths, versions, provenance, or lineage selection. For
 Assembly Review, the manifest supplies the NCBI Latin scientific name in
 `user_metadata.target_species`; the system derives lineage from the frozen NCBI
-snapshot selected from that root and the installed host registry. A historical
-`assembly_review.busco.lineage` is consistency-only.
+snapshot selected from that root and the installed host registry. A RunConfig
+`assembly_review.busco.lineage`, when present, is consistency-only.
 
 The NCBI installer resolves its root destination from the active mapping and
 writes one named child directory. If using it before the root exists, manually

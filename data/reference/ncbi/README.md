@@ -54,10 +54,5 @@ python scripts/install_ncbi_reference.py --reference metazoa --verify-only
 python scripts/install_ncbi_reference.py --reference viridiplantae --verify-only
 ```
 
-At run readiness, the sole manifest-owned `target_species` is tested against
-every installed snapshot using the existing fallback order: exact species,
-same genus, same family, then same order. The snapshot providing the best
-available tier is selected; equal tiers prefer more primary records and then
-the snapshot directory name for deterministic behavior. Readiness fails only
-when no snapshot provides useful evidence. The freeze records every installed
-manifest hash so replacing any snapshot cannot silently alter a committed run.
+Runtime selection and BUSCO lineage resolution are owned by the
+[Assembly Review stage contract](../../../docs/architecture/reference/stage-contracts.md#6-assembly-review).

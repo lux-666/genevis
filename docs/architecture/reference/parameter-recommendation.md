@@ -152,9 +152,9 @@ only when the canonical supplied species facts do not already contain a motif.
 A supplied motif is validated and persisted as `provided_species_fact` without
 a model call; otherwise the resolver requires the supplied scientific name and
 persists the exact messages, raw response, parse result, and resolved source.
-Pre-v3 motif/config checkpoint fields are rejected. The threshold snapshot
-binds the verified motif-resolution ref, and all scan/patch consumers use only
-that resolved evidence.
+Motif/config checkpoint fields outside the current schema are rejected. The
+threshold snapshot binds the verified motif-resolution ref, and all scan/patch
+consumers use only that resolved evidence.
 
 All DTOs forbid unknown top-level fields and exclude session identity, paths,
 artifact IDs/hashes, storage metadata, credentials, and unrestricted registry
@@ -215,12 +215,12 @@ active occurrence's work tree; recovery independently verifies the immutable
 artifact type, method, metadata, hash, and indexed destination.
 
 The v3 loader verifies artifact type, hash, schema, stage, method, task, and
-attempt-chain identity before returning the chain. Pre-v3 roots, pre-v3 ref
-names, and mixed identities fail closed. The response, parse, recommendation,
-and T2T motif-manifest leaves retain their own declared schema versions; the
-hard cutover applies to the recommendation snapshot/manifest root and the
-approved attempt boundary. Checkpoint state contains bounded cursors and refs,
-not the request/response bodies. For Assembly, the compact stage cursor may
+attempt-chain identity before returning the chain. Non-v3 roots, incompatible
+ref names, and mixed identities fail closed. Response, parse, recommendation,
+and T2T motif-manifest leaves retain their declared schema versions; v3 applies
+to the recommendation snapshot/manifest root and approved attempt boundary.
+Checkpoint state contains bounded cursors and refs, not the request/response
+bodies. For Assembly, the compact stage cursor may
 carry the validated selection/primary-method cursor needed to resume; the full
 recommendation, approval, model, command, and evidence records remain immutable
 artifacts and Ledger facts. No execution attempt is added before the approval
