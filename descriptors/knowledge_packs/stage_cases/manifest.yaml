@@ -1,0 +1,6 @@
+schema_version: 1
+description: Stage-scoped, source-bound literature Cases
+stages:
+  - assembly
+  - hic_scaffolding
+  - t2t
