@@ -1,6 +1,6 @@
 # Case 知识库 V1：设计与实施计划
 
-状态：已确认，Phase 0 实施中
+状态：Phase 0–1 已实施，Phase 2 待实施
 实施位置：`main` working tree
 实施原则：保留现有严格校验、curation 门禁、comparison-group 检查、确定性检索与 trace；V1 只建立一套 case 表示和一条运行时链路。
 
