@@ -1,4 +1,4 @@
-"""Strict, stage-scoped literature Case loading for the isolated V1 library."""
+"""Strict, stage-scoped loading for an external CasePack V1."""
 
 from __future__ import annotations
 
@@ -29,8 +29,6 @@ MAX_QUOTES_PER_CASE = 32
 MAX_TOTAL_QUOTE_CHARS = 16_000
 MAX_SOURCE_BYTES = 256 * 1024
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CASE_ROOT = _PROJECT_ROOT / "descriptors" / "knowledge_packs" / "stage_cases"
 _ID_PART = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _SCIENTIFIC_NAME = re.compile(r"[A-Z][a-z]+(?: [a-z][a-z-]+)+")
 
@@ -507,10 +505,10 @@ class CaseLibrary:
         return bool(self.records)
 
 
-def load_case_library(root: Path | None = None) -> CaseLibrary:
-    """Load and fully validate one repository-backed V1 Case library."""
+def load_case_library(root: Path) -> CaseLibrary:
+    """Load and fully validate one external CasePack V1."""
 
-    library_root = (root or DEFAULT_CASE_ROOT).resolve()
+    library_root = root.resolve()
     manifest_path = library_root / "manifest.yaml"
     try:
         manifest = _Manifest.model_validate(_load_mapping(manifest_path))
@@ -725,7 +723,6 @@ def _without_provenance(value: Any) -> Any:
 __all__ = [
     "CASE_SCHEMA_VERSION",
     "CASE_STAGES",
-    "DEFAULT_CASE_ROOT",
     "CaseLibrary",
     "CaseValidationError",
     "load_case_library",

@@ -346,7 +346,7 @@ def test_runtime_method_must_exist_in_same_stage(tmp_path: Path) -> None:
         load_case_library(_write_library(tmp_path, [case]))
 
 
-def test_repository_library_contract() -> None:
-    library = load_case_library()
+def test_empty_casepack_contract(tmp_path: Path) -> None:
+    library = load_case_library(_write_library(tmp_path, []))
 
     assert len(library) == 0
