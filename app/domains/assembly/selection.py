@@ -101,7 +101,7 @@ PARAMETER_CASE_READ_TYPE: dict[NormalizedReadType, str] = {
 }
 
 DEFAULT_PRIMARY_BY_READ_TYPE: dict[NormalizedReadType, str] = {
-    "cyclone": FLYE_METHOD,
+    "cyclone": HIFIASM_ONT_METHOD,
     "ont_raw": HIFIASM_ONT_METHOD,
     "ont_hq": HIFIASM_ONT_METHOD,
     "pacbio_clr": FLYE_METHOD,

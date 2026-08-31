@@ -14,6 +14,7 @@ from app.control.lifecycle import normalize_resume_review_request
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
+    default_primary_method,
     validate_assembly_selection,
 )
 from app.integrity import sha256_file
@@ -291,6 +292,9 @@ class AssemblyDescriptorTests(unittest.TestCase):
 
     def test_shared_read_type_mapping_covers_manifest_platforms_and_methods(self):
         self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["cyclone"], "cyclone")
+        self.assertEqual(
+            default_primary_method("cyclone"), "assembly.candidate.hifiasm_ont"
+        )
         self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["pacbio_hifi"], "pacbio_hifi")
         self.assertEqual(SHARED_TO_METHOD_READ_TYPE["cyclone"]["hifiasm_ont"], "ont")
         self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_raw"]["hifiasm_ont"], "ont")
