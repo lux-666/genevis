@@ -157,7 +157,7 @@ def validate_reference_snapshot(reference_dir: Path | str) -> dict[str, Any]:
 
     root = Path(reference_dir)
     sources = _reference_sources(root)
-    provenance, _source_bytes, error = _reference_provenance(root, sources)
+    provenance, _tables, error = _load_reference_snapshot(root, sources)
     if error is not None:
         raise ValueError(error)
     return provenance

@@ -199,7 +199,7 @@ def resolve_ncbi_reference(
                 f"NCBI reference {name!r} failed integrity validation: {exc}"
             ) from exc
 
-        if species_name is None and len(references) == 1:
+        if species_name is None:
             matches.append((0, 0, str(name), path))
             continue
         pack = build_related_species_evidence_pack(

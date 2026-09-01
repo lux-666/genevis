@@ -189,6 +189,18 @@ def test_species_name_selects_one_of_multiple_ncbi_references(tmp_path: Path) ->
     )
 
 
+def test_host_check_without_species_validates_multiple_ncbi_references(
+    tmp_path: Path,
+) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    resolver, metazoa, _viridiplantae = _multi_reference_resolver(tmp_path, lineage)
+
+    assert resolve_ncbi_reference(resolver, species_name=None) == (
+        "metazoa",
+        str(metazoa.resolve()),
+    )
+
+
 def test_species_name_does_not_require_one_snapshot_match(tmp_path: Path) -> None:
     lineage = ensure_busco_lineage(tmp_path / "busco")
     ncbi_root = tmp_path / "ncbi"
