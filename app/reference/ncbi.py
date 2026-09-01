@@ -29,6 +29,9 @@ _STATISTICS_BASIS = {
     "busco_duplicated": "busco_duplicated_percent",
 }
 
+_PLANT_TAXONOMY_MARKERS = frozenset({"viridiplantae", "embryophyta"})
+_PLANT_BUSCO_LINEAGE = "embryophyta_odb10"
+
 _ACCESSION_RE = re.compile(r"^(GC[AF])_(\d+)(?:\.\d+)?$", re.IGNORECASE)
 _ALTERNATE_NAME_RE = re.compile(
     r"(?:\balternate\b|\balt(?:ernative)?\b|\.alt\b|"
@@ -417,6 +420,18 @@ def resolve_busco_lineage_for_species(
         raise ValueError(
             f"cannot resolve BUSCO lineage for species {species_name!r}: {notes}"
         )
+    taxonomy_terms = _verified_exact_taxonomy_terms(
+        species_name,
+        reference_dir=reference_dir,
+    )
+    if _PLANT_TAXONOMY_MARKERS & {_normalise(term) for term in taxonomy_terms}:
+        if _PLANT_BUSCO_LINEAGE not in configured_lineages:
+            raise ValueError(
+                f"plant taxonomy for species {species_name!r} requires installed "
+                f"BUSCO lineage {_PLANT_BUSCO_LINEAGE!r}; configured lineages="
+                f"{sorted(configured_lineages)}"
+            )
+        return _PLANT_BUSCO_LINEAGE
     observed = {
         str(record["busco"]["lineage"])
         for record in pack["selected_records"]
@@ -442,6 +457,28 @@ def resolve_busco_lineage_for_species(
 
 def _busco_lineage_family(name: str) -> str:
     return _normalise(name).partition("_odb")[0]
+
+
+def _verified_exact_taxonomy_terms(
+    species_name: str,
+    *,
+    reference_dir: Path | str,
+) -> tuple[str, ...]:
+    """Return exact target taxonomy from one verified NCBI lineage2 snapshot."""
+
+    root = Path(reference_dir)
+    _provenance, tables, error = _load_reference_snapshot(
+        root,
+        _reference_sources(root),
+    )
+    if error is not None:
+        raise ValueError(error)
+    assert tables is not None
+    target = _normalise(species_name)
+    for terms in tables.ranked_lineage_by_taxid.values():
+        if terms and _normalise(terms[-1]) == target:
+            return tuple(terms)
+    return ()
 
 
 def _empty_pack(species_name: str | None, sources: dict[str, str]) -> dict[str, Any]:

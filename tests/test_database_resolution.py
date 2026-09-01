@@ -32,7 +32,9 @@ def _write_reference(reference: Path, files: dict[str, str]) -> None:
     native = {
         f"{prefix}.ncbi.json": "{}\n",
         f"{prefix}.ncbi.lineage": lineage,
-        f"{prefix}.ncbi.lineage2": lineage,
+        f"{prefix}.ncbi.lineage2": files.get(
+            f"{prefix}.ncbi.lineage2", lineage
+        ),
         tsv_name: files[tsv_name],
     }
     for name, content in native.items():
@@ -53,8 +55,9 @@ def _write_species_reference(
     reference: Path,
     *,
     species_name: str,
-    lineage_name: str,
+    lineage_name: str | None,
     prefix: str = "Metazoa",
+    taxonomy_lineage: str | None = None,
 ) -> None:
     _write_reference(
         reference,
@@ -62,10 +65,14 @@ def _write_species_reference(
             f"{prefix}.ncbi.tsv": (
                 "Current Accession\tOrganism Name\tOrganism Taxonomic ID\t"
                 "Annotation BUSCO Lineage\n"
-                f"GCF_000000001.1\t{species_name}\t1\t{lineage_name}\n"
+                f"GCF_000000001.1\t{species_name}\t1\t{lineage_name or ''}\n"
             ),
             f"{prefix}.ncbi.lineage": (
                 f"Organism Taxonomic ID\tLineage\n1\tMetazoa;{species_name}\n"
+            ),
+            f"{prefix}.ncbi.lineage2": (
+                "Organism Taxonomic ID\tLineage\n"
+                f"1\t{taxonomy_lineage or f'{prefix};{species_name}'}\n"
             ),
         },
     )
@@ -210,6 +217,141 @@ def test_species_name_selects_configured_busco_lineage(tmp_path: Path) -> None:
 
     assert projection["lineage_name"] == "actinopterygii_odb10"
     assert projection["threads"] == 6
+
+
+def test_plant_taxonomy_selects_fixed_lineage_without_busco_annotation(
+    tmp_path: Path,
+) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    species_name = "Brassica rapa subsp. pekinensis"
+    _write_species_reference(
+        ncbi,
+        species_name=species_name,
+        lineage_name=None,
+        prefix="Viridiplantae",
+        taxonomy_lineage=(
+            "cellular organisms;Eukaryota;Viridiplantae;Streptophyta;"
+            "Embryophyta;Brassicales;Brassicaceae;Brassica;"
+            f"{species_name}"
+        ),
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    projection = resolve_busco_parameters(
+        _run_config(threads=6),
+        resolver,
+        species_name=species_name,
+    )
+
+    assert projection["lineage_name"] == "embryophyta_odb10"
+
+
+def test_plant_taxonomy_fixed_lineage_precedes_narrower_annotation(
+    tmp_path: Path,
+) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    species_name = "Brassica rapa subsp. pekinensis"
+    _write_species_reference(
+        ncbi,
+        species_name=species_name,
+        lineage_name="brassicales_odb10",
+        prefix="Viridiplantae",
+        taxonomy_lineage=f"Viridiplantae;Embryophyta;Brassica;{species_name}",
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    projection = resolve_busco_parameters(
+        _run_config(),
+        resolver,
+        species_name=species_name,
+    )
+
+    assert projection["lineage_name"] == "embryophyta_odb10"
+
+
+def test_nonplant_taxonomy_cannot_fall_back_to_embryophyta(tmp_path: Path) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    _write_species_reference(
+        ncbi,
+        species_name="Solea ovata",
+        lineage_name=None,
+        prefix="Viridiplantae",
+        taxonomy_lineage="Eukaryota;Metazoa;Chordata;Solea;Solea ovata",
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    with pytest.raises(
+        DatabaseResolutionError,
+        match="cannot resolve one configured BUSCO lineage",
+    ):
+        resolve_busco_parameters(
+            _run_config(),
+            resolver,
+            species_name="Solea ovata",
+        )
+
+
+def test_plant_taxonomy_requires_fixed_lineage_to_be_installed(
+    tmp_path: Path,
+) -> None:
+    lineage = ensure_busco_lineage(
+        tmp_path / "busco", lineage_name="metazoa_odb10"
+    )
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    species_name = "Brassica rapa subsp. pekinensis"
+    _write_species_reference(
+        ncbi,
+        species_name=species_name,
+        lineage_name="metazoa_odb10",
+        prefix="Viridiplantae",
+        taxonomy_lineage=f"Viridiplantae;Embryophyta;Brassica;{species_name}",
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    with pytest.raises(
+        DatabaseResolutionError,
+        match="plant taxonomy.*requires installed BUSCO lineage "
+        "'embryophyta_odb10'",
+    ):
+        resolve_busco_parameters(
+            _run_config(),
+            resolver,
+            species_name=species_name,
+        )
+
+
+def test_explicit_run_config_lineage_conflicts_with_fixed_plant_lineage(
+    tmp_path: Path,
+) -> None:
+    lineage = ensure_busco_lineage(tmp_path / "busco")
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    species_name = "Brassica rapa subsp. pekinensis"
+    _write_species_reference(
+        ncbi,
+        species_name=species_name,
+        lineage_name=None,
+        prefix="Viridiplantae",
+        taxonomy_lineage=f"Viridiplantae;Embryophyta;Brassica;{species_name}",
+    )
+    resolver = EnvResolver(config_data=_config(lineage, ncbi))
+
+    with pytest.raises(
+        DatabaseResolutionError,
+        match="assembly_review.busco.lineage conflicts with the species-derived",
+    ):
+        resolve_busco_parameters(
+            _run_config(lineage="metazoa_odb10"),
+            resolver,
+            species_name=species_name,
+        )
 
 
 def test_species_name_selects_one_of_multiple_ncbi_references(tmp_path: Path) -> None:

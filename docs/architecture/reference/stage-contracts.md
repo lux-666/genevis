@@ -369,12 +369,21 @@ installed children using the existing exact, same-genus, same-family, then
 same-order fallback. The full lineage supplies matching terms and `lineage2`
 supplies ranked taxonomic hints. Selection uses the best available tier; equal
 tiers prefer more primary records and then the snapshot directory name.
-Readiness fails only when no child provides useful evidence. The selected
-snapshot maps that scientific name to related-species
-`Annotation BUSCO Lineage` values. The runtime intersects those annotations
-with the host registry and requires exactly one compatible installed lineage
-before freeze. Snapshot creation/installation owns producing and validating
-that mapping; the user does not inspect snapshot rows or choose a lineage.
+Readiness fails only when no child provides useful evidence. BUSCO selection
+first applies one deterministic taxonomy rule to the selected, verified
+snapshot: when the exact target entry in `*.ncbi.lineage2` contains
+`Viridiplantae` or `Embryophyta`, the runtime requires and selects the installed
+`embryophyta_odb10` lineage. This rule does not infer taxonomy from snapshot
+directory names, related-species rows, or the host default. A plant target
+blocks before freeze when that fixed lineage is not installed.
+
+When the fixed plant rule does not apply, the selected snapshot maps the
+scientific name to related-species `Annotation BUSCO Lineage` values. The
+runtime intersects those annotations with the host registry and requires
+exactly one compatible installed lineage before freeze. The fixed plant rule
+takes precedence over a narrower plant lineage annotation. Snapshot
+creation/installation owns producing and validating the reference data; the
+user does not inspect snapshot rows or choose a lineage.
 `assembly_review.busco.lineage` is not a public selection surface. When present
 in RunConfig, it is only a consistency assertion; a mismatch with the
 species-derived lineage fails with the RunConfig field path. Templates and TUI
