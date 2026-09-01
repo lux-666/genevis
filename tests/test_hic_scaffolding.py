@@ -75,6 +75,7 @@ from app.storage.assembly_candidates import (
 )
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
+from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -1663,6 +1664,74 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(
                 candidate_record["producer_event_id"], decision_ref["artifact_id"]
             )
+
+    def test_deterministic_baseline_skips_model_and_runs_with_empty_l2(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir,
+                error_model,
+                chromosome_model,
+            )
+            state = self._configured_state(tmpdir, assembly, reads)
+            state["stage_outputs"]["hic_scaffolding"]["autohic_parameters"][
+                "restriction_enzyme"
+            ] = "MboI"
+            state["stage_seeds"] = {
+                "hic_scaffolding": {
+                    "parameter_advisor": "deterministic_baseline"
+                }
+            }
+
+            with (
+                patch(
+                    "app.llm.parameters.base.build_chat_model",
+                    side_effect=AssertionError("baseline must not call the model"),
+                ),
+                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}),
+            ):
+                result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(result["active_interrupt"]["gate_id"], "hic_scaffolding")
+            self.assertEqual(
+                hic["parameter_recommendation_mode"],
+                "deterministic_baseline",
+            )
+            cursor = ParameterRecommendationCursor.model_validate(
+                hic["current_parameter_recommendation"]
+            )
+            self.assertEqual(cursor.status, "approved")
+            attempt = ParameterAttempt.model_validate(hic["parameter_attempts"][0])
+            bundle = load_approved_parameter_chain_v3(
+                result,
+                attempt=attempt,
+                expected_stage="hic_scaffolding",
+                expected_method_id=AUTOHIC_METHOD,
+            )
+            self.assertEqual(bundle.approved_l2, {})
+            self.assertEqual(
+                bundle.chain.manifest.summary["policy"],
+                "deterministic_baseline",
+            )
+            self.assertTrue(bundle.chain.manifest.summary["policy_skipped_model"])
+
+            config = (
+                SessionPaths.from_run_dir(result["data_dir"])
+                .workflow_step_work_dir(
+                    "step-002-hic_scaffolding",
+                    "hic_scaffolding",
+                )
+                / "autohic"
+                / "cfg-autohic.txt"
+            ).read_text(encoding="utf-8")
+            self.assertIn("ENZYME=MboI", config)
+            self.assertIn("N_CPU=2", config)
+            self.assertIn("NUMBER_OF_EDIT_ROUNDS=2", config)
+            self.assertIn("TRANSLOCATION_ADJUST=True", config)
+            self.assertIn("INVERSION_ADJUST=True", config)
+            self.assertIn("DEBRIS_ADJUST=False", config)
 
     def test_final_review_can_keep_prior_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:

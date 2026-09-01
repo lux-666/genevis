@@ -501,9 +501,10 @@ must not replace a session-relative snapshot ref with a global hash-only ref.
 
 The exact advisory policy is owned by
 [recommendation-policy.md](recommendation-policy.md). Frozen
-`RunConfig.assembly` carries `method_route_advisor` and `parameter_advisor`;
-the Assembly cursor repeats those modes so recovery and evidence readers do not
-reopen RunConfig to interpret a recommendation record.
+`RunConfig.assembly` carries `method_route_advisor` and `parameter_advisor`, and
+`RunConfig.hic_scaffolding` carries its own `parameter_advisor`. The Assembly
+and Hi-C cursors repeat the applicable frozen mode so recovery and evidence
+readers do not reopen RunConfig to interpret a recommendation record.
 
 ### 10.1 Assembly method recommendation
 

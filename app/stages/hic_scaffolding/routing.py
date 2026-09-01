@@ -47,9 +47,11 @@ def route_after_resolve(state: TopLevelState) -> str:
 
 
 def route_after_recommendation(state: TopLevelState) -> str:
-    """Every valid LLM recommendation pauses for human approval."""
+    """Route approved deterministic baselines to execution, others to review."""
 
     status = _output(state).get("status")
+    if status == "parameters_approved":
+        return "autohic"
     return "block" if status == "blocked_human" else "fail"
 
 

@@ -51,6 +51,7 @@ from app.review.approval import (
 )
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
+    PersistedReviewRequest,
     ReviewPersistenceError,
     persist_review_request,
 )
@@ -124,6 +125,19 @@ _RECOMMENDER_METHOD = "hic_scaffolding.parameter_recommender"
 _APPROVAL_METHOD = "hic_scaffolding.parameter_approval"
 
 
+def autohic_parameter_policy(state: TopLevelState) -> Literal[
+    "advisor", "deterministic_baseline"
+]:
+    """Read the frozen AutoHiC parameter-advisor mode from the stage seed."""
+
+    seed = (state.get("stage_seeds") or {}).get("hic_scaffolding") or {}
+    mode = seed.get("parameter_advisor") if isinstance(seed, Mapping) else None
+    return cast(
+        Literal["advisor", "deterministic_baseline"],
+        mode if mode in {"advisor", "deterministic_baseline"} else "advisor",
+    )
+
+
 def _settle_terminal_autohic(
     state: TopLevelState,
     stage_update: StateUpdate,
@@ -165,6 +179,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
         return {}
 
     task = _parameter_prompt_task(hic_out)
+    policy = autohic_parameter_policy(state)
     try:
         attempts_before = _validate_parameter_attempt_chain(
             state, list(hic_out.get("parameter_attempts") or [])
@@ -236,6 +251,12 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             )
             dependency_refs = _initial_dependency_refs(state, hic_out)
         else:
+            if policy == "deterministic_baseline":
+                return _fail_update(
+                    state,
+                    "deterministic AutoHiC parameter baseline supports initial only",
+                    failure_kind="parameter_recommendation",
+                )
             initial_attempt = ParameterAttempt.model_validate(attempts_before[0])
             initial_chain = load_parameter_recommendation_chain_v3(
                 state,
@@ -317,6 +338,11 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
                 "prompt_bundle_id": PROMPT_BUNDLE,
                 "prompt_template_sha256": autohic_parameter_prompt_hash(),
                 "messages": messages,
+                **(
+                    {"policy_skipped_model": True}
+                    if policy == "deterministic_baseline"
+                    else {}
+                ),
             },
             artifact_type=HIC_PARAMETER_MODEL_REQUEST,
             method_name=_RECOMMENDER_METHOD,
@@ -338,7 +364,30 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             method_name=_RECOMMENDER_METHOD,
         )
         if recovered_response is None:
-            decision = invoke_autohic_parameter_model(model_request, messages=messages)
+            if policy == "deterministic_baseline":
+                decision = restore_autohic_parameter_decision(
+                    {
+                        "schema_version": 2,
+                        "raw_response": json.dumps(
+                            {
+                                "parameters": {},
+                                "summary": (
+                                    "Deterministic baseline: parameter advisor "
+                                    "disabled; empty L2 mapping."
+                                ),
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        "validity": "parsed",
+                        "error": None,
+                        "model_id": "deterministic_baseline_policy",
+                    }
+                )
+            else:
+                decision = invoke_autohic_parameter_model(
+                    model_request, messages=messages
+                )
         else:
             model_response_ref, response_record = recovered_response
             decision = restore_autohic_parameter_decision(response_record)
@@ -418,7 +467,18 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
                 recommendation_ref=recommendation_ref,
                 response_parse_ref=response_parse_ref,
             ),
-            summary={"response_parsed": bool(decision.valid)},
+            summary={
+                "response_parsed": bool(decision.valid),
+                **(
+                    {
+                        "policy": "deterministic_baseline",
+                        "policy_skipped_model": True,
+                        "policy_decision_source": "deterministic_baseline",
+                    }
+                    if policy == "deterministic_baseline"
+                    else {}
+                ),
+            },
         )
         manifest_ref = write_autohic_parameter_artifact(
             state,
@@ -455,7 +515,10 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             state,
             "AutoHiC parameter recommendation response could not be parsed",
             failure_kind="parameter_recommendation",
-            extra={"current_parameter_recommendation": cursor.model_dump(mode="json")},
+            extra={
+                "parameter_recommendation_mode": policy,
+                "current_parameter_recommendation": cursor.model_dump(mode="json"),
+            },
         )
 
     sparse_parameters = dict(recommendation.get("parameters") or {})
@@ -501,6 +564,16 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             "review_request_ref": persisted_request.request_ref,
         }
     )
+    if policy == "deterministic_baseline":
+        return _auto_approve_autohic_baseline(
+            state=state,
+            attempts_before=attempts_before,
+            cursor=cursor,
+            manifest_ref=manifest_ref,
+            recommendation_ref=recommendation_ref,
+            persisted_request=persisted_request,
+            bindings=bindings,
+        )
     interrupt = persisted_request.compact_interrupt(
         stage="hic_scaffolding",
         gate_id="parameter_approval",
@@ -519,6 +592,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
         state,
         {
             "status": "blocked_human",
+            "parameter_recommendation_mode": policy,
             "block_reason": "autohic_parameter_approval_required",
             "active_interrupt": interrupt,
             "current_parameter_attempt_id": (
@@ -527,6 +601,86 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             "proposed_parameter_attempt_id": recommendation_id,
             "parameter_attempts": attempts_before,
             "current_parameter_recommendation": cursor.model_dump(mode="json"),
+        },
+    )
+
+
+def _auto_approve_autohic_baseline(
+    *,
+    state: TopLevelState,
+    attempts_before: list[dict[str, Any]],
+    cursor: ParameterRecommendationCursor,
+    manifest_ref: ArtifactRef,
+    recommendation_ref: ArtifactRef,
+    persisted_request: PersistedReviewRequest,
+    bindings: dict[str, Any],
+) -> StateUpdate:
+    """Approve the exact empty-L2 policy recommendation without a human gate."""
+
+    try:
+        decision_ref = persist_parameter_approval_decision(
+            state,
+            stage="hic_scaffolding",
+            request_id=persisted_request.review_request_id,
+            request_ref=persisted_request.request_ref,
+            request=ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="hic_scaffolding",
+                gate_id="parameter_approval",
+                review_request_id=persisted_request.review_request_id,
+                review_request_hash=persisted_request.request_hash,
+                decision="approve_parameters",
+                decided_by="auto_rule",
+                notes=["approved by deterministic_baseline policy"],
+                metadata={
+                    **bindings,
+                    "source": "policy",
+                    "configured_seconds": 0,
+                    "elapsed_seconds": 0,
+                    "automatic_resolution": {
+                        "source": "policy",
+                        "configured_seconds": 0,
+                        "elapsed_seconds": 0.0,
+                        "outcome": "approve_persisted_recommendation",
+                    },
+                },
+                rationale_artifact_ref=recommendation_ref,
+            ),
+            manifest_ref=manifest_ref,
+            method_name=_APPROVAL_METHOD,
+            artifact_type=HIC_PARAMETER_APPROVAL_DECISION,
+        )
+        attempt = ParameterAttempt(
+            schema_version=3,
+            attempt_id=cursor.recommendation_id,
+            method_id=AUTOHIC_METHOD,
+            task=cursor.task,
+            status="recommended",
+            previous_attempt_id=cursor.previous_attempt_id,
+            recommendation_manifest_ref=manifest_ref,
+            approval_decision_ref=decision_ref,
+            recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
+            previous_attempt_seal_hash=cursor.previous_attempt_seal_hash,
+        )
+    except (OSError, ReviewPersistenceError, ValueError) as exc:
+        return _fail_update(
+            state,
+            f"AutoHiC deterministic parameter baseline failed: {exc}",
+            failure_kind="parameter_recommendation",
+        )
+    attempts = [*attempts_before, attempt.model_dump(mode="json")]
+    return _update_hic_output(
+        state,
+        {
+            "status": "parameters_approved",
+            "parameter_recommendation_mode": "deterministic_baseline",
+            "current_parameter_attempt_id": cursor.recommendation_id,
+            "parameter_attempts": attempts,
+            "current_parameter_recommendation": cursor.model_copy(
+                update={"status": "approved"}
+            ).model_dump(mode="json"),
+            "proposed_parameter_attempt_id": None,
+            "parameter_retry_request": None,
         },
     )
 

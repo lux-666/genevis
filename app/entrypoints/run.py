@@ -176,6 +176,7 @@ def _stage_seeds_from_run_config(
 
     if "hic_scaffolding" in requested and run_config.hic_scaffolding:
         hic_seed: dict[str, Any] = {}
+        hic_seed["parameter_advisor"] = run_config.hic_scaffolding.parameter_advisor
         if run_config.hic_scaffolding.autohic_parameters:
             hic_seed["autohic_parameters"] = (
                 run_config.hic_scaffolding.autohic_parameters.model_dump(

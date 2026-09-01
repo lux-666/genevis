@@ -1,7 +1,7 @@
 # Recommendation Policy Contract
 
-> **Status:** implemented for Assembly method/route and Assembly parameter
-> advisors.
+> **Status:** implemented for Assembly method/route, Assembly parameter, and
+> AutoHiC parameter advisors.
 > **Read when:** changing ablation policy, deterministic baselines, advisor
 > preflight, or recommendation evidence.  
 > **Comes from:** operator draft policy or structured RunConfig.  
@@ -12,12 +12,13 @@
 > `app/entrypoints/ask_planner.py`, `app/entrypoints/run.py`,
 > `app/llm/json_response.py`, `app/stages/assembly/decision.py`,
 > `app/llm/parameters/assembly/recommender.py`,
-> `app/stages/assembly/nodes.py`, and
-> `app/stages/assembly/parameters/workflow.py`.
+> `app/stages/assembly/nodes.py`,
+> `app/stages/assembly/parameters/workflow.py`, and
+> `app/stages/hic_scaffolding/parameters/workflow.py`.
 
 ## Definition
 
-`RecommendationPolicy` owns two independent, frozen advisory modes:
+Assembly `RecommendationPolicy` owns two independent, frozen advisory modes:
 
 ```json
 {
@@ -29,6 +30,10 @@
 Each value is either `"advisor"` or `"deterministic_baseline"`. The modes are
 independent so an experiment can ablate one advisory boundary without changing
 the other. There is no generic enabled boolean.
+
+`RunConfig.hic_scaffolding.parameter_advisor` uses the same two values for the
+AutoHiC parameter boundary. AutoHiC has no method-selection advisor because its
+stage method is fixed.
 
 A policy may replace the *proposal source* for the two named advisors. It does
 not bypass the method/route human confirmation gate in advisor mode, and it does
@@ -53,9 +58,10 @@ emit a string or `null` in both schemas.
 
 A mutable TUI draft carries `recommendation_policy` before planning. It is
 projected through `entry_request.recommendation_policy` into the planner and
-compiled into `RunConfig.assembly` at whole-run freeze. The frozen fields are
-`method_route_advisor` and `parameter_advisor`; the draft policy cannot be
-changed after freeze.
+compiled into `RunConfig.assembly` at whole-run freeze. The frozen Assembly
+fields are `method_route_advisor` and `parameter_advisor`; structured RunConfig
+additionally freezes `hic_scaffolding.parameter_advisor`. These policies cannot
+be changed after freeze.
 
 The policy never reintroduces an Assembly method or parameter into RunConfig.
 Method identity remains stage-owned. A policy selects who proposes the method
@@ -87,7 +93,8 @@ the method-advisor human gate.
 `advisor` is the schema-3 parameter recommendation transaction: immutable
 request, raw response, sparse mapping, approval gate, and approved attempt.
 
-`deterministic_baseline` builds an empty-L2 schema-3 baseline from the same
+For Assembly and AutoHiC, `deterministic_baseline` builds an empty-L2 schema-3
+baseline from the same
 validated facts, catalog, context, and dependency refs. It records a policy
 summary, persists the exact request it would have sent plus explicit
 policy-owned response and parse records, and creates a hash-bound approved
@@ -95,14 +102,17 @@ initial attempt with an automatic policy decision through the same schema-3
 manifest boundary. The decision metadata uses `source="policy"` and a complete
 automatic-resolution audit, so it is distinguishable from a foreground
 countdown. Execution adapters use the baseline resolver and must not apply an
-L2 mapping in this mode. Retry is not supported by the initial baseline policy;
-a retry request fails closed rather than silently switching to advisor mode.
+L2 mapping in this mode. For AutoHiC, an operator-provided restriction enzyme
+remains an L1 fact while the other values resolve from catalog L0 defaults.
+Retry is not supported by the initial baseline policy; a retry request fails
+closed rather than silently switching to advisor mode.
 
 ## Readiness and evidence
 
 Readiness follows the frozen policy. When both Assembly advisors use baselines,
-the run does not require the Assembly LLM endpoint before freeze; any Hi-C or
-T2T advisor still does. The exact structured endpoint probe and no-session-on-
+Assembly does not require an LLM endpoint; when AutoHiC's parameter advisor also
+uses a baseline, Hi-C does not require one either. Any remaining advisor stage,
+including T2T, still does. The exact structured endpoint probe and no-session-on-
 failure behavior are owned by the
 [execution lifecycle](execution-lifecycle.md#whole-run-readiness-boundary). The
 Assembly cursor persists both policy modes, and the

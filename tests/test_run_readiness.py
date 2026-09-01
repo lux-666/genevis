@@ -216,6 +216,44 @@ def test_partial_deterministic_assembly_still_requires_llm() -> None:
     assert run_requires_llm(run_config)
 
 
+def test_full_deterministic_assembly_and_autohic_do_not_require_llm() -> None:
+    run_config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "hic_scaffolding", "allow_local_execution": True},
+            ],
+            "assembly": {
+                "assembly_route": "hifi",
+                "method_route_advisor": "deterministic_baseline",
+                "parameter_advisor": "deterministic_baseline",
+            },
+            "hic_scaffolding": {
+                "parameter_advisor": "deterministic_baseline",
+                "autohic_parameters": {"restriction_enzyme": "MboI"},
+            },
+        }
+    )
+
+    assert not run_requires_llm(run_config)
+
+
+def test_autohic_advisor_still_requires_llm() -> None:
+    run_config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "hic_scaffolding", "allow_local_execution": True}
+            ],
+            "hic_scaffolding": {
+                "parameter_advisor": "advisor",
+                "autohic_parameters": {"restriction_enzyme": "MboI"},
+            },
+        }
+    )
+
+    assert run_requires_llm(run_config)
+
+
 def test_deferred_assembly_does_not_preflight_all_candidates(tmp_path: Path) -> None:
     run_config = RunConfig.model_validate(
         {"requested_stages": [{"stage": "assembly", "allow_local_execution": True}]}

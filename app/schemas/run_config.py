@@ -296,7 +296,7 @@ class AssemblyReviewRunConfig(BaseModel):
 
 
 class AutoHiCRunParameters(BaseModel):
-    """Pinned executor settings plus an optional enzyme fact for the LLM."""
+    """Pinned executor settings plus an optional enzyme fact for resolution."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -306,14 +306,31 @@ class AutoHiCRunParameters(BaseModel):
 
 
 class HiCScaffoldingRunConfig(BaseModel):
-    """AutoHiC runtime configuration; method and enzyme approval are stage-owned."""
+    """AutoHiC runtime configuration and frozen parameter-advisor policy."""
 
     model_config = ConfigDict(extra="forbid")
 
     autohic_parameters: AutoHiCRunParameters | None = None
+    parameter_advisor: RecommendationMode = "advisor"
     retry_on_execution_failure: bool = False
     max_execution_retries: int = Field(default=0, ge=0)
     max_review_retries: int = Field(default=1, ge=0)
+
+    @model_validator(mode="after")
+    def _baseline_requires_an_explicit_enzyme(self) -> "HiCScaffoldingRunConfig":
+        enzyme = (
+            self.autohic_parameters.restriction_enzyme
+            if self.autohic_parameters is not None
+            else None
+        )
+        if self.parameter_advisor == "deterministic_baseline" and (
+            not isinstance(enzyme, str) or not enzyme.strip()
+        ):
+            raise ValueError(
+                "hic_scaffolding deterministic_baseline requires "
+                "autohic_parameters.restriction_enzyme"
+            )
+        return self
 
 
 class RequestedStage(BaseModel):

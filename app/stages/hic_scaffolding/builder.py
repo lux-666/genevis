@@ -93,7 +93,11 @@ def build_stage() -> CompiledStateGraph[
     graph.add_conditional_edges(
         "recommend_autohic_parameters",
         route_after_recommendation,
-        {"block": "block", "fail": "settle_method_before_failure"},
+        {
+            "autohic": "autohic",
+            "block": "block",
+            "fail": "settle_method_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "autohic",

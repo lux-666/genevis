@@ -678,6 +678,49 @@ class RunConfigSchemaTests(unittest.TestCase):
             "python3.9",
         )
 
+    def test_autohic_parameter_policy_accepts_deterministic_baseline(self):
+        config = RunConfig.model_validate(
+            {
+                "requested_stages": _local_stage_requests("hic_scaffolding"),
+                "hic_scaffolding": {
+                    "parameter_advisor": "deterministic_baseline",
+                    "autohic_parameters": {"restriction_enzyme": "MboI"},
+                },
+            }
+        )
+
+        assert config.hic_scaffolding is not None
+        self.assertEqual(
+            config.hic_scaffolding.parameter_advisor,
+            "deterministic_baseline",
+        )
+        self.assertEqual(
+            _stage_seeds_from_run_config(config, shared_parameters=None)[
+                "hic_scaffolding"
+            ]["parameter_advisor"],
+            "deterministic_baseline",
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "requested_stages": _local_stage_requests("hic_scaffolding"),
+                    "hic_scaffolding": {"parameter_advisor": "disabled"},
+                }
+            )
+        self.assertIn("parameter_advisor", str(ctx.exception))
+
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "requested_stages": _local_stage_requests("hic_scaffolding"),
+                    "hic_scaffolding": {
+                        "parameter_advisor": "deterministic_baseline"
+                    },
+                }
+            )
+        self.assertIn("restriction_enzyme", str(ctx.exception))
+
     def test_t2t_run_config_does_not_materialize_catalog_owned_mode(self):
         config = RunConfig.model_validate(
             {

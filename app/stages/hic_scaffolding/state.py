@@ -109,6 +109,7 @@ class HiCScaffoldingCursor(TypedDict, total=False):
     env: dict[str, str]
     autohic_parameters: AutoHiCParametersJson
     parameter_retry_policy: ParameterRetryPolicyJson
+    parameter_recommendation_mode: Literal["advisor", "deterministic_baseline"]
     review_policy: JsonObject
 
     status: str
