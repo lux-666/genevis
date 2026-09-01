@@ -1028,7 +1028,7 @@ class InputProfilerTests(unittest.TestCase):
                 "selected_route": "cyclone",
                 "assembly_selection": {
                     "read_type": "cyclone",
-                    "primary_method": "assembly.candidate.flye",
+                    "primary_method": "assembly.candidate.hifiasm_ont",
                     "source": "human",
                     "rationale": "human selected cyclone read type",
                 },
