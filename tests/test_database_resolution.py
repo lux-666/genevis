@@ -16,7 +16,11 @@ from app.execution.dependency_snapshot import (
     capture_dependency_snapshot,
 )
 from app.execution.env_resolver import EnvResolver
-from app.reference.ncbi import MATCHING_TIER_RANK, MATCHING_TIERS
+from app.reference.ncbi import (
+    MATCHING_TIER_RANK,
+    MATCHING_TIERS,
+    validate_reference_snapshot,
+)
 from app.schemas.run_config import RunConfig
 from tests.busco_fixture import ensure_busco_lineage
 
@@ -133,6 +137,39 @@ def test_matching_tier_order_has_one_canonical_contract() -> None:
     assert MATCHING_TIER_RANK == {
         tier: rank for rank, tier in enumerate(MATCHING_TIERS)
     }
+
+
+def test_reference_snapshot_accepts_taxids_without_lineage(tmp_path: Path) -> None:
+    reference = tmp_path / "ncbi"
+    reference.mkdir()
+    _write_reference(
+        reference,
+        {
+            "Metazoa.ncbi.tsv": "accession\n",
+            "Metazoa.ncbi.lineage": (
+                "Organism Taxonomic ID\tLineage\n"
+                "1\t\n"
+                "2\tcellular organisms;Eukaryota;Metazoa\n"
+            ),
+        },
+    )
+
+    assert validate_reference_snapshot(reference)["verification"] == "verified"
+
+
+def test_reference_snapshot_rejects_non_numeric_taxid(tmp_path: Path) -> None:
+    reference = tmp_path / "ncbi"
+    reference.mkdir()
+    _write_reference(
+        reference,
+        {
+            "Metazoa.ncbi.tsv": "accession\n",
+            "Metazoa.ncbi.lineage": "Organism Taxonomic ID\tLineage\nbad\t\n",
+        },
+    )
+
+    with pytest.raises(ValueError, match="reference_source_unreadable"):
+        validate_reference_snapshot(reference)
 
 
 def test_logical_lineage_resolves_to_complete_projection(tmp_path: Path) -> None:

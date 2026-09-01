@@ -549,10 +549,12 @@ def _load_lineage_terms(contents: bytes) -> dict[str, list[str]]:
         if not line.strip():
             continue
         fields = line.split(maxsplit=1)
-        if len(fields) != 2:
-            raise ValueError("NCBI lineage row has no lineage value")
+        if not fields[0].isdigit():
+            raise ValueError("NCBI lineage row has an invalid taxid")
         result[fields[0]] = [
-            term.strip() for term in fields[1].split(";") if term.strip()
+            term.strip()
+            for term in (fields[1] if len(fields) == 2 else "").split(";")
+            if term.strip()
         ]
     return result
 
