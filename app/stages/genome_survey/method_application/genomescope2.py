@@ -234,7 +234,6 @@ def collect_genomescope2_artifacts(state: TopLevelState) -> StateUpdate:
             "status": COLLECTED_STATUS,
             "genomescope2_summary_path": summary_ref,
             "genomescope2_summary_ref": summary_ref,
-            "genomescope2_output_dir_ref": str(Path(summary_ref).parent),
             "artifact_refs": [
                 *list(output.get("artifact_refs") or []),
                 *[str(artifact.file_path) for artifact in artifacts],

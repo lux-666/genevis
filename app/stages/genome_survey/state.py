@@ -115,7 +115,6 @@ class GenomeSurveyCursor(TypedDict, total=False):
     genomescope2_summary_path: str
     genomescope2_summary_ref: str
     genomescope2_output_dir: str
-    genomescope2_output_dir_ref: str
 
     estimates: dict[str, EstimateValue]
     measured_estimates: dict[str, EstimateValue]

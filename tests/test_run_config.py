@@ -11,6 +11,8 @@ from pydantic import ValidationError
 
 from app.entrypoints.run import _stage_seeds_from_run_config
 from app.schemas.run_config import RunConfig, load_run_config
+from app.stages.assembly.state import ASSEMBLY_STAGE_CURSOR_ADAPTER
+from app.stages.hic_scaffolding.state import HIC_SCAFFOLDING_CURSOR_ADAPTER
 
 
 def _busco_config(lineage: str = "embryophyta_odb10") -> dict[str, object]:
@@ -192,6 +194,9 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly is not None
         self.assertEqual(config.assembly.method_route_advisor, "deterministic_baseline")
         self.assertEqual(config.assembly.parameter_advisor, "advisor")
+        ASSEMBLY_STAGE_CURSOR_ADAPTER.validate_python(
+            _stage_seeds_from_run_config(config, shared_parameters=None)["assembly"]
+        )
 
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
@@ -694,12 +699,11 @@ class RunConfigSchemaTests(unittest.TestCase):
             config.hic_scaffolding.parameter_advisor,
             "deterministic_baseline",
         )
-        self.assertEqual(
-            _stage_seeds_from_run_config(config, shared_parameters=None)[
-                "hic_scaffolding"
-            ]["parameter_advisor"],
-            "deterministic_baseline",
-        )
+        seed = _stage_seeds_from_run_config(config, shared_parameters=None)[
+            "hic_scaffolding"
+        ]
+        self.assertEqual(seed["parameter_advisor"], "deterministic_baseline")
+        HIC_SCAFFOLDING_CURSOR_ADAPTER.validate_python(seed)
 
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(

@@ -678,6 +678,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertNotIn("survey_parameters", survey)
             self.assertNotIn("jellyfish_frozen_attempt_ref", survey)
             self.assertNotIn("genomescope2_execution_result", survey)
+            self.assertNotIn("genomescope2_output_dir_ref", survey)
 
             artifact_events = [
                 json.loads(line)

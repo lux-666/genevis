@@ -108,6 +108,7 @@ class HiCScaffoldingCursor(TypedDict, total=False):
     execution_mode: Literal["local"]
     env: dict[str, str]
     autohic_parameters: AutoHiCParametersJson
+    parameter_advisor: Literal["advisor", "deterministic_baseline"]
     parameter_retry_policy: ParameterRetryPolicyJson
     parameter_recommendation_mode: Literal["advisor", "deterministic_baseline"]
     review_policy: JsonObject

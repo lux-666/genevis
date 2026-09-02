@@ -67,7 +67,6 @@ COMMITTED_CURSOR_KEYS = frozenset(
         "estimate_sources",
         "estimates",
         "executed_methods",
-        "genomescope2_output_dir_ref",
         "genomescope2_summary_ref",
         "genome_size_prior",
         "genome_size_source",
