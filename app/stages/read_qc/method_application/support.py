@@ -253,8 +253,8 @@ def _validate_aggregate_invariants(
                 or not math.isclose(
                     actual_value,
                     expected_value,
-                    rel_tol=1e-6,
-                    abs_tol=0.01,
+                    rel_tol=0.0 if key == "avg_len" else 1e-6,
+                    abs_tol=0.05 if key == "avg_len" else 0.01,
                 )
             ):
                 raise DataLayoutError(

@@ -518,6 +518,28 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         self.assertEqual(summary["sum_len"], 11_000)
         self.assertEqual(summary["n50"], 100)
 
+    def test_summary_accepts_seqkit_one_decimal_avg_len_rounding(self):
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = root / "seqkit_stats.tsv"
+            aggregate = root / "aggregate_seqkit_stats.tsv"
+            header = "file\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\tN50\n"
+            stats.write_text(
+                header
+                + "reads.fastq\t964731\t21165397525\t1\t21939.2\t100000\t30000\n",
+                encoding="utf-8",
+            )
+            aggregate.write_text(
+                header + "-\t964731\t21165397525\t1\t21939.2\t100000\t30000\n",
+                encoding="utf-8",
+            )
+
+            summary = parse_seqkit_summary(stats, aggregate_stats_path=aggregate)
+
+        self.assertEqual(summary["avg_len"], 21939.2)
+
     def test_aggregate_helper_streams_exact_inputs_into_one_seqkit_stats_invocation(
         self,
     ):
