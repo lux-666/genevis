@@ -82,6 +82,7 @@ class ReadQCStageCursor(TypedDict, total=False):
     env: dict[str, str]
     status: str
     reason: str
+    failure_kind: str
     method_name: str
     package_name: str
     skip_reason: str

@@ -116,6 +116,7 @@ class AssemblyStageCursor(TypedDict, total=False):
 
     status: str
     reason: str
+    failure_kind: str
     block_reason: str
     method_name: str
     missing_params: list[str]

@@ -18,7 +18,9 @@ from app.schemas.state import (
     validate_state_field,
     validate_top_level_state,
 )
+from app.stages.assembly.state import ASSEMBLY_STAGE_CURSOR_ADAPTER
 from app.stages.base import update_validated_stage_output, validated_stage_output
+from app.stages.read_qc.state import READ_QC_STAGE_CURSOR_ADAPTER
 
 
 class _TestAssemblyCursor(TypedDict, total=False):
@@ -27,6 +29,15 @@ class _TestAssemblyCursor(TypedDict, total=False):
 
 
 _TEST_ASSEMBLY_CURSOR_ADAPTER = TypeAdapter(_TestAssemblyCursor)
+
+
+@pytest.mark.parametrize(
+    "adapter", (READ_QC_STAGE_CURSOR_ADAPTER, ASSEMBLY_STAGE_CURSOR_ADAPTER)
+)
+def test_executable_stage_cursors_accept_shared_collect_failure(adapter) -> None:
+    assert adapter.validate_python(
+        {"status": "failed", "failure_kind": "collect"}
+    )["failure_kind"] == "collect"
 
 
 def test_top_level_state_marks_runtime_invariants_as_required() -> None:
