@@ -57,6 +57,7 @@ def _write_species_reference(
     species_name: str,
     lineage_name: str | None,
     prefix: str = "Metazoa",
+    full_lineage: str | None = None,
     taxonomy_lineage: str | None = None,
 ) -> None:
     _write_reference(
@@ -68,7 +69,8 @@ def _write_species_reference(
                 f"GCF_000000001.1\t{species_name}\t1\t{lineage_name or ''}\n"
             ),
             f"{prefix}.ncbi.lineage": (
-                f"Organism Taxonomic ID\tLineage\n1\tMetazoa;{species_name}\n"
+                "Organism Taxonomic ID\tLineage\n"
+                f"1\t{full_lineage or f'{prefix};{species_name}'}\n"
             ),
             f"{prefix}.ncbi.lineage2": (
                 "Organism Taxonomic ID\tLineage\n"
@@ -232,9 +234,7 @@ def test_plant_genus_taxonomy_selects_fixed_lineage_without_exact_target(
         lineage_name=None,
         prefix="Viridiplantae",
         taxonomy_lineage=(
-            "cellular organisms;Eukaryota;Viridiplantae;Streptophyta;"
-            "Embryophyta;Brassicales;Brassicaceae;Brassica;"
-            "Brassica rapa"
+            "Brassicales;Brassicaceae;Brassica;Brassica rapa"
         ),
     )
     resolver = EnvResolver(config_data=_config(lineage, ncbi))
@@ -282,6 +282,7 @@ def test_nonplant_taxonomy_cannot_fall_back_to_embryophyta(tmp_path: Path) -> No
         species_name="Solea ovata",
         lineage_name=None,
         prefix="Viridiplantae",
+        full_lineage="Eukaryota;Metazoa;Chordata;Solea;Solea ovata",
         taxonomy_lineage="Eukaryota;Metazoa;Chordata;Solea;Solea ovata",
     )
     resolver = EnvResolver(config_data=_config(lineage, ncbi))

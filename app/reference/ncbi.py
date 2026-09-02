@@ -464,7 +464,7 @@ def _verified_target_taxonomy_terms(
     *,
     reference_dir: Path | str,
 ) -> tuple[str, ...]:
-    """Return exact-taxid taxonomy or common same-genus taxonomy."""
+    """Return common full-lineage taxonomy for exact or same-genus rows."""
 
     root = Path(reference_dir)
     _provenance, tables, error = _load_reference_snapshot(
@@ -475,18 +475,22 @@ def _verified_target_taxonomy_terms(
         raise ValueError(error)
     assert tables is not None
     target = _normalise(species_name)
-    for row in tables.rows:
-        if _normalise(row.get("Organism Name")) == target:
-            terms = tables.ranked_lineage_by_taxid.get(
-                _value(row, "Organism Taxonomic ID"), []
-            )
-            if terms:
-                return tuple(terms)
-    genus = _normalise(species_name.split()[0])
+    taxids = [
+        _value(row, "Organism Taxonomic ID")
+        for row in tables.rows
+        if _normalise(row.get("Organism Name")) == target
+    ]
+    if not taxids:
+        genus = _normalise(species_name.split()[0])
+        taxids = [
+            _value(row, "Organism Taxonomic ID")
+            for row in tables.rows
+            if _organism_genus(row) == genus
+        ]
     matches = [
-        {_normalise(term) for term in terms}
-        for terms in tables.ranked_lineage_by_taxid.values()
-        if genus in {_normalise(term) for term in terms}
+        tables.lineage_by_taxid[taxid]
+        for taxid in taxids
+        if tables.lineage_by_taxid.get(taxid)
     ]
     return tuple(set.intersection(*matches)) if matches else ()
 
