@@ -141,6 +141,52 @@ def test_failure_update_that_raises_after_commit_is_reconciled(tmp_path) -> None
     ] == ["stage_failed", "session_terminal"]
 
 
+def test_runtime_failure_closes_missing_fixed_method_dispositions(tmp_path) -> None:
+    run_dir = v2_run_dir(tmp_path / "data", "s1")
+    ledger = Ledger(run_dir)
+    ledger.create_session("s1", "control/manifest.yaml")
+    state = _failed_middle_occurrence_state(run_dir)
+    state["workflow_steps"][1]["selected_method_names"] = [
+        "read_qc.long_read_stats.seqkit_stats",
+        "read_qc.length_filter.skip",
+    ]
+    ledger.record_stage_completed(
+        "s1", "inventory", workflow_step_id="step-000-inventory"
+    )
+    ledger.record_event(
+        "s1",
+        "attempt_failed",
+        {
+            "method_name": "read_qc.long_read_stats.seqkit_stats",
+            "error": "worker crashed",
+        },
+        stage="read_qc",
+        workflow_step_id="step-001-read_qc",
+        subject_id="s1:step-001-read_qc:seqkit",
+        idempotency_key="attempt:s1:step-001-read_qc:seqkit:failed",
+    )
+    result = finalize_authoritative_terminal(
+        _TerminalGraph(state),
+        {"configurable": {"thread_id": "s1"}},
+        state,
+        "s1",
+        run_dir,
+        "memory",
+        normalize_failure=True,
+    )
+
+    dispositions = {
+        row["summary"]["method_name"]: row["summary"]["disposition"]
+        for row in ledger.read_event_rows("s1")
+        if row["event_type"] == "method_disposition_recorded"
+    }
+    assert dispositions == {
+        "read_qc.long_read_stats.seqkit_stats": "failed",
+        "read_qc.length_filter.skip": "not_started",
+    }
+    assert result.terminal_event["summary"]["outcome"] == "failed"
+
+
 def test_inter_occurrence_failure_settles_prefix_without_faking_stage_failure(
     tmp_path,
 ) -> None:

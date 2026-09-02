@@ -12,7 +12,10 @@ from typing import Any, Literal, cast
 from langchain_core.runnables import RunnableConfig
 
 from app.control import errors as control_errors
-from app.control.occurrence_settlement import settle_workflow_step_outcome
+from app.control.occurrence_settlement import (
+    _settled_method_names,
+    settle_workflow_step_outcome,
+)
 from app.control.projections import reduce_workflow_progress
 from app.control.workflow_plan import (
     current_workflow_step_id,
@@ -169,6 +172,7 @@ def finalize_authoritative_terminal(
     }
 
     update_error: Exception | None = None
+    between_occurrences = False
     if normalize_failure:
         pending_outcome = terminal_state.get("workflow_step_outcome")
         workflow_index = terminal_state.get("workflow_step_index")
@@ -233,6 +237,8 @@ def finalize_authoritative_terminal(
         ) from exc
 
     try:
+        if normalize_failure and not between_occurrences:
+            _settle_runtime_failure_method_dispositions(checkpoint_state, ledger)
         settle_workflow_step_outcome(
             checkpoint_state,
             data_dir=paths.run_dir,
@@ -431,6 +437,49 @@ def finalize_authoritative_terminal(
         terminal_event=terminal_event,
         compaction_warning=compaction_warning,
     )
+
+
+def _settle_runtime_failure_method_dispositions(
+    state: TopLevelState,
+    ledger: Ledger,
+) -> None:
+    """Conservatively close roster gaps left by an unexpected graph exception."""
+
+    outcome = state.get("workflow_step_outcome") or {}
+    step_id = str(outcome.get("workflow_step_id") or "")
+    step = next(
+        step for step in state.get("workflow_steps") or [] if step["step_id"] == step_id
+    )
+    stage = step["stage"]
+    cursor = (state.get("stage_outputs") or {}).get(stage, {})
+    roster = _settled_method_names(step, cursor) or []
+    rows = ledger.read_event_rows(state["session_id"])
+    disposed = {
+        (row.get("summary") or {}).get("method_name")
+        for row in rows
+        if row.get("event_type") == "method_disposition_recorded"
+        and row.get("workflow_step_id") == step_id
+    }
+    attempted = {
+        (row.get("summary") or {}).get("method_name")
+        for row in rows
+        if row.get("event_type")
+        in {"attempt_started", "attempt_succeeded", "attempt_failed"}
+        and row.get("workflow_step_id") == step_id
+    }
+    reason = str(outcome.get("reason") or state.get("last_error") or "runtime failure")
+    for method_name in roster:
+        if method_name in disposed:
+            continue
+        failed = method_name in attempted
+        ledger.record_method_disposition(
+            state["session_id"],
+            stage,
+            step_id,
+            method_name,
+            "failed" if failed else "not_started",
+            reason=reason if failed else None,
+        )
 
 
 def inspect_state(
