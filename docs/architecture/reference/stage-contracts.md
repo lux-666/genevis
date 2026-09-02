@@ -371,11 +371,12 @@ supplies ranked taxonomic hints. Selection uses the best available tier; equal
 tiers prefer more primary records and then the snapshot directory name.
 Readiness fails only when no child provides useful evidence. BUSCO selection
 first applies one deterministic taxonomy rule to the selected, verified
-snapshot: when the exact target entry in `*.ncbi.lineage2` contains
-`Viridiplantae` or `Embryophyta`, the runtime requires and selects the installed
-`embryophyta_odb10` lineage. This rule does not infer taxonomy from snapshot
-directory names, related-species rows, or the host default. A plant target
-blocks before freeze when that fixed lineage is not installed.
+snapshot: when the exact target taxid, or the common taxonomy of all same-genus
+entries when no exact target exists, contains `Viridiplantae` or `Embryophyta`,
+the runtime requires and selects the installed `embryophyta_odb10` lineage.
+This rule does not infer taxonomy from snapshot directory names,
+related-species `Annotation BUSCO Lineage` values, or the host default. A plant
+target blocks before freeze when that fixed lineage is not installed.
 
 When the fixed plant rule does not apply, the selected snapshot maps the
 scientific name to related-species `Annotation BUSCO Lineage` values. The

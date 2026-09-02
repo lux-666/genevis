@@ -219,7 +219,7 @@ def test_species_name_selects_configured_busco_lineage(tmp_path: Path) -> None:
     assert projection["threads"] == 6
 
 
-def test_plant_taxonomy_selects_fixed_lineage_without_busco_annotation(
+def test_plant_genus_taxonomy_selects_fixed_lineage_without_exact_target(
     tmp_path: Path,
 ) -> None:
     lineage = ensure_busco_lineage(tmp_path / "busco")
@@ -228,7 +228,7 @@ def test_plant_taxonomy_selects_fixed_lineage_without_busco_annotation(
     species_name = "Brassica rapa subsp. pekinensis"
     _write_species_reference(
         ncbi,
-        species_name=species_name,
+        species_name="Brassica rapa",
         lineage_name=None,
         prefix="Viridiplantae",
         taxonomy_lineage=(

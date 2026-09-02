@@ -420,7 +420,7 @@ def resolve_busco_lineage_for_species(
         raise ValueError(
             f"cannot resolve BUSCO lineage for species {species_name!r}: {notes}"
         )
-    taxonomy_terms = _verified_exact_taxonomy_terms(
+    taxonomy_terms = _verified_target_taxonomy_terms(
         species_name,
         reference_dir=reference_dir,
     )
@@ -459,12 +459,12 @@ def _busco_lineage_family(name: str) -> str:
     return _normalise(name).partition("_odb")[0]
 
 
-def _verified_exact_taxonomy_terms(
+def _verified_target_taxonomy_terms(
     species_name: str,
     *,
     reference_dir: Path | str,
 ) -> tuple[str, ...]:
-    """Return taxonomy for the exact target row's taxid in a verified snapshot."""
+    """Return exact-taxid taxonomy or common same-genus taxonomy."""
 
     root = Path(reference_dir)
     _provenance, tables, error = _load_reference_snapshot(
@@ -482,7 +482,13 @@ def _verified_exact_taxonomy_terms(
             )
             if terms:
                 return tuple(terms)
-    return ()
+    genus = _normalise(species_name.split()[0])
+    matches = [
+        {_normalise(term) for term in terms}
+        for terms in tables.ranked_lineage_by_taxid.values()
+        if genus in {_normalise(term) for term in terms}
+    ]
+    return tuple(set.intersection(*matches)) if matches else ()
 
 
 def _empty_pack(species_name: str | None, sources: dict[str, str]) -> dict[str, Any]:
