@@ -234,7 +234,7 @@ def test_plant_taxonomy_selects_fixed_lineage_without_busco_annotation(
         taxonomy_lineage=(
             "cellular organisms;Eukaryota;Viridiplantae;Streptophyta;"
             "Embryophyta;Brassicales;Brassicaceae;Brassica;"
-            f"{species_name}"
+            "Brassica rapa"
         ),
     )
     resolver = EnvResolver(config_data=_config(lineage, ncbi))

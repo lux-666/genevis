@@ -464,7 +464,7 @@ def _verified_exact_taxonomy_terms(
     *,
     reference_dir: Path | str,
 ) -> tuple[str, ...]:
-    """Return exact target taxonomy from one verified NCBI lineage2 snapshot."""
+    """Return taxonomy for the exact target row's taxid in a verified snapshot."""
 
     root = Path(reference_dir)
     _provenance, tables, error = _load_reference_snapshot(
@@ -475,9 +475,13 @@ def _verified_exact_taxonomy_terms(
         raise ValueError(error)
     assert tables is not None
     target = _normalise(species_name)
-    for terms in tables.ranked_lineage_by_taxid.values():
-        if terms and _normalise(terms[-1]) == target:
-            return tuple(terms)
+    for row in tables.rows:
+        if _normalise(row.get("Organism Name")) == target:
+            terms = tables.ranked_lineage_by_taxid.get(
+                _value(row, "Organism Taxonomic ID"), []
+            )
+            if terms:
+                return tuple(terms)
     return ()
 
 
