@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import nbformat
 
@@ -127,9 +129,14 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             update = build_related_species_statistics_and_notebook(state)
 
             ar_out = update["stage_outputs"]["assembly_review"]
-            self.assertIn("related_species_statistics_pack", ar_out)
+            self.assertNotIn("related_species_statistics_pack", ar_out)
             self.assertEqual(
-                ar_out["related_species_statistics_pack"]["status"], "available"
+                json.loads(
+                    Path(ar_out["related_species_statistics_pack_ref"]).read_text(
+                        encoding="utf-8"
+                    )
+                )["status"],
+                "available",
             )
             self.assertIn("related_species_statistics_pack_ref", ar_out)
             self.assertIn("assembly_review_comparative_notebook_ref", ar_out)
@@ -190,7 +197,11 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             update = build_related_species_statistics_and_notebook(state)
 
             ar_out = update["stage_outputs"]["assembly_review"]
-            statistics_pack = ar_out["related_species_statistics_pack"]
+            statistics_pack = json.loads(
+                Path(ar_out["related_species_statistics_pack_ref"]).read_text(
+                    encoding="utf-8"
+                )
+            )
 
             # target_position should reflect that target_metrics were provided
             target_position = statistics_pack.get("target_position", {})
@@ -204,6 +215,56 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             self.assertTrue(notebook_path.exists())
             notebook = nbformat.read(notebook_path, as_version=4)
             nbformat.validate(notebook)
+
+    def test_large_statistics_pack_is_kept_out_of_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                "s-large",
+                "session_id: s-large\nuser_metadata:\n"
+                "  target_species: Test species\nassets: []\n",
+            )
+            state["stage_outputs"] = {
+                "assembly_review": {
+                    "status": "evaluated",
+                    "candidates": [_candidate("c1")],
+                    "signals": [],
+                    "related_species_reference_dir": str(_empty_reference(tmpdir)),
+                }
+            }
+            large_pack = {
+                "status": "available",
+                "analysis_cohort": {
+                    "records": [{"record": "x" * 1_000} for _ in range(150)]
+                },
+            }
+
+            with (
+                patch(
+                    "app.stages.assembly_review.nodes._build_related_species_statistics_pack",
+                    return_value=large_pack,
+                ),
+                patch(
+                    "app.stages.assembly_review.nodes.render_statistics_figures",
+                    return_value={},
+                ),
+                patch(
+                    "app.stages.assembly_review.nodes.build_assembly_review_notebook",
+                    return_value=nbformat.v4.new_notebook(),
+                ),
+            ):
+                update = build_related_species_statistics_and_notebook(state)
+
+            review = update["stage_outputs"]["assembly_review"]
+            self.assertNotIn("related_species_statistics_pack", review)
+            self.assertEqual(
+                json.loads(
+                    Path(review["related_species_statistics_pack_ref"]).read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                large_pack,
+            )
 
     def test_statistics_and_notebook_node_skips_when_status_failed(self):
         """Node returns empty update when assembly_review status is a fail status."""

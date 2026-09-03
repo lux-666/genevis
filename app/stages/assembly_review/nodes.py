@@ -772,7 +772,6 @@ def build_related_species_statistics_and_notebook(
     return update_assembly_review_output(
         state,
         {
-            "related_species_statistics_pack": statistics_pack,
             "related_species_statistics_pack_ref": statistics_ref,
             "assembly_review_comparative_notebook_ref": str(notebook_path),
             "comparative_figures": figure_paths,

@@ -136,7 +136,6 @@ class AssemblyReviewCursor(TypedDict, total=False):
     related_species_reference_dir: str
     related_species_evidence_pack: dict[str, CursorJsonValue]
     related_species_evidence_pack_ref: str
-    related_species_statistics_pack: dict[str, CursorJsonValue]
     related_species_statistics_pack_ref: str
     assembly_review_comparative_notebook_ref: str
     comparative_figures: dict[str, str]
