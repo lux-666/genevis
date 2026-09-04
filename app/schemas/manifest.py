@@ -32,6 +32,7 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "hic_alignment_bam",
     "hic_merged_nodups",
     "assembly_fasta_registered",
+    "reference_genome_fasta",
     "reference_proteins",
 }
 
@@ -183,6 +184,23 @@ class InputManifest(BaseModel):
                         f"and assets[{entry_ordinal}].paths[{path_ordinal}]"
                     )
                 seen[canonical] = (entry_ordinal, path_ordinal)
+        return self
+
+    @model_validator(mode="after")
+    def _require_single_reference_genome(self) -> InputManifest:
+        references = [
+            asset
+            for asset in self.assets
+            if asset.asset_type == "reference_genome_fasta"
+        ]
+        if len(references) > 1:
+            raise ValueError(
+                "input manifest accepts at most one reference_genome_fasta asset"
+            )
+        if references and len(references[0].paths) != 1:
+            raise ValueError(
+                "reference_genome_fasta must declare exactly one FASTA path"
+            )
         return self
 
 
@@ -488,6 +506,18 @@ def validate_manifest(
             fact.platform == "unknown" for fact in entry.path_facts
         ):
             warnings.append(f"{spec.asset_type}: platform unknown for {spec.paths}")
+
+        if spec.asset_type == "reference_genome_fasta":
+            invalid_formats = [
+                fact.declared_path
+                for fact in entry.path_facts
+                if fact.exists and fact.format != "fasta"
+            ]
+            if invalid_formats:
+                errors.append(
+                    "reference_genome_fasta: reference genome must be FASTA: "
+                    f"{invalid_formats}"
+                )
 
         if spec.metadata.get("ambiguous"):
             warnings.append(

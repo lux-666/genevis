@@ -1,7 +1,7 @@
 method_name: assembly_review.eval.quast
 stage: assembly_review
 package_ref: quast
-goal: "Evaluate assembly contiguity with reference-free QUAST basic reports before human review."
+goal: "Evaluate assembly contiguity with QUAST before human review, using a per-run reference genome when one is registered."
 required_inputs:
   - name: draft_assembly
     type: draft_assembly
@@ -9,7 +9,11 @@ required_inputs:
 expected_outputs:
   - name: quast_report
     type: quast_report
-    description: "Reference-free QUAST basic report files, including report.tsv when execution is enabled."
+    description: "QUAST report files, including report.tsv when execution is enabled."
+optional_inputs:
+  - name: reference_genome
+    type: reference_genome_fasta
+    description: "One manifest-registered reference genome FASTA for QUAST -r mode."
 review_rules:
   - quast_report_exists
 human_review_triggers:

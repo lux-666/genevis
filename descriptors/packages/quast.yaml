@@ -7,7 +7,7 @@ entry_patterns:
   - "quast.py {assembly} -r {reference} -o {out_dir} --threads {threads}"
 help_summary: "Quality Assessment Tool for Genome Assemblies."
 known_pitfalls:
-  - "Reference-free basic mode is the Phase 3 task 07 execution path; reference mode is registered for later explicit use."
+  - "Reference mode is used only when one reference_genome_fasta asset is registered in the frozen input manifest; otherwise QUAST remains reference-free."
   - "Large genomes require substantial memory for contig alignment."
 resource_defaults:
   cpu_cores: 8

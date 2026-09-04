@@ -12,7 +12,10 @@ from langgraph.graph.state import CompiledStateGraph
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.attempt_owners import DIRECT_ATTEMPTS_KEY
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.input_integrity import artifact_input_dependency
+from app.execution.input_integrity import (
+    artifact_input_dependency,
+    asset_input_dependencies,
+)
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -45,6 +48,8 @@ from app.stages.assembly_review.method_application.support import (
 )
 from app.stages.assembly_review.state import AssemblyReviewCursor
 from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
+from app.stages.resource_resolution import resolve_stage_resource
+from app.stages.resource_specs import QUAST_REFERENCE_SPEC
 from app.storage.artifacts import (
     publish_or_recover_work_artifact,
     record_registered_artifacts,
@@ -188,6 +193,77 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
             status="evaluating",
         )
     attempts: list[FrozenAttemptSpec] = []
+    try:
+        reference = resolve_stage_resource(
+            state,
+            resource_spec=QUAST_REFERENCE_SPEC,
+        )
+    except (OSError, TypeError, ValueError):
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_reference_dependency_invalid",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {**output, "signals": signals},
+            status="evaluating",
+        )
+    if reference.found and len(reference.paths) != 1:
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_requires_single_reference_genome",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {**output, "signals": signals},
+            status="evaluating",
+        )
+    reference_path = (
+        Path(reference.paths[0]).expanduser().resolve(strict=False)
+        if reference.found
+        else None
+    )
+    if reference_path is not None and len(reference.asset_records) != 1:
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_reference_must_be_registry_backed",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {**output, "signals": signals},
+            status="evaluating",
+        )
+    try:
+        reference_dependencies = (
+            asset_input_dependencies(
+                state,
+                [record.asset_id for record in reference.asset_records],
+                [record.path for record in reference.asset_records],
+            )
+            if reference_path is not None
+            else []
+        )
+    except (OSError, TypeError, ValueError):
+        signals = mark_evaluator_not_started(
+            output,
+            method_name=QUAST_METHOD,
+            signal_name="quast",
+            reason="quast_reference_dependency_invalid",
+        )
+        return rewrite_eval_bundle(
+            state,
+            {**output, "signals": signals},
+            status="evaluating",
+        )
+    reference_asset_id = (
+        reference.asset_records[0].asset_id if reference.asset_records else None
+    )
     for candidate, verified in materialized:
         candidate_id = candidate.get("candidate_id", "unknown")
         safe_id = safe_candidate_id(candidate_id)
@@ -197,11 +273,14 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
         out_dir = working_dir / "quast_out"
         report_tsv = out_dir / "report.tsv"
         assembly_ref = verified.primary_output_path
+        reference_arg = (
+            f"-r {shlex.quote(str(reference_path))} " if reference_path else ""
+        )
         script_path.write_text(
             "set -e\n"
             f"mkdir -p {shlex.quote(str(out_dir))}\n"
             f"quast.py {shlex.quote(str(assembly_ref))} "
-            f"-o {shlex.quote(str(out_dir))} --threads {threads}\n"
+            f"{reference_arg}-o {shlex.quote(str(out_dir))} --threads {threads}\n"
             f"test -f {shlex.quote(str(report_tsv))}\n",
             encoding="utf-8",
         )
@@ -221,7 +300,8 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
                     state,
                     verified.primary_output_ref,
                     assembly_ref,
-                )
+                ),
+                *reference_dependencies,
             ],
             metadata={
                 "candidate_id": candidate_id,
@@ -229,6 +309,15 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
                 "quast_output_dir": str(out_dir),
                 "report_tsv": str(report_tsv),
                 "threads": threads,
+                "reference_mode": (
+                    "reference_based"
+                    if reference_path is not None
+                    else "reference_free"
+                ),
+                "reference_genome_path": (
+                    str(reference_path) if reference_path is not None else None
+                ),
+                "reference_genome_asset_id": reference_asset_id,
             },
         )
         attempts.append(attempt)
@@ -267,6 +356,11 @@ def collect_quast_artifacts(state: TopLevelState) -> StateUpdate:
             "attempt_id": attempt.attempt_id,
             "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"),
             "quast_output_dir": attempt.metadata.get("quast_output_dir"),
+            "reference_mode": attempt.metadata.get("reference_mode"),
+            "reference_genome_path": attempt.metadata.get("reference_genome_path"),
+            "reference_genome_asset_id": attempt.metadata.get(
+                "reference_genome_asset_id"
+            ),
         }
         if result.success:
             artifact_metadata = {
@@ -327,6 +421,13 @@ def collect_quast_artifacts(state: TopLevelState) -> StateUpdate:
                         "attempt_id": attempt.attempt_id,
                         "draft_assembly_ref": attempt.metadata.get(
                             "draft_assembly_ref"
+                        ),
+                        "reference_mode": attempt.metadata.get("reference_mode"),
+                        "reference_genome_path": attempt.metadata.get(
+                            "reference_genome_path"
+                        ),
+                        "reference_genome_asset_id": attempt.metadata.get(
+                            "reference_genome_asset_id"
                         ),
                         "report_tsv_ref": str(report_tsv),
                         "metrics": metrics,

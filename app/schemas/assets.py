@@ -20,6 +20,7 @@ AssetType = Literal[
     "raw_isoseq_or_long_rna_reads",
     "clean_isoseq_reads",
     "transcript_ccs_reads",
+    "reference_genome_fasta",
     "reference_proteins",
     "assembly_fasta_registered",
     "draft_assembly",

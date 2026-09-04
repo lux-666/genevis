@@ -17,6 +17,14 @@ user_metadata:
   target_species: Solea ovata  # REPLACE with the real NCBI scientific name
 
 assets:
+  # Optional: binds this exact reference FASTA to the run. When present, QUAST
+  # uses it with -r; this is unrelated to databases.ncbi.reference_dir.
+  # - asset_type: reference_genome_fasta
+  #   paths:
+  #     - /ABS/PATH/TO/reference_genome.fasta
+  #   format: fasta
+  #   compression: none
+
   # Long-read-only input is valid. If short DNA reads are also declared,
   # Genome Survey prefers them for its k-mer survey.
   - asset_type: raw_long_reads

@@ -117,4 +117,5 @@ LOGICAL_RESOURCES = {
     "short_reads": "Short-read sequencing data (Illumina)",
     "assembly": "Assembly result (updated by dedup/review/hic/t2t)",
     "hic_reads": "Hi-C sequencing data",
+    "reference_genome": "Per-run reference genome FASTA for reference-based evaluation",
 }

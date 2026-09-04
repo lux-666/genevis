@@ -40,6 +40,12 @@ HIC_READS_SPEC = ResourceSpec(
     asset_types=["hic_reads_registered"],
     allow_multiple=True,
 )
+QUAST_REFERENCE_SPEC = ResourceSpec(
+    resource_type="reference_genome",
+    asset_types=["reference_genome_fasta"],
+    required=False,
+    allow_multiple=True,
+)
 
 
 def assembly_resource_spec() -> ResourceSpec:

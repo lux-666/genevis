@@ -2030,6 +2030,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     script_path.exists(), f"script not found: {script_path}"
                 )
                 script_text = script_path.read_text(encoding="utf-8")
+                self.assertNotIn(" -r ", script_text)
+                self.assertEqual(attempt.metadata["reference_mode"], "reference_free")
                 expected_out_dir = (
                     SessionPaths.from_run_dir(run_dir).workflow_step_work_dir(
                         "step-002-assembly_review", "assembly_review"
@@ -2042,6 +2044,90 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 self.assertNotIn(" out/runs/s1/artifacts/", script_text)
             finally:
                 os.chdir(old_cwd)
+
+    def test_quast_uses_manifest_reference_and_freezes_asset_dependency(self):
+        from app.execution.env_resolver import EnvSpec
+        from app.stages.assembly_review.nodes import plan_review_metrics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            draft = tmp / "draft.fasta"
+            reference = tmp / "reference.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            reference.write_text(">chr1\nACGTACGT\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": (
+                            "test-session:reference_genome_fasta:reference.fasta"
+                        ),
+                        "asset_type": "reference_genome_fasta",
+                        "path": str(reference),
+                        "format": "fasta",
+                        "checksum": sha256_file(reference),
+                        "checksum_status": "ready",
+                        "size_bytes": reference.stat().st_size,
+                        "metadata": {"compression": "none", "layout": "single"},
+                    }
+                ],
+            )
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            state = self._build_state(
+                entry_mode="raw_inputs",
+                registry_ref=str(registry),
+                data_dir=tmpdir,
+            )
+            state["stage_outputs"]["assembly"] = {
+                "status": "draft_ready",
+                "selected_candidate_refs": [str(candidate_ref)],
+            }
+            self._set_candidate_refs(state, [str(candidate_ref)])
+            state.update(resolve_candidates(state))
+            state.update(plan_review_metrics(state))
+            state["stage_outputs"]["assembly_review"] = {
+                **state["stage_outputs"]["assembly_review"],
+                "execution_mode": "local",
+                "quast_parameters": {"threads": 2},
+            }
+            with (
+                patch(
+                    "app.stages.assembly_review.method_application.quast.review_methods_error",
+                    return_value=None,
+                ),
+                patch(
+                    "app.stages.assembly_review.method_application.quast.resolve_method_env",
+                    return_value=(EnvSpec(conda_env="env_geno_exec"), [], None),
+                ),
+            ):
+                result = freeze_quast_attempts(state)
+
+            attempts = result["stage_outputs"]["assembly_review"]["execution_attempts"]
+            attempt = load_frozen_attempt(
+                {**state, **result},
+                attempts[0]["frozen_attempt_ref"],
+                expected_stage="assembly_review",
+                expected_method_name="assembly_review.eval.quast",
+            )
+            script_text = attempt.script_path.read_text(encoding="utf-8")
+            self.assertIn(f"-r {reference.resolve()}", script_text)
+            self.assertEqual(attempt.metadata["reference_mode"], "reference_based")
+            self.assertEqual(
+                attempt.metadata["reference_genome_asset_id"],
+                "test-session:reference_genome_fasta:reference.fasta",
+            )
+            asset_dependencies = [
+                dependency
+                for dependency in attempt.input_dependencies
+                if dependency.kind == "asset"
+            ]
+            self.assertEqual(len(asset_dependencies), 1)
+            self.assertEqual(asset_dependencies[0].path, str(reference.resolve()))
 
 
 class AssemblyReviewSchemaTests(unittest.TestCase):

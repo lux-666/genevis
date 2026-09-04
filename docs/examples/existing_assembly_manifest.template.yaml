@@ -9,6 +9,14 @@ sample_id: existing_assembly_sample
 user_metadata:
   target_species: Solea ovata  # REPLACE with the real NCBI scientific name
 assets:
+  # Optional reference genome for QUAST -r mode. This file is frozen as a
+  # per-run asset; databases.ncbi.reference_dir is a different evidence source.
+  # - asset_type: reference_genome_fasta
+  #   paths:
+  #     - /ABS/PATH/TO/reference_genome.fasta
+  #   format: fasta
+  #   compression: none
+
   - asset_type: assembly_fasta_registered
     paths:
       - /ABS/PATH/TO/existing_assembly.fasta

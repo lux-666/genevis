@@ -1104,6 +1104,8 @@ def _populate_resource_refs_from_assets(
             resource_type = "hic_reads"
         elif record.asset_type == "assembly_fasta_registered":
             resource_type = "assembly"
+        elif record.asset_type == "reference_genome_fasta":
+            resource_type = "reference_genome"
         elif record.asset_type == "reference_proteins":
             resource_type = "reference_proteins"
 

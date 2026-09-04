@@ -21,6 +21,7 @@ from app.review.application import (
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.inventory.builder import build_stage
@@ -511,6 +512,41 @@ class InventoryStageTests(unittest.TestCase):
                     {asset["asset_type"] for asset in registry["assets"]},
                     {"assembly_fasta_registered", asset_type},
                 )
+
+    def test_inventory_registers_quast_reference_as_logical_resource(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "reads.fastq"
+            reference = Path(tmpdir) / "reference.fasta"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            reference.write_text(">chr1\nACGT\n", encoding="utf-8")
+            manifest = {
+                "session_id": "quast-reference",
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(reads)],
+                        "platform": "ont",
+                    },
+                    {
+                        "asset_type": "reference_genome_fasta",
+                        "paths": [str(reference)],
+                        "format": "fasta",
+                        "compression": "none",
+                    },
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+
+            _, result = self._invoke_inventory("quast-reference", path)
+
+            resource = ResourceRef.from_dict(
+                result["resource_refs"]["reference_genome"]
+            )
+            self.assertEqual(resource.paths, [str(reference.resolve())])
+            self.assertEqual(
+                resource.metadata["asset_types"], ["reference_genome_fasta"]
+            )
+            self.assertEqual(resource.metadata["formats"], ["fasta"])
 
     def test_inventory_writes_ledger_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:

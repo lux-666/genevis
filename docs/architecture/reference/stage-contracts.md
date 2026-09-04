@@ -353,6 +353,12 @@ Registered methods:
 - `assembly_review.eval.busco`.
 
 QUAST and BUSCO evidence is collected through an ordered shared lifecycle.
+QUAST runs in reference-free mode by default. A manifest may register exactly
+one `reference_genome_fasta`; Inventory exposes it as the `reference_genome`
+logical resource, and every QUAST attempt binds its registry asset identity,
+size, and checksum before passing it through `-r`. The per-run reference FASTA
+is independent of the host-owned NCBI snapshot registry and is frozen with the
+session inputs.
 BUSCO and NCBI reference data resolve only from the host database registry
 captured in the frozen dependency manifest. Assembly Review requires
 `input_manifest.user_metadata.target_species` as an NCBI Latin scientific name

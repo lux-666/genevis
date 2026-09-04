@@ -93,6 +93,7 @@ class ManifestSchemaTests(unittest.TestCase):
             "hic_reads_registered",
             "hic_alignment_bam",
             "assembly_fasta_registered",
+            "reference_genome_fasta",
             "reference_proteins",
         ]
         for t in types:
@@ -113,6 +114,31 @@ class ManifestSchemaTests(unittest.TestCase):
         raw = manifest.assets[0]
         rna = manifest.assets[1]
         self.assertTrue(raw.metadata.get("ambiguous") or rna.metadata.get("ambiguous"))
+
+    def test_reference_genome_requires_exactly_one_manifest_path(self):
+        with self.assertRaisesRegex(ValueError, "exactly one FASTA path"):
+            InputManifest(
+                session_id="multiple-reference-paths",
+                assets=[
+                    InputAssetSpec(
+                        asset_type="reference_genome_fasta",
+                        paths=["ref-a.fa", "ref-b.fa"],
+                    )
+                ],
+            )
+
+        with self.assertRaisesRegex(ValueError, "at most one"):
+            InputManifest(
+                session_id="multiple-reference-assets",
+                assets=[
+                    InputAssetSpec(
+                        asset_type="reference_genome_fasta", paths=["ref-a.fa"]
+                    ),
+                    InputAssetSpec(
+                        asset_type="reference_genome_fasta", paths=["ref-b.fa"]
+                    ),
+                ],
+            )
 
 
 class FileInferenceTests(unittest.TestCase):
@@ -183,6 +209,49 @@ class FileInferenceTests(unittest.TestCase):
 
 
 class ManifestValidationTests(unittest.TestCase):
+    def test_reference_genome_must_be_fasta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reference = Path(tmpdir) / "reference.fastq"
+            reference.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = InputManifest(
+                session_id="reference-format",
+                assets=[
+                    InputAssetSpec(
+                        asset_type="reference_genome_fasta",
+                        paths=[str(reference)],
+                    )
+                ],
+            )
+
+            report = validate_manifest(manifest)
+
+            self.assertFalse(report["valid"])
+            self.assertTrue(
+                any(
+                    "reference genome must be FASTA" in error
+                    for error in report["errors"]
+                )
+            )
+
+    def test_reference_genome_fasta_is_valid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reference = Path(tmpdir) / "reference.fna"
+            reference.write_text(">chr1\nACGT\n", encoding="utf-8")
+            manifest = InputManifest(
+                session_id="reference-fasta",
+                assets=[
+                    InputAssetSpec(
+                        asset_type="reference_genome_fasta",
+                        paths=[str(reference)],
+                    )
+                ],
+            )
+
+            report = validate_manifest(manifest)
+
+            self.assertTrue(report["valid"], report["errors"])
+            self.assertEqual(report["inferred"][0]["path_facts"][0]["format"], "fasta")
+
     def test_validate_rejects_directory_and_fifo_manifest_assets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
