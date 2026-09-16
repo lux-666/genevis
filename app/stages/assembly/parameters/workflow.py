@@ -18,7 +18,6 @@ from typing import Any, Literal, cast
 from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import fail_workflow_step
 from app.domains.assembly.selection import validate_assembly_selection
-from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (
     load_execution_evidence,
     read_execution_stderr_tail,
@@ -28,6 +27,7 @@ from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
+from app.knowledge.assembly_runtime import initial_material_query
 from app.llm.json_response import model_response_record
 from app.llm.parameters.assembly.prompt import (
     parameter_prompt_bundle_hash,
@@ -78,6 +78,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
+    CanonicalRecommendationFacts,
     ExecutionFailureTrigger,
     ParameterAttemptEvidenceV3,
     ParameterExecutionEvidence,
@@ -180,21 +181,8 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
     try:
         if task == "recommend_initial":
             catalog = load_parameter_catalog(method_name)
-            stage_outputs = state.get("stage_outputs") or {}
-            shared = state.get("shared_parameters")
-            if shared is None:
-                shared = {}
-            if hasattr(shared, "model_dump"):
-                shared = shared.model_dump(mode="json", exclude_none=True)
-            facts = build_canonical_facts(
-                shared_parameters=shared,
-                read_qc_output=stage_outputs.get("read_qc"),
-                genome_survey_result=stage_outputs.get("genome_survey"),
-                asset_flags={
-                    "has_hifi": bool(assembly_out.get("hifi_reads_ref")),
-                    "has_ont": bool(assembly_out.get("ont_reads_ref")),
-                    "has_hic": bool(assembly_out.get("hic_reads_ref")),
-                },
+            facts = CanonicalRecommendationFacts.model_validate(
+                initial_material_query(state, assembly_out)["facts"]
             )
             context = build_assembly_recommendation_context(
                 state,
@@ -294,6 +282,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
     try:
         if task == "recommend_initial":
             basis_snapshot = build_parameter_basis_snapshot(
+                state=state,
                 method_id=catalog.method_id,
                 catalog=catalog,
                 facts=facts,
@@ -614,6 +603,7 @@ def _baseline_assembly_parameters(
             method_name="assembly.parameter_recommender",
         )
         basis_snapshot = build_parameter_basis_snapshot(
+            state=state,
             method_id=catalog.method_id,
             catalog=catalog,
             facts=facts,

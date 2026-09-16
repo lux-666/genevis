@@ -92,14 +92,6 @@ ROUTE_TO_READ_TYPE: dict[str, NormalizedReadType] = {
     "hifi": "pacbio_hifi",
 }
 
-PARAMETER_CASE_READ_TYPE: dict[NormalizedReadType, str] = {
-    "cyclone": "ont",
-    "ont_raw": "ont",
-    "ont_hq": "ont",
-    "pacbio_clr": "ont",
-    "pacbio_hifi": "hifi",
-}
-
 DEFAULT_PRIMARY_BY_READ_TYPE: dict[NormalizedReadType, str] = {
     "cyclone": HIFIASM_ONT_METHOD,
     "ont_raw": HIFIASM_ONT_METHOD,
@@ -163,15 +155,6 @@ def normalize_read_type(
     return None
 
 
-def parameter_case_read_type(value: Any, *, platform: Any = None) -> str | None:
-    """Collapse shared read-type variants to evidence/parameter case keys."""
-
-    normalized = normalize_read_type(value, platform=platform)
-    if normalized is None:
-        return None
-    return PARAMETER_CASE_READ_TYPE.get(normalized)
-
-
 def resolve_read_type(
     *candidates: tuple[str, Any] | tuple[str, Any, Any],
     context: str | None = None,
@@ -216,42 +199,6 @@ def resolve_read_type_with_source(
         )
         return read_type, source
     return None, None
-
-
-def resolve_parameter_case_read_type(
-    *candidates: tuple[str, Any] | tuple[str, Any, Any],
-    context: str | None = None,
-) -> str | None:
-    """Resolve the first valid parameter/evidence case read-type key."""
-
-    for candidate in candidates:
-        source, raw_value, platform = _read_type_candidate_parts(candidate)
-        if raw_value is None and platform is None:
-            continue
-        read_type = parameter_case_read_type(raw_value, platform=platform)
-        if read_type is None:
-            logger.debug(
-                "ignored unrecognized assembly parameter case read_type candidate",
-                extra={
-                    "context": context,
-                    "source": source,
-                    "value": raw_value,
-                    "platform": platform,
-                },
-            )
-            continue
-        logger.debug(
-            "resolved assembly parameter case read_type candidate",
-            extra={
-                "context": context,
-                "source": source,
-                "value": raw_value,
-                "platform": platform,
-                "read_type": read_type,
-            },
-        )
-        return read_type
-    return None
 
 
 def route_from_read_type(read_type: str) -> str:

@@ -74,9 +74,7 @@ def _load_request(run_dir: Path, record: dict[str, Any]) -> dict[str, Any]:
     messages = payload.get("messages")
     if not isinstance(messages, list) or len(messages) != 2:
         raise ValueError(f"model request does not contain two messages: {request_path}")
-    user_content = (
-        messages[1].get("content") if isinstance(messages[1], dict) else None
-    )
+    user_content = messages[1].get("content") if isinstance(messages[1], dict) else None
     if not isinstance(user_content, str):
         raise ValueError(f"model request user message has no text: {request_path}")
     request_dto = json.loads(user_content)
@@ -109,9 +107,10 @@ def prepare_request(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     request = _load_request(run_dir, record)
     removed = {
         field: request.pop(field, None)
-        for field in ("literature_cases", "literature_selection", "method_guidance")
+        for field in ("knowledge_evidence", "method_guidance", "method_decision")
         if field in request
     }
+    request.update(knowledge_evidence={}, method_guidance=[], method_decision={})
     validated = AssemblyParameterRequestDTO.model_validate(request).model_dump(
         mode="json", exclude_none=True
     )
@@ -130,11 +129,13 @@ def prepare_request(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "source_run": str(paths.run_dir),
         "input_manifest": (
             paths.input_manifest_path.read_text(encoding="utf-8")
-            if paths.input_manifest_path.exists() else None
+            if paths.input_manifest_path.exists()
+            else None
         ),
         "run_config": (
             json.loads(paths.run_config_path.read_text(encoding="utf-8"))
-            if paths.run_config_path.exists() else None
+            if paths.run_config_path.exists()
+            else None
         ),
         "frozen_parameters": _load_indexed_json(
             run_dir, _latest_record(run_dir, ASSEMBLY_PARAMETER_FROZEN_PARAMETERS)
@@ -175,8 +176,7 @@ def main() -> int:
     print(f"wrote operator context {context_path}")
     print(f"method: {prepared['metadata']['method_id']}")
     print(
-        "knowledge fields removed: literature_cases, literature_selection, "
-        "method_guidance"
+        "knowledge fields cleared: knowledge_evidence, method_decision, method_guidance"
     )
     print(
         "send only the messages array to the LLM; keep the context file for "

@@ -123,7 +123,7 @@ class KnowledgePackTests(unittest.TestCase):
         )
 
         self.assertIn("hifi", ctx["allowed_actions"])
-        self.assertIn("Route Selection Skill", ctx["skill_text"])
+        self.assertIn("Assembly Method and Route Advice", ctx["skill_text"])
         self.assertTrue(ctx["cases"])
 
     def test_load_route_selector_context_missing(self):
@@ -619,7 +619,9 @@ class InputProfilerTests(unittest.TestCase):
                 result = infer_input_profile(resolved)
 
             self.assertIsNotNone(model.messages)
-            self.assertIn("Route Selection Skill", model.messages[0]["content"])
+            self.assertIn(
+                "Assembly Method and Route Advice", model.messages[0]["content"]
+            )
             prompt_payload = json.loads(model.messages[1]["content"])
             self.assertEqual(
                 prompt_payload["data_profile"]["read_qc_summary"]["n50"],

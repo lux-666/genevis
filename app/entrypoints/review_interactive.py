@@ -833,15 +833,19 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
             print("  evidence_refs:")
             for name, ref in proposal["evidence_refs"].items():
                 print(f"    {name}: {ref}")
-        cases = proposal.get("literature_cases") or []
+        cases = proposal.get("reference_cases") or []
         if cases:
             print(f"  production paper evidence ({len(cases)}, top-5 maximum):")
             for case in cases:
                 doi = f" doi={case['doi']}" if case.get("doi") else ""
                 print(f"    - {case.get('case_id')}{doi}")
-                for excerpt in case.get("source_excerpts") or []:
-                    span_id = excerpt.get("span_id") or "span"
-                    print(f"      {span_id}: {excerpt.get('quote')}")
+                method = case.get("method") or {}
+                print(
+                    f"      method: {method.get('tool')} {method.get('version') or ''}"
+                )
+                for setting in method.get("settings") or []:
+                    print(f"      setting: {setting}")
+                print(f"      scope: {case.get('evidence_scope', '')}")
 
     candidates = brief.get("candidates") or []
     if candidates:
@@ -935,13 +939,14 @@ def _brief_parameter_approval(
         data_dir,
     )
     if isinstance(basis, dict):
-        proposal["literature_cases"] = [
+        proposal["reference_cases"] = [
             {
                 "case_id": case.get("case_id"),
-                "doi": (case.get("source") or {}).get("doi"),
-                "source_excerpts": list(case.get("source_excerpts") or []),
+                "doi": (case.get("paper") or {}).get("doi"),
+                "method": case.get("method"),
+                "evidence_scope": case.get("evidence_scope"),
             }
-            for case in (basis.get("literature_cases") or [])[:5]
+            for case in ((basis.get("knowledge_evidence") or {}).get("cases") or [])[:5]
             if isinstance(case, dict)
         ]
     return proposal

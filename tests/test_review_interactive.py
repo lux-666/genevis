@@ -1065,19 +1065,20 @@ class DecisionBriefTests(unittest.TestCase):
             basis_path.write_text(
                 json.dumps(
                     {
-                        "literature_cases": [
-                            {
-                                "case_id": f"paper-{index}",
-                                "source": {"doi": f"10.1000/{index}"},
-                                "source_excerpts": [
-                                    {
-                                        "span_id": f"methods-{index}",
-                                        "quote": f"Exact methods quote {index}.",
-                                    }
-                                ],
-                            }
-                            for index in range(6)
-                        ]
+                        "knowledge_evidence": {
+                            "cases": [
+                                {
+                                    "case_id": f"paper-{index}",
+                                    "paper": {"doi": f"10.1000/{index}"},
+                                    "method": {
+                                        "tool": "NextDenovo",
+                                        "settings": ["read_cutoff = 10000"],
+                                    },
+                                    "evidence_scope": "Synthetic fixture",
+                                }
+                                for index in range(6)
+                            ]
+                        }
                     }
                 ),
                 encoding="utf-8",
@@ -1138,11 +1139,11 @@ class DecisionBriefTests(unittest.TestCase):
         proposal = brief["parameter_proposal"]
         self.assertEqual(proposal["parameter_diff"]["purge_level"]["to"], 2)
         self.assertEqual(proposal["failure_facts"]["signals"]["return_code"], 137)
-        self.assertEqual(len(proposal["literature_cases"]), 5)
+        self.assertEqual(len(proposal["reference_cases"]), 5)
         rendered = out.getvalue()
         self.assertIn("production paper evidence (5, top-5 maximum)", rendered)
         self.assertIn("doi=10.1000/0", rendered)
-        self.assertIn("Exact methods quote 0.", rendered)
+        self.assertIn("read_cutoff = 10000", rendered)
 
     def test_assembly_review_brief_structure(self):
         summary = {

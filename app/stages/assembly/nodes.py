@@ -608,6 +608,7 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
         strict=False,
         include_actions=True,
         required_files=(),
+        include_cases=False,
     )
     if policy == "deterministic_baseline":
         recommendation = _deterministic_method_recommendation(assembly_out)
@@ -1950,7 +1951,10 @@ def _recommend_route_with_decision_boundary(
     assembly_out: AssemblyStageCursor,
     ctx: dict[str, Any],
 ) -> RouteRecommendation:
-    prompt_payload = _route_selector_payload(state, assembly_out, ctx)
+    retrieval_audit: dict[str, Any] = {}
+    prompt_payload = _route_selector_payload(
+        state, assembly_out, ctx, audit=retrieval_audit
+    )
     allowed_actions = list(ctx.get("allowed_actions") or [])
     allowed_methods = list(prompt_payload.get("allowed_methods") or [])
     request = AssemblyDecisionRequest(
@@ -1975,6 +1979,7 @@ def _recommend_route_with_decision_boundary(
                     "allowed_actions": allowed_actions,
                     "allowed_methods": allowed_methods,
                     "prompt_payload": prompt_payload,
+                    **retrieval_audit,
                     "messages": messages,
                 },
                 artifact_type=ASSEMBLY_METHOD_MODEL_REQUEST,
@@ -2121,6 +2126,8 @@ def _route_selector_payload(
     state: TopLevelState,
     assembly_out: AssemblyStageCursor,
     ctx: dict[str, Any],
+    *,
+    audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stage_outputs = state.get("stage_outputs") or {}
     read_qc = dict(stage_outputs.get("read_qc") or {})
@@ -2132,10 +2139,11 @@ def _route_selector_payload(
     species_facts = shared.get("species_facts")
     available_read_types = sorted(_assembly_observed_read_types(assembly_out))
     data_profile = {
-        "session_id": state.get("session_id"),
-        "ont_reads_ref": assembly_out.get("ont_reads_ref"),
-        "hifi_reads_ref": assembly_out.get("hifi_reads_ref"),
-        "hic_reads_ref": assembly_out.get("hic_reads_ref"),
+        "available_inputs": {
+            "ont": bool(assembly_out.get("ont_reads_ref")),
+            "hifi": bool(assembly_out.get("hifi_reads_ref")),
+            "hic": bool(assembly_out.get("hic_reads_ref")),
+        },
         "platform": assembly_out.get("platform"),
         "target_level": assembly_out.get("target_level"),
         "genome_size_prior": assembly_out.get("genome_size_prior"),
@@ -2148,9 +2156,6 @@ def _route_selector_payload(
         "genome_survey": {
             "confidence": survey.get("confidence") if survey_available else None,
             "estimates": survey.get("estimates") if survey_available else None,
-            "result_artifact_ref": (
-                survey.get("result_artifact_ref") if survey_available else None
-            ),
         },
         "has_hifi": assembly_out.get("has_hifi"),
         "has_hic": assembly_out.get("has_hic"),
@@ -2164,10 +2169,30 @@ def _route_selector_payload(
         "evidence_status": evidence_status,
     }
     allowed_methods = _assembly_method_candidates(assembly_out)
+    from app.domains.assembly.material_query import build_material_query, visible_query
+    from app.domains.assembly.software_knowledge import candidate_descriptions
+    from app.knowledge.assembly_cases import snapshot_hash
+    from app.knowledge.assembly_retrieval import retrieve_assembly_cases
+    from app.knowledge.assembly_runtime import frozen_knowledge
+
+    snapshot = frozen_knowledge(state)
+    query = build_material_query(state, assembly_out)
+    knowledge = retrieve_assembly_cases(snapshot, query, purpose="method_choice")
+    if audit is not None:
+        audit.update(
+            material_query=query,
+            retrieval_trace=knowledge["trace"],
+            knowledge_sha256=snapshot_hash(snapshot),
+            consumer_version=5,
+        )
     return {
         "data_profile": data_profile,
         "rules": ctx.get("rules") or {},
-        "cases": ctx.get("cases") or [],
+        "knowledge_evidence": knowledge["evidence"],
+        "material_context": visible_query(query),
+        "method_capabilities": candidate_descriptions(
+            allowed_methods, snapshot.software
+        ),
         "allowed_actions": ctx.get("allowed_actions") or [],
         "allowed_methods": allowed_methods,
         "required_output": {

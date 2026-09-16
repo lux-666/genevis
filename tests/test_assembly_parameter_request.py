@@ -178,7 +178,7 @@ def test_initial_builder_returns_only_the_strict_model_dto() -> None:
 
     assert request["schema_version"] == 3
     assert request["recommendation_contract"] == PARAMETER_RECOMMENDATION_CONTRACT
-    assert request["literature_cases"]
+    assert request["knowledge_evidence"]["cases"] == []
     assert request["method_guidance"]
     assert set(request) == {
         "schema_version",
@@ -189,8 +189,9 @@ def test_initial_builder_returns_only_the_strict_model_dto() -> None:
         "assembly_context",
         "method_guidance",
         "adjustable_parameters",
-        "literature_selection",
-        "literature_cases",
+        "knowledge_evidence",
+        "material_context",
+        "method_decision",
     }
     assert {
         "input_profile_hash",
@@ -227,26 +228,10 @@ def test_request_dto_rejects_accidental_audit_fields() -> None:
 def test_full_basis_and_model_case_have_separate_explicit_owners() -> None:
     basis, request = _initial_request()
 
-    assert len(request["literature_cases"]) == len(basis["literature_cases"])
-    assert [case["case_id"] for case in request["literature_cases"]] == [
-        case["case_id"] for case in basis["literature_cases"]
-    ]
-    for case in request["literature_cases"]:
-        assert set(case).issubset(
-            {
-                "schema_version",
-                "case_id",
-                "case_type",
-                "source",
-                "applicability",
-                "observed_facts",
-                "intervention",
-                "rationale_claims",
-                "outcomes",
-                "source_excerpts",
-                "numeric_match",
-            }
-        )
+    assert request["knowledge_evidence"] == basis["knowledge_evidence"]
+    assert request["knowledge_evidence"] is not basis["knowledge_evidence"]
+    assert "knowledge_sha256" not in request
+    assert "retrieval_trace" not in request
     assert "methods_path" not in json.dumps(request, ensure_ascii=False)
 
 
@@ -278,7 +263,7 @@ def test_retry_reuses_basis_and_exposes_typed_attempt_history() -> None:
         basis_snapshot=basis,
     )
 
-    assert retry["literature_cases"] == initial["literature_cases"]
+    assert retry["knowledge_evidence"] == initial["knowledge_evidence"]
     assert "baseline_params" not in retry
     history = retry["assembly_context"]["retry"]["attempt_history"]
     assert history[0]["recommended_parameters"] == {"purge_level": 1}
@@ -329,8 +314,8 @@ def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators(
 ):
     basis, request = _initial_request()
 
-    assert "query_id" not in basis["literature_selection"]
-    assert "query_id" not in request["literature_selection"]
+    assert "knowledge_sha256" in basis
+    assert "knowledge_sha256" not in request
     request_text = json.dumps(request, ensure_ascii=False)
     assert "retrieval_query_ref" not in request_text
     assert "retrieval_trace_ref" not in request_text
@@ -357,5 +342,5 @@ def test_methods_without_guidance_or_cases_produce_serializable_dtos() -> None:
         )
 
         json.dumps(request)
-        assert "method_guidance" not in request
+        assert request["method_guidance"] == []
         assert "literature_cases" not in request

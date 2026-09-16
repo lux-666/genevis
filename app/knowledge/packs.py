@@ -20,6 +20,7 @@ def load_knowledge_pack(
     root: Path | None = None,
     strict: bool = True,
     include_actions: bool = False,
+    include_cases: bool = True,
     required_files: tuple[str, ...] = ("rules", "cases", "skill"),
 ) -> dict[str, Any]:
     """Load a knowledge pack with shared strict/graceful behavior."""
@@ -47,7 +48,11 @@ def load_knowledge_pack(
             return _empty_pack()
 
     rules = _load_rules(pack_dir, paths["rules"]) if paths["rules"].exists() else {}
-    cases = _load_cases(pack_dir, paths["cases"]) if paths["cases"].exists() else []
+    cases = (
+        _load_cases(pack_dir, paths["cases"])
+        if include_cases and paths["cases"].exists()
+        else []
+    )
     skill = (
         paths["skill"].read_text(encoding="utf-8") if paths["skill"].exists() else None
     )

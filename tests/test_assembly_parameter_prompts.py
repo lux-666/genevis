@@ -15,14 +15,9 @@ def _request_dto(method_id: str = "hifiasm") -> dict:
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": method_id,
         "task": "recommend_initial",
-        "observations": [
-            {
-                "id": "pf_1",
-                "section": "genome_survey",
-                "name": "heterozygosity",
-                "value": 0.01,
-            }
-        ],
+        "facts": {"genome": {"heterozygosity": {"value": 0.01, "unit": "fraction"}}},
+        "material_context": {},
+        "method_decision": {"method_id": method_id},
         "method_guidance": [
             {
                 "guidance_id": "g1",
@@ -39,27 +34,17 @@ def _request_dto(method_id: str = "hifiasm") -> dict:
                 "allowed_values": [0, 1, 2, 3],
             }
         },
-        "literature_selection": {
-            "selected_case_ids": ["paper.1"],
-            "selected_count": 1,
+        "knowledge_evidence": {
+            "cases": [
+                {
+                    "case_id": "paper.1",
+                    "paper": {"doi": "10.example/one"},
+                    "method": {"tool": "NextDenovo", "settings": ["read_cutoff=10000"]},
+                    "content": {"notes": ["Reported parameter rationale."]},
+                }
+            ],
+            "software_explanations": [],
         },
-        "literature_cases": [
-            {
-                "schema_version": 3,
-                "case_id": "paper.1",
-                "case_type": "initial",
-                "source": {"kind": "paper", "doi": "10.example/one"},
-                "applicability": {"read_type": "hifi"},
-                "observed_facts": {},
-                "intervention": {"tool": "hifiasm", "parameters": {}},
-                "rationale_claims": [],
-                "outcomes": {},
-                "source_excerpts": [
-                    {"span_id": "q1", "quote": "Reported parameter rationale."}
-                ],
-                "numeric_match": {"numeric_similarity": 0.8},
-            }
-        ],
     }
 
 
@@ -74,7 +59,7 @@ def test_renderer_serializes_the_direct_dto_without_a_second_projection() -> Non
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    assert rendered_request["literature_cases"][0]["case_id"] == "paper.1"
+    assert rendered_request["knowledge_evidence"]["cases"][0]["case_id"] == "paper.1"
 
 
 @pytest.mark.parametrize("method_id", ["flye", "nextdenovo", "hifiasm", "hifiasm_ont"])
@@ -96,6 +81,8 @@ def test_prompt_is_one_system_user_pair_without_response_example(
         in messages[0]["content"]
     )
     assert "Do not return observation IDs" in messages[0]["content"]
+    assert "cross-method cases" in messages[0]["content"]
+    assert "never foreign-tool keys" in messages[0]["content"]
 
 
 def test_retry_context_is_rendered_exactly_from_the_strict_dto() -> None:

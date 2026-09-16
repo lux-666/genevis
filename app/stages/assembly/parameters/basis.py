@@ -1,14 +1,16 @@
-"""Resolve Assembly parameter knowledge basis and retry normalization inputs."""
+"""Freeze the confirmed method's direct and cross-method recommendation basis."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from app.domains.assembly.case_selector import select_evidence_cases
-from app.domains.assembly.constants import HIFIASM_METHOD, HIFIASM_ONT_METHOD
-from app.domains.assembly.method_guidance import load_method_guidance
-from app.knowledge.packs import load_knowledge_pack
+from app.knowledge.assembly_cases import KnowledgeSnapshot, snapshot_hash
+from app.knowledge.assembly_retrieval import retrieve_assembly_cases
+from app.knowledge.assembly_runtime import (
+    capture_knowledge,
+    frozen_knowledge,
+    initial_material_query,
+)
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
@@ -22,37 +24,44 @@ def build_parameter_basis_snapshot(
     catalog: MethodParameterCatalog,
     facts: CanonicalRecommendationFacts,
     context: AssemblyRecommendationContext,
-    knowledge_pack_id: str = "parameter_recommender",
-    knowledge_root: Path | None = None,
+    state: Any = None,
+    knowledge: KnowledgeSnapshot | None = None,
+    material_query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Select the full immutable knowledge basis for an initial recommendation."""
-
     if method_id != catalog.method_id:
-        raise ValueError(
-            f"parameter basis method {method_id!r} does not match catalog "
-            f"{catalog.method_id!r}"
-        )
-    knowledge_pack = load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
-    literature_cases, literature_selection = select_evidence_cases(
-        knowledge_pack["cases"],
-        method_id=method_id,
-        task="recommend_initial",
-        facts=facts,
-        context=context,
-        strategy=knowledge_pack.get("strategies"),
-        source_root=knowledge_pack.get("pack_root"),
+        raise ValueError("parameter basis method does not match catalog")
+    snapshot = knowledge or (
+        frozen_knowledge(state) if state is not None else capture_knowledge()
     )
+    assembly = (
+        ((state.get("stage_outputs") or {}).get("assembly") or {}) if state else {}
+    )
+    query = material_query or (
+        initial_material_query(state, assembly)
+        if state is not None
+        else {
+            "text": facts.species.scientific_name or "",
+            "platforms": [],
+            "observations": [],
+            "target_level": context.target_level,
+        }
+    )
+    retrieved = retrieve_assembly_cases(
+        snapshot, query, purpose="parameters", selected_method=method_id
+    )
+    selection = assembly.get("assembly_selection") or {}
     return {
         "schema_version": 3,
-        "method_id": catalog.method_id,
+        "consumer_version": 5,
+        "method_id": method_id,
         "catalog_snapshot": catalog.model_dump(mode="json"),
-        "literature_selection": dict(literature_selection),
-        "literature_cases": list(literature_cases),
-        "method_guidance": _method_guidance(method_id),
+        "knowledge_sha256": snapshot_hash(snapshot),
+        "knowledge_evidence": retrieved["evidence"],
+        "retrieval_trace": retrieved["trace"],
+        "material_query": query,
+        "method_decision": {
+            "method_id": method_id,
+            "rationale": selection.get("rationale", ""),
+        },
+        "method_guidance": snapshot.software.get(method_id, {}).get("guidance", []),
     }
-
-
-def _method_guidance(method_id: str) -> list[dict[str, Any]]:
-    if method_id not in {HIFIASM_METHOD, HIFIASM_ONT_METHOD}:
-        return []
-    return load_method_guidance().model_cards_for_method(method_id)

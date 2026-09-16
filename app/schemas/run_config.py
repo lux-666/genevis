@@ -77,6 +77,7 @@ _BUSCO_LINEAGE_CONTRACTS: dict[str, dict[str, bool]] = {
 _BUSCO_VERSION_RE = re.compile(r"_(odb\d+(?:\.\d+)?)$")
 
 _RUN_CONFIG_PATH_FIELDS = (
+    ("assembly", "case_source"),
     ("assembly", "hifi_reads_ref"),
     ("assembly", "hic_reads_ref"),
     ("t2t", "chromosome_list_ref"),
@@ -178,6 +179,8 @@ class AssemblyRunConfig(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    case_source: str | None = Field(default=None, min_length=1)
 
     threads: int = Field(default=32, gt=0)
     hifi_reads_ref: str | None = None
