@@ -76,7 +76,7 @@ Read these only when a task needs the exact contract.
 | [`reference/shared-facts.md`](reference/shared-facts.md) | Cross-stage biological facts, genome-size resolution priority, planning collection rules, and conflict behavior |
 | [`reference/recommendation-policy.md`](reference/recommendation-policy.md) | Independent advisor/baseline modes for Assembly method/route and parameter recommendations |
 | [`reference/parameter-recommendation.md`](reference/parameter-recommendation.md) | Exact model DTO, schema-3 evidence, sparse response, approval, and retry semantics |
-| [`reference/casepack.md`](reference/casepack.md) | External CasePack V1 layout, strict loader boundary, evidence validation, and current runtime availability |
+| [`reference/casepack.md`](reference/casepack.md) | Assembly v5 case consumption: explicit source methods/settings, cross-method retrieval, software explanations and frozen evidence |
 | [`reference/stage-contracts.md`](reference/stage-contracts.md) | Biological stage inputs/outputs, stage outcomes versus method dispositions, registered method roles, QC facts, and review triggers |
 | [`reference/descriptors.md`](reference/descriptors.md) | Package and method capability metadata |
 | [`reference/governance.md`](reference/governance.md) | Source-of-truth, change-control, and quality-gate policy |

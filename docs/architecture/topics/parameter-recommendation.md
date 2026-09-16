@@ -26,3 +26,14 @@ retain stage-specific biological inputs:
 Exact DTO fields, sparse-response validation, persistence, approval timing,
 retry semantics, and command-resolution precedence remain in the linked
 reference contracts.
+
+Assembly's case consumer uses one source and shared retrieval
+for method choice and parameter recommendation. Broad material matches, including
+other assemblers, inform method choice first. Once the method is confirmed,
+direct and cross-method cases plus software/parameter explanations inform its
+sparse parameter mapping. Reference-tool settings retain their source identity.
+
+The [Assembly case contract](../reference/casepack.md) owns the implemented
+exchange and cutover; [conformance](../reference/conformance.md#assembly-software-explanation-coverage)
+records remaining software-guidance coverage. Existing approval/execution
+boundaries remain unchanged. Hi-C and T2T literature/method extensions are deferred.

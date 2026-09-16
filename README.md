@@ -184,3 +184,26 @@ gene-agent inspect \
 - [New Host Setup](docs/deployment/migration.md)：新主机安装；
 - [Mac/Server Workflow](docs/deployment/mac_dev_server_pull.md)：Git 同步和服务器更新；
 - [Configuration Examples](docs/examples/)：可复制、schema-valid 的输入模板。
+
+## Assembly v5 case consumption
+
+Assembly 方法推荐和参数推荐共用一份冻结的案例与软件知识。
+配置 `assembly.case_source` 指向包含 `recommendation-cases.v1` JSON 的目录
+（相对路径以配置文件为基准）；不配置时只用当前材料与软件知识，不回退旧案例库。
+来源方法、原生参数、材料状态和结果限定均保留，跨方法案例可参与推理，
+但执行输出只能包含已确认方法的 L2 参数。
+
+已有 `assembly-extraction.v5` 图通过显式选择文件导出：
+
+```bash
+python scripts/build_assembly_cases.py \
+  --extractions /absolute/path/to/extractions \
+  --selection /absolute/path/to/selection.json \
+  --output /absolute/path/to/assembly-cases
+```
+
+该命令不修改原图，不覆盖不同内容，不将投影视为论文重新审核。
+新运行在输入准备时捕获内容，冻结至 `control/assembly_knowledge.json`；
+恢复和重试不重新读取外部案例目录。旧 Assembly 冻结运行须新建运行，
+旧 casepack/V1/pilot 配置不兼容。Hi-C、T2T 的扩展不在本次范围。
+精确合同见 [Assembly case consumption](docs/architecture/reference/casepack.md)。

@@ -76,6 +76,14 @@ fields.
 
 ## Method/route advisor
 
+The [Assembly case consumer](casepack.md) defines the implemented advisory
+evidence policy: material/task matches across methods plus software capabilities
+inform a useful first choice. Paired performance comparisons can support the
+choice but are not required to offer advice. The parameter decision follows
+method confirmation and can use foreign-method cases without changing the
+confirmed executable method. This changes advisor evidence, not the independent
+advisor/baseline modes defined here.
+
 `advisor` is the normal transaction: after QC/survey evidence, the exact model
 request, raw response, parsed recommendation, and human confirmation are
 persisted before `assembly_selection` binds.

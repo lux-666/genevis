@@ -16,6 +16,22 @@ the owning reference specifications.
 
 ## Open gaps
 
+### Assembly software explanation coverage
+
+The single Assembly consumer, cross-method retrieval and frozen method/parameter
+basis are implemented. Source settings survive independently of target L2 keys.
+Explanations currently come from executable catalogs plus existing hifiasm
+mechanism guidance. They do not yet cover every foreign/historical setting or
+version-specific interaction; unexplained settings are retained as unknown.
+
+- Current evidence: `app/domains/assembly/software_knowledge.py`,
+  `method_guidance.py`, and `app/knowledge/assembly_retrieval.py`.
+- Contract owner: [Assembly case consumption](casepack.md).
+- Closure condition: curate referenced mechanism/version guidance for settings
+  encountered in the real case corpus beyond the current catalogs. This is
+  content coverage, not a second consumer or a requirement to translate foreign
+  settings into executable parameters. Hi-C/T2T remain deferred.
+
 ### Repository quality gates are targets, not a current success claim
 
 The repository intends these commands to be merge gates:
@@ -30,6 +46,12 @@ pytest -q
 The working tree passes a gate only when that command returns zero for the
 revision being described; the command output is the evidence.
 
+- Current unresolved checks: `mypy app` reports a missing local annotation for
+  `outcome` in `app/control/lifecycle.py`. Repository formatting also differs
+  in `app/execution/run_readiness.py`,
+  `app/stages/hic_scaffolding/parameters/workflow.py`,
+  `tests/test_database_resolution.py`, `tests/test_hic_scaffolding.py`,
+  `tests/test_run_config.py` and `tests/test_state_schema.py`.
 - Policy owner: [Governance](governance.md).
 - Current evidence: `pyproject.toml` plus the command output for the checked
   revision.

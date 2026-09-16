@@ -125,7 +125,9 @@ Assembly `AssemblyParameterRequestDTO` contains:
 - typed `assembly_context` with the route, normalized read type, target level,
   and bounded chronological attempt history when retrying;
 - `adjustable_parameters` with descriptive/type metadata but no default value;
-- optional `method_guidance`, `literature_selection`, and `literature_cases`.
+- `knowledge_evidence` with source-method-aware cases and software explanations;
+- `material_context`, `method_decision`, and `method_guidance` (empty evidence
+  collections are explicit, not old-source fallbacks).
 
 AutoHiC `AutoHiCParameterRequest` contains:
 
@@ -270,3 +272,17 @@ Tests must prove that:
 - every retry prompt contains ordered evidence for all earlier attempts;
 - provided facts and executor/tool defaults remain distinguishable from LLM
   recommendations in frozen evidence.
+
+## Assembly case evidence
+
+Assembly requests include `knowledge_evidence` from their frozen case/software
+snapshot. Without `assembly.case_source`, the literature selection is empty;
+software knowledge and current material facts remain available.
+
+The [Assembly case contract](casepack.md) owns the single
+consumer providing source-method-aware, direct and cross-method evidence plus
+parameter explanations. The new parameter request uses the confirmed method,
+its decision context and its adjustable catalog. Foreign settings are explanatory
+evidence, not additions to that catalog. The immutable basis retains the selected
+evidence and explanations for retry. Sparse-L2 parsing, catalog ownership,
+approval and execution resolution remain owned by this contract.
