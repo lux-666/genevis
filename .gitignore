@@ -27,6 +27,7 @@ logs/
 pid*.log.info
 
 app/entrypoints/workflow.ipynb
+app/entrypoints/graph_showcase.ipynb
 
 *.egg-info/
 dist/
