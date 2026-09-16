@@ -136,6 +136,7 @@ def _stage_seeds_from_run_config(
     if "assembly" in requested and run_config.assembly:
         assembly_seed: dict[str, Any] = {}
         for key in (
+            "case_source",
             "threads",
             "hifi_reads_ref",
             "hic_reads_ref",

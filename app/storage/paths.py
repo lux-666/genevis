@@ -104,10 +104,6 @@ class SessionPaths:
         return self.run_dir / "control"
 
     @property
-    def assembly_knowledge_path(self) -> Path:
-        return self.control_dir / "assembly_knowledge.json"
-
-    @property
     def artifacts_dir(self) -> Path:
         return self.run_dir / "artifacts"
 

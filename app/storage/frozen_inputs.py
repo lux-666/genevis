@@ -27,7 +27,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from app.domains.assembly.selection import PLATFORMS_BY_SHARED_READ_TYPE
 from app.integrity import sha256_file, validate_sha256
-from app.knowledge.assembly_cases import KnowledgeSnapshot, snapshot_bytes
 from app.schemas.manifest import (
     AssetEntryInference,
     Compression,
@@ -53,13 +52,11 @@ _FILE_NAMES = {
     "input_manifest": "input_manifest.yaml",
     "run_config": "run_config.json",
     "dependency_manifest": "dependency_manifest.json",
-    "assembly_knowledge": "assembly_knowledge.json",
 }
 _FILE_SCHEMA_VERSIONS = {
     "input_manifest": INPUT_MANIFEST_SCHEMA_VERSION,
     "run_config": RUN_CONFIG_SCHEMA_VERSION,
     "dependency_manifest": 2,
-    "assembly_knowledge": 5,
 }
 
 
@@ -192,7 +189,6 @@ class PreparedSessionInputs:
     manifest: InputManifest
     run_config: RunConfig
     declarations: CanonicalInputDeclarations
-    assembly_knowledge: KnowledgeSnapshot | None = None
 
 
 def canonicalize_input_declarations(
@@ -507,26 +503,12 @@ def prepare_session_inputs(
     *,
     manifest_draft: str | Path | InputManifest | Mapping[str, Any],
     run_config_draft: str | Path | RunConfig | Mapping[str, Any],
-    captured_knowledge: KnowledgeSnapshot | None = None,
 ) -> PreparedSessionInputs:
     """Validate and canonicalize drafts without creating any run-owned path."""
 
     try:
         manifest = _load_manifest_draft(manifest_draft)
         run_config = _load_run_config_draft(run_config_draft)
-        knowledge = None
-        if "assembly" in run_config.requested_stage_names():
-            from app.knowledge.assembly_runtime import capture_knowledge
-
-            knowledge = (
-                KnowledgeSnapshot.model_validate_json(
-                    snapshot_bytes(captured_knowledge)
-                )
-                if captured_knowledge is not None
-                else capture_knowledge(
-                    run_config.assembly.case_source if run_config.assembly else None
-                )
-            )
         declarations = canonicalize_input_declarations(manifest, run_config)
         if not declarations.manifest_report["valid"]:
             raise FrozenInputValidationError(
@@ -542,7 +524,7 @@ def prepare_session_inputs(
         )
     except FrozenInputValidationError:
         raise
-    except (OSError, ValidationError, ValueError) as exc:
+    except (ValidationError, ValueError) as exc:
         raise FrozenInputValidationError(
             f"input preparation failed validation: {exc}"
         ) from exc
@@ -551,7 +533,6 @@ def prepare_session_inputs(
         manifest=manifest,
         run_config=run_config,
         declarations=declarations,
-        assembly_knowledge=knowledge,
     )
 
 
@@ -589,7 +570,6 @@ def freeze_session_inputs(
         prepared = prepare_session_inputs(
             manifest_draft=prepared_inputs.manifest,
             run_config_draft=prepared_inputs.run_config,
-            captured_knowledge=prepared_inputs.assembly_knowledge,
         )
     elif manifest_draft is not None and run_config_draft is not None:
         prepared = prepare_session_inputs(
@@ -614,11 +594,6 @@ def freeze_session_inputs(
     )
     manifest_bytes = _manifest_bytes(manifest)
     run_config_bytes = _run_config_bytes(run_config)
-    knowledge_bytes = (
-        snapshot_bytes(prepared.assembly_knowledge)
-        if prepared.assembly_knowledge
-        else None
-    )
 
     # Keep the create-only freeze lock outside ``data_root``.  Creating
     # ``control/`` or ``runs/<session>/`` before validation would make an
@@ -641,12 +616,6 @@ def freeze_session_inputs(
                     parent_session_id=parent_session_id,
                     selected_methods=dependency_methods,
                 )
-                if knowledge_bytes is not None and bundle.file_sha256(
-                    "assembly_knowledge"
-                ) != _sha256_bytes(knowledge_bytes):
-                    raise FrozenInputConflictError(
-                        "Assembly knowledge changed after input preparation"
-                    )
                 return bundle
 
             partial = _partial_freeze_paths(paths)
@@ -697,7 +666,6 @@ def freeze_session_inputs(
                 input_manifest_bytes=manifest_bytes,
                 run_config_bytes=run_config_bytes,
                 dependency_manifest_bytes=dependency_bytes,
-                assembly_knowledge_bytes=knowledge_bytes,
             )
             _publish_freeze_transaction(
                 paths,
@@ -705,11 +673,6 @@ def freeze_session_inputs(
                     "input_manifest": manifest_bytes,
                     "run_config": run_config_bytes,
                     "dependency_manifest": dependency_bytes,
-                    **(
-                        {"assembly_knowledge": knowledge_bytes}
-                        if knowledge_bytes is not None
-                        else {}
-                    ),
                     "frozen_inputs": _marker_bytes(marker),
                 },
             )
@@ -726,12 +689,12 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
         raise FrozenInputIntegrityError(
             "frozen input marker session_id does not match its run directory"
         )
-    if set(marker.files) not in (set(_FILE_KEYS), {*_FILE_KEYS, "assembly_knowledge"}):
+    if set(marker.files) != set(_FILE_KEYS):
         raise FrozenInputIntegrityError(
             "frozen input marker must contain exactly " + ", ".join(_FILE_KEYS)
         )
 
-    for key in marker.files:
+    for key in _FILE_KEYS:
         _verify_frozen_file(paths, marker, key)
 
     manifest = _load_frozen_manifest(paths.input_manifest_path)
@@ -740,19 +703,6 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
             "frozen input manifest session_id does not match its run directory"
         )
     run_config = _load_frozen_run_config(paths.run_config_path)
-    if "assembly" in run_config.requested_stage_names():
-        if "assembly_knowledge" not in marker.files:
-            raise FrozenInputIntegrityError(
-                "pre-v5 Assembly run: new frozen knowledge is required"
-            )
-        try:
-            KnowledgeSnapshot.model_validate_json(
-                paths.assembly_knowledge_path.read_bytes()
-            )
-        except ValueError as exc:
-            raise FrozenInputIntegrityError(
-                f"invalid frozen Assembly knowledge: {exc}"
-            ) from exc
     declarations = canonicalize_input_declarations(manifest, run_config)
     if not declarations.manifest_report["valid"]:
         raise FrozenInputIntegrityError(
@@ -1279,15 +1229,12 @@ def _build_marker(
     input_manifest_bytes: bytes,
     run_config_bytes: bytes,
     dependency_manifest_bytes: bytes,
-    assembly_knowledge_bytes: bytes | None = None,
 ) -> FrozenInputsMarker:
     values = {
         "input_manifest": input_manifest_bytes,
         "run_config": run_config_bytes,
         "dependency_manifest": dependency_manifest_bytes,
     }
-    if assembly_knowledge_bytes is not None:
-        values["assembly_knowledge"] = assembly_knowledge_bytes
     files = {
         key: FrozenInputFile(
             path_ref=paths.to_ref(_path_for_key(paths, key)),
@@ -1328,7 +1275,7 @@ def _publish_freeze_transaction(
             )
             for key, value in payloads.items()
         }
-        for key in payloads.keys() - {"frozen_inputs"}:
+        for key in _FILE_KEYS:
             _publish_staged_create_only(staged[key], _path_for_key(paths, key))
         _fsync_directory(paths.control_dir)
         _publish_staged_create_only(staged["frozen_inputs"], paths.frozen_inputs_path)
@@ -1407,7 +1354,6 @@ def _partial_freeze_paths(paths: SessionPaths) -> list[Path]:
             paths.input_manifest_path,
             paths.run_config_path,
             paths.dependency_manifest_path,
-            paths.assembly_knowledge_path,
             paths.frozen_inputs_path,
         )
         if path.exists()
@@ -1501,8 +1447,6 @@ def _path_for_key(paths: SessionPaths, key: str) -> Path:
         return paths.run_config_path
     if key == "dependency_manifest":
         return paths.dependency_manifest_path
-    if key == "assembly_knowledge":
-        return paths.assembly_knowledge_path
     raise KeyError(key)
 
 

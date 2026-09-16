@@ -9,6 +9,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domains.assembly.material_query import visible_query
+from app.knowledge.assembly_cases import canonical_tool
+from app.knowledge.assembly_retrieval import project_assembly_evidence
 from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
@@ -56,6 +58,11 @@ def build_parameter_request_dto(
         raise ValueError("parameter request basis method does not match the catalog")
     if basis_snapshot.get("consumer_version") != 5:
         raise ValueError("pre-v5 Assembly basis cannot be used; start a new run")
+    evidence = basis_snapshot["knowledge_evidence"]
+    if evidence["purpose"] != "parameters" or canonical_tool(
+        evidence.get("target_method", "")
+    ) != canonical_tool(catalog.tool):
+        raise ValueError("parameter evidence purpose or target does not match catalog")
     fields = ("value_type", "allowed_values", "min", "max", "description", "notes")
     adjustable = {
         name: {
@@ -74,7 +81,7 @@ def build_parameter_request_dto(
         facts=facts,
         assembly_context=context,
         adjustable_parameters=adjustable,
-        knowledge_evidence=deepcopy(basis_snapshot["knowledge_evidence"]),
+        knowledge_evidence=project_assembly_evidence(evidence),
         material_context=deepcopy(visible_query(basis_snapshot["material_query"])),
         method_decision=deepcopy(basis_snapshot["method_decision"]),
         method_guidance=deepcopy(basis_snapshot["method_guidance"]),

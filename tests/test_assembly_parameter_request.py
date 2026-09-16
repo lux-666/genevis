@@ -228,11 +228,30 @@ def test_request_dto_rejects_accidental_audit_fields() -> None:
 def test_full_basis_and_model_case_have_separate_explicit_owners() -> None:
     basis, request = _initial_request()
 
-    assert request["knowledge_evidence"] == basis["knowledge_evidence"]
+    assert request["knowledge_evidence"]["cases"] == []
+    assert "target_method" in basis["knowledge_evidence"]
+    assert "target_method" not in request["knowledge_evidence"]
     assert request["knowledge_evidence"] is not basis["knowledge_evidence"]
     assert "knowledge_sha256" not in request
     assert "retrieval_trace" not in request
     assert "methods_path" not in json.dumps(request, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "change", [{"target_method": "NextDenovo"}, {"purpose": "method_choice"}]
+)
+def test_request_rejects_evidence_for_another_task_or_target(change) -> None:
+    basis, _ = _initial_request()
+    basis["knowledge_evidence"].update(change)
+    with pytest.raises(ValueError, match="purpose or target"):
+        build_parameter_request_dto(
+            method_id=HIFIASM_METHOD,
+            catalog=load_parameter_catalog(HIFIASM_METHOD),
+            facts=_facts(),
+            context=_context(),
+            task="recommend_initial",
+            basis_snapshot=basis,
+        )
 
 
 def test_retry_reuses_basis_and_exposes_typed_attempt_history() -> None:
@@ -314,7 +333,7 @@ def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators(
 ):
     basis, request = _initial_request()
 
-    assert "knowledge_sha256" in basis
+    assert "knowledge_sha256" not in basis
     assert "knowledge_sha256" not in request
     request_text = json.dumps(request, ensure_ascii=False)
     assert "retrieval_query_ref" not in request_text

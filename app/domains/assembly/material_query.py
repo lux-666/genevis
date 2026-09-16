@@ -141,4 +141,11 @@ def build_material_query(
 
 
 def visible_query(query: Mapping[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in query.items() if k != "read_binding"}
+    """Material scope only; canonical facts are sent once, separately."""
+    result = {k: query[k] for k in ("platforms", "read_summary_scope") if k in query}
+    for observation in query.get("observations", []):
+        if observation["name"] == "coverage" and observation["state"] == "filtered":
+            result["filtered_coverage"] = {
+                k: observation[k] for k in ("value", "unit", "platform", "basis")
+            }
+    return result

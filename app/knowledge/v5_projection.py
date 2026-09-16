@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 from app.knowledge.assembly_cases import (
     AssemblyCase,
+    CaseContent,
     CasePaper,
     Observation,
     SourceMethod,
@@ -41,6 +42,61 @@ def _feature_name(key: str) -> tuple[str, str | None]:
     )
     name = key[len(platform) + 1 :] if platform else key
     return name.removesuffix("_bp"), platform
+
+
+def _material_label(state: dict[str, Any], samples: dict[str, Any]) -> str:
+    subjects = ", ".join(samples[s].get("name", s) for s in state.get("sample_ids", []))
+    return "; ".join(
+        str(v)
+        for v in (
+            state.get("name", state["id"]),
+            state.get("kind"),
+            subjects,
+            state.get("sample_scope"),
+            state.get("origin"),
+        )
+        if v
+    )
+
+
+def _citations(entity: dict[str, Any], sources: dict[str, Any]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            f"{sources[e['source_id']]['name']}: {e['locator']}"
+            for e in entity.get("evidence", [])
+        )
+    )
+
+
+def _measurement_summary(
+    measurement: dict[str, Any],
+    indexes: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    summary = {
+        "metric": measurement["metric"],
+        "value": measurement["value"],
+        "objects": [
+            _material_label(indexes["states"][s], indexes["samples"])
+            for s in measurement["state_ids"]
+        ],
+        "basis": measurement["basis"],
+        "context": measurement.get("context", []),
+        "evidence": _citations(measurement, indexes["sources"]),
+    }
+    if measurement.get("assessment_step_id"):
+        assessment = indexes["steps"][measurement["assessment_step_id"]]
+        method = indexes["methods"].get(assessment.get("method_id"), {})
+        summary["assessment"] = "; ".join(
+            str(v)
+            for v in (
+                assessment["name"],
+                method.get("tool"),
+                method.get("version"),
+                *method.get("settings", []),
+            )
+            if v
+        )
+    return {k: v for k, v in summary.items() if v}
 
 
 def project_paper(
@@ -167,11 +223,6 @@ def project_paper(
             raise ValueError(
                 "outcome is not attached to this operation or its descendants"
             )
-        assessments = {
-            m["assessment_step_id"]
-            for m in original_measurements + outcomes
-            if m.get("assessment_step_id")
-        }
         routes = [r for r in graph["routes"] if step["id"] in r["step_ids"]]
         related = (
             direct
@@ -185,26 +236,29 @@ def project_paper(
             "action": step["name"],
             "condition": step.get("condition"),
             "method_label": method.get("name"),
-            "samples": [indexes["samples"][sid] for sid in step["sample_ids"]],
-            "inputs": [
-                {**i, "material": states[i["state_id"]]} for i in step["inputs"]
-            ],
-            "outputs": [states[sid] for sid in step["output_state_ids"]],
-            "reported_measurements": original_measurements,
-            "measurement_materials": [
-                states[sid]
-                for sid in sorted(
-                    {sid for m in original_measurements for sid in m["state_ids"]}
-                )
-            ],
-            "assessments": [
+            "samples": [
                 {
-                    **indexes["steps"][sid],
-                    "method": indexes["methods"].get(
-                        indexes["steps"][sid].get("method_id")
-                    ),
+                    "name": indexes["samples"][sid].get("name", sid),
+                    "context": indexes["samples"][sid].get("context", []),
                 }
-                for sid in sorted(assessments)
+                for sid in step["sample_ids"]
+            ],
+            "inputs": [
+                {
+                    "role": i["role"],
+                    "material": _material_label(
+                        states[i["state_id"]], indexes["samples"]
+                    ),
+                    **({"use": i["use"]} if i.get("use") else {}),
+                }
+                for i in step["inputs"]
+            ],
+            "outputs": [
+                _material_label(states[sid], indexes["samples"])
+                for sid in step["output_state_ids"]
+            ],
+            "reported_measurements": [
+                _measurement_summary(m, indexes) for m in original_measurements
             ],
             "normalization_notes": {
                 k: v["exclude_reason"]
@@ -212,31 +266,38 @@ def project_paper(
                 if v.get("exclude_reason")
             },
             "sample_context": binding.get("ploidy_context"),
-            "outcomes": [
-                {**m, "measured_materials": [states[s] for s in m["state_ids"]]}
-                for m in outcomes
-            ],
+            "outcomes": [_measurement_summary(m, indexes) for m in outcomes],
             "routes": [
-                {k: r[k] for k in ("name", "role", "selection_reason") if k in r}
+                {k: r[k] for k in ("name", "role", "selection_reason") if r.get(k)}
                 for r in routes
             ],
             "gaps": [
-                g
+                {
+                    "kind": g["kind"],
+                    "issue": g["issue"],
+                    "evidence": _citations(g, indexes["sources"]),
+                    "leads": [
+                        f"{indexes['sources'][e['source_id']]['name']}: {e['locator']}"
+                        for e in g.get("leads", [])
+                    ],
+                }
                 for g in graph["gaps"]
                 if not g.get("affected_ids") or related & set(g["affected_ids"])
             ],
             "notes": binding.get("notes", []),
-            "method_evidence": method.get("evidence", []),
-            "step_evidence": step.get("evidence", []),
-            "sources": [
-                {
-                    k: s[k]
-                    for k in ("id", "name", "read_scope", "access", "limitation")
-                    if k in s
-                }
+            "evidence": list(
+                dict.fromkeys(
+                    _citations(method, indexes["sources"])
+                    + _citations(step, indexes["sources"])
+                )
+            ),
+            "source_limits": [
+                f"{s['name']}: {s['access']}; {s.get('limitation', '')}"
                 for s in graph["sources"]
+                if s.get("access") != "read" or s.get("limitation")
             ],
         }
+        content = {k: v for k, v in content.items() if v}
         cases.append(
             AssemblyCase(
                 case_id=f"{paper_id}:{step['id']}",
@@ -250,7 +311,7 @@ def project_paper(
                 route_roles=tuple(sorted({r["role"] for r in routes})),
                 input_platforms=tuple(sorted(set(binding["inputs"].values()))),
                 observations=tuple(observations),
-                content=content,
+                content=cast(CaseContent, content),
             )
         )
     return CasePaper(

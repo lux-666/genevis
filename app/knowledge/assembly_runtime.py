@@ -1,4 +1,4 @@
-"""Assembly knowledge access: frozen run contents, never live case fallback."""
+"""Read the configured live case directory for each new recommendation."""
 
 from __future__ import annotations
 
@@ -7,37 +7,21 @@ from typing import Any, Mapping
 
 from app.domains.assembly.material_query import build_material_query
 from app.domains.assembly.software_knowledge import capture_software_knowledge
-from app.knowledge.assembly_cases import KnowledgeSnapshot, load_case_papers
+from app.knowledge.assembly_cases import AssemblyKnowledge, load_case_papers
 from app.schemas.artifacts import ArtifactRef
-from app.stages.base import absolute_data_dir, session_paths
+from app.stages.base import absolute_data_dir
 from app.storage.artifacts import resolve_artifact_ref
 
 
-def capture_knowledge(root: str | None = None) -> KnowledgeSnapshot:
-    return KnowledgeSnapshot(
+def load_knowledge(root: str | None = None) -> AssemblyKnowledge:
+    return AssemblyKnowledge(
         papers=load_case_papers(root), software=capture_software_knowledge()
     )
 
 
-def frozen_knowledge(state: Any) -> KnowledgeSnapshot:
-    if not state.get("data_dir"):
-        return capture_knowledge()
-    paths = session_paths(state)
-    if paths.frozen_inputs_path.exists():
-        from app.storage.frozen_inputs import validate_frozen_inputs
-
-        bundle = validate_frozen_inputs(paths)
-        if "assembly_knowledge" not in bundle.marker.files:
-            raise ValueError(
-                "Assembly v5 requires a new frozen run with assembly knowledge"
-            )
-        return KnowledgeSnapshot.model_validate_json(
-            paths.assembly_knowledge_path.read_bytes()
-        )
-    if ((state.get("stage_seeds") or {}).get("assembly") or {}).get("case_source"):
-        raise ValueError("case consumption requires frozen session inputs")
-    # Standalone domain diagnostics have no run to freeze; no literature is read.
-    return capture_knowledge()
+def current_knowledge(state: Any) -> AssemblyKnowledge:
+    seed = (state.get("stage_seeds") or {}).get("assembly") or {}
+    return load_knowledge(seed.get("case_source"))
 
 
 def initial_material_query(state: Any, assembly: Mapping[str, Any]) -> dict[str, Any]:

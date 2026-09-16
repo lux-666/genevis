@@ -624,15 +624,15 @@ class InputProfilerTests(unittest.TestCase):
             )
             prompt_payload = json.loads(model.messages[1]["content"])
             self.assertEqual(
-                prompt_payload["data_profile"]["read_qc_summary"]["n50"],
+                prompt_payload["facts"]["reads"]["read_n50"]["value"],
                 12345,
             )
             self.assertEqual(
-                prompt_payload["data_profile"]["genome_survey"]["confidence"],
+                prompt_payload["facts"]["genome"]["estimate_confidence"],
                 "high",
             )
             self.assertEqual(
-                prompt_payload["data_profile"]["evidence_status"],
+                prompt_payload["evidence_status"],
                 {"read_qc": "available", "genome_survey": "available"},
             )
             self.assertEqual(
@@ -689,15 +689,13 @@ class InputProfilerTests(unittest.TestCase):
                 assembly_cursor,
                 {"rules": {}},
             )
-            self.assertIsNone(prompt_payload["data_profile"]["read_qc_summary"])
-            self.assertIsNone(
-                prompt_payload["data_profile"]["genome_survey"]["estimates"]
-            )
+            self.assertNotIn("read_n50", prompt_payload["facts"]["reads"])
+            self.assertNotIn("estimate_confidence", prompt_payload["facts"]["genome"])
             self.assertEqual(
-                prompt_payload["data_profile"]["evidence_status"],
+                prompt_payload["evidence_status"],
                 {"read_qc": "unavailable", "genome_survey": "unavailable"},
             )
-            self.assertIn("evidence_status", prompt_payload["data_profile"])
+            self.assertIn("evidence_status", prompt_payload)
 
     def test_deferred_mixed_inputs_reach_method_recommender(self):
         class FakeModel:

@@ -1,13 +1,15 @@
 # Assembly Method and Route Advice
 
 Recommend a useful first method for the sample, available reads and output
-objective. Read material_context, available data_profile evidence,
+objective. Read material_context, canonical facts and evidence_status,
 knowledge_evidence and method_capabilities together. Choose only an allowed
 method and its compatible route/read type. Reference software need not be an
 executable candidate. HiFi availability alone does not select hifiasm.
 
-Use material-matched cases across tools and platforms, preserving their source
-settings, execution status, route roles, results and limitations. A highly
+Use material-matched cases across tools and platforms: method identity, material,
+execution status, route roles, outcomes, match differences and limitations.
+Source settings and explanations belong to the later parameter request, not this
+method-choice view. A highly
 matched NextDenovo case can support recommending NextDenovo, or inform the
 problem interpretation while recommending another assembler. Use software
 mechanisms and domain knowledge when cases are sparse. Controlled same-condition

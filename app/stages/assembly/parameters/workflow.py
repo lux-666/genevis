@@ -221,8 +221,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 expected_method_id=method_name,
             )
             catalog = initial_chain.catalog
-            basis_snapshot = dict(initial_chain.basis_snapshot)
-            basis_ref = initial_chain.manifest.refs.basis_snapshot_ref
             facts = initial_chain.input_snapshot.facts
             hydrated_history = tuple(
                 hydrate_parameter_attempt(
@@ -280,7 +278,16 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         return _fail_update(state, f"Assembly input snapshot persistence failed: {exc}")
 
     try:
-        if task == "recommend_initial":
+        recovered_basis = recover_artifact(
+            state,
+            recommendation_id,
+            "basis_snapshot.json",
+            expected_type=ASSEMBLY_PARAMETER_BASIS,
+            method_name="assembly.parameter_recommender",
+        )
+        if recovered_basis is not None:
+            basis_ref, basis_snapshot = recovered_basis
+        else:
             basis_snapshot = build_parameter_basis_snapshot(
                 state=state,
                 method_id=catalog.method_id,

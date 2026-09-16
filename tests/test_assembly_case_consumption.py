@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 import pytest
 from pydantic import ValidationError
@@ -12,14 +13,20 @@ from app.domains.assembly.software_knowledge import capture_software_knowledge
 from app.domains.parameter_recommendation.resolution import resolve_parameters
 from app.knowledge.assembly_cases import (
     AssemblyCase,
+    AssemblyKnowledge,
     CasePaper,
-    KnowledgeSnapshot,
     Observation,
     SourceMethod,
+    json_size,
     load_case_papers,
 )
-from app.knowledge.assembly_retrieval import retrieve_assembly_cases
-from app.knowledge.assembly_runtime import frozen_knowledge, initial_material_query
+from app.knowledge.assembly_retrieval import (
+    project_assembly_evidence,
+    project_method_choice_case,
+    project_parameter_case,
+    retrieve_assembly_cases,
+)
+from app.knowledge.assembly_runtime import current_knowledge, initial_material_query
 from app.knowledge.v5_projection import project_paper
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 from app.llm.parameters.assembly.request import build_parameter_request_dto
@@ -32,7 +39,6 @@ from app.stages.assembly.nodes import infer_input_profile, resolve_extended_inpu
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.storage.frozen_inputs import (
-    FrozenInputIntegrityError,
     freeze_session_inputs,
     prepare_session_inputs,
     validate_frozen_inputs,
@@ -40,6 +46,7 @@ from app.storage.frozen_inputs import (
 from tests import test_frozen_inputs as frozen_fixtures
 from tests import test_parameter_resolution_validation as resolver_fixtures
 from tests import test_phase8_slice1 as route_fixtures
+from tests import test_phase10_parameter_catalog as attempt_fixtures
 
 TARGET = "assembly.candidate.hifiasm"
 
@@ -72,16 +79,16 @@ def paper(
                 execution_status="performed",
                 route_roles=("alternative",),
                 content={
-                    "background": "repeat-rich diploid genome",
-                    "result": "assembly outcome, not parameter effect",
+                    "action": "repeat-rich diploid genome assembly",
+                    "notes": ["assembly outcome, not parameter effect"],
                 },
             ),
         ),
     )
 
 
-def snapshot() -> KnowledgeSnapshot:
-    return KnowledgeSnapshot(
+def snapshot() -> AssemblyKnowledge:
+    return AssemblyKnowledge(
         software=capture_software_knowledge(),
         papers=(
             paper("nd", "NextDenovo", 420e6, settings=("read_cutoff = 10000",)),
@@ -99,8 +106,32 @@ def query() -> dict:
     }
 
 
-def test_cross_method_case_and_native_config_explanation_survive_real_messages():
+@pytest.mark.parametrize(
+    "source_settings, expected_explanations",
+    [
+        (("read_cutoff = 10000",), {"read_cutoff"}),
+        (
+            ("read_cutoff = 10000", "nextgraph_a = 2"),
+            {"read_cutoff", "nextgraph_a"},
+        ),
+        (
+            ("read_cutoff = 10000", "unrecognized_option = 2"),
+            {"read_cutoff"},
+        ),
+    ],
+)
+def test_cross_method_case_and_native_config_explanation_survive_real_messages(
+    source_settings, expected_explanations
+):
     corpus = snapshot()
+    corpus = corpus.model_copy(
+        update={
+            "papers": (
+                paper("nd", "NextDenovo", 420e6, settings=source_settings),
+                corpus.papers[1],
+            )
+        }
+    )
     for purpose in ("method_choice", "parameters"):
         result = retrieve_assembly_cases(
             corpus, query(), purpose=purpose, selected_method=TARGET
@@ -143,7 +174,33 @@ def test_cross_method_case_and_native_config_explanation_survive_real_messages()
     assert "/private/current" not in text
     assert "retrieval_trace" not in text and "knowledge_sha256" not in text
     assert json.loads(text) == dto
-    assert dto["knowledge_evidence"] == basis["knowledge_evidence"]
+    model_case = dto["knowledge_evidence"]["cases"][0]
+    audit_case = basis["knowledge_evidence"]["cases"][0]
+    assert model_case["relation"] == "cross_method"
+    assert model_case["target_method"] == "hifiasm"
+    source = model_case["source_method"]
+    assert source["settings"] == list(source_settings)
+    assert set(source["setting_explanations"]["settings"]) == expected_explanations
+    assert set(audit_case["setting_explanations"]["settings"]) == expected_explanations
+    # Unused NextDenovo descriptions stay out of the rendered request, even
+    # though the internal software catalog contains them. The target catalog
+    # remains separate and is not reduced to historical case settings.
+    for native, spec in corpus.software["assembly.candidate.nextdenovo"][
+        "parameters"
+    ].items():
+        if native not in expected_explanations:
+            assert spec["meaning"] not in json.dumps(source)
+    assert "NextDenovo work directory." not in text
+    assert "Input FOFN path used in run.cfg." not in text
+    assert expected_explanations.isdisjoint(dto["adjustable_parameters"])
+    assert "purge_level" in dto["adjustable_parameters"]
+    assert "method" not in model_case and "content" not in model_case
+    assert audit_case["content"] == corpus.papers[0].cases[0].content
+    assert audit_case["observations"] == [observation(420e6).model_dump(mode="json")]
+    assert "do not directly map" in text
+    assert "facts" not in dto["material_context"]
+    assert "observations" not in dto["material_context"]
+    assert "read_binding" not in dto["material_context"]
     with pytest.raises(ValueError, match="not cataloged as L2-adjustable"):
         resolve_parameters(
             cat,
@@ -165,13 +222,17 @@ def test_cross_method_case_and_native_config_explanation_survive_real_messages()
 def test_missing_and_zero_measurements_defaults_and_whole_card_budgets():
     corpus = snapshot()
     assert (
-        retrieve_assembly_cases(corpus, {}, purpose="parameters")["evidence"]["cases"]
+        retrieve_assembly_cases(
+            corpus, {}, purpose="parameters", selected_method=TARGET
+        )["evidence"]["cases"]
         == []
     )
     assert observation(0).value == 0
     with pytest.raises(ValidationError):
         observation(float("nan"))
-    tiny = retrieve_assembly_cases(corpus, query(), purpose="parameters", max_chars=256)
+    tiny = retrieve_assembly_cases(
+        corpus, query(), purpose="parameters", selected_method=TARGET, max_chars=256
+    )
     assert tiny["evidence"]["cases"] == []
     assert {r["decision"] for r in tiny["trace"]} == {"whole_case_budget"}
     missing_settings = paper("m", "NextDenovo", 420e6)
@@ -182,6 +243,206 @@ def test_missing_and_zero_measurements_defaults_and_whole_card_budgets():
         selected_method=TARGET,
     )
     assert result["evidence"]["cases"][0]["method"]["settings"] == []
+
+
+def test_task_projections_allowlist_fields_without_mutating_full_evidence():
+    case = retrieve_assembly_cases(
+        snapshot(), query(), purpose="parameters", selected_method=TARGET
+    )["evidence"]["cases"][0]
+    case["method"]["version"] = "2.5"
+    case["method"]["mode"] = "ont"
+    case["route_roles"] = ["primary", "benchmark"]
+    case["content"].update(
+        samples=[{"name": "species A", "context": ["diploid", "2n=34"]}],
+        sample_context="diploid",
+        outcomes=[
+            {
+                "metric": "BUSCO",
+                "value": "98%",
+                "objects": ["final scaffold"],
+                "basis": "combined",
+                "context": ["after scaffolding"],
+                "assessment": "BUSCO v5, lineage A",
+                "evidence": ["AUDIT_ONLY_LOCATOR"],
+            }
+        ],
+        gaps=[
+            {
+                "kind": "conflict",
+                "issue": "version conflict",
+                "leads": ["AUDIT_ONLY_LEAD"],
+            }
+        ],
+        normalization_notes={"coverage": "combined coverage cannot be split"},
+        evidence=["AUDIT_ONLY_EVIDENCE"],
+    )
+    case["future_audit_field"] = "AUDIT_ONLY_FUTURE"
+    case["content"]["future_field"] = "AUDIT_ONLY_CONTENT"
+    case["setting_explanations"]["settings"]["read_cutoff"]["future_metadata"] = (
+        "AUDIT_ONLY_SEMANTICS"
+    )
+    original = deepcopy(case)
+    method = project_method_choice_case(case)
+    parameter = project_parameter_case(case, target_method="hifiasm")
+    assert case == original
+    assert set(method) == {
+        "case_id",
+        "method",
+        "material",
+        "execution_status",
+        "route_role",
+        "outcomes",
+        "match",
+        "limitations",
+    }
+    assert set(parameter) == (set(method) - {"method"}) | {
+        "source_method",
+        "target_method",
+        "relation",
+    }
+    assert method["material"]["sample_traits"] == ["species A", "diploid", "2n=34"]
+    assert method["material"]["observations"][0]["value"] == 420e6
+    assert method["route_role"] == ["primary", "benchmark"]
+    assert method["method"] == {"tool": "NextDenovo", "version": "2.5", "mode": "ont"}
+    assert "settings" not in method["method"]
+    assert parameter["relation"] == "cross_method"
+    assert "Minimum read length cutoff" in json.dumps(parameter)
+    assert parameter["outcomes"] == method["outcomes"]
+    assert method["outcomes"][0]["basis"] == "combined"
+    assert method["outcomes"][0]["assessment"] == "BUSCO v5, lineage A"
+    assert "version conflict" in method["limitations"]
+    assert "AUDIT_ONLY" not in json.dumps([method, parameter])
+    assert (
+        project_parameter_case(case, target_method="nextdenovo")["relation"]
+        == "same_tool"
+    )
+    with pytest.raises(ValueError, match="target tool"):
+        project_parameter_case(case, target_method="")
+    parameter["outcomes"][0]["objects"].append("mutated")
+    parameter["source_method"]["settings"].append("mutated")
+    assert case == original
+    case["route_roles"] = []
+    case["method"]["settings"] = []
+    assert project_method_choice_case(case)["route_role"] == []
+    assert (
+        project_parameter_case(case, target_method="hifiasm")["source_method"][
+            "settings"
+        ]
+        == []
+    )
+
+
+def test_projection_keeps_comparable_and_grouped_measurement_semantics():
+    case = retrieve_assembly_cases(snapshot(), query(), purpose="method_choice")[
+        "evidence"
+    ]["cases"][0]
+    case["observations"][0].update(
+        name="coverage",
+        value=0,
+        unit="x",
+        platform="ont",
+        state="filtered",
+        origin="derived",
+        basis="filtered reads / estimated genome size",
+    )
+    case["observations"].append(
+        {
+            **case["observations"][0],
+            "value": 50,
+            "origin": "reported",
+            "state": "raw",
+        }
+    )
+    case["content"]["reported_measurements"] = [
+        {
+            "metric": "total coverage",
+            "value": "100x",
+            "objects": ["HiFi", "ONT"],
+            "basis": "combined",
+            "context": ["Cannot assign to each platform"],
+            "evidence": ["AUDIT_ONLY"],
+        }
+    ]
+    case["execution_status"] = "described_only"
+    view = project_method_choice_case(case)
+    assert view["execution_status"] == "described_only"
+    grouped, derived, reported = view["material"]["observations"]
+    assert grouped["basis"] == "combined" and grouped["objects"] == ["HiFi", "ONT"]
+    assert "evidence" not in grouped
+    assert derived["value"] == 0 and derived["state"] == "filtered"
+    assert derived["platform"] == "ont" and derived["origin"] == "derived"
+    assert reported["state"] == "raw" and reported["origin"] == "reported"
+
+
+def test_measurements_share_objects_without_losing_per_metric_qualifications():
+    case = retrieve_assembly_cases(snapshot(), query(), purpose="method_choice")[
+        "evidence"
+    ]["cases"][0]
+    label = "haplotype A; assembly; species A; individual; study"
+    common = {"objects": [label], "basis": "each"}
+    long_qualification = "Exact assessment scope. " * 30
+    case["content"].update(
+        samples=[{"name": "species A", "context": ["diploid"]}],
+        outcomes=[
+            {**common, "metric": "QV", "value": "55", "assessment": long_qualification},
+            {
+                **common,
+                "metric": "QV",
+                "value": "54",
+                "assessment": "different evaluator",
+            },
+            {**common, "metric": "N50", "value": "10 Mb", "context": ["final output"]},
+            {**common, "metric": "N50", "value": "10 Mb", "context": ["final output"]},
+            {**common, "metric": "N50", "value": "9 Mb", "basis": "combined"},
+        ],
+        gaps=[
+            {"kind": "scope_limit", "issue": "Downstream annotation inventory " * 50},
+            {"kind": "conflict", "issue": long_qualification},
+        ],
+    )
+    original = deepcopy(case)
+    view = project_method_choice_case(case)
+    first, combined = view["outcomes"]
+    assert first["objects"] == ["haplotype A; assembly; individual; study"]
+    assert "assessment" not in first
+    assert first["metrics"] == [
+        {"metric": "QV", "value": "55", "assessment": long_qualification},
+        {"metric": "QV", "value": "54", "assessment": "different evaluator"},
+        {"metric": "N50", "value": "10 Mb", "context": ["final output"]},
+    ]
+    assert combined["basis"] == "combined"
+    assert long_qualification in view["limitations"]
+    assert "Extraction has explicit scope limits" in json.dumps(view)
+    assert "Downstream annotation inventory" not in json.dumps(view)
+    assert case == original
+    # Grouped samples must retain the per-object sample identity.
+    case["content"]["samples"].append({"name": "species B", "context": []})
+    assert project_method_choice_case(case)["outcomes"][0]["objects"] == [label]
+
+
+@pytest.mark.parametrize("purpose", ["method_choice", "parameters"])
+def test_budget_counts_whole_model_views_not_full_audit_records(purpose):
+    corpus = snapshot().model_copy(update={"papers": (snapshot().papers[0],)})
+    corpus.papers[0].cases[0].content["evidence"] = ["SOURCE_LOCATOR" * 5000]
+    before = corpus.model_dump(mode="json")
+    retrieved = retrieve_assembly_cases(
+        corpus, query(), purpose=purpose, selected_method=TARGET
+    )
+    evidence = retrieved["evidence"]
+    projected = project_assembly_evidence(evidence)
+    budget = json_size(projected)
+    assert json_size(evidence) > 32000
+    assert budget < 32000
+    exact = retrieve_assembly_cases(
+        corpus, query(), purpose=purpose, selected_method=TARGET, max_chars=budget
+    )
+    assert exact["evidence"] == evidence
+    too_small = retrieve_assembly_cases(
+        corpus, query(), purpose=purpose, selected_method=TARGET, max_chars=budget - 1
+    )
+    assert too_small["evidence"]["cases"] == []
+    assert too_small["trace"][0]["decision"] == "whole_case_budget"
+    assert corpus.model_dump(mode="json") == before
 
 
 def test_same_configuration_does_not_count_as_independent_evidence():
@@ -255,7 +516,7 @@ def test_case_loader_rejects_old_versions_duplicates_and_symlinks(tmp_path):
     with pytest.raises(ValueError):
         load_case_papers(tmp_path)
     with pytest.raises(ValueError):
-        KnowledgeSnapshot(
+        AssemblyKnowledge(
             software={},
             papers=(paper("p", "NextDenovo", 1), paper("p", "NextDenovo", 2)),
         )
@@ -263,8 +524,8 @@ def test_case_loader_rejects_old_versions_duplicates_and_symlinks(tmp_path):
         RunConfig.model_validate({"assembly": {"casepack": {"root": "/old"}}})
 
 
-def test_real_freeze_captures_contents_and_survives_source_removal(
-    tmp_path, monkeypatch
+def test_freeze_does_not_copy_or_require_case_directory_and_live_reads_refresh(
+    tmp_path,
 ):
     paths, manifest, config, envs = frozen_fixtures.FrozenInputTests()._fixture(
         tmp_path
@@ -294,22 +555,42 @@ def test_real_freeze_captures_contents_and_survives_source_removal(
     bundle = freeze_session_inputs(
         paths, prepared_inputs=prepared, config_path=envs, probe_environments=False
     )
-    assert bundle.file_sha256("assembly_knowledge")
+    assert set(bundle.marker.files) == {
+        "input_manifest",
+        "run_config",
+        "dependency_manifest",
+    }
+    assert not (paths.control_dir / "assembly_knowledge.json").exists()
     assert validate_frozen_inputs(paths).run_config.assembly.case_source == str(source)
-    state = {"data_dir": str(paths.run_dir), "session_id": paths.session_id}
+    from app.entrypoints.run import _stage_seeds_from_run_config
 
-    def fail_live_capture():
-        raise AssertionError("frozen runtime reopened live software knowledge")
-
-    monkeypatch.setattr(
-        "app.knowledge.assembly_runtime.capture_software_knowledge", fail_live_capture
+    state = {
+        "data_dir": str(paths.run_dir),
+        "session_id": paths.session_id,
+        "stage_seeds": _stage_seeds_from_run_config(
+            bundle.run_config, shared_parameters=None
+        ),
+    }
+    with pytest.raises(FileNotFoundError):
+        current_knowledge(state)
+    source.mkdir()
+    file.write_text(
+        paper(
+            "nd", "NextDenovo", 420e6, settings=("read_cutoff = 8000",)
+        ).model_dump_json()
     )
-    assert frozen_knowledge(state).papers[0].cases[0].method.settings == (
-        "read_cutoff = 10000",
+    assert current_knowledge(state).papers[0].cases[0].method.settings == (
+        "read_cutoff = 8000",
     )
-    paths.assembly_knowledge_path.write_text("{}")
-    with pytest.raises(FrozenInputIntegrityError, match="hash mismatch"):
-        validate_frozen_inputs(paths)
+    file.write_text(
+        paper(
+            "nd", "NextDenovo", 420e6, settings=("read_cutoff = 9000",)
+        ).model_dump_json()
+    )
+    assert current_knowledge(state).papers[0].cases[0].method.settings == (
+        "read_cutoff = 9000",
+    )
+    assert not (paths.control_dir / "assembly_knowledge.json").exists()
 
 
 def test_method_request_persists_shared_query_and_cross_method_basis(
@@ -317,7 +598,7 @@ def test_method_request_persists_shared_query_and_cross_method_basis(
 ):
     corpus = snapshot()
     monkeypatch.setattr(
-        "app.knowledge.assembly_runtime.frozen_knowledge", lambda _: corpus
+        "app.knowledge.assembly_runtime.current_knowledge", lambda _: corpus
     )
     reads = tmp_path / "reads.fastq"
     reads.write_text("@r\nACGT\n+\n!!!!\n")
@@ -356,7 +637,9 @@ def test_method_request_persists_shared_query_and_cross_method_basis(
     assembly = update["stage_outputs"]["assembly"]
     payload = json.loads(captured[1]["content"])
     assert payload["knowledge_evidence"]["cases"][0]["method"]["tool"] == "NextDenovo"
-    assert "read_cutoff = 10000" in captured[1]["content"]
+    assert "read_cutoff = 10000" not in captured[1]["content"]
+    assert "setting_explanations" not in captured[1]["content"]
+    assert "content" not in payload["knowledge_evidence"]["cases"][0]
     assert str(tmp_path) not in captured[1]["content"]
     assert "retrieval_trace" not in payload
     state = {**resolved, **update}
@@ -370,12 +653,84 @@ def test_method_request_persists_shared_query_and_cross_method_basis(
         state, assembly["assembly_method_model_request_ref"]
     )
     record = json.loads(request_path.read_text())
-    assert record["retrieval_trace"] and record["knowledge_sha256"]
+    assert record["retrieval_trace"] and "knowledge_sha256" not in record
     assert record["consumer_version"] == 5
+    assert record["knowledge_evidence"]["cases"][0]["method"]["settings"] == [
+        "read_cutoff = 10000"
+    ]
+    assert (
+        record["knowledge_evidence"]["cases"][0]["content"]
+        == corpus.papers[0].cases[0].content
+    )
     assert (
         assembly["recommended_assembly_selection"]["primary_method"]
         == "assembly.candidate.nextdenovo"
     )
+    original_request = request_path.read_bytes()
+    monkeypatch.setattr(
+        "app.knowledge.assembly_runtime.current_knowledge",
+        lambda _: pytest.fail("same recorded method request reloaded live cases"),
+    )
+    resumed = infer_input_profile(resolved)
+    assert (
+        resumed["stage_outputs"]["assembly"]["assembly_method_model_request_ref"]
+        == assembly["assembly_method_model_request_ref"]
+    )
+    assert request_path.read_bytes() == original_request
+
+
+def test_parameter_retry_reads_live_cases_but_recovery_keeps_recorded_request(
+    tmp_path, monkeypatch
+):
+    from app.stages.assembly.parameters.workflow import (
+        execution_retry_gate,
+        recommend_assembly_parameters,
+    )
+
+    state = attempt_fixtures.ParameterRecommendationNodeTests()._state(str(tmp_path))
+    attempt = attempt_fixtures._persist_parameter_attempt(
+        state,
+        method_id="assembly.candidate.hifiasm_ont",
+        recommended_params={"purge_level": 1},
+        status="execution_failed",
+        execution_result={"return_code": 17, "status": "failed"},
+    )
+    state["stage_outputs"]["assembly"].update(
+        status="failed", current_parameter_attempt_id=0, parameter_attempts=[attempt]
+    )
+    source = tmp_path / "live-cases"
+    source.mkdir()
+    case_file = source / "case.json"
+    case_file.write_text(
+        paper(
+            "nd", "NextDenovo", 420e6, settings=("read_cutoff = 10000",)
+        ).model_dump_json()
+    )
+    state["stage_seeds"]["assembly"] = {"case_source": str(source)}
+    state["stage_outputs"] = execution_retry_gate(state)["stage_outputs"]
+    model = attempt_fixtures._FakeModel(
+        attempt_fixtures._complete_hifiasm_ont_response(purge_level=2)
+    )
+    monkeypatch.setattr(
+        "app.llm.parameters.assembly.recommender.build_chat_model", lambda: model
+    )
+    # The old attempt's fixture has no cases; new retry must not inherit it.
+    result = recommend_assembly_parameters(state)
+    assert result["stage_outputs"]["assembly"]["status"] == "blocked_human"
+    original_prompt = model.messages[1]["content"]
+    assert "read_cutoff = 10000" in original_prompt
+    case_file.unlink()
+    monkeypatch.setattr(
+        "app.knowledge.assembly_runtime.current_knowledge",
+        lambda _: pytest.fail("same attempt reopened case directory"),
+    )
+    monkeypatch.setattr(
+        "app.stages.assembly.parameters.basis.current_knowledge",
+        lambda _: pytest.fail("same attempt reopened case directory"),
+    )
+    resumed = recommend_assembly_parameters(state)
+    assert resumed["stage_outputs"]["assembly"]["status"] == "blocked_human"
+    assert model.messages[1]["content"] == original_prompt
 
 
 def test_explicit_graph_projection_retains_settings_and_combined_measurements():
@@ -440,3 +795,16 @@ def test_explicit_graph_projection_retains_settings_and_combined_measurements():
     )
     assert result.cases[0].observations == ()
     assert result.cases[0].content["reported_measurements"][0]["basis"] == "combined"
+    summary = result.cases[0].content
+    assert isinstance(summary["inputs"][0]["material"], str)
+    assert all(isinstance(s, str) for s in summary["outputs"])
+    assert "measurement_materials" not in summary and "assessments" not in summary
+    assert "state_ids" not in summary["reported_measurements"][0]
+    for bad_content in (
+        {**summary, "measurement_materials": graph["states"]},
+        {**summary, "inputs": [{"role": "target", "material": graph["states"][0]}]},
+    ):
+        with pytest.raises(ValidationError):
+            AssemblyCase.model_validate(
+                {**result.cases[0].model_dump(), "content": bad_content}
+            )

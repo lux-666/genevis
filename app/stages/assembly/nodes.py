@@ -1952,8 +1952,24 @@ def _recommend_route_with_decision_boundary(
     ctx: dict[str, Any],
 ) -> RouteRecommendation:
     retrieval_audit: dict[str, Any] = {}
-    prompt_payload = _route_selector_payload(
-        state, assembly_out, ctx, audit=retrieval_audit
+    existing_requests = []
+    control = stage_artifacts_dir(state, "assembly", "control")
+    for record in read_artifact_records(absolute_data_dir(state), state["session_id"]):
+        if record.get("artifact_type") != ASSEMBLY_METHOD_MODEL_REQUEST:
+            continue
+        ref = ArtifactRef.model_validate(
+            {key: record[key] for key in ArtifactRef.model_fields if key in record}
+        )
+        path = resolve_artifact_ref(absolute_data_dir(state), state["session_id"], ref)
+        if path.parent == control:
+            existing_requests.append((ref, json.loads(path.read_text())))
+    if len(existing_requests) > 1:
+        raise ValueError("multiple Assembly method requests for this occurrence")
+    saved = existing_requests[0] if existing_requests else None
+    prompt_payload = (
+        saved[1]["prompt_payload"]
+        if saved
+        else _route_selector_payload(state, assembly_out, ctx, audit=retrieval_audit)
     )
     allowed_actions = list(ctx.get("allowed_actions") or [])
     allowed_methods = list(prompt_payload.get("allowed_methods") or [])
@@ -1966,24 +1982,30 @@ def _recommend_route_with_decision_boundary(
         allowed_actions=allowed_actions,
         allowed_methods=allowed_methods,
     )
-    messages = render_assembly_decision_messages(request)
+    messages = (
+        saved[1]["messages"] if saved else render_assembly_decision_messages(request)
+    )
     try:
-        request_ref = ArtifactRef.model_validate(
-            _write_assembly_json_artifact(
-                state,
-                "method_model_request.json",
-                {
-                    "schema_version": 1,
-                    "kind": request.kind,
-                    "session_id": request.session_id,
-                    "allowed_actions": allowed_actions,
-                    "allowed_methods": allowed_methods,
-                    "prompt_payload": prompt_payload,
-                    **retrieval_audit,
-                    "messages": messages,
-                },
-                artifact_type=ASSEMBLY_METHOD_MODEL_REQUEST,
-                method_name="assembly.method_recommender",
+        request_ref = (
+            saved[0]
+            if saved
+            else ArtifactRef.model_validate(
+                _write_assembly_json_artifact(
+                    state,
+                    "method_model_request.json",
+                    {
+                        "schema_version": 1,
+                        "kind": request.kind,
+                        "session_id": request.session_id,
+                        "allowed_actions": allowed_actions,
+                        "allowed_methods": allowed_methods,
+                        "prompt_payload": prompt_payload,
+                        **retrieval_audit,
+                        "messages": messages,
+                    },
+                    artifact_type=ASSEMBLY_METHOD_MODEL_REQUEST,
+                    method_name="assembly.method_recommender",
+                )
             )
         )
         recovered = _recover_assembly_method_response(state, request_ref)
@@ -2129,69 +2151,37 @@ def _route_selector_payload(
     *,
     audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    stage_outputs = state.get("stage_outputs") or {}
-    read_qc = dict(stage_outputs.get("read_qc") or {})
-    survey = dict(stage_outputs.get("genome_survey") or {})
     evidence_status = _route_selector_evidence_status(state)
-    read_qc_available = evidence_status["read_qc"] == "available"
-    survey_available = evidence_status["genome_survey"] == "available"
-    shared = _shared_parameters(state)
-    species_facts = shared.get("species_facts")
     available_read_types = sorted(_assembly_observed_read_types(assembly_out))
-    data_profile = {
-        "available_inputs": {
-            "ont": bool(assembly_out.get("ont_reads_ref")),
-            "hifi": bool(assembly_out.get("hifi_reads_ref")),
-            "hic": bool(assembly_out.get("hic_reads_ref")),
-        },
-        "platform": assembly_out.get("platform"),
-        "target_level": assembly_out.get("target_level"),
-        "genome_size_prior": assembly_out.get("genome_size_prior"),
-        "resolved_genome_size": assembly_out.get("resolved_genome_size"),
-        "read_qc_summary": (
-            read_qc.get("post_filter_summary") or read_qc.get("summary")
-        )
-        if read_qc_available
-        else None,
-        "genome_survey": {
-            "confidence": survey.get("confidence") if survey_available else None,
-            "estimates": survey.get("estimates") if survey_available else None,
-        },
-        "has_hifi": assembly_out.get("has_hifi"),
-        "has_hic": assembly_out.get("has_hic"),
-        "primary_member_platforms": list(
-            (assembly_out.get("assembly_input_member_platforms") or {}).get(
-                "primary", []
-            )
-        ),
-        "available_read_types": available_read_types,
-        "species_facts": species_facts if isinstance(species_facts, Mapping) else None,
-        "evidence_status": evidence_status,
-    }
     allowed_methods = _assembly_method_candidates(assembly_out)
     from app.domains.assembly.material_query import build_material_query, visible_query
     from app.domains.assembly.software_knowledge import candidate_descriptions
-    from app.knowledge.assembly_cases import snapshot_hash
-    from app.knowledge.assembly_retrieval import retrieve_assembly_cases
-    from app.knowledge.assembly_runtime import frozen_knowledge
+    from app.knowledge.assembly_retrieval import (
+        project_assembly_evidence,
+        retrieve_assembly_cases,
+    )
+    from app.knowledge.assembly_runtime import current_knowledge
 
-    snapshot = frozen_knowledge(state)
+    library = current_knowledge(state)
     query = build_material_query(state, assembly_out)
-    knowledge = retrieve_assembly_cases(snapshot, query, purpose="method_choice")
+    knowledge = retrieve_assembly_cases(library, query, purpose="method_choice")
     if audit is not None:
         audit.update(
             material_query=query,
             retrieval_trace=knowledge["trace"],
-            knowledge_sha256=snapshot_hash(snapshot),
+            knowledge_evidence=knowledge["evidence"],
             consumer_version=5,
         )
     return {
-        "data_profile": data_profile,
+        "facts": query["facts"],
+        "target_level": assembly_out.get("target_level"),
+        "available_read_types": available_read_types,
+        "evidence_status": evidence_status,
         "rules": ctx.get("rules") or {},
-        "knowledge_evidence": knowledge["evidence"],
+        "knowledge_evidence": project_assembly_evidence(knowledge["evidence"]),
         "material_context": visible_query(query),
         "method_capabilities": candidate_descriptions(
-            allowed_methods, snapshot.software
+            allowed_methods, library.software
         ),
         "allowed_actions": ctx.get("allowed_actions") or [],
         "allowed_methods": allowed_methods,
@@ -2203,8 +2193,7 @@ def _route_selector_payload(
             "uncertainty_notes": "list of strings",
         },
         "evidence_rule": (
-            "data_profile.evidence_status is authoritative. Fields paired with "
-            "unavailable evidence are null and must not be inferred or used as "
+            "evidence_status is authoritative. Missing facts must not be inferred as "
             "observations. Return insufficient_data unless the available "
             "evidence supports one route."
         ),

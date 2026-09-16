@@ -38,12 +38,16 @@ def _request_dto(method_id: str = "hifiasm") -> dict:
             "cases": [
                 {
                     "case_id": "paper.1",
-                    "paper": {"doi": "10.example/one"},
-                    "method": {"tool": "NextDenovo", "settings": ["read_cutoff=10000"]},
-                    "content": {"notes": ["Reported parameter rationale."]},
+                    "source_method": {
+                        "tool": "NextDenovo",
+                        "settings": ["read_cutoff=10000"],
+                        "setting_explanations": {"settings": {}, "scope": "unknown"},
+                    },
+                    "target_method": "hifiasm",
+                    "relation": "cross_method",
+                    "limitations": ["Reported parameter rationale."],
                 }
             ],
-            "software_explanations": [],
         },
     }
 

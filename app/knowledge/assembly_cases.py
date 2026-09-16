@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+    with_config,
+)
+from typing_extensions import TypedDict
 
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_CORPUS_BYTES = 64 * 1024 * 1024
@@ -43,6 +50,64 @@ class SourceMethod(Record):
     settings: tuple[str, ...] = ()
 
 
+@with_config(ConfigDict(extra="forbid"))
+class CaseSample(TypedDict):
+    name: str
+    context: list[str]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class CaseInput(TypedDict, total=False):
+    role: str
+    material: str
+    use: str
+
+
+@with_config(ConfigDict(extra="forbid"))
+class CaseMeasurement(TypedDict, total=False):
+    metric: str
+    value: str
+    objects: list[str]
+    basis: str
+    context: list[str]
+    assessment: str
+    evidence: list[str]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class CaseRoute(TypedDict, total=False):
+    name: str
+    role: str
+    selection_reason: str
+
+
+@with_config(ConfigDict(extra="forbid"))
+class CaseGap(TypedDict, total=False):
+    kind: str
+    issue: str
+    evidence: list[str]
+    leads: list[str]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class CaseContent(TypedDict, total=False):
+    action: str
+    condition: str
+    method_label: str
+    samples: list[CaseSample]
+    inputs: list[CaseInput]
+    outputs: list[str]
+    reported_measurements: list[CaseMeasurement]
+    normalization_notes: dict[str, str]
+    sample_context: str
+    outcomes: list[CaseMeasurement]
+    routes: list[CaseRoute]
+    gaps: list[CaseGap]
+    notes: list[str]
+    evidence: list[str]
+    source_limits: list[str]
+
+
 class AssemblyCase(Record):
     case_id: str = Field(min_length=1)
     configuration_id: str = Field(min_length=1)
@@ -52,7 +117,7 @@ class AssemblyCase(Record):
     input_platforms: tuple[str, ...] = ()
     execution_status: Literal["performed", "described_only", "unclear"]
     route_roles: tuple[str, ...] = ()
-    content: dict[str, Any]
+    content: CaseContent
 
 
 class CasePaper(Record):
@@ -73,25 +138,16 @@ class CasePaper(Record):
         return self
 
 
-class KnowledgeSnapshot(Record):
-    schema_version: Literal[5] = 5
+class AssemblyKnowledge(Record):
     papers: tuple[CasePaper, ...] = ()
     software: dict[str, Any]
 
     @model_validator(mode="after")
-    def unique_papers(self) -> KnowledgeSnapshot:
+    def unique_papers(self) -> AssemblyKnowledge:
         ids = [p.paper_id for p in self.papers]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate paper identity")
         return self
-
-
-def snapshot_bytes(snapshot: KnowledgeSnapshot) -> bytes:
-    return (snapshot.model_dump_json(indent=2) + "\n").encode()
-
-
-def snapshot_hash(snapshot: KnowledgeSnapshot) -> str:
-    return hashlib.sha256(snapshot_bytes(snapshot)).hexdigest()
 
 
 def load_case_papers(root: str | Path | None) -> tuple[CasePaper, ...]:

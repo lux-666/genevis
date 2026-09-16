@@ -125,6 +125,7 @@ class AssemblyStageCursor(TypedDict, total=False):
     assembly_route: AssemblyRoute
     target_level: AssemblyTargetLevel
     method_route_advisor: Literal["advisor", "deterministic_baseline"]
+    case_source: str
     parameter_advisor: Literal["advisor", "deterministic_baseline"]
     explicit_route: Literal["cyclone", "ont", "hifi"] | None
     selected_route: Literal["cyclone", "ont", "hifi"]

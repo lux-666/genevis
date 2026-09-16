@@ -201,21 +201,21 @@ class _AssemblyMethodModel:
 
     def invoke(self, _messages: list[dict[str, str]]) -> str:
         request = json.loads(_messages[1]["content"])
-        profile = request["data_profile"]
+        profile = request["facts"]["asset_presence"]
         allowed_methods = request["allowed_methods"]
-        platforms = profile.get("primary_member_platforms") or []
-        platform = profile.get("platform")
+        platforms = request["material_context"].get("platforms") or []
+        platform = next(iter(platforms), None)
         if (
             profile.get("has_hifi")
             or profile.get("hifi_reads_ref")
             or platform == "pacbio_hifi"
-            or "pacbio_hifi" in platforms
+            or "hifi" in platforms
         ):
             route = "hifi"
             read_type = "pacbio_hifi"
             preferred = "assembly.candidate.hifiasm"
         elif (
-            profile.get("ont_reads_ref")
+            profile.get("has_ont")
             or platform in {"ont", "ont_raw", "ont_hq"}
             or any(item in {"ont", "ont_raw", "ont_hq"} for item in platforms)
         ):
@@ -258,9 +258,10 @@ class AssemblyDescriptorTests(unittest.TestCase):
             {},
         )
 
-        profile = payload["data_profile"]
-        self.assertEqual(profile["available_read_types"], ["ont_raw", "pacbio_hifi"])
-        self.assertEqual(profile["species_facts"], {"scientific_name": "Solea ovata"})
+        self.assertEqual(payload["available_read_types"], ["ont_raw", "pacbio_hifi"])
+        self.assertEqual(
+            payload["facts"]["species"], {"scientific_name": "Solea ovata"}
+        )
 
     def test_descriptor_registry_loads_assembly_candidates(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
