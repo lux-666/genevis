@@ -187,7 +187,7 @@ gene-agent inspect \
 
 ## Assembly v5 case consumption
 
-Assembly 方法推荐和参数推荐共用一份冻结的案例与软件知识。
+Assembly 每次新方法推荐和参数推荐（含重试）直接读取配置的活动案例目录。
 配置 `assembly.case_source` 指向包含 `recommendation-cases.v1` JSON 的目录
 （相对路径以配置文件为基准）；不配置时只用当前材料与软件知识，不回退旧案例库。
 来源方法、原生参数、材料状态和结果限定均保留，跨方法案例可参与推理，
@@ -203,7 +203,8 @@ python scripts/build_assembly_cases.py \
 ```
 
 该命令不修改原图，不覆盖不同内容，不将投影视为论文重新审核。
-新运行在输入准备时捕获内容，冻结至 `control/assembly_knowledge.json`；
-恢复和重试不重新读取外部案例目录。旧 Assembly 冻结运行须新建运行，
+不创建运行级案例快照，也不把完整 v5 实体复制进 case。
+每次推荐只记录实际选中的紧凑证据；恢复同一次已记录请求不改写历史内容。
+case 保留方法原生参数、材料/结果对象、评价口径、来源定位和缺口。
 旧 casepack/V1/pilot 配置不兼容。Hi-C、T2T 的扩展不在本次范围。
 精确合同见 [Assembly case consumption](docs/architecture/reference/casepack.md)。

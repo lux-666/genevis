@@ -15,6 +15,22 @@ def _markdown_files() -> list[Path]:
 
 
 class DocumentationContractTests(unittest.TestCase):
+    def test_assembly_case_contract_names_compact_live_boundary(self) -> None:
+        contract = (
+            PROJECT_ROOT / "docs/architecture/reference/casepack.md"
+        ).read_text()
+        for required in (
+            "Live directory, model projection and ownership",
+            "duplicate representations",
+            "CaseContent",
+            "intentional symmetry",
+            "test_assembly_case_consumption.py",
+            "project_method_choice_case()",
+            "project_parameter_case()",
+            "check_assembly_projection.sh",
+        ):
+            self.assertIn(required, contract)
+
     def test_markdown_relative_links_resolve(self) -> None:
         broken: list[str] = []
         for source in _markdown_files():

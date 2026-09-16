@@ -484,13 +484,15 @@ Run snapshots preserve the exact basis used by parameter recommenders:
 - retry limits and approval policy;
 - relevant tool and reference-data provenance.
 
-Retries derive from the initial immutable recommendation chain and must not
-silently reload a changed catalog, policy, or evidence set. A stage may either
-share the initial basis ref or publish an attempt-scoped copy derived from that
-verified basis: Assembly currently shares its initial ref, while AutoHiC writes
-a basis artifact for each recommendation ID after loading retry inputs from the
-initial chain. Attempt-scoped copies must remain content-consistent with the
-initial immutable basis except for explicitly modeled retry context.
+Retries derive executable catalogs, material facts and policy from their verified
+initial chain. Assembly rereads the live case directory and software explanations
+for each new recommendation, including retries, and records only selected
+evidence per attempt; it does not create a run-level corpus snapshot. Recovery of
+the same recorded attempt preserves that attempt's request. AutoHiC retains its
+initial basis semantics and writes an attempt-scoped copy. See the
+[Assembly case contract](casepack.md#live-directory-model-projection-and-ownership)
+for the live-library boundary; this does not authorize changing approved
+parameters or executable catalogs.
 
 Cross-run physical deduplication is an implementation detail only. Runtime code
 must not replace a session-relative snapshot ref with a global hash-only ref.

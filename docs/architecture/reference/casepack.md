@@ -65,6 +65,13 @@ or reconstructing the full v5 graph. The explicit offline projection builds
 the new exchange from existing graphs. It does not merely relabel pilot/legacy
 JSON or remove method/settings content to satisfy the consumer.
 
+Case content is an allowlisted recommendation summary, not a copy of v5
+entities. Preserve sample background, input roles and processing scope, source
+settings, evaluated-object labels, measurement basis, assessment conditions,
+limitations and source locators. Do not embed whole states, steps, methods or
+source registries inside inputs, assessments or outcomes. The original graph
+remains the detailed source of truth.
+
 ## Current material query
 
 One Assembly material query is built before method recommendation and reused for
@@ -107,10 +114,11 @@ BM25), structured relative-distance scores, and weighted reciprocal-rank fusion
 unit, platform and processing state. The parameter purpose adds a small same-tool
 bonus (0.002); repeated tools receive a modest diversity penalty (0.15).
 Defaults are five whole cases, two per independent source, and 32,000 compact
-JSON characters including settings and explanations. Shared configurations are
+JSON characters of the task-specific LLM view, including settings and explanations
+only for parameter recommendation. Shared configurations are
 deduplicated within a paper. These are uncalibrated retrieval heuristics.
 
-The service has two purpose-specific selections over the same frozen corpus:
+The service has two purpose-specific selections over the configured live directory:
 
 | Purpose | Evidence selection |
 |---|---|
@@ -128,8 +136,9 @@ roles. Described-only actions cannot stand in for performed results. Failed or
 unselected outcomes are context for judgement rather than automatically discarded
 negative examples.
 
-Budget the complete case together with its settings, qualifications and necessary
-software explanations. Deduplicate shared configurations and reused data, cap
+Budget each whole task-specific case view together with its qualifications and
+necessary software explanations; never truncate a setting or outcome to fit.
+Full audit records are not prompt-budgeted. Deduplicate shared configurations and reused data, cap
 concentration by paper, and consider method diversity among relevant candidates.
 Do not require equal software quotas or fill the budget with unsupported matches.
 Allow no literature matches while still supplying the current facts and software
@@ -151,9 +160,17 @@ CLI flags and configuration keys both require support. Unknown semantics remain
 unknown rather than receiving a fabricated equivalence.
 
 Attach compact method descriptions at method choice. At parameter recommendation,
-include explanations for relevant retrieved settings and the target method's
-adjustable catalog/guidance. Deduplicate shared explanations within the prompt;
-do not append every tool's complete manual or parameter catalog to every case.
+include explanations for relevant retrieved settings inside `source_method` and
+the target method's adjustable catalog/guidance once at request level. Do not
+repeat explanations in a second global list or append a tool's complete manual
+or parameter catalog to every case.
+Source explanations are restricted to native flags/config keys actually present
+in that case's `settings`. For a hifiasm target and a NextDenovo case reporting
+only `read_cutoff` and `nextgraph_a`, include only those two NextDenovo
+explanations, not its `threads`, `workdir`, input bindings or full catalog.
+Unknown source settings remain verbatim with unknown semantics; absence of an
+explanation must not be filled with another parameter's description. The target
+hifiasm adjustable catalog remains separate because it defines valid outputs.
 
 Cross-method reasoning can transfer a problem interpretation or tuning strategy
 and can propose a target-tool value when its semantics and current data support
@@ -167,7 +184,7 @@ context but never overwrite current executor bindings or sample facts.
 
 ```mermaid
 flowchart TD
-    C["Frozen case corpus and software knowledge"] --> R["Shared retrieval"]
+    C["Live case directory and software knowledge"] --> R["Shared retrieval"]
     Q["Current materials and assembly objective"] --> R
     R --> M["Cross-method evidence + executable candidates"]
     M --> A["Method advisor"]
@@ -178,9 +195,10 @@ flowchart TD
     L --> E["Existing approval and parameterized execution"]
 ```
 
-Both advisors use the same frozen corpus, material facts and software knowledge;
-their evidence projections can differ. Parameter retrieval may add targeted
-cases from that same snapshot after method confirmation. The parameter request
+Both advisors read the same configured directory and share material facts;
+their evidence projections can differ and directory changes are visible to the
+next new recommendation. Parameter retrieval may add targeted
+cases after method confirmation. The parameter request
 also retains the method decision's reasons and relevant case context. This uses
 the existing two decision boundaries, not a third LLM retrieval/translation call.
 
@@ -202,34 +220,84 @@ bindings and resolvable execution requirements. A useful reference method need n
 be locally executable. The model must distinguish reference tools from available
 execution choices. Candidate capability summaries accompany their IDs.
 
-## Frozen inputs, model projection and ownership
+## Live directory, model projection and ownership
 
 The single new source is optional: no source means empty literature evidence plus
-software knowledge, not reactivation of an old case library. The consumer captures
-the selected corpus and software knowledge into its own immutable run artifacts
-at input preparation, retaining their identity for both decisions and resume.
+software knowledge, not reactivation of an old case library. Each new method or
+parameter recommendation, including parameter retries, reads the current case
+directory and software knowledge. There is no run-level corpus copy, hash,
+snapshot file, freeze validation or case-directory cache.
 It does not require an approval marker or run record to be written into producer
 cases. Preliminary extraction/review scope remains explicit evidence context.
 
 Configure `assembly.case_source` as a directory of exchange JSON files; paths are
-resolved relative to the run config. Preparation reads the corpus and catalogs
-once; freezing publishes `control/assembly_knowledge.json` (schema 5) together
-with the existing control files, under the same final commit marker and hashes.
-Old Assembly markers lacking this snapshot are rejected. The exchange loader
+resolved relative to the run config and passed through the Assembly seed.
+Input freezing does not access the case directory; normal input/control files
+are unchanged. The exchange loader
 rejects old schemas, duplicate identities, non-regular/symlink case files and
 oversized payloads (8 MiB per paper, 64 MiB total).
 
 Method and parameter model requests contain bounded readable evidence and the
-reason for relevance. Storage paths, full retrieval traces and snapshot hashes
+reason for relevance. Storage paths and full retrieval traces
 remain in durable records rather than becoming instructions for the model.
-The existing parameter basis freezes the exact parameter selection and software
-explanations; retries inherit it and add their existing ordered attempt history.
-Resume and retries use captured contents rather than reopening a mutable producer
-directory. Case loading errors and an honest empty match remain distinguishable.
+Each attempt records only its selected evidence and software explanations.
+New retries reread the directory while retaining the confirmed method, executable
+catalog, material facts and ordered attempt history. Recovering the same already
+recorded request uses that request, not a newly retrieved replacement. This is
+ordinary recommendation/approval evidence, not a second case library.
+Case loading errors and an honest empty match remain distinguishable.
+
+The boundary is explicit: complete case / traceable record → retrieval and
+scoring fields → task-specific LLM view. `retrieve_assembly_cases()` returns full
+selected case records, including matching observations, source identity and
+setting explanations. Method request audit records and parameter
+`basis_snapshot.json` retain these records as `knowledge_evidence`.
+
+`project_method_choice_case()` emits case identity, source tool/version/mode,
+sample traits, platforms, observations, execution status, route roles, outcomes
+and match differences. It excludes source settings and their explanations.
+`project_parameter_case()` reuses the same material/outcome projection and adds
+`source_method` with native settings and `setting_explanations`, `target_method`
+and `relation` (`same_tool` or `cross_method`). The parameter view replaces the
+short `method` object rather than repeating its identity. Cross-method settings
+are references, never mechanically mapped to target flags or values.
+
+Reported measurement groups keep their evaluated objects, basis and assessment
+context, without source locators. Comparable observations retain units, object,
+platform, processing state and reported/derived origin. Readable source groups
+also remain when present: they can include combined or unnormalizable quantities
+and cannot safely be replaced by the numeric retrieval index.
+Within each readable measurement list, identical objects and basis are emitted
+once with a `metrics` list. Shared context/assessment is hoisted to the group;
+different qualifications remain on their individual metrics. Conflicting values
+remain explicit, never averaged or selected away. In single-sample cases, object
+labels omit only exact sample-name segments already present in `sample_traits`;
+kind, scope, origin and distinguishing suffixes remain. Multi-sample labels remain
+intact. No free text is cut by length.
+`scope_limit` gaps become one extraction-scope notice; conflicts, missing sources,
+missing facts and ambiguous links retain their complete qualification.
+Unknown or multiple route roles remain explicit. A small `limitations` list keeps
+source scope, gap issues, normalization caveats and attribution notes; full
+evidence locators and follow-up leads stay in audit records. The two public
+projections are allowlists, so new audit fields cannot silently enter prompts.
+
+The model receives current `facts` once and a small material-scope context.
+Query text, read bindings and duplicate raw QC/survey mappings stay outside it.
+
+These are duplicate representations: run-level corpus copies, nested full v5
+entities, and repeated model facts. The retained per-attempt approval records
+have an independent lifecycle (intentional symmetry), not library ownership.
+Full audit cases and task-specific views are also intentional symmetry: shared
+material/outcome semantics move together, while task-only settings remain separate.
+The compact `CaseContent` contract forbids entity-shaped extras and nested
+material objects; regression tests enforce that boundary and the single-facts
+model payload. Run `pytest -q tests/test_assembly_case_consumption.py` to check
+these simplification invariants; `bash scripts/check_assembly_projection.sh`
+also enforces zero text clones in the scoped knowledge implementation.
 
 | Owner | Responsibility |
 |---|---|
-| `app/knowledge/` | One case contract, loading/snapshot, indexing, retrieval and bounded evidence projection |
+| `app/knowledge/` | One case contract, live loading, retrieval and bounded evidence projection |
 | `app/domains/assembly/` | Current-material query, method identity/capability mapping and software semantics |
 | `app/stages/assembly/` | Retrieve before method choice, bind confirmation, persist each decision and reuse its evidence |
 | `app/llm/` | Separate method/parameter requests and prompts; cross-method interpretation with target-only executable outputs |
@@ -262,9 +330,10 @@ Acceptance must cover:
   knowledge, without fabricated cases, observations or numeric success probabilities.
 - Mixed input platforms, raw/filtered states, source-setting versus measurement
   provenance, shared configurations and complete-card budgets remain distinct.
-- Frozen evidence survives source-directory modification/removal; parameter retry
-  preserves the confirmed method and initial basis; baseline and approval paths
-  retain their existing contracts.
+- Directory edits are visible to new recommendations and retries; historical
+  request records remain unchanged. No corpus is written into control files.
+  Parameter retry preserves the confirmed method, catalog and material facts;
+  baseline and approval paths retain their existing contracts.
 - The production Assembly path has one consumer implementation and no old-source
   fallback. Hi-C and T2T behavior is unchanged by this scoped rebuild.
 
