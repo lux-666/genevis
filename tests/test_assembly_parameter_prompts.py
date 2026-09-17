@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 
 import pytest
 
-from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
+from app.llm.parameters.assembly.prompt import (
+    parameter_prompt_bundle_hash,
+    parameter_prompt_bundle_name,
+    render_assembly_parameter_messages,
+)
 from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
+from app.llm.prompts import load_prompt_bundle
 
 
 def _request_dto(method_id: str = "hifiasm") -> dict:
@@ -64,6 +70,39 @@ def test_renderer_serializes_the_direct_dto_without_a_second_projection() -> Non
         separators=(",", ":"),
     )
     assert rendered_request["knowledge_evidence"]["cases"][0]["case_id"] == "paper.1"
+
+
+@pytest.mark.parametrize("method", ["flye", "nextdenovo", "hifiasm", "hifiasm_ont"])
+def test_renderer_and_hash_use_the_same_method_bundle(method):
+    full_id = "assembly.candidate." + method
+    bundle = load_prompt_bundle(parameter_prompt_bundle_name(full_id))
+    canonical = json.dumps(
+        {
+            "name": bundle.name,
+            "system": bundle.system,
+            "user_template": bundle.user_template,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert parameter_prompt_bundle_hash(full_id) == sha256(canonical).hexdigest()
+    assert parameter_prompt_bundle_name(full_id) == parameter_prompt_bundle_name(method)
+    assert (
+        render_assembly_parameter_messages(_request_dto(full_id))[0]["content"]
+        == bundle.system
+    )
+
+
+@pytest.mark.parametrize("method", ["unknown", "", None])
+def test_renderer_and_hash_reject_the_same_unknown_methods(method):
+    for call in (
+        lambda: render_assembly_parameter_messages(_request_dto(method)),
+        lambda: parameter_prompt_bundle_hash(method),
+        lambda: parameter_prompt_bundle_name(method),
+    ):
+        with pytest.raises(ValueError, match="Unsupported assembly parameter prompt"):
+            call()
 
 
 @pytest.mark.parametrize("method_id", ["flye", "nextdenovo", "hifiasm", "hifiasm_ont"])

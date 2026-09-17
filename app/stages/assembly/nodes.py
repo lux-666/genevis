@@ -1952,20 +1952,12 @@ def _recommend_route_with_decision_boundary(
     ctx: dict[str, Any],
 ) -> RouteRecommendation:
     retrieval_audit: dict[str, Any] = {}
-    existing_requests = []
-    control = stage_artifacts_dir(state, "assembly", "control")
-    for record in read_artifact_records(absolute_data_dir(state), state["session_id"]):
-        if record.get("artifact_type") != ASSEMBLY_METHOD_MODEL_REQUEST:
-            continue
-        ref = ArtifactRef.model_validate(
-            {key: record[key] for key in ArtifactRef.model_fields if key in record}
+    try:
+        saved = _recover_assembly_method_artifact(state, ASSEMBLY_METHOD_MODEL_REQUEST)
+    except (OSError, TypeError, ValueError) as exc:
+        return _unavailable_route_recommendation(
+            f"assembly method request recovery failed: {exc}"
         )
-        path = resolve_artifact_ref(absolute_data_dir(state), state["session_id"], ref)
-        if path.parent == control:
-            existing_requests.append((ref, json.loads(path.read_text())))
-    if len(existing_requests) > 1:
-        raise ValueError("multiple Assembly method requests for this occurrence")
-    saved = existing_requests[0] if existing_requests else None
     prompt_payload = (
         saved[1]["prompt_payload"]
         if saved
@@ -2008,7 +2000,9 @@ def _recommend_route_with_decision_boundary(
                 )
             )
         )
-        recovered = _recover_assembly_method_response(state, request_ref)
+        recovered = _recover_assembly_method_artifact(
+            state, ASSEMBLY_METHOD_MODEL_RESPONSE, request_ref=request_ref
+        )
         if recovered is None:
             decision = make_assembly_decision(request, messages=messages)
             response_ref = ArtifactRef.model_validate(
@@ -2300,16 +2294,33 @@ def _validated_recommended_method(
     return method
 
 
-def _recover_assembly_method_response(
-    state: TopLevelState, request_ref: ArtifactRef
+def _recover_assembly_method_artifact(
+    state: TopLevelState,
+    artifact_type: str,
+    *,
+    request_ref: ArtifactRef | None = None,
 ) -> tuple[ArtifactRef, dict[str, Any]] | None:
-    """Recover a prior response published before a checkpoint was written."""
+    """Locate both method records by the same occurrence/producer identity."""
 
+    if artifact_type not in {
+        ASSEMBLY_METHOD_MODEL_REQUEST,
+        ASSEMBLY_METHOD_MODEL_RESPONSE,
+    }:
+        raise ValueError("unsupported Assembly method artifact type")
+    if (artifact_type == ASSEMBLY_METHOD_MODEL_RESPONSE) != (request_ref is not None):
+        raise ValueError("only response recovery requires a bound request reference")
+    if (
+        request_ref is not None
+        and request_ref.artifact_type != ASSEMBLY_METHOD_MODEL_REQUEST
+    ):
+        raise ValueError("response recovery must bind an Assembly method request")
     records = read_artifact_records(absolute_data_dir(state), state["session_id"])
     step_id = current_workflow_step_id(state, expected_stage="assembly")
-    for record in reversed(records):
+    recovered = None
+    for record in records:
         if (
-            record.get("artifact_type") != ASSEMBLY_METHOD_MODEL_RESPONSE
+            record.get("artifact_type") != artifact_type
+            or record.get("stage") != "assembly"
             or record.get("method_id") != "assembly.method_recommender"
             or record.get("workflow_step_id") != step_id
         ):
@@ -2320,11 +2331,13 @@ def _recover_assembly_method_response(
         path = resolve_artifact_ref(absolute_data_dir(state), state["session_id"], ref)
         body = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(body, dict):
-            raise ValueError("persisted Assembly model response is not an object")
-        if body.get("request_sha256") != request_ref.sha256:
+            raise ValueError("persisted Assembly model record is not an object")
+        if request_ref is not None and body.get("request_sha256") != request_ref.sha256:
             continue
-        return ref, body
-    return None
+        if recovered is not None:
+            raise ValueError(f"multiple {artifact_type} records for this occurrence")
+        recovered = (ref, body)
+    return recovered
 
 
 def _unavailable_route_recommendation(

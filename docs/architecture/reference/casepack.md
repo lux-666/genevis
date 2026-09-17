@@ -247,6 +247,16 @@ recorded request uses that request, not a newly retrieved replacement. This is
 ordinary recommendation/approval evidence, not a second case library.
 Case loading errors and an honest empty match remain distinguishable.
 
+Method request/response recovery has one locator,
+`_recover_assembly_method_artifact()`: filter the artifact index by Assembly stage,
+current workflow step, recommender and artifact type before resolving bytes.
+Responses additionally bind the request hash. Multiple matching records fail
+closed rather than choosing the newest record. Unrelated occurrences are not
+resolved while recovering this occurrence. Parameter-attempt recovery remains
+with its existing deterministic-destination storage owner (intentional symmetry).
+Prompt rendering and hashing share `parameter_prompt_bundle_name()`; their method
+to-template lookup is not independently implemented in each path.
+
 The boundary is explicit: complete case / traceable record → retrieval and
 scoring fields → task-specific LLM view. `retrieve_assembly_cases()` returns full
 selected case records, including matching observations, source identity and

@@ -22,14 +22,8 @@ def render_assembly_parameter_messages(
     """Render the strict parameter DTO into one provider-neutral message pair."""
 
     method_id = _normalized_method_id(request_dto.get("method_id"))
-    try:
-        bundle_name = _BUNDLE_BY_METHOD[method_id]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported assembly parameter prompt method: {method_id!r}"
-        ) from exc
     return render_prompt_messages(
-        load_prompt_bundle(bundle_name),
+        load_prompt_bundle(parameter_prompt_bundle_name(method_id)),
         {
             "method_id": method_id,
             "parameter_request_json": json.dumps(

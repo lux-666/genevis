@@ -28,6 +28,8 @@ class DocumentationContractTests(unittest.TestCase):
             "project_method_choice_case()",
             "project_parameter_case()",
             "check_assembly_projection.sh",
+            "_recover_assembly_method_artifact()",
+            "parameter_prompt_bundle_name()",
         ):
             self.assertIn(required, contract)
 
