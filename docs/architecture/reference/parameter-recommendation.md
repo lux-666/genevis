@@ -202,6 +202,10 @@ stage-owned knowledge basis. `recommendation_manifest.json` is the strict
 task, recommendation ID, and predecessor identity.
 
 `model_request.json` owns the exact compact-JSON messages and prompt identity.
+Assembly records additionally bind the input and basis artifacts by SHA-256;
+same-attempt recovery rejects missing or inconsistent bindings without rebuilding
+the prompt. Basis method, consumer version and evidence target checks apply to
+both initial construction and recovery.
 Run, request-correlation, and retrieval-query identities are derived from the
 run path, recommendation directory, and manifest rather than repeated in the
 input snapshot, basis, or model-request body.
@@ -287,5 +291,7 @@ parameter explanations. The new parameter request uses the confirmed method,
 its decision context and its adjustable catalog. Foreign settings are explanatory
 evidence, not additions to that catalog. Each attempt records its selected
 evidence and explanations; new retries reread cases while same-attempt recovery
-uses its recorded basis. Sparse-L2 parsing, catalog ownership,
+uses its recorded basis, catalog and exact model messages/DTO without rerendering
+or reprojecting under changed templates. Input facts, task and context must still
+match the immutable record; conflicts fail closed. Sparse-L2 parsing, catalog ownership,
 approval and execution resolution remain owned by this contract.

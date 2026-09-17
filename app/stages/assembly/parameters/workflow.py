@@ -40,7 +40,11 @@ from app.llm.parameters.assembly.recommender import (
 from app.llm.parameters.assembly.recommender import (
     restore_assembly_parameter_decision,
 )
-from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.llm.parameters.assembly.request import (
+    AssemblyParameterRequestDTO,
+    build_parameter_request_dto,
+    validate_parameter_basis,
+)
 from app.review.application import (
     PreparedReviewApplication,
     ReviewIntentV1,
@@ -76,6 +80,7 @@ from app.schemas.artifacts import (
     ParameterAttemptTask,
     ParameterRecommendationCursor,
 )
+from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     CanonicalRecommendationFacts,
@@ -179,8 +184,23 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
             )
 
     try:
+        recovered_basis = recover_artifact(
+            state,
+            recommendation_id,
+            "basis_snapshot.json",
+            expected_type=ASSEMBLY_PARAMETER_BASIS,
+            method_name="assembly.parameter_recommender",
+        )
+        if recovered_basis is not None:
+            basis_ref, basis_snapshot = recovered_basis
         if task == "recommend_initial":
-            catalog = load_parameter_catalog(method_name)
+            catalog = (
+                MethodParameterCatalog.model_validate(
+                    basis_snapshot["catalog_snapshot"]
+                )
+                if basis_snapshot is not None
+                else load_parameter_catalog(method_name)
+            )
             facts = CanonicalRecommendationFacts.model_validate(
                 initial_material_query(state, assembly_out)["facts"]
             )
@@ -244,12 +264,14 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 attempts_before=attempts_before,
             )
 
+        if catalog.method_id != method_name:
+            raise ValueError("recovered catalog method mismatch")
         if not any(spec.layers.l2 is not None for spec in catalog.parameters.values()):
             raise ValueError(
                 f"Assembly parameter catalog has no L2 parameters: {catalog.method_id}"
             )
     except (
-        FileNotFoundError,
+        OSError,
         KeyError,
         ParameterEvidenceError,
         ParameterPersistenceError,
@@ -278,15 +300,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         return _fail_update(state, f"Assembly input snapshot persistence failed: {exc}")
 
     try:
-        recovered_basis = recover_artifact(
-            state,
-            recommendation_id,
-            "basis_snapshot.json",
-            expected_type=ASSEMBLY_PARAMETER_BASIS,
-            method_name="assembly.parameter_recommender",
-        )
-        if recovered_basis is not None:
-            basis_ref, basis_snapshot = recovered_basis
+        if basis_snapshot is not None:
+            if basis_snapshot["catalog_snapshot"] != catalog.model_dump(mode="json"):
+                raise ValueError("recovered basis catalog differs from retry lineage")
         else:
             basis_snapshot = build_parameter_basis_snapshot(
                 state=state,
@@ -305,33 +321,71 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
             )
         if basis_ref is None or basis_snapshot is None:
             raise ValueError("Assembly recommendation basis is missing")
-
-        request_dto = build_parameter_request_dto(
-            method_id=catalog.method_id,
-            catalog=catalog,
-            facts=facts,
-            context=context,
-            task=task,
-            basis_snapshot=basis_snapshot,
+        validate_parameter_basis(
+            method_id=catalog.method_id, catalog=catalog, basis_snapshot=basis_snapshot
         )
 
-        messages = render_assembly_parameter_messages(request_dto)
-        model_request_ref = write_artifact(
+        recovered_request = recover_artifact(
             state,
             recommendation_id,
             "model_request.json",
-            {
-                "schema_version": 3,
-                "prompt_bundle_id": parameter_prompt_bundle_name(catalog.method_id),
-                "prompt_template_sha256": (
-                    parameter_prompt_bundle_hash(catalog.method_id)
-                ),
-                "parameter_request_schema_version": 3,
-                "messages": messages,
-            },
-            artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
+            expected_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
             method_name="assembly.parameter_recommender",
         )
+        if recovered_request is not None:
+            model_request_ref, record = recovered_request
+            if (
+                record.get("input_snapshot_sha256") != input_snapshot_ref.sha256
+                or record.get("basis_sha256") != basis_ref.sha256
+            ):
+                raise ValueError("recorded parameter request evidence binding mismatch")
+            messages = record["messages"]
+            if (
+                not isinstance(messages, list)
+                or len(messages) != 2
+                or not all(isinstance(m, dict) for m in messages)
+                or messages[0].get("role") != "system"
+                or messages[1].get("role") != "user"
+                or not all(isinstance(m.get("content"), str) for m in messages)
+            ):
+                raise ValueError("invalid recorded Assembly parameter messages")
+            request_dto = json.loads(messages[1]["content"])
+            saved_dto = AssemblyParameterRequestDTO.model_validate(request_dto)
+            if (
+                saved_dto.method_id != catalog.method_id
+                or saved_dto.task != task
+                or saved_dto.facts != facts
+                or saved_dto.assembly_context != context
+            ):
+                raise ValueError("recorded parameter request input binding mismatch")
+        else:
+            request_dto = build_parameter_request_dto(
+                method_id=catalog.method_id,
+                catalog=catalog,
+                facts=facts,
+                context=context,
+                task=task,
+                basis_snapshot=basis_snapshot,
+            )
+            messages = render_assembly_parameter_messages(request_dto)
+            model_request_ref = write_artifact(
+                state,
+                recommendation_id,
+                "model_request.json",
+                {
+                    "schema_version": 3,
+                    "prompt_bundle_id": parameter_prompt_bundle_name(catalog.method_id),
+                    "prompt_template_sha256": (
+                        parameter_prompt_bundle_hash(catalog.method_id)
+                    ),
+                    "parameter_request_schema_version": 3,
+                    "input_snapshot_sha256": input_snapshot_ref.sha256,
+                    "basis_sha256": basis_ref.sha256,
+                    "messages": messages,
+                },
+                artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
+                method_name="assembly.parameter_recommender",
+            )
     except (
         FileNotFoundError,
         KeyError,

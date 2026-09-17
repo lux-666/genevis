@@ -99,6 +99,19 @@ def _measurement_summary(
     return {k: v for k, v in summary.items() if v}
 
 
+def _outcome_attribution(
+    state_ids: list[str], outputs: set[str], descendants: set[str]
+) -> str:
+    objects = set(state_ids)
+    if not objects:
+        return "unknown"
+    if objects <= outputs:
+        return "direct_output"
+    if objects <= descendants - outputs:
+        return "downstream_context"
+    return "mixed_context"
+
+
 def project_paper(
     paper_id: str, graph: dict[str, Any], selections: list[dict[str, Any]]
 ) -> CasePaper:
@@ -213,7 +226,10 @@ def project_paper(
             expanded = descendants | {
                 sid
                 for operation in graph["steps"]
-                if any(i["state_id"] in descendants for i in operation["inputs"])
+                if any(
+                    i["state_id"] in descendants and i["role"] == "target"
+                    for i in operation["inputs"]
+                )
                 for sid in operation["output_state_ids"]
             }
             if expanded == descendants:
@@ -266,7 +282,15 @@ def project_paper(
                 if v.get("exclude_reason")
             },
             "sample_context": binding.get("ploidy_context"),
-            "outcomes": [_measurement_summary(m, indexes) for m in outcomes],
+            "outcomes": [
+                {
+                    **_measurement_summary(m, indexes),
+                    "attribution": _outcome_attribution(
+                        m["state_ids"], set(step["output_state_ids"]), descendants
+                    ),
+                }
+                for m in outcomes
+            ],
             "routes": [
                 {k: r[k] for k in ("name", "role", "selection_reason") if r.get(k)}
                 for r in routes

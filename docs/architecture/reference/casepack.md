@@ -33,6 +33,13 @@ the older producer pilot exchange is not accepted by the runtime.
 One paper contains zero or more cases. A case represents an identified sample or
 explicit sample group using a particular method configuration for a particular
 assembly task. Shared configurations remain identifiable across sample cases.
+The unit is one Assembly operation, not an Assembly/Hi-C/T2T workflow case.
+Hi-C reads directly used for assembler phasing are supporting Assembly inputs;
+later scaffolding and T2T actions are not this operation's settings. Keep the
+reported action, input roles/purpose and direct outputs in the compact view.
+Never infer a mode from a tool name. Outcomes identify `direct_output`,
+`downstream_context`, `mixed_context`, or `unknown` from explicit graph bindings;
+downstream measurements are not assembler-only performance evidence.
 
 Each case exposes the following information:
 
@@ -102,8 +109,9 @@ shown to the model alongside similarities.
 Use deterministic structured matching plus lexical retrieval over compact case
 text for the first implementation. Both are over one corpus. Structured matching
 compares only commensurable known observations; lexical retrieval covers sample
-background, assembly difficulty, actions and mechanism vocabulary that cannot be
-reduced to numeric distance. Union the candidate lists and fuse their ranks;
+background against case text (including actions and method descriptions).
+Current query text contains the reported scientific name and clade, not inferred
+difficulty labels. Union the candidate lists and fuse their ranks;
 preserve the component matches and missing-feature coverage for interpretation.
 Do not turn feature completeness or a ranking score into biological confidence.
 An embedding service or an additional model reranker is not required initially.
@@ -113,6 +121,10 @@ BM25), structured relative-distance scores, and weighted reciprocal-rank fusion
 (material 2, lexical 1; damping 10). Comparable observations must match name,
 unit, platform and processing state. The parameter purpose adds a small same-tool
 bonus (0.002); repeated tools receive a modest diversity penalty (0.15).
+Admission requires positive material or lexical relevance. Comparable but
+zero-similarity features are differences, not matches; a nonzero match need not
+be exact. Numeric similarities and differences remain visible per observation.
+Unknown read processing state is not a wildcard for raw/filtered measurements.
 Defaults are five whole cases, two per independent source, and 32,000 compact
 JSON characters of the task-specific LLM view, including settings and explanations
 only for parameter recommendation. Shared configurations are
@@ -248,12 +260,19 @@ ordinary recommendation/approval evidence, not a second case library.
 Case loading errors and an honest empty match remain distinguishable.
 
 Method request/response recovery has one locator,
-`_recover_assembly_method_artifact()`: filter the artifact index by Assembly stage,
-current workflow step, recommender and artifact type before resolving bytes.
-Responses additionally bind the request hash. Multiple matching records fail
-closed rather than choosing the newest record. Unrelated occurrences are not
-resolved while recovering this occurrence. Parameter-attempt recovery remains
-with its existing deterministic-destination storage owner (intentional symmetry).
+`_recover_assembly_method_artifact()`: use deterministic occurrence-local request
+and response destinations with shared `recover_published_artifact()`, including
+repair of publication-before-index crashes. Responses bind the request hash.
+Conflicting records and older content-addressed method records fail closed; start
+a new run instead of silently redispatching. Unrelated occurrences are not resolved.
+Method recovery reuses the recorded action/method allowlists and system message,
+not current skill text. A competing response publication reuses the verified
+winner; this is not an exactly-once external model-call guarantee.
+Parameter-attempt recovery uses the same storage primitive. A recorded parameter
+request reuses its exact messages/DTO and catalog, without rerendering templates or
+reprojecting evidence; request hashes bind the immutable input and basis artifacts.
+`validate_parameter_basis()` is shared by new requests and recovery. Unbound older
+requests fail closed rather than being silently upgraded.
 Prompt rendering and hashing share `parameter_prompt_bundle_name()`; their method
 to-template lookup is not independently implemented in each path.
 
@@ -264,6 +283,7 @@ setting explanations. Method request audit records and parameter
 `basis_snapshot.json` retain these records as `knowledge_evidence`.
 
 `project_method_choice_case()` emits case identity, source tool/version/mode,
+the reported operation and its direct input roles/purpose and outputs,
 sample traits, platforms, observations, execution status, route roles, outcomes
 and match differences. It excludes source settings and their explanations.
 `project_parameter_case()` reuses the same material/outcome projection and adds
@@ -277,7 +297,7 @@ context, without source locators. Comparable observations retain units, object,
 platform, processing state and reported/derived origin. Readable source groups
 also remain when present: they can include combined or unnormalizable quantities
 and cannot safely be replaced by the numeric retrieval index.
-Within each readable measurement list, identical objects and basis are emitted
+Within each readable measurement list, identical objects, basis and attribution are emitted
 once with a `metrics` list. Shared context/assessment is hoisted to the group;
 different qualifications remain on their individual metrics. Conflicting values
 remain explicit, never averaged or selected away. In single-sample cases, object
@@ -287,7 +307,7 @@ intact. No free text is cut by length.
 `scope_limit` gaps become one extraction-scope notice; conflicts, missing sources,
 missing facts and ambiguous links retain their complete qualification.
 Unknown or multiple route roles remain explicit. A small `limitations` list keeps
-source scope, gap issues, normalization caveats and attribution notes; full
+source scope/access limits, gap issues, normalization caveats and attribution notes; full
 evidence locators and follow-up leads stay in audit records. The two public
 projections are allowlists, so new audit fields cannot silently enter prompts.
 

@@ -29,7 +29,10 @@ from app.knowledge.assembly_retrieval import (
 from app.knowledge.assembly_runtime import current_knowledge, initial_material_query
 from app.knowledge.v5_projection import project_paper
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
-from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.llm.parameters.assembly.request import (
+    build_parameter_request_dto,
+    validate_parameter_basis,
+)
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     CanonicalRecommendationFacts,
@@ -104,6 +107,67 @@ def query() -> dict:
         "platforms": ["hifi"],
         "read_binding": {"paths": ["/private/current/reads.fastq"]},
     }
+
+
+def test_zero_similarity_is_not_admitted_or_labelled_as_a_match():
+    ploidy = Observation(
+        name="ploidy", value=4, unit="count", object_id="sample", basis="reported"
+    )
+    source = paper("poly", "hifiasm", 420e6)
+    source = source.model_copy(
+        update={
+            "cases": (source.cases[0].model_copy(update={"observations": (ploidy,)}),)
+        }
+    )
+    corpus = snapshot().model_copy(update={"papers": (source,)})
+    current = {"observations": [{**ploidy.model_dump(), "value": 2}], "text": ""}
+    assert not retrieve_assembly_cases(corpus, current, purpose="method_choice")[
+        "evidence"
+    ]["cases"]
+    current["text"] = "repeat-rich"
+    matched = retrieve_assembly_cases(corpus, current, purpose="method_choice")[
+        "evidence"
+    ]["cases"][0]["match"]
+    assert matched["matched_features"] == []
+    assert matched["differing_features"] == ["ploidy"]
+    assert matched["missing"] == []
+    assert matched["comparisons"][0]["query_value"] == 2
+    assert matched["comparisons"][0]["case_value"] == 4
+    assert matched["comparisons"][0]["similarity"] == 0
+
+
+def test_comparisons_keep_each_query_observation_identity():
+    reference = observation(420e6).model_dump()
+    current = {
+        "observations": [
+            {**reference, "value": 420, "unit": "Mb"},
+            reference,
+            {**reference, "state": "raw"},
+            {**reference, "platform": "hifi"},
+        ],
+        "text": "",
+    }
+    result = retrieve_assembly_cases(snapshot(), current, purpose="method_choice")
+    match = result["evidence"]["cases"][0]["match"]
+    assert match["matched_features"] == ["genome_size"]
+    assert match["missing"] == ["genome_size"] * 3
+    assert len(match["comparisons"]) == 1
+    assert match["comparisons"][0]["unit"] == "bp"
+    assert result["trace"][0]["material"] == 0.25
+
+
+def test_partial_numeric_similarity_is_kept_without_unknown_read_wildcards():
+    current = {"observations": [observation(400e6).model_dump()], "text": ""}
+    case = retrieve_assembly_cases(snapshot(), current, purpose="method_choice")[
+        "evidence"
+    ]["cases"][0]
+    assert case["match"]["matched_features"] == ["genome_size"]
+    assert case["match"]["differing_features"] == ["genome_size"]
+    assert 0 < case["match"]["comparisons"][0]["similarity"] < 1
+    current["observations"][0]["state"] = "raw"
+    assert not retrieve_assembly_cases(snapshot(), current, purpose="method_choice")[
+        "evidence"
+    ]["cases"]
 
 
 @pytest.mark.parametrize(
@@ -288,6 +352,7 @@ def test_task_projections_allowlist_fields_without_mutating_full_evidence():
     assert set(method) == {
         "case_id",
         "method",
+        "operation",
         "material",
         "execution_status",
         "route_role",
@@ -309,6 +374,7 @@ def test_task_projections_allowlist_fields_without_mutating_full_evidence():
     assert "Minimum read length cutoff" in json.dumps(parameter)
     assert parameter["outcomes"] == method["outcomes"]
     assert method["outcomes"][0]["basis"] == "combined"
+    assert method["outcomes"][0]["attribution"] == "unknown"
     assert method["outcomes"][0]["assessment"] == "BUSCO v5, lineage A"
     assert "version conflict" in method["limitations"]
     assert "AUDIT_ONLY" not in json.dumps([method, parameter])
@@ -720,6 +786,16 @@ def test_parameter_retry_reads_live_cases_but_recovery_keeps_recorded_request(
     original_prompt = model.messages[1]["content"]
     assert "read_cutoff = 10000" in original_prompt
     case_file.unlink()
+    for function in (
+        "render_assembly_parameter_messages",
+        "build_parameter_request_dto",
+        "parameter_prompt_bundle_hash",
+        "invoke_assembly_parameter_model",
+    ):
+        monkeypatch.setattr(
+            f"app.stages.assembly.parameters.workflow.{function}",
+            lambda *args, **kwargs: pytest.fail("same attempt rebuilt prompt"),
+        )
     monkeypatch.setattr(
         "app.knowledge.assembly_runtime.current_knowledge",
         lambda _: pytest.fail("same attempt reopened case directory"),
@@ -733,7 +809,109 @@ def test_parameter_retry_reads_live_cases_but_recovery_keeps_recorded_request(
     assert model.messages[1]["content"] == original_prompt
 
 
-def test_explicit_graph_projection_retains_settings_and_combined_measurements():
+def test_initial_parameter_recovery_does_not_reload_current_catalog(
+    tmp_path, monkeypatch
+):
+    from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
+
+    state = attempt_fixtures.ParameterRecommendationNodeTests()._state(str(tmp_path))
+    model = attempt_fixtures._FakeModel(
+        attempt_fixtures._complete_hifiasm_ont_response(purge_level=2)
+    )
+    monkeypatch.setattr(
+        "app.llm.parameters.assembly.recommender.build_chat_model", lambda: model
+    )
+    first = recommend_assembly_parameters(state)
+    assert first["stage_outputs"]["assembly"]["status"] == "blocked_human"
+    for name in (
+        "load_parameter_catalog",
+        "render_assembly_parameter_messages",
+        "build_parameter_request_dto",
+        "invoke_assembly_parameter_model",
+    ):
+        monkeypatch.setattr(
+            f"app.stages.assembly.parameters.workflow.{name}",
+            lambda *args, **kwargs: pytest.fail(
+                "recovery used current catalog or prompt"
+            ),
+        )
+    replay = recommend_assembly_parameters(state)
+    assert (
+        replay["stage_outputs"]["assembly"]["current_parameter_recommendation"]
+        == first["stage_outputs"]["assembly"]["current_parameter_recommendation"]
+    )
+
+
+@pytest.mark.parametrize("binding", ["basis_sha256", "input_snapshot_sha256"])
+def test_parameter_recovery_rejects_unbound_request(tmp_path, monkeypatch, binding):
+    from app.stages.assembly.parameters import workflow
+
+    state = attempt_fixtures.ParameterRecommendationNodeTests()._state(str(tmp_path))
+    model = attempt_fixtures._FakeModel(
+        attempt_fixtures._complete_hifiasm_ont_response(purge_level=2)
+    )
+    monkeypatch.setattr(
+        "app.llm.parameters.assembly.recommender.build_chat_model", lambda: model
+    )
+    write = workflow.write_artifact
+
+    def mismatched_request(state, identifier, filename, payload, **kwargs):
+        if filename == "model_request.json":
+            payload = {**payload, binding: "wrong"}
+        return write(state, identifier, filename, payload, **kwargs)
+
+    monkeypatch.setattr(workflow, "write_artifact", mismatched_request)
+    assert (
+        workflow.recommend_assembly_parameters(state)["stage_outputs"]["assembly"][
+            "status"
+        ]
+        == "blocked_human"
+    )
+    monkeypatch.setattr(
+        workflow,
+        "invoke_assembly_parameter_model",
+        lambda *a, **k: pytest.fail("unbound request invoked model"),
+    )
+    replay = workflow.recommend_assembly_parameters(state)
+    assert "evidence binding mismatch" in str(replay)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"schema_version": 2},
+        {"consumer_version": 4},
+        {"knowledge_evidence": []},
+        {"knowledge_evidence": {"purpose": "parameters", "target_method": None}},
+        {
+            "knowledge_evidence": {
+                "purpose": "method_choice",
+                "target_method": "hifiasm",
+            }
+        },
+        {
+            "knowledge_evidence": {
+                "purpose": "parameters",
+                "target_method": "NextDenovo",
+            }
+        },
+    ],
+)
+def test_parameter_basis_guard_rejects_bad_schema_and_evidence(invalid):
+    catalog = load_parameter_catalog(TARGET)
+    basis = {
+        "schema_version": 3,
+        "consumer_version": 5,
+        "method_id": TARGET,
+        "knowledge_evidence": {"purpose": "parameters", "target_method": catalog.tool},
+    }
+    with pytest.raises(ValueError):
+        validate_parameter_basis(
+            method_id=TARGET, catalog=catalog, basis_snapshot={**basis, **invalid}
+        )
+
+
+def projection_fixture():
     graph = {
         "schema_version": "assembly-extraction.v5",
         "paper": {"title": "Synthetic"},
@@ -788,6 +966,11 @@ def test_explicit_graph_projection_retains_settings_and_combined_measurements():
             "features": {"ont_coverage": {"measurement": "q", "unit": "x"}},
         }
     ]
+    return graph, selection
+
+
+def test_explicit_graph_projection_retains_settings_and_combined_measurements():
+    graph, selection = projection_fixture()
     result = project_paper("p", graph, selection)
     assert result.cases[0].method.settings == (
         "read_cutoff = 10000",
@@ -808,3 +991,69 @@ def test_explicit_graph_projection_retains_settings_and_combined_measurements():
             AssemblyCase.model_validate(
                 {**result.cases[0].model_dump(), "content": bad_content}
             )
+
+
+@pytest.mark.parametrize(
+    "objects, expected",
+    [
+        (["a"], "direct_output"),
+        (["final"], "downstream_context"),
+        (["a", "final"], "mixed_context"),
+        (["final", "r"], "mixed_context"),
+    ],
+)
+def test_assembly_phasing_inputs_and_output_attribution(objects, expected):
+    graph, selection = projection_fixture()
+    graph["states"].extend(
+        [
+            {
+                "id": "hic",
+                "name": "trimmed Hi-C reads",
+                "kind": "reads",
+                "sample_ids": ["s"],
+            },
+            {"id": "final", "kind": "scaffolds", "sample_ids": ["s"]},
+        ]
+    )
+    graph["steps"][0]["name"] = "assemble with Hi-C phasing"
+    graph["steps"][0]["inputs"].append(
+        {"state_id": "hic", "role": "support", "use": "haplotype phasing"}
+    )
+    graph["steps"].append(
+        {
+            "id": "scaffold",
+            "name": "scaffold",
+            "inputs": [{"state_id": "a", "role": "target"}],
+            "output_state_ids": ["final"],
+        }
+    )
+    graph["measurements"].append(
+        {
+            "id": "result",
+            "state_ids": objects,
+            "metric": "QV",
+            "value": "50",
+            "basis": "combined",
+        }
+    )
+    selection[0]["outcomes"] = ["result"]
+    selection[0]["inputs"]["hic"] = "hic"
+    projected = project_paper("p", graph, selection)
+    corpus = snapshot().model_copy(update={"papers": (projected,)})
+    audit = retrieve_assembly_cases(
+        corpus, {"text": "phasing"}, purpose="method_choice"
+    )["evidence"]["cases"][0]
+    dto = project_method_choice_case(audit)
+    assert dto["operation"]["action"] == "assemble with Hi-C phasing"
+    assert dto["operation"]["inputs"][1]["role"] == "support"
+    assert dto["operation"]["inputs"][1]["use"] == "haplotype phasing"
+    assert dto["operation"]["outputs"] == ["a; contigs; sample"]
+    assert dto["outcomes"][0]["attribution"] == expected
+    assert "settings" not in dto["method"]
+    assert "mode" not in dto["method"]  # Never invent a mode from a phrase.
+    assert projected.cases[0].method.settings == tuple(graph["methods"][0]["settings"])
+    # Using contigs as a reference/support does not make outputs their descendants.
+    if objects == ["final"]:
+        graph["steps"][1]["inputs"][0]["role"] = "reference"
+        with pytest.raises(ValueError, match="descendants"):
+            project_paper("p", graph, selection)

@@ -72,6 +72,9 @@ class CaseMeasurement(TypedDict, total=False):
     context: list[str]
     assessment: str
     evidence: list[str]
+    attribution: Literal[
+        "direct_output", "downstream_context", "mixed_context", "unknown"
+    ]
 
 
 @with_config(ConfigDict(extra="forbid"))

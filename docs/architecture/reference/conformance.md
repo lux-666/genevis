@@ -32,6 +32,28 @@ version-specific interaction; unexplained settings are retained as unknown.
   content coverage, not a second consumer or a requirement to translate foreign
   settings into executable parameters. Hi-C/T2T remain deferred.
 
+### Assembly corpus handoff and measured recommendation coverage
+
+The exporter has been exercised on the current producer graphs and explicit
+selection: five papers, six Assembly cases, all hifiasm. The producer's `cases/`
+pilot format is not the runtime exchange; export through
+`scripts/build_assembly_cases.py` and configure one `assembly.case_source`.
+The consumer's local `data/assembly_cases_v5/` is an ignored deployment artifact,
+not a packaged corpus or a second reader. Source graphs/pilot files are not rewritten.
+
+Current read observations have unknown processing-state bindings. They remain
+readable context, but do not numerically match runtime raw/filtered observations.
+Do not close this gap by making unknown a wildcard or inferring state from labels.
+Cross-method NextDenovo tests use synthetic fixtures; they establish wiring and
+native-setting preservation, not real-corpus coverage or biological benefit.
+
+- Current evidence: `app/knowledge/v5_projection.py`,
+  `tests/test_assembly_case_consumption.py`, and the current explicit export.
+- Contract owner: [Assembly case consumption](casepack.md).
+- Closure condition: add evidence-checked state bindings and actual foreign-tool
+  case selections, then validate the exported packages and method/parameter
+  requests. Outcome-quality experiments remain separate from software tests.
+
 ### Repository quality gates are targets, not a current success claim
 
 The repository intends these commands to be merge gates:

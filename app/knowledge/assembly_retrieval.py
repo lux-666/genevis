@@ -26,7 +26,7 @@ def _measurement_groups(
     for measurement in measurements:
         context: dict[str, Any] = {
             key: deepcopy(measurement[key])
-            for key in ("objects", "basis")
+            for key in ("objects", "basis", "attribution")
             if key in measurement
         }
         metric = {
@@ -106,6 +106,7 @@ def project_method_choice_case(case: dict[str, Any]) -> dict[str, Any]:
             if g.get("issue")
         ),
         *content.get("notes", []),
+        *content.get("source_limits", []),
     ]
     return {
         "case_id": case["case_id"],
@@ -114,6 +115,11 @@ def project_method_choice_case(case: dict[str, Any]) -> dict[str, Any]:
             for key in ("tool", "version", "mode")
             if case["method"].get(key) is not None
         },
+        "operation": {
+            key: deepcopy(content[key])
+            for key in ("action", "condition", "method_label", "inputs", "outputs")
+            if content.get(key)
+        },
         "material": {
             "sample_traits": list(dict.fromkeys(traits)),
             "platforms": list(case["input_platforms"]),
@@ -121,10 +127,19 @@ def project_method_choice_case(case: dict[str, Any]) -> dict[str, Any]:
         },
         "execution_status": case["execution_status"],
         "route_role": roles[0] if len(roles) == 1 else list(roles),
-        "outcomes": _measurement_groups(content.get("outcomes", []), sample_names),
+        "outcomes": _measurement_groups(
+            [{"attribution": "unknown", **m} for m in content.get("outcomes", [])],
+            sample_names,
+        ),
         "match": {
-            key: list(case["match"][key])
-            for key in ("matched_features", "missing", "platform_differences")
+            key: deepcopy(case["match"].get(key, []))
+            for key in (
+                "matched_features",
+                "differing_features",
+                "comparisons",
+                "missing",
+                "platform_differences",
+            )
         },
         "limitations": list(dict.fromkeys(v for v in limitations if v)),
     }
@@ -188,9 +203,9 @@ def _tokens(text: str) -> set[str]:
 
 def _matches(
     query: list[Observation], observed: tuple[Observation, ...]
-) -> dict[str, float]:
+) -> dict[int, dict[str, Any]]:
     result = {}
-    for q in query:
+    for index, q in enumerate(query):
         values = [
             o.value
             for o in observed
@@ -201,11 +216,21 @@ def _matches(
         if len(set(values)) != 1:
             continue
         v = values[0]
-        result[f"{q.object_id}:{q.name}"] = (
+        similarity = (
             float(q.value == v)
             if q.name == "ploidy"
             else max(0.0, 1 - abs(q.value - v) / max(abs(q.value), abs(v), 1e-12))
         )
+        result[index] = {
+            "name": q.name,
+            "object_id": q.object_id,
+            "similarity": similarity,
+            "query_value": q.value,
+            "case_value": v,
+            "unit": q.unit,
+            "platform": q.platform,
+            "state": q.state,
+        }
     return result
 
 
@@ -234,7 +259,9 @@ def retrieve_assembly_cases(
         for case in paper.cases:
             matches = _matches(observations, case.observations)
             material = (
-                sum(matches.values()) / len(observations) if observations else 0.0
+                sum(m["similarity"] for m in matches.values()) / len(observations)
+                if observations
+                else 0.0
             )
             tokens = _tokens(str(case.content) + " " + str(case.method))
             lexical = len(words & tokens) / math.sqrt(max(1, len(words) * len(tokens)))
@@ -242,7 +269,7 @@ def retrieve_assembly_cases(
                 target and canonical_tool(case.method.tool) == canonical_tool(target)
             )
             # Same-tool status alone is insufficient evidence of relevance.
-            if not matches and not words & tokens:
+            if material <= 0 and lexical <= 0:
                 continue
             rows.append(
                 {
@@ -322,14 +349,20 @@ def retrieve_assembly_cases(
                 ),
                 "match": {
                     "matched_features": [
-                        q.name
-                        for q in observations
-                        if f"{q.object_id}:{q.name}" in row["matches"]
+                        m["name"]
+                        for m in row["matches"].values()
+                        if m["similarity"] > 0
                     ],
+                    "differing_features": [
+                        m["name"]
+                        for m in row["matches"].values()
+                        if m["similarity"] < 1
+                    ],
+                    "comparisons": list(row["matches"].values()),
                     "missing": [
                         q.name
-                        for q in observations
-                        if f"{q.object_id}:{q.name}" not in row["matches"]
+                        for index, q in enumerate(observations)
+                        if index not in row["matches"]
                     ],
                     "platform_differences": sorted(
                         set(case.input_platforms) ^ set(query.get("platforms", []))

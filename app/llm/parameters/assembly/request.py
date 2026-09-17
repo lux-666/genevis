@@ -45,6 +45,32 @@ class AssemblyParameterRequestDTO(BaseModel):
         return self
 
 
+def validate_parameter_basis(
+    *,
+    method_id: str,
+    catalog: MethodParameterCatalog,
+    basis_snapshot: Mapping[str, Any],
+) -> None:
+    """Shared new-request/recovery guard; independent of prompt projection."""
+    if (
+        not isinstance(basis_snapshot, Mapping)
+        or basis_snapshot.get("schema_version") != 3
+    ):
+        raise ValueError("Assembly parameter basis requires schema 3")
+    if method_id != catalog.method_id or basis_snapshot.get("method_id") != method_id:
+        raise ValueError("parameter request basis method does not match the catalog")
+    if basis_snapshot.get("consumer_version") != 5:
+        raise ValueError("pre-v5 Assembly basis cannot be used; start a new run")
+    evidence = basis_snapshot.get("knowledge_evidence")
+    if (
+        not isinstance(evidence, Mapping)
+        or evidence.get("purpose") != "parameters"
+        or not isinstance(evidence.get("target_method"), str)
+        or canonical_tool(evidence["target_method"]) != canonical_tool(catalog.tool)
+    ):
+        raise ValueError("parameter evidence purpose or target does not match catalog")
+
+
 def build_parameter_request_dto(
     *,
     method_id: str,
@@ -54,15 +80,10 @@ def build_parameter_request_dto(
     task: ParameterAttemptTask,
     basis_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if method_id != catalog.method_id or basis_snapshot.get("method_id") != method_id:
-        raise ValueError("parameter request basis method does not match the catalog")
-    if basis_snapshot.get("consumer_version") != 5:
-        raise ValueError("pre-v5 Assembly basis cannot be used; start a new run")
+    validate_parameter_basis(
+        method_id=method_id, catalog=catalog, basis_snapshot=basis_snapshot
+    )
     evidence = basis_snapshot["knowledge_evidence"]
-    if evidence["purpose"] != "parameters" or canonical_tool(
-        evidence.get("target_method", "")
-    ) != canonical_tool(catalog.tool):
-        raise ValueError("parameter evidence purpose or target does not match catalog")
     fields = ("value_type", "allowed_values", "min", "max", "description", "notes")
     adjustable = {
         name: {

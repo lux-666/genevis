@@ -129,7 +129,7 @@ from app.stages.resource_resolution import update_resource_ref
 from app.storage.artifacts import (
     publish_artifact_record,
     read_artifact_records,
-    resolve_artifact_ref,
+    recover_published_artifact,
 )
 from app.storage.assembly_candidates import load_executed_candidate_bundle
 from app.storage.ledger import Ledger
@@ -1861,6 +1861,12 @@ def _requested_method(
         raise ResumeValidationError(str(exc)) from exc
 
 
+_METHOD_RECORD_FILENAMES = {
+    ASSEMBLY_METHOD_MODEL_REQUEST: "method_model_request.json",
+    ASSEMBLY_METHOD_MODEL_RESPONSE: "method_model_response.json",
+}
+
+
 def _write_assembly_json_artifact(
     state: TopLevelState,
     filename: str,
@@ -1883,6 +1889,11 @@ def _write_assembly_json_artifact(
     logical = Path(filename)
     suffix = logical.suffix or ".json"
     path = artifact_dir / f"{logical.stem}.{content_hash}{suffix}"
+    if (
+        method_name == "assembly.method_recommender"
+        and artifact_type in _METHOD_RECORD_FILENAMES
+    ):
+        path = artifact_dir / _METHOD_RECORD_FILENAMES[artifact_type]
     temporary = stage_work_dir(
         state,
         "assembly",
@@ -1954,29 +1965,55 @@ def _recommend_route_with_decision_boundary(
     retrieval_audit: dict[str, Any] = {}
     try:
         saved = _recover_assembly_method_artifact(state, ASSEMBLY_METHOD_MODEL_REQUEST)
-    except (OSError, TypeError, ValueError) as exc:
+        if saved:
+            record = saved[1]
+            messages = record["messages"]
+            request = AssemblyDecisionRequest(
+                **{
+                    key: record[key]
+                    for key in (
+                        "kind",
+                        "session_id",
+                        "prompt_payload",
+                        "allowed_actions",
+                        "allowed_methods",
+                    )
+                },
+                system_prompt=messages[0]["content"],
+            )
+            if (
+                request.session_id != state["session_id"]
+                or len(messages) != 2
+                or messages[0]["role"] != "system"
+                or messages[1]["role"] != "user"
+                or json.loads(messages[1]["content"]) != request.prompt_payload
+                or request.allowed_methods
+                != request.prompt_payload.get("allowed_methods", [])
+                or request.allowed_actions
+                != request.prompt_payload.get("allowed_actions", [])
+            ):
+                raise ValueError("recorded method request binding mismatch")
+        else:
+            prompt_payload = _route_selector_payload(
+                state, assembly_out, ctx, audit=retrieval_audit
+            )
+            request = AssemblyDecisionRequest(
+                kind="route_selection",
+                session_id=state["session_id"],
+                prompt_payload=prompt_payload,
+                system_prompt=(
+                    "You are an expert genome assembly method and route advisor.\n\n"
+                )
+                + str(ctx.get("skill_text") or ""),
+                allowed_actions=list(ctx.get("allowed_actions") or []),
+                allowed_methods=list(prompt_payload.get("allowed_methods") or []),
+            )
+            messages = render_assembly_decision_messages(request)
+    except (OSError, KeyError, IndexError, TypeError, ValueError) as exc:
         return _unavailable_route_recommendation(
             f"assembly method request recovery failed: {exc}"
         )
-    prompt_payload = (
-        saved[1]["prompt_payload"]
-        if saved
-        else _route_selector_payload(state, assembly_out, ctx, audit=retrieval_audit)
-    )
-    allowed_actions = list(ctx.get("allowed_actions") or [])
-    allowed_methods = list(prompt_payload.get("allowed_methods") or [])
-    request = AssemblyDecisionRequest(
-        kind="route_selection",
-        session_id=state["session_id"],
-        prompt_payload=prompt_payload,
-        system_prompt="You are an expert genome assembly method and route advisor.\n\n"
-        + str(ctx.get("skill_text") or ""),
-        allowed_actions=allowed_actions,
-        allowed_methods=allowed_methods,
-    )
-    messages = (
-        saved[1]["messages"] if saved else render_assembly_decision_messages(request)
-    )
+    allowed_methods = request.allowed_methods
     try:
         request_ref = (
             saved[0]
@@ -1989,9 +2026,9 @@ def _recommend_route_with_decision_boundary(
                         "schema_version": 1,
                         "kind": request.kind,
                         "session_id": request.session_id,
-                        "allowed_actions": allowed_actions,
+                        "allowed_actions": request.allowed_actions,
                         "allowed_methods": allowed_methods,
-                        "prompt_payload": prompt_payload,
+                        "prompt_payload": request.prompt_payload,
                         **retrieval_audit,
                         "messages": messages,
                     },
@@ -2005,25 +2042,32 @@ def _recommend_route_with_decision_boundary(
         )
         if recovered is None:
             decision = make_assembly_decision(request, messages=messages)
-            response_ref = ArtifactRef.model_validate(
-                _write_assembly_json_artifact(
-                    state,
-                    "method_model_response.json",
-                    {
-                        "request_sha256": request_ref.sha256,
-                        **model_response_record(
-                            schema_version=1,
-                            raw_response=decision.raw_response,
-                            valid=decision.valid,
-                            error=decision.error,
-                            model_id=decision.model_id,
-                        ),
-                    },
-                    artifact_type=ASSEMBLY_METHOD_MODEL_RESPONSE,
-                    method_name="assembly.method_recommender",
+            try:
+                response_ref = ArtifactRef.model_validate(
+                    _write_assembly_json_artifact(
+                        state,
+                        "method_model_response.json",
+                        {
+                            "request_sha256": request_ref.sha256,
+                            **model_response_record(
+                                schema_version=1,
+                                raw_response=decision.raw_response,
+                                valid=decision.valid,
+                                error=decision.error,
+                                model_id=decision.model_id,
+                            ),
+                        },
+                        artifact_type=ASSEMBLY_METHOD_MODEL_RESPONSE,
+                        method_name="assembly.method_recommender",
+                    )
                 )
-            )
-        else:
+            except FileExistsError:
+                recovered = _recover_assembly_method_artifact(
+                    state, ASSEMBLY_METHOD_MODEL_RESPONSE, request_ref=request_ref
+                )
+                if recovered is None:
+                    raise
+        if recovered is not None:
             response_ref, response_record = recovered
             decision = restore_assembly_decision(response_record, request)
     except (OSError, TypeError, ValueError) as exc:
@@ -2300,7 +2344,7 @@ def _recover_assembly_method_artifact(
     *,
     request_ref: ArtifactRef | None = None,
 ) -> tuple[ArtifactRef, dict[str, Any]] | None:
-    """Locate both method records by the same occurrence/producer identity."""
+    """Recover the occurrence's fixed record, including publish-before-index."""
 
     if artifact_type not in {
         ASSEMBLY_METHOD_MODEL_REQUEST,
@@ -2316,7 +2360,10 @@ def _recover_assembly_method_artifact(
         raise ValueError("response recovery must bind an Assembly method request")
     records = read_artifact_records(absolute_data_dir(state), state["session_id"])
     step_id = current_workflow_step_id(state, expected_stage="assembly")
-    recovered = None
+    destination = stage_artifacts_dir(
+        state, "assembly", "control", _METHOD_RECORD_FILENAMES[artifact_type]
+    )
+    # Reject pre-cutover/competing identities, never silently rerun an old request.
     for record in records:
         if (
             record.get("artifact_type") != artifact_type
@@ -2325,19 +2372,24 @@ def _recover_assembly_method_artifact(
             or record.get("workflow_step_id") != step_id
         ):
             continue
-        ref = ArtifactRef.model_validate(
-            {key: record[key] for key in ArtifactRef.model_fields if key in record}
-        )
-        path = resolve_artifact_ref(absolute_data_dir(state), state["session_id"], ref)
-        body = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(body, dict):
-            raise ValueError("persisted Assembly model record is not an object")
-        if request_ref is not None and body.get("request_sha256") != request_ref.sha256:
-            continue
-        if recovered is not None:
-            raise ValueError(f"multiple {artifact_type} records for this occurrence")
-        recovered = (ref, body)
-    return recovered
+        if absolute_data_dir(state) / record["path_ref"] != destination:
+            raise ValueError("incompatible Assembly method record; start a new run")
+    recovered = recover_published_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        destination,
+        stage="assembly",
+        method_name="assembly.method_recommender",
+        artifact_type=artifact_type,
+    )
+    if recovered is None:
+        return None
+    body = json.loads(recovered.path.read_text(encoding="utf-8"))
+    if not isinstance(body, dict):
+        raise ValueError("persisted Assembly model record is not an object")
+    if request_ref is not None and body.get("request_sha256") != request_ref.sha256:
+        raise ValueError("Assembly response request hash mismatch")
+    return recovered.ref, body
 
 
 def _unavailable_route_recommendation(
