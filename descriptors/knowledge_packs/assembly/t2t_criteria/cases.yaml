@@ -1,7 +1,0 @@
-- case_id: near_t2t_ont
-  context:
-    platform: ont_r10
-    target_level: near_t2t
-  verdict: near_t2t
-  confidence: 0.82
-  key_reasoning: "Good telomere and low-gap evidence can support near-T2T, pending final review policy."

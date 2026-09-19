@@ -1,6 +1,0 @@
-- case_id: cyclone_draft
-  context:
-    platform: cyclone
-    target_level: draft
-  decision: adopt_draft
-  reasoning: "Draft target with adequate basic QC can proceed without T2T finishing."
