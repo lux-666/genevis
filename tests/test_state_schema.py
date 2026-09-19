@@ -35,9 +35,12 @@ _TEST_ASSEMBLY_CURSOR_ADAPTER = TypeAdapter(_TestAssemblyCursor)
     "adapter", (READ_QC_STAGE_CURSOR_ADAPTER, ASSEMBLY_STAGE_CURSOR_ADAPTER)
 )
 def test_executable_stage_cursors_accept_shared_collect_failure(adapter) -> None:
-    assert adapter.validate_python(
-        {"status": "failed", "failure_kind": "collect"}
-    )["failure_kind"] == "collect"
+    assert (
+        adapter.validate_python({"status": "failed", "failure_kind": "collect"})[
+            "failure_kind"
+        ]
+        == "collect"
+    )
 
 
 def test_top_level_state_marks_runtime_invariants_as_required() -> None:

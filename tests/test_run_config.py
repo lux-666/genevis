@@ -718,9 +718,7 @@ class RunConfigSchemaTests(unittest.TestCase):
             RunConfig.model_validate(
                 {
                     "requested_stages": _local_stage_requests("hic_scaffolding"),
-                    "hic_scaffolding": {
-                        "parameter_advisor": "deterministic_baseline"
-                    },
+                    "hic_scaffolding": {"parameter_advisor": "deterministic_baseline"},
                 }
             )
         self.assertIn("restriction_enzyme", str(ctx.exception))

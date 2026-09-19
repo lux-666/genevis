@@ -979,9 +979,15 @@ used directly or through stage/storage helpers is:
 
 ```python
 paths.workflow_step_artifacts_dir(workflow_step_id, "assembly")
-paths.workflow_step_artifact_path(workflow_step_id, "assembly", "parameter_recommendations", "000", "...")
-paths.workflow_step_artifact_path(workflow_step_id, "assembly", "attempts", "000", "...")
-paths.workflow_step_artifact_path(workflow_step_id, "assembly", "reviews", review_request_id, "request.json")
+paths.workflow_step_artifact_path(
+    workflow_step_id, "assembly", "parameter_recommendations", "000", "..."
+)
+paths.workflow_step_artifact_path(
+    workflow_step_id, "assembly", "attempts", "000", "..."
+)
+paths.workflow_step_artifact_path(
+    workflow_step_id, "assembly", "reviews", review_request_id, "request.json"
+)
 paths.workflow_step_work_dir(workflow_step_id, "assembly")
 paths.workflow_step_work_path(workflow_step_id, "assembly", "attempts", "000", "...")
 paths.report_path("session_summary.json")

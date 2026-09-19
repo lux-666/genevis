@@ -68,12 +68,10 @@ pytest -q
 The working tree passes a gate only when that command returns zero for the
 revision being described; the command output is the evidence.
 
-- Current unresolved checks: `mypy app` reports a missing local annotation for
-  `outcome` in `app/control/lifecycle.py`. Repository formatting also differs
-  in `app/execution/run_readiness.py`,
-  `app/stages/hic_scaffolding/parameters/workflow.py`,
-  `tests/test_database_resolution.py`, `tests/test_hic_scaffolding.py`,
-  `tests/test_run_config.py` and `tests/test_state_schema.py`.
+- Run the checks in the project environment with the declared development
+  and TUI dependencies installed. A missing optional dependency or a Python
+  target incompatible with installed stubs is an environment failure, not
+  evidence that source type checking passed.
 - Policy owner: [Governance](governance.md).
 - Current evidence: `pyproject.toml` plus the command output for the checked
   revision.

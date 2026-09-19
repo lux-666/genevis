@@ -125,9 +125,9 @@ _RECOMMENDER_METHOD = "hic_scaffolding.parameter_recommender"
 _APPROVAL_METHOD = "hic_scaffolding.parameter_approval"
 
 
-def autohic_parameter_policy(state: TopLevelState) -> Literal[
-    "advisor", "deterministic_baseline"
-]:
+def autohic_parameter_policy(
+    state: TopLevelState,
+) -> Literal["advisor", "deterministic_baseline"]:
     """Read the frozen AutoHiC parameter-advisor mode from the stage seed."""
 
     seed = (state.get("stage_seeds") or {}).get("hic_scaffolding") or {}

@@ -32,9 +32,7 @@ def _write_reference(reference: Path, files: dict[str, str]) -> None:
     native = {
         f"{prefix}.ncbi.json": "{}\n",
         f"{prefix}.ncbi.lineage": lineage,
-        f"{prefix}.ncbi.lineage2": files.get(
-            f"{prefix}.ncbi.lineage2", lineage
-        ),
+        f"{prefix}.ncbi.lineage2": files.get(f"{prefix}.ncbi.lineage2", lineage),
         tsv_name: files[tsv_name],
     }
     for name, content in native.items():
@@ -233,9 +231,7 @@ def test_plant_genus_taxonomy_selects_fixed_lineage_without_exact_target(
         species_name="Brassica rapa",
         lineage_name=None,
         prefix="Viridiplantae",
-        taxonomy_lineage=(
-            "Brassicales;Brassicaceae;Brassica;Brassica rapa"
-        ),
+        taxonomy_lineage=("Brassicales;Brassicaceae;Brassica;Brassica rapa"),
     )
     resolver = EnvResolver(config_data=_config(lineage, ncbi))
 
@@ -301,9 +297,7 @@ def test_nonplant_taxonomy_cannot_fall_back_to_embryophyta(tmp_path: Path) -> No
 def test_plant_taxonomy_requires_fixed_lineage_to_be_installed(
     tmp_path: Path,
 ) -> None:
-    lineage = ensure_busco_lineage(
-        tmp_path / "busco", lineage_name="metazoa_odb10"
-    )
+    lineage = ensure_busco_lineage(tmp_path / "busco", lineage_name="metazoa_odb10")
     ncbi = tmp_path / "ncbi"
     ncbi.mkdir()
     species_name = "Brassica rapa subsp. pekinensis"
@@ -318,8 +312,7 @@ def test_plant_taxonomy_requires_fixed_lineage_to_be_installed(
 
     with pytest.raises(
         DatabaseResolutionError,
-        match="plant taxonomy.*requires installed BUSCO lineage "
-        "'embryophyta_odb10'",
+        match="plant taxonomy.*requires installed BUSCO lineage 'embryophyta_odb10'",
     ):
         resolve_busco_parameters(
             _run_config(),

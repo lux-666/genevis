@@ -1678,9 +1678,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "restriction_enzyme"
             ] = "MboI"
             state["stage_seeds"] = {
-                "hic_scaffolding": {
-                    "parameter_advisor": "deterministic_baseline"
-                }
+                "hic_scaffolding": {"parameter_advisor": "deterministic_baseline"}
             }
 
             with (
@@ -1718,8 +1716,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertTrue(bundle.chain.manifest.summary["policy_skipped_model"])
 
             config = (
-                SessionPaths.from_run_dir(result["data_dir"])
-                .workflow_step_work_dir(
+                SessionPaths.from_run_dir(result["data_dir"]).workflow_step_work_dir(
                     "step-002-hic_scaffolding",
                     "hic_scaffolding",
                 )

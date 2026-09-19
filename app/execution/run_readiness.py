@@ -144,9 +144,7 @@ def run_requires_llm(run_config: RunConfig) -> bool:
             required_stages = set(required_stages) - {"assembly"}
     if "hic_scaffolding" in required_stages:
         hic = run_config.hic_scaffolding
-        parameter_advisor = (
-            hic.parameter_advisor if hic is not None else "advisor"
-        )
+        parameter_advisor = hic.parameter_advisor if hic is not None else "advisor"
         if parameter_advisor == "deterministic_baseline":
             required_stages = set(required_stages) - {"hic_scaffolding"}
     return bool(required_stages)

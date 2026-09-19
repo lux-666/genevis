@@ -445,7 +445,7 @@ def _settle_runtime_failure_method_dispositions(
 ) -> None:
     """Conservatively close roster gaps left by an unexpected graph exception."""
 
-    outcome = state.get("workflow_step_outcome") or {}
+    outcome: Mapping[str, Any] = state.get("workflow_step_outcome") or {}
     step_id = str(outcome.get("workflow_step_id") or "")
     step = next(
         step for step in state.get("workflow_steps") or [] if step["step_id"] == step_id
