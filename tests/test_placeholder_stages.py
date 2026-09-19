@@ -1,4 +1,4 @@
-"""Contracts for parent-registered GapCloser and Base Polish placeholders."""
+"""Contracts for the parent-registered Base Polish placeholder."""
 
 from __future__ import annotations
 
@@ -24,10 +24,6 @@ from app.stages.base_polish.state import (
     read_base_polish_stage_output,
     update_base_polish_stage_output,
 )
-from app.stages.gapcloser.state import (
-    read_gapcloser_stage_output,
-    update_gapcloser_stage_output,
-)
 from app.storage.ledger import Ledger
 from app.workflow import (
     MANUAL_ONLY_STAGES,
@@ -38,7 +34,7 @@ from app.workflow import (
 from tests.data_v2 import v2_run_dir
 
 
-@pytest.mark.parametrize("stage", ["gapcloser", "base_polish"])
+@pytest.mark.parametrize("stage", ["base_polish"])
 def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
     stage: str,
 ) -> None:
@@ -99,11 +95,6 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
     ("stage", "reader", "updater"),
     [
         (
-            "gapcloser",
-            read_gapcloser_stage_output,
-            update_gapcloser_stage_output,
-        ),
-        (
             "base_polish",
             read_base_polish_stage_output,
             update_base_polish_stage_output,
@@ -149,7 +140,7 @@ def test_placeholder_cursor_schema_is_strict(
 
 
 def test_placeholder_stages_are_manual_only_but_requestable() -> None:
-    assert MANUAL_ONLY_STAGES == {"gapcloser", "base_polish"}
+    assert MANUAL_ONLY_STAGES == {"base_polish"}
     assert stages_through("t2t") == [
         "read_qc",
         "genome_survey",
@@ -157,6 +148,7 @@ def test_placeholder_stages_are_manual_only_but_requestable() -> None:
         "assembly_dedup",
         "assembly_review",
         "hic_scaffolding",
+        "gapcloser",
         "t2t",
     ]
     intent = deterministic_workflow_intent("对这个样本做 T2T 组装")
@@ -186,7 +178,7 @@ def test_placeholder_stages_are_manual_only_but_requestable() -> None:
         RunConfig.model_validate(
             {
                 "requested_stages": [
-                    {"stage": "gapcloser", "allow_local_execution": True}
+                    {"stage": "base_polish", "allow_local_execution": True}
                 ]
             }
         )

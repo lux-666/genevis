@@ -177,8 +177,9 @@ Those are available boundaries, not a mandatory identical sequence for all ten
 stages.
 
 The parent registers ten domain stages explicitly in `app/graph/builder.py`; the
-subgraphs are composable but there is no dynamic plugin registry. `gapcloser` and
-`base_polish` are manual-only placeholders and fail closed if reached. Resume
+subgraphs are composable but there is no dynamic plugin registry. `gapcloser`
+executes the HiFi-only TGS-GapCloser route with manual result adoption;
+`base_polish` is a manual-only placeholder and fails closed if reached. Resume
 applies only the decision bound to the interrupted immutable occurrence; it does
 not rewrite the remaining plan, a fixed method roster, or an already-bound
 Assembly selection.

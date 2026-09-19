@@ -201,7 +201,7 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             item["stage"]: item["allow_local_execution"]
             for item in result.choices["suggested_stage_occurrences"]
         }
-        self.assertFalse(consent["gapcloser"])
+        self.assertTrue(consent["gapcloser"])
         self.assertFalse(consent["base_polish"])
         self.assertTrue(consent["t2t"])
 

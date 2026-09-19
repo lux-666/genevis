@@ -255,6 +255,20 @@ class GraphRoutingTests(unittest.TestCase):
             )
 
             def fail_with_skip(_state):
+                from app.execution.method_outcomes import (
+                    MethodOutcome,
+                    settle_method_outcomes,
+                )
+
+                settle_method_outcomes(
+                    _state,
+                    stage="gapcloser",
+                    outcomes=MethodOutcome(
+                        "gapcloser.tgs_gapcloser",
+                        "not_started",
+                        reason="synthetic stage failure",
+                    ),
+                )
                 return {
                     **fail_workflow_step(
                         _state,

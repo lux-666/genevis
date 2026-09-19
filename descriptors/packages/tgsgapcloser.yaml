@@ -1,0 +1,12 @@
+package_name: tgsgapcloser
+version_constraint: "==1.2.1"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "tgsgapcloser --scaff assembly.fa --reads hifi.fa --output result --ne --tgstype pb --minmap_arg '-x asm20'"
+help_summary: "TGS-GapCloser N-gap filling, first slice restricted to HiFi."
+known_pitfalls:
+  - "Only FASTA reads are accepted; the adapter validates and normalizes FASTQ."
+  - "Upstream has fixed done_step tags: use an isolated working directory."
+  - "This route does not correct noisy reads."
+  - "The wrapper requires GNU getopt, not macOS BSD getopt."

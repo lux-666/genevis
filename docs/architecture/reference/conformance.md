@@ -16,6 +16,21 @@ the owning reference specifications.
 
 ## Open gaps
 
+### GapCloser representative-sample acceptance and noisy-read routes
+
+The implemented TGS-GapCloser slice accepts only explicitly classified HiFi
+reads, validates native products, and requires durable manual adoption. Tests
+cover the shared lifecycle with a fixture executable and provide an opt-in
+real-binary synthetic-gap check. Neither is representative biological acceptance
+or evidence of improved consensus accuracy. No ONT/CLR/CycloneSEQ correction
+route or polishing implementation is claimed.
+
+- Current evidence: `app/stages/gapcloser/`, `tests/test_gapcloser.py`.
+- Contract owner: [GapCloser](stage-contracts.md#8-gapcloser).
+- Closure condition: run a representative scaffold/HiFi dataset on a provisioned
+  host, inspect the gap-detail report, evaluate quality independently, and record
+  the human adoption. Other platforms require a separately accepted route.
+
 ### Assembly software explanation coverage
 
 The single Assembly consumer, cross-method retrieval and frozen method/parameter

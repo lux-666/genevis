@@ -119,7 +119,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertIn("allow_local_execution", str(ctx.exception))
 
     def test_manual_only_stages_reject_local_execution(self):
-        for stage in ("gapcloser", "base_polish"):
+        for stage in ("base_polish",):
             with self.subTest(stage=stage), self.assertRaises(ValidationError) as ctx:
                 RunConfig.model_validate(
                     {"requested_stages": _local_stage_requests(stage)}

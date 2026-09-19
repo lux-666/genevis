@@ -1,0 +1,26 @@
+method_name: gapcloser.tgs_gapcloser
+stage: gapcloser
+package_ref: tgsgapcloser
+goal: "Fill scaffold N-gaps with HiFi reads and expose a candidate for manual adoption."
+required_inputs:
+  - name: assembly
+    type: assembly
+    description: "Current verified assembly candidate."
+  - name: long_reads
+    type: raw_or_clean_long_reads
+    description: "Complete current read set, explicitly classified pacbio_hifi."
+expected_outputs:
+  - name: gap_closed_assembly
+    type: gapcloser.assembly
+    description: "Native TGS-GapCloser FASTA, validated before adoption."
+  - name: gap_fill_details
+    type: gapcloser.details
+    description: "S/N/F coordinate evidence for every output scaffold."
+  - name: validation_report
+    type: gapcloser.validation
+    description: "Input/output gaps, lengths and segment consistency, not QV."
+review_rules:
+  - source_segments_and_coordinates_match
+  - human_adoption_required
+human_review_triggers:
+  - gap_closing_result_adoption

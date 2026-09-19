@@ -244,6 +244,26 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
 
 register_review_gate(
     ReviewGateDeclaration(
+        stage="gapcloser",
+        gate_id="gapcloser_adoption",
+        decisions_allowed=(
+            "accept_candidate",
+            "keep_prior_assembly",
+            "stop_human_review",
+        ),
+        intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+        validate_intent_request="app.stages.gapcloser.review:validate_intent_request",
+        effect_kind="gapcloser.adoption.v1",
+        effect_model="app.stages.gapcloser.review:GapCloserAdoptionEffect",
+        prepare_application="app.stages.gapcloser.review:prepare_application",
+        apply_application="app.stages.gapcloser.review:apply_application",
+        template_preferred_decision="keep_prior_assembly",
+        proposal_label="TGS-GapCloser candidate adoption",
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
         stage="assembly",
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),

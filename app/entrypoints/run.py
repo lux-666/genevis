@@ -196,6 +196,9 @@ def _stage_seeds_from_run_config(
     if "t2t" in requested and run_config.t2t:
         seeds["t2t"] = run_config.t2t.model_dump(mode="json", exclude_none=True)
 
+    if "gapcloser" in requested and run_config.gapcloser:
+        seeds["gapcloser"] = run_config.gapcloser.model_dump(mode="json")
+
     for review_stage in registered_review_stages():
         if review_stage not in requested:
             continue

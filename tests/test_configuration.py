@@ -62,7 +62,7 @@ def test_descriptor_registry_loading_is_cwd_independent(tmp_path, monkeypatch) -
     registry = load_descriptor_registry()
 
     assert "assembly.candidate.flye" in registry.methods
-    assert len(registry.methods) == 14
+    assert len(registry.methods) == 15
     assert registry.methods["assembly_dedup.purge_dups"].defaults == {
         "automatic_purge_approved": False,
         "cutoffs_strategy": "calcuts_auto",

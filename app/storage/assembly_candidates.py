@@ -16,6 +16,7 @@ from app.integrity import sha256_file
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
+    GAPCLOSER_ASSEMBLY,
     HIC_SCAFFOLDED_ASSEMBLY,
     T2T_PATCHED_ASSEMBLY,
     ArtifactMeta,
@@ -33,6 +34,7 @@ class AssemblyCandidateBundleError(ValueError):
 CANONICAL_ASSEMBLY_CANDIDATE_PRIMARY_TYPES: frozenset[str] = frozenset(
     {
         ASSEMBLY_DRAFT_ASSEMBLY,
+        GAPCLOSER_ASSEMBLY,
         HIC_SCAFFOLDED_ASSEMBLY,
         T2T_PATCHED_ASSEMBLY,
     }

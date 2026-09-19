@@ -118,6 +118,13 @@ stages:
     conda_env: your_tool_env
 
 methods:
+  gapcloser.tgs_gapcloser:
+    conda_env: your_tool_env
+    # TGS-GapCloser 1.2.1; getopt must be the GNU implementation.
+    required_tools:
+      - tgsgapcloser
+      - minimap2
+      - getopt
   read_qc.long_read_stats.seqkit_stats:
     conda_env: your_tool_env
     required_tools:

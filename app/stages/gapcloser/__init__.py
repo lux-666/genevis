@@ -1,1 +1,1 @@
-"""Parent-registered placeholder for post-Hi-C gap closing."""
+"""TGS-GapCloser HiFi gap filling and manual candidate adoption."""

@@ -112,7 +112,7 @@ table and never mutates the supplied state.
 | `assembly_dedup` | `assembly`, `long_reads` | `assembly` |
 | `assembly_review` | `assembly` | `assembly` |
 | `hic_scaffolding` | `assembly`, `hic_reads` | adopted chromosome-scale `assembly` |
-| `gapcloser` | none: registered placeholder with no executable input contract | none |
+| `gapcloser` | current adopted `assembly`; complete HiFi-only `long_reads` when internal gaps exist | manually adopted or reused `assembly` |
 | `t2t` | current adopted `assembly`, `long_reads` | `assembly` |
 | `base_polish` | none: registered placeholder with no executable input contract | none |
 
@@ -122,9 +122,10 @@ families are present. `resource_specs.py` owns only canonical resource
 resolution; stages do not share a second declarative planning table.
 
 Hi-C reads stop at `hic_scaffolding`. After human adoption, that occurrence
-replaces the central `assembly` resource. The current `gapcloser` placeholder
-neither reads nor updates it; if a GapCloser occurrence is reached it stops
-there. Any later T2T occurrence resolves the then-current assembly and the
+replaces the central `assembly` resource. GapCloser consumes that assembly and
+the complete current HiFi read set; manual adoption replaces it, while keeping
+the prior assembly or finding no internal gaps declares a reused delivery.
+Any later T2T occurrence resolves the then-current assembly and the
 long-read set; it does not consume `hic_reads` or a contact map directly. The
 current `base_polish` placeholder likewise publishes no resource.
 
@@ -199,18 +200,18 @@ verification are owned by the
 Every central `assembly` resource that represents an executed candidate,
 including an Inventory-wrapped registered assembly, carries a current executed
 candidate bundle and its exact primary-output ref. When Assembly Dedup, an
-accepted Hi-C adoption, an accepted T2T patch, or an Assembly Review corrective
-action changes the assembly path, it publishes a new executed candidate in that
+accepted Hi-C or GapCloser adoption, an accepted T2T patch, or an Assembly Review
+corrective action changes the assembly path, it publishes a new executed candidate in that
 active occurrence. The previous current candidate and primary output remain as
 `input_candidate_bundle_ref` and `input_primary_output_ref` lineage metadata.
 
 The generic candidate wrapper accepts exactly these primary artifact types:
 `assembly.draft_assembly`, `hic_scaffolding.chromosome_scaffolded_assembly`,
-and `t2t.patched_assembly`. The wrapper itself remains
+`gapcloser.assembly`, and `t2t.patched_assembly`. The wrapper itself remains
 `draft_assembly.candidate`; no derived FASTA is copied under a draft-only type.
 Assembly Review consumes the same current candidate contract after each of
-those producers and has no Hi-C- or T2T-specific fallback path. An unchanged
-Hi-C/T2T decision preserves the current paths and candidate relation while
+those producers and has no producer-specific fallback path. An unchanged
+Hi-C/GapCloser/T2T decision preserves the current paths and candidate relation while
 republishing the central ResourceRef under the active producer occurrence, so
 a later Review can verify the exact delivery handoff.
 

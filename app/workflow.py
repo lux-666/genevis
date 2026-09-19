@@ -25,7 +25,7 @@ STAGE_ORDER: list[DomainStage] = [
     "base_polish",
 ]
 
-MANUAL_ONLY_STAGES: frozenset[DomainStage] = frozenset({"gapcloser", "base_polish"})
+MANUAL_ONLY_STAGES: frozenset[DomainStage] = frozenset({"base_polish"})
 
 # A successful occurrence of one of these stages owns the canonical assembly
 # handoff.  Keep this set aligned with the stages that publish an assembly
@@ -37,6 +37,7 @@ ASSEMBLY_HANDOFF_PRODUCER_STAGES: frozenset[DomainStage] = frozenset(
         "assembly_dedup",
         "assembly_review",
         "hic_scaffolding",
+        "gapcloser",
         "t2t",
     }
 )
@@ -91,7 +92,7 @@ def stages_through(endpoint: str) -> list[DomainStage]:
     >>> stages_through("assembly_review")
     ['read_qc', 'genome_survey', 'assembly', 'assembly_dedup', 'assembly_review']
     >>> stages_through("t2t")
-    ['read_qc', ..., 'assembly_review', 'hic_scaffolding', 't2t']
+    ['read_qc', ..., 'assembly_review', 'hic_scaffolding', 'gapcloser', 't2t']
     """
     if endpoint not in STAGE_ORDER:
         raise ValueError(f"unknown stage endpoint: {endpoint!r}")

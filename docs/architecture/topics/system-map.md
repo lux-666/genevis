@@ -93,7 +93,8 @@ The stage registry contains inventory, read QC, genome survey, assembly,
 assembly deduplication, assembly review, Hi-C scaffolding, GapCloser, T2T
 finishing, and Base Polish. Operator plans compile to immutable occurrences;
 registry order remains registration/display guidance rather than runtime
-successor logic. GapCloser and Base Polish remain manual-only placeholders.
+successor logic. GapCloser supports HiFi-only TGS-GapCloser with manual adoption;
+Base Polish remains a manual-only placeholder.
 Exact occurrence, Review-binding, and placeholder rules belong to
 [Runtime orchestration](runtime-orchestration.md) and
 [Stage contracts](../reference/stage-contracts.md).

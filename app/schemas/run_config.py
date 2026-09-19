@@ -95,6 +95,17 @@ class RunConfigSharedParameters(BaseModel):
     species_facts: SpeciesFacts | None = None
 
 
+class GapCloserRunConfig(BaseModel):
+    """Operator-owned settings for the HiFi-only TGS-GapCloser route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    threads: int = Field(default=16, ge=1, le=1024)
+    min_identity: float = Field(default=0.2, gt=0, le=1)
+    min_match: int = Field(default=200, ge=1)
+    gap_size_check: bool = False
+
+
 class T2TReadInput(BaseModel):
     """One explicitly classified long-read input selected for T2T finishing."""
 
@@ -358,6 +369,7 @@ class RunConfig(BaseModel):
     assembly_dedup: AssemblyDedupRunConfig | None = None
     assembly_review: AssemblyReviewRunConfig | None = None
     hic_scaffolding: HiCScaffoldingRunConfig | None = None
+    gapcloser: GapCloserRunConfig | None = None
     t2t: T2TRunConfig | None = None
     review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
 

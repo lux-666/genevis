@@ -1,7 +1,7 @@
 # Stage Contract Reference
 
-> **Status:** accepted and implemented for current stages. GapCloser and Base
-> Polish remain planned placeholder capabilities.
+> **Status:** accepted and implemented for current stages. Base
+> Polish remains a planned placeholder capability.
 > **Read when:** exact biological stage inputs, outputs, methods, or review
 > triggers matter.  
 > **Comes from:** [Runtime orchestration](../topics/runtime-orchestration.md).  
@@ -471,27 +471,61 @@ not create a review gate, and does not cause automatic retry or rollback.
 
 ## Shared placeholder boundary
 
-GapCloser and Base Polish are parent-graph placeholders. Each has no registered
+Base Polish is a parent-graph placeholder. It has no registered
 method, descriptor, local-execution configuration, artifact contract, or
 resource handoff. A requested occurrence writes `blocked_not_implemented` and
 terminates through the failed boundary; an absent occurrence has no runtime
-behavior. Neither placeholder reads or updates the central `assembly` resource.
+behavior. It neither reads nor updates the central `assembly` resource.
 
-## 8. GapCloser Placeholder
+## 8. GapCloser
 
-Intended purpose: fill structural sequence gaps in an assembly when an operator
-places this placeholder occurrence in the frozen workflow.
+Purpose: fill internal N-gaps with TGS-GapCloser using explicitly classified
+PacBio HiFi reads. The first slice supports only the no-error-correction route
+(`--ne --tgstype pb --minmap_arg '-x asm20'`). ONT, CLR, CycloneSEQ, unknown
+platforms, and mixed-platform current read sets are rejected, not reclassified.
+This stage does not infer that length-filtered noisy reads are corrected reads.
+
+The registered method is `gapcloser.tgs_gapcloser`. It consumes the current
+verified assembly candidate and complete current HiFi read set through the
+existing resource resolver. FASTA/FASTQ (plain or gzip) reads are validated and
+normalized to a run-owned FASTA; source identities remain in an indexed input
+record. The original assembly and reads are never overwritten. Each occurrence
+uses its own tool working directory because upstream uses fixed checkpoint tags.
+
+RunConfig carries bounded operator settings, not an LLM recommender. Execution
+uses the shared freeze/run/collect lifecycle. Both native 1.2.1 products,
+`.scaff_seqs` and `.gap_fill_detail`, are mandatory (the upstream README uses
+different suffixes; the adapter follows
+[the verified upstream source](https://github.com/BGI-Qingdao/TGS-GapCloser/tree/e1a7e01c6259e6651a8007e4e4c3b887bef38b19)).
+Collection validates scaffold identity,
+segment coordinates, copied source sequence and N segments, and publishes an
+input/output gap-count and length report. Those checks prove structural
+consistency, not consensus accuracy or biological improvement.
+Scaffolds without internal gaps must remain unchanged. Unfilled N segments
+consume the same source Ns; source prefixes and suffixes cannot be discarded.
+Inserted sequence and overlap closures (including adjacent S segments without
+an F segment) must bridge exactly one internal source gap between retained
+anchors. Only that gap's flanks may be trimmed, with removed bases reported.
+
+A separate manual-only adoption gate offers `accept_candidate`,
+`keep_prior_assembly`, or `stop_human_review`. No timeout auto-adopts a patch.
+Only a verified adoption replaces the central assembly; keeping the prior
+assembly declares a reused delivery. Missing local-execution authorization fails closed.
+An assembly without internal gaps reuses its current candidate without running
+the tool and records the method as skipped. Zero filled gaps after execution is
+a valid reported result, not a claim of improvement. Real-tool acceptance is
+reported separately from fixture-backed integration tests.
 
 Accepted placement and handoff design:
 
 - the complete recommendation places `gapcloser` after `hic_scaffolding` and
   before `t2t`;
-- the implemented stage will require the current central `assembly`;
-- successful adoption will publish an occurrence-owned assembly candidate and
-  replace the central `assembly` handoff consumed by T2T or a later Review.
+- the implemented stage requires the current central `assembly`;
+- successful adoption publishes an occurrence-owned assembly candidate and
+  replaces the central `assembly` handoff consumed by T2T or a later Review.
 
-The complete workflow recommendation includes this position with local
-execution disabled; generic prefix expansion omits it.
+A following Assembly Review binds to this GapCloser delivery. Base Polish
+remains deferred.
 
 ## 9. T2T Finishing
 

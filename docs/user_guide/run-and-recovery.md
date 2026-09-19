@@ -56,6 +56,53 @@ exact occurrence and freeze contract is linked above; RunConfig remains the
 literal occurrence/authorization authority. Deferred Assembly method and
 parameter decisions are stage-owned evidence rather than startup configuration.
 
+## HiFi gap closing from an existing assembly
+
+Use [the manifest](../examples/gapcloser_manifest.template.yaml) and
+[the RunConfig](../examples/gapcloser_run_config.template.json) for one complete
+GapCloser artifact without rerunning Assembly, Hi-C, or T2T:
+
+```bash
+cp docs/examples/gapcloser_manifest.template.yaml /server/path/manifest.yaml
+cp docs/examples/gapcloser_run_config.template.json /server/path/run_config.json
+```
+
+Replace the assembly/read paths and session ID. Supply the complete current
+HiFi read set. The active `config/envs.yaml` must map
+`gapcloser.tgs_gapcloser` to a tool environment with TGS-GapCloser 1.2.1,
+minimap2, and GNU getopt (not the macOS BSD command). Use the ordinary `run`
+command below. This slice needs no LLM endpoint and no evaluation databases.
+Upstream's PB thresholds are exposed as operator settings, not claimed to be
+optimal HiFi recommendations.
+
+The tool emits a candidate FASTA, native segment details, and an indexed
+validation report. The report measures gap/length changes and copied-segment
+consistency, not QV or biological improvement. Use `review` or a request-bound
+decision file to `accept_candidate`, `keep_prior_assembly`, or
+`stop_human_review`. There is no automatic adoption; `inspect` reports the
+final adopted/reused assembly after completion. If there are no internal
+N-gaps, the stage reuses the input without invoking the tool.
+
+ONT/CLR/CycloneSEQ/unknown or mixed-platform read sets are unsupported here.
+The complete-workflow recommendation is not an input-compatibility guarantee;
+omit unsupported occurrences explicitly. Base Polish is still a placeholder.
+For independent quality evaluation, explicitly append an Assembly Review
+occurrence and configure its separate tools, databases, and species metadata.
+Exact scope and handoff semantics live in the
+[GapCloser contract](../architecture/reference/stage-contracts.md#8-gapcloser).
+
+An opt-in real-tool synthetic smoke test is available on a provisioned host.
+It freezes the example configuration, runs Inventory and GapCloser, closes the
+SQLite checkpoint, then exercises CLI resume and final `inspect` delivery.
+Conda must be available, and the environment running pytest must expose the
+TGS-GapCloser/minimap2/GNU getopt binaries (the test freezes `sys.prefix`):
+
+```bash
+GENE_AGENT_TGS_REAL_SMOKE=1 pytest -q tests/test_gapcloser.py -k real_tgs
+```
+
+This deterministic synthetic gap is not representative biological acceptance.
+
 ## Start
 
 Launch a new run from a real interactive terminal:

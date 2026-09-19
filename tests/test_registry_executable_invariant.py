@@ -34,6 +34,8 @@ from app.stages.assembly_dedup import builder as assembly_dedup_builder
 from app.stages.assembly_dedup import nodes as assembly_dedup_nodes
 from app.stages.assembly_review import builder as assembly_review_builder
 from app.stages.assembly_review.method_application import busco, quast
+from app.stages.gapcloser import builder as gapcloser_builder
+from app.stages.gapcloser import nodes as gapcloser_nodes
 from app.stages.genome_survey import builder as genome_survey_builder
 from app.stages.genome_survey.method_application import genomescope2, jellyfish
 from app.stages.hic_scaffolding import builder as hic_scaffolding_builder
@@ -59,6 +61,13 @@ class LocalBinding:
 
 
 LOCAL_BINDINGS = (
+    LocalBinding(
+        gapcloser_nodes,
+        gapcloser_nodes.LIFECYCLE,
+        gapcloser_nodes.build_gapcloser_graph,
+        gapcloser_builder.build_stage,
+        "tgs_gapcloser",
+    ),
     LocalBinding(
         flye,
         flye.LIFECYCLE,
