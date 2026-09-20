@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from app.execution.lifecycle import (
 )
 from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
 from app.execution.method_runner import build_frozen_attempt
+from app.llm.parameters.assembly.request import build_parameter_request_dto
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
@@ -384,22 +386,52 @@ def _persist_v3_recommendation_fixture(
         payload=snapshot.model_dump(mode="json"),
         artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     )
+    basis = {
+        "schema_version": 3,
+        "method_id": "assembly.contract",
+        "catalog_snapshot": catalog.model_dump(mode="json"),
+        "consumer_version": 5,
+        "knowledge_evidence": {
+            "purpose": "parameters",
+            "stage": "assembly",
+            "task": "contig_assembly",
+            "limitations": [],
+            "target_method": catalog.tool,
+            "cases": [],
+        },
+        "material_query": {},
+        "method_decision": {"method_id": catalog.method_id},
+        "method_guidance": [],
+    }
     basis_snapshot_ref = _publish_v3_parameter_record(
         state,
         attempt_id=attempt_id,
         filename="basis_snapshot.json",
-        payload={
-            "schema_version": 3,
-            "method_id": "assembly.contract",
-            "catalog_snapshot": catalog.model_dump(mode="json"),
-        },
+        payload=basis,
         artifact_type=ASSEMBLY_PARAMETER_BASIS,
+    )
+    dto = build_parameter_request_dto(
+        method_id=catalog.method_id,
+        catalog=catalog,
+        facts=snapshot.facts,
+        context=snapshot.stage_context,
+        task=task,
+        basis_snapshot=basis,
     )
     model_request_ref = _publish_v3_parameter_record(
         state,
         attempt_id=attempt_id,
         filename="model_request.json",
-        payload={"schema_version": 3, "messages": []},
+        payload={
+            "schema_version": 3,
+            "parameter_request_schema_version": 3,
+            "input_snapshot_sha256": input_snapshot_ref.sha256,
+            "basis_sha256": basis_snapshot_ref.sha256,
+            "messages": [
+                {"role": "system", "content": "Lifecycle fixture"},
+                {"role": "user", "content": json.dumps(dto)},
+            ],
+        },
         artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
     )
     model_response_ref = _publish_v3_parameter_record(

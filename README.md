@@ -203,6 +203,7 @@ python scripts/build_assembly_cases.py \
   --extractions ../gene_agent_cases/extractions \
   --selection ../gene_agent_cases/scripts/case_projection_pilot.selection.json \
   --output /absolute/path/to/assembly-cases
+python -c 'from pathlib import Path; from app.knowledge.assembly_cases import load_case_papers; papers = load_case_papers(Path("/absolute/path/to/assembly-cases")); print(len(papers), "papers", sum(len(p.cases) for p in papers), "cases")'
 ```
 
 该命令不修改原图，不覆盖不同内容，不将投影视为论文重新审核。
@@ -212,6 +213,7 @@ python scripts/build_assembly_cases.py \
 选择文件中的每项必须明确 `paper`、`step`、`stage: assembly`、
 `task: contig_assembly` 和输入 state ID 到平台的 `inputs` 映射；
 `features` 指向 measurement ID 并声明规范单位，`outcomes` 列出结果 measurement ID。
+显式倍性标量使用 `unit: count`；不从 `diploid`、`2n=34` 或 coverage 推断数值倍性。
 `input_states` 只在原图证据明确时填写，否则保留 `unknown`，不当作 raw/filtered 通配符。
 不创建运行级案例快照，也不把完整 v5 实体复制进 case。
 每次推荐只记录实际选中的紧凑证据；恢复同一次已记录请求不改写历史内容。

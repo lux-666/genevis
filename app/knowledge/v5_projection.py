@@ -21,16 +21,24 @@ _UNITS = {
     "%": ("fraction", 0.01),
     "x": ("x", 1),
     "×": ("x", 1),
+    "count": ("count", 1),
 }
 
 
 def _number(raw: str, unit: str) -> float | None:
     match = re.fullmatch(
-        r"\s*(?:~|approximately\s+)?([\d,]+(?:\.\d+)?)\s*(bp|kb|Mb|Gb|%|x|×)\s*", raw
+        r"\s*(?:~|approximately\s+)?([\d,]+(?:\.\d+)?)"
+        r"\s*(bp|kb|Mb|Gb|%|x|×|count)?\s*",
+        raw,
     )
-    if not match or _UNITS[match[2]][0] != unit:
+    if not match:
         return None
-    value = float(match[1].replace(",", "")) * _UNITS[match[2]][1]
+    # Only an explicitly count-valued selection permits a bare scalar. Never
+    # infer ploidy from prose ("diploid", "2n=34") or from a coverage suffix.
+    source_unit = match[2] or ("count" if unit == "count" else None)
+    if source_unit is None or _UNITS[source_unit][0] != unit:
+        return None
+    value = float(match[1].replace(",", "")) * _UNITS[source_unit][1]
     if unit == "fraction" and not 0 <= value <= 1:
         return None
     return value

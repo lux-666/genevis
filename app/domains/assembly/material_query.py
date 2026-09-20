@@ -92,6 +92,7 @@ def build_material_query(
         qc_platform = PLATFORMS.get(next(iter(qc_platforms)))
         if qc_platform:
             for name, q in (
+                ("total_bases", facts.reads.total_bases),
                 ("read_n50", facts.reads.read_n50),
                 ("mean_read_length", facts.reads.mean_read_length),
                 ("coverage", coverage),

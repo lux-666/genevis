@@ -25,6 +25,8 @@ from app.execution.evidence import (
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.integrity import sha256_file
+from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
+from app.llm.parameters.assembly.request import build_parameter_request_dto
 from app.review.application import (
     load_verified_review_application,
     persist_review_application,
@@ -361,25 +363,47 @@ def _persist_parameter_attempt(
         payload=snapshot.model_dump(mode="json"),
         artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     )
+    basis = {
+        "schema_version": 3,
+        "method_id": catalog.method_id,
+        "catalog_snapshot": catalog.model_dump(mode="json"),
+        "consumer_version": 5,
+        "knowledge_evidence": {
+            "purpose": "parameters",
+            "stage": "assembly",
+            "task": "contig_assembly",
+            "limitations": [],
+            "target_method": catalog.tool,
+            "cases": [],
+        },
+        "material_query": {},
+        "method_decision": {"method_id": catalog.method_id},
+        "method_guidance": [],
+    }
     basis_ref = write_recommendation_json_artifact(
         **common,
         filename="basis_snapshot.json",
-        payload={
-            "schema_version": 3,
-            "method_id": catalog.method_id,
-            "catalog_snapshot": catalog.model_dump(mode="json"),
-            "consumer_version": 5,
-            "knowledge_evidence": {"cases": []},
-            "material_query": {},
-            "method_decision": {"method_id": catalog.method_id},
-            "method_guidance": [],
-        },
+        payload=basis,
         artifact_type=ASSEMBLY_PARAMETER_BASIS,
+    )
+    dto = build_parameter_request_dto(
+        method_id=method_id,
+        catalog=catalog,
+        facts=snapshot.facts,
+        context=snapshot.stage_context,
+        task=task,
+        basis_snapshot=basis,
     )
     model_request_ref = write_recommendation_json_artifact(
         **common,
         filename="model_request.json",
-        payload={"schema_version": 3, "messages": []},
+        payload={
+            "schema_version": 3,
+            "parameter_request_schema_version": 3,
+            "input_snapshot_sha256": input_snapshot_ref.sha256,
+            "basis_sha256": basis_ref.sha256,
+            "messages": render_assembly_parameter_messages(dto),
+        },
         artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
     )
     model_response_ref = write_recommendation_json_artifact(

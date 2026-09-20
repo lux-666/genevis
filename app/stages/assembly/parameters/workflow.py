@@ -41,9 +41,9 @@ from app.llm.parameters.assembly.recommender import (
     restore_assembly_parameter_decision,
 )
 from app.llm.parameters.assembly.request import (
-    AssemblyParameterRequestDTO,
     build_parameter_request_dto,
     validate_parameter_basis,
+    validate_recorded_parameter_request,
 )
 from app.review.application import (
     PreparedReviewApplication,
@@ -334,30 +334,15 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
         )
         if recovered_request is not None:
             model_request_ref, record = recovered_request
-            if (
-                record.get("input_snapshot_sha256") != input_snapshot_ref.sha256
-                or record.get("basis_sha256") != basis_ref.sha256
-            ):
-                raise ValueError("recorded parameter request evidence binding mismatch")
+            request_dto = validate_recorded_parameter_request(
+                record,
+                input_snapshot=input_snapshot,
+                input_snapshot_sha256=input_snapshot_ref.sha256,
+                basis_snapshot=basis_snapshot,
+                basis_sha256=basis_ref.sha256,
+                catalog=catalog,
+            )
             messages = record["messages"]
-            if (
-                not isinstance(messages, list)
-                or len(messages) != 2
-                or not all(isinstance(m, dict) for m in messages)
-                or messages[0].get("role") != "system"
-                or messages[1].get("role") != "user"
-                or not all(isinstance(m.get("content"), str) for m in messages)
-            ):
-                raise ValueError("invalid recorded Assembly parameter messages")
-            request_dto = json.loads(messages[1]["content"])
-            saved_dto = AssemblyParameterRequestDTO.model_validate(request_dto)
-            if (
-                saved_dto.method_id != catalog.method_id
-                or saved_dto.task != task
-                or saved_dto.facts != facts
-                or saved_dto.assembly_context != context
-            ):
-                raise ValueError("recorded parameter request input binding mismatch")
         else:
             request_dto = build_parameter_request_dto(
                 method_id=catalog.method_id,
@@ -698,6 +683,8 @@ def _baseline_assembly_parameters(
                     catalog.method_id
                 ),
                 "parameter_request_schema_version": 3,
+                "input_snapshot_sha256": input_snapshot_ref.sha256,
+                "basis_sha256": basis_ref.sha256,
                 "messages": messages,
                 "policy_skipped_model": True,
             },

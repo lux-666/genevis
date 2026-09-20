@@ -124,7 +124,7 @@ class KnowledgePackTests(unittest.TestCase):
 
         self.assertIn("hifi", ctx["allowed_actions"])
         self.assertIn("Assembly Method and Route Advice", ctx["skill_text"])
-        self.assertTrue(ctx["cases"])
+        self.assertNotIn("cases", ctx)
 
     def test_load_route_selector_context_missing(self):
         ctx = load_knowledge_pack(
@@ -138,7 +138,6 @@ class KnowledgePackTests(unittest.TestCase):
             ctx,
             {
                 "rules": {},
-                "cases": [],
                 "skill": None,
                 "skill_text": None,
                 "strategies": {},
@@ -185,7 +184,7 @@ class KnowledgePackTests(unittest.TestCase):
 
         self.assertEqual(ctx["allowed_actions"], ["choose"])
         self.assertIsNone(ctx["skill_text"])
-        self.assertEqual(ctx["cases"], [])
+        self.assertNotIn("cases", ctx)
 
 
 class InputProfilerTests(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Literal
@@ -16,6 +17,7 @@ from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     CanonicalRecommendationFacts,
+    RecommendationInputSnapshotV3,
 )
 
 
@@ -69,6 +71,58 @@ def validate_parameter_basis(
         or canonical_tool(evidence["target_method"]) != canonical_tool(catalog.tool)
     ):
         raise ValueError("parameter evidence purpose or target does not match catalog")
+
+
+def validate_recorded_parameter_request(
+    record: Mapping[str, Any],
+    *,
+    input_snapshot: RecommendationInputSnapshotV3,
+    input_snapshot_sha256: str,
+    basis_snapshot: Mapping[str, Any],
+    basis_sha256: str,
+    catalog: MethodParameterCatalog,
+) -> dict[str, Any]:
+    """Validate persisted evidence without rebuilding a prompt or reading live cases.
+
+    Recovery and the shared approval/execution loader use this same contract.
+    """
+    validate_parameter_basis(
+        method_id=input_snapshot.method_id,
+        catalog=catalog,
+        basis_snapshot=basis_snapshot,
+    )
+    if (
+        record.get("schema_version") != 3
+        or record.get("parameter_request_schema_version") != 3
+    ):
+        raise ValueError("invalid recorded Assembly parameter request schema")
+    if (
+        not input_snapshot_sha256
+        or not basis_sha256
+        or record.get("input_snapshot_sha256") != input_snapshot_sha256
+        or record.get("basis_sha256") != basis_sha256
+    ):
+        raise ValueError("recorded parameter request evidence binding mismatch")
+    messages = record.get("messages")
+    if (
+        not isinstance(messages, list)
+        or len(messages) != 2
+        or not all(isinstance(m, dict) for m in messages)
+        or messages[0].get("role") != "system"
+        or messages[1].get("role") != "user"
+        or not all(isinstance(m.get("content"), str) for m in messages)
+    ):
+        raise ValueError("invalid recorded Assembly parameter messages")
+    request_dto = json.loads(messages[1]["content"])
+    saved_dto = AssemblyParameterRequestDTO.model_validate(request_dto)
+    if (
+        saved_dto.method_id != catalog.method_id
+        or saved_dto.task != input_snapshot.task
+        or saved_dto.facts != input_snapshot.facts
+        or saved_dto.assembly_context != input_snapshot.stage_context
+    ):
+        raise ValueError("recorded parameter request input binding mismatch")
+    return dict(request_dto)
 
 
 def build_parameter_request_dto(

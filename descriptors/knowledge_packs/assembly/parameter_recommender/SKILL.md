@@ -11,12 +11,12 @@ The model receives four distinct inputs:
 3. Optional paper case cards containing original parameters, excerpts, rationale, citation, applicability, outcomes, and numeric similarity.
 4. Method-guidance cards describing biological mechanisms without fixed trigger values.
 
-Paper cards are analogs, not recipes. Method, read type, route, assembly goal, and clade are not retrieval gates or score terms. The model judges transferability from each complete card. A novel organism does not need a matching paper case: mechanistic extrapolation from its biological observations is a normal recommendation mode.
+Paper cards are analogs, not recipes. Runtime literature comes only from the configured `assembly.case_source` directory of `recommendation-cases.v1` packages. This parameter pack retains `guidance.yaml` for software mechanisms; it does not supply a second case library. The model judges transferability, including cross-method limitations. Empty literature evidence is allowed.
 
 ## Selection, Augmentation, Generation, Validation
 
-- Selection ranks paper cards by missing-aware numeric similarity across genome size, coverage, read N50, heterozygosity, and ploidy. Actionability only breaks ties. Missing dimensions are excluded and weights are renormalized.
-- Augmentation presents each selected card exactly once and adds applicable method-guidance cards. It never synthesizes a second copy of parameters, quotes, rationale, or citation.
+- Selection compares observations only when name, unit, platform and material state match. Missing case dimensions remain in the query denominator; weights are not renormalized over matches. Material and lexical ranks are fused, then source and method diversity are applied. Same-method evidence receives a small preference for parameter recommendations, but cannot create relevance by itself. `unknown` is not a raw/filtered wildcard.
+- Augmentation presents each selected task-specific card exactly once and adds applicable method-guidance cards. It never synthesizes a second copy of parameters, quotes, rationale, or citation.
 - Generation is one LLM call. The model judges the evidence and returns the explicit L2 parameter mapping it recommends passing for this attempt. It may omit an L2 parameter when the tool default should apply.
 - Application parsing checks only the declared JSON response shape. Parameter values are shown to the human reviewer without catalog-range or biological hard-rule rejection.
 

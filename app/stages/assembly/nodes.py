@@ -608,7 +608,6 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
         strict=False,
         include_actions=True,
         required_files=(),
-        include_cases=False,
     )
     if policy == "deterministic_baseline":
         recommendation = _deterministic_method_recommendation(assembly_out)

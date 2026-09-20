@@ -14,6 +14,7 @@ from typing import Any, Literal, Mapping, Sequence, cast
 from uuid import uuid4
 
 from app.control.workflow_plan import current_workflow_step_id
+from app.llm.parameters.assembly.request import validate_recorded_parameter_request
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_BASIS,
@@ -276,6 +277,18 @@ def load_parameter_recommendation_chain_v3(
         expected_type=types.model_request,
     )
     _require_schema(model_request, 3, "parameter model request")
+    if expected_stage == "assembly":
+        try:
+            validate_recorded_parameter_request(
+                model_request,
+                input_snapshot=input_snapshot,
+                input_snapshot_sha256=input_snapshot_ref.sha256,
+                basis_snapshot=basis_snapshot,
+                basis_sha256=basis_snapshot_ref.sha256,
+                catalog=catalog,
+            )
+        except ValueError as exc:
+            raise ParameterEvidenceError(str(exc)) from exc
     model_response_ref = _verified_current_occurrence_ref(
         state,
         refs.model_response_ref,

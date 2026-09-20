@@ -544,13 +544,45 @@ def test_material_query_never_assigns_mixed_qc_to_hifi():
         build_material_query(state, {**assembly, "target_level": "draft"})["text"]
         == mixed["text"]
     )
-    assert all(o["name"] not in {"read_n50", "coverage"} for o in mixed["observations"])
+    assert all(
+        o["name"] not in {"total_bases", "read_n50", "coverage"}
+        for o in mixed["observations"]
+    )
     qc = state["stage_outputs"]["read_qc"]
     qc["input_member_platforms"] = ["pacbio_hifi"]
     qc["raw_long_reads_paths"] = ["/a.fastq"]
+    raw = build_material_query(state, assembly)
+    bases = next(o for o in raw["observations"] if o["name"] == "total_bases")
+    assert (bases["value"], bases["unit"], bases["platform"], bases["state"]) == (
+        100000,
+        "bp",
+        "hifi",
+        "raw",
+    )
     qc["post_filter_summary"] = {"total_bases": 50000, "n50": 200}
     qc["filtered_long_reads_refs"] = ["/filtered.fastq"]
     measured = build_material_query(state, assembly)
+    bases = next(o for o in measured["observations"] if o["name"] == "total_bases")
+    assert (bases["value"], bases["state"]) == (50000, "filtered")
+    case = paper("qc", "hifiasm", 1)
+    case = case.model_copy(
+        update={
+            "cases": (
+                case.cases[0].model_copy(
+                    update={"observations": (Observation(**bases),)}
+                ),
+            )
+        }
+    )
+    # No species text or genome traits: total bases alone reaches retrieval.
+    retrieved = retrieve_assembly_cases(
+        AssemblyKnowledge(software={}, papers=(case,)),
+        {"observations": [bases]},
+        purpose="method_choice",
+    )
+    assert retrieved["evidence"]["cases"][0]["match"]["matched_features"] == [
+        "total_bases"
+    ]
     coverage = next(o for o in measured["observations"] if o["name"] == "coverage")
     assert (coverage["value"], coverage["platform"], coverage["state"]) == (
         50,
@@ -560,12 +592,12 @@ def test_material_query_never_assigns_mixed_qc_to_hifi():
     assert "raw_coverage" not in measured["facts"]["sequencing"]
     qc["filtered_long_reads_refs"] = []
     assert all(
-        o["name"] != "coverage"
+        o["name"] not in {"coverage", "total_bases"}
         for o in build_material_query(state, assembly)["observations"]
     )
     state["skip_reasons"] = {"qc": "skipped"}
     assert all(
-        o["name"] != "coverage"
+        o["name"] not in {"coverage", "total_bases"}
         for o in build_material_query(state, assembly)["observations"]
     )
 
@@ -702,6 +734,9 @@ def test_method_request_persists_shared_query_and_cross_method_basis(
     update = infer_input_profile(resolved)
     assembly = update["stage_outputs"]["assembly"]
     payload = json.loads(captured[1]["content"])
+    for route in payload["rules"]["routes"].values():
+        assert set(route) == {"description"}
+    assert set(payload["rules"]["routes"]) == {"cyclone", "ont", "hifi"}
     assert payload["knowledge_evidence"]["cases"][0]["method"]["tool"] == "NextDenovo"
     assert "read_cutoff = 10000" not in captured[1]["content"]
     assert "setting_explanations" not in captured[1]["content"]
@@ -1057,3 +1092,41 @@ def test_assembly_phasing_inputs_and_output_attribution(objects, expected):
         graph["steps"][1]["inputs"][0]["role"] = "reference"
         with pytest.raises(ValueError, match="descendants"):
             project_paper("p", graph, selection)
+
+
+@pytest.mark.parametrize("raw", ["2", "2 count", "2.0"])
+def test_explicit_ploidy_count_projection_participates_in_retrieval(raw):
+    graph, selection = projection_fixture()
+    graph["states"].append(
+        {
+            "id": "g",
+            "kind": "biological_genome",
+            "sample_ids": ["s"],
+            "sample_scope": "individual",
+            "origin": "study",
+        }
+    )
+    graph["measurements"].append(
+        {
+            "id": "pl",
+            "state_ids": ["g"],
+            "metric": "ploidy",
+            "value": raw,
+            "basis": "each",
+        }
+    )
+    selection[0]["features"] = {"ploidy": {"measurement": "pl", "unit": "count"}}
+    projected = project_paper("p", graph, selection)
+    ploidy = projected.cases[0].observations[0]
+    assert (ploidy.name, ploidy.value, ploidy.unit) == ("ploidy", 2, "count")
+    current = build_material_query({"shared_parameters": {"ploidy": 2}}, {})
+    result = retrieve_assembly_cases(
+        AssemblyKnowledge(software={}, papers=(projected,)),
+        current,
+        purpose="method_choice",
+    )
+    assert result["evidence"]["cases"][0]["match"]["matched_features"] == ["ploidy"]
+    assert result["evidence"]["cases"][0]["match"]["comparisons"][0]["similarity"] == 1
+    for unsupported in ("diploid", "2n=34", "2x", "2–4", "two"):
+        graph["measurements"][-1]["value"] = unsupported
+        assert not project_paper("p", graph, selection).cases[0].observations

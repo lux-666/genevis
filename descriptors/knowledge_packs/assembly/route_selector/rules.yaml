@@ -9,18 +9,14 @@ allowed_actions:
 
 routes:
   cyclone:
-    primary_tool: flye
-    primary_tool_flag: nano-raw
     description: "CycloneSeq or ONT R9-like long reads."
   ont:
-    primary_tool: hifiasm_ont
-    baseline_tool: flye
     description: "ONT R10/high-quality nanopore reads."
   hifi:
-    primary_tool: hifiasm_hifi
     description: "PacBio HiFi reads."
 
 selection_priority_notes:
+  - "Routes describe input compatibility. Choose among compatible registered methods using current material and case evidence; a route does not prescribe a default tool."
   - "HiFi reads with adequate coverage usually select hifi."
   - "ONT R10/high-quality ONT reads usually select ont."
   - "CycloneSeq or ONT R9-like reads usually select cyclone."

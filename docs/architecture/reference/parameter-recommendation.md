@@ -293,5 +293,11 @@ evidence, not additions to that catalog. Each attempt records its selected
 evidence and explanations; new retries reread cases while same-attempt recovery
 uses its recorded basis, catalog and exact model messages/DTO without rerendering
 or reprojecting under changed templates. Input facts, task and context must still
-match the immutable record; conflicts fail closed. Sparse-L2 parsing, catalog ownership,
+match the immutable record; conflicts fail closed. Assembly request records must
+bind `input_snapshot_sha256` and `basis_sha256` to the exact manifest refs and
+contain a valid two-message request/DTO. Recovery, approval and execution use the
+same validator at the shared chain-loading boundary, including deterministic
+baseline requests. Unbound older records require a new run; no hashes are
+retroactively supplied. Other stages retain their own request contracts.
+Sparse-L2 parsing, catalog ownership,
 approval and execution resolution remain owned by this contract.
