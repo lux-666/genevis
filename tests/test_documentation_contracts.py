@@ -33,7 +33,10 @@ class DocumentationContractTests(unittest.TestCase):
             "Phase4ReadQCRealSmokeTests",
             "completed AutoHiC attempt is not launched again",
             "assembly_fasta_registered",
-            "not** a five-stage or slice",
+            "--route contig",
+            "## Independent slice server runbook",
+            "--compare-hic-execution-from",
+            "Reuse that run's evidence",
             "does not claim the pending tests or server runs",
         ):
             self.assertIn(requirement, guide)

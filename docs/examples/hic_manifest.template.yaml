@@ -1,0 +1,19 @@
+# Pair with hic_run_config.template.json. Use a fresh session for each trial.
+session_id: hic-slice-YYYYMMDD-a
+sample_id: REPLACE_SAMPLE
+assets:
+  - asset_type: assembly_fasta_registered
+    paths: [/ABS/PATH/TO/verified_assembly.fasta]
+    format: fasta
+    compression: none
+    metadata:
+      source_run: REPLACE_SOURCE_SESSION_OR_ACCESSION
+      source_sha256: REPLACE_WITH_SOURCE_FILE_SHA256
+  - asset_type: hic_reads_registered
+    paired_reads:
+      - r1: /ABS/PATH/TO/hic_R1.fastq.gz
+        r2: /ABS/PATH/TO/hic_R2.fastq.gz
+    platform: illumina
+    layout: paired
+    format: fastq
+    compression: gzip

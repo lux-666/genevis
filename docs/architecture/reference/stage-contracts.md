@@ -619,3 +619,22 @@ verified stage deliveries, quality evaluation, and human decisions. A FASTA or
 a completed session alone is insufficient evidence of a fully executed route.
 Collection evidence must name intact indexed output artifacts. An earlier
 successful attempt does not erase a method's final failed or skipped outcome.
+
+The same read-only acceptance diagnostic supports explicit scopes: `complete`
+(the default), `contig`, `review`, `hic`, `gapcloser`, `t2t`, `base-polish`, and
+`finishing`. Each requires its exact occurrence sequence; a slice is never
+reported as complete-route coverage. Independent slices register their source
+FASTA through Inventory and verify that the first tool consumes that candidate's
+primary output. A terminal Review requires QUAST/BUSCO execution and collected
+metrics for every evaluated candidate. Scopes ending after Base Polish plus
+Review additionally require the immutable source/polished pair under identical
+evaluation settings. Scopes without Review explicitly have no final QUAST/BUSCO
+quality evaluation. Legitimate skips leave tool-execution coverage incomplete.
+
+For the single-stage Hi-C scope, an operator may compare a read-only audit made
+at the post-execution adoption gate with the completed audit after detached
+resume. The comparison binds the same session, frozen inputs and review request,
+and requires unchanged attempt-start events, execution evidence and collected
+output hashes. It is an execution-replay check, not biological acceptance or
+protection against a deliberately forged operator baseline. Parameter retries
+are new execution and cannot pass this no-rerun assertion.

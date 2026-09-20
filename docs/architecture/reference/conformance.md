@@ -185,6 +185,15 @@ representative input through canonical completion. Most method tests isolate
 their stage with fixtures, stubs, or patched external boundaries. The existing
 real-tool Read QC smoke does not close the whole-path gap.
 
+The operator reports a completed real five-stage run. Reuse and audit its
+preserved evidence with `route_acceptance --route contig`; absence of a bundled
+automated dataset/harness does not mean that server execution did not happen.
+The server run directory has not been independently inspected in this checkout.
+The same diagnostic now supports independent Review, Hi-C, GapCloser, T2T,
+Base Polish plus Review, and finishing scopes, with published RunConfig/input
+templates. The Hi-C scope can compare adoption-gate and post-resume executions.
+These entries are not proof that their real-tool server runs have passed.
+
 `server_check.sh` proves the fixed host tool/package/database closure and
 `server_test.sh` is a regression entry, not whole-path biological execution
 evidence. Its suite can currently auto-run the conditional SeqKit smoke on a
@@ -194,13 +203,15 @@ is still incomplete. Neither command may be cited as a successful contig run.
 - Current evidence: `tests/test_read_qc.py`, `tests/test_genome_survey.py`,
   `tests/test_assembly.py`, `tests/test_assembly_dedup.py`,
   `tests/test_assembly_review.py`, `scripts/server_check.sh`, and
-  `scripts/server_test.sh`.
+  `scripts/server_test.sh`, `app/diagnostics/route_acceptance.py`, and
+  `tests/test_route_acceptance.py`.
 - Contract owners: [Stage contracts](stage-contracts.md) and the
   [deployment boundary](../../deployment/README.md).
-- Closure condition: audit/fill code-test gaps and isolate real-tool tests,
-  then pass small-data smoke for the contig methods before adding an explicit
-  small real-data five-stage acceptance harness using the canonical contig
-  templates, installed tools and configured live LLM. Require a canonical completed terminal,
+- Closure condition: audit preserved real-run evidence, fill demonstrated
+  code-test gaps and isolate real-tool tests. Add small-data real-tool coverage
+  only for methods/branches not already proven; use the canonical templates
+  and `gene-agent run`, not a second execution framework. For repeatable server
+  acceptance, retain traceable input/tool identities and an audit with a canonical completed terminal,
   five settled analytical occurrences, and a hash-verified `final_assembly`
   from detached inspection. Focused stubbed tests do not satisfy this condition.
   Hi-C and finishing stages are independent slices before full-route acceptance;

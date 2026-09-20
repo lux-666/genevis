@@ -1,0 +1,7 @@
+{
+  "requested_stages": [
+    {"stage": "t2t", "allow_local_execution": true}
+  ],
+  "review_policy": {"max_blocked_seconds": -1},
+  "t2t": {"mode": "auto_patch"}
+}

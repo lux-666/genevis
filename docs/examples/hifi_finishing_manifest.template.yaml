@@ -1,0 +1,26 @@
+# Shared by base_polish, t2t and finishing RunConfig templates.
+# Use a different session_id for EVERY run; never edit a frozen session.
+session_id: finishing-slice-YYYYMMDD-a
+sample_id: REPLACE_SAMPLE
+user_metadata:
+  target_species: Solea ovata # REPLACE with the real NCBI scientific name
+assets:
+  - asset_type: assembly_fasta_registered
+    paths: [/ABS/PATH/TO/verified_assembly.fasta]
+    format: fasta
+    compression: none
+    metadata:
+      source_run: REPLACE_SOURCE_SESSION_OR_ACCESSION
+      source_sha256: REPLACE_WITH_SOURCE_FILE_SHA256
+  - asset_type: raw_long_reads
+    paths:
+      - /ABS/PATH/TO/hifi.fastq.gz # List ALL files of the selected sample read set
+    platform: pacbio_hifi
+    layout: single
+    format: fastq
+    compression: gzip
+  # Optional independent reference for QUAST:
+  # - asset_type: reference_genome_fasta
+  #   paths: [/ABS/PATH/TO/reference.fasta]
+  #   format: fasta
+  #   compression: none

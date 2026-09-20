@@ -1,0 +1,7 @@
+{
+  "requested_stages": [
+    {"stage": "hic_scaffolding", "allow_local_execution": true}
+  ],
+  "review_policy": {"max_blocked_seconds": -1},
+  "hic_scaffolding": {"autohic_parameters": {"threads": 16}}
+}

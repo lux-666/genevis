@@ -1,0 +1,16 @@
+{
+  "requested_stages": [
+    {"stage": "gapcloser", "allow_local_execution": true},
+    {"stage": "t2t", "allow_local_execution": true},
+    {"stage": "base_polish", "allow_local_execution": true},
+    {"stage": "assembly_review", "allow_local_execution": true}
+  ],
+  "review_policy": {"max_blocked_seconds": -1},
+  "gapcloser": {"threads": 16},
+  "t2t": {"mode": "auto_patch"},
+  "base_polish": {"threads": 16},
+  "assembly_review": {
+    "quast": {"threads": 16},
+    "busco": {"threads": 16}
+  }
+}

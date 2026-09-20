@@ -14,8 +14,8 @@ deployment pages link here instead of copying the run contract.
 **先单测 / 集成测试 → 小数据真实工具 smoke → 分段 E2E → 最后完整真实 E2E。**
 
 The complete ten-stage template is the final acceptance target, not the next
-debugging run. First inventory existing tests, fill demonstrated gaps, then
-exercise the small five-stage contig route. A passing fake executable proves
+debugging run. First inventory existing tests and prior real-run evidence, then
+fill demonstrated gaps. A passing fake executable proves
 the application contract, not that the real biological tool works. A host
 readiness check, a FASTA, or a completed session alone proves neither.
 
@@ -72,8 +72,15 @@ weakening validation. Test a legitimate skip separately from an execution path.
 
 ### 3. First real E2E: the small five-stage contig route
 
-After the code gaps and relevant tool smokes are green, use small but real,
-traceable data for **QC → Survey → Assembly → Dedup → Review**, with the
+**The operator has already run this five-stage route. Reuse that run's evidence;
+do not rerun each successful stage just to fill a checklist.** Its exact methods,
+skips and recovery branches still need inspection; this document is not an audit
+of an unprovided server run directory. A successful hifiasm run does not cover
+Flye, and a skipped Dedup does not cover purge_dups execution. Add targeted tests
+only for uncovered paths or changed behavior.
+
+For a new dataset or a missing branch, use small but real, traceable data for
+**QC → Survey → Assembly → Dedup → Review**, with the
 [contig templates below](#five-stage-contig-input). Keep biological facts and
 read platforms accurate; choose a dataset suitable for survey and dedup rather
 than forcing those stages to run on unsuitable material. Keep human gates
@@ -120,9 +127,11 @@ acceptance evidence; never copy foreign run-local refs into a new checkpoint.
 - T2T: test supported extension evidence and a no-extension path, plus manual
   adoption/retention and resume without replaying a completed alignment.
 
-The GapCloser templates are already available below. Hi-C/Base Polish/T2T
-slice fixtures and real-tool acceptance entry points must be completed and
-verified as needed; the full-route template is not a substitute for them.
+All these slices now use the [independent slice commands](#independent-slice-server-runbook)
+below: ordinary `gene-agent run`, explicit RunConfig templates, and the same
+read-only `route_acceptance` with a named scope. No separate stage runner is
+needed. Templates are ready for server execution, not evidence of an executed
+real-tool smoke or E2E.
 
 ### 6. Only then run the complete real E2E
 
@@ -130,12 +139,15 @@ Use full-scale or representative real data only after the preceding layers
 pass. The [complete route below](#complete-hifihic-server-acceptance) is final
 integration/biological acceptance, not the primary way to discover ordinary
 input, routing, collection or resume bugs. Its read-only `route_acceptance`
-command requires the complete route and is **not** a five-stage or slice
-validator. Do not add unused stages simply to satisfy that checker.
+command defaults to the complete route; select `--route contig`, `hic`,
+`gapcloser`, `base-polish`, `t2t`, `finishing`, or `review` for the matching
+scope. Do not add unused stages simply to satisfy that checker.
 
-**Immediate priority:** fill the demonstrated code-test/isolation gaps, complete
-the contig methods' small real-tool smokes, then run the small five-stage E2E.
-Do not start the ten-stage run first. This guide sets the acceptance sequence;
+**Immediate priority:** reuse the completed contig run, fill demonstrated
+code-test/isolation and uncovered method/branch gaps, then run the independent
+Hi-C and finishing slices. Do not repeat an accepted execution solely because
+it did not use a dedicated smoke-test wrapper. Do not start the ten-stage run
+first. This guide sets the acceptance sequence;
 it does not claim the pending tests or server runs have already been executed.
 
 ## Before a real run
@@ -187,6 +199,22 @@ exact occurrence and freeze contract is linked above; RunConfig remains the
 literal occurrence/authorization authority. Deferred Assembly method and
 parameter decisions are stage-owned evidence rather than startup configuration.
 
+Audit the **existing** five-stage run (no tool execution):
+
+```bash
+python -m app.diagnostics.route_acceptance --route contig \
+  --run-dir /server/path/data/runs/EXISTING_CONTIG_SESSION \
+  > /server/path/contig-acceptance.json
+```
+
+This checks verified processes/collections, assembly handoffs and final
+QUAST/BUSCO evaluation. Inspect QC/Survey collected products and their frozen
+input dependencies as well; the auditor's predecessor-assembly check starts
+at assembly handoffs, not a blanket proof of every upstream read transformation.
+If an older run uses an unsupported schema, keep its matching checkout for
+inspection. Do not modify its frozen controls/checkpoint to make this audit pass
+or assume that rejection by a newer reader invalidates a previously good run.
+
 ## HiFi gap closing from an existing assembly
 
 Use [the manifest](../examples/gapcloser_manifest.template.yaml) and
@@ -233,6 +261,179 @@ GENE_AGENT_TGS_REAL_SMOKE=1 pytest -q tests/test_gapcloser.py -k real_tgs
 ```
 
 This deterministic synthetic gap is not representative biological acceptance.
+
+## Independent slice server runbook
+
+**已跑过的五阶段不要求重跑。接下来从已有 assembly 拆出这些分段；以下命令都在服务器仓库根目录、已激活的 orchestrator 环境运行。**
+Use an intact, known-good FASTA from `gene-agent inspect --json`'s
+`final_assembly`, or a traceable external assembly. A slice is a **new session**,
+not resuming the source session midway. Inventory imports and hashes that file;
+never paste another run's ArtifactRefs into a manifest or checkpoint.
+
+| `slice` / audit scope | RunConfig template | Manifest template | Requested work |
+|---|---|---|---|
+| `hic` | [hic](../examples/hic_run_config.template.json) | [hic](../examples/hic_manifest.template.yaml) | AutoHiC, collection, adoption and detached resume |
+| `gapcloser` | [gapcloser](../examples/gapcloser_run_config.template.json) | [gapcloser](../examples/gapcloser_manifest.template.yaml) | TGS-GapCloser and adoption / no-gap reuse |
+| `base-polish` | [base_polish](../examples/base_polish_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | Racon plus paired final QUAST/BUSCO Review |
+| `t2t` | [t2t](../examples/t2t_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | Terminal extension evidence and patch adoption / retention |
+| `finishing` | [finishing](../examples/finishing_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | GapCloser → T2T → Base Polish → Review, without rerunning upstream stages |
+| `review` | [assembly_review](../examples/assembly_review_run_config.template.json) | [existing_assembly](../examples/existing_assembly_manifest.template.yaml) | QUAST/BUSCO only, for an existing assembly |
+
+### Copy and edit one slice
+
+Change `slice` to one row above. Use a **new** `acceptance_work` directory for
+each trial; the shared data root may hold all sessions. These commands do not
+launch tools yet:
+
+```bash
+slice=hic
+acceptance_work=/server/path/acceptance/hic-a
+acceptance_data=/server/path/data
+case "$slice" in
+  hic) config_stem=hic; manifest_stem=hic ;;
+  gapcloser) config_stem=gapcloser; manifest_stem=gapcloser ;;
+  base-polish) config_stem=base_polish; manifest_stem=hifi_finishing ;;
+  t2t) config_stem=t2t; manifest_stem=hifi_finishing ;;
+  finishing) config_stem=finishing; manifest_stem=hifi_finishing ;;
+  review) config_stem=assembly_review; manifest_stem=existing_assembly ;;
+  *) echo 'Unknown slice'; exit 1 ;;
+esac
+mkdir -p "$acceptance_work"
+cp -n "docs/examples/${manifest_stem}_manifest.template.yaml" "$acceptance_work/manifest.yaml"
+cp -n "docs/examples/${config_stem}_run_config.template.json" "$acceptance_work/run_config.json"
+```
+
+**停在这里编辑两个文件，再执行下一段。** Replace every placeholder, including
+the unique `session_id`, sample ID, actual species and all absolute input paths.
+For source provenance, run `sha256sum /absolute/source/assembly.fasta` and record
+the digest/source session in manifest asset metadata; that metadata is a note,
+not a bypass of Inventory's actual byte validation. Match `format`, `compression`
+and platforms to the files. Keep all required reads of the selected dataset;
+do not hide multiple input files by listing only the first one. Use valid small
+datasets, not arbitrarily truncated FASTQs.
+
+- Hi-C requires the matching sample's R1/R2 pairs, the configured AutoHiC
+  package/models and its complete tool closure. If known, set the actual
+  `hic_scaffolding.autohic_parameters.restriction_enzyme`; otherwise resolve it
+  through the parameter gate. No evaluation databases are needed for this slice.
+- Base Polish and `finishing` require HiFi reads, real species metadata,
+  minimap2/Racon and QUAST/BUSCO with the host BUSCO/NCBI registry. Both templates
+  include final Review; do not remove it and claim quality acceptance.
+- T2T requires reads and verified species/motif context. If known, add the actual
+  `shared_parameters.species_facts.telomere_motif` (and ploidy if appropriate);
+  otherwise use the persisted resolver. Approve thresholds at the parameter
+  gate. `auto_patch` does **not** mean automatic adoption. This standalone slice
+  has no final QUAST/BUSCO evaluation; use `review` separately if needed.
+- GapCloser's no-gap reuse is valid but does not exercise TGS. Likewise, no
+  supported T2T extension is not a code defect or proof of successful extension.
+  Source retention after a real tool run still counts as execution coverage.
+- Keep manual gates (`max_blocked_seconds: -1`). A method's configured LLM
+  resolver still needs its endpoint; `server_check.sh` does not check that.
+
+### Preflight, run, inspect and audit
+
+Continue in the same shell after editing:
+
+```bash
+acceptance_session="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["session_id"])' "$acceptance_work/manifest.yaml")"
+bash scripts/server_check.sh "$acceptance_work/run_config.json"
+```
+
+Resolve any preflight failure before running. Then, from a real interactive
+terminal (do not pipe `run` through `tee`):
+
+```bash
+gene-agent run --manifest "$acceptance_work/manifest.yaml" \
+  --run-config "$acceptance_work/run_config.json" --data-dir "$acceptance_data"
+```
+
+Review the evidence at each gate. For ordinary slices either decide there, or
+leave the prompt and use the [request-bound resume procedure](#resume-from-a-decision-file).
+For Hi-C, follow the dedicated recovery check below **before accepting its
+post-execution adoption gate**.
+
+```bash
+gene-agent inspect --session-id "$acceptance_session" --data-dir "$acceptance_data" --json \
+  > "$acceptance_work/inspect.json"
+if python -m app.diagnostics.route_acceptance --route "$slice" \
+  --run-dir "$acceptance_data/runs/$acceptance_session" > "$acceptance_work/acceptance.json"; then
+  acceptance_status=0
+else
+  acceptance_status=$?
+fi
+printf 'Acceptance exit: %s\n' "$acceptance_status"
+```
+
+Read `acceptance.json`: **0** means execution coverage for **that scope only**;
+**2** means unfinished/failed/skipped coverage (inspect `coverage_gaps` and logs);
+**1** means inconsistent/missing required evidence and must be investigated.
+A non-Review scope explicitly reports `quality_evaluation_status: not_evaluated`;
+an exit 0 is not a quality comparison or a biological improvement verdict.
+The report checks Inventory's registered source, collected artifact hashes and
+stage-to-stage assembly dependencies. Keep the whole run directory, not only
+this JSON. Do not mutate inputs or frozen controls to recover a failed run.
+
+### Hi-C: prove detached resume does not launch AutoHiC again
+
+Use the single-stage `hic` slice above. Approve parameters normally, let AutoHiC
+finish, and wait for **`gate_id: hic_scaffolding`**, the adoption gate. This is
+not `parameter_approval` or an execution-retry gate. At the decision-selection
+prompt, press Ctrl-C (or leave its selection empty); the durable pending gate
+remains. Do not interrupt a running tool or choose `stop_human_review`, which
+is a terminal decision. Confirm with `inspect` that the run is `blocked_human`.
+
+Capture the read-only post-execution baseline after the process exits:
+
+```bash
+if python -m app.diagnostics.route_acceptance --route hic \
+  --run-dir "$acceptance_data/runs/$acceptance_session" > "$acceptance_work/hic-before-resume.json"; then
+  hic_before_status=0
+else
+  hic_before_status=$?
+fi
+printf 'Expected pending-gate exit 2; got %s\n' "$hic_before_status"
+gene-agent inspect --session-id "$acceptance_session" --data-dir "$acceptance_data" \
+  --write-decision-template "$acceptance_work/hic-decision.json"
+```
+
+If the baseline reports exit 1, fix the evidence problem before continuing. Edit
+only the template's decision fields: use `accept_candidate` to adopt, or
+`keep_prior_assembly` to decline adoption successfully. Preserve request identity
+and binding. `request_parameter_retry` deliberately starts new execution and
+does not belong in this no-rerun check. Then:
+
+```bash
+gene-agent resume --session-id "$acceptance_session" --data-dir "$acceptance_data" \
+  --decision-file "$acceptance_work/hic-decision.json" --checkpointer sqlite
+python -m app.diagnostics.route_acceptance --route hic \
+  --run-dir "$acceptance_data/runs/$acceptance_session" \
+  --compare-hic-execution-from "$acceptance_work/hic-before-resume.json" \
+  > "$acceptance_work/hic-after-resume.json"
+```
+
+Expect exit 0 and `resume_execution_check.status: unchanged`. The checker
+requires the same session/frozen inputs/adoption request, a completed resumed
+session, unchanged attempt-start records, execution refs and collected output
+hashes. It rejects an empty/pre-execution baseline or a fresh retry. Do not edit
+the baseline. Test both adopt and retain in separate sessions if both branches
+need coverage; a completed human decision is not reversible by a second resume.
+
+### Base Polish and T2T acceptance points
+
+For `base-polish`, inspect the mandatory comparison, before/after PAFs and native
+candidate; choose `accept_candidate` or `keep_prior_assembly`. At the following
+Review, inspect **both** source and polished candidate QUAST/BUSCO metrics and
+choose the final assembly; retaining the original remains a valid outcome.
+`route_acceptance --route base-polish` requires both evaluator executions for
+both candidates under the same settings. A FASTA alone cannot pass.
+
+For `t2t`, inspect the finishing report, terminal scans, alignment support and
+patch records. Adoption uses `accept_selected_candidates` with the actual
+candidate IDs; retention uses `continue_without_patch`; `stop_pipeline` is a
+stop, not a successful retention. Legitimate no-extension paths are reported
+as such. Use the gate's generated template for detached resume, not a fabricated
+decision payload. To verify multi-stage finishing handoff after these slices,
+repeat the runbook with `slice=finishing` and a new session/source assembly.
 
 ## Complete HiFi/Hi-C server acceptance
 
@@ -281,6 +482,7 @@ After the run, use the read-only acceptance entry point:
 
 ```bash
 python -m app.diagnostics.route_acceptance \
+  --route complete \
   --run-dir /server/path/data/runs/SESSION_ID > /server/path/acceptance.json
 ```
 

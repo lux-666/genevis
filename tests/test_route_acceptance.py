@@ -18,6 +18,212 @@ from tests.data_v2 import v2_run_dir
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize(
+    "route,template,stages",
+    [
+        ("contig", "contig", recommended_workflow_template("assembly_review")),
+        ("review", "assembly_review", ["assembly_review"]),
+        ("hic", "hic", ["hic_scaffolding"]),
+        ("gapcloser", "gapcloser", ["gapcloser"]),
+        ("t2t", "t2t", ["t2t"]),
+        ("base-polish", "base_polish", ["base_polish", "assembly_review"]),
+        (
+            "finishing",
+            "finishing",
+            ["gapcloser", "t2t", "base_polish", "assembly_review"],
+        ),
+    ],
+)
+def test_slice_profiles_use_exact_frozen_plan(
+    tmp_path, monkeypatch, route, template, stages
+):
+    run = v2_run_dir(tmp_path, "audit")
+    config = load_run_config(
+        ROOT / f"docs/examples/{template}_run_config.template.json"
+    )
+    assert config.requested_stage_names() == stages
+    assert audit.ROUTE_STAGES[route] == stages
+    monkeypatch.setattr(
+        audit,
+        "validate_frozen_inputs",
+        lambda _: SimpleNamespace(run_config=config, file_sha256=lambda key: "0" * 64),
+    )
+    monkeypatch.setattr(
+        audit, "inspect_session", lambda *args: {"supervision_state": "blocked_human"}
+    )
+    report = audit.audit_route(run, route=route)
+    assert report["route"] == route
+    assert report["status"] == "incomplete_execution_coverage"
+    assert [r["stage"] for r in report["occurrences"]] == ["inventory", *stages]
+    with pytest.raises(ValueError, match="route"):
+        audit.audit_route(run, route="hic" if route != "hic" else "t2t")
+
+
+def test_slice_manifests_register_existing_source():
+    for name, types in (
+        ("hic", ["assembly_fasta_registered", "hic_reads_registered"]),
+        ("hifi_finishing", ["assembly_fasta_registered", "raw_long_reads"]),
+    ):
+        manifest = InputManifest.model_validate(
+            yaml.safe_load(
+                (ROOT / f"docs/examples/{name}_manifest.template.yaml").read_text()
+            )
+        )
+        assert [a.asset_type for a in manifest.assets] == types
+        if name == "hic":
+            assert manifest.assets[1].paired_reads
+        else:
+            assert manifest.assets[1].platform == "pacbio_hifi"
+            assert manifest.user_metadata["target_species"]
+
+
+def test_hic_resume_comparison_fails_closed():
+    from copy import deepcopy
+
+    before = {
+        "schema_version": 2,
+        "route": "hic",
+        "session_id": "hic-a",
+        "frozen_input_hashes": {
+            key: "0" * 64
+            for key in ("input_manifest", "run_config", "dependency_manifest")
+        },
+        "session_state": "blocked_human",
+        "active_gate": {"stage": "hic_scaffolding", "gate_id": "hic_scaffolding"},
+        "review_request_ref": {"artifact_id": "adoption"},
+        "occurrences": [
+            {
+                "stage": "hic_scaffolding",
+                "attempt_starts": ["a"],
+                "methods": [
+                    {
+                        "method_name": "hic_scaffolding.autohic",
+                        "processes": [
+                            {
+                                "attempt_id": "a",
+                                "success": True,
+                                "collected": True,
+                                "evidence_ref": {"sha256": "1" * 64},
+                                "collected_refs": [{"sha256": "2" * 64}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    after = deepcopy(before)
+    after.update(session_state="completed", active_gate=None)
+    assert audit.compare_hic_execution(after, before)["status"] == "unchanged"
+    for fault in (
+        "session",
+        "inputs",
+        "gate",
+        "request",
+        "attempt",
+        "product",
+        "empty",
+        "unfinished",
+    ):
+        left, right = deepcopy(before), deepcopy(after)
+        if fault == "session":
+            right["session_id"] = "another"
+        elif fault == "inputs":
+            right["frozen_input_hashes"]["run_config"] = "3" * 64
+        elif fault == "gate":
+            left["active_gate"]["gate_id"] = "parameter_approval"
+        elif fault == "request":
+            right["review_request_ref"] = {"artifact_id": "retry"}
+        elif fault == "attempt":
+            right["occurrences"][0]["attempt_starts"].append("b")
+        elif fault == "product":
+            right["occurrences"][0]["methods"][0]["processes"][0]["collected_refs"] = []
+        elif fault == "empty":
+            left["occurrences"][0]["methods"] = right["occurrences"][0]["methods"] = []
+        else:
+            right["session_state"] = "blocked_human"
+        with pytest.raises(ValueError):
+            audit.compare_hic_execution(right, left)
+
+
+@pytest.mark.parametrize("decision", ["accept_candidate", "keep_prior_assembly"])
+def test_hic_comparison_uses_actual_collected_execution_across_adoption(
+    tmp_path, decision
+):
+    from unittest.mock import patch
+
+    from app.review.base import ResumeReviewRequest
+    from app.schemas.artifacts import ArtifactRef
+    from app.stages.hic_scaffolding.builder import build_stage
+    from app.storage.artifacts import read_artifact_records
+    from tests.test_hic_scaffolding import HiCScaffoldingStageTests
+
+    fixture = HiCScaffoldingStageTests()
+    ran, _ = fixture._ran_autohic_state(str(tmp_path))
+    with patch(
+        "app.execution.method_runner.LocalRunner.run",
+        side_effect=AssertionError("must not reexecute"),
+    ):
+        blocked = build_stage().invoke(ran)
+        gate = blocked["active_interrupt"]
+
+        def capture(state, session_state):
+            step_id = gate["workflow_step_id"]
+            rows = [
+                r
+                for r in Ledger(state["data_dir"]).read_event_rows("s1")
+                if r["workflow_step_id"] == step_id
+            ]
+            records = [
+                r
+                for r in read_artifact_records(state["data_dir"], "s1")
+                if r["workflow_step_id"] == step_id
+            ]
+            occurrence_state = {
+                **state,
+                "current_stage": "hic_scaffolding",
+                "workflow_step_index": blocked["workflow_step_index"],
+            }
+            methods, gaps = audit.execution_coverage(occurrence_state, rows, records)
+            assert not gaps
+            return {
+                "schema_version": 2,
+                "route": "hic",
+                "session_id": "s1",
+                "frozen_input_hashes": {"fixture": "0" * 64},
+                "session_state": session_state,
+                "active_gate": gate if session_state == "blocked_human" else None,
+                "review_request_ref": gate["request_ref"],
+                "occurrences": [
+                    {
+                        "stage": "hic_scaffolding",
+                        "methods": methods,
+                        "attempt_starts": [
+                            r for r in rows if r["event_type"] == "attempt_started"
+                        ],
+                    }
+                ],
+            }
+
+        before = capture(blocked, "blocked_human")
+        adopted = fixture._apply_hic_scaffolding_review(
+            blocked,
+            ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="hic_scaffolding",
+                decision=decision,
+                review_request_id=gate["review_request_id"],
+                review_request_hash=gate["request_hash"],
+                rationale_artifact_ref=ArtifactRef.model_validate(gate["request_ref"]),
+            ),
+        )
+        # This fixture applies the real persisted adoption effect, not the
+        # outer CLI terminal finalizer; compare its verified execution trace.
+        after = capture({**blocked, **adopted}, "completed")
+        assert audit.compare_hic_execution(after, before)["status"] == "unchanged"
+
+
 def test_complete_examples_and_tool_closure() -> None:
     from app.execution.run_readiness import effective_method_closure
 
@@ -147,7 +353,9 @@ def test_unfinished_route_reports_every_occurrence_without_writing(
         ROOT / "docs/examples/hifi_complete_run_config.template.json"
     )
     monkeypatch.setattr(
-        audit, "validate_frozen_inputs", lambda _: SimpleNamespace(run_config=config)
+        audit,
+        "validate_frozen_inputs",
+        lambda _: SimpleNamespace(run_config=config, file_sha256=lambda key: "0" * 64),
     )
     monkeypatch.setattr(
         audit, "inspect_session", lambda *args: {"supervision_state": "blocked_human"}
@@ -168,7 +376,9 @@ def test_non_complete_plan_is_rejected(
     run = v2_run_dir(tmp_path, "audit")
     config = load_run_config(ROOT / "docs/examples/contig_run_config.template.json")
     monkeypatch.setattr(
-        audit, "validate_frozen_inputs", lambda _: SimpleNamespace(run_config=config)
+        audit,
+        "validate_frozen_inputs",
+        lambda _: SimpleNamespace(run_config=config, file_sha256=lambda key: "0" * 64),
     )
     with pytest.raises(ValueError, match="not the complete"):
         audit.audit_route(run)
@@ -182,6 +392,265 @@ def test_cli_invalid_evidence_is_json_and_nonzero(
     )
     assert audit.main() == 1
     assert json.loads(capsys.readouterr().out)["status"] == "invalid_evidence"
+
+
+def test_frozen_gapcloser_slice_checks_registered_source_and_skip(tmp_path):
+    from tests.test_gapcloser import _run_frozen_example
+
+    result, run = _run_frozen_example(tmp_path, "AAAACCCC", "AAAACCCC")
+    assert result["supervision_state"] == "completed"
+    # The graph-only fixture closes SQLite before the CLI terminal finalizer.
+    Ledger(run).record_session_terminal(result["session_id"], outcome="completed")
+
+    # SQLite inspection may create WAL/SHM sidecars; durable evidence is read-only.
+    def evidence_bytes():
+        return {
+            p: p.read_bytes()
+            for p in run.rglob("*")
+            if p.is_file() and "checkpoints" not in p.relative_to(run).parts
+        }
+
+    before = evidence_bytes()
+    report = audit.audit_route(run, route="gapcloser")
+    assert report["status"] == "incomplete_execution_coverage"
+    assert report["quality_evaluation_status"] == "not_evaluated"
+    assert report["final_assembly"]
+    source = report["occurrences"][0]["deliveries"][0]
+    assert source["delivery_mode"] == "materialized"
+    assert (
+        report["occurrences"][1]["deliveries"][0]["primary_output_ref"]
+        == source["primary_output_ref"]
+    )
+    assert any("no_internal_N_gaps" in gap for gap in report["coverage_gaps"])
+    assert evidence_bytes() == before
+    Path(source["path"]).write_text(">changed\nACGT\n")
+    with pytest.raises(ValueError):
+        audit.audit_route(run, route="gapcloser")
+
+
+@pytest.fixture
+def completed_slice(tmp_path, monkeypatch):
+    """Stub only evidence readers to test scoped orchestration and fault policy."""
+    from app.schemas.artifacts import ArtifactRef
+
+    def setup(route):
+        run = v2_run_dir(tmp_path, "audit")
+        stem = {"review": "assembly_review", "base-polish": "base_polish"}.get(
+            route, route
+        )
+        config = load_run_config(
+            ROOT / f"docs/examples/{stem}_run_config.template.json"
+        )
+        steps = workflow_steps_from_run_config(config)
+        rows, deliveries, methods = [], {}, {}
+        for index, step in enumerate(steps):
+            rows.extend(
+                [
+                    {
+                        "event_type": "stage_completed",
+                        "stage": step["stage"],
+                        "workflow_step_id": step["step_id"],
+                    },
+                    {
+                        "event_type": "resource_delivered",
+                        "stage": step["stage"],
+                        "workflow_step_id": step["step_id"],
+                    },
+                ]
+            )
+            deliveries[step["step_id"]] = {
+                "delivery_mode": "materialized",
+                "candidate_id": "candidate",
+                "primary_output_ref": {"producer": index},
+            }
+            names = step["selected_method_names"] if index else []
+            methods[step["step_id"]] = [
+                {
+                    "method_name": name,
+                    "processes": [
+                        {
+                            "success": True,
+                            "collected": True,
+                            "candidate_id": "candidate",
+                            "input_artifacts": [{"producer": index - 1}],
+                            "evaluation_settings": {"threads": 1},
+                        }
+                    ],
+                }
+                for name in names
+            ]
+        request_ref = ArtifactRef(
+            artifact_id="fixture",
+            path_ref="artifacts/request.json",
+            sha256="0" * 64,
+            size_bytes=1,
+            artifact_type="assembly_review.request",
+        ).model_dump(mode="json")
+        snapshot = {
+            "supervision_state": "completed",
+            "final_assembly": {"path": "final.fa"},
+            "latest_review_request_artifact": request_ref,
+        }
+        quality = {"candidates": [{"candidate_id": "candidate"}]}
+        monkeypatch.setattr(
+            audit,
+            "validate_frozen_inputs",
+            lambda _: SimpleNamespace(
+                run_config=config, file_sha256=lambda key: "0" * 64
+            ),
+        )
+        monkeypatch.setattr(audit, "inspect_session", lambda *args: snapshot)
+        monkeypatch.setattr(audit, "read_artifact_records", lambda *args: [])
+        monkeypatch.setattr(Ledger, "read_event_rows", lambda *args: rows)
+        monkeypatch.setattr(
+            audit, "verify_delivery", lambda _, row: deliveries[row["workflow_step_id"]]
+        )
+        monkeypatch.setattr(
+            audit,
+            "execution_coverage",
+            lambda state, *_: (
+                methods[steps[state["workflow_step_index"]]["step_id"]],
+                [],
+            ),
+        )
+        monkeypatch.setattr(audit, "final_evaluation", lambda *args: quality)
+        monkeypatch.setattr(audit, "final_comparison", lambda *args: quality)
+        return run, steps, rows, deliveries, methods, snapshot, quality
+
+    return setup
+
+
+@pytest.mark.parametrize(
+    "route", ["hic", "gapcloser", "t2t", "review", "base-polish", "finishing"]
+)
+def test_completed_scoped_audit_does_not_require_other_stages(completed_slice, route):
+    run, *_ = completed_slice(route)
+    report = audit.audit_route(run, route=route)
+    assert report["status"] == "complete_execution_coverage"
+    assert (report["quality_evaluation_status"] == "verified") == (
+        route in {"review", "base-polish", "finishing"}
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_source",
+        "wrong_input",
+        "duplicate_delivery",
+        "reused_changed_source",
+        "missing_final",
+        "missing_evaluator",
+        "wrong_candidate",
+        "different_settings",
+    ],
+)
+def test_completed_slice_rejects_broken_evidence(completed_slice, fault):
+    run, steps, rows, deliveries, methods, snapshot, quality = completed_slice("review")
+    last = steps[-1]["step_id"]
+    if fault == "missing_source":
+        rows[:] = [
+            r
+            for r in rows
+            if not (
+                r["stage"] == "inventory" and r["event_type"] == "resource_delivered"
+            )
+        ]
+    elif fault == "wrong_input":
+        for method in methods[last]:
+            method["processes"][0]["input_artifacts"] = []
+    elif fault == "duplicate_delivery":
+        rows.append(rows[-1])
+    elif fault == "reused_changed_source":
+        # Review may select an alternative; the reuse identity restriction is
+        # checked against a non-Review producer instead.
+        run, steps, rows, deliveries, methods, snapshot, quality = completed_slice(
+            "hic"
+        )
+        deliveries[steps[-1]["step_id"]]["delivery_mode"] = "reused"
+    elif fault == "missing_final":
+        snapshot["final_assembly"] = None
+    elif fault == "missing_evaluator":
+        methods[last].pop()
+    elif fault == "wrong_candidate":
+        methods[last][0]["processes"][0]["candidate_id"] = "unrelated"
+    else:
+        quality["candidates"].append({"candidate_id": "second"})
+        for method in methods[last]:
+            method["processes"].append(
+                {
+                    **method["processes"][0],
+                    "candidate_id": "second",
+                    "evaluation_settings": {"threads": 2},
+                }
+            )
+    with pytest.raises(ValueError):
+        audit.audit_route(
+            run, route="hic" if fault == "reused_changed_source" else "review"
+        )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "binding",
+        "no_candidates",
+        "duplicate",
+        "missing_signal",
+        "missing_metrics",
+        "missing_refs",
+    ],
+)
+def test_final_evaluation_validates_single_candidate_packet(
+    tmp_path, monkeypatch, fault
+):
+    from app.schemas.artifacts import ArtifactRef
+    from app.storage.paths import SessionPaths
+
+    paths = SessionPaths.from_run_dir(v2_run_dir(tmp_path, "audit"))
+    ref = ArtifactRef(
+        artifact_id="fixture",
+        path_ref="artifacts/packet.json",
+        sha256="0" * 64,
+        size_bytes=1,
+        artifact_type="assembly_review.review_packet",
+    )
+    request = {
+        "workflow_step_id": "step-001-assembly_review",
+        "gate_id": "assembly_review",
+        "payload": {"report_refs": {"review_packet": ref.path_ref}},
+    }
+    candidate = {
+        "candidate_id": "source",
+        "signals": {"available": ["quast", "busco"]},
+        "metrics": {"quast": {"n50": 12}, "busco": {"complete": 10}},
+        "metric_refs_by_signal": {"quast": ["quast.json"], "busco": ["busco.json"]},
+    }
+    packet = {"candidates": [candidate]}
+    if fault == "binding":
+        request["workflow_step_id"] = "another"
+    elif fault == "no_candidates":
+        packet["candidates"] = []
+    elif fault == "duplicate":
+        packet["candidates"].append(candidate)
+    elif fault == "missing_signal":
+        candidate["signals"]["available"].pop()
+    elif fault == "missing_metrics":
+        candidate["metrics"]["busco"] = {}
+    elif fault == "missing_refs":
+        candidate["metric_refs_by_signal"]["busco"] = []
+    monkeypatch.setattr(audit, "load_review_request", lambda *args, **kwargs: request)
+    monkeypatch.setattr(audit, "artifact_ref_for_path", lambda *args, **kwargs: ref)
+    monkeypatch.setattr(audit, "resolve_artifact_ref", lambda *args: paths.run_dir)
+    monkeypatch.setattr(audit, "_json", lambda *args: packet)
+    if fault:
+        with pytest.raises(ValueError):
+            audit.final_evaluation(paths, "step-001-assembly_review", ref)
+    else:
+        quality = audit.final_evaluation(paths, "step-001-assembly_review", ref)
+        assert len(quality["candidates"]) == 1
+        assert quality["independent_qv"] is None
 
 
 @pytest.mark.parametrize("broken_handoff", [False, True])
@@ -226,7 +695,9 @@ def test_complete_audit_requires_input_chain_and_final_pair(
             }
         )
     monkeypatch.setattr(
-        audit, "validate_frozen_inputs", lambda _: SimpleNamespace(run_config=config)
+        audit,
+        "validate_frozen_inputs",
+        lambda _: SimpleNamespace(run_config=config, file_sha256=lambda key: "0" * 64),
     )
     monkeypatch.setattr(
         audit,
@@ -258,6 +729,7 @@ def test_complete_audit_requires_input_chain_and_final_pair(
         refs = [] if broken_handoff and index == 9 else [prior]
         return [
             {
+                "method_name": name,
                 "processes": [
                     {
                         "success": True,
@@ -267,8 +739,9 @@ def test_complete_audit_requires_input_chain_and_final_pair(
                         "evaluation_settings": {"threads": 1},
                     }
                     for candidate in ("source", "polished")
-                ]
+                ],
             }
+            for name in ("assembly_review.eval.quast", "assembly_review.eval.busco")
         ], []
 
     monkeypatch.setattr(audit, "execution_coverage", coverage)

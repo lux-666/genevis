@@ -1,4 +1,4 @@
-"""Read-only evidence audit for the complete HiFi finishing route.
+"""Read-only evidence audit for an explicitly scoped route or independent slice.
 
 Exit 0: full execution coverage; 2: incomplete/legitimately skipped coverage;
 1: inconsistent evidence. None of these is a biological improvement verdict.
@@ -28,6 +28,17 @@ from app.storage.frozen_inputs import validate_frozen_inputs
 from app.storage.ledger import Ledger, project_stage_terminal_events
 from app.storage.paths import SessionPaths
 from app.workflow import ASSEMBLY_HANDOFF_PRODUCER_STAGES, recommended_workflow_template
+
+ROUTE_STAGES = {
+    "complete": recommended_workflow_template("t2t"),
+    "contig": recommended_workflow_template("assembly_review"),
+    "review": ["assembly_review"],
+    "hic": ["hic_scaffolding"],
+    "gapcloser": ["gapcloser"],
+    "t2t": ["t2t"],
+    "base-polish": ["base_polish", "assembly_review"],
+    "finishing": ["gapcloser", "t2t", "base_polish", "assembly_review"],
+}
 
 
 def _ref(record: dict[str, Any]) -> ArtifactRef:
@@ -162,6 +173,49 @@ def execution_coverage(
     return result, gaps
 
 
+def final_evaluation(
+    paths: SessionPaths, final_step_id: str, request_ref: ArtifactRef
+) -> dict[str, Any]:
+    """Verify the terminal Review packet without requiring a polishing pair."""
+    request = load_review_request(
+        paths.run_dir, request_ref, session_id=paths.session_id
+    )
+    if (
+        request["workflow_step_id"] != final_step_id
+        or request["gate_id"] != "assembly_review"
+    ):
+        raise ValueError("final Review request is bound to another occurrence")
+    packet_ref = artifact_ref_for_path(
+        paths.run_dir,
+        paths.session_id,
+        paths.resolve_ref(request["payload"]["report_refs"]["review_packet"]),
+        expected_type="assembly_review.review_packet",
+    )
+    packet = _json(paths, packet_ref)
+    rows = packet["candidates"]
+    if not rows or len({c["candidate_id"] for c in rows}) != len(rows):
+        raise ValueError("final Review has missing or duplicate candidates")
+    for candidate in rows:
+        if not {"quast", "busco"} <= set(candidate["signals"]["available"]):
+            raise ValueError(
+                "final Review requires QUAST and BUSCO for every candidate"
+            )
+        for signal in ("quast", "busco"):
+            refs = candidate["metric_refs_by_signal"].get(signal, [])
+            if not refs or not candidate["metrics"].get(signal):
+                raise ValueError(f"final Review {signal} metrics are missing")
+            for value in refs:
+                ref = artifact_ref_for_path(paths.run_dir, paths.session_id, value)
+                resolve_artifact_ref(paths.run_dir, paths.session_id, ref)
+    return {
+        "review_packet_ref": packet_ref.model_dump(mode="json"),
+        "candidates": rows,
+        "polishing_comparison": packet.get("polishing_comparison"),
+        "independent_qv": None,
+        "quality_verdict": "no_automated_improvement_verdict; see final delivery",
+    }
+
+
 def final_comparison(
     paths: SessionPaths,
     records: list[dict[str, Any]],
@@ -190,60 +244,29 @@ def final_comparison(
         ).bundle.candidate_id
         for ref in pair
     }
-    request = load_review_request(
-        paths.run_dir, request_ref, session_id=paths.session_id
-    )
-    if (
-        request["workflow_step_id"] != final_step_id
-        or request["gate_id"] != "assembly_review"
-    ):
-        raise ValueError("final Review request is bound to another occurrence")
-    packet_ref = artifact_ref_for_path(
-        paths.run_dir,
-        paths.session_id,
-        paths.resolve_ref(request["payload"]["report_refs"]["review_packet"]),
-        expected_type="assembly_review.review_packet",
-    )
-    packet = _json(paths, packet_ref)
-    rows = packet["candidates"]
+    quality = final_evaluation(paths, final_step_id, request_ref)
+    rows = quality["candidates"]
     if {c["candidate_id"] for c in rows} != ids or len(rows) != 2:
         raise ValueError("final Review did not evaluate exactly the polishing pair")
-    if (packet.get("polishing_comparison") or {}).get(
+    if (quality.get("polishing_comparison") or {}).get(
         "report_ref"
     ) != comparison_ref.model_dump(mode="json"):
         raise ValueError("final Review uses another polishing comparison")
-    for candidate in rows:
-        if not {"quast", "busco"} <= set(candidate["signals"]["available"]):
-            raise ValueError(
-                "final Review requires QUAST and BUSCO for BOTH candidates"
-            )
-        for signal in ("quast", "busco"):
-            refs = candidate["metric_refs_by_signal"].get(signal, [])
-            if not refs or not candidate["metrics"].get(signal):
-                raise ValueError(f"final Review {signal} metrics are missing")
-            for value in refs:
-                ref = artifact_ref_for_path(paths.run_dir, paths.session_id, value)
-                resolve_artifact_ref(paths.run_dir, paths.session_id, ref)
     return {
+        **quality,
         "comparison_ref": comparison_ref.model_dump(mode="json"),
-        "review_packet_ref": packet_ref.model_dump(mode="json"),
-        "candidates": rows,
         "polish_delta": report["delta"],
-        "independent_qv": None,
-        "quality_verdict": "no_automated_improvement_verdict; see final delivery",
     }
 
 
-def audit_route(run_dir: Path) -> dict[str, Any]:
+def audit_route(run_dir: Path, *, route: str = "complete") -> dict[str, Any]:
     paths = SessionPaths.from_run_dir(run_dir)
     frozen = validate_frozen_inputs(paths)
     steps = workflow_steps_from_run_config(frozen.run_config)
-    if frozen.run_config.requested_stage_names() != recommended_workflow_template(
-        "t2t"
-    ):
-        raise ValueError(
-            "not the complete finishing route; use hifi_complete templates"
-        )
+    if route not in ROUTE_STAGES:
+        raise ValueError(f"unknown route: {route}")
+    if frozen.run_config.requested_stage_names() != ROUTE_STAGES[route]:
+        raise ValueError(f"not the {route} route; expected {ROUTE_STAGES[route]}")
     snapshot = inspect_session(paths.session_id, paths.run_dir)
     errors = {
         key: snapshot[key]
@@ -284,13 +307,22 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
         gaps.extend(f"{step['step_id']}: {item}" for item in missing)
         terminal = terminals.get((step["step_id"], step["stage"]), {})
         outcome = terminal.get("event_type", "not_terminal")
-        if outcome not in {"stage_completed", "stage_skipped"}:
+        if outcome != "stage_completed":
             gaps.append(f"{step['step_id']}: {outcome}")
         deliveries = [
             verify_delivery(paths, r)
             for r in owned
             if r["event_type"] == "resource_delivered"
         ]
+        if len(deliveries) > 1:
+            raise ValueError(f"{step['step_id']}: ambiguous assembly handoff")
+        if (
+            step["stage"] == "inventory"
+            and route not in {"complete", "contig"}
+            and outcome == "stage_completed"
+            and len(deliveries) != 1
+        ):
+            raise ValueError("slice requires one verified Inventory assembly binding")
         if previous_primary and step["stage"] in ASSEMBLY_HANDOFF_PRODUCER_STAGES - {
             "assembly",
             "inventory",
@@ -323,6 +355,11 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
                 "outcome": outcome,
                 "methods": methods,
                 "deliveries": deliveries,
+                "attempt_starts": [
+                    {key: r[key] for key in ("sequence", "subject_id", "summary")}
+                    for r in owned
+                    if r["event_type"] == "attempt_started"
+                ],
             }
         )
         if deliveries:
@@ -330,24 +367,28 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
     complete = snapshot["supervision_state"] == "completed"
     if complete and not snapshot.get("final_assembly"):
         raise ValueError("completed session has no verified final assembly")
-    quality = (
-        final_comparison(
-            paths,
-            records,
-            steps[-1]["step_id"],
-            _ref(snapshot["latest_review_request_artifact"]),
-        )
-        if complete
-        else None
-    )
+    quality = None
+    if complete and steps[-1]["stage"] == "assembly_review":
+        request_ref = _ref(snapshot["latest_review_request_artifact"])
+        if route in {"complete", "base-polish", "finishing"}:
+            quality = final_comparison(
+                paths, records, steps[-1]["step_id"], request_ref
+            )
+        else:
+            quality = final_evaluation(paths, steps[-1]["step_id"], request_ref)
     if quality:
         pair_ids = {c["candidate_id"] for c in quality["candidates"]}
+        if {m["method_name"] for m in occurrences[-1]["methods"]} != {
+            "assembly_review.eval.quast",
+            "assembly_review.eval.busco",
+        }:
+            raise ValueError("final evaluator roster must include QUAST and BUSCO")
         for method in occurrences[-1]["methods"]:
             successful = [
                 p for p in method["processes"] if p["success"] and p["collected"]
             ]
             if {p["candidate_id"] for p in successful} != pair_ids:
-                raise ValueError("final evaluator has not executed for both candidates")
+                raise ValueError("final evaluator has not executed for every candidate")
             settings = {
                 json.dumps(p["evaluation_settings"], sort_keys=True) for p in successful
             }
@@ -361,8 +402,13 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
     if not complete:
         gaps.append(f"session: {snapshot['supervision_state']}")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "route": route,
         "session_id": paths.session_id,
+        "frozen_input_hashes": {
+            key: frozen.file_sha256(key)
+            for key in ("input_manifest", "run_config", "dependency_manifest")
+        },
         "status": "complete_execution_coverage"
         if not gaps
         else "incomplete_execution_coverage",
@@ -371,6 +417,9 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
         "coverage_gaps": gaps,
         "final_assembly": snapshot.get("final_assembly"),
         "quality_comparison": quality,
+        "quality_evaluation_status": "verified" if quality else "not_evaluated",
+        "active_gate": snapshot.get("active_interrupt"),
+        "review_request_ref": snapshot.get("latest_review_request_artifact"),
         "limitations": [
             "No claim of independent QV or biological improvement.",
             "Legitimate skips are not code failures or proof of tool execution.",
@@ -378,12 +427,64 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def compare_hic_execution(
+    current: dict[str, Any], before: dict[str, Any]
+) -> dict[str, str]:
+    """Compare operator snapshots across a detached Hi-C adoption decision."""
+    for key in (
+        "schema_version",
+        "route",
+        "session_id",
+        "frozen_input_hashes",
+        "review_request_ref",
+    ):
+        if not before.get(key) or before[key] != current.get(key):
+            raise ValueError(f"Hi-C replay comparison: different or missing {key}")
+    if current["route"] != "hic" or current["schema_version"] != 2:
+        raise ValueError("no-rerun comparison requires the single-stage hic route")
+    gate = before.get("active_gate") or {}
+    if (
+        before.get("session_state") != "blocked_human"
+        or gate.get("stage") != "hic_scaffolding"
+        or gate.get("gate_id") != "hic_scaffolding"
+        or current.get("session_state") != "completed"
+    ):
+        raise ValueError("compare a Hi-C adoption gate with its completed resume")
+
+    def trace(report: dict[str, Any]) -> dict[str, Any]:
+        owned = [r for r in report["occurrences"] if r["stage"] == "hic_scaffolding"]
+        if len(owned) != 1:
+            raise ValueError("expected one Hi-C occurrence")
+        occurrence = owned[0]
+        processes = {m["method_name"]: m["processes"] for m in occurrence["methods"]}
+        if not occurrence["attempt_starts"] or not any(
+            p["success"] and p["collected"] and p["collected_refs"]
+            for items in processes.values()
+            for p in items
+        ):
+            raise ValueError("Hi-C baseline has no collected successful execution")
+        return {"starts": occurrence["attempt_starts"], "processes": processes}
+
+    if trace(before) != trace(current):
+        raise ValueError(
+            "Hi-C execution changed: new attempt or changed execution/products"
+        )
+    return {"status": "unchanged", "scope": "hic execution across adoption resume"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--route", choices=tuple(ROUTE_STAGES), default="complete")
+    parser.add_argument("--compare-hic-execution-from", type=Path)
     args = parser.parse_args()
     try:
-        report = audit_route(args.run_dir)
+        report = audit_route(args.run_dir, route=args.route)
+        if args.compare_hic_execution_from:
+            before = json.loads(args.compare_hic_execution_from.read_text())
+            if not isinstance(before, dict):
+                raise ValueError("Hi-C baseline must be an audit JSON object")
+            report["resume_execution_check"] = compare_hic_execution(report, before)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         print(json.dumps({"status": "invalid_evidence", "error": str(exc)}, indent=2))
         return 1

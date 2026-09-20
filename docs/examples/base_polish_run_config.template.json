@@ -1,0 +1,12 @@
+{
+  "requested_stages": [
+    {"stage": "base_polish", "allow_local_execution": true},
+    {"stage": "assembly_review", "allow_local_execution": true}
+  ],
+  "review_policy": {"max_blocked_seconds": -1},
+  "base_polish": {"threads": 16},
+  "assembly_review": {
+    "quast": {"threads": 16},
+    "busco": {"threads": 16}
+  }
+}
