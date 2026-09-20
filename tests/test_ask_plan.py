@@ -202,7 +202,7 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             for item in result.choices["suggested_stage_occurrences"]
         }
         self.assertTrue(consent["gapcloser"])
-        self.assertFalse(consent["base_polish"])
+        self.assertTrue(consent["base_polish"])
         self.assertTrue(consent["t2t"])
 
     def test_no_intent_or_manifest_recommendation_defaults_to_inventory_only(self):

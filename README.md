@@ -30,7 +30,11 @@ README 不复制第二份方法表或完整工作流数组。
 - SQLite checkpoint、人工 gate、`inspect`、`review` 和 `resume`；
 - 完整五阶段 contig 路径，以及非默认后续路径中已接线的 Hi-C scaffolding
   与 T2T 能力；
-- GapCloser 支持 HiFi + TGS-GapCloser，执行后人工采纳；Base Polish 尚未实现，fail closed。
+- GapCloser 支持 HiFi + TGS-GapCloser，执行后人工采纳；Base Polish 支持 HiFi + Racon 单轮修正、前后比较和人工保留原稿。
+
+完整 HiFi + Hi-C 路线的配置、实跑及产物核验入口见
+[服务器验收说明](docs/user_guide/run-and-recovery.md#complete-hifihic-server-acceptance)。
+最终 Review 同口径评价原稿与修正稿，不以 FASTA 存在或 N50 上升判定成功。
 
 精确运行、冻结、进度和恢复语义由
 [run-data contract](docs/architecture/reference/data-contract.md) 等 reference owner
@@ -170,7 +174,7 @@ gene-agent inspect \
 - 大型 FASTQ/FASTA/BAM、日志和结果表不进入 LangGraph state；
 - `gapcloser` 目前仅支持 HiFi 无纠错路线，产物须人工采纳；参见
   [单产物运行示例](docs/user_guide/run-and-recovery.md#hifi-gap-closing-from-an-existing-assembly)；
-- `base_polish` 仍是 manual-only placeholder；
+- `base_polish` 运行 HiFi + Racon，人工决定采纳或保留原稿，最终 Review 比较两者；
 - 当前版本没有 checkpoint migration。更新含活动 session 的服务器 checkout 前，先
   完成运行或保留旧 checkout 与对应环境；
 - 本机缺少真实生信工具只说明本机不是已配置执行主机，不等同于产品回归失败。

@@ -1,7 +1,7 @@
 # Stage Contract Reference
 
-> **Status:** accepted and implemented for current stages. Base
-> Polish remains a planned placeholder capability.
+> **Status:** accepted and implemented for current stages; finishing routes
+> are scoped to the explicitly supported inputs below.
 > **Read when:** exact biological stage inputs, outputs, methods, or review
 > triggers matter.  
 > **Comes from:** [Runtime orchestration](../topics/runtime-orchestration.md).  
@@ -76,9 +76,9 @@ read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
 
 This recommendation fixes the intended biological handoff order without making
 the entire list mandatory. Its first Review evaluates the retained assembly
-after Dedup. Its final Review reserves the position that will evaluate the
-polished assembly once Base Polish implements its handoff; today that Review is
-unreachable and its frozen target remains T2T. `done` is an implicit parent
+after Dedup. Its final Review binds to Base Polish and evaluates both the
+source and polished candidates with the same QUAST/BUSCO configuration. It may
+retain either candidate. `done` is an implicit parent
 terminal, not a requestable stage.
 
 Unregistered future tools are not stage candidates. Adding one requires its
@@ -469,14 +469,6 @@ leave an earlier product indexed as an orphan. That orphan has neither
 `attempt_succeeded` nor `artifact_registered` semantic ledger evidence, does
 not create a review gate, and does not cause automatic retry or rollback.
 
-## Shared placeholder boundary
-
-Base Polish is a parent-graph placeholder. It has no registered
-method, descriptor, local-execution configuration, artifact contract, or
-resource handoff. A requested occurrence writes `blocked_not_implemented` and
-terminates through the failed boundary; an absent occurrence has no runtime
-behavior. It neither reads nor updates the central `assembly` resource.
-
 ## 8. GapCloser
 
 Purpose: fill internal N-gaps with TGS-GapCloser using explicitly classified
@@ -524,8 +516,8 @@ Accepted placement and handoff design:
 - successful adoption publishes an occurrence-owned assembly candidate and
   replaces the central `assembly` handoff consumed by T2T or a later Review.
 
-A following Assembly Review binds to this GapCloser delivery. Base Polish
-remains deferred.
+A following Assembly Review binds to this GapCloser delivery. A following
+Base Polish occurrence consumes the adopted or retained assembly.
 
 ## 9. T2T Finishing
 
@@ -579,21 +571,51 @@ Keeping the prior assembly keeps its bytes and candidate relation, but
 republishes the central `assembly` `ResourceRef` under the active T2T
 occurrence.
 
-## 10. Base Polish Placeholder
+## 10. Base Polish
 
-Intended purpose: correct base substitutions and small indels in the assembly
-available when an operator places this placeholder occurrence in the frozen
-workflow.
+Correct substitutions and small indels in the current verified assembly using
+one HiFi-only minimap2/Racon round. The fixed method is `base_polish.racon`.
+The complete current read set must be explicitly classified `pacbio_hifi`.
+Normalization preserves every read under unique IDs. Racon uses
+`--include-unpolished --no-trimming`; scaffold IDs must survive unchanged.
+This is an operator-selected correction attempt, not a claim that Racon improves
+an already high-quality HiFi assembly.
+
+Before adoption, the same reads are mapped to both the source and candidate
+with identical minimap2 `map-hifi -c --eqx --secondary=no` settings. Both PAFs,
+the candidate FASTA, tool versions, and a source-bound comparison report are
+mandatory. Report read alignment counts, mapped bases, base identity, target
+coverage, scaffold/gap/length changes, and explicitly missing independent QV.
+PAF match/block counts must agree with the eqx CIGAR, accounting for minimap2's
+`nn` count of ambiguous bases excluded from those statistics.
+These are in-sample alignment consistency statistics, not an unbiased error
+estimate; neither higher identity nor N50 automatically approves an output.
+Missing or malformed products fail collection before any adoption gate.
+
+The durable human gate allows `accept_candidate`, `keep_prior_assembly`, and
+`stop_human_review`. Only adoption changes the central assembly; retaining the
+source publishes a reused delivery. Both alternatives and the comparison remain
+immutable artifacts. The handoff retains the alternative candidate so that the
+following Assembly Review evaluates both using the same QUAST settings and
+BUSCO lineage in that occurrence, even after the operator kept the source.
+Final Review can select either candidate. Missing evaluation signals remain
+explicit, never a quality-pass claim. QUAST reference-dependent errors and BUSCO
+complete/single/duplicated/fragmented/missing counts supplement contiguity;
+without an independent reference/read truth set, consensus QV is unmeasured.
 
 Accepted placement and handoff design:
 
 - the complete recommendation places `base_polish` after `t2t`;
-- the implemented stage will require the current central `assembly` plus the
+- the implemented stage requires the current central `assembly` plus the
   polishing evidence required by its selected method;
-- successful adoption will publish an occurrence-owned polished assembly as the
+- successful adoption publishes an occurrence-owned polished assembly as the
   central handoff;
-- the following finish `assembly_review` occurrence will bind to that exact Base
+- the following finish `assembly_review` occurrence binds to that exact Base
   Polish producer step.
 
-The complete workflow recommendation includes this position with local
-execution disabled; generic prefix expansion omits it.
+The server acceptance route explicitly authorizes all requested occurrences.
+Acceptance distinguishes actual process evidence, declared method skips,
+verified stage deliveries, quality evaluation, and human decisions. A FASTA or
+a completed session alone is insufficient evidence of a fully executed route.
+Collection evidence must name intact indexed output artifacts. An earlier
+successful attempt does not erase a method's final failed or skipped outcome.

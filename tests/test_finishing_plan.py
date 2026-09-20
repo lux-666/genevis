@@ -1,4 +1,4 @@
-"""Contracts for the parent-registered Base Polish placeholder."""
+"""Finishing occurrence, execution-consent and planning contracts."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from tests.data_v2 import v2_run_dir
 
 
 @pytest.mark.parametrize("stage", ["base_polish"])
-def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
+def test_unapproved_polishing_fails_closed_with_durable_evidence(
     stage: str,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -66,14 +66,12 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
             config={"configurable": {"thread_id": session_id}},
         )
 
-        reason = (
-            f"{stage} is registered in the parent graph but has no implemented method"
-        )
+        reason = "Base Polish local execution is not authorized"
         assert result["current_stage"] == stage
         assert result["supervision_state"] == "failed_terminal"
         assert result["last_error"] == reason
         assert result["stage_outputs"][stage] == {
-            "status": "blocked_not_implemented",
+            "status": "failed",
             "reason": reason,
         }
         assert f"step-001-{stage}:{stage}_stage" in result["route_trace"]
@@ -101,7 +99,7 @@ def test_explicit_placeholder_request_fails_closed_with_durable_evidence(
         ),
     ],
 )
-def test_placeholder_cursor_schema_is_strict(
+def test_polishing_cursor_schema_is_strict(
     stage: str,
     reader: Callable[[TopLevelState], object],
     updater: Callable[[TopLevelState, dict[str, object]], StateUpdate],
@@ -110,21 +108,21 @@ def test_placeholder_cursor_schema_is_strict(
     update = updater(
         state,
         {
-            "status": "blocked_not_implemented",
-            "reason": "not implemented",
+            "status": "failed",
+            "reason": "execution not authorized",
         },
     )
     state["stage_outputs"] = update["stage_outputs"]
     assert reader(state) == {
-        "status": "blocked_not_implemented",
-        "reason": "not implemented",
+        "status": "failed",
+        "reason": "execution not authorized",
     }
 
     state["stage_outputs"] = validate_stage_outputs(
         {
             stage: {
-                "status": "blocked_not_implemented",
-                "reason": "not implemented",
+                "status": "failed",
+                "reason": "execution not authorized",
                 "unexpected": True,
             }
         }
@@ -132,15 +130,9 @@ def test_placeholder_cursor_schema_is_strict(
     with pytest.raises(ValidationError):
         reader(state)
 
-    state["stage_outputs"] = validate_stage_outputs(
-        {stage: {"status": "blocked_not_implemented"}}
-    )
-    with pytest.raises(ValidationError):
-        reader(state)
 
-
-def test_placeholder_stages_are_manual_only_but_requestable() -> None:
-    assert MANUAL_ONLY_STAGES == {"base_polish"}
+def test_finishing_stages_are_requestable() -> None:
+    assert MANUAL_ONLY_STAGES == set()
     assert stages_through("t2t") == [
         "read_qc",
         "genome_survey",
@@ -174,17 +166,12 @@ def test_placeholder_stages_are_manual_only_but_requestable() -> None:
         ],
     )
     assert parsed.requested_stage_names() == ["gapcloser", "base_polish"]
-    with pytest.raises(ValidationError):
-        RunConfig.model_validate(
-            {
-                "requested_stages": [
-                    {"stage": "base_polish", "allow_local_execution": True}
-                ]
-            }
-        )
+    assert RunConfig.model_validate(
+        {"requested_stages": [{"stage": "base_polish", "allow_local_execution": True}]}
+    ).any_occurrence_allows_local_execution("base_polish")
 
 
-def test_manifest_recommendation_includes_complete_placeholder_positions(
+def test_manifest_recommendation_includes_complete_finishing_positions(
     tmp_path,
 ) -> None:
     reads = tmp_path / "reads.fq"
@@ -259,7 +246,7 @@ def test_manifest_recommendations_use_the_canonical_workflow_helper(tmp_path) ->
     assert _recommended_stages_from_manifest(str(hic_manifest)) == hic_recommendation
 
 
-def test_contig_only_route_does_not_enter_placeholders() -> None:
+def test_contig_only_route_does_not_enter_finishing() -> None:
     assert stages_through("assembly") == [
         "read_qc",
         "genome_survey",

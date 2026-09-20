@@ -199,6 +199,9 @@ def _stage_seeds_from_run_config(
     if "gapcloser" in requested and run_config.gapcloser:
         seeds["gapcloser"] = run_config.gapcloser.model_dump(mode="json")
 
+    if "base_polish" in requested and run_config.base_polish:
+        seeds["base_polish"] = run_config.base_polish.model_dump(mode="json")
+
     for review_stage in registered_review_stages():
         if review_stage not in requested:
             continue

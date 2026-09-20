@@ -118,6 +118,11 @@ stages:
     conda_env: your_tool_env
 
 methods:
+  base_polish.racon:
+    conda_env: your_tool_env
+    required_tools:
+      - minimap2
+      - racon
   gapcloser.tgs_gapcloser:
     conda_env: your_tool_env
     # TGS-GapCloser 1.2.1; getopt must be the GNU implementation.

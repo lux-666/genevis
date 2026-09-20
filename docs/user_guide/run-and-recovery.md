@@ -22,7 +22,8 @@ These checks have deliberately different scope:
 
 - `server_check.sh` probes orchestrator prerequisites, then derives and probes
   the fixed-stage tool/package closure in
-  `docs/examples/contig_run_config.template.json` through the active environment
+  `docs/examples/contig_run_config.template.json` by default (or the RunConfig
+  supplied as its first argument) through the active environment
   mapping. Assembly is deliberately deferred and its selected candidate is
   checked at stage entry. It also validates the host BUSCO/NCBI database
   registry needed by Assembly Review. The script does not validate real input
@@ -85,7 +86,7 @@ N-gaps, the stage reuses the input without invoking the tool.
 
 ONT/CLR/CycloneSEQ/unknown or mixed-platform read sets are unsupported here.
 The complete-workflow recommendation is not an input-compatibility guarantee;
-omit unsupported occurrences explicitly. Base Polish is still a placeholder.
+omit unsupported occurrences explicitly. Base Polish also currently requires HiFi.
 For independent quality evaluation, explicitly append an Assembly Review
 occurrence and configure its separate tools, databases, and species metadata.
 Exact scope and handoff semantics live in the
@@ -102,6 +103,65 @@ GENE_AGENT_TGS_REAL_SMOKE=1 pytest -q tests/test_gapcloser.py -k real_tgs
 ```
 
 This deterministic synthetic gap is not representative biological acceptance.
+
+## Complete HiFi/Hi-C server acceptance
+
+Copy [the full manifest](../examples/hifi_complete_manifest.template.yaml) and
+[RunConfig](../examples/hifi_complete_run_config.template.json) to a server-local
+directory. This is the complete recommended route, with final Review after
+Base Polish. Edit every path, sample identity, genome-size estimate and species.
+Supply the entire current HiFi read set and explicit Hi-C R1/R2 pairs. Do not
+relabel ONT/CLR/CycloneSEQ reads as HiFi.
+
+The template waits for manual decisions (`max_blocked_seconds: -1`). Before
+running, set `assembly_dedup.automatic_purge_approved` to `true` only if the real
+sample and desired haplotype representation justify purging; otherwise Dedup
+retains the source and acceptance reports its execution coverage as incomplete.
+If known, supply the actual Hi-C enzyme in
+`hic_scaffolding.autohic_parameters.restriction_enzyme` and actual ploidy/telomere
+motif in `shared_parameters.species_facts`; otherwise use the existing approved
+resolver gates. Do not guess biological facts to remove a pause. Assembly still
+selects its method/parameters at its stage gates; `assembly.case_source` may
+point to the server's active exported v5 case directory.
+
+Provision the configured method environments, AutoHiC assets, and the host
+BUSCO/NCBI registry via the deployment guide. Base Polish adds Racon (1.5.x) and
+minimap2; GapCloser requires TGS-GapCloser and GNU getopt. Then:
+
+```bash
+bash scripts/server_check.sh /server/path/run_config.json
+gene-agent run --manifest /server/path/manifest.yaml \
+  --run-config /server/path/run_config.json --data-dir /server/path/data
+```
+
+Review candidate evidence at each gate. Base Polish executes one Racon round
+between two identically configured minimap2 alignments, preserves the source,
+and requires `accept_candidate`, `keep_prior_assembly`, or `stop_human_review`.
+The following Review evaluates both candidates with the same QUAST/BUSCO
+settings, regardless of the earlier choice; its human decision chooses the
+final assembly. Optional reference-dependent QUAST errors are unavailable
+without a declared reference; read agreement is in-sample, never independent QV.
+
+After the run, use the read-only acceptance entry point:
+
+```bash
+python -m app.diagnostics.route_acceptance \
+  --run-dir /server/path/data/runs/SESSION_ID > /server/path/acceptance.json
+```
+
+Exit 0 means complete verified process coverage and paired evaluation, **not**
+automatic biological improvement. Exit 2 means an unfinished route or explicit
+coverage gaps, including legitimate skips (e.g. no internal gaps for TGS); it
+must not be reported as that tool having run. Exit 1 identifies inconsistent or
+missing required evidence. The JSON includes each occurrence's method outcomes,
+verified execution/collection refs, candidate/output handoffs, final assembly,
+and paired quality metrics. A failed/blocked process requires inspection of its
+recorded logs; a missing binary on the development host is not code failure.
+
+Keep the run directory, frozen inputs, indexed artifacts, process logs and
+request-bound decisions for acceptance. Do not edit a frozen run to retry new
+configuration; create a new session. Use the ordinary inspect/review/resume
+commands below for interrupted human gates.
 
 ## Start
 

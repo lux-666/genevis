@@ -1,1 +1,1 @@
-"""Parent-registered placeholder for final assembly base polishing."""
+"""HiFi polishing, paired evaluation evidence, and manual adoption."""

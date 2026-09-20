@@ -23,13 +23,29 @@ reads, validates native products, and requires durable manual adoption. Tests
 cover the shared lifecycle with a fixture executable and provide an opt-in
 real-binary synthetic-gap check. Neither is representative biological acceptance
 or evidence of improved consensus accuracy. No ONT/CLR/CycloneSEQ correction
-route or polishing implementation is claimed.
+route is claimed. Base Polish has its separate HiFi-only contract below.
 
 - Current evidence: `app/stages/gapcloser/`, `tests/test_gapcloser.py`.
 - Contract owner: [GapCloser](stage-contracts.md#8-gapcloser).
 - Closure condition: run a representative scaffold/HiFi dataset on a provisioned
   host, inspect the gap-detail report, evaluate quality independently, and record
   the human adoption. Other platforms require a separately accepted route.
+
+### Base Polish representative-sample acceptance and independent accuracy
+
+The HiFi-only minimap2/Racon route, paired pre/post alignment evidence, durable
+manual adoption/source retention, and final QUAST/BUSCO pair are implemented.
+Fixture executables test process contracts, not biological correctness. The
+same reads used for correction cannot establish independent consensus QV.
+
+- Current evidence: `app/stages/base_polish/`, `tests/test_base_polish.py`,
+  `app/diagnostics/route_acceptance.py`.
+- Contract owner: [Base Polish](stage-contracts.md#10-base-polish).
+- Closure condition: execute the complete HiFi/Hi-C server example on real data,
+  inspect actual process coverage and every handoff, compare both candidates,
+  and record adoption or retention. Independent accuracy remains unmeasured
+  unless separately supported by independent truth data. Missing tools on a
+  development host are deployment prerequisites, not method-code defects.
 
 ### Assembly software explanation coverage
 

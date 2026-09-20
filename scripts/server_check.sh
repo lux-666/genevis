@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Server-side environment check for gene-agent.
 # Reports the current commit/branch and verifies the fixed method/package
-# closure needed by the authoritative five-stage contig template. Assembly is
+# closure from the supplied RunConfig (default: five-stage contig template).
+# Assembly is
 # intentionally absent from that startup closure because its method is selected
 # only after upstream evidence exists; the selected method is checked at stage
 # entry against the frozen dependency snapshot. It
@@ -12,7 +13,7 @@
 # missing piece so a server operator can fix the environment before running.
 #
 # Usage:
-#   bash scripts/server_check.sh
+#   bash scripts/server_check.sh [run_config.json]
 set -euo pipefail
 
 CALLER_CWD="$(pwd -P)"
@@ -22,6 +23,17 @@ REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 cd "${REPO_ROOT}"
 
 CONTIG_RUN_CONFIG="docs/examples/contig_run_config.template.json"
+RUN_CONFIG="${CONTIG_RUN_CONFIG}"
+if [[ $# -gt 1 ]]; then
+  echo 'usage: server_check.sh [run_config.json]' >&2
+  exit 1
+elif [[ $# -eq 1 ]]; then
+  if [[ "$1" = /* ]]; then
+    RUN_CONFIG="$1"
+  else
+    RUN_CONFIG="${CALLER_CWD}/$1"
+  fi
+fi
 if [[ -z "${ENV_CONFIG_OVERRIDE}" ]]; then
   ENVS_CONFIG="config/envs.yaml"
 elif [[ "${ENV_CONFIG_OVERRIDE}" = /* ]]; then
@@ -40,7 +52,8 @@ ok() {
 }
 
 echo "== gene-agent server check =="
-echo "scope: orchestrator prerequisites, fixed contig tool/package closure, and host databases"
+echo "scope: orchestrator prerequisites, configured fixed tool/package closure, and host databases"
+echo "run config: ${RUN_CONFIG}"
 echo "environment config: ${ENVS_CONFIG}"
 echo "note: gene-agent run separately validates the LLM endpoint and real inputs before freeze"
 
@@ -71,8 +84,8 @@ if ! python -c 'from langgraph.checkpoint.sqlite import SqliteSaver' >/dev/null 
 fi
 ok "active orchestrator environment has langgraph-checkpoint-sqlite"
 
-if [[ ! -f "${CONTIG_RUN_CONFIG}" ]]; then
-  fail "authoritative contig run config not found: ${CONTIG_RUN_CONFIG}"
+if [[ ! -f "${RUN_CONFIG}" ]]; then
+  fail "run config not found: ${RUN_CONFIG}"
 fi
 if [[ ! -f "${ENVS_CONFIG}" ]]; then
   fail "environment mapping not found: ${ENVS_CONFIG}"
@@ -101,21 +114,21 @@ try:
         llm_probe=lambda: None,
     )
 except (OSError, TypeError, ValueError) as exc:
-    print(f"CONTIG_READINESS_ERROR: {exc}")
+    print(f"RUN_READINESS_ERROR: {exc}")
 else:
-    print("contig methods checked: " + ", ".join(methods))
+    print("configured methods checked: " + ", ".join(methods))
     print("Assembly method selection: deferred to stage entry")
     print(
         "registered Assembly candidates (not startup-preflighted): "
         + ", ".join(assembly_candidate_method_scope())
     )
-' "${CONTIG_RUN_CONFIG}" "${ENVS_CONFIG}")"; then
-  fail "could not invoke the authoritative contig readiness check"
+' "${RUN_CONFIG}" "${ENVS_CONFIG}")"; then
+  fail "could not invoke the run readiness check"
 fi
 printf '%s\n' "${readiness_output}"
-if [[ "${readiness_output}" == *"CONTIG_READINESS_ERROR:"* ]]; then
+if [[ "${readiness_output}" == *"RUN_READINESS_ERROR:"* ]]; then
   fail "fix the reported host tool/package/database readiness issue, then rerun"
 fi
-ok "fixed contig tools/packages and host databases are ready; Assembly candidate readiness is checked after stage-owned method selection"
+ok "configured fixed tools/packages and host databases are ready; Assembly candidate readiness is checked after stage-owned method selection"
 
 echo "== server check passed =="

@@ -242,7 +242,7 @@ class DocumentationContractTests(unittest.TestCase):
             self.assertIn('cd "${REPO_ROOT}"', script)
 
         self.assertIn(
-            "orchestrator prerequisites, fixed contig tool/package closure, "
+            "orchestrator prerequisites, configured fixed tool/package closure, "
             "and host databases",
             server_check,
         )

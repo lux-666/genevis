@@ -76,11 +76,10 @@ canonical complete-genome/T2T occurrence sequence is owned by
 `app.workflow.recommended_workflow_template`; this topic does not maintain a
 second literal array.
 
-The final Review is a second occurrence of the reusable stage. With the current
-Base Polish placeholder, freeze binds that otherwise unreachable Review to T2T,
-the nearest implemented assembly-handoff producer. Once Base Polish implements
-and publishes its own central assembly handoff, the same nearest-producer rule
-will bind the following Review to Base Polish. The operator may remove, move, or
+The final Review is a second occurrence of the reusable stage. Freeze binds it
+to Base Polish, the nearest assembly-handoff producer. It evaluates the paired
+source and polished candidates even when the source was initially retained.
+The operator may remove, move, or
 repeat Review or other stages in the editable occurrence list. An intent or
 confirmed RunConfig containing T2T without a later Review remains valid;
 recommendation does not become validation policy.

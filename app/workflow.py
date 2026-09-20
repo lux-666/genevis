@@ -25,7 +25,7 @@ STAGE_ORDER: list[DomainStage] = [
     "base_polish",
 ]
 
-MANUAL_ONLY_STAGES: frozenset[DomainStage] = frozenset({"base_polish"})
+MANUAL_ONLY_STAGES: frozenset[DomainStage] = frozenset()
 
 # A successful occurrence of one of these stages owns the canonical assembly
 # handoff.  Keep this set aligned with the stages that publish an assembly
@@ -38,6 +38,7 @@ ASSEMBLY_HANDOFF_PRODUCER_STAGES: frozenset[DomainStage] = frozenset(
         "assembly_review",
         "hic_scaffolding",
         "gapcloser",
+        "base_polish",
         "t2t",
     }
 )
@@ -86,8 +87,8 @@ def stages_through(endpoint: str) -> list[DomainStage]:
     TUI intake and planner recommendations share this default instead of
     maintaining independent literal arrays.  A frozen run may use another
     order or repeat stages; runtime never consults this helper for successors.
-    Parent-registered placeholders remain manual-only and are not inserted by
-    the default prefix recommendation.
+    The prefix ends at the requested endpoint; finishing additions belong to
+    the complete-workflow recommendation below.
 
     >>> stages_through("assembly_review")
     ['read_qc', 'genome_survey', 'assembly', 'assembly_dedup', 'assembly_review']
@@ -134,7 +135,7 @@ def recommended_workflow_for_manifest(
     complete-genome recommendation, an existing assembly starts at Review, and
     Hi-C-only input starts at scaffolding.  The returned lists intentionally
     preserve the historical literal occurrence sequences, including the
-    manual-only placeholder positions and the finishing Review occurrence.
+    finishing positions and the final Review occurrence.
     """
 
     available = set(asset_types)

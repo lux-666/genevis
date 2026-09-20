@@ -522,6 +522,13 @@ def parse_quast_report_tsv(path: Path) -> dict[str, Any]:
         "n50": "n50",
         "l50": "l50",
         "gc (%)": "gc_percent",
+        "# n's per 100 kbp": "n_per_100kbp",
+        "# misassemblies": "misassemblies",
+        "# mismatches per 100 kbp": "mismatches_per_100kbp",
+        "# indels per 100 kbp": "indels_per_100kbp",
+        "genome fraction (%)": "genome_fraction_percent",
+        "duplication ratio": "duplication_ratio",
+        "nga50": "nga50",
     }
     for line in path.read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")

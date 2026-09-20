@@ -114,7 +114,7 @@ table and never mutates the supplied state.
 | `hic_scaffolding` | `assembly`, `hic_reads` | adopted chromosome-scale `assembly` |
 | `gapcloser` | current adopted `assembly`; complete HiFi-only `long_reads` when internal gaps exist | manually adopted or reused `assembly` |
 | `t2t` | current adopted `assembly`, `long_reads` | `assembly` |
-| `base_polish` | none: registered placeholder with no executable input contract | none |
+| `base_polish` | current `assembly`, complete HiFi-only `long_reads` | manually adopted or reused `assembly`, plus the paired alternative for final Review |
 
 Runtime stage adapters enforce these direct dependencies. Genome Survey
 already admits a short-read-only run and prefers short DNA reads when both
@@ -127,7 +127,12 @@ the complete current HiFi read set; manual adoption replaces it, while keeping
 the prior assembly or finding no internal gaps declares a reused delivery.
 Any later T2T occurrence resolves the then-current assembly and the
 long-read set; it does not consume `hic_reads` or a contact map directly. The
-current `base_polish` placeholder likewise publishes no resource.
+Base Polish occurrence also uses the current assembly and HiFi read set.
+Its handoff metadata carries `comparison_candidate_bundle_ref`,
+`comparison_primary_output_ref`, and `polish_comparison_ref`. Final Review
+verifies both candidates against that immutable source-bound comparison, then
+evaluates them with the same QUAST/BUSCO settings. These refs describe an
+alternative, not a second current assembly.
 
 Candidate bundles, review decisions, execution evidence, reports, and metrics
 remain artifacts. They may be referenced from resource metadata but do not form
@@ -207,7 +212,7 @@ active occurrence. The previous current candidate and primary output remain as
 
 The generic candidate wrapper accepts exactly these primary artifact types:
 `assembly.draft_assembly`, `hic_scaffolding.chromosome_scaffolded_assembly`,
-`gapcloser.assembly`, and `t2t.patched_assembly`. The wrapper itself remains
+`gapcloser.assembly`, `base_polish.assembly`, and `t2t.patched_assembly`. The wrapper itself remains
 `draft_assembly.candidate`; no derived FASTA is copied under a draft-only type.
 Assembly Review consumes the same current candidate contract after each of
 those producers and has no producer-specific fallback path. An unchanged

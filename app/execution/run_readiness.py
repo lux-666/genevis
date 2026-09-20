@@ -42,6 +42,7 @@ def _fixed_local_methods() -> dict[str, tuple[str, ...]]:
         "assembly_review": tuple(registry.by_stage.get("assembly_review", ())),
         "hic_scaffolding": tuple(registry.by_stage.get("hic_scaffolding", ())),
         "gapcloser": tuple(registry.by_stage.get("gapcloser", ())),
+        "base_polish": tuple(registry.by_stage.get("base_polish", ())),
         "t2t": tuple(registry.by_stage.get("t2t", ())),
     }
 

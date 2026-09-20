@@ -1,0 +1,23 @@
+method_name: base_polish.racon
+stage: base_polish
+package_ref: racon
+goal: "Generate and compare one HiFi-polished candidate, without automatic adoption."
+required_inputs:
+  - name: assembly
+    type: assembly
+    description: "Current verified assembly candidate."
+  - name: long_reads
+    type: raw_or_clean_long_reads
+    description: "Complete explicitly classified HiFi read set."
+expected_outputs:
+  - name: polished_assembly
+    type: base_polish.assembly
+    description: "Racon FASTA with unchanged scaffold identity set."
+  - name: comparison
+    type: base_polish.comparison
+    description: "Same-read pre/post alignment, gap, length and coverage comparison; not QV."
+review_rules:
+  - before_after_comparison_required
+  - human_adoption_required
+human_review_triggers:
+  - polishing_result_adoption

@@ -1,0 +1,28 @@
+# Full route: edit scientific facts and paths before freezing a real run.
+# Pair with hifi_complete_run_config.template.json. No invented enzyme/motif.
+session_id: hifi-complete-YYYYMMDD-a
+sample_id: REPLACE_SAMPLE
+genome_size_estimate: 500000000 # REPLACE with a defensible estimate in bases
+user_metadata:
+  target_species: Solea ovata # REPLACE with the real NCBI scientific name
+assets:
+  - asset_type: raw_long_reads
+    paths:
+      - /ABS/PATH/TO/hifi.fastq.gz # List ALL members of this HiFi read set
+    platform: pacbio_hifi
+    layout: single
+    format: fastq
+    compression: gzip
+  - asset_type: hic_reads_registered
+    paired_reads:
+      - r1: /ABS/PATH/TO/hic_R1.fastq.gz
+        r2: /ABS/PATH/TO/hic_R2.fastq.gz
+    platform: illumina
+    layout: paired
+    format: fastq
+    compression: gzip
+  # Optional reference for QUAST; absence leaves reference metrics unavailable.
+  # - asset_type: reference_genome_fasta
+  #   paths: [/ABS/PATH/TO/reference.fasta]
+  #   format: fasta
+  #   compression: none

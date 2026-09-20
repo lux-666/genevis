@@ -244,6 +244,26 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
 
 register_review_gate(
     ReviewGateDeclaration(
+        stage="base_polish",
+        gate_id="base_polish_adoption",
+        decisions_allowed=(
+            "accept_candidate",
+            "keep_prior_assembly",
+            "stop_human_review",
+        ),
+        intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+        validate_intent_request="app.stages.base_polish.review:validate_intent_request",
+        effect_kind="base_polish.adoption.v1",
+        effect_model="app.stages.base_polish.review:BasePolishAdoptionEffect",
+        prepare_application="app.stages.base_polish.review:prepare_application",
+        apply_application="app.stages.base_polish.review:apply_application",
+        template_preferred_decision="keep_prior_assembly",
+        proposal_label="Base polishing before/after comparison and adoption",
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
         stage="gapcloser",
         gate_id="gapcloser_adoption",
         decisions_allowed=(

@@ -62,7 +62,7 @@ the parent controller.
 | `route_controller` and `route_from_current_stage` | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py` |
 | Frozen workflow-occurrence routing and settlement | `wired` | `implemented-no-process` | `tested` | `none` | Every terminal stage path returns the explicit, frozen-occurrence-bound `workflow_step_outcome`; the shared controller/recovery settlement boundary validates it, records declared immutable deliveries before the singleton stage terminal, and rejects cursor/route-marker inference. `app/schemas/state.py`, `app/control/workflow_plan.py`, `app/control/occurrence_settlement.py`, `app/graph/builder.py`, `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py`, `tests/test_state_schema.py`, `tests/test_terminal_finalizer.py` |
 | Review occurrence placement policy | `wired` | `implemented-no-process` | `tested` | `none` | RunConfig preserves optional literal Review placement; sequence analysis binds only explicit Review occurrences. Deterministic, manifest, and LLM planning use the editable complete recommendation with Gap Closing, Base Polishing, and finish Review. `app/workflow.py`, `app/schemas/run_config.py`, `app/entrypoints/tui_intake.py`, `app/entrypoints/ask_planner.py`; `tests/test_run_config.py`, `tests/test_workflow_plan.py`, `tests/test_tui_intake.py`, `tests/test_ask_plan.py` |
-| Manual-only Base Polish placeholder boundary | `wired` | `placeholder` | `tested` | `known-gap` | A reached frozen occurrence fails closed with a strict cursor; `app/stages/base_polish/`; `tests/test_placeholder_stages.py` |
+| Base Polish adoption boundary | `wired` | `executable` | `tested` | `bounded` | HiFi Racon, paired evidence, durable adopt/retain/stop decisions; `app/stages/base_polish/`; `tests/test_base_polish.py` |
 | SQLite/memory checkpoint selection and durable resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`, `app/control/lifecycle.py`; `tests/test_checkpointer.py`, `tests/test_durable_resume.py` |
 | Foreground review countdown policy | `wired` | `implemented-no-process` | `tested` | `none` | The frozen policy and registered resolver feed the same typed intent, durable preparation, verified application, and recovery protocol as a manual decision. Countdown exists only in the original attached executor; later review/resume remains manual. Exact values and bindings are owned by the run-data contract. `app/review/application.py`, `app/control/resume_transaction.py`, `app/review/approval.py`; `tests/test_review_application.py`, `tests/test_foreground_review_countdown.py`, `tests/test_parameter_persistence_v2.py` |
 | Authoritative terminal finalization, reporting, and checkpoint compaction | `wired` | `implemented-no-process` | `tested` | `known-gap` | `finalize_authoritative_terminal()` proves the checkpoint before recording the singleton terminal Ledger fact, then compacts best-effort. Reports run through `ProjectionBoundary` and cannot alter lifecycle authority. Report regeneration remains the bounded gap in [conformance](reference/conformance.md). `app/control/lifecycle.py`, `app/control/projections.py`, `app/graph/checkpoint_compaction.py`; `tests/test_terminal_finalizer.py`, `tests/test_projections.py`, `tests/test_checkpoint_compaction.py` |
@@ -86,9 +86,9 @@ the exact behavioral contract.
 | Stage resource resolution | Stage adapters query canonical `ResourceSpec` objects through `resource_resolution.py`. There is no separate repository planning-preflight API or duplicate stage-requirement table. The confirmed-run boundary performs read-only machine readiness for the fixed effective method closure before whole-run freeze; deferred Assembly resolves its selected method only from the frozen dependency snapshot and performs stage-time preflight before attempt construction. | `app/execution/run_readiness.py`, `app/execution/env_resolver.py`, `app/stages/resource_specs.py`, `app/stages/resource_resolution.py`; `tests/test_run_readiness.py`, `tests/test_project_scaffold.py`, stage-focused tests | [Resource handoff](reference/resource-handoff.md), [Project bootstrap](topics/bootstrap.md) |
 | Genome Survey logical inputs | The stage boundary exposes only `short_reads` and `long_reads`, prefers the short-read family, and leaves clean/raw lifecycle priority to each resource spec. No-read execution is permitted only when an explicit genome size supports the documented skip path. | `app/stages/genome_survey/nodes.py`, `app/stages/genome_survey/state.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` | [Stage contracts](reference/stage-contracts.md) |
 | Executable artifact dependencies | Genome Survey k-mer products cross the Jellyfish/GenomeScope2 boundary as indexed `ArtifactRefJson` values. The consumer has no path-string upgrade branch. | `app/stages/genome_survey/method_application/jellyfish.py`, `genomescope2.py`; `tests/test_genome_survey.py` | [Data contract](reference/data-contract.md) |
-| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The registry loads as 15 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](reference/descriptors.md) |
+| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The registry loads as 16 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](reference/descriptors.md) |
 | External case consumption | One Assembly v5-derived compact exchange, live directory reads and shared material query; cross-method evidence reaches method choice and target-only parameter advice. No run-level corpus copy or old consumer fallback; Hi-C/T2T extensions deferred. | `app/knowledge/assembly_cases.py`, `assembly_retrieval.py`, `assembly_runtime.py`, `v5_projection.py`; `tests/test_assembly_case_consumption.py`; [software coverage gap](reference/conformance.md#assembly-software-explanation-coverage) | [Assembly case contract](reference/casepack.md) |
-| Registered execution classes | The registry is partitioned into 14 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](reference/descriptors.md) |
+| Registered execution classes | The registry is partitioned into 15 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](reference/descriptors.md) |
 | AutoHiC output collection | After process success and before the first new publication, collection requires all four frozen products or matching attempt-local indexed recovery records. Missing products fail collection; a later publication failure may leave an indexed orphan without success semantic events. | `app/stages/hic_scaffolding/method_application/support.py`; `tests/test_hic_scaffolding.py` | [AutoHiC](topics/autohic.md), [Stage contracts](reference/stage-contracts.md) |
 
 ## Stage node inventory
@@ -131,11 +131,11 @@ the method inventory rather than being hidden inside one stage-level color.
 | T2T threshold recommendation, approval, and `prepare_parameters` | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/t2t/parameters/`; `tests/test_t2t.py`, `tests/test_parameter_recommendation_v3_contract.py` |
 | T2T scans and minimap2 alignment | `wired` | `executable` | `tested` | `none` | `scan_assembly`, `prepare_reads`, `scan_reads`, `alignment`; `app/stages/t2t/nodes.py`; `tests/test_t2t.py` |
 | T2T patch, validation, report, adoption gate, commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | Candidate construction/current-resource replacement declare a materialized or reused assembly delivery, which shared settlement proves against its indexed artifacts. `apply_patches`, `validate_patched`, `report`, `gate_review`; `app/stages/t2t/nodes.py`; `tests/test_t2t.py`, `tests/test_assembly_candidate_bundle.py`, `tests/test_review_resume.py` |
-| Base Polish parent placeholder | `wired` | `placeholder` | `tested` | `known-gap` | Manual-only route position and strict fail-closed cursor; no method, artifact, or resource handoff; `app/stages/base_polish/`; `tests/test_placeholder_stages.py` |
+| Base Polish | `wired` | `executable` | `tested` | `bounded` | HiFi Racon, paired minimap2 evidence and manual handoff; `tests/test_base_polish.py` |
 
 ## Registered method inventory
 
-`descriptors/registry.yaml` currently contains 15 registered methods. Fourteen
+`descriptors/registry.yaml` currently contains 16 registered methods. Fifteen
 declare `execution_kind: local`; the executable invariant binds each ID to an
 imported lifecycle, nested method graph, and outer stage node. The sole
 `planner_only` method is an intentional no-process choice whose real
@@ -163,9 +163,10 @@ settlement debt above.
 | `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py`, `tests/test_database_resolution.py` | manifest NCBI scientific name selects one compatible host-installed lineage; a RunConfig lineage, when present, is assertion-only; path/version/provenance resolve from the frozen host registry |
 | `hic_scaffolding.candidate.autohic` | registered with catalog | `executable` | implemented | `tests/test_hic_scaffolding.py` | all four review products are mandatory at collection |
 | `gapcloser.tgs_gapcloser` | registered | `executable` | implemented | `tests/test_gapcloser.py` | HiFi only; manual adoption; coordinate consistency is not a QV claim |
+| `base_polish.racon` | registered | `executable` | implemented | `tests/test_base_polish.py` | HiFi only; paired read agreement is not independent QV; adoption or source retention |
 | `t2t.alignment.minimap2` | registered with catalog | `executable` | implemented | `tests/test_t2t.py` | none |
 `tests/test_registry_executable_invariant.py` derives local IDs from imported
-`MethodExecutionLifecycle` bindings, proves those bindings cover exactly the 14
+`MethodExecutionLifecycle` bindings, proves those bindings cover exactly the 15
 registered local methods, and verifies each shared freeze/run/collect and outer
 stage route. It derives the planner-only set from the production planner catalog
 and exercises `read_qc.length_filter.skip` through raw-read commit while proving
@@ -186,7 +187,7 @@ freeze binding, retry, and biological knowledge coverage are separate facts.
 | AutoHiC | implemented | implemented | mandatory | implemented | implemented | collection fail-closes on a missing declared product; terminal collect failure has no automatic retry |
 | T2T/minimap2 thresholds | implemented | implemented after motif resolution | mandatory | implemented | initial recommendation only | no T2T parameter-retry route |
 | GapCloser | static bounded RunConfig | no LLM recommendation | manual result adoption | shared frozen attempt | no automatic retry | HiFi-only TGS-GapCloser |
-| Base Polish | no registered method | not implemented | not applicable | no executable attempt | not applicable | parent-only placeholder fails closed when explicitly requested |
+| Base Polish | `base_polish.racon` | minimap2/Racon lifecycle | paired PAF/FASTA/version evidence | manual adoption | source or polished candidate | HiFi only; no independent QV |
 | Read QC, Survey, Dedup, Review | registry-derived default methods | not implemented as formal recommenders | not applicable | normal whole-run freeze | not applicable | defaults are internal; do not expose these as user method-selection fields |
 | Inventory | not required | not required | input ambiguity review only | not applicable | not applicable | no recommender should be inferred |
 
@@ -195,23 +196,22 @@ implemented. The remaining gap is not “parameter recommendation is missing
 everywhere”; it is that method-specific biological knowledge depth is uneven
 and most other stages deliberately use static/operator configuration.
 
-## Product capabilities without a registered executable method
+## Finishing capabilities and remaining product gaps
 
-Some items now have an explicit parent position without an executable closed
-loop. `placeholder` means the graph can represent and fail the request
-truthfully; it does not mean the biological capability runs.
+Executable finishing routes have explicit input limits and still require
+representative server acceptance. `placeholder` identifies a capability without
+an executable closed loop; it does not mean the biological capability runs.
 
 | Product capability | Wiring | Implementation | Verification | Debt | Evidence and owner |
 |---|---|---|---|---|---|
 | Gap closing after chromosome scaffolding | `wired` | `executable` | `tested` | `bounded` | HiFi-only TGS-GapCloser; representative biological acceptance remains open; `tests/test_gapcloser.py`; [stage contract](reference/stage-contracts.md#8-gapcloser) |
-| Automated base polishing | `wired` | `placeholder` | `tested` | `known-gap` | `app/stages/base_polish/`; `tests/test_placeholder_stages.py`; [stage contract](reference/stage-contracts.md#10-base-polish-placeholder) |
-| Finish Review after Base Polish | placement wired; producer handoff absent | unreachable after the Base Polish placeholder | `partially-tested` | `known-gap` | [stage contract](reference/stage-contracts.md#10-base-polish-placeholder) |
+| Automated base polishing | `wired` | `executable` | `tested` | `bounded` | HiFi only, representative acceptance pending; `tests/test_base_polish.py`; [stage contract](reference/stage-contracts.md#10-base-polish) |
+| Finish Review after Base Polish | `wired` | `executable` | `tested` | `bounded` | Paired source/polished QUAST/BUSCO evaluation; [stage contract](reference/stage-contracts.md#10-base-polish) |
 | TUI midstage entry from clean reads or an existing assembly | `unwired` in the public TUI | `placeholder` as accepted design | `partially-tested` | `known-gap` | See [TUI midstage entry](topics/tui-midstage-entry.md) |
 
 The finish Review is a second occurrence of the reusable `assembly_review`
-stage, not a separate “final QA” stage. The Base Polish placeholder or an
-operator-provided polished assembly must not be counted as an automated
-polishing method.
+stage, not a separate “final QA” stage. Source retention is valid. An
+operator-provided polished assembly is not evidence of an executed method.
 
 Maintenance rules are owned by
 [Architecture Governance](reference/governance.md).

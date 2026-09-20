@@ -34,6 +34,8 @@ from app.stages.assembly_dedup import builder as assembly_dedup_builder
 from app.stages.assembly_dedup import nodes as assembly_dedup_nodes
 from app.stages.assembly_review import builder as assembly_review_builder
 from app.stages.assembly_review.method_application import busco, quast
+from app.stages.base_polish import builder as base_polish_builder
+from app.stages.base_polish import nodes as base_polish_nodes
 from app.stages.gapcloser import builder as gapcloser_builder
 from app.stages.gapcloser import nodes as gapcloser_nodes
 from app.stages.genome_survey import builder as genome_survey_builder
@@ -61,6 +63,13 @@ class LocalBinding:
 
 
 LOCAL_BINDINGS = (
+    LocalBinding(
+        base_polish_nodes,
+        base_polish_nodes.LIFECYCLE,
+        base_polish_nodes.build_base_polish_graph,
+        base_polish_builder.build_stage,
+        "racon",
+    ),
     LocalBinding(
         gapcloser_nodes,
         gapcloser_nodes.LIFECYCLE,

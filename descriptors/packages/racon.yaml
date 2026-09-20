@@ -1,0 +1,10 @@
+package_name: racon
+version_constraint: ">=1.5,<2"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "racon -u --no-trimming -t 16 reads.fa alignments.paf assembly.fa"
+help_summary: "One HiFi polishing round with unchanged scaffold identities."
+known_pitfalls:
+  - "In-sample read agreement is not independent consensus QV."
+  - "Polishing can degrade an accurate HiFi assembly; manual comparison is mandatory."

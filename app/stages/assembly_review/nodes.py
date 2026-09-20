@@ -122,6 +122,7 @@ from app.stages.base import (
     stage_artifacts_dir,
     stage_work_dir,
 )
+from app.stages.base_polish.validation import load_comparison as load_polish_comparison
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
 from app.storage.artifacts import (
@@ -190,7 +191,21 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
             ("raw_candidate_bundle_ref", raw_ref, f"{assembly.source}:raw")
         )
     verified_by_id: dict[str, VerifiedExecutedCandidate] = {}
+    comparison_ref = assembly.metadata.get("comparison_candidate_bundle_ref")
+    if comparison_ref is not None:
+        candidate_inputs.append(
+            (
+                "comparison_candidate_bundle_ref",
+                comparison_ref,
+                f"{assembly.source}:alternative",
+            )
+        )
     try:
+        step = current_workflow_step(state)
+        target: Mapping[str, Any] = step.get("review_target", {}) if step else {}
+        producer = workflow_step_by_id(state, str(target.get("producer_step_id")))
+        if producer["stage"] == "base_polish" and comparison_ref is None:
+            raise ValueError("Base Polish handoff requires the paired alternative")
         for metadata_key, raw_candidate_ref, source in candidate_inputs:
             verified = load_executed_candidate_bundle(
                 absolute_data_dir(state),
@@ -214,11 +229,11 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
                     }
                 )
             )
-            projected_primary_key = (
-                "primary_output_ref"
-                if metadata_key == "candidate_bundle_ref"
-                else "raw_primary_output_ref"
-            )
+            projected_primary_key = {
+                "candidate_bundle_ref": "primary_output_ref",
+                "raw_candidate_bundle_ref": "raw_primary_output_ref",
+                "comparison_candidate_bundle_ref": "comparison_primary_output_ref",
+            }[metadata_key]
             projected_primary = assembly.metadata.get(projected_primary_key)
             if projected_primary is None:
                 raise ValueError(f"assembly resource has no {projected_primary_key}")
@@ -230,7 +245,17 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
                     f"assembly resource {projected_primary_key} does not match "
                     f"{metadata_key}"
                 )
-    except (OSError, TypeError, ValueError) as exc:
+        if comparison_ref is not None:
+            load_polish_comparison(
+                state["data_dir"],
+                state["session_id"],
+                assembly.metadata.get("polish_comparison_ref"),
+                candidate_refs=[
+                    ArtifactRef.model_validate(current_ref),
+                    ArtifactRef.model_validate(comparison_ref),
+                ],
+            )
+    except (OSError, KeyError, TypeError, ValueError) as exc:
         return update_assembly_review_output(
             state,
             {
@@ -1846,6 +1871,7 @@ def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
     comparison_payload = {
         "session_id": state["session_id"],
         "candidates": comparison_candidates,
+        "polishing_comparison": _polish_review_evidence(state, candidates),
         "notes": ["thresholds_not_applied_without_human_approval"],
     }
     existing_ref = ar_out.get("candidate_comparison_ref")
@@ -1979,6 +2005,7 @@ def _assembly_review_report_payload(
         "stage": "assembly_review",
         "report_kind": report_kind,
         "candidate_count": len(candidates),
+        "polishing_comparison": _polish_review_evidence(state, candidates),
         "candidates": [
             _candidate_report_row(state, candidate, signals, assembly_out)
             for candidate in candidates
@@ -2004,6 +2031,43 @@ def _assembly_review_report_payload(
             "thresholds_not_applied_without_human_approval",
             "report_informs_human_decision_only",
         ],
+    }
+
+
+def _polish_review_evidence(
+    state: TopLevelState, candidates: list[AssemblyCandidateCursor]
+) -> dict[str, Any] | None:
+    current = (state.get("resource_refs") or {}).get("assembly") or {}
+    metadata = current.get("metadata")
+    if not isinstance(metadata, dict) or not metadata.get("polish_comparison_ref"):
+        return None
+    resource = resolve_stage_resource(state, resource_spec=ASSEMBLY_CANDIDATES_SPEC)
+    ref = resource.metadata.get("polish_comparison_ref")
+    if ref is None:
+        return None
+    report = load_polish_comparison(
+        state["data_dir"],
+        state["session_id"],
+        ref,
+        candidate_refs=[
+            ArtifactRef.model_validate(c["bundle_ref"]) for c in candidates
+        ],
+    )
+    return {
+        "report_ref": ref,
+        **{
+            key: report[key]
+            for key in (
+                "source_candidate_ref",
+                "polished_candidate_ref",
+                "before",
+                "after",
+                "delta",
+                "changed_scaffolds",
+                "independent_qv",
+                "limitations",
+            )
+        },
     }
 
 
@@ -2164,6 +2228,40 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
                 ]
             )
             + " |"
+        )
+
+    lines.extend(["", "## Reference-dependent QUAST metrics", ""])
+    lines.append("Missing values mean unavailable, not zero errors or QV.")
+    for candidate in payload.get("candidates", []):
+        quast = (candidate.get("metrics") or {}).get("quast") or {}
+        lines.append(
+            f"- {candidate.get('candidate_id')}: "
+            + json.dumps(
+                {
+                    key: value
+                    for key, value in quast.items()
+                    if key
+                    not in {"contig_count", "total_length", "n50", "largest_contig"}
+                },
+                sort_keys=True,
+            )
+        )
+    polish = payload.get("polishing_comparison")
+    if polish:
+        lines.extend(
+            [
+                "",
+                "## Paired polishing evidence",
+                "",
+                "Before = source; after = Racon. Same reads were used for correction "
+                "and comparison; these values are not independent QV.",
+                "",
+                "```json",
+                json.dumps(polish, indent=2, sort_keys=True),
+                "```",
+                "Retaining the source is a valid final decision; "
+                "no benefit is assumed.",
+            ]
         )
 
     _append_related_species_sanity_check(

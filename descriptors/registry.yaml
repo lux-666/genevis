@@ -15,6 +15,7 @@ packages:
   juicebox: juicebox.yaml
   seqkit: seqkit.yaml
   tgsgapcloser: tgsgapcloser.yaml
+  racon: racon.yaml
 methods:
   assembly.candidate.flye: assembly/flye_candidate.yaml
   assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
@@ -28,6 +29,7 @@ methods:
   hic_scaffolding.candidate.autohic: hic_scaffolding/autohic_candidate.yaml
   t2t.alignment.minimap2: t2t/minimap2_telomere_alignment.yaml
   gapcloser.tgs_gapcloser: gapcloser/tgs_gapcloser.yaml
+  base_polish.racon: base_polish/racon.yaml
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
   read_qc.length_filter.skip: read_qc/length_filter_skip.yaml
   read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
@@ -56,3 +58,5 @@ by_stage:
     - t2t.alignment.minimap2
   gapcloser:
     - gapcloser.tgs_gapcloser
+  base_polish:
+    - base_polish.racon

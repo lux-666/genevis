@@ -179,7 +179,8 @@ stages.
 The parent registers ten domain stages explicitly in `app/graph/builder.py`; the
 subgraphs are composable but there is no dynamic plugin registry. `gapcloser`
 executes the HiFi-only TGS-GapCloser route with manual result adoption;
-`base_polish` is a manual-only placeholder and fails closed if reached. Resume
+`base_polish` executes a HiFi-only Racon round with paired pre/post evidence
+and manual adoption or source retention. Resume
 applies only the decision bound to the interrupted immutable occurrence; it does
 not rewrite the remaining plan, a fixed method roster, or an already-bound
 Assembly selection.

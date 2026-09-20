@@ -369,7 +369,7 @@ def test_review_target_binds_the_nearest_assembly_handoff_occurrence() -> None:
     }
     assert steps[8]["review_target"] == {
         "resource_type": "assembly",
-        "producer_step_id": "step-006-t2t",
+        "producer_step_id": "step-007-base_polish",
     }
 
 
@@ -392,7 +392,7 @@ def test_complete_recommendation_freezes_literally_with_optional_review() -> Non
     assert [step["stage"] for step in steps] == ["inventory", *stages]
     assert steps[-1]["review_target"] == {
         "resource_type": "assembly",
-        "producer_step_id": "step-008-t2t",
+        "producer_step_id": "step-009-base_polish",
     }
 
 
@@ -430,7 +430,7 @@ def test_workflow_step_validation_rejects_bad_review_targets() -> None:
         validate_workflow_steps(forged)
 
 
-def test_workflow_step_validation_accepts_placeholder_before_optional_review() -> None:
+def test_workflow_step_validation_binds_polish_before_optional_review() -> None:
     steps = [
         {
             "step_id": "step-000-inventory",
@@ -457,7 +457,7 @@ def test_workflow_step_validation_accepts_placeholder_before_optional_review() -
             "selected_method_names": [],
             "review_target": {
                 "resource_type": "assembly",
-                "producer_step_id": "step-001-t2t",
+                "producer_step_id": "step-002-base_polish",
             },
         },
     ]

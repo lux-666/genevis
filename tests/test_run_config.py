@@ -118,13 +118,11 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("allow_local_execution", str(ctx.exception))
 
-    def test_manual_only_stages_reject_local_execution(self):
-        for stage in ("base_polish",):
-            with self.subTest(stage=stage), self.assertRaises(ValidationError) as ctx:
-                RunConfig.model_validate(
-                    {"requested_stages": _local_stage_requests(stage)}
-                )
-            self.assertIn(stage, str(ctx.exception))
+    def test_base_polish_accepts_explicit_local_execution(self):
+        config = RunConfig.model_validate(
+            {"requested_stages": _local_stage_requests("base_polish")}
+        )
+        self.assertTrue(config.any_occurrence_allows_local_execution("base_polish"))
 
     def test_legacy_local_exec_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:

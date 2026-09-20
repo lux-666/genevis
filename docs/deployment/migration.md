@@ -186,8 +186,9 @@ bash /path/to/gene_agent/scripts/server_check.sh
 
 Scope:
 
-- `server_check.sh`: orchestrator prerequisites plus the fixed contig template
-  tool/package/database closure; deferred Assembly-candidate readiness is
+- `server_check.sh [run_config.json]`: orchestrator prerequisites plus the
+  supplied configuration's fixed tool/package/database closure (the default is
+  the contig template); deferred Assembly-candidate readiness is
   stage-owned;
 - `server_test.sh`: earlier Python regression, compile, and diff gate;
 - real-data smoke: an explicit operator run using server-local inputs, described

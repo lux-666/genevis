@@ -1,7 +1,7 @@
 # Deployment Entry Points
 
-This page is the deployment boundary map. It keeps the three host-level
-operations distinct; it does not duplicate the run, freeze, review, or resume
+This page is the deployment boundary map. It keeps host preparation and
+run-evidence acceptance distinct; it does not duplicate the run, freeze, review, or resume
 contract owned by [`user_guide/run-and-recovery.md`](../user_guide/run-and-recovery.md).
 
 ## One authority per operation
@@ -9,8 +9,9 @@ contract owned by [`user_guide/run-and-recovery.md`](../user_guide/run-and-recov
 | Operation | Authoritative entry | Owns | Does not own |
 |---|---|---|---|
 | Bootstrap | optional `gene-agent bootstrap` / `bootstrap --update` assistant | generating, extending, and validating the active environment mapping, declared package canaries, and every method entry declared in that mapping | exclusive authorship of the mapping, package installation, biological inputs, or a run session |
-| Contig acceptance | [`scripts/server_check.sh`](../../scripts/server_check.sh) | read-only orchestrator prerequisites, fixed-stage method/package closure, and host BUSCO/NCBI database integrity derived from the authoritative five-stage contig template | deferred Assembly-candidate readiness, LLM reachability, private inputs, or biological execution |
+| Host readiness | [`scripts/server_check.sh`](../../scripts/server_check.sh) | read-only orchestrator prerequisites, fixed-stage method/package closure, and host databases from an explicit RunConfig; defaults to the five-stage contig template | deferred Assembly-candidate readiness, LLM reachability, private inputs, or biological execution |
 | Code verification | [`scripts/server_test.sh`](../../scripts/server_test.sh) | pytest regression, compileall, and diff check | Conda tool readiness, real-data smoke, or any biological command |
+| Complete HiFi route evidence | `python -m app.diagnostics.route_acceptance --run-dir PATH` | read-only process/collection evidence, handoffs, request-bound paired final evaluation and final output | running tools, changing decisions, independent QV, or guaranteed biological improvement |
 
 ## Host configuration lifecycle
 
@@ -74,6 +75,9 @@ frozen dependency snapshot at Assembly stage entry. Because the authoritative
 contig template includes Assembly Review, the check also validates the BUSCO
 lineage and NCBI snapshots under the root declared in the active host mapping.
 The actual run additionally validates its manifest and selected LLM endpoint.
+For the complete HiFi route, pass the edited RunConfig as the script's first
+argument. Templates, execution and post-run evidence checks are owned by
+[Run and Recovery](../user_guide/run-and-recovery.md#complete-hifihic-server-acceptance).
 
 A successful bootstrap is not a proof that `server_check.sh` will pass, and a
 successful `server_check.sh` is not a proof that every declaration in the active
