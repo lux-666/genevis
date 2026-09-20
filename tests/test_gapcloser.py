@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from app.stages.gapcloser.validation import read_sequences, validate_gap_outputs
+from app.stages.gapcloser.validation import validate_gap_outputs
+from app.stages.sequences import read_sequences
 
 
 def _state(

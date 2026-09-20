@@ -38,15 +38,11 @@ from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.base import append_route_trace, stage_work_dir
 from app.stages.gapcloser.state import read_gapcloser_stage_output as output
 from app.stages.gapcloser.state import update_gapcloser_stage_output as update
-from app.stages.gapcloser.validation import (
-    fasta_records,
-    read_sequences,
-    sequence_summary,
-    validate_gap_outputs,
-)
+from app.stages.gapcloser.validation import validate_gap_outputs
 from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
+from app.stages.sequences import fasta_records, read_sequences, sequence_summary
 from app.storage.artifacts import (
     PublishedArtifact,
     publish_or_recover_work_artifact,
