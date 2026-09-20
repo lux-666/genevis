@@ -10,7 +10,7 @@ contract owned by [`user_guide/run-and-recovery.md`](../user_guide/run-and-recov
 |---|---|---|---|
 | Bootstrap | optional `gene-agent bootstrap` / `bootstrap --update` assistant | generating, extending, and validating the active environment mapping, declared package canaries, and every method entry declared in that mapping | exclusive authorship of the mapping, package installation, biological inputs, or a run session |
 | Host readiness | [`scripts/server_check.sh`](../../scripts/server_check.sh) | read-only orchestrator prerequisites, fixed-stage method/package closure, and host databases from an explicit RunConfig; defaults to the five-stage contig template | deferred Assembly-candidate readiness, LLM reachability, private inputs, or biological execution |
-| Code verification | [`scripts/server_test.sh`](../../scripts/server_test.sh) | pytest regression, compileall, and diff check | Conda tool readiness, real-data smoke, or any biological command |
+| Code verification | [`scripts/server_test.sh`](../../scripts/server_test.sh) | pytest regression, compileall, and diff check; current conditional real-tool isolation caveat below | host readiness or proof of real-data E2E acceptance |
 | Complete HiFi route evidence | `python -m app.diagnostics.route_acceptance --run-dir PATH` | read-only process/collection evidence, handoffs, request-bound paired final evaluation and final output | running tools, changing decisions, independent QV, or guaranteed biological improvement |
 
 ## Host configuration lifecycle
@@ -86,7 +86,12 @@ execute the work. If bootstrap used `--config PATH`, export that same absolute
 path as `GENE_AGENT_ENVS_CONFIG` for `server_check.sh` and the actual run.
 
 `server_test.sh` is a code-level regression gate. It runs pytest, compileall,
-and `git diff --check`; it is not a real-data or biological-tool smoke test.
+and `git diff --check`; it is not a real-data or biological-tool smoke test
+harness. The suite can auto-run SeqKit when its test environment is present;
+strict tool-free selection is pending. Follow the
+[staged acceptance order](../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)
+before a full-route run: code tests, small tool smokes, contig E2E, independent
+Hi-C/finishing slices, then complete real E2E.
 The still-open full-path acceptance boundary is recorded only in
 [Architecture Conformance](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated).
 

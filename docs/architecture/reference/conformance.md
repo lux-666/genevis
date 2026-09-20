@@ -41,9 +41,11 @@ same reads used for correction cannot establish independent consensus QV.
 - Current evidence: `app/stages/base_polish/`, `tests/test_base_polish.py`,
   `app/diagnostics/route_acceptance.py`.
 - Contract owner: [Base Polish](stage-contracts.md#10-base-polish).
-- Closure condition: execute the complete HiFi/Hi-C server example on real data,
-  inspect actual process coverage and every handoff, compare both candidates,
-  and record adoption or retention. Independent accuracy remains unmeasured
+- Closure condition: first run real Racon/minimap2 smoke and an independent
+  Base Polish slice from an existing assembly, compare both candidates, and
+  record adoption or retention. Only after the lower layers pass, exercise the
+  full route according to the [acceptance order](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs).
+  Independent accuracy remains unmeasured
   unless separately supported by independent truth data. Missing tools on a
   development host are deployment prerequisites, not method-code defects.
 
@@ -184,8 +186,10 @@ their stage with fixtures, stubs, or patched external boundaries. The existing
 real-tool Read QC smoke does not close the whole-path gap.
 
 `server_check.sh` proves the fixed host tool/package/database closure and
-`server_test.sh` proves code regression only. Neither command is biological
-execution evidence, and neither may be cited as a successful contig run.
+`server_test.sh` is a regression entry, not whole-path biological execution
+evidence. Its suite can currently auto-run the conditional SeqKit smoke on a
+provisioned host; real-tool opt-in isolation, including collection-time probes,
+is still incomplete. Neither command may be cited as a successful contig run.
 
 - Current evidence: `tests/test_read_qc.py`, `tests/test_genome_survey.py`,
   `tests/test_assembly.py`, `tests/test_assembly_dedup.py`,
@@ -193,11 +197,15 @@ execution evidence, and neither may be cited as a successful contig run.
   `scripts/server_test.sh`.
 - Contract owners: [Stage contracts](stage-contracts.md) and the
   [deployment boundary](../../deployment/README.md).
-- Closure condition: add an explicit server acceptance harness that uses the
-  canonical contig templates, installed real tools, a configured live LLM, and
-  representative server-local reads; require a canonical completed terminal,
+- Closure condition: audit/fill code-test gaps and isolate real-tool tests,
+  then pass small-data smoke for the contig methods before adding an explicit
+  small real-data five-stage acceptance harness using the canonical contig
+  templates, installed tools and configured live LLM. Require a canonical completed terminal,
   five settled analytical occurrences, and a hash-verified `final_assembly`
   from detached inspection. Focused stubbed tests do not satisfy this condition.
+  Hi-C and finishing stages are independent slices before full-route acceptance;
+  the single operator sequence is owned by
+  [Run and Recovery](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs).
 
 ## Update rule
 

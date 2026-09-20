@@ -15,6 +15,29 @@ def _markdown_files() -> list[Path]:
 
 
 class DocumentationContractTests(unittest.TestCase):
+    def test_acceptance_guide_orders_small_slices_before_full_route(self) -> None:
+        guide = (PROJECT_ROOT / "docs/user_guide/run-and-recovery.md").read_text()
+        headings = (
+            "### 1. Audit and complete unit / integration coverage",
+            "### 2. Run small real-tool smoke tests for each key stage",
+            "### 3. First real E2E: the small five-stage contig route",
+            "### 4. Validate Hi-C as an independent E2E slice",
+            "### 5. Validate finishing stages independently",
+            "### 6. Only then run the complete real E2E",
+            "## Complete HiFi/Hi-C server acceptance",
+        )
+        positions = [guide.index(heading) for heading in headings]
+        self.assertEqual(positions, sorted(positions))
+        for requirement in (
+            "Test isolation is not yet complete",
+            "Phase4ReadQCRealSmokeTests",
+            "completed AutoHiC attempt is not launched again",
+            "assembly_fasta_registered",
+            "not** a five-stage or slice",
+            "does not claim the pending tests or server runs",
+        ):
+            self.assertIn(requirement, guide)
+
     def test_assembly_case_contract_names_compact_live_boundary(self) -> None:
         contract = (
             PROJECT_ROOT / "docs/architecture/reference/casepack.md"
