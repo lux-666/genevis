@@ -67,14 +67,16 @@ version-specific interaction; unexplained settings are retained as unknown.
 
 ### Assembly corpus handoff and measured recommendation coverage
 
-The exporter has been exercised on the current producer graphs and explicit
-selection: five papers, six Assembly cases, all hifiasm. The producer's `cases/`
+The current local export contains 94 paper packages and 221 Assembly cases;
+132 cases contain 414 numeric material observations. The producer's `cases/`
 pilot format is not the runtime exchange; export through
 `scripts/build_assembly_cases.py` and configure one `assembly.case_source`.
-The consumer's local `data/assembly_cases_v5/` is an ignored deployment artifact,
-not a packaged corpus or a second reader. Source graphs/pilot files are not rewritten.
+The consumer's local `descriptors/knowledge_packs/assembly/cases/` is Git-ignored
+and manually copied for deployment. The directory is not automatically discovered;
+the runtime still reads only the configured source. Superseded exports are removed
+after validation and handoff. Source graphs/pilot files are not rewritten.
 
-Current read observations have unknown processing-state bindings. They remain
+Some read observations still have unknown processing-state bindings. They remain
 readable context, but do not numerically match runtime raw/filtered observations.
 Do not close this gap by making unknown a wildcard or inferring state from labels.
 Cross-method NextDenovo tests use synthetic fixtures; they establish wiring and

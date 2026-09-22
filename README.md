@@ -212,8 +212,10 @@ python -c 'from pathlib import Path; from app.knowledge.assembly_cases import lo
 
 该命令不修改原图，不覆盖不同内容，不将投影视为论文重新审核。
 更新时先导出到新的目录并验证，再把 `assembly.case_source` 指向该目录；
-运行时只读所配置的这一个目录。`data/assembly_cases_v5/` 只是本机导出位置，
-不是第二套运行时来源，也不是随代码分发的案例库。
+运行时只读所配置的这一个目录。本地 case 统一放在
+`descriptors/knowledge_packs/assembly/cases/`，由 Git 忽略，部署时手动复制；
+复制后必须配置 `assembly.case_source`，程序不会自动扫描该目录。
+验证并完成切换后删除旧导出目录，避免保留多份活动案例库。
 选择文件中的每项必须明确 `paper`、`step`、`stage: assembly`、
 `task: contig_assembly` 和输入 state ID 到平台的 `inputs` 映射；
 `features` 指向 measurement ID 并声明规范单位，`outcomes` 列出结果 measurement ID。

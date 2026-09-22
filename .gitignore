@@ -24,6 +24,9 @@ data/reference/ncbi/*
 !data/reference/ncbi/README.md
 logs/
 /reports/
+# Local case exports and manually copied case data
+/artifacts/
+/descriptors/knowledge_packs/assembly/cases/
 pid*.log.info
 
 app/entrypoints/workflow.ipynb

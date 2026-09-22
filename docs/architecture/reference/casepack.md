@@ -41,6 +41,28 @@ Never infer a mode from a tool name. Outcomes identify `direct_output`,
 `downstream_context`, `mixed_context`, or `unknown` from explicit graph bindings;
 downstream measurements are not assembler-only performance evidence.
 
+An export selection must bind its material measurements explicitly. `features`
+maps a canonical feature key to a measurement specification, or a list of
+specifications when several measurements report that feature. Each specification
+names `measurement` and the normalized `unit`; repeated/conflicting values are
+never overwritten. For a bare table value, `source_unit` additionally requires
+`unit_basis` identifying the source header/metric/context. Bounds and ranges stay
+readable rather than becoming invented scalars. A compound measurement can use
+an explicitly reviewed `component`, for example
+`{"text": "subread N50 14,456 bp", "label": "subread N50"}`. The text must be one
+complete, unique source clause; the optional label must match the feature.
+Normalization never searches for an arbitrary number or treats library size as
+read length. Each component still obeys the original object, sample, processing
+state and exclusion checks, and retains the full original value in its basis.
+`reported_measurements` can select source-only material measurements independently
+of the numeric index. Failed normalization and explicit exclusions retain reasons.
+`input_states` binds only selected input IDs; unknown states remain unknown.
+Selected downstream outcomes retain gaps attached to their evaluated states.
+
+The exporter prints case/feature coverage and warns on an entirely empty numeric
+index. Use `--filename-template '{paper}-response.json'` to export directly from
+response-named v5 graphs without copying them. The default remains `{paper}.json`.
+
 Each case exposes the following information:
 
 | Information | Required semantics |

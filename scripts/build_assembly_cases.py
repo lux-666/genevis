@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,15 +19,38 @@ def main() -> None:
     parser.add_argument("--extractions", type=Path, required=True)
     parser.add_argument("--selection", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--filename-template",
+        choices=("{paper}.json", "{paper}-response.json"),
+        default="{paper}.json",
+        help="Source graph filename; raw response graphs need not be copied/renamed.",
+    )
     args = parser.parse_args()
     selections = json.loads(args.selection.read_text())
     papers = sorted({s["paper"] for s in selections if s["stage"] == "assembly"})
     prepared = {}
+    coverage: Counter[str] = Counter()
+    features: Counter[str] = Counter()
     for paper_id in papers:
         if not paper_id.isalnum():
             raise ValueError("paper IDs must be simple alphanumeric names")
-        graph = json.loads((args.extractions / f"{paper_id}.json").read_text())
+        graph = json.loads(
+            (
+                args.extractions / args.filename_template.format(paper=paper_id)
+            ).read_text()
+        )
         paper = project_paper(paper_id, graph, selections)
+        for case in paper.cases:
+            coverage["cases"] += 1
+            coverage["with_observations"] += bool(case.observations)
+            coverage["with_reported_measurements"] += bool(
+                case.content.get("reported_measurements")
+            )
+            coverage["with_outcomes"] += bool(case.content.get("outcomes"))
+            coverage["with_normalization_notes"] += bool(
+                case.content.get("normalization_notes")
+            )
+            features.update({o.name for o in case.observations})
         payload = (paper.model_dump_json(indent=2) + "\n").encode()
         destination = args.output / f"{paper_id}.json"
         if destination.exists() and destination.read_bytes() != payload:
@@ -38,6 +62,13 @@ def main() -> None:
             with destination.open("xb") as stream:
                 stream.write(payload)
     print(f"Exported {len(prepared)} Assembly paper packages to {args.output}")
+    print(json.dumps({"coverage": coverage, "feature_case_counts": features}))
+    if coverage["cases"] and not coverage["with_observations"]:
+        print(
+            "WARNING: entire corpus has no numeric material index; "
+            "retrieval can only use lexical relevance.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
