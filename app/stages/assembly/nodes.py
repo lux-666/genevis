@@ -501,7 +501,7 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
             "use_hic_phasing": use_hic_phasing,
             "platform": primary_platform,
             "has_hifi": bool(hifi_refs),
-            "has_hic": bool(hic_pairs),
+            "has_hic": bool(load_assets_from_registry(state, ["hic_reads_registered"])),
             "target_level": target_level,
             "genome_size_prior": genome_size_prior,
             "resolved_genome_size": resolved_genome_size,
@@ -1940,7 +1940,7 @@ def _build_input_profile(
         estimated_genome_size=assembly_out.get("genome_size_prior"),
         target_level=assembly_out.get("target_level", "draft"),
         has_hifi=bool(assembly_out.get("hifi_reads_ref")),
-        has_hic=bool(assembly_out.get("hic_reads_ref")),
+        has_hic=bool(assembly_out.get("has_hic") or assembly_out.get("hic_reads_ref")),
         has_rnaseq=bool(
             load_assets_from_registry(
                 state,

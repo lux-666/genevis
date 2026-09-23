@@ -21,9 +21,9 @@ from app.llm.parameters.assembly.recommender import (
     AssemblyParameterDecision,
     recommend_assembly_parameters,
 )
+from app.llm.parameters.assembly.request import AssemblyParameterRequestDTO
 from app.schemas.artifacts import ASSEMBLY_PARAMETER_MODEL_REQUEST
 from app.schemas.parameter_recommendation import (
-    RecommendationDependencyRefs,
     RecommendationInputSnapshotV3,
 )
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
@@ -70,6 +70,7 @@ def load_request_artifact(path: str | Path) -> dict[str, Any]:
 def evaluate_parameter_request(
     request_dto: dict[str, Any],
     *,
+    input_snapshot: RecommendationInputSnapshotV3,
     decision_maker: Callable[
         [dict[str, Any]], AssemblyParameterDecision
     ] = recommend_assembly_parameters,
@@ -79,6 +80,14 @@ def evaluate_parameter_request(
     method_id = str(request_dto.get("method_id") or "")
     if not method_id:
         raise ValueError("parameter request is missing method_id")
+    request = AssemblyParameterRequestDTO.model_validate(request_dto)
+    if (
+        input_snapshot.method_id != request.method_id
+        or input_snapshot.task != request.task
+        or input_snapshot.facts != request.facts
+        or input_snapshot.stage_context != request.assembly_context
+    ):
+        raise ValueError("model request does not match its input snapshot")
     catalog = load_parameter_catalog(method_id)
 
     decision = decision_maker(request_dto)
@@ -99,24 +108,6 @@ def evaluate_parameter_request(
     else:
         parameters = dict((decision.parsed or {}).get("parameters") or {})
         try:
-            snapshot = RecommendationInputSnapshotV3.model_validate(
-                {
-                    "schema_version": 3,
-                    "method_id": method_id,
-                    "task": request_dto.get("task", "recommend_initial"),
-                    "facts": request_dto.get("facts", {}),
-                    "stage_context": request_dto.get(
-                        "assembly_context",
-                        {
-                            "stage": "assembly",
-                            "assembly_route": "ont",
-                            "read_type": "ont_raw",
-                            "target_level": "draft",
-                        },
-                    ),
-                    "dependency_refs": RecommendationDependencyRefs(),
-                }
-            )
             try:
                 resolved = resolve_parameters(
                     catalog,
@@ -124,7 +115,7 @@ def evaluate_parameter_request(
                         "assembly_output_prefix": "diagnostic_replay",
                         "assembly_input_reads": ["/tmp/diagnostic_replay/reads.fastq"],
                     },
-                    snapshot=snapshot,
+                    snapshot=input_snapshot,
                     approved_l2=parameters,
                 )
             except ValueError as exc:
@@ -209,7 +200,10 @@ def run_probe(
     destination = Path(output_dir).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     request_dto = load_request_artifact(request_path)
-    result = evaluate_parameter_request(request_dto)
+    input_snapshot = RecommendationInputSnapshotV3.model_validate_json(
+        request_path.with_name("input_snapshot.json").read_text(encoding="utf-8")
+    )
+    result = evaluate_parameter_request(request_dto, input_snapshot=input_snapshot)
     result["source_model_request"] = str(request_path)
     summary_path = destination / "summary.json"
     summary_path.write_text(

@@ -38,7 +38,7 @@ def build_material_query(
         asset_flags={
             "has_hifi": bool(assembly.get("hifi_reads_ref")),
             "has_ont": bool(assembly.get("ont_reads_ref")),
-            "has_hic": bool(assembly.get("hic_reads_ref")),
+            "has_hic": bool(assembly.get("has_hic") or assembly.get("hic_reads_ref")),
         },
     )
     observations = []
@@ -68,6 +68,8 @@ def build_material_query(
     ):
         if assembly.get(key):
             platforms.add(platform)
+    if assembly.get("has_hic"):
+        platforms.add("hic")
     qc_platforms = set(qc.get("input_member_platforms") or [])
     filtered_paths = qc.get("filtered_long_reads_refs") or (
         [qc["filtered_long_reads_ref"]] if qc.get("filtered_long_reads_ref") else []

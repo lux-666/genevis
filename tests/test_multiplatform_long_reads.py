@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
+from app.domains.assembly.material_query import build_material_query
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.assembly.nodes import resolve_extended_inputs
@@ -197,6 +198,17 @@ class MultiplatformLongReadTests(unittest.TestCase):
                     for role, ids in assembly["assembly_input_member_ids"].items()
                 },
                 {"primary": 2, "ultralong": 2, "hic_r1": 2, "hic_r2": 2},
+            )
+
+            registered["stage_outputs"]["assembly"]["hifiasm_parameters"] = {}
+            unphased = resolve_extended_inputs(registered)["stage_outputs"]["assembly"]
+            self.assertTrue(unphased["has_hic"])
+            self.assertIsNone(unphased["hic_reads_ref"])
+            self.assertEqual(unphased["hic_r1_reads"], [])
+            self.assertTrue(
+                build_material_query(registered, unphased)["facts"]["asset_presence"][
+                    "has_hic"
+                ]
             )
 
     def test_t2t_run_config_accepts_each_supported_long_read_platform(self):
