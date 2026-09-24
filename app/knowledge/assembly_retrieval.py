@@ -257,6 +257,8 @@ def retrieve_assembly_cases(
     rows: list[dict[str, Any]] = []
     for paper in knowledge.papers:
         for case in paper.cases:
+            if purpose == "parameters" and not case.parameter_eligible:
+                continue
             matches = _matches(observations, case.observations)
             material = (
                 sum(m["similarity"] for m in matches.values()) / len(observations)

@@ -27,6 +27,18 @@ def main() -> None:
     )
     args = parser.parse_args()
     selections = json.loads(args.selection.read_text())
+    eligibility_path = (
+        Path(__file__).resolve().parents[1]
+        / "descriptors/knowledge_packs/assembly/parameter_eligibility.json"
+    )
+    eligibility = json.loads(eligibility_path.read_text())
+    for selection in selections:
+        if selection["stage"] == "assembly":
+            case_id = f"{selection['paper']}:{selection['step']}"
+            flag = selection.get("parameter_eligible", eligibility.get(case_id))
+            if type(flag) is not bool:
+                raise ValueError(f"missing parameter eligibility review: {case_id}")
+            selection["parameter_eligible"] = flag
     papers = sorted({s["paper"] for s in selections if s["stage"] == "assembly"})
     prepared = {}
     coverage: Counter[str] = Counter()

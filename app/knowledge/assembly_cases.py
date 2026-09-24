@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     field_validator,
     model_validator,
     with_config,
@@ -114,6 +115,7 @@ class CaseContent(TypedDict, total=False):
 class AssemblyCase(Record):
     case_id: str = Field(min_length=1)
     configuration_id: str = Field(min_length=1)
+    parameter_eligible: StrictBool
     task: Literal["contig_assembly"] = "contig_assembly"
     method: SourceMethod
     observations: tuple[Observation, ...] = ()

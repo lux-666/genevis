@@ -58,6 +58,13 @@ def scalar_fixture():
     return graph, selections
 
 
+def test_each_new_case_requires_parameter_eligibility():
+    graph, selections = projection_fixture()
+    del selections[0]["parameter_eligible"]
+    with pytest.raises(ValueError, match="parameter_eligible"):
+        project_paper("p", graph, selections)
+
+
 def test_explicit_header_unit_and_input_state_enable_numeric_retrieval():
     graph, selections = scalar_fixture()
     graph["measurements"][0].update(metric="Coverage depth (×)", value="30")

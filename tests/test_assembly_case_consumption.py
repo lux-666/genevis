@@ -76,6 +76,7 @@ def paper(
             AssemblyCase(
                 case_id=pid + ":assemble",
                 configuration_id=pid + ":config",
+                parameter_eligible=bool(settings),
                 method=SourceMethod(tool=tool, settings=settings),
                 observations=(observation(size),),
                 input_platforms=("ont",),
@@ -306,7 +307,30 @@ def test_missing_and_zero_measurements_defaults_and_whole_card_budgets():
         purpose="parameters",
         selected_method=TARGET,
     )
-    assert result["evidence"]["cases"][0]["method"]["settings"] == []
+    assert result["evidence"]["cases"] == []
+    assert result["trace"] == []
+    assert retrieve_assembly_cases(
+        corpus.model_copy(update={"papers": (missing_settings,)}),
+        query(),
+        purpose="method_choice",
+    )["evidence"]["cases"]
+
+
+def test_parameter_eligibility_is_per_case_not_inferred_from_settings():
+    source = paper("p", "hifiasm", 420e6, settings=("default parameters",))
+    excluded = source.cases[0].model_copy(update={"parameter_eligible": False})
+    knowledge = snapshot().model_copy(
+        update={"papers": (source.model_copy(update={"cases": (excluded,)}),)}
+    )
+    assert (
+        retrieve_assembly_cases(
+            knowledge, query(), purpose="parameters", selected_method=TARGET
+        )["trace"]
+        == []
+    )
+    assert retrieve_assembly_cases(knowledge, query(), purpose="method_choice")[
+        "evidence"
+    ]["cases"]
 
 
 def test_task_projections_allowlist_fields_without_mutating_full_evidence():
@@ -997,6 +1021,7 @@ def projection_fixture():
             "stage": "assembly",
             "task": "contig_assembly",
             "step": "st",
+            "parameter_eligible": True,
             "inputs": {"r": "ont"},
             "features": {"ont_coverage": {"measurement": "q", "unit": "x"}},
         }

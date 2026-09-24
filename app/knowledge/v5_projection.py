@@ -223,6 +223,8 @@ def project_paper(
     for binding in selections:
         if binding["paper"] != paper_id or binding["stage"] != "assembly":
             continue
+        if not isinstance(binding.get("parameter_eligible"), bool):
+            raise ValueError("each selected case needs parameter_eligible: bool")
         if binding["task"] != "contig_assembly":
             raise ValueError(
                 "only explicitly selected contig assembly tasks are supported"
@@ -459,6 +461,7 @@ def project_paper(
             AssemblyCase(
                 case_id=f"{paper_id}:{step['id']}",
                 configuration_id=f"{paper_id}:{method['id']}",
+                parameter_eligible=binding["parameter_eligible"],
                 method=SourceMethod(
                     tool=method["tool"],
                     version=method.get("version"),

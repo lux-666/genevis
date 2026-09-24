@@ -198,6 +198,9 @@ Assembly 每次新方法推荐和参数推荐（含重试）直接读取配置�
 （相对路径以配置文件为基准）；不配置时只用当前材料与软件知识，不回退旧案例库。
 来源方法、原生参数、材料状态和结果限定均保留，跨方法案例可参与推理，
 但执行输出只能包含已确认方法的 L2 参数。
+每条 case 的 `parameter_eligible` 单独标记是否有可用于调参的明确设置；
+参数检索只排序 `true`，方法路线检索仍使用全部 case。已有判定记录在
+`descriptors/knowledge_packs/assembly/parameter_eligibility.json`；新增选择项须提供该布尔值。
 
 已有 `assembly-extraction.v5` 图通过显式选择文件导出。相邻生产仓库目前的
 `cases/` 是 pilot 格式，不能直接作为 `case_source`；使用其原图和显式绑定：
@@ -210,10 +213,15 @@ python scripts/build_assembly_cases.py \
 python -c 'from pathlib import Path; from app.knowledge.assembly_cases import load_case_papers; papers = load_case_papers(Path("/absolute/path/to/assembly-cases")); print(len(papers), "papers", sum(len(p.cases) for p in papers), "cases")'
 ```
 
+101–200 批次的选择表是 `descriptors/knowledge_packs/assembly/selection_101_200.json`；
+原图在相邻仓库 `outputs/{paper}-response.json`，导出时指定
+`--filename-template '{paper}-response.json'`。123、136、137 的组装步骤未明确绑定输入读段，暂未投影。
+
 该命令不修改原图，不覆盖不同内容，不将投影视为论文重新审核。
 更新时先导出到新的目录并验证，再把 `assembly.case_source` 指向该目录；
 运行时只读所配置的这一个目录。本地 case 统一放在
 `descriptors/knowledge_packs/assembly/cases/`，由 Git 忽略，部署时手动复制；
+更新代码时须同步复制这些 JSON，旧文件缺少 `parameter_eligible` 会加载失败；
 复制后必须配置 `assembly.case_source`，程序不会自动扫描该目录。
 验证并完成切换后删除旧导出目录，避免保留多份活动案例库。
 选择文件中的每项必须明确 `paper`、`step`、`stage: assembly`、
