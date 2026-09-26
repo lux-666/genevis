@@ -184,11 +184,6 @@ def _panel_label(ax: Axes, letter: str) -> None:
     )
 
 
-def _human_int(value: float) -> str:
-    """Group-separated integer, friendly for axis annotations."""
-    return f"{value:,.0f}"
-
-
 def _add_disclaimer(fig: Figure) -> None:
     fig.text(
         0.5,

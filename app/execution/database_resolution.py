@@ -319,14 +319,3 @@ def validate_review_databases(
         "busco_parameters": busco,
         "related_species_reference_dir": ncbi,
     }
-
-
-def frozen_database_projection(
-    snapshot: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Expose only the compact frozen database projection to state consumers."""
-
-    databases = snapshot.get("databases")
-    if not isinstance(databases, Mapping):
-        raise DatabaseResolutionError("frozen dependency snapshot has no databases")
-    return dict(databases)

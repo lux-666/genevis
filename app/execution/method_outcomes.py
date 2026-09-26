@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -50,6 +50,30 @@ class MethodOutcome:
 OutcomePolicy: TypeAlias = Callable[
     [TopLevelState], MethodOutcome | Sequence[MethodOutcome] | None
 ]
+
+
+def method_is_selected(state: TopLevelState, method_name: str) -> bool:
+    """Return whether a method is rostered for the active workflow occurrence."""
+
+    step = current_workflow_step(state)
+    roster = step.get("selected_method_names") if step is not None else None
+    return isinstance(roster, list) and method_name in roster
+
+
+def has_execution_result(
+    output: Mapping[str, object], method_name: str
+) -> bool:
+    """Return whether a method has crossed the execution boundary."""
+
+    attempts = output.get("execution_attempts")
+    if not isinstance(attempts, list):
+        return False
+    return any(
+        attempt.get("method_id") == method_name
+        and attempt.get("status") in {"executed", "execution_failed"}
+        for attempt in attempts
+        if isinstance(attempt, Mapping)
+    )
 
 
 def settle_method_outcomes(

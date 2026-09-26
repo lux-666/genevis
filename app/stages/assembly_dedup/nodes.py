@@ -202,14 +202,6 @@ def _fail_workflow_occurrence(
     return fail_workflow_step(state, "assembly_dedup", reason)
 
 
-def _is_failed_dedup_update(update: StateUpdate) -> bool:
-    outputs = update.get("stage_outputs")
-    if not isinstance(outputs, Mapping):
-        return False
-    cursor = outputs.get("assembly_dedup")
-    return isinstance(cursor, Mapping) and cursor.get("status") == "failed"
-
-
 def enter_assembly_dedup(state: TopLevelState) -> StateUpdate:
     if _output(state).get("status"):
         return {}

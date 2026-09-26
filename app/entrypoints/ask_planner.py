@@ -399,25 +399,6 @@ def _build_hic_scaffolding_config(plan: AskPlanState) -> dict[str, Any] | None:
     return {"autohic_parameters": payload} if payload else {}
 
 
-def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
-    if request.kind == "stage_selection":
-        return {
-            "kind": "stage_selection",
-            "selected_stage_occurrences": request.choices.get(
-                "suggested_stage_occurrences", []
-            ),
-        }
-    if request.kind == "parameter_values":
-        defaults = dict(request.choices.get("defaults", {}))
-        return {
-            "kind": "parameter_values",
-            "shared_parameters": dict(request.choices.get("shared_defaults", {})),
-            "method_parameters": defaults,
-            "stage_parameters": dict(request.choices.get("stage_defaults", {})),
-        }
-    return {"kind": "confirm", "confirmed": True}
-
-
 def _stage_selection_request(
     plan: AskPlanState, ask_plan_ref: str
 ) -> AskClarificationRequest:
@@ -1145,14 +1126,6 @@ def _derive_shared_read_type_from_platform(shared: dict[str, Any]) -> dict[str, 
     if not read_type:
         return shared
     return {**shared, "read_type": read_type}
-
-
-def _has_raw_long_reads(plan: AskPlanState) -> bool:
-    manifest = _load_manifest(plan.manifest_ref)
-    return bool(
-        manifest
-        and any(asset.asset_type == "raw_long_reads" for asset in manifest.assets)
-    )
 
 
 def _long_read_platforms(manifest: Any, *, include_unknown: bool) -> set[str]:

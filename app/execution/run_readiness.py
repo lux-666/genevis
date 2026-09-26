@@ -111,20 +111,6 @@ def effective_method_closure(
     return {stage: tuple(methods) for stage, methods in closure.items()}
 
 
-def selected_local_method_closure(
-    run_config: RunConfig,
-    *,
-    selected_methods: Mapping[str, str | Sequence[str]] | None = None,
-) -> list[str]:
-    """Flatten :func:`effective_method_closure` for diagnostics and callers."""
-
-    closure = effective_method_closure(
-        run_config,
-        selected_methods=selected_methods,
-    )
-    return [method for methods in closure.values() for method in methods]
-
-
 def run_requires_llm(run_config: RunConfig) -> bool:
     """Return whether the confirmed workflow reaches a mandatory LLM boundary."""
 

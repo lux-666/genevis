@@ -19,7 +19,12 @@ from app.execution.lifecycle import (
     load_method_executions,
     run_method_attempts,
 )
-from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
+from app.execution.method_outcomes import (
+    MethodOutcome,
+    has_execution_result,
+    method_is_selected,
+    settle_method_outcomes,
+)
 from app.execution.method_runner import build_frozen_attempt
 from app.llm.parameters.assembly.request import build_parameter_request_dto
 from app.review.persistence import persist_review_decision, persist_review_request
@@ -612,6 +617,33 @@ def _v3_parameter_attempt(
 
 
 class ExecutionLifecycleContractTests(unittest.TestCase):
+    def test_method_roster_helpers_share_execution_boundary_semantics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+
+            self.assertTrue(method_is_selected(state, "assembly_review.eval.quast"))
+            self.assertFalse(method_is_selected(state, "assembly_review.eval.busco"))
+
+            self.assertTrue(
+                has_execution_result(
+                    {
+                        "execution_attempts": [
+                            {
+                                "method_id": "assembly_review.eval.quast",
+                                "status": "execution_failed",
+                            }
+                        ]
+                    },
+                    "assembly_review.eval.quast",
+                )
+            )
+            self.assertFalse(
+                has_execution_result(
+                    {"execution_attempts": "not-a-list"},
+                    "assembly_review.eval.quast",
+                )
+            )
+
     def test_method_graph_requires_an_outcome_policy(self):
         lifecycle = MethodExecutionLifecycle(
             stage="assembly_review",

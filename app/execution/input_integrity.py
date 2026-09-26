@@ -96,20 +96,6 @@ def directory_input_dependency(path: str | Path) -> DirectoryInputDependency:
     )
 
 
-def file_input_dependency(path: str | Path) -> FileInputDependency:
-    """Freeze byte evidence for one unregistered external file."""
-
-    canonical = _canonical(path)
-    source = Path(canonical)
-    if not source.is_file():
-        raise ValueError(f"file input dependency is missing: {source}")
-    return FileInputDependency(
-        path=canonical,
-        size_bytes=source.stat().st_size,
-        sha256=sha256_file(source),
-    )
-
-
 def verify_input_dependencies(
     state: TopLevelState,
     dependencies: Sequence[InputDependency],

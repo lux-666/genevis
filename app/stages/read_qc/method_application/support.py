@@ -337,21 +337,6 @@ def sum_ints(values: Iterable[str | None]) -> int | None:
     )
 
 
-def weighted_average(rows: list[dict[str, str]], *keys: str) -> float | None:
-    weighted: list[tuple[float, int]] = []
-    for row in rows:
-        value = parse_float(row_value(row, *keys))
-        count = parse_int(row.get("sum_len")) or parse_int(row.get("num_seqs"))
-        if value is not None and count is not None and count > 0:
-            weighted.append((value, count))
-    return (
-        sum(value * count for value, count in weighted)
-        / sum(count for _, count in weighted)
-        if weighted
-        else None
-    )
-
-
 def weighted_quality_average(rows: list[dict[str, str]], *keys: str) -> float | None:
     weighted: list[tuple[float, int]] = []
     normalized_values: list[float | None] = []

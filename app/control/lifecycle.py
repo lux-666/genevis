@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,7 +56,6 @@ from app.storage.ledger import (
 from app.storage.paths import SessionPaths
 
 ResumeValidationError = control_errors.ResumeValidationError
-UnsupportedLifecycleOperationError = control_errors.UnsupportedLifecycleOperationError
 
 
 class TerminalFinalizationError(RuntimeError):
@@ -920,14 +919,6 @@ def normalize_resume_review_request(
         raise ResumeValidationError(str(exc)) from exc
 
 
-def reject_unsupported_lifecycle_operation(operation: str) -> None:
-    if operation in {"retry", "rerun", "rebuild", "rebuild-from"}:
-        raise UnsupportedLifecycleOperationError(
-            f"{operation} is not a resume operation and is not implemented in "
-            "the current lifecycle contract."
-        )
-
-
 def _validated_resume_context(
     state: TopLevelState,
     request: ResumeReviewRequest,
@@ -1394,16 +1385,6 @@ def _latest_event(
     for event in reversed(events):
         if event.get("event_type") == event_type:
             return event
-    return None
-
-
-def _latest_artifact(
-    artifacts: list[dict[str, Any]],
-    predicate: Callable[[dict[str, Any]], bool],
-) -> dict[str, Any] | None:
-    for artifact in reversed(artifacts):
-        if predicate(artifact):
-            return artifact
     return None
 
 

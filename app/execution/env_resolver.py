@@ -293,17 +293,6 @@ def _resolve_database_path(value: str, config_root: Path) -> str:
     return str(path.resolve(strict=False))
 
 
-def _load_raw(config_path: Path) -> ConfigMapping:
-    if not config_path.exists():
-        raise FileNotFoundError(f"env config missing: {config_path}")
-    try:
-        with config_path.open("r", encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle) or {}
-    except yaml.YAMLError as exc:
-        raise ValueError(f"env config YAML is invalid: {config_path}: {exc}") from exc
-    return _validated_raw(raw, source=config_path)
-
-
 def _load_raw_with_identity(config_path: Path) -> tuple[ConfigMapping, str]:
     """Parse one byte snapshot and return its content identity."""
     if not config_path.exists():

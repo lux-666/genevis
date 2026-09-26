@@ -1275,9 +1275,3 @@ def _invoke_json_model(system_prompt: str, user_text: str) -> dict[str, Any]:
     model = build_chat_model()
     response = model.invoke([("system", system_prompt), ("human", user_text)])
     return parse_json_object(response_text(response))
-
-
-def _debug_json(value: Mapping[str, Any]) -> str:
-    """Stable JSON renderer kept small for interactive diagnostics and tests."""
-
-    return json.dumps(value, ensure_ascii=False, indent=2, default=str)

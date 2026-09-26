@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import shlex
-from collections.abc import Mapping
 from pathlib import Path
 
-from app.control.workflow_plan import current_workflow_step, current_workflow_step_id
+from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
     CompiledMethodGraph,
@@ -16,7 +15,11 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
-from app.execution.method_outcomes import MethodOutcome
+from app.execution.method_outcomes import (
+    MethodOutcome,
+    has_execution_result,
+    method_is_selected,
+)
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     READ_QC_LONG_READ_AGGREGATE_STATS,
@@ -49,7 +52,7 @@ from app.workflow import is_terminal_failure
 def seqkit_stats_outcome(state: TopLevelState) -> MethodOutcome | None:
     """Return SeqKit stats' terminal disposition for this fixed stage method."""
 
-    if not _is_selected(state):
+    if not method_is_selected(state, METHOD_NAME):
         return None
     output = read_qc_output(state)
     substep = (output.get("substeps") or {}).get("long_read_stats") or {}
@@ -62,7 +65,7 @@ def seqkit_stats_outcome(state: TopLevelState) -> MethodOutcome | None:
             reason=str(substep.get("skip_reason") or "method_not_run"),
         )
     if is_terminal_failure(output.get("status"), extra_statuses={"blocked_input"}):
-        if not _has_execution_result(output, METHOD_NAME):
+        if not has_execution_result(output, METHOD_NAME):
             return MethodOutcome(METHOD_NAME, "not_started")
         return MethodOutcome(
             METHOD_NAME,
@@ -70,24 +73,6 @@ def seqkit_stats_outcome(state: TopLevelState) -> MethodOutcome | None:
             reason=str(output.get("reason") or "seqkit_stats_failed"),
         )
     return None
-
-
-def _is_selected(state: TopLevelState) -> bool:
-    step = current_workflow_step(state)
-    roster = step.get("selected_method_names") if step is not None else None
-    return isinstance(roster, list) and METHOD_NAME in roster
-
-
-def _has_execution_result(output: Mapping[str, object], method_name: str) -> bool:
-    attempts = output.get("execution_attempts")
-    if not isinstance(attempts, list):
-        return False
-    return any(
-        attempt.get("method_id") == method_name
-        and attempt.get("status") in {"executed", "execution_failed"}
-        for attempt in attempts
-        if isinstance(attempt, Mapping)
-    )
 
 
 LIFECYCLE = MethodExecutionLifecycle(
