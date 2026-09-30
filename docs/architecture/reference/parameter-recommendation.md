@@ -23,6 +23,33 @@ the parent graph, approve its own answer, or synthesize a fallback answer.
 Assembly, Hi-C, and T2T share lifecycle and persistence concepts, but they do
 not share one universal biological DTO.
 
+### Reusable model boundary
+
+`app/llm/recommender.py:StructuredRecommender[T]` owns one model invocation,
+raw-response capture, JSON/function-argument extraction and task-specific
+parsing. Callers supply a parser; subclasses may bind an output schema and
+task prompt. `RecommendationResult[T]` preserves parsed data, raw text, the
+provider message where available, and explicit failure information.
+
+The supported transports are `prompt_json`, native `json_schema`, and forced
+`function_calling` through the single `submit_recommendation` function. The
+function submits data; no function name from the model is executed. There is
+no implicit transport fallback or extra model retry. Endpoint capability must
+match the selected transport. Strict provider schemas must follow that
+provider's supported JSON Schema subset; local parsing remains mandatory.
+
+Assembly, Hi-C and T2T parameter recommenders and T2T motif resolution reuse this
+boundary while retaining their existing prompt-JSON contracts, sparse mapping
+semantics and persisted envelopes. Their task-specific request builders and
+normalizers remain separate. New tasks can subclass this boundary as
+`app/llm/dedup.py:PurgeRecommender` does, with a different typed output schema.
+
+The deduplication advisor's QUAST/execute/recommend/review loop is stage-owned,
+not hidden inside the model superclass. Review gates own confirmation and
+foreground countdowns; the execution lifecycle owns process recovery. See the
+[deduplication stage contract](stage-contracts.md#5-assembly-dedup) and
+[operator configuration](../../user_guide/parameter_recommendation.md#iterative-purge_dups-recommendations).
+
 ## Module ownership
 
 ```text

@@ -74,6 +74,13 @@ def _selected_method_names_for_request(
 
     registry = load_descriptor_registry()
     stage_methods = tuple(registry.by_stage.get(request.stage, ()))
+    if request.stage == "assembly_dedup" and not (
+        run_config.assembly_dedup
+        and run_config.assembly_dedup.recommendation_mode == "advisor"
+        and run_config.assembly_dedup.automatic_purge_approved
+        and request.allow_local_execution
+    ):
+        return ("assembly_dedup.purge_dups",)
     if request.stage == "read_qc":
         length_filter = (
             run_config.read_qc.length_filter if run_config.read_qc is not None else None

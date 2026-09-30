@@ -549,3 +549,26 @@ register_review_gate(
         plan_order=30,
     )
 )
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="assembly_dedup",
+        gate_id="dedup_recommendation",
+        decisions_allowed=(
+            "follow_recommendation",
+            "accept_candidate",
+            "keep_prior_assembly",
+            "stop_human_review",
+        ),
+        intent_metadata_model="app.review.application:ForegroundReviewMetadataV1",
+        validate_intent_request="app.stages.assembly_dedup.review:validate_intent_request",
+        effect_kind="assembly_dedup.recommendation.v1",
+        effect_model="app.stages.assembly_dedup.review:DedupReviewEffect",
+        prepare_application="app.stages.assembly_dedup.review:prepare_application",
+        apply_application="app.stages.assembly_dedup.review:apply_application",
+        normalize_timeout_request="app.stages.assembly_dedup.review:normalize_timeout_request",
+        template_preferred_decision="follow_recommendation",
+        required_resume_fields_by_decision={"accept_candidate": ("candidate_id",)},
+        proposal_label="Purge_dups recommendation and result selection",
+    )
+)

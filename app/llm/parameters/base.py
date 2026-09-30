@@ -13,8 +13,9 @@ from hashlib import sha256
 from typing import Any, Literal, Mapping
 
 from app.llm.factory import build_chat_model
-from app.llm.json_response import parse_json_object, response_text
+from app.llm.json_response import parse_json_object
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
+from app.llm.recommender import StructuredRecommender
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
 # Shared across all stages that use the v1 recommendation contract.
@@ -103,19 +104,17 @@ def invoke_parameter_model(
     """Invoke the LLM once; return a validated decision."""
 
     invocation_messages = messages or render_parameter_messages(bundle_name, payload)
-    try:
-        model = build_chat_model()
-        response = model.invoke(invocation_messages)
-    except Exception as exc:
-        return ParameterDecision("", None, False, f"{type(exc).__name__}: {exc}")
-    raw = response_text(response)
-    try:
-        recommendation = normalize_sparse_recommendation(parse_json_object(raw))
-    except Exception as exc:
-        return ParameterDecision(
-            raw, None, False, f"{type(exc).__name__}: {exc}", type(model).__name__
-        )
-    return ParameterDecision(raw, recommendation, True, model_id=type(model).__name__)
+    result = StructuredRecommender(normalize_sparse_recommendation).invoke(
+        invocation_messages,
+        model_factory=build_chat_model,
+    )
+    return ParameterDecision(
+        result.raw_response,
+        result.parsed,
+        result.valid,
+        result.error,
+        result.model_id,
+    )
 
 
 def restore_parameter_decision(record: Mapping[str, Any]) -> ParameterDecision:

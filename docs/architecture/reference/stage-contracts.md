@@ -283,12 +283,13 @@ assembly candidate.
 
 Logical inputs and output:
 
-- requires `assembly` and `long_reads`;
+- requires `assembly`; the `read_depth` strategy also requires `long_reads`;
 - updates `assembly` with the retained candidate relation.
 
 Registered method:
 
 - `assembly_dedup.purge_dups`.
+- `assembly_dedup.eval.quast` (selected only for the enabled advisor loop).
 
 When both local execution and `assembly_dedup.automatic_purge_approved` are
 frozen in RunConfig, the stage materializes depth, cutoff, self-alignment,
@@ -298,14 +299,39 @@ approval, the stage safely passes the original candidate through. Missing
 materialized inputs are represented explicitly; the stage does not synthesize
 a successful purge.
 
-The current approval authorizes the complete automatic `calcuts` path; there is
-no separate operator gate for inspecting the depth histogram or derived cutoff
-values before purge execution. Such a cutoff-review gate remains a design
-candidate rather than a current requirement. Preserving the raw candidate and
-comparing raw/purged candidates in Assembly Review are the implemented
-safeguards.
+`recommendation_mode: deterministic_baseline` retains the single-run path;
+`coverage_mode: self_alignment` selects the alternative without coverage
+estimation. The default remains `read_depth` with automatic `calcuts`.
 
-The authoritative outcome table is:
+`recommendation_mode: advisor` first runs QUAST on the original candidate, then
+opens a durable `dedup_recommendation` gate. Each approved proposal may execute
+one new configuration from the same original assembly. QUAST compares the
+original and all completed candidates before the next proposal. Full QUAST
+tables, actual commands, prior settings and recommendations are model inputs;
+the stage has no hard-coded quality score. Optional reference-genome evidence
+uses the same registered reference for every compared candidate.
+
+`max_attempts` bounds purge executions. Each attempt uses unique working and
+artifact directories and a unique candidate identity. Duplicate configurations
+and nonexistent candidate selections fail validation. A final proposal may
+select any completed attempt or retain the original assembly. Confirmation
+reuses the existing foreground `review_policy` countdown; only the exact saved
+proposal may be followed automatically. Invalid recommendations or explicit
+`human_review` responses have no eligible automatic decision.
+
+Request and response artifacts are recovered without another model call after
+interruption. Approvals bind the request, source, history, proposal and workflow
+occurrence; command freezing rechecks those bindings and parameter equality.
+Method dispositions are settled when the loop selects a delivery or fails,
+not after each successful intermediate attempt. Execution/collection failure
+stops the occurrence and preserves completed candidates as evidence.
+
+The `self_alignment` proposal emits `purge_dups self.paf.gz`, omitting the
+coverage-related `-2 -T/-c` options. `end_only` controls `get_seqs -e`. Empty
+duplicate BED files are valid, and emitted haplotig FASTA files are retained.
+This strategy is a selectable alternative, not a universal quality guarantee.
+
+The baseline outcome table is:
 
 | Input candidate | Local execution | Automatic purge approved | Occurrence outcome | Stage delivery | `purge_dups` disposition | Assembly delivery |
 |---|---|---|---|---|---|---|

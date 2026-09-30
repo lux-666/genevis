@@ -10,8 +10,9 @@ from typing import Any, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from app.llm.factory import build_chat_model
-from app.llm.json_response import parse_json_object, response_text
+from app.llm.json_response import parse_json_object
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
+from app.llm.recommender import StructuredRecommender
 from app.schemas.parameter_recommendation import (
     T2T_MOTIF_RESOLVER_ID,
     CanonicalSpeciesFacts,
@@ -108,39 +109,19 @@ def resolve_t2t_motif(
     invocation_messages = (
         messages if messages is not None else render_t2t_motif_messages(request_dto)
     )
-    try:
-        model = build_chat_model()
-        response = model.invoke(invocation_messages)
-    except Exception as exc:
-        return T2TMotifDecision(
-            raw_response="",
-            status=None,
-            resolved_telomere_motif=None,
-            summary=None,
-            valid=False,
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
-    raw = response_text(response)
-    try:
-        parsed = normalize_t2t_motif_resolution(parse_json_object(raw))
-    except Exception as exc:
-        return T2TMotifDecision(
-            raw_response=raw,
-            status=None,
-            resolved_telomere_motif=None,
-            summary=None,
-            valid=False,
-            error=f"{type(exc).__name__}: {exc}",
-            model_id=type(model).__name__,
-        )
+    result = StructuredRecommender(normalize_t2t_motif_resolution).invoke(
+        invocation_messages,
+        model_factory=build_chat_model,
+    )
+    parsed = result.parsed or {}
     return T2TMotifDecision(
-        raw_response=raw,
-        status=parsed["status"],
-        resolved_telomere_motif=parsed["telomere_motif"],
+        raw_response=result.raw_response,
+        status=parsed.get("status"),
+        resolved_telomere_motif=parsed.get("telomere_motif"),
         summary=parsed.get("summary"),
-        valid=True,
-        model_id=type(model).__name__,
+        valid=result.valid,
+        error=result.error,
+        model_id=result.model_id,
     )
 
 

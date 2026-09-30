@@ -179,6 +179,10 @@ methods:
       - gzip
       - purge_dups
       - get_seqs
+  assembly_dedup.eval.quast:
+    conda_env: your_tool_env
+    required_tools:
+      - quast.py
   assembly_review.eval.quast:
     conda_env: your_tool_env
     required_tools:

@@ -276,6 +276,14 @@ class AssemblyDedupRunConfig(BaseModel):
     automatic_purge_approved: StrictBool = False
     threads: int = Field(default=8, gt=0)
     get_seqs_exclude_haplotigs: StrictBool = True
+    recommendation_mode: Literal["advisor", "deterministic_baseline"] = (
+        "deterministic_baseline"
+    )
+    recommendation_output_method: Literal[
+        "prompt_json", "json_schema", "function_calling"
+    ] = "json_schema"
+    max_attempts: int = Field(default=3, ge=1, le=10, strict=True)
+    coverage_mode: Literal["read_depth", "self_alignment"] = "read_depth"
 
 
 class BuscoRunParameters(BaseModel):

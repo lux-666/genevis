@@ -9,11 +9,11 @@ from pydantic import BaseModel
 from app.llm.factory import build_chat_model
 from app.llm.json_response import (
     parse_json_object,
-    response_text,
     validate_model_response_record,
 )
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 from app.llm.parameters.assembly.response import normalize_parameter_recommendation
+from app.llm.recommender import StructuredRecommender
 
 
 class AssemblyParameterDecision(BaseModel):
@@ -38,32 +38,15 @@ def recommend_assembly_parameters(
         if messages is not None
         else render_assembly_parameter_messages(request_dto)
     )
-    try:
-        model = build_chat_model()
-        response = model.invoke(invocation_messages)
-    except Exception as exc:
-        return AssemblyParameterDecision(
-            raw_response="",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
-    raw_content = response_text(response)
-    try:
-        parsed = normalize_parameter_recommendation(
-            parse_json_object(raw_content),
-            dict(request_dto),
-        )
-    except Exception as exc:
-        return AssemblyParameterDecision(
-            raw_response=raw_content,
-            error=f"{type(exc).__name__}: {exc}",
-            model_id=type(model).__name__,
-        )
+    result = StructuredRecommender(
+        lambda payload: normalize_parameter_recommendation(payload, dict(request_dto))
+    ).invoke(invocation_messages, model_factory=build_chat_model)
     return AssemblyParameterDecision(
-        raw_response=raw_content,
-        parsed=parsed,
-        valid=True,
-        model_id=type(model).__name__,
+        raw_response=result.raw_response,
+        parsed=result.parsed,
+        valid=result.valid,
+        error=result.error,
+        model_id=result.model_id,
     )
 
 

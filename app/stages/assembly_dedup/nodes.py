@@ -123,6 +123,22 @@ def purge_dups_method_outcome_policy(state: TopLevelState) -> MethodOutcome | No
     """Map durable purge_dups collect/failure facts to one method outcome."""
 
     output = _output(state)
+    if output.get("recommendation_mode") == "advisor":
+        if output.get("status") not in {"failed", "pass_through", "dedup_selected"}:
+            return None
+        if output.get("history_refs"):
+            return MethodOutcome(
+                method_name=ASSEMBLY_DEDUP_METHOD,
+                disposition="failed"
+                if output.get("status") == "failed"
+                else "completed",
+                reason=output.get("reason", "dedup loop failed")
+                if output.get("status") == "failed"
+                else None,
+                refs=tuple(
+                    ArtifactRef.model_validate(ref) for ref in output["history_refs"]
+                ),
+            )
     skipped = purge_dups_planner_outcome_policy(state)
     if skipped is not None:
         return skipped
@@ -176,6 +192,8 @@ def purge_dups_planner_outcome_policy(state: TopLevelState) -> MethodOutcome | N
     """Return the deliberate no-local-execution disposition, if selected."""
 
     output = _output(state)
+    if output.get("recommendation_mode") == "advisor" and output.get("history_refs"):
+        return None
     if (
         output.get("status") != "pass_through"
         and output.get("purge_dups_status") != "skipped"
@@ -210,6 +228,8 @@ def enter_assembly_dedup(state: TopLevelState) -> StateUpdate:
 
 def plan_purge_dups(state: TopLevelState) -> StateUpdate:
     output = _output(state)
+    if output.get("recommendation_mode") == "advisor" and output.get("status"):
+        return {}
     try:
         candidate = _selected_assembly_candidate(state)
     except (OSError, TypeError, ValueError) as exc:
@@ -244,7 +264,11 @@ def plan_purge_dups(state: TopLevelState) -> StateUpdate:
         "input_member_platforms": list(
             candidate.bundle.input_member_platforms["primary"]
         ),
-        "cutoffs_strategy": "calcuts_auto",
+        "cutoffs_strategy": (
+            "none"
+            if output.get("coverage_mode") == "self_alignment"
+            else "calcuts_auto"
+        ),
         "automatic_purge_approved": bool(output.get("automatic_purge_approved", False)),
         "threads": threads,
         "get_seqs_exclude_haplotigs": bool(
@@ -278,7 +302,11 @@ def plan_purge_dups(state: TopLevelState) -> StateUpdate:
         state,
         {
             **candidate_payload,
-            "status": "ready_to_run",
+            "status": (
+                "evaluate_dedup"
+                if output.get("recommendation_mode") == "advisor"
+                else "ready_to_run"
+            ),
             "purge_dups_status": "pending",
             "output_assembly_ref": str(dedup_dir / "purged_assembly.fasta"),
         },
@@ -289,6 +317,14 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     dedup_out = _output(state)
     if dedup_out.get("status") != "ready_to_run":
         return {}
+
+    if dedup_out.get("recommendation_mode") == "advisor":
+        from app.stages.assembly_dedup.review import validate_approved_attempt
+
+        try:
+            validate_approved_attempt(state)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            return _fail(state, f"dedup approval is invalid: {exc}")
 
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
@@ -319,10 +355,14 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
 
     try:
         source_candidate = _dedup_source_candidate(state, dedup_out)
-        selected_members = _selected_primary_members(
-            state,
-            list(dedup_out.get("input_member_ids") or []),
-            list(dedup_out.get("input_member_platforms") or []),
+        selected_members = (
+            []
+            if dedup_out.get("coverage_mode") == "self_alignment"
+            else _selected_primary_members(
+                state,
+                list(dedup_out.get("input_member_ids") or []),
+                list(dedup_out.get("input_member_platforms") or []),
+            )
         )
     except (OSError, TypeError, ValueError) as exc:
         return _fail(
@@ -335,6 +375,10 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     output_assembly_ref = Path(dedup_out["output_assembly_ref"])
     work_dir = stage_work_dir(state, "assembly_dedup")
     artifact_dir = stage_artifacts_dir(state, "assembly_dedup")
+    if dedup_out.get("recommendation_mode") == "advisor":
+        part = f"{dedup_out.get('current_attempt', 0):03d}"
+        work_dir = work_dir / "attempts" / part
+        artifact_dir = artifact_dir / "attempts" / part
     work_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -348,6 +392,8 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
     dups_bed = artifact_dir / "dups.bed"
     get_seqs_prefix = work_dir / "purged_assembly"
     get_seqs_primary = Path(f"{get_seqs_prefix}.purged.fa")
+    get_seqs_haplotigs = Path(f"{get_seqs_prefix}.hap.fa")
+    haplotigs = artifact_dir / "purged_assembly.hap.fa"
     member_pafs = [
         work_dir / f"primary_member_{index:03d}.paf.gz"
         for index in range(len(selected_members))
@@ -372,7 +418,7 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         )
     if len(selected_members) == 1:
         mapping_commands.append(shell_publish_file(member_pafs[0], read_paf))
-    else:
+    elif selected_members:
         merged_paf = work_dir / "reads_to_raw_assembly.merged.paf.gz"
         mapping_commands.extend(
             [
@@ -384,24 +430,39 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
                 shell_publish_file(merged_paf, read_paf),
             ]
         )
-    script_path.write_text(
-        "set -euo pipefail\n" + "\n".join(mapping_commands) + "\n"
-        f"cd {shlex.quote(str(artifact_dir))}\n"
+    coverage_commands = (
+        "\n".join(mapping_commands) + "\n"
         f"pbcstat {shlex.quote(str(read_paf))}\n"
         "test -s PB.base.cov && test -s PB.stat\n"
         f"calcuts {shlex.quote(str(pb_stat))} > {shlex.quote(str(cutoffs))}\n"
-        f"split_fa {shlex.quote(str(input_assembly_ref))} > "
+        if selected_members
+        else ""
+    )
+    purge_flags = (
+        f"-2 -T {shlex.quote(str(cutoffs))} -c {shlex.quote(str(base_cov))} "
+        if selected_members
+        else ""
+    )
+    self_preset = shlex.quote(dedup_out.get("self_alignment_preset", "asm5"))
+    script_path.write_text(
+        "set -euo pipefail\n"
+        f"cd {shlex.quote(str(artifact_dir))}\n"
+        + coverage_commands
+        + f"split_fa {shlex.quote(str(input_assembly_ref))} > "
         f"{shlex.quote(str(split_assembly))}\n"
         f"test -s {shlex.quote(str(split_assembly))}\n"
-        f"minimap2 -t {threads} -x asm5 -DP {shlex.quote(str(split_assembly))} "
+        f"minimap2 -t {threads} -x {self_preset} -DP "
+        f"{shlex.quote(str(split_assembly))} "
         f"{shlex.quote(str(split_assembly))} "
         f"| gzip -c > {shlex.quote(str(self_paf))}\n"
-        f"purge_dups -2 -T {shlex.quote(str(cutoffs))} -c {shlex.quote(str(base_cov))} "
+        f"purge_dups {purge_flags}"
         f"{shlex.quote(str(self_paf))} > {shlex.quote(str(dups_bed))}\n"
         f"get_seqs {get_seqs_exclude_flag}-p {shlex.quote(str(get_seqs_prefix))} "
         f"{shlex.quote(str(dups_bed))} "
         f"{shlex.quote(str(input_assembly_ref))}\n"
         f"{shell_publish_file(get_seqs_primary, output_assembly_ref)}\n"
+        f"if test -f {shlex.quote(str(get_seqs_haplotigs))}; then\n"
+        f"  {shell_publish_file(get_seqs_haplotigs, haplotigs)}\nfi\n"
         f"test -s {shlex.quote(str(output_assembly_ref))}\n",
         encoding="utf-8",
     )
@@ -414,6 +475,18 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             input_assembly_ref,
         )
     ]
+    if dedup_out.get("recommendation_mode") == "advisor":
+        from app.storage.artifacts import resolve_artifact_ref
+
+        for raw_ref in (dedup_out["recommendation_ref"], dedup_out["decision_ref"]):
+            ref = ArtifactRef.model_validate(raw_ref)
+            input_dependencies.append(
+                artifact_input_dependency(
+                    state,
+                    ref,
+                    resolve_artifact_ref(data_dir, session_id, ref),
+                )
+            )
     for member in selected_members:
         if member.read_artifact_ref is not None:
             input_dependencies.append(
@@ -433,26 +506,31 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             )
 
     attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly_dedup:purge_dups",
+        attempt_id=(
+            f"{session_id}:assembly_dedup:purge_dups"
+            + (
+                f":{dedup_out.get('current_attempt', 0)}"
+                if dedup_out.get("recommendation_mode") == "advisor"
+                else ""
+            )
+        ),
         session_id=session_id,
         stage="assembly_dedup",
         method_name=ASSEMBLY_DEDUP_METHOD,
         script_path=script_path,
         working_dir=work_dir,
-        expected_outputs=[
-            read_paf,
-            split_assembly,
-            base_cov,
-            pb_stat,
-            cutoffs,
-            self_paf,
-            dups_bed,
-            output_assembly_ref,
-        ],
+        expected_outputs=(
+            [read_paf, base_cov, pb_stat, cutoffs] if selected_members else []
+        )
+        + [split_assembly, self_paf, dups_bed, output_assembly_ref],
         env=dedup_out.get("env"),
         env_spec=env_spec,
         input_dependencies=input_dependencies,
         metadata={
+            "coverage_mode": dedup_out.get("coverage_mode", "read_depth"),
+            "self_alignment_preset": dedup_out.get("self_alignment_preset", "asm5"),
+            "recommendation_ref": dedup_out.get("recommendation_ref"),
+            "decision_ref": dedup_out.get("decision_ref"),
             "candidate_bundle_ref": source_candidate.ref.model_dump(mode="json"),
             "input_primary_output_ref": (
                 source_candidate.primary_output_ref.model_dump(mode="json")
@@ -474,6 +552,7 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
             "cutoffs_ref": str(cutoffs),
             "self_paf_ref": str(self_paf),
             "dups_bed_ref": str(dups_bed),
+            "haplotigs_ref": str(haplotigs),
         },
     )
     return freeze_method_attempts(state, PURGE_DUPS_LIFECYCLE, [attempt])
@@ -499,7 +578,7 @@ def commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
 
 def _commit_assembly_dedup(state: TopLevelState) -> StateUpdate:
     dedup_out = _output(state)
-    if dedup_out.get("status") not in {"dedup_ran", "pass_through"}:
+    if dedup_out.get("status") not in {"dedup_ran", "pass_through", "dedup_selected"}:
         return {}
 
     source_candidate = None
@@ -659,6 +738,7 @@ def _collect_purge_dups_result(
         ("cutoffs_ref", "assembly_dedup.cutoffs"),
         ("self_paf_ref", "assembly_dedup.self_paf"),
         ("dups_bed_ref", "assembly_dedup.dups_bed"),
+        ("haplotigs_ref", "assembly_dedup.haplotigs"),
     ]:
         path_ref = attempt_metadata.get(key)
         if path_ref and Path(str(path_ref)).exists():
@@ -687,6 +767,9 @@ def _collect_purge_dups_result(
     }
     primary_output = artifact_ref_by_path[output_assembly_ref.resolve(strict=False)]
     candidate_id = f"{source_candidate.bundle.candidate_id}:{ASSEMBLY_DEDUP_METHOD}"
+    attempt_index = dedup_out.get("current_attempt", 0)
+    if dedup_out.get("recommendation_mode") == "advisor":
+        candidate_id += f":{attempt_index}"
     planned_candidate = AssemblyCandidateBundle(
         session_id=session_id,
         candidate_id=candidate_id,
@@ -697,7 +780,7 @@ def _collect_purge_dups_result(
         input_member_platforms={
             "primary": list(dedup_out.get("input_member_platforms") or [])
         },
-        parameter_attempt_id=0,
+        parameter_attempt_id=attempt_index,
         genome_size_prior=source_candidate.bundle.genome_size_prior,
         expected_outputs=["primary_assembly"],
     )
@@ -707,6 +790,8 @@ def _collect_purge_dups_result(
         "assembly_dedup",
         "purged_candidate.planned.json",
     )
+    if dedup_out.get("recommendation_mode") == "advisor":
+        plan_source = attempt.working_dir / plan_source.name
     plan_source.write_text(
         json.dumps(planned_candidate.model_dump(mode="json"), indent=2),
         encoding="utf-8",
@@ -749,6 +834,8 @@ def _collect_purge_dups_result(
         "assembly_dedup",
         "purged_candidate.executed.json",
     )
+    if dedup_out.get("recommendation_mode") == "advisor":
+        bundle_source = attempt.working_dir / bundle_source.name
     bundle_source.write_text(
         json.dumps(purged_candidate.model_dump(mode="json"), indent=2),
         encoding="utf-8",
@@ -780,7 +867,7 @@ def _collect_purge_dups_result(
         published_bundle.ref,
         expected_method_name=ASSEMBLY_DEDUP_METHOD,
         expected_candidate_id=candidate_id,
-        expected_parameter_attempt_id=0,
+        expected_parameter_attempt_id=attempt_index,
     )
     if verified_purged.primary_output_ref != primary_output:
         return _fail(state, "purged candidate primary output ref drifted")

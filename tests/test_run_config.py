@@ -414,6 +414,11 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "automatic_purge_approved": True,
                 "threads": 12,
                 "get_seqs_exclude_haplotigs": False,
+                "recommendation_mode": "deterministic_baseline",
+                "recommendation_output_method": "json_schema",
+                "max_attempts": 3,
+                "coverage_mode": "read_depth",
+                "review_policy": {"max_blocked_seconds": 300},
             },
         )
 

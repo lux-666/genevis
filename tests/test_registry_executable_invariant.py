@@ -30,6 +30,7 @@ from app.stages.assembly.method_application import (
     hifiasm_ont,
     nextdenovo,
 )
+from app.stages.assembly_dedup import advisor as dedup_advisor
 from app.stages.assembly_dedup import builder as assembly_dedup_builder
 from app.stages.assembly_dedup import nodes as assembly_dedup_nodes
 from app.stages.assembly_review import builder as assembly_review_builder
@@ -63,6 +64,13 @@ class LocalBinding:
 
 
 LOCAL_BINDINGS = (
+    LocalBinding(
+        dedup_advisor,
+        dedup_advisor.QUAST_LIFECYCLE,
+        dedup_advisor.build_quast_graph,
+        assembly_dedup_builder.build_stage,
+        "evaluate",
+    ),
     LocalBinding(
         base_polish_nodes,
         base_polish_nodes.LIFECYCLE,

@@ -91,6 +91,12 @@ def effective_method_closure(
 
     for stage in local_stages:
         for method_name in fixed_local_methods.get(stage, ()):
+            if method_name == "assembly_dedup.eval.quast" and not (
+                run_config.assembly_dedup
+                and run_config.assembly_dedup.recommendation_mode == "advisor"
+                and run_config.assembly_dedup.automatic_purge_approved
+            ):
+                continue
             add(stage, method_name)
         if stage == "read_qc":
             length_filter = (
@@ -113,6 +119,14 @@ def effective_method_closure(
 
 def run_requires_llm(run_config: RunConfig) -> bool:
     """Return whether the confirmed workflow reaches a mandatory LLM boundary."""
+
+    if (
+        "assembly_dedup" in run_config.requested_stage_names()
+        and run_config.assembly_dedup is not None
+        and run_config.assembly_dedup.automatic_purge_approved
+        and run_config.assembly_dedup.recommendation_mode == "advisor"
+    ):
+        return True
 
     required_stages = _LLM_REQUIRED_STAGES.intersection(
         run_config.requested_stage_names()

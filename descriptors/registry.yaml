@@ -22,6 +22,7 @@ methods:
   assembly.candidate.hifiasm_ont: assembly/hifiasm_ont_candidate.yaml
   assembly.candidate.nextdenovo: assembly/nextdenovo_candidate.yaml
   assembly_dedup.purge_dups: assembly_dedup/purge_dups.yaml
+  assembly_dedup.eval.quast: assembly_dedup/quast_eval.yaml
   assembly_review.eval.quast: assembly_review/quast_eval.yaml
   assembly_review.eval.busco: assembly_review/busco_eval.yaml
   genome_survey.kmer_count.jellyfish: genome_survey/jellyfish_kmer_count.yaml
@@ -49,6 +50,7 @@ by_stage:
     - assembly.candidate.nextdenovo
   assembly_dedup:
     - assembly_dedup.purge_dups
+    - assembly_dedup.eval.quast
   assembly_review:
     - assembly_review.eval.quast
     - assembly_review.eval.busco
