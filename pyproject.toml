@@ -45,6 +45,9 @@ Issues = "https://github.com/lux-666/genevis/issues"
 
 [project.optional-dependencies]
 dev = [
+    # Type-check the supported Python 3.11 target with compatible NumPy stubs,
+    # including when the development interpreter is newer.
+    "numpy>=1.26,<2.3",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.4",

@@ -62,8 +62,18 @@ Ledger outcomes, and failure/recovery behavior. A version/help probe is not
 enough. Record tool versions, data provenance/checksums and resource limits.
 Do not require a biologically excellent assembly from smoke data.
 
-Existing real-tool entries are the conditional SeqKit test above and the
-[opt-in TGS-GapCloser smoke](#hifi-gap-closing-from-an-existing-assembly).
+Existing real-tool entries include the conditional SeqKit test above, the
+[opt-in TGS-GapCloser smoke](#hifi-gap-closing-from-an-existing-assembly), and
+the opt-in Racon/minimap2 synthetic HiFi slice:
+
+```bash
+GENE_AGENT_RACON_REAL_SMOKE=1 python -m pytest -q \
+  tests/test_base_polish.py::test_real_racon_hifi_smoke
+```
+
+Run this on a host with both binaries on PATH. It checks paired alignment
+evidence, the adoption gate and collection replay; it does not establish
+representative sample quality or independent QV.
 Dedicated small-data real-tool smoke coverage for the other listed methods is
 not yet established by the current test suites; their fake-tool tests must not
 be counted as substitutes. Use enough data for a tool's actual input constraints

@@ -3,6 +3,7 @@
 import json
 import os
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +25,7 @@ from app.stages.assembly_dedup.advisor import (
 )
 from app.stages.assembly_dedup.builder import build_stage
 from app.stages.assembly_dedup.review import apply_application, prepare_application
+from app.stages.base import stage_artifacts_dir, stage_work_dir
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests import test_assembly_dedup as fixtures
@@ -209,8 +211,11 @@ def _approve(state, *, automatic=False):
     return {**state, **apply_application(state, verified)}
 
 
-def test_two_rounds_countdown_replay_and_select_earlier_candidate(tmp_path):
+def test_three_rounds_keep_attempt_artifacts_isolated_and_select_earlier_candidate(
+    tmp_path,
+):
     state, source = _state(tmp_path)
+    state["stage_outputs"]["assembly_dedup"]["max_attempts"] = 3
     raw_source = source.read_bytes()
     model = Model(
         [
@@ -218,10 +223,24 @@ def test_two_rounds_countdown_replay_and_select_earlier_candidate(tmp_path):
             for item in [
                 proposal(),
                 proposal(preset="asm10"),
+                proposal(preset="asm20"),
                 proposal("accept", selected=0),
             ]
         ]
     )
+    protected = {}
+    artifact_root = stage_artifacts_dir(state, "assembly_dedup")
+    work_root = stage_work_dir(state, "assembly_dedup")
+
+    def assert_and_remember_artifacts():
+        for path, payload in protected.items():
+            assert path.read_bytes() == payload, f"Earlier evidence changed: {path}"
+        for root in (artifact_root, work_root):
+            for folder in ("attempts", "evaluations", "recommendations"):
+                for path in (root / folder).rglob("*"):
+                    if path.is_file():
+                        protected[path] = path.read_bytes()
+
     with patch("app.llm.recommender.build_chat_model", return_value=model):
         graph = build_stage()
         first = graph.invoke(state)
@@ -232,23 +251,78 @@ def test_two_rounds_countdown_replay_and_select_earlier_candidate(tmp_path):
         replay["stage_outputs"]["assembly_dedup"]["status"] = "dedup_advice_ready"
         recommend_dedup(replay)
         assert len(model.messages) == 1
+        assert_and_remember_artifacts()
         second = graph.invoke(_approve(first, automatic=True))
         assert len(history(second)) == 1
+        assert_and_remember_artifacts()
         third = graph.invoke(_approve(second))
         assert len(history(third)) == 2
-        assert len(model.messages) == 3
+        assert_and_remember_artifacts()
+        fourth = graph.invoke(_approve(third))
+        assert len(history(fourth)) == 3
+        assert_and_remember_artifacts()
+        assert len(model.messages) == 4
+        # Rehydrate a persisted cursor and recover the last saved model response.
+        replay = json.loads(json.dumps(fourth))
+        replay["stage_outputs"]["assembly_dedup"]["status"] = "dedup_advice_ready"
+        recommend_dedup(replay)
+        assert len(model.messages) == 4
+        assert_and_remember_artifacts()
         evidence = json.loads(model.messages[-1][1]["content"])
         assert evidence["remaining_attempts"] == 0
         assert "N50" in evidence["quast_report_tsv"]
         assert "purge_dups " in evidence["attempts"][0]["command"]
         assert "pbcstat " not in evidence["attempts"][0]["command"]
-        final = graph.invoke(_approve(third, automatic=True))
+        final = graph.invoke(_approve(fourth, automatic=True))
+        assert_and_remember_artifacts()
     cursor = final["stage_outputs"]["assembly_dedup"]
     assert cursor["status"] == "completed"
     assert cursor["adopted_attempt"] == 0
     assert "/attempts/000/" in cursor["purged_assembly_ref"]
     assert source.read_bytes() == raw_source
-    assert len(cursor["history_refs"]) == 2
+    records = history(final)
+    assert len(cursor["history_refs"]) == 3
+    assert len({record["candidate_ref"]["path_ref"] for record in records}) == 3
+    assert len({record["recommendation_ref"]["path_ref"] for record in records}) == 3
+    assert all(
+        f"/attempts/{index:03d}/" in record["candidate_ref"]["path_ref"]
+        for index, record in enumerate(records)
+    )
+    for index, record in enumerate(records):
+        execution = load_json(final, record["execution_ref"])
+        frozen = load_json(final, execution["frozen_attempt_ref"])
+        attempt = frozen["attempt"]
+        assert f"/attempts/{index:03d}" in attempt["working_dir"]
+        assert Path(attempt["script_path"]).read_text() == record["command"]
+        assert any(
+            dep.get("artifact_ref") == cursor["input_primary_output_ref"]
+            for dep in attempt["input_dependencies"]
+        )
+    for index, messages in enumerate(model.messages):
+        evidence = json.loads(messages[1]["content"])
+        assert len(evidence["attempts"]) == index
+        assert evidence["remaining_attempts"] == 3 - index
+        request_path = (
+            artifact_root / "recommendations" / f"{index:03d}" / "request.json"
+        )
+        assert json.loads(request_path.read_text())["messages"] == messages
+    for index, checkpoint in enumerate((first, second, third, fourth)):
+        quast = load_json(
+            checkpoint,
+            checkpoint["stage_outputs"]["assembly_dedup"]["quast_execution_ref"],
+        )
+        attempt = load_json(checkpoint, quast["frozen_attempt_ref"])["attempt"]
+        assert attempt["metadata"]["labels"] == [
+            "source",
+            *[f"attempt_{i}" for i in range(index)],
+        ]
+        assert [d["artifact_ref"] for d in attempt["input_dependencies"]] == [
+            cursor["input_primary_output_ref"],
+            *[record["primary_ref"] for record in records[:index]],
+        ]
+        assert (
+            Path(attempt["working_dir"]) == work_root / "evaluations" / f"{index:03d}"
+        )
     assert load_json(final, cursor["history_refs"][0])["parameters"]["end_only"]
     dispositions = [
         event

@@ -307,6 +307,17 @@ Tests must prove that:
 
 ## Assembly case evidence
 
+The diagnostic `parameter_recommendation_smoke` supports a paired initial-request
+ablation. Both arms retain the same facts, confirmed method, catalog, material
+context and software guidance. Both omit method-selection rationale, which can
+contain literature-derived reasoning; only `knowledge_evidence` differs.
+The source request must contain selected literature cases and match its input
+snapshot. Retry requests are rejected because their outcome history can confound
+the comparison. Preparation makes no model calls; live evaluation uses the same
+configured model profile and records each arm's request and raw response in a new
+output directory. Existing directories are never overwritten. Parsing/catalog
+success is not evidence of a biological improvement or of a RAG benefit.
+
 Assembly requests include `knowledge_evidence` read from the configured live
 directory for each new recommendation, including retries. There is no run-level
 case snapshot. Without `assembly.case_source`, the literature selection is empty;

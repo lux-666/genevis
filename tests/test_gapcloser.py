@@ -21,6 +21,8 @@ def _state(
     second_platform: str | None = None,
     gzip_assembly: bool = False,
     truncated_reads: bool = False,
+    source_sequence: str | None = None,
+    read_sequences: list[str] | None = None,
 ):
     from app.integrity import sha256_file
     from app.stages.gapcloser.nodes import METHOD
@@ -42,7 +44,12 @@ def _state(
     state["current_stage"] = "gapcloser"
     reads = tmp_path / "reads with space.fq"
     sequence = "AAAATTCCCC"
-    reads.write_text(f"@r1\n{sequence}\n+\n{'I' * len(sequence)}\n")
+    reads.write_text(
+        "".join(
+            f"@r{index}\n{seq}\n+\n{'I' * len(seq)}\n"
+            for index, seq in enumerate(read_sequences or [sequence])
+        )
+    )
     if truncated_reads:
         reads.write_bytes(gzip.compress(reads.read_bytes())[:-5])
     read_files = [("hifi", reads, platform)]
@@ -67,7 +74,9 @@ def _state(
         ],
     )
     draft = tmp_path / "source.fa"
-    draft.write_text(">chr1\n" + ("AAAANNNNCCCC" if gaps else "AAAACCCC") + "\n")
+    draft.write_text(
+        ">chr1\n" + (source_sequence or ("AAAANNNNCCCC" if gaps else "AAAACCCC")) + "\n"
+    )
     if gzip_assembly:
         draft.write_bytes(gzip.compress(draft.read_bytes()))
     bundle, primary = fixture._publish_candidate(

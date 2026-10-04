@@ -224,6 +224,10 @@ python -c 'from pathlib import Path; from app.knowledge.assembly_cases import lo
 更新代码时须同步复制这些 JSON，旧文件缺少 `parameter_eligible` 会加载失败；
 复制后必须配置 `assembly.case_source`，程序不会自动扫描该目录。
 验证并完成切换后删除旧导出目录，避免保留多份活动案例库。
+替换已有 case 前可在同一导出命令上追加
+`--compare-existing /path/to/delivered-cases --audit-report /path/to/new-audit.json`。
+此模式只比较、不写出 case；报告源图/选择表/输出哈希、逐 case 差异及未选择的论文文件，
+完整案例库不一致时退出码为 1。报告须放在案例目录之外；不会恢复另一个补充表或自动覆盖已交付数据。
 选择文件中的每项必须明确 `paper`、`step`、`stage: assembly`、
 `task: contig_assembly` 和输入 state ID 到平台的 `inputs` 映射；
 `features` 指向 measurement ID 并声明规范单位，`outcomes` 列出结果 measurement ID。

@@ -66,6 +66,25 @@ Exact filenames, schema versions, accepted response fields, source precedence,
 T2T motif-resolution rules, and retry-chain invariants are deliberately not
 duplicated here; use the reference contract when debugging or changing them.
 
+## Compare LLM-only and literature-assisted parameters
+
+Use an initial Assembly `model_request.json` containing retrieved cases, with
+its adjacent `input_snapshot.json`. First prepare both arms without contacting
+the model:
+
+```bash
+python -m app.diagnostics.parameter_recommendation_smoke \
+  --model-request /path/to/model_request.json \
+  --output-dir /path/to/new-prepared-pair --prepare-pair
+```
+
+Inspect each arm's `model_request.json`. To evaluate both through the configured
+LLM, repeat with `--paired` instead of `--prepare-pair` and a new output directory.
+This uses the existing parameter parser/catalog checks and saves raw responses;
+it does not approve parameters or launch assembly. Compare repeated paired
+trials and real assembly outcomes separately. The exact controlled variables
+are owned by the [recommendation contract](../architecture/reference/parameter-recommendation.md#assembly-case-evidence).
+
 ## Iterative purge_dups recommendations
 
 Enable the deduplication advisor in the existing RunConfig (JSON fragment):

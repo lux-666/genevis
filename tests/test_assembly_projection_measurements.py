@@ -252,6 +252,71 @@ def test_export_response_files_reports_empty_material_index(
     assert (tmp_path / "cases/p.json").exists()
 
 
+def test_export_audit_detects_enrichment_and_unselected_files_without_writing(
+    tmp_path, monkeypatch
+):
+    from scripts.build_assembly_cases import main
+
+    graph, selections = scalar_fixture()
+    source = tmp_path / "graphs"
+    source.mkdir()
+    (source / "p.json").write_text(json.dumps(graph))
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps(selections))
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    payload = project_paper("p", graph, selections).model_dump(mode="json")
+    payload["cases"][0]["observations"][0]["basis"] += "; enriched source locator"
+    (existing / "p.json").write_text(json.dumps(payload))
+    (existing / "unselected.json").write_text("{}")
+    before = {p.name: p.read_bytes() for p in existing.iterdir()}
+    output = tmp_path / "output"
+    report = tmp_path / "audit.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_assembly_cases",
+            "--extractions",
+            str(source),
+            "--selection",
+            str(selection),
+            "--output",
+            str(output),
+            "--compare-existing",
+            str(existing),
+            "--audit-report",
+            str(report),
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 1
+    audit = json.loads(report.read_text())
+    assert not audit["comparison"]["matches_complete_corpus"]
+    assert audit["comparison"]["unselected_existing_files"] == ["unselected.json"]
+    assert audit["comparison"]["changes"][0]["changed_cases"] == {
+        payload["cases"][0]["case_id"]: ["observations"]
+    }
+    assert audit["source_sha256"]["p.json"]
+    assert not output.exists()
+    assert {p.name: p.read_bytes() for p in existing.iterdir()} == before
+
+
+def test_export_comparison_ignores_json_formatting_but_reports_missing_cases(tmp_path):
+    from scripts.build_assembly_cases import compare_export
+
+    graph, selections = scalar_fixture()
+    payload = project_paper("p", graph, selections).model_dump(mode="json")
+    prepared = {tmp_path / "p.json": json.dumps(payload).encode()}
+    missing = compare_export(prepared, tmp_path)
+    assert missing["changes"] == [{"paper": "p", "status": "missing"}]
+    (tmp_path / "p.json").write_text(json.dumps(payload, indent=4))
+    identical = compare_export(prepared, tmp_path)
+    assert identical["matches_complete_corpus"]
+    assert identical["changes"] == []
+
+
 def test_explicit_components_recover_metrics_without_confusing_library_size():
     graph, selections = scalar_fixture()
     source = (

@@ -84,27 +84,31 @@ native-setting preservation, not real-corpus coverage or biological benefit.
   case selections, then validate the exported packages and method/parameter
   requests. Outcome-quality experiments remain separate from software tests.
 
-Rebuilding the tracked `descriptors/knowledge_packs/assembly/selection.json`
-from the producer's `outputs/{paper}-response.json` does not reproduce all
-enriched `content` and `observations` in the local case directory. The enrichment
-source and application script are absent from this checkout. Before replacing
-the local cases, recover and source-audit that provenance, establish a
-reproducible export, and independently review eligibility/state bindings.
+Rebuilding the tracked selection from the source graphs does not reproduce all
+enriched `content` and `observations` in the delivered local cases, and the
+selection covers only part of the delivered corpus. Enrichments were retained
+directly in the case files by the chosen delivery policy; the separate patch
+table and replay script were deliberately removed. Preserve those delivered
+files. `build_assembly_cases.py --compare-existing ... --audit-report ...`
+reports changed cases and unselected paper files without writing either corpus;
+it exits nonzero unless the complete corpus matches. Full regeneration still
+requires source-backed selection/enrichment coverage, not copying enriched
+values into graphs without checking their material and source bindings.
 
-### Dedup advisor three-attempt artifact isolation and real-tool acceptance
+### Dedup advisor real-tool acceptance
 
 Structured recommendations and the bounded purge_dups/QUAST review loop are
-implemented. The focused graph test covers two purge attempts, persisted-response
-recovery, and adoption of an earlier candidate using fixture executables. It
-does not establish three-attempt file isolation or real-tool biological quality.
+implemented. The focused graph test covers three purge attempts, four cumulative
+QUAST evaluations/model requests, unchanged earlier files through response
+recovery and review, frozen original-draft inputs, and adoption of the first
+candidate. These fixture-executable checks do not establish real-tool biological
+quality or a server process-restart acceptance run.
 
 - Current evidence: `app/stages/assembly_dedup/` and
   `tests/test_dedup_recommendation_loop.py`.
 - Contract owner: [Assembly Dedup](stage-contracts.md#5-assembly-dedup).
-- Closure condition: inspect three attempts' frozen inputs, execution scripts,
-  candidate outputs, QUAST comparisons, and model request/response records;
-  establish that earlier artifacts remain unchanged through review and recovery.
-  Then validate the isolated stage with real tools and preserve the adoption
+- Closure condition: validate the isolated stage with real tools, including
+  detached process recovery, and preserve the adoption
   evidence before claiming representative-sample acceptance.
 
 ### Repository quality gates are targets, not a current success claim
