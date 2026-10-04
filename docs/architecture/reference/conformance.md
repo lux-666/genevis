@@ -67,13 +67,6 @@ version-specific interaction; unexplained settings are retained as unknown.
 
 ### Assembly corpus handoff and measured recommendation coverage
 
-The producer's `cases/` pilot format is not the runtime exchange; export through
-`scripts/build_assembly_cases.py` and configure one `assembly.case_source`.
-The consumer's local `descriptors/knowledge_packs/assembly/cases/` is Git-ignored
-and manually copied for deployment. The directory is not automatically discovered;
-the runtime still reads only the configured source. Superseded exports are removed
-after validation and handoff. Source graphs/pilot files are not rewritten.
-
 Some read observations still have unknown processing-state bindings. They remain
 readable context, but do not numerically match runtime raw/filtered observations.
 Do not close this gap by making unknown a wildcard or inferring state from labels.
@@ -81,7 +74,11 @@ Cross-method NextDenovo tests use synthetic fixtures; they establish wiring and
 native-setting preservation, not real-corpus coverage or biological benefit.
 
 - Current evidence: `app/knowledge/v5_projection.py`,
-  `tests/test_assembly_case_consumption.py`, and the current explicit export.
+  `tests/test_assembly_case_consumption.py`,
+  `descriptors/knowledge_packs/assembly/selection.json`, and the Git-ignored
+  local `descriptors/knowledge_packs/assembly/cases/` directory. Export through
+  `scripts/build_assembly_cases.py` from the adjacent producer's
+  `../gene_agent_cases/outputs/` to compare corresponding case identities.
 - Contract owner: [Assembly case consumption](casepack.md).
 - Closure condition: add evidence-checked state bindings and actual foreign-tool
   case selections, then validate the exported packages and method/parameter
