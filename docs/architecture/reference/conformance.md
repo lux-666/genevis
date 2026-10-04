@@ -67,8 +67,10 @@ version-specific interaction; unexplained settings are retained as unknown.
 
 ### Assembly corpus handoff and measured recommendation coverage
 
-The current local export contains 94 paper packages and 221 Assembly cases;
-132 cases contain 414 numeric material observations. The producer's `cases/`
+The local directory inspected on 2026-10-04 contains 281 paper packages and
+617 Assembly cases; 94 cases are marked parameter-eligible, and 301 cases contain
+943 numeric material observations. These are loader-validated counts, not an
+independent audit of parameter eligibility or biological evidence. The producer's `cases/`
 pilot format is not the runtime exchange; export through
 `scripts/build_assembly_cases.py` and configure one `assembly.case_source`.
 The consumer's local `descriptors/knowledge_packs/assembly/cases/` is Git-ignored
@@ -88,6 +90,34 @@ native-setting preservation, not real-corpus coverage or biological benefit.
 - Closure condition: add evidence-checked state bindings and actual foreign-tool
   case selections, then validate the exported packages and method/parameter
   requests. Outcome-quality experiments remain separate from software tests.
+
+The tracked `descriptors/knowledge_packs/assembly/selection.json` covers the
+101–300 source range and rebuilds 187 paper packages / 396 cases from the
+producer's `outputs/{paper}-response.json`. Comparing that fresh export with the
+local directory finds differences in 21 paper packages: 31 cases have different
+`content`, including 27 with different `observations`. Case identities and
+parameter-eligibility flags agree. The previously described observation-enrichment
+file and application script are absent from this checkout, so a fresh export is
+not yet proof that the deployed enriched corpus can be reproduced. Preserve the
+current local case files; recover and source-audit the enrichment provenance
+before replacing them. Closing this handoff gap requires a reproducible export
+of the intended corpus and independent review of its eligibility/state bindings.
+
+### Dedup advisor three-attempt artifact isolation and real-tool acceptance
+
+Structured recommendations and the bounded purge_dups/QUAST review loop are
+implemented. The focused graph test covers two purge attempts, persisted-response
+recovery, and adoption of an earlier candidate using fixture executables. It
+does not establish three-attempt file isolation or real-tool biological quality.
+
+- Current evidence: `app/stages/assembly_dedup/` and
+  `tests/test_dedup_recommendation_loop.py`.
+- Contract owner: [Assembly Dedup](stage-contracts.md#5-assembly-dedup).
+- Closure condition: inspect three attempts' frozen inputs, execution scripts,
+  candidate outputs, QUAST comparisons, and model request/response records;
+  establish that earlier artifacts remain unchanged through review and recovery.
+  Then validate the isolated stage with real tools and preserve the adoption
+  evidence before claiming representative-sample acceptance.
 
 ### Repository quality gates are targets, not a current success claim
 

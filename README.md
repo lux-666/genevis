@@ -213,7 +213,7 @@ python scripts/build_assembly_cases.py \
 python -c 'from pathlib import Path; from app.knowledge.assembly_cases import load_case_papers; papers = load_case_papers(Path("/absolute/path/to/assembly-cases")); print(len(papers), "papers", sum(len(p.cases) for p in papers), "cases")'
 ```
 
-101–200 批次的选择表是 `descriptors/knowledge_packs/assembly/selection_101_200.json`；
+现有统一选择表 `descriptors/knowledge_packs/assembly/selection.json` 已顺延覆盖 101–300 的新增选择及参数推荐资格；
 原图在相邻仓库 `outputs/{paper}-response.json`，导出时指定
 `--filename-template '{paper}-response.json'`。123、136、137 的组装步骤未明确绑定输入读段，暂未投影。
 
@@ -235,6 +235,7 @@ case 保留方法原生参数、材料/结果对象、评价口径、来源定�
 一个 case 只对应一次 Assembly 操作；Hi-C 参与组装器分相的直接输入保留，
 后续 scaffolding/T2T 不混入该操作参数。结果明确区分直接输出、下游上下文和混合对象。
 旧 casepack/V1/pilot 配置不兼容。Hi-C、T2T 推荐器的扩展不在本次范围。
-当前已验证的真实导出仍是 5 篇、6 个 hifiasm 案例；跨方法路径已做合成测试，
-尚不代表真实 NextDenovo 语料或推荐效果已验收。
+当前本地案例规模、导出复现差异和待验收边界见
+[Assembly corpus conformance](docs/architecture/reference/conformance.md#assembly-corpus-handoff-and-measured-recommendation-coverage)。
+案例可加载、可检索不等于参数资格、指标绑定或推荐效果已完成验收。
 精确合同见 [Assembly case consumption](docs/architecture/reference/casepack.md)。

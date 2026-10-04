@@ -5751,5 +5751,3370 @@
       "m-haplotypes",
       "m-initial-t2t-chromosomes"
     ]
+  },
+  {
+    "paper": "201",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ultralong-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi",
+      "m-ultralong"
+    ],
+    "outcomes": [
+      "m-cdna",
+      "m-rnaseq"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "201",
+    "step": "step-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ultralong-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi",
+      "m-ultralong"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "201",
+    "step": "step-verkko-herro",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-herro-reads": "ont"
+    },
+    "input_states": {
+      "state-herro-reads": "filtered"
+    }
+  },
+  {
+    "paper": "202",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "features": {
+      "hifi_read_n50": {
+        "measurement": "m-read-n50-hifi",
+        "unit": "bp"
+      },
+      "ont_read_n50": {
+        "measurement": "m-read-n50-ont",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-read-n50-hifi",
+      "m-read-n50-ont",
+      "m-map-hifi",
+      "m-map-ont"
+    ],
+    "outcomes": [
+      "m-init-size",
+      "m-init-n50",
+      "m-init-contigs"
+    ]
+  },
+  {
+    "paper": "203",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-filtered": "ont",
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-depth-hifi"
+    ]
+  },
+  {
+    "paper": "204",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "features": {
+      "hifi_mean_read_length_bp": {
+        "measurement": "m-hifi-mean",
+        "unit": "bp"
+      },
+      "hifi_read_n50": {
+        "measurement": "m-hifi-n50",
+        "unit": "bp"
+      },
+      "ont_mean_read_length_bp": {
+        "measurement": "m-ont-mean",
+        "unit": "bp"
+      },
+      "ont_read_n50": {
+        "measurement": "m-ont-n50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-hifi-mean",
+      "m-hifi-n50",
+      "m-hifi-depth",
+      "m-ont-data",
+      "m-ont-mean",
+      "m-ont-n50",
+      "m-ont-depth",
+      "m-map-hifi"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "205",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont",
+      "state-hic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-hifi-depth",
+      "m-map-hifi"
+    ]
+  },
+  {
+    "paper": "206",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-filtered": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data"
+    ],
+    "outcomes": [
+      "m-contig-count-initial",
+      "m-contig-n50-initial"
+    ]
+  },
+  {
+    "paper": "207",
+    "step": "step-hifiasm-female",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-female": "hifi",
+      "state-ont-female": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data-female",
+      "m-hifi-depth-female",
+      "m-ont-data-female",
+      "m-ont-depth-female"
+    ]
+  },
+  {
+    "paper": "207",
+    "step": "step-hifiasm-male",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-male": "hifi",
+      "state-ont-male": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data-male",
+      "m-ont-data-male"
+    ]
+  },
+  {
+    "paper": "208",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont",
+      "state-hic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data",
+      "m-hic-data"
+    ],
+    "outcomes": [
+      "m-contigs-initial-A",
+      "m-contigs-initial-B"
+    ]
+  },
+  {
+    "paper": "209",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-hifi-male-clean": "hifi"
+    },
+    "input_states": {
+      "state-hifi-male-clean": "filtered"
+    },
+    "reported_measurements": [
+      "m-hifi-male-clean",
+      "m-contamination-rate"
+    ],
+    "outcomes": [
+      "m-hifiasm-contigs",
+      "m-hicanu-comparison"
+    ]
+  },
+  {
+    "paper": "211",
+    "step": "step-contig",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-hic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-hic-data"
+    ],
+    "outcomes": [
+      "m-contigs-raw"
+    ]
+  },
+  {
+    "paper": "212",
+    "step": "step-verkko-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ]
+  },
+  {
+    "paper": "213",
+    "step": "step-hifiasm-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-backbone"
+    ]
+  },
+  {
+    "paper": "214",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-hic-reads": "hic"
+    },
+    "input_states": {
+      "state-hic-reads": "filtered"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-hic-data"
+    ]
+  },
+  {
+    "paper": "214",
+    "step": "step-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-ont-data"
+    ]
+  },
+  {
+    "paper": "215",
+    "step": "step-flye",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-flye-draft"
+    ]
+  },
+  {
+    "paper": "216",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-processed": "ont",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-asm-size",
+      "m-contig-n50",
+      "m-fragments",
+      "m-gc",
+      "m-longest"
+    ]
+  },
+  {
+    "paper": "217",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-depth",
+      "m-read-length"
+    ]
+  },
+  {
+    "paper": "218",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "input_states": {
+      "state-ont-reads": "filtered"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-contig-n50-primary"
+    ]
+  },
+  {
+    "paper": "219",
+    "step": "step-dh-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-dh-hifi-reads": "hifi"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "m-dh-hifi",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-dh-hifi"
+    ],
+    "outcomes": [
+      "m-dh-size"
+    ]
+  },
+  {
+    "paper": "219",
+    "step": "step-hhql-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hhql-hifi-reads": "hifi"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "m-hhql-hifi",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hhql-hifi"
+    ],
+    "outcomes": [
+      "m-hhql-size"
+    ]
+  },
+  {
+    "paper": "219",
+    "step": "step-ss-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ss-hifi-reads": "hifi",
+      "state-ss-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-ss-hifi",
+      "m-ss-ont"
+    ]
+  },
+  {
+    "paper": "219",
+    "step": "step-ss-ont-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-ss-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-ss-ont"
+    ]
+  },
+  {
+    "paper": "220",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-pass": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-contigs"
+    ]
+  },
+  {
+    "paper": "222",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-clean": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-contigs"
+    ]
+  },
+  {
+    "paper": "223",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-depth"
+    ]
+  },
+  {
+    "paper": "224",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-hifiasm-asm",
+      "m-unanchored-drop"
+    ]
+  },
+  {
+    "paper": "224",
+    "step": "step-ont-assemblies",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont",
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-alt-assemblies"
+    ]
+  },
+  {
+    "paper": "225",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-depth"
+    ],
+    "outcomes": [
+      "m-initial-draft"
+    ]
+  },
+  {
+    "paper": "225",
+    "step": "step-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont",
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data",
+      "m-depth"
+    ],
+    "outcomes": [
+      "m-ont-assembly"
+    ]
+  },
+  {
+    "paper": "226",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi": "hifi",
+      "state-ont": "ont"
+    },
+    "input_states": {
+      "state-hifi": "filtered",
+      "state-ont": "filtered"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "metric-hifi-bases",
+        "unit": "bp"
+      },
+      "hifi_read_n50": {
+        "measurement": "metric-hifi-read-n50",
+        "unit": "bp"
+      },
+      "ont_total_bases": {
+        "measurement": "metric-ont-bases",
+        "unit": "bp"
+      },
+      "ont_read_n50": {
+        "measurement": "metric-ont-read-n50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "metric-hifi-bases",
+      "metric-hifi-read-n50",
+      "metric-hifi-depth",
+      "metric-ont-bases",
+      "metric-ont-read-n50",
+      "metric-ont-depth"
+    ],
+    "outcomes": [
+      "metric-draft-contig-length",
+      "metric-draft-contig-n50"
+    ]
+  },
+  {
+    "paper": "227",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-depth"
+    ]
+  },
+  {
+    "paper": "229",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-omnic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-hifi-reads",
+      "m-omnic-reads"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-hifiasm-hz",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads-hz": "hifi"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-hifi",
+      "m-compare-busco",
+      "m-compare-mapping",
+      "m-compare-telomeres"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-hifiasm-j4155s",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads-j4155s": "hifi"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-hifi",
+      "m-compare-busco",
+      "m-compare-mapping",
+      "m-compare-telomeres"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-hifiasm-lk638s",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads-lk638s": "hifi"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-hifi",
+      "m-compare-busco",
+      "m-compare-mapping",
+      "m-compare-telomeres"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-hifiasm-xl628s",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads-xl628s": "hifi"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-hifi",
+      "m-compare-busco",
+      "m-compare-mapping",
+      "m-compare-telomeres"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-nextdenovo-hz",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads-hz": "ont"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-ont"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-nextdenovo-j4155s",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads-j4155s": "ont"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-ont"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-nextdenovo-lk638s",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads-lk638s": "ont"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-ont"
+    ]
+  },
+  {
+    "paper": "230",
+    "step": "step-nextdenovo-xl628s",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads-xl628s": "ont"
+    },
+    "reported_measurements": [
+      "m-data-volumes"
+    ],
+    "outcomes": [
+      "m-contigs-ont"
+    ]
+  },
+  {
+    "paper": "231",
+    "step": "step-assemble-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-gby": "hifi",
+      "state-ont-gby": "ont"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "m-hifi-yield",
+        "unit": "bp"
+      },
+      "ont_total_bases": {
+        "measurement": "m-ont-yield",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hifi-yield",
+      "m-ont-yield"
+    ],
+    "outcomes": [
+      "m-hap1-size-initial",
+      "m-hap2-size-initial",
+      "m-hap1-n50-initial",
+      "m-hap2-n50-initial",
+      "m-hap1-contigs-initial",
+      "m-hap2-contigs-initial"
+    ]
+  },
+  {
+    "paper": "232",
+    "step": "step-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont",
+      "state-hifi-reads": "hifi"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "m-hifi-data",
+        "unit": "bp"
+      },
+      "ont_total_bases": {
+        "measurement": "m-ont-data",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ]
+  },
+  {
+    "paper": "233",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data"
+    ],
+    "outcomes": [
+      "m-draft"
+    ]
+  },
+  {
+    "paper": "234",
+    "step": "step-hifiasm-initial",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-depth"
+    ],
+    "outcomes": [
+      "m-bacterial-genome"
+    ]
+  },
+  {
+    "paper": "235",
+    "step": "step-hifi-asm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-reads",
+      "m-depth"
+    ]
+  },
+  {
+    "paper": "235",
+    "step": "step-int-asm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-ont-reads",
+      "m-hifi-reads",
+      "m-depth"
+    ]
+  },
+  {
+    "paper": "235",
+    "step": "step-ont-asm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-ont-reads",
+      "m-depth"
+    ]
+  },
+  {
+    "paper": "236",
+    "step": "step-canu-alk",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-alk-ont-basecalled": "ont"
+    },
+    "reported_measurements": [
+      "m-alk-ont",
+      "m-alk-ont-reads"
+    ]
+  },
+  {
+    "paper": "236",
+    "step": "step-canu-p94",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-p94-ont-basecalled": "ont"
+    },
+    "reported_measurements": [
+      "m-p94-ont",
+      "m-p94-ont-reads"
+    ]
+  },
+  {
+    "paper": "237",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi": "hifi",
+      "state-reads-ont": "ont"
+    },
+    "features": {
+      "ont_total_bases": {
+        "measurement": "m-ont-data",
+        "unit": "bp"
+      },
+      "hifi_total_bases": {
+        "measurement": "m-hifi-data",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-ont-data",
+      "m-hifi-data"
+    ],
+    "outcomes": [
+      "m-contig-size",
+      "m-contig-n50",
+      "m-contig-n40",
+      "m-contig-longest",
+      "m-contig-mean",
+      "m-contig-median",
+      "m-contig-gc"
+    ]
+  },
+  {
+    "paper": "238",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "features": {
+      "hifi_read_n50": {
+        "measurement": "m-hifi-n50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-hifi-n50"
+    ],
+    "outcomes": [
+      "m-contig-n50"
+    ]
+  },
+  {
+    "paper": "238",
+    "step": "step-ont-assembly",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-ont-reads": "ont"
+    },
+    "features": {
+      "ont_read_n50": {
+        "measurement": "m-ont-n50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-ont-data",
+      "m-ont-n50"
+    ]
+  },
+  {
+    "paper": "239",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont",
+      "state-hic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-reads-hifi",
+      "m-reads-ont",
+      "m-reads-hic",
+      "m-mapping"
+    ],
+    "outcomes": [
+      "m-draft-size",
+      "m-draft-n50",
+      "m-gc"
+    ]
+  },
+  {
+    "paper": "239",
+    "step": "step-ont-assembly",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-reads-ont",
+      "m-mapping"
+    ]
+  },
+  {
+    "paper": "240",
+    "step": "step-assemble-27",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont",
+      "state-hic-reads": "hic"
+    },
+    "outcomes": [
+      "m-near-27",
+      "m-sv"
+    ]
+  },
+  {
+    "paper": "240",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "outcomes": [
+      "m-asm-initial-size"
+    ]
+  },
+  {
+    "paper": "241",
+    "step": "step-hifiasm-tak1",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-tak1": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data"
+    ]
+  },
+  {
+    "paper": "241",
+    "step": "step-hifiasm-tak2",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-tak2": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data"
+    ]
+  },
+  {
+    "paper": "242",
+    "step": "step-hifiasm-pingshan",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-pingshan": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-pingshan"
+    ]
+  },
+  {
+    "paper": "242",
+    "step": "step-ont-asm-pingshan",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-pingshan": "ont"
+    },
+    "reported_measurements": [
+      "m-ont-pingshan"
+    ]
+  },
+  {
+    "paper": "243",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-hic-reads": "hic"
+    },
+    "notes": [
+      "Initial whole-genome hifiasm contig assembly; organellar contigs were removed after assembly, so this is not an organelle-only case."
+    ]
+  },
+  {
+    "paper": "244",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont",
+      "state-hifi-reads": "hifi",
+      "state-hic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data",
+      "m-hic-data",
+      "m-depth"
+    ]
+  },
+  {
+    "paper": "245",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-reads-per-sample"
+    ]
+  },
+  {
+    "paper": "246",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ]
+  },
+  {
+    "paper": "247",
+    "step": "step-prelim-flye",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont": "ont"
+    },
+    "reported_measurements": [
+      "metric-ont-depth"
+    ],
+    "outcomes": [
+      "metric-prelim-n50",
+      "metric-prelim-busco"
+    ]
+  },
+  {
+    "paper": "247",
+    "step": "step-prelim-hicanu",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi": "hifi"
+    },
+    "reported_measurements": [
+      "metric-hifi-depth"
+    ],
+    "outcomes": [
+      "metric-prelim-n50",
+      "metric-prelim-busco"
+    ]
+  },
+  {
+    "paper": "247",
+    "step": "step-prelim-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi": "hifi"
+    },
+    "reported_measurements": [
+      "metric-hifi-depth"
+    ],
+    "outcomes": [
+      "metric-prelim-n50",
+      "metric-prelim-busco",
+      "metric-organelle-contigs-hifiasm"
+    ]
+  },
+  {
+    "paper": "247",
+    "step": "step-prelim-necat",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont": "ont"
+    },
+    "reported_measurements": [
+      "metric-ont-depth"
+    ],
+    "outcomes": [
+      "metric-prelim-n50",
+      "metric-prelim-busco",
+      "metric-organelle-contigs-necat"
+    ]
+  },
+  {
+    "paper": "247",
+    "step": "step-prelim-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont": "ont"
+    },
+    "reported_measurements": [
+      "metric-ont-depth"
+    ],
+    "outcomes": [
+      "metric-prelim-n50",
+      "metric-prelim-busco"
+    ]
+  },
+  {
+    "paper": "247",
+    "step": "step-prelim-wtdbg2",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi": "hifi"
+    },
+    "reported_measurements": [
+      "metric-hifi-depth"
+    ],
+    "outcomes": [
+      "metric-wtdbg2-n50",
+      "metric-wtdbg2-busco"
+    ]
+  },
+  {
+    "paper": "248",
+    "step": "step-necat-at141",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads-at141": "ont"
+    },
+    "input_states": {
+      "state-ont-reads-at141": "filtered"
+    },
+    "reported_measurements": [
+      "m-ont-reads-at141",
+      "m-ont-depth-at141"
+    ],
+    "outcomes": [
+      "m-necat-at141"
+    ]
+  },
+  {
+    "paper": "248",
+    "step": "step-necat-jcp043",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads-jcp043": "ont"
+    },
+    "input_states": {
+      "state-ont-reads-jcp043": "filtered"
+    },
+    "reported_measurements": [
+      "m-ont-reads-jcp043",
+      "m-ont-depth-jcp043"
+    ],
+    "outcomes": [
+      "m-necat-jcp043"
+    ]
+  },
+  {
+    "paper": "249",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "249",
+    "step": "step-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "250",
+    "step": "step-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont",
+      "state-hic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data",
+      "m-hic-data"
+    ]
+  },
+  {
+    "paper": "251",
+    "step": "step-hifiasm-diploid",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-nonhost-reads": "hifi"
+    },
+    "notes": [
+      "The selected non-host read state is produced from the graph's PacBio HiFi read state by host-read removal; retain the explicit hifi provenance."
+    ]
+  },
+  {
+    "paper": "251",
+    "step": "step-hifiasm-tetraploid",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-nonhost-reads": "hifi"
+    },
+    "notes": [
+      "The selected non-host read state is produced from the graph's PacBio HiFi read state by host-read removal; retain the explicit hifi provenance."
+    ]
+  },
+  {
+    "paper": "252",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-reads"
+    ]
+  },
+  {
+    "paper": "253",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont",
+      "state-hic-reads": "hic"
+    },
+    "features": {
+      "hifi_read_n50": {
+        "measurement": "m-hifi-n50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-hifi-n50",
+      "m-ont-data",
+      "m-hic-data"
+    ],
+    "outcomes": [
+      "m-draft-hap1",
+      "m-draft-hap2"
+    ]
+  },
+  {
+    "paper": "254",
+    "step": "step-assemble-contigs",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ]
+  },
+  {
+    "paper": "256",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    }
+  },
+  {
+    "paper": "257",
+    "step": "step-assemble-v1",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-tu1-reads-hifi": "hifi",
+      "state-miz1-reads-hifi": "hifi",
+      "state-oi1-reads-hifi": "hifi",
+      "state-pc1-reads-hifi": "hifi",
+      "state-wtc1-reads-hifi": "hifi",
+      "state-cx1-reads-hifi": "hifi",
+      "state-tc1-reads-hifi": "hifi",
+      "state-cc3-reads-hifi": "hifi",
+      "state-cc2-reads-hifi": "hifi",
+      "state-cc1-reads-hifi": "hifi",
+      "state-cca03-reads-hifi": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-depth"
+    ]
+  },
+  {
+    "paper": "257",
+    "step": "step-assemble-v2",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-tu1-reads-hifi": "hifi",
+      "state-miz1-reads-hifi": "hifi",
+      "state-oi1-reads-hifi": "hifi",
+      "state-pc1-reads-hifi": "hifi",
+      "state-wtc1-reads-hifi": "hifi",
+      "state-cx1-reads-hifi": "hifi",
+      "state-tc1-reads-hifi": "hifi",
+      "state-cc3-reads-hifi": "hifi",
+      "state-cc2-reads-hifi": "hifi",
+      "state-cc1-reads-hifi": "hifi",
+      "state-cca03-reads-hifi": "hifi",
+      "state-tu1-reads-ont": "ont",
+      "state-miz1-reads-ont": "ont",
+      "state-oi1-reads-ont": "ont",
+      "state-pc1-reads-ont": "ont",
+      "state-wtc1-reads-ont": "ont",
+      "state-cx1-reads-ont": "ont",
+      "state-tc1-reads-ont": "ont",
+      "state-cc3-reads-ont": "ont",
+      "state-cc2-reads-ont": "ont",
+      "state-cc1-reads-ont": "ont",
+      "state-cca03-reads-ont": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-depth",
+      "m-ont-depth"
+    ]
+  },
+  {
+    "paper": "257",
+    "step": "step-assemble-v3",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-tu1-reads-hifi": "hifi",
+      "state-miz1-reads-hifi": "hifi",
+      "state-oi1-reads-hifi": "hifi",
+      "state-pc1-reads-hifi": "hifi",
+      "state-wtc1-reads-hifi": "hifi",
+      "state-cx1-reads-hifi": "hifi",
+      "state-tc1-reads-hifi": "hifi",
+      "state-cc3-reads-hifi": "hifi",
+      "state-cc2-reads-hifi": "hifi",
+      "state-cc1-reads-hifi": "hifi",
+      "state-cca03-reads-hifi": "hifi",
+      "state-tu1-reads-ont": "ont",
+      "state-miz1-reads-ont": "ont",
+      "state-oi1-reads-ont": "ont",
+      "state-pc1-reads-ont": "ont",
+      "state-wtc1-reads-ont": "ont",
+      "state-cx1-reads-ont": "ont",
+      "state-tc1-reads-ont": "ont",
+      "state-cc3-reads-ont": "ont",
+      "state-cc2-reads-ont": "ont",
+      "state-cc1-reads-ont": "ont",
+      "state-cca03-reads-ont": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-depth",
+      "m-ont-depth"
+    ]
+  },
+  {
+    "paper": "258",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-depth-consistency"
+    ],
+    "outcomes": [
+      "m-draft-size"
+    ]
+  },
+  {
+    "paper": "259",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-hic-reads": "hic"
+    },
+    "outcomes": [
+      "m-contiguity"
+    ]
+  },
+  {
+    "paper": "260",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "input_states": {
+      "state-hifi-reads": "filtered"
+    },
+    "reported_measurements": [
+      "m-hifi-data"
+    ],
+    "outcomes": [
+      "m-draft-size"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "262",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-yields"
+    ]
+  },
+  {
+    "paper": "263",
+    "step": "step-hifiasm-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "m-hifi-filtered-yield",
+        "unit": "bp"
+      },
+      "ont_total_bases": {
+        "measurement": "m-ont-filtered-yield",
+        "unit": "bp"
+      },
+      "ont_read_n50": {
+        "measurement": "m-ont-filtered-n50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hifi-filtered-yield",
+      "m-ont-filtered-yield",
+      "m-ont-filtered-coverage",
+      "m-ont-filtered-n50",
+      "m-kmer-peaks"
+    ],
+    "outcomes": [
+      "m-hap1-draft-scaffolds",
+      "m-hap1-draft-size",
+      "m-hap1-draft-scaffold-n50",
+      "m-hap1-draft-gaps",
+      "m-hap2-draft-scaffolds",
+      "m-hap2-draft-size",
+      "m-hap2-draft-scaffold-n50",
+      "m-hap2-draft-gaps"
+    ]
+  },
+  {
+    "paper": "264",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data"
+    ],
+    "outcomes": [
+      "m-draft"
+    ]
+  },
+  {
+    "paper": "265",
+    "step": "step-assemble-canu",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-ont": "ont"
+    },
+    "features": {
+      "ont_total_bases": {
+        "measurement": "m-ont-volume",
+        "unit": "bp"
+      },
+      "ont_read_n50": {
+        "measurement": "m-ont-readn50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-ont-volume",
+      "m-ont-coverage",
+      "m-ont-readn50",
+      "m-ont-readcount"
+    ],
+    "outcomes": [
+      "m-canu-size",
+      "m-canu-n50"
+    ]
+  },
+  {
+    "paper": "265",
+    "step": "step-assemble-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-reads-hifi": "hifi",
+      "state-reads-ont": "ont"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "m-hifi-volume",
+        "unit": "bp"
+      },
+      "hifi_read_n50": {
+        "measurement": "m-hifi-readn50",
+        "unit": "bp"
+      },
+      "ont_total_bases": {
+        "measurement": "m-ont-volume",
+        "unit": "bp"
+      },
+      "ont_read_n50": {
+        "measurement": "m-ont-readn50",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-hifi-volume",
+      "m-hifi-coverage",
+      "m-hifi-readn50",
+      "m-hifi-readcount",
+      "m-ont-volume",
+      "m-ont-coverage",
+      "m-ont-readn50",
+      "m-ont-readcount"
+    ],
+    "outcomes": [
+      "m-draft-size",
+      "m-draft-n50",
+      "m-draft-t2t-contigs"
+    ]
+  },
+  {
+    "paper": "267",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-ont-cxa": "ont",
+      "state-reads-ont-csa": "ont",
+      "state-reads-dnbseq-cxa": "short",
+      "state-reads-dnbseq-csa": "short"
+    },
+    "reported_measurements": [
+      "m-ont-cxa",
+      "m-ont-csa",
+      "m-dnbseq-cxa",
+      "m-dnbseq-csa"
+    ]
+  },
+  {
+    "paper": "268",
+    "step": "step-hifiasm-hifi",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-raw": "hifi"
+    },
+    "input_states": {
+      "st-hifi-raw": "raw"
+    },
+    "reported_measurements": [
+      "m-hifi-cov"
+    ]
+  },
+  {
+    "paper": "268",
+    "step": "step-hifiasm-hifi-hic",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-raw": "hifi"
+    },
+    "input_states": {
+      "st-hifi-raw": "raw"
+    },
+    "reported_measurements": [
+      "m-hifi-cov"
+    ],
+    "outcomes": [
+      "m-pre3A-size",
+      "m-pre3A-n50",
+      "m-pre3A-contigs",
+      "m-pre3A-qv",
+      "m-pre3A-busco",
+      "m-pre3B-size",
+      "m-pre3B-n50",
+      "m-pre3B-contigs",
+      "m-pre3B-qv",
+      "m-pre3B-busco"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "268",
+    "step": "step-hifiasm-hifi-ont",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-raw": "hifi",
+      "st-ont-raw": "ont"
+    },
+    "input_states": {
+      "st-hifi-raw": "raw",
+      "st-ont-raw": "raw"
+    },
+    "reported_measurements": [
+      "m-ont-cov",
+      "m-hifi-cov"
+    ]
+  },
+  {
+    "paper": "268",
+    "step": "step-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-ont-raw": "ont"
+    },
+    "input_states": {
+      "st-ont-raw": "raw"
+    },
+    "reported_measurements": [
+      "m-ont-cov"
+    ]
+  },
+  {
+    "paper": "269",
+    "step": "step-assemble-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ss-reads-hifi": "hifi"
+    },
+    "features": {
+      "hifi_total_bases": {
+        "measurement": "m-ss-hifi-yield",
+        "unit": "bp"
+      }
+    },
+    "reported_measurements": [
+      "m-ss-hifi-yield",
+      "m-ss-hifi-coverage"
+    ]
+  },
+  {
+    "paper": "270",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-reads-ont": "ont"
+    },
+    "input_states": {
+      "state-reads-ont": "raw"
+    },
+    "reported_measurements": [
+      "m-ont-data"
+    ],
+    "outcomes": [
+      "m-contigs"
+    ]
+  },
+  {
+    "paper": "271",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-reads": "hifi",
+      "state-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-hifi-n50",
+      "m-ont-data",
+      "m-ont-n50"
+    ]
+  },
+  {
+    "paper": "273",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi": "hifi",
+      "state-reads-ont": "ont",
+      "state-reads-ont-ultralong": "ont",
+      "state-reads-hic": "hic"
+    },
+    "reported_measurements": [
+      "m-ont",
+      "m-ont-ultralong",
+      "m-hifi",
+      "m-hic"
+    ],
+    "outcomes": [
+      "m-contigs"
+    ]
+  },
+  {
+    "paper": "274",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data"
+    ],
+    "outcomes": [
+      "m-contig-stats"
+    ]
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-by",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-by": "hifi",
+      "state-ont-by": "ont"
+    }
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-cor",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-cor": "hifi",
+      "state-ont-cor": "ont"
+    }
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-drs",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-drs": "hifi",
+      "state-ont-drs": "ont"
+    }
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-hou",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-hou": "hifi",
+      "state-ont-hou": "ont"
+    }
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-rjf",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-rjf": "hifi",
+      "state-ont-rjf": "ont"
+    }
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-tib",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-tib": "hifi",
+      "state-ont-tib": "ont"
+    }
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-wl",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-wl": "hifi",
+      "state-ont-wl": "ont"
+    }
+  },
+  {
+    "paper": "275",
+    "step": "step-contig-wpr",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-wpr": "hifi",
+      "state-ont-wpr": "ont"
+    }
+  },
+  {
+    "paper": "276",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi": "hifi",
+      "state-cns-reads": "ont"
+    },
+    "input_states": {
+      "state-cns-reads": "filtered"
+    },
+    "reported_measurements": [
+      "m-hifi"
+    ],
+    "outcomes": [
+      "m-primary"
+    ]
+  },
+  {
+    "paper": "277",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "state-ont-reads": "ont",
+      "state-pacbio-reads": "hifi"
+    },
+    "input_states": {
+      "state-ont-reads": "filtered"
+    },
+    "reported_measurements": [
+      "m-cov-ont",
+      "m-cov-pacbio"
+    ],
+    "outcomes": [
+      "m-genome-size",
+      "m-contig-n50",
+      "m-scaffold-n50",
+      "m-qv",
+      "m-busco",
+      "m-chromosomes"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-biofdc",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-biofdc": "hifi"
+    },
+    "reported_measurements": [
+      "m-biofdc-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-cheonryang",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-cheonryang": "hifi"
+    },
+    "reported_measurements": [
+      "m-cheonryang-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-chunpoong",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-chunpoong": "hifi"
+    },
+    "reported_measurements": [
+      "m-chunpoong-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-fengcheng",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-fengcheng": "hifi"
+    },
+    "reported_measurements": [
+      "m-fengcheng-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-g03009",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-g03009": "hifi"
+    },
+    "reported_measurements": [
+      "m-g03009-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-g03055",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-g03055": "hifi"
+    },
+    "reported_measurements": [
+      "m-g03055-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-geumsun",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-geumsun": "hifi"
+    },
+    "reported_measurements": [
+      "m-geumsun-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-gumpoong",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-gumpoong": "hifi"
+    },
+    "reported_measurements": [
+      "m-gumpoong-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-hamyangg2020",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-hamyangg2020": "hifi"
+    },
+    "reported_measurements": [
+      "m-hamyangg2020-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-jianbt",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-jianbt": "hifi"
+    },
+    "reported_measurements": [
+      "m-jianbt-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-jianxkh",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-jianxkh": "hifi"
+    },
+    "reported_measurements": [
+      "m-jianxkh-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-kuandian",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-kuandian": "hifi"
+    },
+    "reported_measurements": [
+      "m-kuandian-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-nyp",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-nyp": "hifi"
+    },
+    "reported_measurements": [
+      "m-nyp-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-prussia",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-prussia": "hifi"
+    },
+    "reported_measurements": [
+      "m-prussia-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-typ",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-typ": "hifi"
+    },
+    "reported_measurements": [
+      "m-typ-ccs"
+    ]
+  },
+  {
+    "paper": "278",
+    "step": "step-assemble-hifiasm-yunpoong",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-hifi-yunpoong": "hifi"
+    },
+    "reported_measurements": [
+      "m-yunpoong-ccs"
+    ]
+  },
+  {
+    "paper": "279",
+    "step": "step-assemble-candidates",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-reads-ont": "ont"
+    },
+    "notes": [
+      "Six de novo assemblers are represented in one combined graph operation; the source does not provide per-assembler statistics, so the combined method identity is preserved."
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-clr-canu",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-clr": "clr"
+    },
+    "outcomes": [
+      "m-clr-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-clr-mecat2",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-clr": "clr"
+    },
+    "outcomes": [
+      "m-clr-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-clr-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-clr": "clr"
+    },
+    "outcomes": [
+      "m-clr-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-clr-wtdbg2",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-clr": "clr"
+    },
+    "outcomes": [
+      "m-clr-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-hifi-hicanu",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-hifi": "hifi"
+    },
+    "outcomes": [
+      "m-hifi-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-hifi-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-hifi": "hifi"
+    },
+    "outcomes": [
+      "m-hifi-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-ont-necat",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-ont": "ont"
+    },
+    "outcomes": [
+      "m-ont-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-ont-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-ont": "ont"
+    },
+    "outcomes": [
+      "m-ont-assemblers"
+    ]
+  },
+  {
+    "paper": "280",
+    "step": "step-assemble-ont-wtdbg2",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-depth-subsets-ont": "ont"
+    },
+    "outcomes": [
+      "m-ont-assemblers"
+    ]
+  },
+  {
+    "paper": "281",
+    "step": "step-assemble",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-hifi-ccs": "hifi"
+    },
+    "outcomes": [
+      "m-primary"
+    ]
+  },
+  {
+    "paper": "283",
+    "step": "step-asm-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-reads-corrected-3942": "ont",
+      "st-reads-corrected-3903": "ont",
+      "st-reads-corrected-3914": "ont",
+      "st-reads-corrected-6551": "ont",
+      "st-reads-ultralong-3942": "ont",
+      "st-reads-ultralong-3903": "ont",
+      "st-reads-ultralong-3914": "ont",
+      "st-reads-ultralong-6551": "ont"
+    },
+    "input_states": {
+      "st-reads-corrected-3942": "filtered",
+      "st-reads-corrected-3903": "filtered",
+      "st-reads-corrected-3914": "filtered",
+      "st-reads-corrected-6551": "filtered",
+      "st-reads-ultralong-3942": "raw",
+      "st-reads-ultralong-3903": "raw",
+      "st-reads-ultralong-3914": "raw",
+      "st-reads-ultralong-6551": "raw"
+    },
+    "outcomes": [
+      "m-draft-3942-contig",
+      "m-draft-3942-mm",
+      "m-draft-3942-indel",
+      "m-draft-3942-busco",
+      "m-draft-3903-contig",
+      "m-draft-3903-busco",
+      "m-draft-other-contig",
+      "m-t2t-3942-draft"
+    ]
+  },
+  {
+    "paper": "283",
+    "step": "step-asm-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-reads-corrected-3942": "ont",
+      "st-reads-corrected-3903": "ont",
+      "st-reads-ultralong-3942": "ont",
+      "st-reads-ultralong-3903": "ont"
+    },
+    "input_states": {
+      "st-reads-corrected-3942": "filtered",
+      "st-reads-corrected-3903": "filtered",
+      "st-reads-ultralong-3942": "raw",
+      "st-reads-ultralong-3903": "raw"
+    },
+    "outcomes": [
+      "m-verkko-3942-contig",
+      "m-verkko-3942-mm",
+      "m-verkko-3942-busco",
+      "m-verkko-3903-contig",
+      "m-verkko-3903-busco",
+      "m-t2t-3942-verkko"
+    ]
+  },
+  {
+    "paper": "285",
+    "step": "step-hicanu",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-reads-ont": "ont",
+      "st-reads-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "285",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-reads-hifi": "hifi",
+      "st-reads-ont": "ont"
+    },
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "285",
+    "step": "step-nextdenovo",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-reads-ont": "ont",
+      "st-reads-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "286",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-reads-hifi": "hifi",
+      "st-reads-ont": "ont"
+    },
+    "reported_measurements": [
+      "m-seq-hifi",
+      "m-seq-ont"
+    ],
+    "outcomes": [
+      "m-draft-main-contig",
+      "m-draft-hap1-contig",
+      "m-draft-hap2-contig",
+      "m-assembly-versions"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "286",
+    "step": "step-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-reads-hifi": "hifi",
+      "st-reads-ont": "ont"
+    },
+    "reported_measurements": [
+      "m-seq-hifi",
+      "m-seq-ont"
+    ],
+    "outcomes": [
+      "m-draft-verkko-contig"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "287",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-reads-ajwa": "hifi",
+      "st-hifi-reads-male-medina-1": "hifi",
+      "st-hifi-reads-anbara": "hifi",
+      "st-hifi-reads-barni-al-ais": "hifi",
+      "st-hifi-reads-barni-al-ula": "hifi",
+      "st-hifi-reads-gurr": "hifi",
+      "st-hifi-reads-hilali": "hifi",
+      "st-hifi-reads-khudri": "hifi",
+      "st-hifi-reads-nabtat-ali": "hifi",
+      "st-hifi-reads-nabtat-saif": "hifi",
+      "st-hifi-reads-nabtat-sultan": "hifi",
+      "st-hifi-reads-reziz": "hifi",
+      "st-hifi-reads-rutana": "hifi",
+      "st-hifi-reads-safawi": "hifi",
+      "st-hifi-reads-sufri": "hifi",
+      "st-hifi-reads-sagai": "hifi",
+      "st-hifi-reads-shahl": "hifi",
+      "st-hifi-reads-shishi": "hifi",
+      "st-hifi-reads-sukkari": "hifi",
+      "st-hifi-reads-um-kabar": "hifi"
+    },
+    "reported_measurements": [
+      "m-kmer-heterozygosity"
+    ],
+    "outcomes": [
+      "m-ajwa-draft",
+      "m-ajwa-draft-contiguity",
+      "m-removed-contigs"
+    ],
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "287",
+    "step": "step-hifiasm-19",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-reads-ajwa": "hifi",
+      "st-hifi-reads-male-medina-1": "hifi",
+      "st-hifi-reads-anbara": "hifi",
+      "st-hifi-reads-barni-al-ais": "hifi",
+      "st-hifi-reads-barni-al-ula": "hifi",
+      "st-hifi-reads-gurr": "hifi",
+      "st-hifi-reads-hilali": "hifi",
+      "st-hifi-reads-khudri": "hifi",
+      "st-hifi-reads-nabtat-ali": "hifi",
+      "st-hifi-reads-nabtat-saif": "hifi",
+      "st-hifi-reads-nabtat-sultan": "hifi",
+      "st-hifi-reads-reziz": "hifi",
+      "st-hifi-reads-rutana": "hifi",
+      "st-hifi-reads-safawi": "hifi",
+      "st-hifi-reads-sufri": "hifi",
+      "st-hifi-reads-sagai": "hifi",
+      "st-hifi-reads-shahl": "hifi",
+      "st-hifi-reads-shishi": "hifi",
+      "st-hifi-reads-sukkari": "hifi",
+      "st-hifi-reads-um-kabar": "hifi"
+    },
+    "reported_measurements": [
+      "m-kmer-heterozygosity"
+    ]
+  },
+  {
+    "paper": "288",
+    "step": "step-hifiasm-bienne",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-bienne": "hifi"
+    },
+    "reported_measurements": [
+      "m-bienne-coverage",
+      "m-bienne-size-estimate"
+    ]
+  },
+  {
+    "paper": "288",
+    "step": "step-hifiasm-decumbens",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-decumbens": "hifi"
+    },
+    "reported_measurements": [
+      "m-decumbens-coverage",
+      "m-decumbens-size-estimate"
+    ]
+  },
+  {
+    "paper": "288",
+    "step": "step-hifiasm-flax",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-flax": "hifi"
+    },
+    "reported_measurements": [
+      "m-flax-coverage",
+      "m-flax-size-estimate"
+    ]
+  },
+  {
+    "paper": "288",
+    "step": "step-hifiasm-grandiflorum",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-grandiflorum": "hifi"
+    },
+    "reported_measurements": [
+      "m-grandiflorum-coverage",
+      "m-grandiflorum-size-estimate"
+    ]
+  },
+  {
+    "paper": "289",
+    "step": "step-flye",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-sequencing"
+    ]
+  },
+  {
+    "paper": "289",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-reads": "hifi",
+      "st-ont-reads": "ont"
+    },
+    "reported_measurements": [
+      "m-sequencing"
+    ]
+  },
+  {
+    "paper": "290",
+    "step": "step-hifiasm",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "state-ont-reads": "ont",
+      "state-hifi-reads": "hifi"
+    },
+    "reported_measurements": [
+      "m-hifi-data",
+      "m-ont-data"
+    ]
+  },
+  {
+    "paper": "291",
+    "step": "step-nanopore-canu",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-nanopore-reads-bio2mar": "ont"
+    },
+    "outcomes": [
+      "m-reads"
+    ]
+  },
+  {
+    "paper": "292",
+    "step": "step-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hifi-reads": "hifi",
+      "st-ont-reads": "ont",
+      "st-parental-illumina": "short",
+      "st-hic-reads": "hic"
+    },
+    "reported_measurements": [
+      "m-input-data"
+    ],
+    "outcomes": [
+      "m-v01-graph",
+      "m-v01-qv",
+      "m-tool-functions"
+    ]
+  },
+  {
+    "paper": "293",
+    "step": "step-gv1",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "293",
+    "step": "step-hap-draft",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi": "hifi",
+      "st-mgi-parents": "short"
+    }
+  },
+  {
+    "paper": "294",
+    "step": "step-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-f1-hifi": "hifi",
+      "st-f1-ont-filtered": "ont",
+      "st-f1-herro": "ont"
+    },
+    "input_states": {
+      "st-f1-ont-filtered": "filtered",
+      "st-f1-herro": "filtered"
+    },
+    "notes": [
+      "A directly used read state has no unambiguous single-platform label in the graph; it remains in the source operation but is omitted from material-platform matching."
+    ]
+  },
+  {
+    "paper": "295",
+    "step": "step-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi": "hifi",
+      "st-parental": "short"
+    }
+  },
+  {
+    "paper": "296",
+    "step": "step-assemble-cohort",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-cohort": "hifi",
+      "st-parental-cohort": "short"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg001-asm-hac",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg001-ont-hac": "ont",
+      "st-hg001-parent-illumina": "short"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg001-asm-sup",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg001-ont-sup": "ont",
+      "st-hg001-parent-illumina": "short"
+    },
+    "outcomes": [
+      "metric-hg001-t2t",
+      "metric-hg001-n50",
+      "metric-hg001-qv"
+    ]
+  },
+  {
+    "paper": "297",
+    "step": "step-hg001-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg001-herro": "ont"
+    },
+    "input_states": {
+      "st-hg001-herro": "filtered"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg002-asm-hac",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg002-ont-hac": "ont",
+      "st-hg002-parent-illumina": "short"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg002-asm-sup",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg002-ont-sup": "ont",
+      "st-hg002-parent-illumina": "short"
+    },
+    "outcomes": [
+      "metric-hg002-t2t",
+      "metric-hg002-n50",
+      "metric-hg002-qv"
+    ]
+  },
+  {
+    "paper": "297",
+    "step": "step-hg002-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg002-herro": "ont"
+    },
+    "input_states": {
+      "st-hg002-herro": "filtered"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg003-asm-hac",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg003-ont-hac": "ont"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg003-asm-sup",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg003-ont-sup": "ont"
+    },
+    "outcomes": [
+      "metric-hg003-t2t",
+      "metric-hg003-n50",
+      "metric-hg003-qv"
+    ]
+  },
+  {
+    "paper": "297",
+    "step": "step-hg004-asm-hac",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg004-ont-hac": "ont"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg004-asm-sup",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg004-ont-sup": "ont"
+    },
+    "outcomes": [
+      "metric-hg004-t2t",
+      "metric-hg004-n50",
+      "metric-hg004-qv"
+    ]
+  },
+  {
+    "paper": "297",
+    "step": "step-hg005-asm-hac",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg005-ont-hac": "ont",
+      "st-hg005-parent-illumina": "short"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg005-asm-sup",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg005-ont-sup": "ont",
+      "st-hg005-parent-illumina": "short"
+    },
+    "outcomes": [
+      "metric-hg005-t2t",
+      "metric-hg005-n50",
+      "metric-hg005-qv"
+    ]
+  },
+  {
+    "paper": "297",
+    "step": "step-hg005-verkko",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg005-herro": "ont"
+    },
+    "input_states": {
+      "st-hg005-herro": "filtered"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg006-asm-hac",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg006-ont-hac": "ont"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg006-asm-sup",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg006-ont-sup": "ont"
+    },
+    "outcomes": [
+      "metric-hg006-t2t",
+      "metric-hg006-n50",
+      "metric-hg006-qv"
+    ]
+  },
+  {
+    "paper": "297",
+    "step": "step-hg007-asm-hac",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg007-ont-hac": "ont"
+    }
+  },
+  {
+    "paper": "297",
+    "step": "step-hg007-asm-sup",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": true,
+    "inputs": {
+      "st-hg007-ont-sup": "ont"
+    },
+    "outcomes": [
+      "metric-hg007-t2t",
+      "metric-hg007-n50",
+      "metric-hg007-qv"
+    ]
+  },
+  {
+    "paper": "298",
+    "step": "step-badger-dual",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-badger-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-badger-hic",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-badger-hifi": "hifi",
+      "st-badger-hic": "hic"
+    },
+    "outcomes": [
+      "metric-badger-size",
+      "metric-badger-n50",
+      "metric-badger-complete"
+    ]
+  },
+  {
+    "paper": "298",
+    "step": "step-badger-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-badger-hifi": "hifi",
+      "st-badger-parent": "short"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-hg002-dual",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg002-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-hg002-hic",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg002-hifi": "hifi",
+      "st-hg002-hic": "hic"
+    },
+    "outcomes": [
+      "metric-hg002-size",
+      "metric-hg002-n50",
+      "metric-hg002-complete"
+    ]
+  },
+  {
+    "paper": "298",
+    "step": "step-hg002-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg002-hifi": "hifi",
+      "st-hg002-parent": "short"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-hg00733-dual",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg00733-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-hg00733-hic",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg00733-hifi": "hifi",
+      "st-hg00733-hic": "hic"
+    },
+    "outcomes": [
+      "metric-hg00733-size",
+      "metric-hg00733-n50",
+      "metric-hg00733-complete"
+    ]
+  },
+  {
+    "paper": "298",
+    "step": "step-hg00733-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hg00733-hifi": "hifi",
+      "st-hg00733-parent": "short"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-rhino-dual",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-rhino-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-rhino-hic",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-rhino-hifi": "hifi",
+      "st-rhino-hic": "hic"
+    },
+    "outcomes": [
+      "metric-rhino-size",
+      "metric-rhino-n50",
+      "metric-rhino-complete"
+    ]
+  },
+  {
+    "paper": "298",
+    "step": "step-rhino-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-rhino-hifi": "hifi",
+      "st-rhino-parent": "short"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-sterlet-dual",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-sterlet-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-sterlet-hic",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-sterlet-hifi": "hifi",
+      "st-sterlet-hic": "hic"
+    },
+    "outcomes": [
+      "metric-sterlet-size",
+      "metric-sterlet-n50",
+      "metric-sterlet-complete"
+    ]
+  },
+  {
+    "paper": "298",
+    "step": "step-sterlet-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-sterlet-hifi": "hifi",
+      "st-sterlet-parent": "short"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-takahe-dual",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-takahe-hifi": "hifi"
+    }
+  },
+  {
+    "paper": "298",
+    "step": "step-takahe-hic",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-takahe-hifi": "hifi",
+      "st-takahe-hic": "hic"
+    },
+    "outcomes": [
+      "metric-takahe-size",
+      "metric-takahe-n50",
+      "metric-takahe-complete"
+    ]
+  },
+  {
+    "paper": "298",
+    "step": "step-takahe-trio",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-takahe-hifi": "hifi",
+      "st-takahe-parent": "short"
+    }
+  },
+  {
+    "paper": "300",
+    "step": "step-plant-assemble-300",
+    "stage": "assembly",
+    "task": "contig_assembly",
+    "parameter_eligible": false,
+    "inputs": {
+      "st-hifi-plant-300": "hifi",
+      "st-ul-plant-300": "ont"
+    },
+    "outcomes": [
+      "m-plant-complete-300"
+    ]
   }
 ]

@@ -60,9 +60,7 @@ def method_is_selected(state: TopLevelState, method_name: str) -> bool:
     return isinstance(roster, list) and method_name in roster
 
 
-def has_execution_result(
-    output: Mapping[str, object], method_name: str
-) -> bool:
+def has_execution_result(output: Mapping[str, object], method_name: str) -> bool:
     """Return whether a method has crossed the execution boundary."""
 
     attempts = output.get("execution_attempts")
