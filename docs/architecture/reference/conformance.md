@@ -67,11 +67,7 @@ version-specific interaction; unexplained settings are retained as unknown.
 
 ### Assembly corpus handoff and measured recommendation coverage
 
-The local directory inspected on 2026-10-04 contains 281 paper packages and
-617 Assembly cases; 94 cases are marked parameter-eligible, and 301 cases contain
-943 numeric material observations. These are loader-validated counts, not an
-independent audit of parameter eligibility or biological evidence. The producer's `cases/`
-pilot format is not the runtime exchange; export through
+The producer's `cases/` pilot format is not the runtime exchange; export through
 `scripts/build_assembly_cases.py` and configure one `assembly.case_source`.
 The consumer's local `descriptors/knowledge_packs/assembly/cases/` is Git-ignored
 and manually copied for deployment. The directory is not automatically discovered;
@@ -91,17 +87,12 @@ native-setting preservation, not real-corpus coverage or biological benefit.
   case selections, then validate the exported packages and method/parameter
   requests. Outcome-quality experiments remain separate from software tests.
 
-The tracked `descriptors/knowledge_packs/assembly/selection.json` covers the
-101–300 source range and rebuilds 187 paper packages / 396 cases from the
-producer's `outputs/{paper}-response.json`. Comparing that fresh export with the
-local directory finds differences in 21 paper packages: 31 cases have different
-`content`, including 27 with different `observations`. Case identities and
-parameter-eligibility flags agree. The previously described observation-enrichment
-file and application script are absent from this checkout, so a fresh export is
-not yet proof that the deployed enriched corpus can be reproduced. Preserve the
-current local case files; recover and source-audit the enrichment provenance
-before replacing them. Closing this handoff gap requires a reproducible export
-of the intended corpus and independent review of its eligibility/state bindings.
+Rebuilding the tracked `descriptors/knowledge_packs/assembly/selection.json`
+from the producer's `outputs/{paper}-response.json` does not reproduce all
+enriched `content` and `observations` in the local case directory. The enrichment
+source and application script are absent from this checkout. Before replacing
+the local cases, recover and source-audit that provenance, establish a
+reproducible export, and independently review eligibility/state bindings.
 
 ### Dedup advisor three-attempt artifact isolation and real-tool acceptance
 

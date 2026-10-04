@@ -103,6 +103,15 @@ that owner in place; do not add phase plans, implementation summaries, handoff
 snapshots, acceptance logs, or duplicate design explanations to the working
 tree. Keep operational guides executable and current.
 
+Conversation progress, completed-task summaries, test-run logs, and one-off
+handoffs belong in the chat or commit/PR description, not in a new Markdown
+file. When a temporary document has served its purpose, move any still-current
+contract or procedure into its existing owner, remove the temporary file and
+its links, and use Git history for retrieval. Do not create an archive directory
+or a cleanup report to preserve retired documentation. `conformance.md` retains
+only unresolved capability gaps, evidence locations, and closure conditions;
+it is not a dated activity log or a local-data inventory.
+
 Audit finding identifiers are review-local coordinates, not architecture
 categories. Never create an `F1`/`F2`-style contract, table, or navigation path.
 Route each accepted semantic rule into its existing owner; record only a real

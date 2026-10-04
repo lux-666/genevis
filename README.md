@@ -235,7 +235,7 @@ case 保留方法原生参数、材料/结果对象、评价口径、来源定�
 一个 case 只对应一次 Assembly 操作；Hi-C 参与组装器分相的直接输入保留，
 后续 scaffolding/T2T 不混入该操作参数。结果明确区分直接输出、下游上下文和混合对象。
 旧 casepack/V1/pilot 配置不兼容。Hi-C、T2T 推荐器的扩展不在本次范围。
-当前本地案例规模、导出复现差异和待验收边界见
+案例导出复现差异和待验收边界见
 [Assembly corpus conformance](docs/architecture/reference/conformance.md#assembly-corpus-handoff-and-measured-recommendation-coverage)。
 案例可加载、可检索不等于参数资格、指标绑定或推荐效果已完成验收。
 精确合同见 [Assembly case consumption](docs/architecture/reference/casepack.md)。
