@@ -199,35 +199,35 @@ Assembly 每次新方法推荐和参数推荐（含重试）直接读取配置�
 来源方法、原生参数、材料状态和结果限定均保留，跨方法案例可参与推理，
 但执行输出只能包含已确认方法的 L2 参数。
 每条 case 的 `parameter_eligible` 单独标记是否有可用于调参的明确设置；
-参数检索只排序 `true`，方法路线检索仍使用全部 case。已有判定记录在
-`descriptors/knowledge_packs/assembly/parameter_eligibility.json`；新增选择项须提供该布尔值。
+参数检索只排序 `true`，方法路线检索仍使用全部 case。
+**case JSON 是唯一维护和交付依据**：资格、指标、补充证据和来源定位直接保存在 case 内，
+不再维护独立资格表、全库 selection 或补充回放文件。
 
-已有 `assembly-extraction.v5` 图通过显式选择文件导出。相邻生产仓库目前的
-`cases/` 是 pilot 格式，不能直接作为 `case_source`；使用其原图和显式绑定：
+本地 case 统一放在 `descriptors/knowledge_packs/assembly/cases/`，由 Git 忽略。
+使用真实加载器验证，再将这些 JSON 手动复制到服务器的活动案例目录：
+
+```bash
+python -c 'from app.knowledge.assembly_cases import load_case_papers; papers = load_case_papers("descriptors/knowledge_packs/assembly/cases"); print(len(papers), "papers", sum(len(p.cases) for p in papers), "cases")'
+```
+
+复制后配置 `assembly.case_source`；程序不会自动扫描本地目录。
+修订既有 case 时直接更新该文件，保留原生参数、材料绑定和来源证据，然后重新验证。
+修改或复制活动目录前，等待进行中的推荐结束并暂停新推荐和重试；全部文件复制并验证后再恢复。
+Git 不携带这些案例数据，部署和备份应保留已校验的 case 文件；原始图重新投影不能恢复后续补充。
+
+新论文仍可通过 `scripts/build_assembly_cases.py` 从 `assembly-extraction.v5` 图一次性导入。
+调用方为本批新 case 提供临时选择文件，每项显式填写 `parameter_eligible`，不读取全局补充表。
+输出到暂存目录，审核后加入活动案例库；不要用原图批量重建并替换已修订的 case。
 
 ```bash
 python scripts/build_assembly_cases.py \
-  --extractions ../gene_agent_cases/extractions \
-  --selection ../gene_agent_cases/scripts/case_projection_pilot.selection.json \
-  --output /absolute/path/to/assembly-cases
-python -c 'from pathlib import Path; from app.knowledge.assembly_cases import load_case_papers; papers = load_case_papers(Path("/absolute/path/to/assembly-cases")); print(len(papers), "papers", sum(len(p.cases) for p in papers), "cases")'
+  --extractions /path/to/new-source-graphs \
+  --selection /path/to/new-case-bindings.json \
+  --filename-template '{paper}-response.json' \
+  --output /path/to/staged-new-cases
 ```
 
-现有统一选择表 `descriptors/knowledge_packs/assembly/selection.json` 已顺延覆盖 101–300 的新增选择及参数推荐资格；
-原图在相邻仓库 `outputs/{paper}-response.json`，导出时指定
-`--filename-template '{paper}-response.json'`。123、136、137 的组装步骤未明确绑定输入读段，暂未投影。
-
-该命令不修改原图，不覆盖不同内容，不将投影视为论文重新审核。
-更新时先导出到新的目录并验证，再把 `assembly.case_source` 指向该目录；
-运行时只读所配置的这一个目录。本地 case 统一放在
-`descriptors/knowledge_packs/assembly/cases/`，由 Git 忽略，部署时手动复制；
-更新代码时须同步复制这些 JSON，旧文件缺少 `parameter_eligible` 会加载失败；
-复制后必须配置 `assembly.case_source`，程序不会自动扫描该目录。
-验证并完成切换后删除旧导出目录，避免保留多份活动案例库。
-替换已有 case 前可在同一导出命令上追加
-`--compare-existing /path/to/delivered-cases --audit-report /path/to/new-audit.json`。
-此模式只比较、不写出 case；报告源图/选择表/输出哈希、逐 case 差异及未选择的论文文件，
-完整案例库不一致时退出码为 1。报告须放在案例目录之外；不会恢复另一个补充表或自动覆盖已交付数据。
+该工具不修改原图，不覆盖不同内容，不将投影视为论文重新审核。
 选择文件中的每项必须明确 `paper`、`step`、`stage: assembly`、
 `task: contig_assembly` 和输入 state ID 到平台的 `inputs` 映射；
 `features` 指向 measurement ID 并声明规范单位，`outcomes` 列出结果 measurement ID。
@@ -239,7 +239,7 @@ case 保留方法原生参数、材料/结果对象、评价口径、来源定�
 一个 case 只对应一次 Assembly 操作；Hi-C 参与组装器分相的直接输入保留，
 后续 scaffolding/T2T 不混入该操作参数。结果明确区分直接输出、下游上下文和混合对象。
 旧 casepack/V1/pilot 配置不兼容。Hi-C、T2T 推荐器的扩展不在本次范围。
-案例导出复现差异和待验收边界见
+指标绑定及推荐效果的待验收边界见
 [Assembly corpus conformance](docs/architecture/reference/conformance.md#assembly-corpus-handoff-and-measured-recommendation-coverage)。
 案例可加载、可检索不等于参数资格、指标绑定或推荐效果已完成验收。
 精确合同见 [Assembly case consumption](docs/architecture/reference/casepack.md)。

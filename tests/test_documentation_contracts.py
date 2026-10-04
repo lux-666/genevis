@@ -56,8 +56,18 @@ class DocumentationContractTests(unittest.TestCase):
             "check_assembly_projection.sh",
             "_recover_assembly_method_artifact()",
             "parameter_prompt_bundle_name()",
+            "sole maintained corpus",
+            "parameter_eligible",
+            "one-time import tool",
         ):
             self.assertIn(required, contract)
+
+        corpus = PROJECT_ROOT / "descriptors/knowledge_packs/assembly"
+        for retired in ("selection.json", "parameter_eligibility.json"):
+            self.assertFalse(
+                (corpus / retired).exists(),
+                f"{retired} duplicates delivered case ownership",
+            )
 
     def test_markdown_relative_links_resolve(self) -> None:
         broken: list[str] = []

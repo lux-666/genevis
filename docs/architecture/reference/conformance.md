@@ -73,27 +73,14 @@ Do not close this gap by making unknown a wildcard or inferring state from label
 Cross-method NextDenovo tests use synthetic fixtures; they establish wiring and
 native-setting preservation, not real-corpus coverage or biological benefit.
 
-- Current evidence: `app/knowledge/v5_projection.py`,
-  `tests/test_assembly_case_consumption.py`,
-  `descriptors/knowledge_packs/assembly/selection.json`, and the Git-ignored
-  local `descriptors/knowledge_packs/assembly/cases/` directory. Export through
-  `scripts/build_assembly_cases.py` from the adjacent producer's
-  `../gene_agent_cases/outputs/` to compare corresponding case identities.
+- Current evidence: `app/knowledge/assembly_cases.py`,
+  `tests/test_assembly_case_consumption.py`, and the Git-ignored
+  local `descriptors/knowledge_packs/assembly/cases/` directory.
 - Contract owner: [Assembly case consumption](casepack.md).
-- Closure condition: add evidence-checked state bindings and actual foreign-tool
-  case selections, then validate the exported packages and method/parameter
-  requests. Outcome-quality experiments remain separate from software tests.
-
-Rebuilding the tracked selection from the source graphs does not reproduce all
-enriched `content` and `observations` in the delivered local cases, and the
-selection covers only part of the delivered corpus. Enrichments were retained
-directly in the case files by the chosen delivery policy; the separate patch
-table and replay script were deliberately removed. Preserve those delivered
-files. `build_assembly_cases.py --compare-existing ... --audit-report ...`
-reports changed cases and unselected paper files without writing either corpus;
-it exits nonzero unless the complete corpus matches. Full regeneration still
-requires source-backed selection/enrichment coverage, not copying enriched
-values into graphs without checking their material and source bindings.
+- Closure condition: correct source-verified state bindings in the delivered
+  cases, validate the packages and actual foreign-tool retrieval in method and
+  parameter requests, then measure recommendation outcomes separately from
+  software tests. Corpus maintenance uses the case files themselves.
 
 ### Dedup advisor real-tool acceptance
 

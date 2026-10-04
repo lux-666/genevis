@@ -252,26 +252,23 @@ def test_export_response_files_reports_empty_material_index(
     assert (tmp_path / "cases/p.json").exists()
 
 
-def test_export_audit_detects_enrichment_and_unselected_files_without_writing(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("eligible", [True, False, None, "true", 1])
+def test_import_requires_explicit_eligibility_and_preserves_reviewed_cases(
+    tmp_path, monkeypatch, eligible
 ):
     from scripts.build_assembly_cases import main
 
     graph, selections = scalar_fixture()
+    if eligible is None:
+        del selections[0]["parameter_eligible"]
+    else:
+        selections[0]["parameter_eligible"] = eligible
     source = tmp_path / "graphs"
     source.mkdir()
     (source / "p.json").write_text(json.dumps(graph))
-    selection = tmp_path / "selection.json"
+    selection = tmp_path / "bindings.json"
     selection.write_text(json.dumps(selections))
-    existing = tmp_path / "existing"
-    existing.mkdir()
-    payload = project_paper("p", graph, selections).model_dump(mode="json")
-    payload["cases"][0]["observations"][0]["basis"] += "; enriched source locator"
-    (existing / "p.json").write_text(json.dumps(payload))
-    (existing / "unselected.json").write_text("{}")
-    before = {p.name: p.read_bytes() for p in existing.iterdir()}
-    output = tmp_path / "output"
-    report = tmp_path / "audit.json"
+    output = tmp_path / "cases"
     monkeypatch.setattr(
         sys,
         "argv",
@@ -283,38 +280,32 @@ def test_export_audit_detects_enrichment_and_unselected_files_without_writing(
             str(selection),
             "--output",
             str(output),
-            "--compare-existing",
-            str(existing),
-            "--audit-report",
-            str(report),
         ],
     )
-    with pytest.raises(SystemExit) as exc:
+    if type(eligible) is not bool:
+        with pytest.raises(ValueError, match="missing parameter eligibility review"):
+            main()
+        assert not output.exists()
+        return
+    main()
+    destination = output / "p.json"
+    imported = destination.read_bytes()
+    target = tmp_path / "imported.json"
+    destination.rename(target)
+    destination.symlink_to(target)
+    with pytest.raises(ValueError, match="refusing symlink case destination"):
         main()
-    assert exc.value.code == 1
-    audit = json.loads(report.read_text())
-    assert not audit["comparison"]["matches_complete_corpus"]
-    assert audit["comparison"]["unselected_existing_files"] == ["unselected.json"]
-    assert audit["comparison"]["changes"][0]["changed_cases"] == {
-        payload["cases"][0]["case_id"]: ["observations"]
-    }
-    assert audit["source_sha256"]["p.json"]
-    assert not output.exists()
-    assert {p.name: p.read_bytes() for p in existing.iterdir()} == before
-
-
-def test_export_comparison_ignores_json_formatting_but_reports_missing_cases(tmp_path):
-    from scripts.build_assembly_cases import compare_export
-
-    graph, selections = scalar_fixture()
-    payload = project_paper("p", graph, selections).model_dump(mode="json")
-    prepared = {tmp_path / "p.json": json.dumps(payload).encode()}
-    missing = compare_export(prepared, tmp_path)
-    assert missing["changes"] == [{"paper": "p", "status": "missing"}]
-    (tmp_path / "p.json").write_text(json.dumps(payload, indent=4))
-    identical = compare_export(prepared, tmp_path)
-    assert identical["matches_complete_corpus"]
-    assert identical["changes"] == []
+    assert target.read_bytes() == imported
+    destination.unlink()
+    target.rename(destination)
+    payload = json.loads(destination.read_text())
+    assert payload["cases"][0]["parameter_eligible"] is eligible
+    payload["cases"][0]["observations"][0]["basis"] += "; reviewed source locator"
+    destination.write_text(json.dumps(payload))
+    reviewed = destination.read_bytes()
+    with pytest.raises(ValueError, match="refusing to overwrite different case"):
+        main()
+    assert destination.read_bytes() == reviewed
 
 
 def test_explicit_components_recover_metrics_without_confusing_library_size():

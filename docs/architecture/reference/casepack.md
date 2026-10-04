@@ -28,8 +28,24 @@ their established owners.
 
 The producer retains `assembly-extraction.v5` as its execution-fact graph and
 supplies graphs for self-contained `recommendation-cases.v1` paper packages.
-`scripts/build_assembly_cases.py` projects explicitly selected Assembly steps;
-the older producer pilot exchange is not accepted by the runtime.
+The delivered case JSON files are the sole maintained corpus: identity,
+`parameter_eligible`, observations, reported measurements and source locators
+live together in each case. Corrections from source review update that case
+in place; do not maintain a parallel eligibility table, corpus selection list,
+or enrichment replay file. Deploy the validated case files themselves.
+Before editing or copying into an active directory, finish in-flight
+recommendations and pause new recommendations and retries. Resume only after
+the complete update passes the case loader; directory reads are not atomic
+corpus snapshots.
+
+`scripts/build_assembly_cases.py` is an optional one-time import tool for new
+Assembly cases. Its caller-supplied selection binds source steps, inputs and
+measurements and must explicitly include `parameter_eligible` for every case.
+It has no repository-global selection or eligibility fallback. Import into a
+separate staging directory, review the resulting cases, then add them to the
+active corpus. It refuses to overwrite different existing case content.
+Re-exporting an original graph is not a way to restore later case corrections.
+The older producer pilot exchange is not accepted by the runtime.
 One paper contains zero or more cases. A case represents an identified sample or
 explicit sample group using a particular method configuration for a particular
 assembly task. Shared configurations remain identifiable across sample cases.
@@ -98,8 +114,9 @@ Case content is an allowlisted recommendation summary, not a copy of v5
 entities. Preserve sample background, input roles and processing scope, source
 settings, evaluated-object labels, measurement basis, assessment conditions,
 limitations and source locators. Do not embed whole states, steps, methods or
-source registries inside inputs, assessments or outcomes. The original graph
-remains the detailed source of truth.
+source registries inside inputs, assessments or outcomes. The original graph and
+cited paper remain source evidence; the reviewed case file owns the delivered
+recommendation content, including later corrections.
 
 ## Current material query
 
