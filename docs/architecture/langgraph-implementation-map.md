@@ -1,218 +1,188 @@
-# LangGraph Implementation Map
+<a id="langgraph-implementation-map"></a>
 
-> **Status:** current implementation map, with partial and debt units marked
-> explicitly.
-> **Read when:** determining which graph nodes, method routes, parameter flows,
-> and review boundaries actually exist before changing or extending a stage.
-> **Comes from:** frozen workflow occurrences, compiled graph builders, descriptor
-> registry, method adapters, focused tests, and architecture conformance review.
-> **Feeds into:** implementation planning, code review, method onboarding, and
-> updates to the exact architecture contracts.
-> **Contract dependencies:** [Runtime orchestration](topics/runtime-orchestration.md),
-> [Stage contracts](reference/stage-contracts.md),
-> [Descriptors](reference/descriptors.md),
-> [Parameter recommendation](reference/parameter-recommendation.md),
-> [CasePack](reference/casepack.md), and
-> [Architecture conformance](reference/conformance.md).
-> **Code evidence:** `app/workflow.py`, `app/graph/`, every
-> `app/stages/*/builder.py`, `app/execution/`, `descriptors/registry.yaml`, and
-> the focused test files named below.
+# LangGraph 实现映射
 
-This page projects what is wired, executable, verified, partial, or absent in
-the current tree. Exact behavioral rules remain owned by the linked reference
-contracts.
+> **状态：** 当前实现映射，明确标记部分实现和欠账。
+>
+> **阅读场景：** 修改或扩展阶段前，确定真实存在的图节点、方法路线、参数流程和评审边界。
+>
+> **来源：** 冻结工作流 occurrence、编译图 builder、描述符注册表、方法适配器、聚焦测试与架构一致性审查。
+>
+> **下游：** 实现规划、代码评审、方法接入、精确架构契约更新。
+>
+> **依赖契约：** [运行时编排](topics/runtime-orchestration.md)、[阶段契约](reference/stage-contracts.md)、[描述符](reference/descriptors.md)、[参数推荐](reference/parameter-recommendation.md)、[案例契约](reference/casepack.md)、[架构一致性](reference/conformance.md)。
+>
+> **代码依据：** `app/workflow.py`、`app/graph/`、所有 `app/stages/*/builder.py`、`app/execution/`、`descriptors/registry.yaml` 及下方聚焦测试。
 
-## How to read status
+本页投影当前树中已接线、可执行、已验证、部分实现或缺失的能力。精确行为仍由链接的参考契约拥有。
 
-A compiled stage is not automatically a completed capability. Each unit is
-classified on four independent axes.
+<a id="how-to-read-status"></a>
 
-| Axis | Values | Interpretation |
+## 状态读法
+
+编译阶段不自动等于能力完成。每个单元沿四个独立轴分类。
+
+| 轴 | 值 | 含义 |
 |---|---|---|
-| Wiring | `wired`, `unwired`, `not-applicable` | Reachability through a graph edge, conditional route, or registered method route |
-| Implementation | `executable`, `implemented-no-process`, `partial`, `placeholder`, `absent` | Real runner path, deliberate non-process behavior, incomplete boundary, named shell without a closed loop, or no modeled unit |
-| Verification | `tested`, `partially-tested`, `untested` | Presence of focused tests that exercise the claim; this is not a claim that every repository quality gate is currently green |
-| Debt | `none`, `known-gap`, `contract-drift` | No recorded limitation, bounded product limitation, or mismatch recorded in the conformance register |
+| 接线 | `wired`、`unwired`、`not-applicable` | 能否通过图边、条件路线或注册方法路线到达 |
+| 实现 | `executable`、`implemented-no-process`、`partial`、`placeholder`、`absent` | 真实 Runner 路径、有意无进程行为、不完整边界、只有命名外壳而无闭环、没有建模单元 |
+| 验证 | `tested`、`partially-tested`、`untested` | 是否有针对性测试覆盖声明，不等于全部仓库质量门当前通过 |
+| 欠账 | `none`、`known-gap`、`contract-drift` | 无记录限制、有界产品限制、一致性登记的契约漂移 |
 
-`Not required` is a capability decision, not a failure status. For example,
-Inventory does not need an LLM parameter recommender. `Placeholder` means a
-named interface or graph position exists without an executable closed loop;
-`absent` means there is no canonical stage, registered method, or graph
-contract at all.
+“不需要”是能力决策，不是失败。例如 Inventory 不需要 LLM 参数推荐器。`placeholder` 指有命名接口或图位置却没有执行闭环；`absent` 指完全没有规范阶段、注册方法或图契约。
 
-## Parent graph
+<a id="parent-graph"></a>
 
-The parent graph is a controller loop, not an unconditional linear pipeline.
-It selects one active immutable `workflow_step`, invokes the corresponding
-stage subgraph, then returns to the controller. Occurrence identity, settlement,
-literal ordering, repeated-stage, Review-target, and cursor rules are owned by
-the [run-data contract](reference/data-contract.md) and
-[stage contracts](reference/stage-contracts.md); this implementation map records
-only the current wiring and evidence for those rules.
+## 父图
 
-There are no direct parent edges from one biological stage to the next. Every
-compiled stage returns to `route_controller`. Stage subgraphs own biological
-selection and evidence; the parent records stage entry and invokes shared
-occurrence settlement, while the authoritative finalizer owns session terminal
-events. Operator reports are emitted by the executor/projection boundary, not
-the parent controller.
+父图是控制器循环，不是无条件线性流水线：选择当前不可变 `workflow_step`，调用对应子图，再回控制器。Occurrence 身份、结算、字面顺序、重复阶段、Review 目标和游标规则由[运行数据](reference/data-contract.md)及[阶段契约](reference/stage-contracts.md)拥有，本页只记录接线和证据。
 
-| Parent unit | Wiring | Implementation | Verification | Debt | Evidence |
+父图没有生物学阶段之间的直接边，每个编译阶段返回 `route_controller`。子图拥有生物学选择与证据；父图记录阶段进入并调用共享结算；权威终结器拥有会话终态。操作者报告由执行器/投影边界生成，不由父控制器生成。
+
+| 父图单元 | 接线 | 实现 | 验证 | 欠账 | 证据 |
 |---|---|---|---|---|---|
-| `route_controller` and `route_from_current_stage` | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py` |
-| Frozen workflow-occurrence routing and settlement | `wired` | `implemented-no-process` | `tested` | `none` | Every terminal stage path returns the explicit, frozen-occurrence-bound `workflow_step_outcome`; the shared controller/recovery settlement boundary validates it, records declared immutable deliveries before the singleton stage terminal, and rejects cursor/route-marker inference. `app/schemas/state.py`, `app/control/workflow_plan.py`, `app/control/occurrence_settlement.py`, `app/graph/builder.py`, `app/graph/routing.py`; `tests/test_graph_routing.py`, `tests/test_routing_contracts.py`, `tests/test_state_schema.py`, `tests/test_terminal_finalizer.py` |
-| Review occurrence placement policy | `wired` | `implemented-no-process` | `tested` | `none` | RunConfig preserves optional literal Review placement; sequence analysis binds only explicit Review occurrences. Deterministic, manifest, and LLM planning use the editable complete recommendation with Gap Closing, Base Polishing, and finish Review. `app/workflow.py`, `app/schemas/run_config.py`, `app/entrypoints/tui_intake.py`, `app/entrypoints/ask_planner.py`; `tests/test_run_config.py`, `tests/test_workflow_plan.py`, `tests/test_tui_intake.py`, `tests/test_ask_plan.py` |
-| Base Polish adoption boundary | `wired` | `executable` | `tested` | `bounded` | HiFi Racon, paired evidence, durable adopt/retain/stop decisions; `app/stages/base_polish/`; `tests/test_base_polish.py` |
-| SQLite/memory checkpoint selection and durable resume | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`, `app/control/lifecycle.py`; `tests/test_checkpointer.py`, `tests/test_durable_resume.py` |
-| Foreground review countdown policy | `wired` | `implemented-no-process` | `tested` | `none` | The frozen policy and registered resolver feed the same typed intent, durable preparation, verified application, and recovery protocol as a manual decision. Countdown exists only in the original attached executor; later review/resume remains manual. Exact values and bindings are owned by the run-data contract. `app/review/application.py`, `app/control/resume_transaction.py`, `app/review/approval.py`; `tests/test_review_application.py`, `tests/test_foreground_review_countdown.py`, `tests/test_parameter_persistence_v2.py` |
-| Authoritative terminal finalization, reporting, and checkpoint compaction | `wired` | `implemented-no-process` | `tested` | `known-gap` | `finalize_authoritative_terminal()` proves the checkpoint before recording the singleton terminal Ledger fact, then compacts best-effort. Reports run through `ProjectionBoundary` and cannot alter lifecycle authority. Report regeneration remains the bounded gap in [conformance](reference/conformance.md). `app/control/lifecycle.py`, `app/control/projections.py`, `app/graph/checkpoint_compaction.py`; `tests/test_terminal_finalizer.py`, `tests/test_projections.py`, `tests/test_checkpoint_compaction.py` |
+| `route_controller`、`route_from_current_stage` | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/routing.py`；`tests/test_graph_routing.py`、`tests/test_routing_contracts.py` |
+| 冻结 occurrence 路由与结算 | `wired` | `implemented-no-process` | `tested` | `none` | 每条阶段终态路径返回冻结 occurrence 绑定的明确 `workflow_step_outcome`；控制器/恢复共享边界校验它，先记录不可变交付再写单例阶段终态，拒绝游标/路由标记推断。`app/schemas/state.py`、`app/control/workflow_plan.py`、`app/control/occurrence_settlement.py`、`app/graph/builder.py`、`app/graph/routing.py`；`tests/test_graph_routing.py`、`tests/test_routing_contracts.py`、`tests/test_state_schema.py`、`tests/test_terminal_finalizer.py` |
+| Review occurrence 位置策略 | `wired` | `implemented-no-process` | `tested` | `none` | RunConfig 保留可选字面 Review 位置，序列分析只绑定明确 occurrence。确定性、manifest 和 LLM 规划共用含 GapCloser、Base Polish、最终 Review 的可编辑完整推荐。`app/workflow.py`、`app/schemas/run_config.py`、`app/entrypoints/tui_intake.py`、`app/entrypoints/ask_planner.py`；`tests/test_run_config.py`、`tests/test_workflow_plan.py`、`tests/test_tui_intake.py`、`tests/test_ask_plan.py` |
+| Base Polish 采纳边界 | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对证据、持久采纳/保留/停止；`app/stages/base_polish/`；`tests/test_base_polish.py` |
+| SQLite/memory checkpoint 选择和持久恢复 | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`、`app/control/lifecycle.py`；`tests/test_checkpointer.py`、`tests/test_durable_resume.py` |
+| 前台评审倒计时 | `wired` | `implemented-no-process` | `tested` | `none` | 冻结策略与注册 resolver 进入人工决策共用的类型化意图、持久准备、已验证应用和恢复协议。倒计时仅存在于原附着执行器，后续 review/resume 人工恢复。值与绑定由运行数据契约拥有。`app/review/application.py`、`app/control/resume_transaction.py`、`app/review/approval.py`；`tests/test_review_application.py`、`tests/test_foreground_review_countdown.py`、`tests/test_parameter_persistence_v2.py` |
+| 权威终结、报告、checkpoint 压缩 | `wired` | `implemented-no-process` | `tested` | `none` | `finalize_authoritative_terminal()` 先证明 checkpoint 再写 Ledger 终态单例，随后尽力压缩。报告经 `ProjectionBoundary`，不得改变生命周期权威；独立重建全部报告不在契约内。`app/control/lifecycle.py`、`app/control/projections.py`、`app/graph/checkpoint_compaction.py`；`tests/test_terminal_finalizer.py`、`tests/test_projections.py`、`tests/test_checkpoint_compaction.py` |
 
-## Cross-cutting implementation boundaries
+<a id="cross-cutting-implementation-boundaries"></a>
 
-These boundaries apply across multiple stage graphs. This table identifies the
-implemented owner and verification surface; the linked reference document owns
-the exact behavioral contract.
+## 跨切面实现边界
 
-| Boundary | Current implementation | Code and test evidence | Contract owner |
+以下边界横跨多个阶段图。表格标识实现所有者与验证面，链接的参考文档拥有精确行为。
+
+| 边界 | 当前实现 | 代码与测试证据 | 契约所有者 |
 |---|---|---|---|
-| Public structured-run preflight and whole-run freeze | Structured/TUI paths validate and freeze the literal occurrence sequence. Fixed-stage method rosters derive from registry defaults; Assembly may omit its roster for stage-owned deferred selection. Manifest validation probes one logical byte from uncompressed and gzip content before frozen publication, rejecting empty or unreadable members; bzip2/xz fail preflight until execution support is end-to-end. | `app/entrypoints/run.py`, `app/entrypoints/tui.py`, `app/schemas/manifest.py`, `app/storage/frozen_inputs.py`; `tests/test_run_command.py`, `tests/test_frozen_inputs.py`, `tests/test_manifest.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
-| Attached and detached progress | One pure reducer consumes only the frozen plan, canonical occurrence terminals, and a matching active gate. Attached rendering invokes it after settlement; detached inspection invokes the same reducer. Cursor, route-tail order, and skip-reason fields are not progress inputs. Detached resumability additionally requires verified frozen inputs and a readable checkpoint row for the inspected session, not SQLite-file existence alone. | `app/control/projections.py`, `app/control/lifecycle.py`, `app/graph/builder.py`; `tests/test_projections.py`, `tests/test_graph_routing.py`, `tests/test_run_command.py`, `tests/test_review_resume.py`, `tests/test_inspect_read_model.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
-| Verified frozen context and trace authority | Production run and resume validate one frozen transaction and pass its in-memory `FrozenInputBundle` into the Inventory subgraph. Inventory validation and registration consume its canonical manifest, RunConfig, declarations, and paths. Trace derives workflow steps from a freshly validated bundle, otherwise only occurrence-bearing Ledger/artifact facts. | `app/entrypoints/run.py`, `app/graph/builder.py`, `app/stages/inventory/nodes.py`, `app/reports/trace_writer.py`; `tests/test_frozen_inputs.py`, `tests/test_run_trace.py`, `tests/test_resource_resolution.py` | [Runtime orchestration](topics/runtime-orchestration.md), [Data contract](reference/data-contract.md) |
-| Occurrence, method, and attempt fact integrity | Occurrence settlement is explicit and stage terminals are append singletons. Attempt terminals are mutually exclusive under the Ledger append lock; trace projects the conservative canonical terminal and exposes integrity diagnostics for conflicts. Shared lifecycle and planner settlement record one typed durable method disposition per effective method and occurrence; deferred Assembly validates `primary_method == assembly_selection.primary_method` before settlement. | `app/execution/lifecycle.py`, `app/execution/method_outcomes.py`, `app/control/occurrence_settlement.py`, `app/storage/ledger.py`, `app/graph/builder.py`, `app/reports/trace_writer.py`; `tests/test_execution_lifecycle.py`, `tests/test_terminal_finalizer.py`, `tests/test_ledger_v2.py`, `tests/test_graph_routing.py`, `tests/test_run_trace.py`, `tests/test_read_qc.py`, `tests/test_genome_survey.py` | [Execution lifecycle](reference/execution-lifecycle.md), [Data contract](reference/data-contract.md) |
-| Local process dispatch | `LocalRunner` invokes the frozen interpreter/script as argv, optionally wrapped by `conda run`, always with `shell=False`. Non-empty `env_setup` shell fragments fail closed on both dispatch paths. | `app/execution/local_runner.py`; `tests/test_execution_runner.py`, `tests/test_env_resolver.py` | [Execution](topics/execution.md), [Execution lifecycle](reference/execution-lifecycle.md) |
-| Interactive Inventory-only planning | Ask/TUI distinguish an unanswered selection (`None`) from an explicit empty occurrence list. Plain-text, questionary, and LLM Plan Draft paths accept `[]`, skip biological planning questions, render `Inventory only`, and freeze `requested_stages: []`. | `app/schemas/ask_plan.py`, `app/entrypoints/ask_interactive.py`, `app/entrypoints/tui.py`; `tests/test_ask_plan.py`, `tests/test_ask_interactive.py`, `tests/test_tui.py` | [TUI and planning](topics/tui-and-planning.md), [Runtime orchestration](topics/runtime-orchestration.md) |
-| Current assembly candidate continuity and immutable delivery | Every implemented assembly-handoff producer declares an occurrence-bound delivery. Shared settlement verifies its candidate/primary artifact ownership before appending `resource_delivered`; Review requires the frozen producer terminal, its single delivery, the current projection, and the resolved candidate bundle to agree. Reused candidates are valid only through an explicit reused delivery. | `app/control/workflow_plan.py`, `app/control/occurrence_settlement.py`, `app/graph/builder.py`, `app/storage/ledger.py`, `app/storage/assembly_candidates.py`, `app/stages/{inventory,assembly,assembly_dedup,assembly_review,hic_scaffolding,t2t}/nodes.py`; `tests/test_inventory.py`, `tests/test_assembly.py`, `tests/test_assembly_dedup.py`, `tests/test_assembly_review.py`, `tests/test_hic_scaffolding.py`, `tests/test_t2t.py` | [Resource handoff](reference/resource-handoff.md), [Stage contracts](reference/stage-contracts.md) |
-| Read QC closed evidence package | SeqKit publishes one direct whole-read-set aggregate for each cardinality; that aggregate owns length and quality metrics, while retained per-file rows serve only as consistency checks. Aggregate and summary provenance reference their real read inputs/aggregate. Input provenance freezes through the resource registry, and zero-retained filtering preserves evidence but fails the occurrence instead of replacing `long_reads`. | `app/stages/read_qc/method_application/support.py`, `app/stages/read_qc/method_application/seqkit_stats.py`, `app/stages/read_qc/method_application/seqkit_length_filter.py`, `app/stages/read_qc/nodes.py`; `tests/test_read_qc.py`, `tests/test_frozen_inputs.py` | [Stage contracts](reference/stage-contracts.md), [Resource handoff](reference/resource-handoff.md) |
-| Stage resource resolution | Stage adapters query canonical `ResourceSpec` objects through `resource_resolution.py`. There is no separate repository planning-preflight API or duplicate stage-requirement table. The confirmed-run boundary performs read-only machine readiness for the fixed effective method closure before whole-run freeze; deferred Assembly resolves its selected method only from the frozen dependency snapshot and performs stage-time preflight before attempt construction. | `app/execution/run_readiness.py`, `app/execution/env_resolver.py`, `app/stages/resource_specs.py`, `app/stages/resource_resolution.py`; `tests/test_run_readiness.py`, `tests/test_project_scaffold.py`, stage-focused tests | [Resource handoff](reference/resource-handoff.md), [Project bootstrap](topics/bootstrap.md) |
-| Genome Survey logical inputs | The stage boundary exposes only `short_reads` and `long_reads`, prefers the short-read family, and leaves clean/raw lifecycle priority to each resource spec. No-read execution is permitted only when an explicit genome size supports the documented skip path. | `app/stages/genome_survey/nodes.py`, `app/stages/genome_survey/state.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` | [Stage contracts](reference/stage-contracts.md) |
-| Executable artifact dependencies | Genome Survey k-mer products cross the Jellyfish/GenomeScope2 boundary as indexed `ArtifactRefJson` values. The consumer has no path-string upgrade branch. | `app/stages/genome_survey/method_application/jellyfish.py`, `genomescope2.py`; `tests/test_genome_survey.py` | [Data contract](reference/data-contract.md) |
-| Descriptor loading | Registry, package, method, planner, IO, conditional-requirement, and resource-hint YAML models reject undeclared keys. The registry loads as 16 retained, typed method records. | `app/schemas/descriptors.py`; `tests/test_configuration.py` | [Descriptors](reference/descriptors.md) |
-| External case consumption | One Assembly v5-derived compact exchange, live directory reads and shared material query; cross-method evidence reaches method choice and target-only parameter advice. No run-level corpus copy or old consumer fallback; Hi-C/T2T extensions deferred. | `app/knowledge/assembly_cases.py`, `assembly_retrieval.py`, `assembly_runtime.py`, `v5_projection.py`; `tests/test_assembly_case_consumption.py`; [software coverage gap](reference/conformance.md#assembly-software-explanation-coverage) | [Assembly case contract](reference/casepack.md) |
-| Registered execution classes | The registry is partitioned into 15 `local` methods bound to imported lifecycle/graph objects and one `planner_only` method whose real route is proven to launch no process. | `tests/test_registry_executable_invariant.py`, `descriptors/registry.yaml` | [Descriptors](reference/descriptors.md) |
-| AutoHiC output collection | After process success and before the first new publication, collection requires all four frozen products or matching attempt-local indexed recovery records. Missing products fail collection; a later publication failure may leave an indexed orphan without success semantic events. | `app/stages/hic_scaffolding/method_application/support.py`; `tests/test_hic_scaffolding.py` | [AutoHiC](topics/autohic.md), [Stage contracts](reference/stage-contracts.md) |
+| 公共结构化运行预检与整次冻结 | 结构化/TUI 校验并冻结字面 occurrence；固定名单由注册表默认推导，Assembly 可省略而延迟选择。发布前从未压缩/gzip 输入探测一个逻辑字节，拒绝空或不可读成员；bzip2/xz 在端到端执行支持前拒绝预检。 | `app/entrypoints/run.py`、`app/entrypoints/tui.py`、`app/schemas/manifest.py`、`app/storage/frozen_inputs.py`；`tests/test_run_command.py`、`tests/test_frozen_inputs.py`、`tests/test_manifest.py` | [运行时](topics/runtime-orchestration.md)、[数据](reference/data-contract.md) |
+| 附着与分离进度 | 一个纯 reducer 仅消费冻结计划、规范 occurrence 终态和匹配门禁；附着在结算后调用，分离检查调用同一函数。游标、轨迹尾顺序、skip 原因不作进度输入。分离可恢复性还要求已验证冻结输入与当前会话可读 checkpoint 行，不能只看 SQLite 文件存在。 | `app/control/projections.py`、`app/control/lifecycle.py`、`app/graph/builder.py`；`tests/test_projections.py`、`tests/test_graph_routing.py`、`tests/test_run_command.py`、`tests/test_review_resume.py`、`tests/test_inspect_read_model.py` | [运行时](topics/runtime-orchestration.md)、[数据](reference/data-contract.md) |
+| 已验证冻结上下文与轨迹权威 | 生产 run/resume 校验一份冻结事务，将内存 `FrozenInputBundle` 注入 Inventory；验证和注册消费规范 manifest、RunConfig、声明、路径。Trace 从新验证 bundle 导出步骤，否则仅使用带 occurrence 的 Ledger/产物事实。 | `app/entrypoints/run.py`、`app/graph/builder.py`、`app/stages/inventory/nodes.py`、`app/reports/trace_writer.py`；`tests/test_frozen_inputs.py`、`tests/test_run_trace.py`、`tests/test_resource_resolution.py` | [运行时](topics/runtime-orchestration.md)、[数据](reference/data-contract.md) |
+| Occurrence、方法、尝试事实完整性 | 显式 occurrence 结算，阶段终态追加单例；尝试终态在 Ledger 追加锁内互斥，trace 保守投影规范终态并显露冲突。共享生命周期/规划结算为有效方法与 occurrence 记录一个类型化处置；延迟 Assembly 先验证 `primary_method == assembly_selection.primary_method`。 | `app/execution/lifecycle.py`、`app/execution/method_outcomes.py`、`app/control/occurrence_settlement.py`、`app/storage/ledger.py`、`app/graph/builder.py`、`app/reports/trace_writer.py`；`tests/test_execution_lifecycle.py`、`tests/test_terminal_finalizer.py`、`tests/test_ledger_v2.py`、`tests/test_graph_routing.py`、`tests/test_run_trace.py`、`tests/test_read_qc.py`、`tests/test_genome_survey.py` | [生命周期](reference/execution-lifecycle.md)、[数据](reference/data-contract.md) |
+| 本地进程分发 | `LocalRunner` 以 argv 调用冻结解释器/脚本，可选 `conda run`，始终 `shell=False`；两条路径都拒绝非空 `env_setup` shell 片段。 | `app/execution/local_runner.py`；`tests/test_execution_runner.py`、`tests/test_env_resolver.py` | [执行](topics/execution.md)、[生命周期](reference/execution-lifecycle.md) |
+| 交互 Inventory-only 规划 | Ask/TUI 区分未回答 `None` 和显式空列表；纯文本、questionary、LLM 草稿均接受 `[]`，跳过生物学规划问题，显示 `Inventory only`，冻结 `requested_stages: []`。 | `app/schemas/ask_plan.py`、`app/entrypoints/ask_interactive.py`、`app/entrypoints/tui.py`；`tests/test_ask_plan.py`、`tests/test_ask_interactive.py`、`tests/test_tui.py` | [TUI](topics/tui-and-planning.md)、[运行时](topics/runtime-orchestration.md) |
+| 当前候选连续性与不可变交付 | 每个已实现组装生产者声明 occurrence 交付。共享结算在追加 `resource_delivered` 前验证候选/主产物所有权；Review 要求冻结生产者终态、唯一交付、当前投影、解析候选包一致。复用候选必须显式 reused 交付。 | `app/control/workflow_plan.py`、`app/control/occurrence_settlement.py`、`app/graph/builder.py`、`app/storage/ledger.py`、`app/storage/assembly_candidates.py`、`app/stages/{inventory,assembly,assembly_dedup,assembly_review,hic_scaffolding,gapcloser,t2t,base_polish}/nodes.py`；`tests/test_inventory.py`、`tests/test_assembly.py`、`tests/test_assembly_dedup.py`、`tests/test_assembly_review.py`、`tests/test_hic_scaffolding.py`、`tests/test_gapcloser.py`、`tests/test_t2t.py`、`tests/test_base_polish.py` | [资源](reference/resource-handoff.md)、[阶段](reference/stage-contracts.md) |
+| Read QC 闭合证据包 | SeqKit 对每个输入规模发布一份直接全读段集汇总，拥有长度/质量指标；逐文件行仅交叉检查。汇总/摘要来源引用真实输入/汇总；注册表冻结来源。零保留过滤保留证据但失败，不替换 `long_reads`。 | `app/stages/read_qc/method_application/support.py`、`seqkit_stats.py`、`seqkit_length_filter.py`、`app/stages/read_qc/nodes.py`；`tests/test_read_qc.py`、`tests/test_frozen_inputs.py` | [阶段](reference/stage-contracts.md)、[资源](reference/resource-handoff.md) |
+| 阶段资源解析 | 适配器经 `resource_resolution.py` 查询规范 `ResourceSpec`，无独立规划预检 API 或重复需求表。确认运行前只读检查固定闭包；延迟 Assembly 从冻结快照解析选择，并在构建尝试前阶段预检。 | `app/execution/run_readiness.py`、`app/execution/env_resolver.py`、`app/stages/resource_specs.py`、`app/stages/resource_resolution.py`；`tests/test_run_readiness.py`、`tests/test_project_scaffold.py`、阶段测试 | [资源](reference/resource-handoff.md)、[Bootstrap](topics/bootstrap.md) |
+| Genome Survey 逻辑输入 | 仅暴露 `short_reads`、`long_reads`，优先短读段族；clean/raw 优先级归资源规格。只有明确基因组大小支持文档 skip 路线时可无读段。 | `app/stages/genome_survey/nodes.py`、`state.py`、`app/stages/resource_specs.py`；`tests/test_genome_survey.py`、`tests/test_genome_size.py` | [阶段](reference/stage-contracts.md) |
+| 可执行产物依赖 | Jellyfish/GenomeScope2 以已索引 `ArtifactRefJson` 交接 k-mer 产物，消费者无路径字符串升级分支。 | `app/stages/genome_survey/method_application/jellyfish.py`、`genomescope2.py`；`tests/test_genome_survey.py` | [数据](reference/data-contract.md) |
+| 描述符加载 | 注册表、包、方法、规划器、IO、条件需求、资源提示 YAML 全部拒绝未声明键；注册表是唯一方法清单，加载类型化记录。 | `app/schemas/descriptors.py`；`tests/test_configuration.py` | [描述符](reference/descriptors.md) |
+| 外部案例消费 | 唯一 v5 派生紧凑交换、实时目录、共享材料查询；跨方法证据进入方法选择与仅目标参数建议。无运行级案例副本或旧消费者后备，Hi-C/T2T 待扩展。 | `app/knowledge/assembly_cases.py`、`assembly_retrieval.py`、`assembly_runtime.py`、`v5_projection.py`；`tests/test_assembly_case_consumption.py`；[软件覆盖缺口](reference/conformance.md#assembly-software-explanation-coverage) | [案例](reference/casepack.md) |
+| 注册执行类别 | `local` 方法绑定导入的生命周期/图对象；`planner_only` 的真实路线证明无进程。 | `tests/test_registry_executable_invariant.py`、`descriptors/registry.yaml` | [描述符](reference/descriptors.md) |
+| AutoHiC 输出收集 | 进程成功后、首次新发布前，要求四项冻结产品或匹配尝试的索引恢复记录。缺产物收集失败；后续发布失败可留下无成功语义事件的索引孤儿。 | `app/stages/hic_scaffolding/method_application/support.py`；`tests/test_hic_scaffolding.py` | [AutoHiC](topics/autohic.md)、[阶段](reference/stage-contracts.md) |
 
-## Stage node inventory
+<a id="stage-node-inventory"></a>
 
-These rows classify concrete node groups. Nested method nodes are expanded in
-the method inventory rather than being hidden inside one stage-level color.
+## 阶段节点清单
 
-### Inventory and input preparation
+以下对具体节点组分类。嵌套方法在方法清单展开，不以一个阶段颜色隐藏细节。
 
-| Stage node or capability group | Wiring | Implementation | Verification | Debt | Evidence |
+<a id="inventory-and-input-preparation"></a>
+
+### Inventory 与输入准备
+
+| 阶段节点/能力组 | 接线 | 实现 | 验证 | 欠账 | 证据 |
 |---|---|---|---|---|---|
-| Inventory `enter -> validate_inputs -> register_assets -> commit` | `wired` | `implemented-no-process` | `tested` | `none` | Validated frozen input injection and registered-candidate wrapping preserve logical compressed non-empty input; an existing assembly is declared as an immutable reused delivery at occurrence settlement. `app/stages/inventory/builder.py`, `app/stages/inventory/nodes.py`; `tests/test_inventory.py`, `tests/test_frozen_inputs.py`, `tests/test_resource_resolution.py`, `tests/test_manifest.py` |
-| Inventory `review_gate` and `fail` boundaries | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/inventory/builder.py`; `tests/test_inventory.py`, `tests/test_review_resume.py` |
-| Read QC `enter`, `resolve_raw_long_reads`, planning, `commit`, `fail` | `wired` | `implemented-no-process` | `tested` | `none` | Direct resources resolve through frozen registry-backed provenance. A successful filter publishes a read-set manifest; a zero-retained result preserves collected evidence and fails the occurrence without replacing `long_reads`. `app/stages/read_qc/builder.py`, `app/stages/read_qc/nodes.py`; `tests/test_read_qc.py` |
-| Read QC `seqkit_stats` nested method node | `wired` | `executable` | `tested` | `none` | One direct input-stream aggregate owns whole-read-set length, N50, and quality values; per-file rows are retained only for cross-checks and provenance follows the actual read inputs. `app/stages/read_qc/method_application/support.py`, `app/stages/read_qc/method_application/seqkit_stats.py`; `tests/test_read_qc.py` |
-| Read QC `seqkit_length_filter` nested method node, including intentional skip | `wired` | `executable` plus `implemented-no-process` skip | `tested` | `none` | Filtering publishes a read-set manifest and direct post-filter aggregate. Its zero-retained path produces no downstream handoff; the intentional planner skip remains a no-process raw-read pass-through. `app/stages/read_qc/method_application/seqkit_length_filter.py`, `app/stages/read_qc/nodes.py`; `tests/test_read_qc.py` |
-| Genome Survey input resolution and `select_survey_mode` | `wired` | `implemented-no-process` | `tested` | `none` | Stage-owned `short_reads | long_reads` resolution and explicit-size skip; `app/stages/genome_survey/nodes.py`, `app/stages/resource_specs.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` |
-| Genome Survey `jellyfish -> genomescope2` method chain | `wired` | `executable` | `tested` | `none` | Indexed k-mer `ArtifactRefJson` handoff with no string compatibility branch; `app/stages/genome_survey/method_application/`; `tests/test_genome_survey.py` |
-| Genome Survey `write_full_survey_result`, explicit-prior skip, `commit`, `fail` | `wired` | `implemented-no-process` | `tested` | `none` | Provided-only mode persists a completed provided result while selected survey methods settle typed durable dispositions independently of the occurrence terminal. `app/stages/genome_survey/builder.py`, `app/stages/genome_survey/nodes.py`; `tests/test_genome_survey.py`, `tests/test_genome_size.py` |
+| Inventory `enter -> validate_inputs -> register_assets -> commit` | `wired` | `implemented-no-process` | `tested` | `none` | 冻结输入注入和注册候选包装保留压缩内容逻辑非空；已有组装在结算声明不可变复用交付。`app/stages/inventory/builder.py`、`nodes.py`；`tests/test_inventory.py`、`tests/test_frozen_inputs.py`、`tests/test_resource_resolution.py`、`tests/test_manifest.py` |
+| Inventory `review_gate`、`fail` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/inventory/builder.py`；`tests/test_inventory.py`、`tests/test_review_resume.py` |
+| Read QC `enter`、`resolve_raw_long_reads`、规划、`commit`、`fail` | `wired` | `implemented-no-process` | `tested` | `none` | 冻结注册表来源解析直接资源；过滤成功发布 read-set manifest，零保留保持证据并失败，不替换 `long_reads`。`app/stages/read_qc/builder.py`、`nodes.py`；`tests/test_read_qc.py` |
+| Read QC `seqkit_stats` | `wired` | `executable` | `tested` | `none` | 直接输入流汇总拥有全读段长度/N50/质量，逐文件行仅交叉检查，来源跟随真实输入。`app/stages/read_qc/method_application/support.py`、`seqkit_stats.py`；`tests/test_read_qc.py` |
+| Read QC `seqkit_length_filter` 及有意 skip | `wired` | `executable` 与 `implemented-no-process` skip | `tested` | `none` | 过滤发布 read-set manifest 与直接过滤后汇总；零保留无下游交接；规划 skip 为无进程 raw 透传。`app/stages/read_qc/method_application/seqkit_length_filter.py`、`app/stages/read_qc/nodes.py`；`tests/test_read_qc.py` |
+| Genome Survey 输入解析、`select_survey_mode` | `wired` | `implemented-no-process` | `tested` | `none` | 阶段拥有 short/long 解析与明确大小 skip；`app/stages/genome_survey/nodes.py`、`app/stages/resource_specs.py`；`tests/test_genome_survey.py`、`tests/test_genome_size.py` |
+| Genome Survey `jellyfish -> genomescope2` | `wired` | `executable` | `tested` | `none` | 已索引 k-mer `ArtifactRefJson` 交接，无字符串兼容；`app/stages/genome_survey/method_application/`；`tests/test_genome_survey.py` |
+| Genome Survey `write_full_survey_result`、明确先验 skip、`commit`、`fail` | `wired` | `implemented-no-process` | `tested` | `none` | provided-only 持久化完成结果；选定方法的类型化持久处置独立于 occurrence 终态。`app/stages/genome_survey/builder.py`、`nodes.py`；`tests/test_genome_survey.py`、`tests/test_genome_size.py` |
 
-### Assembly production, review, and chromosome finishing
+<a id="assembly-production-review-and-chromosome-finishing"></a>
 
-| Stage node or capability group | Wiring | Implementation | Verification | Debt | Evidence |
+### Assembly 生产、评审和染色体精修
+
+| 阶段节点/能力组 | 接线 | 实现 | 验证 | 欠账 | 证据 |
 |---|---|---|---|---|---|
-| Assembly input/profile route: `resolve_extended_inputs -> infer_input_profile -> select_route` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly/builder.py`; `tests/test_assembly.py`, `tests/test_multiplatform_long_reads.py` |
-| Assembly selection: `build_assembly_candidate_set -> select_primary` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly/nodes.py`; `tests/test_assembly.py`, `tests/test_assembly_candidate_bundle.py` |
-| Assembly `recommend_parameters` and mandatory approval block | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `known-gap` | Formal schema-3 flow is implemented; method-specific knowledge coverage is uneven; `tests/test_parameter_recommendation_v3_contract.py`, `tests/test_phase11_parameter_approval.py` |
-| Assembly `flye`, `nextdenovo`, `hifiasm`, `hifiasm_ont` nested method nodes | `wired` | `executable` | `tested` | method-specific below | `app/stages/assembly/method_application/`; `tests/test_assembly.py` |
-| Assembly `execution_retry_gate`, `commit`, `fail`, `block` | `wired` | `implemented-no-process` | `tested` | `none` | A completed occurrence requires an executed candidate and declares a materialized immutable delivery. Planning-only/non-local paths cannot advance; every reject/failure path settles the active occurrence explicitly. `app/stages/assembly/parameters/workflow.py`, `app/stages/assembly/nodes.py`; `tests/test_assembly.py`, `tests/test_phase11_parameter_approval.py`, `tests/test_review_resume.py` |
-| Dedup baseline or `QUAST -> recommend -> review -> purge_dups -> QUAST` loop | `wired` | `executable` | `tested` | `none` | Local execution plus explicit automatic-purge approval can produce a completed/materialized delivery. Missing approval or local authorization completes as pass-through with a skipped `purge_dups` disposition and explicit reused delivery; no materialized candidate is failed with `not_started` and no delivery. `app/stages/assembly_dedup/`; `tests/test_assembly_dedup.py` |
-| Assembly Review reusable subgraph, candidate resolution, and `quast -> busco` metrics | `wired` | `executable` | `tested` | `none` | Candidate resolution requires the frozen producer occurrence's completed terminal, exactly one immutable delivery, matching current `ResourceRef`, and the matching indexed candidate/primary bundle before evaluation. `app/stages/assembly_review/`, `app/storage/assembly_candidates.py`; `tests/test_assembly_review.py`, `tests/test_assembly_candidate_bundle.py` |
-| Assembly Review rule, review-owned parameter-quality, related-species, comparison nodes | `wired` | `implemented-no-process` | `tested` | `none` | Parameter-quality diagnosis remains in the active `assembly_review` occurrence; it records no Assembly retry cursor or parameter evidence and continues to related-species/human review. `app/stages/assembly_review/nodes.py`; `tests/test_phase10_parameter_catalog.py`, `tests/test_related_species_evidence.py`, `tests/test_related_species_statistics.py`, `tests/test_assembly_review_statistics_integration.py` |
-| Assembly Review `human_gate` and adoption/resume transaction | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly_review/builder.py`, `app/control/resume_transaction.py`; `tests/test_review_resume.py` |
-| Hi-C `resolve_hic_inputs` and requirement boundary | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/`; `tests/test_hic_scaffolding.py` |
-| Hi-C `recommend_autohic_parameters` and approval/retry gates | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`; `tests/test_hic_scaffolding.py`, `tests/test_parameter_resolution_validation.py` |
-| Hi-C `autohic` nested method node and collection | `wired` | `executable` | `tested` | `none` | Real runner plus fail-closed validation of FASTA, `.hic`, `.assembly`, and HTML, including replay and late-publication failure coverage; `app/stages/hic_scaffolding/method_application/`; `tests/test_hic_scaffolding.py` |
-| Hi-C `chromosome_assembly_review`, block, and adoption resume | `wired` | `implemented-no-process` | `tested` | `none` | Candidate construction and current-resource replacement declare a materialized or reused assembly delivery, which shared settlement proves against its indexed artifacts. `app/stages/hic_scaffolding/builder.py`, `app/stages/hic_scaffolding/nodes.py`; `tests/test_hic_scaffolding.py`, `tests/test_assembly_candidate_bundle.py`, `tests/test_review_resume.py` |
-| GapCloser HiFi execution and adoption | `wired` | `executable` | `tested` | `bounded` | TGS-GapCloser no-correction route, native coordinate validation, durable manual adoption and materialized/reused assembly delivery; `app/stages/gapcloser/`; `tests/test_gapcloser.py`. Representative-sample acceptance remains open. |
-| T2T input and motif chain: `resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process` with conditional model call | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`; `tests/test_t2t_motif.py` |
-| T2T threshold recommendation, approval, and `prepare_parameters` | `wired` | `implemented-no-process` model/evidence workflow | `tested` | `none` | `app/stages/t2t/parameters/`; `tests/test_t2t.py`, `tests/test_parameter_recommendation_v3_contract.py` |
-| T2T scans and minimap2 alignment | `wired` | `executable` | `tested` | `none` | `scan_assembly`, `prepare_reads`, `scan_reads`, `alignment`; `app/stages/t2t/nodes.py`; `tests/test_t2t.py` |
-| T2T patch, validation, report, adoption gate, commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | Candidate construction/current-resource replacement declare a materialized or reused assembly delivery, which shared settlement proves against its indexed artifacts. `apply_patches`, `validate_patched`, `report`, `gate_review`; `app/stages/t2t/nodes.py`; `tests/test_t2t.py`, `tests/test_assembly_candidate_bundle.py`, `tests/test_review_resume.py` |
-| Base Polish | `wired` | `executable` | `tested` | `bounded` | HiFi Racon, paired minimap2 evidence and manual handoff; `tests/test_base_polish.py` |
+| Assembly 输入/profile：`resolve_extended_inputs -> infer_input_profile -> select_route` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly/builder.py`；`tests/test_assembly.py`、`tests/test_multiplatform_long_reads.py` |
+| Assembly 选择：`build_assembly_candidate_set -> select_primary` | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly/nodes.py`；`tests/test_assembly.py`、`tests/test_assembly_candidate_bundle.py` |
+| Assembly `recommend_parameters` 与必需审批阻塞 | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `known-gap` | schema-3 已实现，方法知识深度不均；`tests/test_parameter_recommendation_v3_contract.py`、`tests/test_phase11_parameter_approval.py` |
+| Assembly `flye`、`nextdenovo`、`hifiasm`、`hifiasm_ont` | `wired` | `executable` | `tested` | 见方法条目 | `app/stages/assembly/method_application/`；`tests/test_assembly.py` |
+| Assembly `execution_retry_gate`、`commit`、`fail`、`block` | `wired` | `implemented-no-process` | `tested` | `none` | 完成需 executed candidate 并声明物化交付；仅规划/非本地不能推进，拒绝/失败显式结算。`app/stages/assembly/parameters/workflow.py`、`app/stages/assembly/nodes.py`；`tests/test_assembly.py`、`tests/test_phase11_parameter_approval.py`、`tests/test_review_resume.py` |
+| Dedup 基线或 `QUAST -> recommend -> review -> purge_dups -> QUAST` 循环 | `wired` | `executable` | `tested` | `known-gap` | 本地执行加明确 purge 授权可物化交付；缺批准/授权则透传完成，purge 处置 skipped 并显式 reused 交付；无物化候选则 not_started/失败且无交付。顾问循环真实工具验收仍缺。`app/stages/assembly_dedup/`；`tests/test_assembly_dedup.py`、`tests/test_dedup_recommendation_loop.py` |
+| Assembly Review 可复用子图、候选解析、`quast -> busco` | `wired` | `executable` | `tested` | `none` | 评估前要求冻结生产者完成终态、唯一交付、当前引用、索引候选/主输出一致。`app/stages/assembly_review/`、`app/storage/assembly_candidates.py`；`tests/test_assembly_review.py`、`tests/test_assembly_candidate_bundle.py` |
+| Assembly Review 规则、参数质量、近缘物种、比较节点 | `wired` | `implemented-no-process` | `tested` | `none` | 参数质量诊断留在当前 Review，不写 Assembly 重试游标/参数证据，继续近缘物种/人工评审。`app/stages/assembly_review/nodes.py`；`tests/test_phase10_parameter_catalog.py`、`tests/test_related_species_evidence.py`、`tests/test_related_species_statistics.py`、`tests/test_assembly_review_statistics_integration.py` |
+| Assembly Review `human_gate` 与采纳/恢复事务 | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly_review/builder.py`、`app/control/resume_transaction.py`；`tests/test_review_resume.py` |
+| Hi-C `resolve_hic_inputs` 与需求边界 | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/`；`tests/test_hic_scaffolding.py` |
+| Hi-C `recommend_autohic_parameters` 与审批/重试 | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`；`tests/test_hic_scaffolding.py`、`tests/test_parameter_resolution_validation.py` |
+| Hi-C `autohic` 方法与收集 | `wired` | `executable` | `tested` | `none` | 真实 Runner 和 FASTA/.hic/.assembly/HTML 严格校验，含回放与后期发布失败覆盖。`app/stages/hic_scaffolding/method_application/`；`tests/test_hic_scaffolding.py` |
+| Hi-C `chromosome_assembly_review`、阻塞、采纳恢复 | `wired` | `implemented-no-process` | `tested` | `none` | 候选/当前资源替换声明 materialized 或 reused 交付，共享结算对照索引产物验证。`app/stages/hic_scaffolding/builder.py`、`nodes.py`；`tests/test_hic_scaffolding.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
+| GapCloser HiFi 执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser 无校正路线、原生坐标校验、持久人工采纳、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
+| T2T 输入/基序：`resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process`，条件模型调用 | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`；`tests/test_t2t_motif.py` |
+| T2T 阈值推荐、审批、`prepare_parameters` | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |
+| T2T 扫描与 minimap2 比对 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py` |
+| T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
+| Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、人工交接；`tests/test_base_polish.py` |
 
-## Registered method inventory
+<a id="registered-method-inventory"></a>
 
-`descriptors/registry.yaml` currently contains 17 registered methods. Sixteen
-declare `execution_kind: local`; the executable invariant binds each ID to an
-imported lifecycle, nested method graph, and outer stage node. The sole
-`planner_only` method is an intentional no-process choice whose real
-planner-to-stage route is tested. There are currently **no descriptor-only
-placeholder methods in the registry**. Descriptor loading is strict at the
-registry and every nested YAML model boundary.
+## 注册方法清单
 
-The `Adapter/lifecycle` and `Collection` columns below describe executable
-process wiring only. They do not override the cross-cutting evidence and
-settlement debt above.
+`descriptors/registry.yaml` 当前包含 17 个注册方法：16 个 `local` 和 1 个 `planner_only`。可执行不变量将每个本地 ID 绑定到导入生命周期、嵌套方法图和外层阶段节点。唯一 `planner_only` 是有意无进程选择，真实规划到阶段路线有测试。注册表当前**没有仅描述符占位方法**。注册表和每层嵌套 YAML 都严格加载。
 
-| Registered method | Descriptor | Adapter/lifecycle | Collection | Verification | Debt or limitation |
+下面适配器/生命周期和收集列只描述进程接线，不覆盖上方跨切面证据与结算边界。
+
+| 注册方法 | 描述符 | 适配器/生命周期 | 收集 | 验证 | 限制或欠账 |
 |---|---|---|---|---|---|
-| `read_qc.long_read_stats.seqkit_stats` | registered | `executable` | implemented | `tests/test_read_qc.py` | direct whole-read-set aggregate with per-file consistency checks and a typed terminal disposition |
-| `read_qc.length_filter.seqkit_seq` | registered | `executable` | implemented | `tests/test_read_qc.py` | zero retained reads fail the occurrence without a handoff; requires approved `min_len`; selected executions settle typed outcomes |
-| `read_qc.length_filter.skip` | registered | `implemented-no-process` (`planner_only`) | not applicable | `tests/test_read_qc.py`, `tests/test_ask_plan.py` | deliberate raw-read pass-through with a completed no-process disposition |
-| `genome_survey.kmer_count.jellyfish` | registered | `executable` | implemented | `tests/test_genome_survey.py` | typed k-mer artifact publication |
-| `genome_survey.model.genomescope2` | registered | `executable` | implemented | `tests/test_genome_survey.py` | typed k-mer artifact dependency |
-| `assembly.candidate.flye` | registered with catalog | `executable` | implemented | `tests/test_assembly.py`, `tests/test_configuration.py` | none |
-| `assembly.candidate.hifiasm` | registered with catalog | `executable` | implemented | `tests/test_assembly.py`, `tests/test_hifiasm_evidence_case.py` | richest current literature case coverage |
-| `assembly.candidate.hifiasm_ont` | registered with catalog | `executable` | implemented | `tests/test_assembly.py`, `tests/test_hifiasm_numeric_retrieval.py` | structured guidance exists; numeric case corpus is Hifiasm-centered |
-| `assembly.candidate.nextdenovo` | registered with catalog | `executable` | implemented | `tests/test_assembly.py` | catalog exists; no equivalent literature case corpus |
-| `assembly_dedup.purge_dups` | registered | `executable` | implemented | `tests/test_assembly_dedup.py` | durable `completed`, `skipped`, or `not_started` disposition is orthogonal to the delivered occurrence and its immutable delivery |
-| `assembly_dedup.eval.quast` | registered | `executable` | implemented | `tests/test_dedup_recommendation_loop.py` | Advisor-only source/candidate comparison; shares the canonical execution lifecycle; terminal disposition deferred until loop settlement |
-| `assembly_review.eval.quast` | registered | `executable` | implemented | `tests/test_assembly_review.py` | stage-local review, not final integrated QA |
-| `assembly_review.eval.busco` | registered | `executable` | implemented | `tests/test_assembly_review.py`, `tests/test_database_resolution.py` | manifest NCBI scientific name selects one compatible host-installed lineage; a RunConfig lineage, when present, is assertion-only; path/version/provenance resolve from the frozen host registry |
-| `hic_scaffolding.candidate.autohic` | registered with catalog | `executable` | implemented | `tests/test_hic_scaffolding.py` | all four review products are mandatory at collection |
-| `gapcloser.tgs_gapcloser` | registered | `executable` | implemented | `tests/test_gapcloser.py` | HiFi only; manual adoption; coordinate consistency is not a QV claim |
-| `base_polish.racon` | registered | `executable` | implemented | `tests/test_base_polish.py` | HiFi only; paired read agreement is not independent QV; adoption or source retention |
-| `t2t.alignment.minimap2` | registered with catalog | `executable` | implemented | `tests/test_t2t.py` | none |
-`tests/test_registry_executable_invariant.py` derives local IDs from imported
-`MethodExecutionLifecycle` bindings, proves those bindings cover exactly the 15
-registered local methods, and verifies each shared freeze/run/collect and outer
-stage route. It derives the planner-only set from the production planner catalog
-and exercises `read_qc.length_filter.skip` through raw-read commit while proving
-that no filter frozen attempt, runner call, or method-scoped attempt event is
-created. The two sets are disjoint and their union equals the complete registry.
+| `read_qc.long_read_stats.seqkit_stats` | 已注册 | `executable` | 已实现 | `tests/test_read_qc.py` | 直接全读段汇总、逐文件一致性检查、类型化终态处置 |
+| `read_qc.length_filter.seqkit_seq` | 已注册 | `executable` | 已实现 | `tests/test_read_qc.py` | 零保留使 occurrence 失败且无交接；需批准 `min_len`；执行结算类型化结果 |
+| `read_qc.length_filter.skip` | 已注册 | `implemented-no-process`（`planner_only`） | 不适用 | `tests/test_read_qc.py`、`tests/test_ask_plan.py` | 有意 raw 透传，完成无进程处置 |
+| `genome_survey.kmer_count.jellyfish` | 已注册 | `executable` | 已实现 | `tests/test_genome_survey.py` | 类型化 k-mer 产物发布 |
+| `genome_survey.model.genomescope2` | 已注册 | `executable` | 已实现 | `tests/test_genome_survey.py` | 类型化 k-mer 依赖 |
+| `assembly.candidate.flye` | 已注册且有目录 | `executable` | 已实现 | `tests/test_assembly.py`、`tests/test_configuration.py`、`tests/test_assembly_case_consumption.py` | 使用共享实时案例消费者；真实检索覆盖与推荐收益尚需测量 |
+| `assembly.candidate.hifiasm` | 已注册且有目录 | `executable` | 已实现 | `tests/test_assembly.py`、`tests/test_hifiasm_evidence_case.py` | 目录和机制指导已提供；案例数量不代表已测推荐收益 |
+| `assembly.candidate.hifiasm_ont` | 已注册且有目录 | `executable` | 已实现 | `tests/test_assembly.py`、`tests/test_hifiasm_numeric_retrieval.py` | 共享消费者；需区分输入模式与状态，不能将 HiFi 案例默认视为 ONT 匹配 |
+| `assembly.candidate.nextdenovo` | 已注册且有目录 | `executable` | 已实现 | `tests/test_assembly.py`、`tests/test_assembly_case_consumption.py` | 共享库可消费原生 NextDenovo 案例与设置；真实覆盖和生物学收益尚需测量 |
+| `assembly_dedup.purge_dups` | 已注册 | `executable` | 已实现 | `tests/test_assembly_dedup.py` | 持久 completed/skipped/not_started 处置独立于 occurrence 和交付 |
+| `assembly_dedup.eval.quast` | 已注册 | `executable` | 已实现 | `tests/test_dedup_recommendation_loop.py` | 顾问模式的来源/候选比较；共享生命周期，处置延迟至循环结算 |
+| `assembly_review.eval.quast` | 已注册 | `executable` | 已实现 | `tests/test_assembly_review.py` | 可复用 Review 评估器，包括请求时最终成对 Review；不等于独立 QV |
+| `assembly_review.eval.busco` | 已注册 | `executable` | 已实现 | `tests/test_assembly_review.py`、`tests/test_database_resolution.py` | manifest NCBI 学名选择兼容已装 lineage；RunConfig lineage 仅断言，路径/版本/来源取冻结主机注册表 |
+| `hic_scaffolding.candidate.autohic` | 已注册且有目录 | `executable` | 已实现 | `tests/test_hic_scaffolding.py` | 收集必须有全部四项评审产品 |
+| `gapcloser.tgs_gapcloser` | 已注册 | `executable` | 已实现 | `tests/test_gapcloser.py` | 仅 HiFi，人工采纳；坐标一致性不是 QV |
+| `base_polish.racon` | 已注册 | `executable` | 已实现 | `tests/test_base_polish.py` | 仅 HiFi；成对读段一致性不是独立 QV；采纳或保留源 |
+| `t2t.alignment.minimap2` | 已注册且有目录 | `executable` | 已实现 | `tests/test_t2t.py` | 无额外记录限制 |
 
-## Parameter capability map
+`tests/test_registry_executable_invariant.py` 从导入 `MethodExecutionLifecycle` 绑定导出本地 ID，证明覆盖每个本地方法，并验证共享 freeze/run/collect 与外层路线。从生产规划目录导出 planner-only 集合，沿 `read_qc.length_filter.skip` 到 raw 提交，证明不创建过滤冻结尝试、Runner 调用或方法尝试事件。两集合互斥，并集等于完整注册表。
 
-Parameter capability is not one Boolean. Catalog, recommendation, approval,
-freeze binding, retry, and biological knowledge coverage are separate facts.
+<a id="parameter-capability-map"></a>
 
-| Scope | Static catalog | Recommendation and immutable evidence | Human approval | Frozen-attempt binding | Retry | Current limitation |
+## 参数能力映射
+
+参数能力不是布尔值。目录、推荐、审批、冻结绑定、重试和生物学知识覆盖是独立事实。
+
+| 范围 | 静态目录 | 推荐与不可变证据 | 人工审批 | 冻结尝试绑定 | 重试 | 当前限制 |
 |---|---|---|---|---|---|---|
-| Assembly: Flye | implemented | implemented | mandatory | implemented | implemented | catalog present; no method-specific literature case corpus comparable to Hifiasm |
-| Assembly: Hifiasm | implemented | implemented | mandatory | implemented | implemented | current evidence retrieval is concentrated here |
-| Assembly: Hifiasm-ONT | implemented | implemented | mandatory | implemented | implemented | structured Hifiasm guidance exists; numeric cases remain Hifiasm-centered |
-| Assembly: NextDenovo | implemented | implemented | mandatory | implemented | implemented | catalog present; no equivalent literature case corpus |
-| AutoHiC | implemented | implemented | mandatory | implemented | implemented | collection fail-closes on a missing declared product; terminal collect failure has no automatic retry |
-| T2T/minimap2 thresholds | implemented | implemented after motif resolution | mandatory | implemented | initial recommendation only | no T2T parameter-retry route |
-| GapCloser | static bounded RunConfig | no LLM recommendation | manual result adoption | shared frozen attempt | no automatic retry | HiFi-only TGS-GapCloser |
-| Base Polish | `base_polish.racon` | minimap2/Racon lifecycle | paired PAF/FASTA/version evidence | manual adoption | source or polished candidate | HiFi only; no independent QV |
-| Read QC, Survey, Dedup, Review | registry-derived default methods | not implemented as formal recommenders | not applicable | normal whole-run freeze | not applicable | defaults are internal; do not expose these as user method-selection fields |
-| Inventory | not required | not required | input ambiguity review only | not applicable | not applicable | no recommender should be inferred |
+| Assembly：Flye | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 可消费原生/跨方法案例；实际覆盖和收益未测 |
+| Assembly：Hifiasm | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 机制指导较丰富，但不能代替代表样本验收 |
+| Assembly：Hifiasm-ONT | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 必须保持 ONT 模式、读段状态与案例绑定差异 |
+| Assembly：NextDenovo | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 有原生来源设置；不能机械翻译外部工具参数 |
+| AutoHiC | 已实现 | 已实现 | 顾问模式必需 | 已实现 | 已实现 | 缺声明产品时收集拒绝；终态收集失败无自动重试 |
+| T2T/minimap2 阈值 | 已实现 | 基序解析后已实现 | 必需 | 已实现 | 仅初始推荐 | 无 T2T 参数重试路线 |
+| GapCloser | 有界静态 RunConfig | 无 LLM 推荐 | 人工结果采纳 | 共享冻结尝试 | 无自动重试 | HiFi-only TGS-GapCloser |
+| Base Polish | 有界静态 RunConfig | 无 LLM 参数推荐；成对 PAF/FASTA/版本证据 | 人工结果采纳/源保留 | 共享 minimap2/Racon 冻结尝试 | 无自动重试 | 一轮 HiFi Racon；无独立 QV |
+| Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`，支持注册前台 resolver | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |
+| Read QC、Survey、Review | 注册表默认方法与静态/操作者参数 | 无 schema-3 参数推荐；Review 可另有决策推荐 | 按各阶段门禁 | 可执行方法使用共享尝试冻结 | 按阶段契约 | 默认方法内部拥有，不暴露为用户方法选择字段 |
+| Inventory | 不需要 | 不需要 | 仅输入歧义评审 | 不适用 | 不适用 | 不应推断存在推荐器 |
 
-The formal schema-3 recommendation chain for Assembly, AutoHiC, and T2T is
-implemented. The remaining gap is not “parameter recommendation is missing
-everywhere”; it is that method-specific biological knowledge depth is uneven
-and most other stages deliberately use static/operator configuration.
+Assembly、AutoHiC、T2T 的正式 schema-3 链已实现；Assembly/AutoHiC 显式确定性基线以策略记录批准初始尝试，详见[推荐策略](reference/recommendation-policy.md)。Dedup 顾问使用独立类型化任务输出。剩余缺口是知识深度与真实结果验证；多数其他阶段有意使用静态/操作者配置。
 
-## Finishing capabilities and remaining product gaps
+<a id="finishing-capabilities-and-remaining-product-gaps"></a>
 
-Executable finishing routes have explicit input limits and still require
-representative server acceptance. `placeholder` identifies a capability without
-an executable closed loop; it does not mean the biological capability runs.
+## 精修能力与剩余产品缺口
 
-| Product capability | Wiring | Implementation | Verification | Debt | Evidence and owner |
+可执行精修路线有明确输入限制，仍需代表性服务器验收。`placeholder` 表示没有执行闭环，不能据此声称生物学能力已运行。
+
+| 产品能力 | 接线 | 实现 | 验证 | 欠账 | 证据与所有者 |
 |---|---|---|---|---|---|
-| Gap closing after chromosome scaffolding | `wired` | `executable` | `tested` | `bounded` | HiFi-only TGS-GapCloser; representative biological acceptance remains open; `tests/test_gapcloser.py`; [stage contract](reference/stage-contracts.md#8-gapcloser) |
-| Automated base polishing | `wired` | `executable` | `tested` | `bounded` | HiFi only, representative acceptance pending; `tests/test_base_polish.py`; [stage contract](reference/stage-contracts.md#10-base-polish) |
-| Finish Review after Base Polish | `wired` | `executable` | `tested` | `bounded` | Paired source/polished QUAST/BUSCO evaluation; [stage contract](reference/stage-contracts.md#10-base-polish) |
-| TUI midstage entry from clean reads or an existing assembly | `unwired` in the public TUI | `placeholder` as accepted design | `partially-tested` | `known-gap` | See [TUI midstage entry](topics/tui-midstage-entry.md) |
+| 染色体 scaffolding 后补缺口 | `wired` | `executable` | `tested` | `known-gap` | HiFi-only TGS-GapCloser；代表样本验收待完成；`tests/test_gapcloser.py`；[阶段](reference/stage-contracts.md#8-gapcloser) |
+| 自动碱基抛光 | `wired` | `executable` | `tested` | `known-gap` | 仅 HiFi，代表样本验收待完成；`tests/test_base_polish.py`；[阶段](reference/stage-contracts.md#10-base-polish) |
+| Base Polish 后最终 Review | `wired` | `executable` | `tested` | `known-gap` | 源/抛光候选成对 QUAST/BUSCO；[阶段](reference/stage-contracts.md#10-base-polish) |
+| clean 读段/已有组装的 TUI 中途入口 | 公共 TUI 中 `unwired` | 已接受设计 `placeholder` | `partially-tested` | `known-gap` | [TUI 中途入口](topics/tui-midstage-entry.md) |
 
-The finish Review is a second occurrence of the reusable `assembly_review`
-stage, not a separate “final QA” stage. Source retention is valid. An
-operator-provided polished assembly is not evidence of an executed method.
-
-Maintenance rules are owned by
-[Architecture Governance](reference/governance.md).
+最终 Review 是可复用 `assembly_review` 的第二次 occurrence，不是独立“最终 QA”阶段。保留源组装合法。操作者提供的抛光组装不能证明方法已执行。维护规则由[架构治理](reference/governance.md)拥有。

@@ -1,32 +1,32 @@
-# Contig-level manifest template.
+# Contig 级 manifest 模板。
 #
-# Copy this file to a server-local directory, edit the placeholders,
-# then pair with contig_run_config.template.json.
+# 复制到服务器本地目录，替换占位符，
+# 并与 contig_run_config.template.json 配套使用。
 #
-# Schema reference: app/schemas/manifest.py (InputManifest / InputAssetSpec).
+# Schema 参考：app/schemas/manifest.py（InputManifest / InputAssetSpec）。
 
 session_id: contig-run-YYYYMMDD-a
 sample_id: sample_name
 genome_size_estimate: 500000000
 
-# Required for Assembly Review. Use the full NCBI Latin scientific name, not a
-# common name or abbreviation. The selected frozen NCBI snapshot resolves it
-# and lets the runtime select one matching, host-installed BUSCO lineage;
-# users do not choose the lineage manually.
+# Assembly Review 必需。使用完整 NCBI 拉丁学名，
+# 不使用俗名或缩写。选定冻结 NCBI 快照解析该名称，
+# 让运行时选择匹配且主机已安装的 BUSCO lineage；
+# 用户不手动选择 lineage。
 user_metadata:
-  target_species: Solea ovata  # REPLACE with the real NCBI scientific name
+  target_species: Solea ovata  # 替换为真实 NCBI 学名
 
 assets:
-  # Optional: binds this exact reference FASTA to the run. When present, QUAST
-  # uses it with -r; this is unrelated to databases.ncbi.reference_dir.
+  # 可选：将精确参考 FASTA 绑定到运行。存在时 QUAST
+  # 使用 -r 传入；它与 databases.ncbi.reference_dir 无关。
   # - asset_type: reference_genome_fasta
   #   paths:
   #     - /ABS/PATH/TO/reference_genome.fasta
   #   format: fasta
   #   compression: none
 
-  # Long-read-only input is valid. If short DNA reads are also declared,
-  # Genome Survey prefers them for its k-mer survey.
+  # 仅长读段输入合法。若同时声明短 DNA 读段，
+  # Genome Survey 优先使用短读段进行 k-mer 调查。
   - asset_type: raw_long_reads
     paths:
       - /ABS/PATH/TO/long_reads.fastq.gz
@@ -36,4 +36,4 @@ assets:
     compression: gzip
     metadata:
       source: <basecaller-or-archive-name>
-      note: replace with real server-local paths; do not commit private paths
+      note: 替换为真实服务器本地路径；不要提交私有路径

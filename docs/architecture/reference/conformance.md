@@ -1,235 +1,101 @@
-# Architecture Conformance
+<a id="architecture-conformance"></a>
 
-This page records known differences between accepted architecture and the
-current working tree. It is not a compatibility contract and does not weaken
-the owning reference specifications.
+# 架构一致性
 
-> **Status:** conformance-debt  
-> **Read when:** a design claim and current code appear to disagree.  
-> **Comes from:** architecture review and repository verification.  
-> **Feeds into:** scoped implementation work that closes a listed gap.  
-> **Related topics:** [Data and storage](../topics/data-and-storage.md),
-> [Execution](../topics/execution.md),
-> [Runtime orchestration](../topics/runtime-orchestration.md), and
-> [Bootstrap](../topics/bootstrap.md).  
-> **Code evidence:** each item below names its current evidence path.
+本页记录已接受架构与当前工作树之间的已知差异。它不是兼容性契约，也不削弱负责该主题的参考规范。
 
-## Open gaps
+> **状态：** 一致性欠账
+>
+> **阅读场景：** 设计声明与当前代码看似不一致时。
+>
+> **来源：** 架构审查与仓库验证。
+>
+> **下游：** 关闭所列缺口的范围明确的实现工作。
+>
+> **相关主题：** [数据与存储](../topics/data-and-storage.md)、[执行](../topics/execution.md)、[运行时编排](../topics/runtime-orchestration.md)、[Bootstrap](../topics/bootstrap.md)。
+>
+> **代码依据：** 每一项均列出现有证据路径。
 
-### GapCloser representative-sample acceptance and noisy-read routes
+<a id="open-gaps"></a>
 
-The implemented TGS-GapCloser slice accepts only explicitly classified HiFi
-reads, validates native products, and requires durable manual adoption. Tests
-cover the shared lifecycle with a fixture executable and provide an opt-in
-real-binary synthetic-gap check. Neither is representative biological acceptance
-or evidence of improved consensus accuracy. No ONT/CLR/CycloneSEQ correction
-route is claimed. Base Polish has its separate HiFi-only contract below.
+## 未关闭缺口
 
-- Current evidence: `app/stages/gapcloser/`, `tests/test_gapcloser.py`.
-- Contract owner: [GapCloser](stage-contracts.md#8-gapcloser).
-- Closure condition: run a representative scaffold/HiFi dataset on a provisioned
-  host, inspect the gap-detail report, evaluate quality independently, and record
-  the human adoption. Other platforms require a separately accepted route.
+<a id="gapcloser-representative-sample-acceptance-and-noisy-read-routes"></a>
 
-### Base Polish representative-sample acceptance and independent accuracy
+### GapCloser 代表性样本验收与含噪读段路线
 
-The HiFi-only minimap2/Racon route, paired pre/post alignment evidence, durable
-manual adoption/source retention, and final QUAST/BUSCO pair are implemented.
-Fixture executables test process contracts, not biological correctness. The
-same reads used for correction cannot establish independent consensus QV.
+已实现的 TGS-GapCloser 切片只接受明确分类的 HiFi 读段，校验原生产物，并要求持久人工采纳。测试使用 fixture 可执行文件覆盖共享生命周期，并提供可选真实二进制合成缺口检查；两者都不是代表性生物样本，也不能证明共识准确性改善。没有声明 ONT/CLR/CycloneSEQ 校正路线。Base Polish 在下方有独立 HiFi-only 契约。
 
-- Current evidence: `app/stages/base_polish/`, `tests/test_base_polish.py`,
-  `app/diagnostics/route_acceptance.py`.
-- Contract owner: [Base Polish](stage-contracts.md#10-base-polish).
-- Closure condition: first run real Racon/minimap2 smoke and an independent
-  Base Polish slice from an existing assembly, compare both candidates, and
-  record adoption or retention. Only after the lower layers pass, exercise the
-  full route according to the [acceptance order](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs).
-  Independent accuracy remains unmeasured
-  unless separately supported by independent truth data. Missing tools on a
-  development host are deployment prerequisites, not method-code defects.
+- 当前证据：`app/stages/gapcloser/`、`tests/test_gapcloser.py`。
+- 契约所有者：[GapCloser](stage-contracts.md#8-gapcloser)。
+- 关闭条件：在已配置主机上运行代表性 scaffold/HiFi 数据集，检查 gap-detail 报告，独立评估质量，并记录人工采纳。其他平台须另行接受一条路线。
 
-### Assembly software explanation coverage
+<a id="base-polish-representative-sample-acceptance-and-independent-accuracy"></a>
 
-The single Assembly consumer, cross-method retrieval and frozen method/parameter
-basis are implemented. Source settings survive independently of target L2 keys.
-Explanations currently come from executable catalogs plus existing hifiasm
-mechanism guidance. They do not yet cover every foreign/historical setting or
-version-specific interaction; unexplained settings are retained as unknown.
+### Base Polish 代表性样本验收与独立准确性
 
-- Current evidence: `app/domains/assembly/software_knowledge.py`,
-  `method_guidance.py`, and `app/knowledge/assembly_retrieval.py`.
-- Contract owner: [Assembly case consumption](casepack.md).
-- Closure condition: curate referenced mechanism/version guidance for settings
-  encountered in the real case corpus beyond the current catalogs. This is
-  content coverage, not a second consumer or a requirement to translate foreign
-  settings into executable parameters. Hi-C/T2T remain deferred.
+仅 HiFi 的 minimap2/Racon 路线、成对前后比对证据、持久人工采纳/源保留以及最终成对 QUAST/BUSCO 评估已实现。fixture 可执行测试证明进程契约，不证明生物学正确性。同一批用于校正的读段不能建立独立共识 QV。
 
-### Assembly corpus handoff and measured recommendation coverage
+- 当前证据：`app/stages/base_polish/`、`tests/test_base_polish.py`、`app/diagnostics/route_acceptance.py`。
+- 契约所有者：[Base Polish](stage-contracts.md#10-base-polish)。
+- 关闭条件：先运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整路线。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
 
-Some read observations still have unknown processing-state bindings. They remain
-readable context, but do not numerically match runtime raw/filtered observations.
-Do not close this gap by making unknown a wildcard or inferring state from labels.
-Cross-method NextDenovo tests use synthetic fixtures; they establish wiring and
-native-setting preservation, not real-corpus coverage or biological benefit.
+<a id="assembly-software-explanation-coverage"></a>
 
-- Current evidence: `app/knowledge/assembly_cases.py`,
-  `tests/test_assembly_case_consumption.py`, and the Git-ignored
-  local `descriptors/knowledge_packs/assembly/cases/` directory.
-- Contract owner: [Assembly case consumption](casepack.md).
-- Closure condition: correct source-verified state bindings in the delivered
-  cases, validate the packages and actual foreign-tool retrieval in method and
-  parameter requests, then measure recommendation outcomes separately from
-  software tests. Corpus maintenance uses the case files themselves.
+### Assembly 软件解释覆盖
 
-### Dedup advisor real-tool acceptance
+单一 Assembly 消费者、跨方法检索和冻结的方法/参数基础已实现。来源设置独立保留，不受目标 L2 键影响。解释目前来自可执行目录与既有 hifiasm 机制指导，尚未覆盖全部外部/历史设置或版本交互；无法解释的设置保留为未知。
 
-Structured recommendations and the bounded purge_dups/QUAST review loop are
-implemented. The focused graph test covers three purge attempts, four cumulative
-QUAST evaluations/model requests, unchanged earlier files through response
-recovery and review, frozen original-draft inputs, and adoption of the first
-candidate. These fixture-executable checks do not establish real-tool biological
-quality or a server process-restart acceptance run.
+- 当前证据：`app/domains/assembly/software_knowledge.py`、`method_guidance.py`、`app/knowledge/assembly_retrieval.py`。
+- 契约所有者：[Assembly 案例消费](casepack.md)。
+- 关闭条件：为真实案例库中遇到的设置补充经引用的机制/版本指导，超出当前目录的覆盖范围。这是内容覆盖，不是第二消费者，也不要求将外部设置翻译成可执行参数。Hi-C/T2T 仍在规划中。
 
-- Current evidence: `app/stages/assembly_dedup/` and
-  `tests/test_dedup_recommendation_loop.py`.
-- Contract owner: [Assembly Dedup](stage-contracts.md#5-assembly-dedup).
-- Closure condition: validate the isolated stage with real tools, including
-  detached process recovery, and preserve the adoption
-  evidence before claiming representative-sample acceptance.
+<a id="assembly-corpus-handoff-and-measured-recommendation-coverage"></a>
 
-### Repository quality gates are targets, not a current success claim
+### Assembly 案例交接与已测推荐覆盖
 
-The repository intends these commands to be merge gates:
+部分读段观测仍缺少处理状态绑定。它们仍可作为上下文读取，但不能与运行时 raw/filtered 观测做数值匹配。不要通过把 unknown 当通配符或从标签推断状态来关闭缺口。跨方法 NextDenovo 测试使用合成 fixture，证明接线与原生设置保留，不证明真实案例库覆盖或生物学收益。
 
-```bash
-ruff format --check .
-ruff check .
-mypy app
-pytest -q
-```
+- 当前证据：`app/knowledge/assembly_cases.py`、`tests/test_assembly_case_consumption.py` 及 Git 忽略的本地 `descriptors/knowledge_packs/assembly/cases/`。
+- 契约所有者：[Assembly 案例消费](casepack.md)。
+- 关闭条件：为已交付案例补齐经来源核验的状态绑定，验证软件包和实际外部工具检索在方法与参数请求中的表现，再将推荐结果与软件测试分开测量。案例库维护以案例文件本身为准。
 
-The working tree passes a gate only when that command returns zero for the
-revision being described; the command output is the evidence.
+<a id="dedup-advisor-real-tool-acceptance"></a>
 
-- Run the checks in the project environment with the declared development
-  and TUI dependencies installed. A missing optional dependency or a Python
-  target incompatible with installed stubs is an environment failure, not
-  evidence that source type checking passed.
-- Policy owner: [Governance](governance.md).
-- Current evidence: `pyproject.toml` plus the command output for the checked
-  revision.
-- Closure condition: all four commands return zero and CI or an equivalent
-  enforced workflow runs them without exclusions that weaken the declared
-  policy.
+### Dedup 顾问真实工具验收
 
-### Storage garbage collection is audit-only
+结构化推荐和有界 purge_dups/QUAST 评审循环已实现。聚焦图测试覆盖三次 purge 尝试、四次累积 QUAST 评估/模型请求、响应恢复与评审期间早先文件不变、冻结原始草稿输入，以及采纳首个候选。fixture 可执行检查不能证明真实工具的生物学质量，也不能证明服务器进程重启验收。
 
-The run data contract defines retention and garbage-collection safety, but the
-implemented `storage-audit` command is read-only. It can project a cleanup
-manifest; it does not delete unreachable immutable artifacts, compact the
-artifact index after deletion, or reclaim retained method work directories.
+- 当前证据：`app/stages/assembly_dedup/`、`tests/test_dedup_recommendation_loop.py`。
+- 契约所有者：[Assembly Dedup](stage-contracts.md#5-assembly-dedup)。
+- 关闭条件：使用真实工具验证隔离阶段，包括分离进程恢复，并在声称代表性样本验收前保留验收证据。
 
-- Current evidence: `app/storage/audit.py` and the `storage-audit` CLI path in
-  `app/entrypoints/run.py`.
-- Contract owner: [Run data](data-contract.md).
-- Closure condition: implement and test an explicit safe apply path, or narrow
-  the accepted contract to audit and cleanup-manifest generation only.
+<a id="run-level-replay-capability-is-not-declared"></a>
 
-### Some reports still depend on live state projections
+### 运行级回放能力尚未声明
 
-The run-data contract says reports are regenerable projections from
-authoritative artifacts and Ledger events. The session summary satisfies that
-boundary, but `write_operator_report` requires a caller-supplied compact result
-for current stage, supervision, error, interrupt, and route tail. The
-stage-owned `assembly_review.md` writer likewise renders from the live Assembly
-Review cursor and an indexed packet; it neither embeds the shared source
-watermark nor has a dedicated durable-record-only regeneration path. There is
-no command or loader that reconstructs either exact projection solely from the
-Ledger and indexed artifacts. Despite that, `_reclaimable_candidates` currently
-labels every file under `reports/` as a derived report that can be regenerated.
-The cleanup manifest is dry-run-only today, but that blanket classification is
-not safe input for a future apply path.
+数据契约将 `fully_materialized`、`verified_external_dependencies`、`audit_only` 定义为运行级执行回放词汇，并预留 `control/run.json` 作为未来所有者；但生产路径 API、写入器和加载器尚未实现该记录。冻结控制输入与每次尝试的依赖记录提供底层证据，却没有可查询的单一持久声明。
 
-This is report-regeneration debt only. Projection exception isolation is
-implemented: `ProjectionBoundary` converts ordinary report/projection failures
-into bounded warnings and they do not alter lifecycle, review status,
-checkpoint, or authoritative-terminal facts. It is therefore not an open
-conformance gap.
+- 当前证据：`app/storage/frozen_inputs.py`、`app/execution/dependency_snapshot.py`；仓库搜索找不到 `control/run.json` 路径 API、写入器或读取器。
+- 契约所有者：[运行数据](data-contract.md)。
+- 关闭条件：发布并校验一个由冻结依赖/物化事实导出的回放枚举运行元数据记录，或从已接受契约和路径 API 中移除该枚举及 `run.json` 目标。
 
-- Current evidence: `app/reports/review_report.py` versus
-  `app/reports/trace_writer.py`, plus the report helpers in
-  `app/stages/assembly_review/nodes.py`, `_reclaimable_candidates` in
-  `app/storage/audit.py`, `tests/test_run_trace.py`, and
-  `tests/test_assembly_review.py`.
-- Contract owner: [Run data](data-contract.md).
-- Closure condition: implement and test durable-record reconstruction and
-  equivalent watermarks for both projections, or explicitly narrow the owning
-  contract so these live-result projections are not promised to be
-  independently regenerable; in either case, derive cleanup eligibility from
-  proven per-report regeneration support instead of directory membership.
+<a id="five-stage-real-tool-contig-acceptance-is-not-automated"></a>
 
-### Run-level replay capability is not declared
+### 五阶段真实工具 contig 验收尚未自动化
 
-The data contract defines `fully_materialized`,
-`verified_external_dependencies`, and `audit_only` as the run-level execution
-replay vocabulary and reserves `control/run.json` as its future owner, but no
-production path API, writer, or loader currently implements that record.
-Frozen control inputs and per-attempt dependency records provide the underlying
-evidence, but there is no single durable declaration to query.
+五阶段原始读段 contig 路径已有聚焦单元和集成覆盖，包括整图生命周期测试，但尚无一次自动验收运行在代表性输入上通过规范完成流程调用真实 SeqKit、Jellyfish、GenomeScope2、所选组装器、purge_dups、QUAST、BUSCO 和配置的 LLM 端点。多数方法测试使用 fixture、stub 或修补外部边界隔离阶段。现有真实工具 Read QC 冒烟不能关闭整条路径缺口。
 
-- Current evidence: `app/storage/frozen_inputs.py` and
-  `app/execution/dependency_snapshot.py`; repository search finds no
-  `control/run.json` path API, writer, or reader.
-- Contract owner: [Run data](data-contract.md).
-- Closure condition: publish and validate a run metadata record whose replay
-  enum is derived from the frozen dependency/materialization facts, or remove
-  the enum and `run.json` target from the accepted contract and path API.
+操作者报告完成了一次真实五阶段运行。请用 `route_acceptance --route contig` 复用并审计其保留证据；本检出中没有捆绑自动数据集/测试框架，不等于服务器执行未发生。同一诊断现在也支持独立的 Review、Hi-C、GapCloser、T2T、Base Polish + Review 和 finishing 范围，并提供已发布 RunConfig/输入模板。这些条目不能证明对应服务器真实工具运行已通过。
 
-### Five-stage real-tool contig acceptance is not automated
+`server_check.sh` 证明固定主机工具/包/数据库闭包，`server_test.sh` 是回归入口，不是全流程生物学执行证据。普通回归排除显式标记的真实工具检查（包括 SeqKit 和 hifiasm CLI 验证），且测试收集期间不探测工具。这两个脚本通过都不能证明 contig 运行成功。
 
-The five-stage raw-read contig path has focused unit and integration coverage,
-including whole-graph lifecycle tests, but it does not have one automated
-acceptance run that invokes the real SeqKit, Jellyfish, GenomeScope2, selected
-assembler, purge_dups, QUAST, BUSCO, and configured LLM endpoint on one
-representative input through canonical completion. Most method tests isolate
-their stage with fixtures, stubs, or patched external boundaries. The existing
-real-tool Read QC smoke does not close the whole-path gap.
+- 当前证据：`tests/test_read_qc.py`、`tests/test_genome_survey.py`、`tests/test_assembly.py`、`tests/test_assembly_dedup.py`、`tests/test_assembly_review.py`、`scripts/server_check.sh`、`scripts/server_test.sh`、`app/diagnostics/route_acceptance.py`、`tests/test_route_acceptance.py`。
+- 契约所有者：[阶段契约](stage-contracts.md)与[部署边界](../../deployment/README.md)。
+- 关闭条件：审计保留的真实运行证据，补齐已证明的代码测试缺口并隔离真实工具测试。仅为尚未证明的方法/分支增加小数据真实工具覆盖；使用规范模板和 `gene-agent run`，不要建立第二执行框架。可复现服务器验收应保留可追溯输入/工具身份，并通过分离检查得到规范完成终态、五个已结算分析 occurrence 和哈希验证的 `final_assembly`。聚焦 stub 测试不满足条件。Hi-C 与 finishing 阶段在全流程验收前先作为独立切片；单一操作者顺序由[运行与恢复](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)拥有。
 
-The operator reports a completed real five-stage run. Reuse and audit its
-preserved evidence with `route_acceptance --route contig`; absence of a bundled
-automated dataset/harness does not mean that server execution did not happen.
-The server run directory has not been independently inspected in this checkout.
-The same diagnostic now supports independent Review, Hi-C, GapCloser, T2T,
-Base Polish plus Review, and finishing scopes, with published RunConfig/input
-templates. The Hi-C scope can compare adoption-gate and post-resume executions.
-These entries are not proof that their real-tool server runs have passed.
+<a id="update-rule"></a>
 
-`server_check.sh` proves the fixed host tool/package/database closure and
-`server_test.sh` is a regression entry, not whole-path biological execution
-evidence. Its suite can currently auto-run the conditional SeqKit smoke on a
-provisioned host; real-tool opt-in isolation, including collection-time probes,
-is still incomplete. Neither command may be cited as a successful contig run.
+## 更新规则
 
-- Current evidence: `tests/test_read_qc.py`, `tests/test_genome_survey.py`,
-  `tests/test_assembly.py`, `tests/test_assembly_dedup.py`,
-  `tests/test_assembly_review.py`, `scripts/server_check.sh`, and
-  `scripts/server_test.sh`, `app/diagnostics/route_acceptance.py`, and
-  `tests/test_route_acceptance.py`.
-- Contract owners: [Stage contracts](stage-contracts.md) and the
-  [deployment boundary](../../deployment/README.md).
-- Closure condition: audit preserved real-run evidence, fill demonstrated
-  code-test gaps and isolate real-tool tests. Add small-data real-tool coverage
-  only for methods/branches not already proven; use the canonical templates
-  and `gene-agent run`, not a second execution framework. For repeatable server
-  acceptance, retain traceable input/tool identities and an audit with a canonical completed terminal,
-  five settled analytical occurrences, and a hash-verified `final_assembly`
-  from detached inspection. Focused stubbed tests do not satisfy this condition.
-  Hi-C and finishing stages are independent slices before full-route acceptance;
-  the single operator sequence is owned by
-  [Run and Recovery](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs).
-
-## Update rule
-
-Every entry identifies the accepted owner, current code evidence, and an
-objective closure condition. Delete an entry in the same change that closes it.
+每条记录都要标明接受的所有者、当前代码证据和客观关闭条件。关闭缺口的同一变更中删除对应条目。

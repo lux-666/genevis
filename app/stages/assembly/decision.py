@@ -84,8 +84,9 @@ def make_assembly_decision(
             error=f"{type(exc).__name__}: {exc}",
         )
 
-    raw_content = response_text(response)
+    raw_content = ""
     try:
+        raw_content = response_text(response)
         parsed = parse_json_object(raw_content)
         _validate_route_selection(
             parsed, request.allowed_actions, request.allowed_methods

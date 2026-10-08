@@ -1,4 +1,4 @@
-"""Small shared primitives for regenerable report projections."""
+"""Small shared primitives for best-effort report projections."""
 
 from __future__ import annotations
 

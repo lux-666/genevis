@@ -13,7 +13,3 @@ class LifecycleError(ValueError):
 
 class ResumeValidationError(LifecycleError):
     """Raised when a resume request cannot be applied."""
-
-
-class UnsupportedLifecycleOperationError(LifecycleError):
-    """Raised for lifecycle operations outside the current task scope."""

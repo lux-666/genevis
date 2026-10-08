@@ -56,6 +56,10 @@ class AssemblyDedupStageTests(unittest.TestCase):
                     "step_id": "step-003-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
+                    "selected_method_names": [
+                        "assembly_review.eval.quast",
+                        "assembly_review.eval.busco",
+                    ],
                     "review_target": {
                         "resource_type": "assembly",
                         "producer_step_id": "step-002-assembly_dedup",

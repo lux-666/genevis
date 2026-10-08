@@ -1,88 +1,74 @@
-# Architecture Governance
+<a id="architecture-governance"></a>
 
-> **Status:** implemented policy; see
-> [Architecture conformance](conformance.md) for gates that are not currently
-> proven green.  
-> **Read when:** changing architecture ownership, documentation, descriptors,
-> review policy, or repository-wide gates.  
-> **Comes from:** accepted project design and current engineering policy.  
-> **Feeds into:** every architecture and implementation change.  
-> **Related contracts:** [Descriptors](descriptors.md),
-> [Run data](data-contract.md), [Stage contracts](stage-contracts.md).  
-> **Code evidence:** `pyproject.toml`, the implementation modules named by each
-> contract, and the tests relevant to the changed boundary.
+# 架构治理
 
-This document describes how a coordinating agent should steer Gene Agent work.
-The coordinator is not expected to write every method implementation. The main
-job is to preserve architecture, contracts, sequencing, review quality, and
-handoff clarity.
+> **状态：** 已实施的政策；实际门禁是否通过，以对应版本的命令结果为准，尚未关闭的差异见[架构一致性缺口](conformance.md)。
+>
+> **何时阅读：** 修改架构职责、文档、描述符、评审政策或仓库级门禁时。
+>
+> **来源：** 已接受的项目设计和当前工程政策。
+>
+> **作用对象：** 所有架构与实现变更。
+>
+> **相关契约：** [描述符](descriptors.md)、[运行数据](data-contract.md)、[阶段契约](stage-contracts.md)。
+>
+> **代码证据：** `pyproject.toml`、各契约列出的实现模块以及与变更边界相关的测试。
 
-## Coordinator Role
+本页描述协调者如何推进 Gene Agent 工作。协调者无需亲自编写每个方法，主要职责是维护架构、契约、实施顺序、审查质量和清晰的交接。
 
-The coordinator owns these responsibilities:
+<a id="coordinator-role"></a>
 
-- Apply direct user instructions and preserve the repository engineering policy
-  defined by this page.
-- Keep architecture documents current before large implementation work.
-- Split large work into testable slices with explicit exit criteria.
-- Make sure state, ledger, artifact, runner, review, and descriptor boundaries
-  remain separate.
+## 协调者职责
 
-The coordinator should avoid these behaviors:
+协调者负责：
 
-- Do not implement a heavy bioinformatics method before its descriptor, inputs,
-  outputs, review rule, and artifact contract are clear.
-- Do not copy `rna_agent` business terms such as `integration`, `annotation`,
-  and `benchmark` into genome-specific code unless they are truly generic.
-- Do not put FASTQ/FASTA contents, large reports, generated scripts, or command
-  logs in LangGraph state.
-- Do not make a top-level graph edge for every biological tool.
-- Do not let an LLM write routing, checkpoint, ledger, or lifecycle core logic.
+- 遵循用户直接指令，维护本页定义的仓库工程政策。
+- 在大型实现工作之前更新架构文档。
+- 将大型工作拆分为可测试、退出条件明确的切片。
+- 保持 state、Ledger、Artifact、Runner、review 和 descriptor 各自的边界。
 
-## Sources of Truth
+应避免：
 
-Do not force design authority, current implementation state, biological
-rationale, and coordination procedure into one linear ranking:
+- 在描述符、输入、输出、评审规则和产物契约尚不清晰时实现重型生信方法。
+- 将 `rna_agent` 的 `integration`、`annotation`、`benchmark` 等业务术语搬入基因组代码，除非确属通用概念。
+- 将 FASTQ/FASTA 内容、大型报告、生成脚本或命令日志放进 LangGraph state。
+- 为每个生物工具创建父图边。
+- 让运行时 LLM 生成并控制路由、checkpoint、Ledger 或生命周期核心逻辑。
 
-- Direct user instruction governs the current task.
-- Accepted topic and reference nodes under `docs/architecture/` govern intended
-  cross-cutting behavior; `docs/architecture/README.md` routes readers to the
-  single owner for each boundary.
-- Reference pages own exact schemas, normative arrays, default values, and
-  lifecycle invariants. Topic pages may explain flows and relationships but
-  must link to those owners instead of copying a second normative contract.
-- `docs/architecture/reference/stage-contracts.md` and
-  `docs/architecture/reference/descriptors.md` govern stable domain boundaries.
-- Code and tests are the evidence for what is implemented now. They do not
-  silently amend an accepted design; a mismatch is recorded as conformance
-  debt.
-- This page is the single owner of repository-local engineering procedure. Its
-  process rules cannot silently amend product behavior owned by another
-  architecture contract.
+<a id="sources-of-truth"></a>
 
-## Change Control
+## 权威来源
 
-For each non-trivial change:
+不要将设计权威、当前实现、生物学依据和协调规程强行排成一条优先级链：
 
-1. Identify the single architecture owner, assumptions, and success criteria.
-2. For design-affecting work, update and settle that owner before behavior code;
-   when the user requires design confirmation, implementation starts only after
-   that confirmation.
-3. Add or update a focused test before behavior code when applicable.
-4. Keep edits scoped to the approved task.
-5. Run focused verification for the affected boundary and the full regression
-   suite when behavior changes.
+- 用户直接指令约束当前任务。
+- `docs/architecture/` 下已接受的专题和参考契约约束预期跨领域行为；`docs/architecture/README.md` 将读者导航到各边界的唯一权威。
+- 参考文档定义精确 schema、规范数组、默认值和生命周期不变量。专题只解释流程和关系，应链接到权威文档，不复制第二份规范契约。
+- `docs/architecture/reference/stage-contracts.md` 和 `docs/architecture/reference/descriptors.md` 定义稳定的领域边界。
+- 代码和测试证明当前实现，不会静默修改已接受设计；不一致必须登记为一致性欠账。
+- 本页是仓库内部工程规程的唯一权威。流程规则不能静默改写其他架构契约定义的产品行为。
 
-Comments record only non-obvious rationale. Architecture text and pull-request
-descriptions state final behavior and decisions not evident from the diff; they
-omit intermediate attempts, rejected alternatives, and never-merged states.
+<a id="change-control"></a>
 
-Documentation-only changes do not need full runner tests, but they should keep
-the scaffold structure test passing when they add required documents or paths.
+## 变更控制
 
-### Repository quality gates
+每次非简单变更应：
 
-The intended repository-wide gates are:
+1. 确认唯一架构权威、假设和成功条件。
+2. 涉及设计时，先更新并确定权威契约，再修改行为代码；用户要求设计确认时，必须确认后才实施。
+3. 适用时先添加或更新针对性测试，再修改行为代码。
+4. 将改动限制在已授权任务范围内。
+5. 验证受影响边界；行为发生变化时运行完整回归。
+
+注释只解释不明显的理由。架构正文和 PR 描述应陈述最终行为及 diff 无法直接说明的决策，省略中间尝试、被放弃的方案和从未合并的状态。
+
+纯文档变更无需完整执行器测试；增加必需文档或路径时，应保持项目结构测试通过。
+
+<a id="repository-quality-gates"></a>
+
+### 仓库质量门禁
+
+必需的仓库级门禁：
 
 ```bash
 ruff format --check .
@@ -91,37 +77,18 @@ mypy app
 pytest -q
 ```
 
-Do not call a command a passing gate unless it returns zero for the revision in
-question. Do not weaken configuration or add broad exclusions to manufacture a
-pass. Until all four gates are green and enforced, record that difference in
-[Architecture conformance](conformance.md).
+`scripts/server_test.sh` 按顺序运行这些门禁，然后执行编译与 diff 检查。普通 pytest 排除 `real_tool`；安装在主机上的生物工具只通过显式 `pytest -m real_tool` 选择检查。
 
-## Documentation Standard
+只有命令对所述版本返回零，才能声称门禁通过。不得削弱代码测试选择或添加排除项制造通过结果。未关闭的差异记录在[架构一致性缺口](conformance.md)。
 
-Each current architecture or domain contract has one owning document. Update
-that owner in place; do not add phase plans, implementation summaries, handoff
-snapshots, acceptance logs, or duplicate design explanations to the working
-tree. Keep operational guides executable and current.
+<a id="documentation-standard"></a>
 
-Conversation progress, completed-task summaries, test-run logs, and one-off
-handoffs belong in the chat or commit/PR description, not in a new Markdown
-file. When a temporary document has served its purpose, move any still-current
-contract or procedure into its existing owner, remove the temporary file and
-its links, and use Git history for retrieval. Do not create an archive directory
-or a cleanup report to preserve retired documentation. `conformance.md` retains
-only unresolved capability gaps, evidence locations, and closure conditions;
-it is not a dated activity log or a local-data inventory.
+## 文档标准
 
-Audit finding identifiers are review-local coordinates, not architecture
-categories. Never create an `F1`/`F2`-style contract, table, or navigation path.
-Route each accepted semantic rule into its existing owner; record only a real
-implementation-versus-contract gap in `conformance.md`, named by the missing
-capability or conflicting representation rather than by the review that found
-it. Operator guides and examples may summarize usage, but must link back to the
-owner for defaults, precedence, and lifecycle semantics.
+每项当前架构或领域契约只有一个权威文档，直接原地更新；不要向工作树增加阶段计划、实现摘要、交接快照、验收日志或重复设计说明。操作指南必须保持可执行且与当前行为一致。
 
-For simplification work, classify candidates as `exact clone`,
-`semantic duplication`, `duplicate representation`, `dead surface`, or
-`intentional symmetry` using code and call-site evidence. Prefer deleting a
-source of truth over adding an abstraction. Preserve public compatibility
-surfaces unless their owner explicitly changes that contract.
+对话进展、已完成任务摘要、测试日志和一次性交接放在聊天或 commit/PR 描述中，不新建 Markdown。临时文档完成用途后，将仍有效的契约或规程移入现有权威文档，删除临时文件及链接，并通过 Git 历史检索。不要建立归档目录或清理报告来保留已退役文档。`conformance.md` 只保留未解决的能力缺口、证据位置和关闭条件，不作为带日期的活动日志或本地数据清单。
+
+审查发现编号只是在当前审查中定位问题的坐标，不是架构分类。不得创建 `F1`/`F2` 式契约、表格或导航。已接受的语义规则应进入现有权威文档；只有实际的实现与契约差异才记入 `conformance.md`，并以缺失能力或冲突表示命名，不以发现它的审查命名。操作指南和示例可概述用法，但默认值、优先级和生命周期语义应链接回权威来源。
+
+简化工作应根据代码与调用点证据，将候选分类为精确克隆（`exact clone`）、语义重复（`semantic duplication`）、重复表示（`duplicate representation`）、死接口（`dead surface`）或有意对称（`intentional symmetry`）。优先删除多余权威来源，避免增加抽象。除非权威契约被明确修改，否则保留公共兼容接口。

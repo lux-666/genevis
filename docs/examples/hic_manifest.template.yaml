@@ -1,4 +1,4 @@
-# Pair with hic_run_config.template.json. Use a fresh session for each trial.
+# 配套 hic_run_config.template.json；每次试验使用新会话。
 session_id: hic-slice-YYYYMMDD-a
 sample_id: REPLACE_SAMPLE
 assets:

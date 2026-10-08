@@ -102,7 +102,7 @@ def _env_config(path: Path) -> Path:
         "databases:\n"
         "  busco:\n"
         "    default_lineage: embryophyta_odb10\n"
-        "    lineages:\n" + lineage_yaml + "  ncbi_metazoa:\n"
+        "    lineages:\n" + lineage_yaml + "  ncbi:\n"
         f"    reference_dir: {reference}\n"
         "methods:\n"
         "  assembly.candidate.flye:\n"
@@ -138,7 +138,7 @@ def _append_database_registry(path: Path) -> None:
         f"        path: {busco_root / 'embryophyta_odb10'}\n"
         "        version: odb10\n"
         "        source: test_fixture\n"
-        "  ncbi_metazoa:\n"
+        "  ncbi:\n"
         f"    reference_dir: {_write_ncbi_reference(path.parent)}\n",
         encoding="utf-8",
     )

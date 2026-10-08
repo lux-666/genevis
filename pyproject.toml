@@ -75,3 +75,9 @@ packages = ["app"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "descriptors" = "app/_descriptors"
+
+[tool.pytest.ini_options]
+addopts = "-m 'not real_tool'"
+markers = [
+    "real_tool: explicitly selected checks that invoke installed biological tools",
+]

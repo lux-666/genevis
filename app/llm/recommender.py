@@ -99,7 +99,6 @@ class StructuredRecommender(Generic[T]):
             model_id = original_model_id
             if isinstance(response, BaseModel):
                 raw_message = response.model_dump(mode="json")
-            raw = response_text(response)
             if self.method == "function_calling":
                 calls = getattr(response, "additional_kwargs", {}).get("tool_calls")
                 if not isinstance(calls, list) or len(calls) != 1:
@@ -112,6 +111,8 @@ class StructuredRecommender(Generic[T]):
                 raw = function.get("arguments")
                 if not isinstance(raw, str):
                     raise ValueError("function arguments must be a JSON string")
+            else:
+                raw = response_text(response)
             parsed = self.parse(parse_json_object(raw))
             return RecommendationResult(raw, parsed, None, model_id, raw_message)
         except Exception as exc:

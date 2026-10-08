@@ -124,8 +124,8 @@ bootstrap 都在同一次调用中展示候选计划并等待确认，确认后�
 方法会在上游证据产生后于 stage 内推荐，并从冻结的环境快照检查所选候选。真实
 `gene-agent run` 还会检查输入和 LLM。因此部分 bootstrap 成功不代表完整 contig
 环境已经就绪。
-`server_test.sh` 只做代码回归、
-compile 和 diff 检查，不是真实数据生信 smoke test。
+`server_test.sh` 执行 format、lint、mypy、代码回归、compile 和 diff 检查，
+明确排除 `real_tool`；真实工具检查通过 `pytest -m real_tool` 单独选择。
 
 ### 3. Copy the authoritative templates
 

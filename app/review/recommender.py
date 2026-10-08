@@ -9,13 +9,13 @@ from typing import Any, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.llm.factory import build_chat_model
-from app.llm.json_response import parse_json_object
 from app.llm.prompts import (
     PROMPT_ROOT,
     PromptBundle,
     load_prompt_bundle,
     render_prompt_messages,
 )
+from app.llm.recommender import StructuredRecommender
 from app.review.base import ResumeReviewRequest
 from app.review.gates import review_prompt_bundle
 from app.review.persistence import (
@@ -84,8 +84,25 @@ def recommend_review_decision(
         },
     )
     model = _bind_recommendation_response_format(chat_model or build_chat_model())
-    raw_text = _invoke_model(model, messages)
-    raw = _parse_json(raw_text)
+    result = StructuredRecommender(lambda payload: payload).invoke(
+        messages, model_factory=lambda: model
+    )
+    if not result.valid:
+        error = result.error or "unknown model response failure"
+        if error.startswith("JSONDecodeError:"):
+            raise RecommendationError(
+                f"review recommendation is not valid JSON: {error}"
+            )
+        if "LLM returned empty content" in error:
+            raise RecommendationError(
+                "review recommendation LLM returned empty content"
+            )
+        if "LLM response JSON must be an object" in error:
+            raise RecommendationError("review recommendation JSON must be an object")
+        raise RecommendationError(f"review recommendation LLM call failed: {error}")
+    raw_text = result.raw_response
+    raw = result.parsed
+    assert raw is not None
     normalized = _normalize_recommendation(raw, session_id=session_id, stage=stage)
     draft = RecommendationDraft.model_validate(normalized)
     if draft.session_id != session_id:
@@ -228,24 +245,6 @@ def _bind_recommendation_response_format(chat_model: Any) -> Any:
         return bind(response_format={"type": "json_object"})
 
 
-def _invoke_model(chat_model: Any, messages: list[dict[str, str]]) -> str:
-    try:
-        response = chat_model.invoke(messages)
-    except Exception as exc:
-        raise RecommendationError(
-            f"review recommendation LLM call failed: {type(exc).__name__}: {exc}"
-        ) from exc
-    content = getattr(response, "content", response)
-    if isinstance(content, list):
-        content = "".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    if not isinstance(content, str) or not content.strip():
-        raise RecommendationError("review recommendation LLM returned empty content")
-    return content.strip()
-
-
 def _normalize_recommendation(
     raw: dict[str, Any], *, session_id: str, stage: str
 ) -> dict[str, Any]:
@@ -258,19 +257,6 @@ def _normalize_recommendation(
         rationale = normalized.pop("rationale")
         normalized["notes"] = [rationale] if isinstance(rationale, str) else rationale
     return normalized
-
-
-def _parse_json(text: str) -> dict[str, Any]:
-    try:
-        return parse_json_object(text)
-    except json.JSONDecodeError as exc:
-        raise RecommendationError(
-            f"review recommendation is not valid JSON: {exc}"
-        ) from exc
-    except ValueError as exc:
-        raise RecommendationError(
-            "review recommendation JSON must be an object"
-        ) from exc
 
 
 def _model_identifier(model: Any) -> str | None:

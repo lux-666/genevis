@@ -429,17 +429,16 @@ class EntrypointTests(unittest.TestCase):
                 "out",
                 "--format",
                 "json",
-                "--dry-run-manifest",
             ]
         )
 
         self.assertEqual(args.command, "storage-audit")
         self.assertEqual(args.session_id, "s1")
         self.assertEqual(args.format, "json")
-        self.assertTrue(args.dry_run_manifest)
+        self.assertFalse(hasattr(args, "dry_run_manifest"))
         self.assertFalse(hasattr(args, "apply"))
 
-    def test_storage_audit_cli_emits_optional_dry_run_manifest(self):
+    def test_storage_audit_cli_reports_usage_without_cleanup_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SessionPaths(tmp, "s1")
             ensure_run_layout(paths)
@@ -459,7 +458,6 @@ class EntrypointTests(unittest.TestCase):
                     tmp,
                     "--format",
                     "json",
-                    "--dry-run-manifest",
                 ]
             )
             stdout = io.StringIO()
@@ -469,9 +467,11 @@ class EntrypointTests(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
-        self.assertEqual(payload["audit"]["session_id"], "s1")
-        self.assertEqual(payload["cleanup_manifest"]["candidate_file_count"], 1)
-        self.assertEqual(payload["cleanup_manifest"]["retained_work_file_count"], 1)
+        self.assertEqual(payload["session_id"], "s1")
+        self.assertEqual(payload["layers"]["reports"]["file_count"], 1)
+        self.assertEqual(payload["layers"]["work"]["file_count"], 1)
+        self.assertNotIn("reclaimable", payload)
+        self.assertNotIn("cleanup_manifest", payload)
 
     def test_storage_audit_cli_returns_nonzero_on_integrity_error(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,33 +1,28 @@
-# Resource Handoff Contract
+<a id="resource-handoff-contract"></a>
 
-> **Status:** accepted; remaining cross-cutting gaps are listed in
-> [Architecture conformance](conformance.md).
-> **Read when:** a stage publishes or consumes a materialized biological file.  
-> **Comes from:** [Data and storage](../topics/data-and-storage.md) and stage
-> commit boundaries.  
-> **Feeds into:** downstream stage validation and method freezing.  
-> **Related contracts:** [Stage contracts](stage-contracts.md),
-> [Run data](data-contract.md).  
-> **Code evidence:** `app/stages/resource_specs.py`,
-> `app/stages/resource_resolution.py`, `app/schemas/resource_ref.py`,
-> `app/control/occurrence_settlement.py`.
+# 资源交接契约
 
-This specification owns cross-stage file handoff. Biological inputs, outputs,
-and review triggers remain in [`stage-contracts.md`](stage-contracts.md);
-this document defines how materialized resources move between stages.
+> **状态：** 已接受；剩余跨切面缺口见[架构一致性](conformance.md)。
+>
+> **阅读场景：** 阶段发布或消费物化的生物学文件。
+>
+> **来源：** [数据与存储](../topics/data-and-storage.md)和阶段提交边界。
+>
+> **下游：** 下游阶段校验与方法冻结。
+>
+> **相关契约：** [阶段契约](stage-contracts.md)、[运行数据](data-contract.md)。
+>
+> **代码依据：** `app/stages/resource_specs.py`、`app/stages/resource_resolution.py`、`app/schemas/resource_ref.py`、`app/control/occurrence_settlement.py`。
 
-## State ownership
+本规范拥有跨阶段文件交接。生物学输入、输出和评审触发仍属于[阶段契约](stage-contracts.md)；本文定义物化资源如何在阶段间传递。
 
-`TopLevelState.resource_refs` is the only cross-stage file handoff table.
-`stage_outputs` contains stage-private, checkpointable cursors and may hold
-status, metrics, evidence refs, and recovery metadata. A downstream stage must
-not scan another stage's output or guess a key name to locate an input file.
-It is a current-occurrence scratch projection, not a history table: when a
-same-named stage occurrence is entered again, its slot is replaced from the
-frozen stage seed. Prior occurrence history remains in step-scoped artifacts,
-review records, execution evidence, and ledger events.
+<a id="state-ownership"></a>
 
-A persisted `ResourceRef` has this shape:
+## 状态所有权
+
+`TopLevelState.resource_refs` 是唯一跨阶段文件交接表。`stage_outputs` 包含阶段私有、可 checkpoint 的游标，可持有状态、指标、证据引用和恢复元数据。下游不得扫描其他阶段输出或猜键名寻找输入。它是当前 occurrence 的临时投影，不是历史表；再次进入同名阶段时，从冻结种子替换其槽位。既往 occurrence 历史保留在步骤范围的产物、评审记录、执行证据和 Ledger 事件中。
+
+持久 `ResourceRef` 结构如下：
 
 ```json
 {
@@ -50,104 +45,68 @@ A persisted `ResourceRef` has this shape:
 }
 ```
 
-Current constraints:
+当前约束：
 
-- the table key and `resource_type` must match;
-- `paths` contains at least one non-empty string;
-- `source_stage is None` if and only if `workflow_step_id is None`;
-- a present `source_stage` and `workflow_step_id` are each non-empty strings;
-- ordinary manifest/external resources leave both provenance fields absent,
-  while a stage-produced resource records its canonical producing stage and
-  exact workflow occurrence. A registered assembly is deliberately upgraded by
-  Inventory into an executed candidate, so its central `assembly` handoff has
-  `source_stage="inventory"` and
-  `workflow_step_id="step-000-inventory"`;
-- the complete table is JSON-only and at most 128 KiB;
-- reducers validate and replace the complete table;
-- stage nodes return a delta and do not mutate input state;
-- large evidence, logs, commands, and metric tables live in artifacts or the
-  ledger, with only compact refs in metadata.
+- 表键必须匹配 `resource_type`。
+- `paths` 至少含一个非空字符串。
+- `source_stage is None` 当且仅当 `workflow_step_id is None`。
+- 存在时，两者均为非空字符串。
+- 普通 manifest/外部资源不带这两个来源字段；阶段资源记录规范生产阶段和精确 occurrence。已注册组装由 Inventory 有意包装为 executed candidate，因此中央 `assembly` 交接带 `source_stage="inventory"`、`workflow_step_id="step-000-inventory"`。
+- 完整表仅含 JSON，最多 128 KiB。
+- reducer 验证并替换完整表。
+- 阶段节点返回增量，不修改输入状态。
+- 大型证据、日志、命令、指标表位于产物或 Ledger；metadata 只放紧凑引用。
 
-Scalar observations such as genome size are parameter or measurement evidence,
-not path resources.
+基因组大小等标量观测属于参数或测量证据，不是路径资源。
 
-## Resolution
+<a id="resolution"></a>
 
-All stages resolve inputs through
-`app.stages.resource_resolution.resolve_stage_resource` in this order:
+## 解析
 
-1. `state.resource_refs[logical_resource]`;
-2. the asset registry, using the `ResourceSpec` asset types and priorities;
-3. `found=False`.
+所有阶段通过 `app.stages.resource_resolution.resolve_stage_resource` 按以下顺序解析：
 
-There is no separate explicit run-override layer in the resolver. A stage may
-still consume a run-config field at its own adapter boundary, but that is not a
-fourth cross-stage resource source.
+1. `state.resource_refs[logical_resource]`。
+2. 按 `ResourceSpec` 资产类型与优先级查询资产注册表。
+3. `found=False`。
 
-The resolver does not scan `stage_outputs`. The calling stage owns the decision
-to fail, skip, or use an explicitly allowed fallback when a resource is absent;
-the resolver itself remains a non-throwing query for absence. It does not own
-environment/LLM readiness, method selection, or tool preflight and must not
-re-read a live `envs.yaml` or infer method identity from a resource path. Those
-checks belong to the
-[execution lifecycle](execution-lifecycle.md#whole-run-readiness-boundary) and
-the stage adapter that freezes the selected attempt.
+解析器没有独立显式运行覆盖层。阶段仍可在适配器边界消费运行配置字段，但那不是第四种跨阶段资源来源。
 
-When inventory contains clean and raw assets for one logical resource,
-`ResourceSpec.asset_type_priority_groups` determines the preferred type. Once a
-later stage publishes a central resource ref, resolution must not silently fall
-back to an older inventory asset.
+解析器不扫描 `stage_outputs`。资源缺失时，调用阶段决定失败、跳过或使用明确允许的后备；解析器本身只是缺失时不抛异常的查询。它不拥有环境/LLM 就绪、方法选择或工具预检，不得重读实时 `envs.yaml` 或从资源路径推断方法。检查属于[执行生命周期](execution-lifecycle.md#whole-run-readiness-boundary)与冻结所选尝试的适配器。
 
-Stages publish with `update_resource_ref(...)`, which returns a new validated
-table and never mutates the supplied state.
+Inventory 同一逻辑资源同时含 clean/raw 资产时，由 `ResourceSpec.asset_type_priority_groups` 决定首选类型。后续阶段一旦发布中央资源引用，就不得静默回退到旧 Inventory 资产。
 
-## Logical resources
+阶段使用 `update_resource_ref(...)` 发布；它返回新验证表，不修改传入状态。
 
-| Stage | Requires | Produces or updates |
+<a id="logical-resources"></a>
+
+## 逻辑资源
+
+| 阶段 | 必需 | 产生或更新 |
 |---|---|---|
-| `inventory` | — | `long_reads`, `short_reads`, `hic_reads`, `assembly`, according to the manifest |
+| `inventory` | — | 按 manifest 注册 `long_reads`、`short_reads`、`hic_reads`、`assembly` |
 | `read_qc` | `long_reads` | `long_reads` |
-| `genome_survey` | for a full survey, at least one of `short_reads` or `long_reads`, preferring the `short_reads` family; each family's clean/raw priority is resolved before the stage boundary; an explicit genome size permits the no-read skip path | scalar measurement evidence only |
+| `genome_survey` | 完整 Survey 至少需要 `short_reads` 或 `long_reads`，优先短读段族；族内 clean/raw 优先级在阶段前解析；明确基因组大小允许无读段 skip | 仅标量测量证据 |
 | `assembly` | `long_reads` | `assembly` |
-| `assembly_dedup` | `assembly`, `long_reads` | `assembly` |
+| `assembly_dedup` | `assembly`；`read_depth` 策略还需 `long_reads` | `assembly` |
 | `assembly_review` | `assembly` | `assembly` |
-| `hic_scaffolding` | `assembly`, `hic_reads` | adopted chromosome-scale `assembly` |
-| `gapcloser` | current adopted `assembly`; complete HiFi-only `long_reads` when internal gaps exist | manually adopted or reused `assembly` |
-| `t2t` | current adopted `assembly`, `long_reads` | `assembly` |
-| `base_polish` | current `assembly`, complete HiFi-only `long_reads` | manually adopted or reused `assembly`, plus the paired alternative for final Review |
+| `hic_scaffolding` | `assembly`、`hic_reads` | 已采纳染色体级 `assembly` |
+| `gapcloser` | 当前采纳 `assembly`；存在内部缺口时需完整 HiFi-only `long_reads` | 人工采纳或复用的 `assembly` |
+| `t2t` | 当前采纳 `assembly`、`long_reads` | `assembly` |
+| `base_polish` | 当前 `assembly`、完整 HiFi-only `long_reads` | 人工采纳或复用的 `assembly`，以及供最终 Review 的成对替代候选 |
 
-Runtime stage adapters enforce these direct dependencies. Genome Survey
-already admits a short-read-only run and prefers short DNA reads when both
-families are present. `resource_specs.py` owns only canonical resource
-resolution; stages do not share a second declarative planning table.
+运行时适配器强制这些直接依赖。Genome Survey 已允许只有短读段的运行，两族均存在时优先短 DNA 读段。`resource_specs.py` 仅拥有规范资源解析；阶段不共享第二份声明式规划表。
 
-Hi-C reads stop at `hic_scaffolding`. After human adoption, that occurrence
-replaces the central `assembly` resource. GapCloser consumes that assembly and
-the complete current HiFi read set; manual adoption replaces it, while keeping
-the prior assembly or finding no internal gaps declares a reused delivery.
-Any later T2T occurrence resolves the then-current assembly and the
-long-read set; it does not consume `hic_reads` or a contact map directly. The
-Base Polish occurrence also uses the current assembly and HiFi read set.
-Its handoff metadata carries `comparison_candidate_bundle_ref`,
-`comparison_primary_output_ref`, and `polish_comparison_ref`. Final Review
-verifies both candidates against that immutable source-bound comparison, then
-evaluates them with the same QUAST/BUSCO settings. These refs describe an
-alternative, not a second current assembly.
+Hi-C 读段止于 `hic_scaffolding`。人工采纳后，该 occurrence 替换中央 `assembly`。GapCloser 消费该组装和完整当前 HiFi 集合；采纳则替换，保留旧组装或没有内部缺口则声明复用交付。后续 T2T 解析当时的组装和长读段，不直接消费 `hic_reads` 或 contact map。Base Polish 同样使用当前组装和 HiFi 集合。交接 metadata 携带 `comparison_candidate_bundle_ref`、`comparison_primary_output_ref`、`polish_comparison_ref`。最终 Review 依据不可变来源绑定比较验证两个候选，再用相同 QUAST/BUSCO 设置评估。这些引用描述替代项，不构成第二个当前组装。
 
-Candidate bundles, review decisions, execution evidence, reports, and metrics
-remain artifacts. They may be referenced from resource metadata but do not form
-a second cross-stage file table.
+候选包、评审决策、执行证据、报告和指标仍是产物。资源 metadata 可引用它们，但不形成第二跨阶段文件表。
 
-## Immutable assembly delivery
+<a id="immutable-assembly-delivery"></a>
 
-`resource_refs["assembly"]` is a replaceable current-routing projection. Its
-`source_stage` and `workflow_step_id` labels are necessary for dispatch, but
-they are not immutable proof that the named occurrence delivered the candidate
-relation. That proof is one occurrence-bound `resource_delivered` Ledger fact
-written by the shared settlement boundary before the occurrence's
-`stage_completed` terminal.
+## 不可变组装交付
 
-The current v1 delivery schema is deliberately assembly-specific:
+`resource_refs["assembly"]` 是可替换的当前路由投影。其 `source_stage` 和 `workflow_step_id` 是分发必需标签，但不是指定 occurrence 已交付候选关系的不可变证明。证明由共享结算边界在 `stage_completed` 前写入的一条 occurrence 绑定 `resource_delivered` Ledger 事实提供。
+
+当前 v1 交付 schema 有意专用于组装：
 
 ```json
 {
@@ -166,125 +125,68 @@ The current v1 delivery schema is deliberately assembly-specific:
 }
 ```
 
-`delivery_mode="materialized"` means the occurrence created a new executed
-candidate relation. `delivery_mode="reused"` means it deliberately delivered
-an older verified candidate unchanged. Reuse is not absence of a delivery:
-Dedup pass-through, retained Hi-C/T2T results, and an unchanged Review decision
-each own a new delivery fact that points to the older candidate and primary
-output. The physical producer recorded in those artifact-index rows may
-therefore precede the delivery occurrence.
+`delivery_mode="materialized"` 表示 occurrence 创建新的 executed candidate 关系；`"reused"` 表示有意原样交付旧的已验证候选。复用不是无交付：Dedup 透传、Hi-C/T2T 保留和 Review 不改变结果的决策都拥有新的交付事实，指向旧候选与主输出。因此产物索引的物理生产者可早于交付 occurrence。
 
-One completed occurrence may deliver `assembly` at most once. Exact replay of
-the same event is idempotent; changing its stage/step binding, delivery mode,
-candidate ref, or primary ref is a Ledger conflict. A completed occurrence that
-claims an assembly handoff must have both this fact and a current
-`ResourceRef` whose paths and metadata project the same primary output and
-candidate. A delivery event without the matching completed occurrence is an
-incomplete crash prefix and is not consumable.
+一个完成 occurrence 最多交付一次 `assembly`。相同事件精确回放幂等；更改阶段/步骤绑定、交付模式、候选引用或主引用产生 Ledger 冲突。声明组装交接的完成 occurrence 必须同时具有交付事实和当前 `ResourceRef`，路径与 metadata 投影相同主输出与候选。没有匹配完成 occurrence 的交付事件是未完成崩溃前缀，不可消费。
 
-Assembly Review validates all of the following before candidate loading:
+Assembly Review 加载候选前验证：
 
-1. its frozen `review_target.producer_step_id` names the expected earlier
-   producer occurrence;
-2. that occurrence has the canonical `stage_completed` terminal;
-3. exactly one matching `resource_delivered` fact exists for `assembly`;
-4. the current `ResourceRef` stage/step labels, candidate ref, primary ref, and
-   path equal that immutable delivery; and
-5. the executed candidate bundle and its embedded primary output verify.
+1. 冻结 `review_target.producer_step_id` 指向预期的早先生产 occurrence。
+2. 该 occurrence 具有规范 `stage_completed` 终态。
+3. `assembly` 恰好有一个匹配的 `resource_delivered` 事实。
+4. 当前 `ResourceRef` 的阶段/步骤标签、候选引用、主引用、路径与交付一致。
+5. executed candidate 包及其嵌入主输出通过验证。
 
-Review accepts only an occurrence-bound, verified delivery fact. Relabeling a
-mutable `ResourceRef` cannot satisfy that requirement.
+Review 只接受绑定 occurrence 的已验证交付事实，重贴可变 `ResourceRef` 标签不能满足要求。
 
-The operator-facing `final_assembly` field is a detached read model of these
-deliveries, not another resource record. Its terminal bounding and artifact
-verification are owned by the
-[run-data contract](data-contract.md#13-ledger-v2).
+操作者 `final_assembly` 是交付事实的分离读取模型，不是另一份资源记录。终态范围限制与产物验证由[运行数据契约](data-contract.md#13-ledger-v2)拥有。
 
-## Current assembly candidate lineage
+<a id="current-assembly-candidate-lineage"></a>
 
-Every central `assembly` resource that represents an executed candidate,
-including an Inventory-wrapped registered assembly, carries a current executed
-candidate bundle and its exact primary-output ref. When Assembly Dedup, an
-accepted Hi-C or GapCloser adoption, an accepted T2T patch, or an Assembly Review
-corrective action changes the assembly path, it publishes a new executed candidate in that
-active occurrence. The previous current candidate and primary output remain as
-`input_candidate_bundle_ref` and `input_primary_output_ref` lineage metadata.
+## 当前组装候选谱系
 
-The generic candidate wrapper accepts exactly these primary artifact types:
-`assembly.draft_assembly`, `hic_scaffolding.chromosome_scaffolded_assembly`,
-`gapcloser.assembly`, `base_polish.assembly`, and `t2t.patched_assembly`. The wrapper itself remains
-`draft_assembly.candidate`; no derived FASTA is copied under a draft-only type.
-Assembly Review consumes the same current candidate contract after each of
-those producers and has no producer-specific fallback path. An unchanged
-Hi-C/GapCloser/T2T decision preserves the current paths and candidate relation while
-republishing the central ResourceRef under the active producer occurrence, so
-a later Review can verify the exact delivery handoff.
+每个表示 executed candidate 的中央 `assembly` 资源（包括 Inventory 包装的已注册组装）都携带当前执行候选包和精确主输出引用。Assembly Dedup、采纳的 Hi-C/GapCloser/Base Polish、采纳的 T2T 补丁或 Assembly Review 校正行动改变组装路径时，在当前 occurrence 发布新执行候选。原当前候选和主输出保留为 `input_candidate_bundle_ref`、`input_primary_output_ref` 谱系 metadata。
 
-## Read QC handoff lineage
+通用候选包装严格接受这些主产物类型：`assembly.draft_assembly`、`hic_scaffolding.chromosome_scaffolded_assembly`、`gapcloser.assembly`、`base_polish.assembly`、`t2t.patched_assembly`。包装本身仍为 `draft_assembly.candidate`；派生 FASTA 不复制为仅 draft 类型。各生产者之后 Assembly Review 都消费同一当前候选契约，没有生产者专属后备。Hi-C/GapCloser/T2T/Base Polish 不改变组装的决策保留路径与候选关系，但在当前生产 occurrence 下重新发布中央 ResourceRef，使后续 Review 能验证精确交付。
 
-The accepted Read QC lineage never creates a second read-resource protocol.
-An unfiltered completion republishes or retains `long_reads` with the exact ordered asset IDs,
-asset-registry ref, member platforms/formats, and paths that were measured. A
-successful length filter publishes one immutable read-set manifest that maps
-each derived member to its source asset ID, source input ref, filter method, and
-approved parameters. The central `long_reads` `ResourceRef` then contains the
-ordered filtered paths plus that manifest ref and source-member identities.
+<a id="read-qc-handoff-lineage"></a>
 
-Once Read QC publishes a central `long_reads` ref, downstream resolution must
-not fall back to an older raw asset set. A filter that retains zero reads still
-publishes its method evidence and zero-valued aggregate statistics, but it does
-not replace the central resource with empty files; the Read QC occurrence fails
-its delivery contract with `no_reads_retained`.
+## Read QC 交接谱系
 
-FOFNs, per-file statistics, and summary reports are artifacts or adapter-local
-files. They are not peer handoff mechanisms. Exact measurement provenance is
-owned by the Read QC section of
-[`stage-contracts.md`](stage-contracts.md).
+Read QC 谱系不创建第二读段资源协议。未过滤完成时，重新发布或保留 `long_reads`，携带实际测量的精确有序资产 ID、资产注册表引用、成员平台/格式和路径。长度过滤成功后，发布一个不可变读段集合 manifest，将每个派生成员映射到源资产 ID、源输入引用、过滤方法和批准参数。中央 `long_reads` `ResourceRef` 随后包含有序过滤路径、manifest 引用及源成员身份。
 
-## Sequencing-member identity
+Read QC 发布中央 `long_reads` 后，下游不得回退到旧 raw 资产集。过滤后零读段仍发布方法证据与零值汇总统计，但不以空文件替换中央资源；Read QC occurrence 以 `no_reads_retained` 交付失败。
 
-Inventory registers every declared file independently. Two
-`raw_long_reads` entries, or two files inside one entry, therefore retain
-distinct opaque asset IDs even when they have the same basename. Platform and
-format are per-member registry facts; `asset_type` is not an identity key.
+FOFN、逐文件统计和摘要报告属于产物或适配器局部文件，不是并列交接机制。精确测量来源由[阶段契约](stage-contracts.md)的 Read QC 节拥有。
 
-Inventory-produced `long_reads` and `hic_reads` metadata contains the typed
-asset-registry `ArtifactRef`, ordered asset IDs corresponding one-to-one with
-`paths`, member/pair counts, and deduplicated platform/format sets. It never
-embeds asset records. Consumers reconstruct and verify members through the
-shared registry/read-set resolvers.
+<a id="sequencing-member-identity"></a>
 
-Hi-C pair authority is the manifest declaration projected into registry
-`manifest_entry_ordinal`, `pair_index`, and `mate` facts. File names and flat
-path position never create a pair.
+## 测序成员身份
 
-## Assembly input roles and product handoff
+Inventory 独立注册每个声明文件。两个 `raw_long_reads` 条目或一个条目内的两个文件，即使 basename 相同，也保留独立不透明资产 ID。平台与格式是逐成员注册事实；`asset_type` 不是身份键。
 
-Assembly partitions the complete ordered long-read member set by platform.
-The HiFi Hifiasm method binds all selected HiFi members positionally, optional
-ONT ultra-long members to one comma-joined `--ul`, and all declared Hi-C lanes
-to comma-joined `--h1`/`--h2`. The separate Hifiasm-ONT method binds ONT as
-primary positional input and fixes `--ont`; it does not reuse `--ul`.
+Inventory 生成的 `long_reads`、`hic_reads` metadata 包含类型化资产注册表 `ArtifactRef`、与 `paths` 一一对应的有序资产 ID、成员/读对数、去重平台/格式集合，不嵌入资产记录。消费者通过共享注册表/读段集合解析器重建并验证成员。
 
-Only one assembler-origin backbone is materialized. Its executed candidate
-bundle references the immutable plan, canonical primary FASTA, and generic
-adapter-declared native outputs. Native graphs, alternate contigs, reports,
-logs, or configs remain inside that executed bundle and do not become peer
-assembly candidates or downstream assembly paths.
+Hi-C 读对权威是 manifest 声明投影的 `manifest_entry_ordinal`、`pair_index`、`mate` 事实。文件名和扁平路径位置永不创建读对。
 
-Assembly checkpoints hold singular typed `planned_candidate_bundle_ref` and
-`executed_candidate_bundle_ref` values. Plural and absolute-path candidate
-cursor fields are rejected.
+<a id="assembly-input-roles-and-product-handoff"></a>
 
-## FOFN boundary
+## Assembly 输入角色与产品交接
 
-The canonical long-read handoff is
-`resource_refs["long_reads"].paths: list[str]`.
+Assembly 按平台划分完整有序长读段成员集。HiFi Hifiasm 按位置绑定全部选定 HiFi 成员，可选 ONT ultra-long 合并为一个逗号连接 `--ul`，全部声明 Hi-C lane 合并到逗号连接的 `--h1`/`--h2`。独立 Hifiasm-ONT 方法将 ONT 作为主位置输入并固定 `--ont`，不复用 `--ul`。
 
-FOFN files are tool-adapter or stage-internal artifacts:
+只物化一个组装器来源主干。executed candidate 包引用不可变计划、规范主 FASTA 和通用适配器声明的原生输出。原生图、替代 contig、报告、日志或配置保留在包内，不变为并列组装候选或下游组装路径。
 
-- Read QC may generate a FOFN for audit or a tool invocation.
-- An adapter such as NextDenovo may create its required FOFN in its own work
-  directory from the canonical path list.
-- Downstream stages do not consume `*_fofn_ref`, `assembly_input_ref`, or other
-  stage-output handoff keys.
+Assembly checkpoint 持有单数类型化 `planned_candidate_bundle_ref`、`executed_candidate_bundle_ref`。复数和绝对路径候选游标字段被拒绝。
+
+<a id="fofn-boundary"></a>
+
+## FOFN 边界
+
+规范长读段交接为 `resource_refs["long_reads"].paths: list[str]`。
+
+FOFN 是工具适配器或阶段内部产物：
+
+- Read QC 可为审计或工具调用生成 FOFN。
+- NextDenovo 等适配器可从规范路径列表在自身工作目录创建所需 FOFN。
+- 下游不消费 `*_fofn_ref`、`assembly_input_ref` 或其他阶段输出交接键。

@@ -225,24 +225,26 @@ class DatabaseRegistry(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_legacy_ncbi_metazoa(cls, value: object) -> object:
-        """Accept the former single-reference shape without emitting it."""
-        if not isinstance(value, Mapping):
-            return value
-        migrated = dict(value)
-        legacy = migrated.pop("ncbi_metazoa", None)
-        if legacy is not None:
-            if "ncbi" in migrated:
-                raise ValueError(
-                    "databases cannot declare both ncbi and legacy ncbi_metazoa"
-                )
-            migrated["ncbi"] = legacy
-        return migrated
+    def _normalize_database_keys(cls, value: object) -> object:
+        return normalize_database_registry(value)
 
-    @property
-    def ncbi_metazoa(self) -> NcbiDatabaseSpec:
-        """Read-only compatibility view for callers loading an old host file."""
-        return self.ncbi
+
+def normalize_database_registry(value: object) -> object:
+    """Normalize old host-file keys before either loading or bootstrap planning.
+
+    Preserve values for the typed loader to validate; reject ambiguous dual
+    declarations even when one value is null. Runtime records emit only ncbi.
+    """
+    if not isinstance(value, Mapping):
+        return value
+    normalized = dict(value)
+    if "ncbi_metazoa" in normalized:
+        if "ncbi" in normalized:
+            raise ValueError(
+                "databases cannot declare both ncbi and legacy ncbi_metazoa"
+            )
+        normalized["ncbi"] = normalized.pop("ncbi_metazoa")
+    return normalized
 
 
 def package_preflight(package: PackageSpec) -> PackagePreflightResult:

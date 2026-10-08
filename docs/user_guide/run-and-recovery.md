@@ -1,215 +1,128 @@
-# Run and Recovery
+<a id="run-and-recovery"></a>
 
-This is the single operator guide for starting, inspecting, reviewing, and
-resuming a Gene Agent session. Behavioral explanations live in
-[Runtime orchestration](../architecture/topics/runtime-orchestration.md) and
-[Review and resume](../architecture/topics/review-and-resume.md); exact lifecycle
-semantics are owned by the
-[Run data contract](../architecture/reference/data-contract.md) and its linked
-reference contracts. CLI flags are defined by `app/entrypoints/run.py`;
-deployment pages link here instead of copying the run contract.
+# 运行与恢复
 
-## Acceptance order: code tests before real end-to-end runs
+这是启动、检查、评审、恢复 Gene Agent 会话的唯一操作者指南。行为说明见[运行时编排](../architecture/topics/runtime-orchestration.md)和[评审与恢复](../architecture/topics/review-and-resume.md)；精确生命周期由[运行数据契约](../architecture/reference/data-contract.md)及其链接拥有。CLI 标志由 `app/entrypoints/run.py` 定义，部署页链接此处，不复制运行契约。
 
-**先单测 / 集成测试 → 小数据真实工具 smoke → 分段 E2E → 最后完整真实 E2E。**
+<a id="acceptance-order-code-tests-before-real-end-to-end-runs"></a>
 
-The complete ten-stage template is the final acceptance target, not the next
-debugging run. First inventory existing tests and prior real-run evidence, then
-fill demonstrated gaps. A passing fake executable proves
-the application contract, not that the real biological tool works. A host
-readiness check, a FASTA, or a completed session alone proves neither.
+## 验收顺序：先代码测试，再真实端到端运行
 
-### 1. Audit and complete unit / integration coverage
+**单元/集成测试 → 小数据真实工具冒烟 → 分段端到端 → 完整真实端到端。**
 
-Use fixtures, fake executables and controlled failures; do not run real large
-tools in this layer. Check each relevant stage for invalid/missing inputs,
-artifact identity and handoff, router/gate/resume behavior, durable failure
-records, and explicit skip conditions. Verify that failed collection cannot
-publish a successful handoff, and that resume does not repeat a completed
-process. Extend existing tests rather than creating another parallel harness.
+完整十阶段模板是最终验收目标，不是下一次调试运行。先盘点既有测试与真实运行证据，再补已证明缺口。伪工具通过只证明应用契约，不证明真实生物工具能工作；主机就绪、FASTA 或完成会话单独都不能证明。
 
-The repository already contains the following coverage; this is an inventory
-of test code, not a claim that every boundary or real-tool route is accepted:
+<a id="1-audit-and-complete-unit--integration-coverage"></a>
 
-| Boundary | Existing evidence | Remaining acceptance work |
+### 1. 审计并补齐单元与集成覆盖
+
+本层使用 fixture、伪可执行文件和受控失败，不运行大型真实工具。逐阶段检查非法/缺失输入、产物身份/交接、路由/门禁/恢复、持久失败、明确 skip。证明收集失败不能发布成功交接，恢复不重复已完成进程。扩展既有测试，不另建并行框架。
+
+以下是已有测试代码清单，不代表全部边界或真实工具路线已验收：
+
+| 边界 | 已有证据 | 剩余验收 |
 |---|---|---|
-| Stage input validation | `tests/test_inventory.py`, `test_read_qc.py`, `test_genome_survey.py`, `test_assembly.py`, `test_hic_scaffolding.py`, `test_gapcloser.py`, `test_base_polish.py`, `test_t2t.py` | Check the chosen route's actual invalid-input matrix; add uncovered cases before real execution. |
-| Artifact handoff | `test_assembly_candidate_bundle.py`, `test_resource_resolution.py`, `test_occurrence_settlement.py`, `test_workflow_plan.py` | Prove continuous handoff with real artifacts in the small E2E, not only isolated fixtures. |
-| Router / gate / resume | `test_graph_routing.py`, `test_review_gates.py`, `test_review_application.py`, `test_resume_transaction.py`, `test_durable_resume.py` | Exercise actual tool-backed gates across process/SQLite close and reopen. |
-| Failure and skip | `test_execution_lifecycle.py`, `test_execution_collect.py`, `test_ledger_v2.py`, stage suites | Test nonzero exits, missing/malformed products, incomplete execution and permitted skips separately; no false success or automatic rerun. |
-| AutoHiC recovery | `test_hic_scaffolding.py::HiCScaffoldingStageTests` contains executed-checkpoint collection replay and adoption/source-retention tests using a fake AutoHiC environment | Real-tool, detached human-gate resume remains a separate slice; assert unchanged execution count. |
-| Base Polish recovery | `test_base_polish.py` includes collection replay, corrupt-evidence rejection, paired final evaluation and SQLite/CLI resume using fake tools | Real Racon/minimap2 smoke and representative quality acceptance are still required. |
-| Placeholder boundary | `test_registry_executable_invariant.py`, `test_finishing_plan.py`; Base Polish is now executable, not a placeholder | Any future requested placeholder must fail deterministically, record failure, produce no success delivery and enter no downstream stage. Unsupported input is not a placeholder or a successful skip. |
+| 阶段输入校验 | `tests/test_inventory.py`、`test_read_qc.py`、`test_genome_survey.py`、`test_assembly.py`、`test_hic_scaffolding.py`、`test_gapcloser.py`、`test_base_polish.py`、`test_t2t.py` | 检查路线实际非法输入矩阵，真实执行前补未覆盖情况 |
+| 产物交接 | `test_assembly_candidate_bundle.py`、`test_resource_resolution.py`、`test_occurrence_settlement.py`、`test_workflow_plan.py` | 小型端到端用真实产物证明连续交接 |
+| 路由/门禁/恢复 | `test_graph_routing.py`、`test_review_gates.py`、`test_review_application.py`、`test_resume_transaction.py`、`test_durable_resume.py` | 真实工具门禁跨进程/SQLite 关闭重开 |
+| 失败与 skip | `test_execution_lifecycle.py`、`test_execution_collect.py`、`test_ledger_v2.py`、阶段测试 | 分开测试非零退出、缺失/畸形产品、不完整执行、允许 skip；不能误报成功或自动重跑 |
+| AutoHiC 恢复 | `test_hic_scaffolding.py::HiCScaffoldingStageTests` 用伪环境覆盖执行 checkpoint 收集回放、采纳/保留 | 独立真实工具分离人工门恢复，断言执行数不变 |
+| Base Polish 恢复 | `test_base_polish.py` 用伪工具覆盖收集回放、损坏证据拒绝、成对评估、SQLite/CLI 恢复 | 真实 Racon/minimap2 冒烟及代表性质量验收 |
+| 占位边界 | `test_registry_executable_invariant.py`、`test_finishing_plan.py`；Base Polish 已可执行 | 未来请求占位必须确定失败、记录失败、无成功交付、不进下游。不支持输入不是占位或成功 skip |
 
-**Test isolation is not yet complete.** `Phase4ReadQCRealSmokeTests` in
-`test_read_qc.py` probes `env_geno_exec` during collection and runs real SeqKit
-when available. `test_phase10_parameter_catalog.py` can invoke installed hifiasm
-for help/version validation; that is not an assembly smoke. TGS-GapCloser's
-real smoke is explicitly opt-in. Because `server_test.sh` currently runs the
-whole pytest suite, do not label it a guaranteed tool-free test command on a
-provisioned server. Before using it as a strict first-layer gate, separate real
-tool tests behind explicit opt-in selection, including their collection-time
-probes. Missing development-host binaries are not code defects; skipped tests
-are not evidence of successful real execution.
+**真实工具检查必须显式选择。** 普通 `pytest -q`、`server_test.sh` 排除 `real_tool`。收集测试不探测 Conda 或生物工具；被选择测试在执行时检查前置条件，缺工具则失败。`Phase4ReadQCRealSmokeTests` 在 `env_geno_exec` 执行 SeqKit；标记的 hifiasm help/version 是 CLI 兼容检查，不是组装冒烟。开发主机缺二进制不是代码缺陷；取消选择不证明真实执行成功。
 
-### 2. Run small real-tool smoke tests for each key stage
+<a id="2-run-small-real-tool-smoke-tests-for-each-key-stage"></a>
 
-Use bounded, tool-valid input and actually invoke SeqKit, Jellyfish/GenomeScope2,
-Flye or the selected compatible assembler, purge_dups, QUAST, BUSCO, AutoHiC,
-TGS-GapCloser, and Racon/minimap2 as applicable. Check frozen command/input
-identity, exit status, required native products, collection, indexed artifacts,
-Ledger outcomes, and failure/recovery behavior. A version/help probe is not
-enough. Record tool versions, data provenance/checksums and resource limits.
-Do not require a biologically excellent assembly from smoke data.
+### 2. 对关键阶段运行小型真实工具冒烟
 
-Existing real-tool entries include the conditional SeqKit test above, the
-[opt-in TGS-GapCloser smoke](#hifi-gap-closing-from-an-existing-assembly), and
-the opt-in Racon/minimap2 synthetic HiFi slice:
+使用有界且符合工具要求的输入，实际调用适用的 SeqKit、Jellyfish/GenomeScope2、Flye 或所选兼容组装器、purge_dups、QUAST、BUSCO、AutoHiC、TGS-GapCloser、Racon/minimap2。检查冻结命令/输入身份、退出状态、必需原生产物、收集、索引、Ledger 结果、失败/恢复。版本/help 探测不够。记录版本、数据来源/校验和、资源限制；不要求冒烟数据产生优秀生物学组装。
+
+已有真实入口包括显式选择 SeqKit、[可选 TGS-GapCloser 冒烟](#hifi-gap-closing-from-an-existing-assembly)、可选 Racon/minimap2 合成 HiFi 切片：
 
 ```bash
-GENE_AGENT_RACON_REAL_SMOKE=1 python -m pytest -q \
+python -m pytest -q -m real_tool \
   tests/test_base_polish.py::test_real_racon_hifi_smoke
 ```
 
-Run this on a host with both binaries on PATH. It checks paired alignment
-evidence, the adoption gate and collection replay; it does not establish
-representative sample quality or independent QV.
-Dedicated small-data real-tool smoke coverage for the other listed methods is
-not yet established by the current test suites; their fake-tool tests must not
-be counted as substitutes. Use enough data for a tool's actual input constraints
-(especially BUSCO and AutoHiC), rather than making tiny invalid input pass by
-weakening validation. Test a legitimate skip separately from an execution path.
+单独选择 SeqKit：
 
-### 3. First real E2E: the small five-stage contig route
+```bash
+python -m pytest -q -m real_tool tests/test_read_qc.py::Phase4ReadQCRealSmokeTests
+```
 
-**The operator has already run this five-stage route. Reuse that run's evidence;
-do not rerun each successful stage just to fill a checklist.** Its exact methods,
-skips and recovery branches still need inspection; this document is not an audit
-of an unprovided server run directory. A successful hifiasm run does not cover
-Flye, and a skipped Dedup does not cover purge_dups execution. Add targeted tests
-only for uncovered paths or changed behavior.
+Racon 切片需主机 PATH 中有两个二进制，检查成对比对、采纳门、收集回放，不建立代表性质量或独立 QV。其他所列方法尚无当前测试集证明的专属小数据真实冒烟，不能以伪工具替代。输入须满足真实约束（尤其 BUSCO/AutoHiC），不削弱校验以接受无效极小数据。合法 skip 与执行路径分别测试。
 
-For a new dataset or a missing branch, use small but real, traceable data for
-**QC → Survey → Assembly → Dedup → Review**, with the
-[contig templates below](#five-stage-contig-input). Keep biological facts and
-read platforms accurate; choose a dataset suitable for survey and dedup rather
-than forcing those stages to run on unsuitable material. Keep human gates
-manual during acceptance (`review_policy.max_blocked_seconds: -1`).
+<a id="3-first-real-e2e-the-small-five-stage-contig-route"></a>
 
-Verify each downstream frozen attempt consumes the preceding stage's intended
-artifact, not a manually substituted path. Require actual execution evidence
-for the intended methods, collected metrics, settled occurrences, request-bound
-decisions, and a hash-verified final assembly after detached inspection.
-If Dedup or another method legitimately skips, report that coverage gap and
-test its execution branch separately. For failures, inspect logs and prove
-supported recovery or an explicit new session; do not rewrite frozen evidence
-to manufacture completion. See the existing
-[five-stage acceptance gap](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated).
+### 3. 首个真实端到端：小型五阶段 contig 路线
 
-### 4. Validate Hi-C as an independent E2E slice
+**操作者已跑过五阶段，复用该运行证据，不为填检查表逐项重跑成功阶段。** 仍需检查实际方法、skip、恢复分支；本文未审计尚未提供的服务器运行目录。Hifiasm 成功不覆盖 Flye，Dedup skip 不覆盖 purge_dups 执行。只对未覆盖路径或行为改动增加针对性测试。
 
-Start from a known-good assembly and a small, sufficient real paired Hi-C
-dataset. Exercise AutoHiC → required product collection → human adoption gate
-→ accept or decline → detached resume. Use the gate's actual decisions:
-`accept_candidate`, `keep_prior_assembly`, or `stop_human_review`; do not invent
-a generic `reject` value. `reject_parameters` belongs to parameter approval;
-`request_parameter_retry` explicitly requests a fresh attempt at adoption review.
+新数据集或缺失分支使用小型真实可追溯数据运行 **QC → Survey → Assembly → Dedup → Review**，见[下方 contig 模板](#five-stage-contig-input)。保留准确事实和平台，选择适合 Survey/Dedup 的数据，不强迫不适材料执行。验收时人工门保持 `review_policy.max_blocked_seconds: -1`。
 
-Check every required AutoHiC product and adopted/reused assembly handoff.
-Close the process/checkpoint connection at the human gate, resume with a bound
-decision, and assert that the completed AutoHiC attempt is not launched again:
-no second process/start event, unchanged attempt identity and output hashes.
-An explicitly requested fresh parameter retry is different from replay.
+验证每个下游冻结尝试消费前阶段预期产物，不是手替路径。要求目标方法真实执行证据、收集指标、结算 occurrence、请求绑定决策、分离检查后哈希验证最终组装。合法 skip 要报告覆盖缺口并单测执行分支。失败时检查日志，证明受支持恢复或明确新会话，不重写冻结证据制造完成。见[五阶段缺口](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated)。
 
-### 5. Validate finishing stages independently
+<a id="4-validate-hi-c-as-an-independent-e2e-slice"></a>
 
-Give GapCloser, Base Polish and T2T an existing assembly plus each stage's
-required supporting reads/facts; do not rerun QC through Hi-C merely to test
-them. For a separate run, declare the verified source FASTA through
-`assembly_fasta_registered` so Inventory creates the new run's canonical
-candidate/artifact refs. Retain the source run's identity/checksum in the
-acceptance evidence; never copy foreign run-local refs into a new checkpoint.
+### 4. 独立验证 Hi-C 端到端切片
 
-- GapCloser: test a real internal-gap execution and the no-gap reuse branch.
-- Base Polish: test real correction, mandatory before/after evidence, adoption
-  and source retention, then paired final evaluation. Same-read agreement is
-  not independent QV and improvement is not assumed.
-- T2T: test supported extension evidence and a no-extension path, plus manual
-  adoption/retention and resume without replaying a completed alignment.
+从已知良好组装和足量小型真实配对 Hi-C 开始，覆盖 AutoHiC → 必需产品收集 → 人工采纳门 → 接受/保留 → 分离恢复。使用真实决策 `accept_candidate`、`keep_prior_assembly`、`stop_human_review`，不编造通用 reject。`reject_parameters` 属参数审批，`request_parameter_retry` 在采纳门明确请求新尝试。
 
-All these slices now use the [independent slice commands](#independent-slice-server-runbook)
-below: ordinary `gene-agent run`, explicit RunConfig templates, and the same
-read-only `route_acceptance` with a named scope. No separate stage runner is
-needed. Templates are ready for server execution, not evidence of an executed
-real-tool smoke or E2E.
+检查全部 AutoHiC 产品及采纳/复用交接。在人工门关闭进程/checkpoint 连接，用绑定决策恢复，断言已完成 AutoHiC 尝试不会再次启动：无第二进程/start 事件，尝试身份、输出哈希不变。明确请求新参数重试不同于回放。
 
-### 6. Only then run the complete real E2E
+<a id="5-validate-finishing-stages-independently"></a>
 
-Use full-scale or representative real data only after the preceding layers
-pass. The [complete route below](#complete-hifihic-server-acceptance) is final
-integration/biological acceptance, not the primary way to discover ordinary
-input, routing, collection or resume bugs. Its read-only `route_acceptance`
-command defaults to the complete route; select `--route contig`, `hic`,
-`gapcloser`, `base-polish`, `t2t`, `finishing`, or `review` for the matching
-scope. Do not add unused stages simply to satisfy that checker.
+### 5. 独立验证精修阶段
 
-**Immediate priority:** reuse the completed contig run, fill demonstrated
-code-test/isolation and uncovered method/branch gaps, then run the independent
-Hi-C and finishing slices. Do not repeat an accepted execution solely because
-it did not use a dedicated smoke-test wrapper. Do not start the ten-stage run
-first. This guide sets the acceptance sequence;
-it does not claim the pending tests or server runs have already been executed.
+向 GapCloser、Base Polish、T2T 提供已有组装和各自读段/事实，不为测试重跑 QC 到 Hi-C。独立运行以 `assembly_fasta_registered` 声明已验证源 FASTA，让 Inventory 创建新运行的规范候选/引用。验收证据保留源运行身份/校验和，不把其他运行局部引用复制到新 checkpoint。
 
-## Before a real run
+- GapCloser：真实内部缺口执行与无缺口复用。
+- Base Polish：真实校正、必需前后证据、采纳/源保留、成对最终评估。同读段一致性不是独立 QV，不预设改善。
+- T2T：支持延长证据与无延长路径，人工采纳/保留，以及恢复不重跑完成比对。
 
-Provision a Linux/server checkout with
-[New Host Setup](../deployment/migration.md), then run:
+全部切片用下方[独立命令](#independent-slice-server-runbook)：普通 run、明确模板、同一具名范围只读 route_acceptance，不需另一个阶段 Runner。模板已可供服务器运行，不等于真实冒烟或端到端已执行。
+
+<a id="6-only-then-run-the-complete-real-e2e"></a>
+
+### 6. 最后才运行完整真实端到端
+
+前层通过后才用全规模或代表性真实数据。[完整路线](#complete-hifihic-server-acceptance)是最终集成/生物学验收，不是发现普通输入、路由、收集、恢复 bug 的首选。只读 route_acceptance 默认完整路线；匹配范围选 contig、hic、gapcloser、base-polish、t2t、finishing、review。不要为满足检查器加入无用阶段。
+
+**当前优先级：** 复用完成 contig，补已证明的代码测试/隔离和未覆盖方法/分支，再跑独立 Hi-C/finishing。不要仅因已验收执行没用专属冒烟 wrapper 就重跑，不先开十阶段。本文规定验收顺序，不声称待办测试或服务器运行已经执行。
+
+<a id="before-a-real-run"></a>
+
+## 真实运行前
+
+按[新主机配置](../deployment/migration.md)准备 Linux/服务器检出，再运行：
 
 ```bash
 bash scripts/server_check.sh
 ```
 
-These checks have deliberately different scope:
+检查范围不同：
 
-- `server_check.sh` probes orchestrator prerequisites, then derives and probes
-  the fixed-stage tool/package closure in
-  `docs/examples/contig_run_config.template.json` by default (or the RunConfig
-  supplied as its first argument) through the active environment
-  mapping. Assembly is deliberately deferred and its selected candidate is
-  checked at stage entry. It also validates the host BUSCO/NCBI database
-  registry needed by Assembly Review. The script does not validate real input
-  files or the LLM endpoint.
-- `server_test.sh` is the earlier regression gate run immediately after installing
-  the orchestrator; New Host Setup owns that command and its position. Its
-  current real-tool isolation caveat is documented above.
-- `gene-agent run` performs run-specific input, fixed tool/package, database,
-  and LLM checks before it publishes frozen inputs; a deferred Assembly method
-  is checked later from that frozen dependency snapshot.
+- server_check.sh 先探测编排器，再通过活动映射探测默认 contig 模板或首参 RunConfig 的固定工具/包闭包。Assembly 延迟，候选阶段检查；也验证 Review 所需 BUSCO/NCBI，不验证真实输入或 LLM。
+- server_test.sh 是安装编排器后立即运行的早期回归门禁，其命令与位置归新主机指南；真实工具隔离规则见上。
+- gene-agent run 在发布冻结前做输入、固定工具/包、数据库、LLM 专属检查；延迟 Assembly 后续从冻结快照检查。
 
-## Five-stage contig input
+<a id="five-stage-contig-input"></a>
 
-Use the paired templates:
+## 五阶段 contig 输入
+
+使用配套模板：
 
 ```bash
 cp docs/examples/contig_manifest.template.yaml /server/path/manifest.yaml
 cp docs/examples/contig_run_config.template.json /server/path/run_config.json
 ```
 
-This pair is the authoritative five-stage contig example named in the root
-README; the exact occurrence list remains in the JSON rather than being copied
-into another guide. Inventory is added as the implicit first occurrence during
-freeze. Fill every placeholder with server-local paths. The template
-intentionally leaves the Assembly method and parameters unset. After upstream
-QC/survey evidence exists, Assembly recommends and confirms a compatible method,
-then recommends its parameters. The active environment mapping must declare the
-tool requirements of every candidate that the run may select.
+这是根 README 指定的权威五阶段示例，精确 occurrence 列表保留在 JSON，不在其他指南重复。Inventory 冻结时作为隐式首步加入。替换所有服务器本地路径占位。模板有意不设 Assembly 方法/参数，QC/Survey 后由阶段推荐确认兼容方法，再推荐参数。活动映射须声明运行可选择的每个候选工具需求。
 
-The example files, not this guide, own the complete schema-valid payload. The
-exact occurrence and freeze contract is linked above; RunConfig remains the
-literal occurrence/authorization authority. Deferred Assembly method and
-parameter decisions are stage-owned evidence rather than startup configuration.
+完整 schema 有效载荷由示例文件拥有；RunConfig 仍是字面 occurrence/授权权威。延迟 Assembly 方法/参数是阶段证据，不是启动配置。
 
-Audit the **existing** five-stage run (no tool execution):
+审计**已有**五阶段运行，不执行工具：
 
 ```bash
 python -m app.diagnostics.route_acceptance --route contig \
@@ -217,83 +130,53 @@ python -m app.diagnostics.route_acceptance --route contig \
   > /server/path/contig-acceptance.json
 ```
 
-This checks verified processes/collections, assembly handoffs and final
-QUAST/BUSCO evaluation. Inspect QC/Survey collected products and their frozen
-input dependencies as well; the auditor's predecessor-assembly check starts
-at assembly handoffs, not a blanket proof of every upstream read transformation.
-If an older run uses an unsupported schema, keep its matching checkout for
-inspection. Do not modify its frozen controls/checkpoint to make this audit pass
-or assume that rejection by a newer reader invalidates a previously good run.
+检查验证进程/收集、组装交接、最终 QUAST/BUSCO。还应检查 QC/Survey 产品及冻结输入依赖；审计器前驱组装检查从组装交接开始，不是所有上游读段转换的全面证明。旧运行 schema 不受支持时保留匹配检出检查，不改冻结控制/checkpoint 来凑通过；新版读取器拒绝不等于旧运行失效。
 
-## HiFi gap closing from an existing assembly
+<a id="hifi-gap-closing-from-an-existing-assembly"></a>
 
-Use [the manifest](../examples/gapcloser_manifest.template.yaml) and
-[the RunConfig](../examples/gapcloser_run_config.template.json) for one complete
-GapCloser artifact without rerunning Assembly, Hi-C, or T2T:
+## 从已有组装进行 HiFi 补缺口
+
+使用 [manifest](../examples/gapcloser_manifest.template.yaml) 和 [RunConfig](../examples/gapcloser_run_config.template.json) 完成独立 GapCloser，不重跑 Assembly、Hi-C、T2T：
 
 ```bash
 cp docs/examples/gapcloser_manifest.template.yaml /server/path/manifest.yaml
 cp docs/examples/gapcloser_run_config.template.json /server/path/run_config.json
 ```
 
-Replace the assembly/read paths and session ID. Supply the complete current
-HiFi read set. The active `config/envs.yaml` must map
-`gapcloser.tgs_gapcloser` to a tool environment with TGS-GapCloser 1.2.1,
-minimap2, and GNU getopt (not the macOS BSD command). Use the ordinary `run`
-command below. This slice needs no LLM endpoint and no evaluation databases.
-Upstream's PB thresholds are exposed as operator settings, not claimed to be
-optimal HiFi recommendations.
+替换组装/读段路径、会话 ID，提供完整当前 HiFi 集。活动主机配置（默认 `config/envs.yaml`）须把 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser 1.2.1、minimap2、GNU getopt（不是 macOS BSD）的环境。使用下方普通 run；此切片不需 LLM 或评估数据库。上游 PB 阈值作为操作者设置暴露，不称最优 HiFi 推荐。
 
-The tool emits a candidate FASTA, native segment details, and an indexed
-validation report. The report measures gap/length changes and copied-segment
-consistency, not QV or biological improvement. Use `review` or a request-bound
-decision file to `accept_candidate`, `keep_prior_assembly`, or
-`stop_human_review`. There is no automatic adoption; `inspect` reports the
-final adopted/reused assembly after completion. If there are no internal
-N-gaps, the stage reuses the input without invoking the tool.
+工具生成候选 FASTA、原生片段细节、索引校验报告，测量缺口/长度变化与复制片段一致性，不是 QV 或改善。用 review 或请求绑定文件执行 accept_candidate、keep_prior_assembly、stop_human_review。不自动采纳；完成后 inspect 报告最终采纳/复用组装。无内部 N 缺口则不调用工具，复用输入。
 
-ONT/CLR/CycloneSEQ/unknown or mixed-platform read sets are unsupported here.
-The complete-workflow recommendation is not an input-compatibility guarantee;
-omit unsupported occurrences explicitly. Base Polish also currently requires HiFi.
-For independent quality evaluation, explicitly append an Assembly Review
-occurrence and configure its separate tools, databases, and species metadata.
-Exact scope and handoff semantics live in the
-[GapCloser contract](../architecture/reference/stage-contracts.md#8-gapcloser).
+此处不支持 ONT/CLR/CycloneSEQ/未知/混合读段。完整工作流推荐不保证输入兼容，应明确省略不支持 occurrence；Base Polish 当前也要求 HiFi。独立质量评估需显式追加 Review 并配置工具、数据库、物种。精确范围见[GapCloser 契约](../architecture/reference/stage-contracts.md#8-gapcloser)。
 
-An opt-in real-tool synthetic smoke test is available on a provisioned host.
-It freezes the example configuration, runs Inventory and GapCloser, closes the
-SQLite checkpoint, then exercises CLI resume and final `inspect` delivery.
-Conda must be available, and the environment running pytest must expose the
-TGS-GapCloser/minimap2/GNU getopt binaries (the test freezes `sys.prefix`):
+配置主机可显式运行真实工具合成冒烟：冻结示例、运行 Inventory/GapCloser、关闭 SQLite，再经 CLI 恢复和最终 inspect。需 Conda，运行 pytest 的环境暴露 TGS/minimap2/GNU getopt（测试冻结 sys.prefix）：
 
 ```bash
-GENE_AGENT_TGS_REAL_SMOKE=1 pytest -q tests/test_gapcloser.py -k real_tgs
+python -m pytest -q -m real_tool tests/test_gapcloser.py -k real_tgs
 ```
 
-This deterministic synthetic gap is not representative biological acceptance.
+确定性合成缺口不是代表性生物学验收。
 
-## Independent slice server runbook
+<a id="independent-slice-server-runbook"></a>
 
-**已跑过的五阶段不要求重跑。接下来从已有 assembly 拆出这些分段；以下命令都在服务器仓库根目录、已激活的 orchestrator 环境运行。**
-Use an intact, known-good FASTA from `gene-agent inspect --json`'s
-`final_assembly`, or a traceable external assembly. A slice is a **new session**,
-not resuming the source session midway. Inventory imports and hashes that file;
-never paste another run's ArtifactRefs into a manifest or checkpoint.
+## 独立切片服务器操作手册
 
-| `slice` / audit scope | RunConfig template | Manifest template | Requested work |
+**已跑过五阶段无需重跑。以下从已有组装拆分，在服务器仓库根、已激活编排器环境运行。** 使用 inspect JSON 的 final_assembly 中完整已知良好 FASTA，或可追溯外部组装。切片是**新会话**，不是中途恢复源会话。Inventory 导入并哈希；不要粘贴其他运行 ArtifactRef 到 manifest/checkpoint。
+
+| slice / 审计范围 | RunConfig 模板 | Manifest 模板 | 工作 |
 |---|---|---|---|
-| `hic` | [hic](../examples/hic_run_config.template.json) | [hic](../examples/hic_manifest.template.yaml) | AutoHiC, collection, adoption and detached resume |
-| `gapcloser` | [gapcloser](../examples/gapcloser_run_config.template.json) | [gapcloser](../examples/gapcloser_manifest.template.yaml) | TGS-GapCloser and adoption / no-gap reuse |
-| `base-polish` | [base_polish](../examples/base_polish_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | Racon plus paired final QUAST/BUSCO Review |
-| `t2t` | [t2t](../examples/t2t_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | Terminal extension evidence and patch adoption / retention |
-| `finishing` | [finishing](../examples/finishing_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | GapCloser → T2T → Base Polish → Review, without rerunning upstream stages |
-| `review` | [assembly_review](../examples/assembly_review_run_config.template.json) | [existing_assembly](../examples/existing_assembly_manifest.template.yaml) | QUAST/BUSCO only, for an existing assembly |
+| `hic` | [hic](../examples/hic_run_config.template.json) | [hic](../examples/hic_manifest.template.yaml) | AutoHiC、收集、采纳、分离恢复 |
+| `gapcloser` | [gapcloser](../examples/gapcloser_run_config.template.json) | [gapcloser](../examples/gapcloser_manifest.template.yaml) | TGS 与采纳/无缺口复用 |
+| `base-polish` | [base_polish](../examples/base_polish_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | Racon 与成对最终 QUAST/BUSCO |
+| `t2t` | [t2t](../examples/t2t_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | 端部延长证据、补丁采纳/保留 |
+| `finishing` | [finishing](../examples/finishing_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | GapCloser → T2T → Base Polish → Review，不重跑上游 |
+| `review` | [assembly_review](../examples/assembly_review_run_config.template.json) | [existing_assembly](../examples/existing_assembly_manifest.template.yaml) | 已有组装仅 QUAST/BUSCO |
 
-### Copy and edit one slice
+<a id="copy-and-edit-one-slice"></a>
 
-Change `slice` to one row above. Use a **new** `acceptance_work` directory for
-each trial; the shared data root may hold all sessions. These commands do not
-launch tools yet:
+### 复制并编辑一个切片
+
+将 slice 改为上表范围。每试验使用**新** acceptance_work 目录，可共用数据根。以下尚不启动工具：
 
 ```bash
 slice=hic
@@ -313,54 +196,33 @@ cp -n "docs/examples/${manifest_stem}_manifest.template.yaml" "$acceptance_work/
 cp -n "docs/examples/${config_stem}_run_config.template.json" "$acceptance_work/run_config.json"
 ```
 
-**停在这里编辑两个文件，再执行下一段。** Replace every placeholder, including
-the unique `session_id`, sample ID, actual species and all absolute input paths.
-For source provenance, run `sha256sum /absolute/source/assembly.fasta` and record
-the digest/source session in manifest asset metadata; that metadata is a note,
-not a bypass of Inventory's actual byte validation. Match `format`, `compression`
-and platforms to the files. Keep all required reads of the selected dataset;
-do not hide multiple input files by listing only the first one. Use valid small
-datasets, not arbitrarily truncated FASTQs.
+**先停下编辑两个文件，再执行下一段。** 替换唯一 session_id、sample ID、真实物种、全部绝对输入路径。来源用 `sha256sum /absolute/source/assembly.fasta` 并将摘要/源会话记入资产 metadata；只是注记，不绕过 Inventory 字节验证。format、compression、平台必须匹配文件。保留所选数据集全部所需读段，不只列首文件隐藏其他成员。使用有效小数据，不任意截断 FASTQ。
 
-- Hi-C requires the matching sample's R1/R2 pairs, the configured AutoHiC
-  package/models and its complete tool closure. If known, set the actual
-  `hic_scaffolding.autohic_parameters.restriction_enzyme`; otherwise resolve it
-  through the parameter gate. No evaluation databases are needed for this slice.
-- Base Polish and `finishing` require HiFi reads, real species metadata,
-  minimap2/Racon and QUAST/BUSCO with the host BUSCO/NCBI registry. Both templates
-  include final Review; do not remove it and claim quality acceptance.
-- T2T requires reads and verified species/motif context. If known, add the actual
-  `shared_parameters.species_facts.telomere_motif` (and ploidy if appropriate);
-  otherwise use the persisted resolver. Approve thresholds at the parameter
-  gate. `auto_patch` does **not** mean automatic adoption. This standalone slice
-  has no final QUAST/BUSCO evaluation; use `review` separately if needed.
-- GapCloser's no-gap reuse is valid but does not exercise TGS. Likewise, no
-  supported T2T extension is not a code defect or proof of successful extension.
-  Source retention after a real tool run still counts as execution coverage.
-- Keep manual gates (`max_blocked_seconds: -1`). A method's configured LLM
-  resolver still needs its endpoint; `server_check.sh` does not check that.
+- Hi-C 需同样本 R1/R2、AutoHiC 包/模型及完整工具闭包。已知时设置真实的 `hic_scaffolding.autohic_parameters.restriction_enzyme`，否则参数门解析；本切片无评估数据库。
+- Base Polish/finishing 需 HiFi、真实物种、minimap2/Racon、QUAST/BUSCO 与主机 BUSCO/NCBI。两模板含最终 Review，不能删掉再声称质量验收。
+- T2T 需读段和验证的物种/基序。已知时填 `shared_parameters.species_facts.telomere_motif`（及适当 ploidy），否则用持久 resolver；参数门批准阈值。auto_patch 不代表自动采纳。此切片无最终 QUAST/BUSCO，需要时另用 review。
+- GapCloser 无缺口复用合法，但没执行 TGS；T2T 无支持延长也不是 bug 或成功延长证明。真实工具执行后保留源仍算执行覆盖。
+- 保持人工门 `max_blocked_seconds: -1`；配置的 LLM resolver 仍需端点，server_check.sh 不检查它。
 
-### Preflight, run, inspect and audit
+<a id="preflight-run-inspect-and-audit"></a>
 
-Continue in the same shell after editing:
+### 预检、运行、检查与审计
+
+编辑后在同一 shell 继续：
 
 ```bash
 acceptance_session="$(python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["session_id"])' "$acceptance_work/manifest.yaml")"
 bash scripts/server_check.sh "$acceptance_work/run_config.json"
 ```
 
-Resolve any preflight failure before running. Then, from a real interactive
-terminal (do not pipe `run` through `tee`):
+解决预检失败后，从真实交互终端运行，不把 run 管道接到 tee：
 
 ```bash
 gene-agent run --manifest "$acceptance_work/manifest.yaml" \
   --run-config "$acceptance_work/run_config.json" --data-dir "$acceptance_data"
 ```
 
-Review the evidence at each gate. For ordinary slices either decide there, or
-leave the prompt and use the [request-bound resume procedure](#resume-from-a-decision-file).
-For Hi-C, follow the dedicated recovery check below **before accepting its
-post-execution adoption gate**.
+逐门检查证据。普通切片可当场决策或退出后按[请求绑定恢复](#resume-from-a-decision-file)。Hi-C 在接受执行后采纳门**之前**按下方专属恢复检查。
 
 ```bash
 gene-agent inspect --session-id "$acceptance_session" --data-dir "$acceptance_data" --json \
@@ -374,25 +236,15 @@ fi
 printf 'Acceptance exit: %s\n' "$acceptance_status"
 ```
 
-Read `acceptance.json`: **0** means execution coverage for **that scope only**;
-**2** means unfinished/failed/skipped coverage (inspect `coverage_gaps` and logs);
-**1** means inconsistent/missing required evidence and must be investigated.
-A non-Review scope explicitly reports `quality_evaluation_status: not_evaluated`;
-an exit 0 is not a quality comparison or a biological improvement verdict.
-The report checks Inventory's registered source, collected artifact hashes and
-stage-to-stage assembly dependencies. Keep the whole run directory, not only
-this JSON. Do not mutate inputs or frozen controls to recover a failed run.
+阅读 acceptance.json：退出 **0** 仅代表该范围执行覆盖；**2** 表示未完成/失败/skip 缺口，检查 coverage_gaps/日志；**1** 表示必需证据不一致/缺失，须调查。无 Review 范围显式 `quality_evaluation_status: not_evaluated`，退出 0 不是质量比较或改善结论。报告检查 Inventory 源、产物哈希、阶段组装依赖。保留完整运行目录，不仅 JSON。不要修改输入或冻结控制来恢复失败。
 
-### Hi-C: prove detached resume does not launch AutoHiC again
+<a id="hi-c-prove-detached-resume-does-not-launch-autohic-again"></a>
 
-Use the single-stage `hic` slice above. Approve parameters normally, let AutoHiC
-finish, and wait for **`gate_id: hic_scaffolding`**, the adoption gate. This is
-not `parameter_approval` or an execution-retry gate. At the decision-selection
-prompt, press Ctrl-C (or leave its selection empty); the durable pending gate
-remains. Do not interrupt a running tool or choose `stop_human_review`, which
-is a terminal decision. Confirm with `inspect` that the run is `blocked_human`.
+### Hi-C：证明分离恢复不再次启动 AutoHiC
 
-Capture the read-only post-execution baseline after the process exits:
+使用单阶段 hic。正常批准参数，等待 AutoHiC 完成后的 **gate_id: hic_scaffolding** 采纳门，不是 parameter_approval 或执行重试门。在决策选择提示处 Ctrl-C 或留空，持久待决门保留。不打断运行工具，也不选择终态 stop_human_review。Inspect 确认 blocked_human。
+
+进程退出后保存只读执行后基线：
 
 ```bash
 if python -m app.diagnostics.route_acceptance --route hic \
@@ -406,11 +258,7 @@ gene-agent inspect --session-id "$acceptance_session" --data-dir "$acceptance_da
   --write-decision-template "$acceptance_work/hic-decision.json"
 ```
 
-If the baseline reports exit 1, fix the evidence problem before continuing. Edit
-only the template's decision fields: use `accept_candidate` to adopt, or
-`keep_prior_assembly` to decline adoption successfully. Preserve request identity
-and binding. `request_parameter_retry` deliberately starts new execution and
-does not belong in this no-rerun check. Then:
+基线退出 1 时先解决证据问题。只编辑模板决策字段：accept_candidate 采纳，keep_prior_assembly 成功保留；保留身份和绑定。request_parameter_retry 会新执行，不适用于此检查。然后：
 
 ```bash
 gene-agent resume --session-id "$acceptance_session" --data-dir "$acceptance_data" \
@@ -421,58 +269,28 @@ python -m app.diagnostics.route_acceptance --route hic \
   > "$acceptance_work/hic-after-resume.json"
 ```
 
-Expect exit 0 and `resume_execution_check.status: unchanged`. The checker
-requires the same session/frozen inputs/adoption request, a completed resumed
-session, unchanged attempt-start records, execution refs and collected output
-hashes. It rejects an empty/pre-execution baseline or a fresh retry. Do not edit
-the baseline. Test both adopt and retain in separate sessions if both branches
-need coverage; a completed human decision is not reversible by a second resume.
+预期退出 0 且 `resume_execution_check.status: unchanged`。要求同会话/冻结输入/采纳请求、恢复后完成、attempt-start/执行引用/输出哈希不变。拒绝空/执行前基线或新重试，不编辑基线。两分支需覆盖时用不同会话；完成决策不能靠第二次 resume 撤销。
 
-### Base Polish and T2T acceptance points
+<a id="base-polish-and-t2t-acceptance-points"></a>
 
-For `base-polish`, inspect the mandatory comparison, before/after PAFs and native
-candidate; choose `accept_candidate` or `keep_prior_assembly`. At the following
-Review, inspect **both** source and polished candidate QUAST/BUSCO metrics and
-choose the final assembly; retaining the original remains a valid outcome.
-`route_acceptance --route base-polish` requires both evaluator executions for
-both candidates under the same settings. A FASTA alone cannot pass.
+### Base Polish 与 T2T 验收要点
 
-For `t2t`, inspect the finishing report, terminal scans, alignment support and
-patch records. Adoption uses `accept_selected_candidates` with the actual
-candidate IDs; retention uses `continue_without_patch`; `stop_pipeline` is a
-stop, not a successful retention. Legitimate no-extension paths are reported
-as such. Use the gate's generated template for detached resume, not a fabricated
-decision payload. To verify multi-stage finishing handoff after these slices,
-repeat the runbook with `slice=finishing` and a new session/source assembly.
+Base-polish 检查必需比较、前后 PAF、原生候选，采纳或保留。随后 Review 检查**两个**候选 QUAST/BUSCO 并选最终组装，保留原始合法。该范围要求同设置下两候选均执行两评估器，单 FASTA 不够。
 
-## Complete HiFi/Hi-C server acceptance
+T2T 检查精修报告、端部扫描、比对支持、补丁记录。采纳用 `accept_selected_candidates` 和真实 ID；保留用 `continue_without_patch`；`stop_pipeline` 是停止，不是成功保留。合法无延长如实报告。分离恢复用门生成模板，不伪造载荷。切片后验证多阶段精修交接时，用新会话/源组装重复操作手册并设 slice=finishing。
 
-This is the **last** acceptance layer. Complete the code tests, small real-tool
-smokes, small contig E2E and independent slices above before starting this run.
-The existence of these templates does not establish that those prerequisites
-have passed.
+<a id="complete-hifihi-c-server-acceptance"></a>
+<a id="complete-hifihic-server-acceptance"></a>
 
-Copy [the full manifest](../examples/hifi_complete_manifest.template.yaml) and
-[RunConfig](../examples/hifi_complete_run_config.template.json) to a server-local
-directory. This is the complete recommended route, with final Review after
-Base Polish. Edit every path, sample identity, genome-size estimate and species.
-Supply the entire current HiFi read set and explicit Hi-C R1/R2 pairs. Do not
-relabel ONT/CLR/CycloneSEQ reads as HiFi.
+## 完整 HiFi/Hi-C 服务器验收
 
-The template waits for manual decisions (`max_blocked_seconds: -1`). Before
-running, set `assembly_dedup.automatic_purge_approved` to `true` only if the real
-sample and desired haplotype representation justify purging; otherwise Dedup
-retains the source and acceptance reports its execution coverage as incomplete.
-If known, supply the actual Hi-C enzyme in
-`hic_scaffolding.autohic_parameters.restriction_enzyme` and actual ploidy/telomere
-motif in `shared_parameters.species_facts`; otherwise use the existing approved
-resolver gates. Do not guess biological facts to remove a pause. Assembly still
-selects its method/parameters at its stage gates; `assembly.case_source` may
-point to the server's active exported v5 case directory.
+这是**最后一层**。先完成上述代码、小工具、小 contig、独立切片；模板存在不证明前置已通过。
 
-Provision the configured method environments, AutoHiC assets, and the host
-BUSCO/NCBI registry via the deployment guide. Base Polish adds Racon (1.5.x) and
-minimap2; GapCloser requires TGS-GapCloser and GNU getopt. Then:
+复制[完整 manifest](../examples/hifi_complete_manifest.template.yaml)和[RunConfig](../examples/hifi_complete_run_config.template.json)到服务器本地。路线含 Base Polish 后最终 Review。编辑全部路径、样本身份、大小先验、物种，提供完整当前 HiFi 与明确 Hi-C R1/R2。不把 ONT/CLR/CycloneSEQ 重标 HiFi。
+
+模板等待人工决策（`max_blocked_seconds: -1`）。只有真实样本和目标单倍型表示适合 purge 时，才把 `assembly_dedup.automatic_purge_approved` 设为 `true`，否则 Dedup 保留源，验收报告执行覆盖不完整。已知时在 `hic_scaffolding.autohic_parameters.restriction_enzyme` 中设置真实 Hi-C 酶，在 `shared_parameters.species_facts` 中设置实际倍性和端粒基序，否则用既有批准 resolver 门，不猜事实消除暂停。Assembly 仍阶段选择方法/参数；`assembly.case_source` 可指向服务器活动的 v5 导出案例目录。
+
+按部署指南准备环境、AutoHiC、BUSCO/NCBI。Base Polish 增加 Racon 1.5.x 与 minimap2，GapCloser 需 TGS/GNU getopt。然后：
 
 ```bash
 bash scripts/server_check.sh /server/path/run_config.json
@@ -480,15 +298,9 @@ gene-agent run --manifest /server/path/manifest.yaml \
   --run-config /server/path/run_config.json --data-dir /server/path/data
 ```
 
-Review candidate evidence at each gate. Base Polish executes one Racon round
-between two identically configured minimap2 alignments, preserves the source,
-and requires `accept_candidate`, `keep_prior_assembly`, or `stop_human_review`.
-The following Review evaluates both candidates with the same QUAST/BUSCO
-settings, regardless of the earlier choice; its human decision chooses the
-final assembly. Optional reference-dependent QUAST errors are unavailable
-without a declared reference; read agreement is in-sample, never independent QV.
+逐门评审。Base Polish 在相同设置的两次 minimap2 间执行一轮 Racon、保留源，要求 accept_candidate、keep_prior_assembly 或 stop_human_review。后续 Review 不论先前选择，均同设置评估两者，由人工选最终。无声明参考时 QUAST 参考相关错误不可用；读段一致性是样本内指标，绝非独立 QV。
 
-After the run, use the read-only acceptance entry point:
+运行后只读验收：
 
 ```bash
 python -m app.diagnostics.route_acceptance \
@@ -496,23 +308,15 @@ python -m app.diagnostics.route_acceptance \
   --run-dir /server/path/data/runs/SESSION_ID > /server/path/acceptance.json
 ```
 
-Exit 0 means complete verified process coverage and paired evaluation, **not**
-automatic biological improvement. Exit 2 means an unfinished route or explicit
-coverage gaps, including legitimate skips (e.g. no internal gaps for TGS); it
-must not be reported as that tool having run. Exit 1 identifies inconsistent or
-missing required evidence. The JSON includes each occurrence's method outcomes,
-verified execution/collection refs, candidate/output handoffs, final assembly,
-and paired quality metrics. A failed/blocked process requires inspection of its
-recorded logs; a missing binary on the development host is not code failure.
+退出 0 表示完整验证进程覆盖与成对评估，不表示自动生物学改善；2 表示未完成或明确缺口，含合法 skip（如无内部缺口），不能报告工具已运行；1 表示证据不一致/缺失。JSON 含各 occurrence 方法结果、验证执行/收集引用、候选/输出交接、最终组装、成对质量指标。失败/阻塞进程需检查日志；开发主机缺二进制不是代码失败。
 
-Keep the run directory, frozen inputs, indexed artifacts, process logs and
-request-bound decisions for acceptance. Do not edit a frozen run to retry new
-configuration; create a new session. Use the ordinary inspect/review/resume
-commands below for interrupted human gates.
+保留运行目录、冻结输入、索引产物、日志、请求绑定决策。新配置重试不要编辑冻结运行，应创建新会话。人工门中断使用下方普通 inspect/review/resume。
 
-## Start
+<a id="start"></a>
 
-Launch a new run from a real interactive terminal:
+## 启动
+
+从真实交互终端启动新运行：
 
 ```bash
 gene-agent run \
@@ -521,35 +325,27 @@ gene-agent run \
   --data-dir /server/path/data
 ```
 
-The manifest owns `session_id`. Output is stored below:
+manifest 拥有 session_id，输出存于：
 
 ```text
 /server/path/data/runs/<session_id>/
 ```
 
-Both stdin and stdout must be TTYs before freeze. A selected occurrence may
-start a local process only when its frozen local-execution authorization allows
-it. `review_policy.max_blocked_seconds` applies to every registered review gate,
-including both Assembly gates and Assembly Review; `review_policy.stages` is
-only an optional per-stage override. Exact default and countdown semantics are
-owned by the
-[Review Contract](../architecture/reference/data-contract.md#12-review-contract).
-Parameter and review gates follow the frozen policy and registered resolver:
-depending on that policy, a gate may wait for a human or resolve through its
-eligible attached-process countdown path. An interrupted durable gate remains
-manual recovery work; a later process does not reconstruct the old countdown.
+冻结前 stdin/stdout 必须 TTY；occurrence 只有冻结授权允许才启动本地进程。全局 `review_policy.max_blocked_seconds` 应用于全部注册门（包括 Assembly 两门和 Review），`review_policy.stages` 仅提供可选的阶段覆盖。默认和倒计时精确语义归[评审契约](../architecture/reference/data-contract.md#12-review-contract)。门按冻结策略与注册 resolver 人工等待或使用合格附着倒计时。持久门中断后人工恢复，新进程不重建旧倒计时。
 
-The optional conversational entry is:
+可选对话入口：
 
 ```bash
 gene-agent tui --data-dir /server/path/data
 ```
 
-TUI and structured `run` converge on the same frozen-session executor.
+TUI 与结构化 run 汇入同一冻结会话执行器。
 
-## Inspect
+<a id="inspect"></a>
 
-Human-readable inspection:
+## 检查
+
+人类可读检查：
 
 ```bash
 gene-agent inspect \
@@ -557,12 +353,9 @@ gene-agent inspect \
   --data-dir /server/path/data
 ```
 
-After canonical completion, `final_assembly` is the verified absolute path of
-the latest assembly delivered by the workflow. The JSON form also includes its
-immutable `primary_output_ref`, candidate bundle, producer stage, and workflow
-occurrence; failed integrity checks are reported instead of returning a path.
+规范完成后，`final_assembly` 是最新交付组装的验证绝对路径。JSON 还含不可变主输出引用 `primary_output_ref`、候选包、生产阶段和工作流 occurrence；完整性失败报告错误而不返回路径。
 
-Machine-readable polling for one or many independent sessions:
+对一个或多个独立会话做机器可读轮询：
 
 ```bash
 gene-agent inspect \
@@ -571,13 +364,9 @@ gene-agent inspect \
   --json
 ```
 
-`workflow_progress` is derived from the verified frozen plan, canonical Ledger
-terminal facts, and a verified active gate. Checkpoint, execution marker, and
-lock state belong to the adjacent `execution` diagnostics; they are not progress
-truth. If frozen inputs cannot be verified, `inspect` withholds plan-derived
-fields instead of guessing a recovery authority.
+workflow_progress 来自验证冻结计划、规范 Ledger 终态、验证活动门。Checkpoint、执行标记、锁属于相邻 execution 诊断，不是进度真相。冻结输入无法验证时隐藏计划派生字段，不猜恢复权威。
 
-Generate the diagnostic session summary only when needed:
+仅需要时生成诊断会话摘要：
 
 ```bash
 gene-agent inspect \
@@ -586,17 +375,13 @@ gene-agent inspect \
   --trace
 ```
 
-`--trace` is a report-generation operation, not a polling protocol. Its public
-output is the **session summary** under `reports/session_summary.json` and
-`reports/session_summary.md`. For diagnosis it may build a limited view from
-occurrence-bearing Ledger/artifact evidence when the frozen plan is unavailable;
-that fallback does not authorize control or resume. Internal compatibility names
-such as `write_final_review_report` or `latest_final_report` do not define a
-second external report type.
+trace 是报告生成，不是轮询协议。公共输出为 `reports/session_summary.json` 和 `reports/session_summary.md` 的**会话摘要**。冻结计划不可用时可从 occurrence Ledger/产物构建有限诊断视图，不授权控制/恢复。`write_final_review_report`、`latest_final_report` 等内部兼容名不定义第二种外部报告类型。
 
-## Review interactively
+<a id="review-interactively"></a>
 
-For a durable human gate:
+## 交互评审
+
+持久人工门使用：
 
 ```bash
 gene-agent review \
@@ -605,12 +390,13 @@ gene-agent review \
   --checkpointer sqlite
 ```
 
-The command validates the active request and writes the decision evidence before
-applying the resume transaction.
+命令验证当前请求，写决策证据，再应用恢复事务。
 
-## Resume from a decision file
+<a id="resume-from-a-decision-file"></a>
 
-First generate a request-bound template:
+## 从决策文件恢复
+
+先生成请求绑定模板：
 
 ```bash
 gene-agent inspect \
@@ -619,7 +405,7 @@ gene-agent inspect \
   --write-decision-template /server/path/decision.json
 ```
 
-Edit only the decision fields exposed by that template, then resume:
+只编辑模板暴露的决策字段，再恢复：
 
 ```bash
 gene-agent resume \
@@ -629,12 +415,10 @@ gene-agent resume \
   --checkpointer sqlite
 ```
 
-Resume verifies session identity, occurrence/gate binding, immutable evidence,
-decision shape, and checkpoint availability before changing workflow state.
+恢复在改状态前验证会话、occurrence/门绑定、不可变证据、决策结构和 checkpoint 可用性。
 
-## Upgrade safety
+<a id="upgrade-safety"></a>
 
-The current pre-release runtime has no checkpoint migration. Before pulling new
-code over a checkout with active sessions, either finish those sessions or keep
-the old checkout and matching environment until they are terminal. A report is
-not a checkpoint and cannot substitute for durable resume state.
+## 升级安全
+
+当前预发布运行时没有 checkpoint 迁移。在活动会话检出上拉新代码前，先完成会话，或保留旧检出与匹配环境直至终态。报告不是 checkpoint，不能替代持久恢复状态。

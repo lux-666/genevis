@@ -70,6 +70,36 @@ def _request_payload(result: dict) -> dict:
     return _request_record(result)["payload"]
 
 
+def _review_occurrence_state(methods: list[str]) -> dict:
+    return {
+        "workflow_steps": [
+            {
+                "step_id": "step-000-inventory",
+                "stage": "inventory",
+                "allow_local_execution": False,
+                "selected_method_names": [],
+            },
+            {
+                "step_id": "step-001-assembly",
+                "stage": "assembly",
+                "allow_local_execution": True,
+            },
+            {
+                "step_id": "step-002-assembly_review",
+                "stage": "assembly_review",
+                "allow_local_execution": True,
+                "selected_method_names": methods,
+                "review_target": {
+                    "resource_type": "assembly",
+                    "producer_step_id": "step-001-assembly",
+                },
+            },
+        ],
+        "workflow_step_index": 2,
+        "current_stage": "assembly_review",
+    }
+
+
 class AssemblyReviewDescriptorTests(unittest.TestCase):
     def test_descriptor_registry_loads_assembly_review_methods(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
@@ -168,6 +198,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
     def test_quast_outcome_requires_every_candidate_and_survives_warnings(self):
         state = {
+            **_review_occurrence_state(["assembly_review.eval.quast"]),
             "stage_outputs": {
                 "assembly_review": {
                     "status": "completed_with_warnings",
@@ -231,7 +262,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                         },
                     ],
                 }
-            }
+            },
         }
         outcome = quast_method_outcome(state)
         self.assertIsNotNone(outcome)
@@ -281,6 +312,74 @@ class AssemblyReviewStageTests(unittest.TestCase):
         self.assertIsNotNone(execution)
         self.assertEqual(execution.disposition, "failed")
         self.assertEqual(execution.reason, "quast_candidate_evaluation_failed")
+
+    def test_review_plan_cannot_select_an_evaluator_outside_the_roster(self):
+        state = {
+            **_review_occurrence_state([]),
+            "stage_outputs": {
+                "assembly_review": {
+                    "review_plan": {"planned_signals": ["quast"]},
+                }
+            },
+        }
+        self.assertIsNone(quast_method_outcome(state))
+        state["workflow_steps"][2]["selected_method_names"] = [
+            "assembly_review.eval.quast"
+        ]
+        state["stage_outputs"]["assembly_review"]["review_plan"] = {}
+        self.assertIsNotNone(quast_method_outcome(state))
+
+    def test_unselected_evaluators_do_not_freeze_or_probe_environments(self):
+        state = {
+            **_review_occurrence_state([]),
+            "stage_outputs": {
+                "assembly_review": {
+                    "execution_mode": "local",
+                    "review_plan": {
+                        "status": "evaluating",
+                        "planned_signals": ["quast", "busco"],
+                    },
+                }
+            },
+        }
+        for module, freeze in (
+            ("quast", freeze_quast_attempts),
+            ("busco", freeze_busco_attempts),
+        ):
+            with patch(
+                f"app.stages.assembly_review.method_application.{module}.review_methods_error",
+                side_effect=AssertionError("unselected evaluator probed tools"),
+            ):
+                self.assertEqual(freeze(state), {})
+
+    def test_missing_frozen_review_roster_is_rejected(self):
+        state = {
+            **_review_occurrence_state([]),
+            "stage_outputs": {"assembly_review": {}},
+        }
+        state["workflow_steps"][2].pop("selected_method_names")
+        with self.assertRaisesRegex(ValueError, "missing its frozen method roster"):
+            quast_method_outcome(state)
+
+    def test_repeated_review_uses_only_the_active_occurrence_roster(self):
+        state = {
+            **_review_occurrence_state(["assembly_review.eval.quast"]),
+            "stage_outputs": {"assembly_review": {}},
+        }
+        state["workflow_steps"].append(
+            {
+                **state["workflow_steps"][2],
+                "step_id": "step-003-assembly_review",
+                "selected_method_names": ["assembly_review.eval.busco"],
+                "review_target": {
+                    "resource_type": "assembly",
+                    "producer_step_id": "step-002-assembly_review",
+                },
+            }
+        )
+        self.assertIsNotNone(quast_method_outcome(state))
+        state["workflow_step_index"] = 3
+        self.assertIsNone(quast_method_outcome(state))
 
     def test_resolves_t2t_and_hic_derived_current_candidates_without_fallback(self):
         producer_cases = (
@@ -511,6 +610,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
         ]:
             with self.subTest(module=module_name):
                 state = {
+                    # This route-only fixture settles no evaluator disposition.
+                    **_review_occurrence_state([]),
                     "session_id": "s1",
                     "stage_outputs": {"assembly_review": {"status": ran_status}},
                 }

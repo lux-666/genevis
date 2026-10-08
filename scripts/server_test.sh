@@ -38,16 +38,25 @@ if ! python -m pip check >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! python -c 'import pytest' >/dev/null 2>&1; then
-  printf "error: pytest is missing; install all project and test dependencies with: %s\n" "${INSTALL_COMMAND}" >&2
+if ! python -c 'import pytest, ruff, mypy' >/dev/null 2>&1; then
+  printf "error: development test/lint/type dependencies are missing; install all project and test dependencies with: %s\n" "${INSTALL_COMMAND}" >&2
   exit 1
 fi
 
 echo "scope: server-side code regression and compile checks only"
 echo "note: this does not run real biological tools or real-data smoke tests"
 
-echo "== pytest =="
-PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" python -m pytest -q
+echo "== format =="
+python -m ruff format --check .
+
+echo "== lint =="
+python -m ruff check .
+
+echo "== types =="
+python -m mypy app
+
+echo "== pytest (code tests only) =="
+PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" python -m pytest -q -m 'not real_tool'
 
 echo "== compileall =="
 PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" python -m compileall app tests

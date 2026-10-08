@@ -71,7 +71,6 @@ def planner_evaluator_outcome(
     state: TopLevelState,
     *,
     method_name: str,
-    signal_name: str,
 ) -> MethodOutcome | None:
     """Settle a selected evaluator that cannot enter a local method graph.
 
@@ -88,9 +87,7 @@ def planner_evaluator_outcome(
     # attempt a conflicting ``not_started`` disposition for the same method.
     if str(output.get("status") or "") == "failed":
         return None
-    if not _evaluator_selected(
-        state, output, method_name, signal_name
-    ) or local_execution_enabled(output):
+    if not evaluator_selected(state, method_name) or local_execution_enabled(output):
         return None
     return MethodOutcome(
         method_name=method_name,
@@ -108,7 +105,7 @@ def evaluator_method_outcome(
     """Reduce one evaluator's complete candidate batch to one disposition."""
 
     output = review_output(state)
-    if not _evaluator_selected(state, output, method_name, signal_name):
+    if not evaluator_selected(state, method_name):
         return None
     candidate_ids = {
         str(candidate.get("candidate_id"))
@@ -235,25 +232,18 @@ def mark_evaluator_not_started(
     return signals
 
 
-def _evaluator_selected(
-    state: TopLevelState,
-    output: AssemblyReviewCursor,
-    method_name: str,
-    signal_name: str,
-) -> bool:
-    """Use the frozen occurrence roster, with a plan-only unit-test fallback."""
-
-    # Production workflow freezes a non-empty plan with an explicit roster.
-    # Small legacy/unit states predate that control surface; preserve their
-    # review-plan fallback rather than asking current_workflow_step() to
-    # validate its intentionally absent/empty plan.
-    if state.get("workflow_steps"):
-        step = current_workflow_step(state)
-        if step is not None and "selected_method_names" in step:
-            return method_name in set(step["selected_method_names"])
-    review_plan = output.get("review_plan") or {}
-    planned_signals = review_plan.get("planned_signals") or []
-    return signal_name in set(planned_signals)
+def evaluator_selected(state: TopLevelState, method_name: str) -> bool:
+    """Use only the active frozen Review occurrence's evaluator roster."""
+    step = current_workflow_step(state)
+    if step is None or step["stage"] != "assembly_review":
+        raise ValueError(
+            "evaluator selection requires an active Assembly Review occurrence"
+        )
+    if "selected_method_names" not in step:
+        raise ValueError(
+            "Assembly Review occurrence is missing its frozen method roster"
+        )
+    return method_name in step["selected_method_names"]
 
 
 def verified_review_candidate(

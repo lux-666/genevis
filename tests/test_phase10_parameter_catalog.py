@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from pydantic import ValidationError
 
 from app.control.lifecycle import normalize_resume_review_request
@@ -206,6 +207,10 @@ def _v2_state(tmpdir: str, *, session_id: str = "s1") -> dict:
                 "step_id": "step-004-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": True,
+                "selected_method_names": [
+                    "assembly_review.eval.quast",
+                    "assembly_review.eval.busco",
+                ],
                 "review_target": {
                     "resource_type": "assembly",
                     "producer_step_id": "step-003-assembly",
@@ -792,17 +797,12 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
             catalog = load_parameter_catalog(method_id)
             self.assertTrue(expected_keys <= set(catalog.parameters))
 
+    @pytest.mark.real_tool
     def test_cataloged_hifiasm_flags_exist_in_runtime_help_when_binary_available(self):
         binary = _runtime_hifiasm_binary()
-        if not binary:
-            if os.environ.get("PHASE10_REQUIRE_HIFIASM_RUNTIME") == "1":
-                self.fail(
-                    "PHASE10_REQUIRE_HIFIASM_RUNTIME=1 requires HIFIASM_BIN "
-                    "or hifiasm on PATH."
-                )
-            self.skipTest(
-                "Set HIFIASM_BIN or put hifiasm on PATH to verify runtime help flags."
-            )
+        self.assertIsNotNone(
+            binary, "real hifiasm CLI check requires HIFIASM_BIN or hifiasm on PATH"
+        )
 
         version_result = subprocess.run(
             [binary, "--version"],

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 import unittest
 from pathlib import Path
+from urllib.parse import unquote
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -14,51 +16,111 @@ def _markdown_files() -> list[Path]:
     return [PROJECT_ROOT / "README.md", *sorted((PROJECT_ROOT / "docs").rglob("*.md"))]
 
 
+def _markdown_lines(text: str) -> list[tuple[int, str]]:
+    """Keep source locations while excluding fenced examples from link checks."""
+    result = []
+    fence: str | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            token = marker[1]
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            continue
+        if fence is None:
+            result.append((number, line))
+    return result
+
+
+def _markdown_anchors(text: str) -> set[str]:
+    anchors: set[str] = set()
+    counts: dict[str, int] = {}
+    for _, line in _markdown_lines(text):
+        anchors.update(re.findall(r'<a\s+(?:id|name)="([^"]+)"', line))
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if not heading:
+            continue
+        title = re.sub(r"<[^>]*>", "", heading[1]).lower()
+        slug = "".join(
+            char
+            for char in title
+            if char in " -_" or unicodedata.category(char)[0] in "LN"
+        ).replace(" ", "-")
+        count = counts.get(slug, 0)
+        counts[slug] = count + 1
+        anchors.add(f"{slug}-{count}" if count else slug)
+    return anchors
+
+
 class DocumentationContractTests(unittest.TestCase):
     def test_acceptance_guide_orders_small_slices_before_full_route(self) -> None:
         guide = (PROJECT_ROOT / "docs/user_guide/run-and-recovery.md").read_text()
         headings = (
-            "### 1. Audit and complete unit / integration coverage",
-            "### 2. Run small real-tool smoke tests for each key stage",
-            "### 3. First real E2E: the small five-stage contig route",
-            "### 4. Validate Hi-C as an independent E2E slice",
-            "### 5. Validate finishing stages independently",
-            "### 6. Only then run the complete real E2E",
-            "## Complete HiFi/Hi-C server acceptance",
+            "### 1. 审计并补齐单元与集成覆盖",
+            "### 2. 对关键阶段运行小型真实工具冒烟",
+            "### 3. 首个真实端到端：小型五阶段 contig 路线",
+            "### 4. 独立验证 Hi-C 端到端切片",
+            "### 5. 独立验证精修阶段",
+            "### 6. 最后才运行完整真实端到端",
+            "## 完整 HiFi/Hi-C 服务器验收",
         )
         positions = [guide.index(heading) for heading in headings]
         self.assertEqual(positions, sorted(positions))
         for requirement in (
-            "Test isolation is not yet complete",
+            "真实工具检查必须显式选择",
             "Phase4ReadQCRealSmokeTests",
-            "completed AutoHiC attempt is not launched again",
+            "已完成 AutoHiC 尝试不会再次启动",
             "assembly_fasta_registered",
             "--route contig",
-            "## Independent slice server runbook",
+            "## 独立切片服务器操作手册",
             "--compare-hic-execution-from",
-            "Reuse that run's evidence",
-            "does not claim the pending tests or server runs",
+            "复用该运行证据",
+            "不声称待办测试或服务器运行已经执行",
         ):
             self.assertIn(requirement, guide)
+
+    def test_implementation_map_method_inventory_matches_the_registry(self) -> None:
+        from app.schemas.descriptors import DescriptorRegistry
+
+        registry = DescriptorRegistry.load(PROJECT_ROOT / "descriptors/registry.yaml")
+        document = (
+            PROJECT_ROOT / "docs/architecture/langgraph-implementation-map.md"
+        ).read_text()
+        declared = re.search(r"包含 (\d+) 个注册方法：(\d+) 个 `local`", document)
+        self.assertIsNotNone(declared)
+        assert declared is not None
+        self.assertEqual(int(declared[1]), len(registry.methods))
+        local_count = sum(
+            method.planner.execution_kind == "local"
+            for method in registry.methods.values()
+        )
+        self.assertEqual(int(declared[2]), local_count)
+        inventory = document.split("## 注册方法清单", 1)[1].split("## 参数能力映射", 1)[
+            0
+        ]
+        documented = set(re.findall(r"^\| `([\w.]+)` \|", inventory, re.MULTILINE))
+        self.assertEqual(documented, set(registry.methods))
 
     def test_assembly_case_contract_names_compact_live_boundary(self) -> None:
         contract = (
             PROJECT_ROOT / "docs/architecture/reference/casepack.md"
         ).read_text()
         for required in (
-            "Live directory, model projection and ownership",
-            "duplicate representations",
+            "实时目录、模型投影与所有权",
+            "重复表示",
             "CaseContent",
-            "intentional symmetry",
+            "有意对称",
             "test_assembly_case_consumption.py",
             "project_method_choice_case()",
             "project_parameter_case()",
             "check_assembly_projection.sh",
             "_recover_assembly_method_artifact()",
             "parameter_prompt_bundle_name()",
-            "sole maintained corpus",
+            "唯一维护的案例库",
             "parameter_eligible",
-            "one-time import tool",
+            "一次性导入工具",
         ):
             self.assertIn(required, contract)
 
@@ -71,20 +133,30 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_markdown_relative_links_resolve(self) -> None:
         broken: list[str] = []
+        anchor_cache: dict[Path, set[str]] = {}
         for source in _markdown_files():
-            lines = source.read_text(encoding="utf-8").splitlines()
-            for line_number, line in enumerate(lines, 1):
+            for line_number, line in _markdown_lines(
+                source.read_text(encoding="utf-8")
+            ):
                 for raw_target in MARKDOWN_LINK.findall(line):
                     target = raw_target.strip().strip("<>")
-                    if target.startswith(("http://", "https://", "mailto:", "#")):
+                    if re.match(r"^[a-zA-Z][\w+.-]*:", target):
                         continue
-                    relative = target.split("#", 1)[0].split("?", 1)[0]
-                    if not relative:
-                        continue
-                    resolved = (source.parent / relative).resolve()
+                    relative, _, fragment = target.partition("#")
+                    relative = unquote(relative.split("?", 1)[0])
+                    resolved = (
+                        (source.parent / relative).resolve() if relative else source
+                    )
+                    location = source.relative_to(PROJECT_ROOT)
                     if not resolved.exists():
-                        location = source.relative_to(PROJECT_ROOT)
                         broken.append(f"{location}:{line_number}: {target}")
+                    elif fragment and resolved.suffix == ".md":
+                        if resolved not in anchor_cache:
+                            anchor_cache[resolved] = _markdown_anchors(
+                                resolved.read_text(encoding="utf-8")
+                            )
+                        if unquote(fragment) not in anchor_cache[resolved]:
+                            broken.append(f"{location}:{line_number}: {target}")
         self.assertFalse(
             broken, "broken relative Markdown links:\n" + "\n".join(broken)
         )
@@ -128,9 +200,7 @@ class DocumentationContractTests(unittest.TestCase):
             PROJECT_ROOT / "docs" / "architecture" / "reference" / "governance.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn(
-            "single owner of repository-local engineering procedure", governance
-        )
+        self.assertIn("仓库内部工程规程的唯一权威", governance)
         stale = [
             str(path.relative_to(PROJECT_ROOT))
             for path in _markdown_files()
@@ -155,8 +225,8 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("developer_guide/README.md", docs_map)
         self.assertIn("user_guide/README.md", docs_map)
         self.assertIn("../architecture/README.md", developer_index)
-        self.assertIn("navigation layer", developer_index)
-        self.assertIn("index only", user_index)
+        self.assertIn("导航层", developer_index)
+        self.assertIn("仅为索引", user_index)
 
     def test_active_env_config_is_machine_local_and_fail_closed(self) -> None:
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
@@ -171,9 +241,9 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertTrue(
             (PROJECT_ROOT / "docs" / "examples" / "envs.yaml.example").is_file()
         )
-        self.assertIn("ignored, machine-local state", bootstrap_topic)
-        self.assertIn("never falls back to the example", bootstrap_topic)
-        self.assertIn("must remain ignored/untracked", deployment_map)
+        self.assertIn("被 Git 忽略的机器本地状态", bootstrap_topic)
+        self.assertIn("绝不回退到示例", bootstrap_topic)
+        self.assertIn("必须保持忽略/未跟踪", deployment_map)
 
     def test_existing_host_config_split_has_safe_pull_sequence(self) -> None:
         migration = (
@@ -189,7 +259,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertLess(backup, clean)
         self.assertLess(clean, pull)
         self.assertLess(pull, restore)
-        self.assertIn("does not\nsilently use the example", migration)
+        self.assertIn("不会静默使用示例", migration)
 
     def test_readme_and_deployment_do_not_regrow_a_second_run_contract(self) -> None:
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
@@ -216,6 +286,8 @@ class DocumentationContractTests(unittest.TestCase):
         forbidden = (
             "review_policy.max_blocked_seconds: 300",
             "defaults to `300`",
+            "默认值为 `300`",
+            "默认 300",
             "read_qc -> genome_survey -> assembly -> assembly_dedup",
         )
         violations: list[str] = []
@@ -247,17 +319,15 @@ class DocumentationContractTests(unittest.TestCase):
         conformance = (reference_dir / "conformance.md").read_text(encoding="utf-8")
         governance = (reference_dir / "governance.md").read_text(encoding="utf-8")
 
-        self.assertIn("accepts only the exact", execution)
-        self.assertIn('parsed JSON object `{"ready": true}`', execution)
+        self.assertIn("只接受精确", execution)
+        self.assertIn('解析 JSON 对象 `{"ready": true}`', execution)
         self.assertNotIn('{"ready": true}', resources)
         self.assertIn("ReviewPolicyConfig.max_blocked_seconds", run_data)
         self.assertNotIn("max_blocked_seconds", parameters)
         self.assertNotIn("max_blocked_seconds", stages)
-        self.assertIn("Manifest-owned target species", shared)
-        self.assertNotIn("Target species has two frozen representations", conformance)
-        self.assertIn(
-            "Audit finding identifiers are review-local coordinates", governance
-        )
+        self.assertIn("manifest 拥有的目标物种", shared)
+        self.assertNotIn("目标物种有两套冻结表示", conformance)
+        self.assertIn("审查发现编号只是在当前审查中定位问题的坐标", governance)
 
         for document in reference_dir.glob("*.md"):
             self.assertIsNone(
@@ -298,7 +368,17 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertNotIn("conda run", server_check)
         self.assertIn("code regression and compile checks only", server_test)
         self.assertIn("not a real-data or biological-tool smoke test", server_test)
-        self.assertIn("pytest -q", server_test)
+        self.assertIn("pytest -q -m 'not real_tool'", server_test)
+        gates = (
+            "ruff format --check .",
+            "ruff check .",
+            "mypy app",
+            "pytest -q -m 'not real_tool'",
+            "compileall app tests",
+            "git diff --check",
+        )
+        positions = [server_test.index(gate) for gate in gates]
+        self.assertEqual(positions, sorted(positions))
         self.assertNotIn("unittest discover", server_test)
         self.assertNotIn("npx", server_test)
         self.assertNotIn("conda run", server_test)
@@ -331,10 +411,10 @@ class DocumentationContractTests(unittest.TestCase):
         deployment_map = (PROJECT_ROOT / "docs" / "deployment" / "README.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("every method entry declared", deployment_map)
-        self.assertIn("fixed-stage method/package closure", deployment_map)
-        self.assertIn("Assembly method selection remains deferred", deployment_map)
-        self.assertIn("not a proof that `server_check.sh` will pass", deployment_map)
+        self.assertIn("映射内每个方法项", deployment_map)
+        self.assertIn("固定阶段方法/包闭包", deployment_map)
+        self.assertIn("Assembly 方法选择延迟", deployment_map)
+        self.assertIn("不证明 `server_check.sh` 一定成功", deployment_map)
 
     def test_host_guides_run_code_gate_before_host_gate(self) -> None:
         commands = {

@@ -2,7 +2,8 @@
 
 The audit deliberately stops at evidence collection.  It never creates a
 directory, rewrites the artifact index, compacts checkpoints, or removes a
-candidate.  Cleanup is represented only as a dry-run manifest.
+file. It reports storage usage and evidence integrity without classifying
+files for deletion.
 """
 
 from __future__ import annotations
@@ -116,10 +117,6 @@ def audit_run_storage(
         for name, files in layer_files.items()
     }
     duplicates = _duplicate_content(all_files)
-    reclaimable = _reclaimable_candidates(
-        layer_files["reports"],
-        layer_files["work"],
-    )
 
     return {
         "schema_version": 2,
@@ -133,89 +130,7 @@ def audit_run_storage(
         "checkpoint": checkpoint,
         "duplicates": duplicates,
         "artifact_index": artifact_index,
-        "reclaimable": reclaimable,
         "warnings": sorted(set(warnings)),
-    }
-
-
-def build_cleanup_manifest(audit: Mapping[str, Any]) -> dict[str, Any]:
-    """Build a pure dry-run manifest from an audit result.
-
-    Only regenerable reports enter the automatic-cleanup candidate set.
-    ``work/`` remains reported as retained because Data v2 reserves it for
-    resume and operator-directed cleanup. This function performs no filesystem
-    access.
-    """
-
-    if audit.get("schema_version") != 2:
-        raise ValueError("cleanup manifest requires a schema v2 storage audit")
-    run_root = audit.get("run_root")
-    session_id = audit.get("session_id")
-    reclaimable = audit.get("reclaimable")
-    if not isinstance(run_root, str) or not isinstance(session_id, str):
-        raise ValueError("storage audit is missing run identity")
-    if not isinstance(reclaimable, Mapping):
-        raise ValueError("storage audit is missing reclaimable candidates")
-    candidates = reclaimable.get("files")
-    if not isinstance(candidates, list):
-        raise ValueError("storage audit has invalid reclaimable candidates")
-
-    entries: list[dict[str, Any]] = []
-    retained_work: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            raise ValueError("cleanup candidate must be an object")
-        entry = {
-            key: candidate.get(key)
-            for key in (
-                "path_ref",
-                "sha256",
-                "size_bytes",
-                "reason",
-                "requires_output_verification",
-            )
-        }
-        path_parts = (
-            Path(entry["path_ref"]).parts if isinstance(entry["path_ref"], str) else ()
-        )
-        if (
-            not isinstance(entry["path_ref"], str)
-            or entry["path_ref"].startswith("/")
-            or ".." in path_parts
-            or not path_parts
-            or path_parts[0] not in {"reports", "work"}
-            or not isinstance(entry["sha256"], str)
-            or len(entry["sha256"]) != 64
-            or any(character not in "0123456789abcdef" for character in entry["sha256"])
-            or isinstance(entry["size_bytes"], bool)
-            or not isinstance(entry["size_bytes"], int)
-            or entry["size_bytes"] < 0
-            or not isinstance(entry["reason"], str)
-            or not isinstance(entry["requires_output_verification"], bool)
-        ):
-            raise ValueError("cleanup candidate is not a normalized audited file")
-        if (path_parts[0] == "work") != entry["requires_output_verification"]:
-            raise ValueError(
-                "cleanup candidate has an invalid layer safety classification"
-            )
-        if path_parts[0] == "work":
-            retained_work.append(entry)
-        else:
-            entries.append(entry)
-
-    entries.sort(key=lambda item: item["path_ref"])
-    retained_work.sort(key=lambda item: item["path_ref"])
-    return {
-        "schema_version": 2,
-        "session_id": session_id,
-        "run_root": run_root,
-        "dry_run": True,
-        "deletion_performed": False,
-        "candidate_file_count": len(entries),
-        "candidate_bytes": sum(item["size_bytes"] for item in entries),
-        "entries": entries,
-        "retained_work_file_count": len(retained_work),
-        "retained_work_bytes": sum(item["size_bytes"] for item in retained_work),
     }
 
 
@@ -877,44 +792,7 @@ def _duplicate_content(files: Iterable[_FileInfo]) -> dict[str, Any]:
     }
 
 
-def _reclaimable_candidates(
-    report_files: Iterable[_FileInfo],
-    work_files: Iterable[_FileInfo],
-) -> dict[str, Any]:
-    reports = list(report_files)
-    work = list(work_files)
-    candidates = [
-        {
-            **file.public(),
-            "reason": "derived report can be regenerated",
-            "requires_output_verification": False,
-        }
-        for file in reports
-    ]
-    candidates.extend(
-        {
-            **file.public(),
-            "reason": (
-                "mutable work candidate; verify every required output was published"
-            ),
-            "requires_output_verification": True,
-        }
-        for file in work
-    )
-    candidates.sort(key=lambda item: item["path_ref"])
-    report_bytes = sum(file.size_bytes for file in reports)
-    work_bytes = sum(file.size_bytes for file in work)
-    return {
-        "confirmed_report_bytes": report_bytes,
-        "conditional_work_bytes": work_bytes,
-        "candidate_bytes": report_bytes + work_bytes,
-        "file_count": len(candidates),
-        "files": candidates,
-    }
-
-
 __all__ = [
     "audit_run_storage",
-    "build_cleanup_manifest",
     "verify_checkpoint_free_artifact_retention",
 ]

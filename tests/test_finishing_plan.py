@@ -289,11 +289,11 @@ def test_documentation_and_simplification_policy_is_final_state_only() -> None:
         "intentional symmetry",
     ):
         assert label in governance
-    assert "Comments record only non-obvious rationale" in governance
-    assert "omit intermediate attempts" in governance
-    assert "never-merged states" in governance
-    assert "## Boundary Rules" not in governance
-    assert "## Review Gate Policy" not in governance
+    assert "注释只解释不明显的理由" in governance
+    assert "省略中间尝试" in governance
+    assert "从未合并的状态" in governance
+    assert "## 边界规则" not in governance
+    assert "## 评审门禁策略" not in governance
     for symbol in (
         "candidate_ids_from_review_request_payload",
         "validate_sha256",
@@ -305,11 +305,11 @@ def test_documentation_and_simplification_policy_is_final_state_only() -> None:
         "Ledger.record_method_disposition_recorded",
     ):
         assert symbol not in governance
-    assert "Content-addressed JSON publication" not in governance
-    assert "schema-v1 route restorer" in recommendation_policy
+    assert "内容寻址 JSON 发布" not in governance
+    assert "schema-v1 路线恢复器" in recommendation_policy
     assert "_parameter_evidence_location" in parameter_contract
     assert "_load_reference_snapshot" not in stage_contract
-    assert "never stringifies" in review_topic
-    assert "arbitrary provider object" in review_topic
+    assert "不把任意对象转成" in review_topic
+    assert "看似模型输出的字符串" in review_topic
     assert "intentional symmetry" not in server_test.lower()
     assert "npx" not in server_test

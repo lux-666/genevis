@@ -35,6 +35,7 @@ from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly_review.method_application.support import (
     evaluator_method_outcome,
+    evaluator_selected,
     local_execution_enabled,
     mark_evaluator_not_started,
     mark_missing_signals,
@@ -85,7 +86,6 @@ def quast_planner_outcome(state: TopLevelState) -> MethodOutcome | None:
     return planner_evaluator_outcome(
         state,
         method_name=QUAST_METHOD,
-        signal_name="quast",
     )
 
 
@@ -102,6 +102,8 @@ def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
     output = review_output(state)
     review_plan = output.get("review_plan") or {}
     if review_plan.get("status") != "evaluating" or not local_execution_enabled(output):
+        return {}
+    if not evaluator_selected(state, QUAST_METHOD):
         return {}
     descriptor_error = review_methods_error([QUAST_METHOD])
     if descriptor_error:

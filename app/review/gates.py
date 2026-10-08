@@ -197,10 +197,6 @@ def find_review_gate(
     return None
 
 
-def is_registered_review_gate(stage: str | None, gate_id: str | None = None) -> bool:
-    return find_review_gate(stage, gate_id) is not None
-
-
 def registered_review_stages() -> tuple[DomainStage, ...]:
     return tuple(dict.fromkeys(stage for stage, _ in _DECLARATIONS))
 

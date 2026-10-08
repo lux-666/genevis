@@ -92,7 +92,7 @@ def _config(lineage: Path, ncbi: Path) -> dict[str, object]:
                     }
                 },
             },
-            "ncbi_metazoa": {"reference_dir": str(ncbi)},
+            "ncbi": {"reference_dir": str(ncbi)},
         },
         "methods": {},
         "stages": {},
@@ -135,7 +135,6 @@ def _multi_reference_resolver(
         **config["databases"],
         "ncbi": {"reference_dir": str(root)},
     }
-    config["databases"].pop("ncbi_metazoa")
     return EnvResolver(config_data=config), metazoa, viridiplantae
 
 
@@ -392,7 +391,6 @@ def test_species_name_does_not_require_one_snapshot_match(tmp_path: Path) -> Non
             prefix=prefix,
         )
     config = _config(lineage, metazoa)
-    config["databases"].pop("ncbi_metazoa")
     config["databases"]["ncbi"] = {"reference_dir": str(ncbi_root)}
     resolver = EnvResolver(config_data=config)
 
@@ -465,7 +463,7 @@ def test_database_paths_are_relative_to_env_config(tmp_path: Path) -> None:
         "    lineages:\n"
         f"      {lineage.name}: {{path: db/busco/{lineage.name}, "
         "version: odb10, source: test}\n"
-        "  ncbi_metazoa:\n    reference_dir: db/ncbi\n",
+        "  ncbi:\n    reference_dir: db/ncbi\n",
         encoding="utf-8",
     )
     resolver = EnvResolver(envs)
@@ -474,7 +472,7 @@ def test_database_paths_are_relative_to_env_config(tmp_path: Path) -> None:
     assert resolver.databases.busco.lineages[lineage.name].path == str(
         lineage.resolve()
     )
-    assert resolver.databases.ncbi_metazoa.reference_dir == str(ncbi.resolve())
+    assert resolver.databases.ncbi.reference_dir == str(ncbi.resolve())
     assert resolve_ncbi_reference_dir(resolver) == str(ncbi.resolve())
 
 
@@ -490,7 +488,7 @@ def test_frozen_ncbi_snapshot_identity_rejects_replacement(tmp_path: Path) -> No
         f"  busco:\n    default_lineage: {lineage.name}\n"
         f"    lineages:\n      {lineage.name}: {{path: {lineage}, "
         "version: odb10, source: test}\n"
-        f"  ncbi_metazoa:\n    reference_dir: {ncbi}\n",
+        f"  ncbi:\n    reference_dir: {ncbi}\n",
         encoding="utf-8",
     )
     snapshot = capture_dependency_snapshot(config_path=envs)

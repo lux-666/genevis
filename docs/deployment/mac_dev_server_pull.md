@@ -1,52 +1,40 @@
-# Mac Development and Server Execution
+<a id="mac-development-and-server-execution"></a>
 
-This page owns the Git handoff and server-update procedure. It does not repeat
-the run/freeze/recovery contract; operators use
-[Run and Recovery](../user_guide/run-and-recovery.md) after the checkout is ready.
+# Mac 开发与服务器执行
 
-The bootstrap, contig-readiness, and code-test boundaries are indexed in
-[Deployment Entry Points](README.md).
+本页拥有 Git 交接和服务器更新流程。运行/冻结/恢复契约见检出准备完成后使用的[运行与恢复](../user_guide/run-and-recovery.md)。Bootstrap、contig 就绪和代码测试边界索引见[部署入口](README.md)。
 
-The Mac checkout owns editing, review, lightweight verification, commits, and
-pushes. The Linux/server checkout owns environment validation and real
-bioinformatics execution. Git is the supported code-transfer boundary; Gene
-Agent has no in-agent SSH runner, remote scheduler backend, or Mac-side artifact
-collector.
+Mac 检出用于编辑、审查、轻量验证、提交和推送；Linux/服务器检出用于环境验证和真实生物信息学执行。Git 是受支持的代码传输边界；Gene Agent 没有代理内 SSH Runner、远程调度后端或 Mac 端产物收集器。
 
-## Source boundary
+<a id="source-boundary"></a>
 
-Tracked project material includes code, descriptors, dependency declarations,
-tests, documentation, examples, and helper scripts.
+## 源码边界
 
-Server-local material includes:
+跟踪的项目材料包括代码、描述符、依赖声明、测试、文档、示例和辅助脚本。
 
-- real FASTQ/FASTA/BAM inputs and sample metadata;
-- `.env`, API keys, and other credentials;
-- active `config/envs.yaml`; only `docs/examples/envs.yaml.example` is committed;
-- Conda environments and external package installations;
-- databases, BUSCO lineages, model files, runtime artifacts, Ledger, reports,
-  and checkpoints;
-- copied run configs containing private run inputs or executor knobs.
+服务器本地材料包括：
 
-Acquire and install NCBI snapshots only through their
-[snapshot authority](../../data/reference/ncbi/README.md). The installer
-resolves its root destination from `databases.ncbi` in the active host
-mapping; use `--config PATH` when that mapping is not the default. Assembly
-Review rejects an invalid snapshot or one whose content changed after freeze.
+- 真实 FASTQ/FASTA/BAM 输入和样本元数据。
+- `.env`、API 密钥和其他凭据。
+- 活动 `config/envs.yaml`；只提交 `docs/examples/envs.yaml.example`。
+- Conda 环境和外部包安装。
+- 数据库、BUSCO lineage、模型文件、运行产物、Ledger、报告、checkpoint。
+- 含私有运行输入或执行器设置的运行配置副本。
 
-## First pull after the host-config split
+只通过[快照权威文档](../../data/reference/ncbi/README.md)获取并安装 NCBI 快照。安装器从活动主机映射的 `databases.ncbi` 解析目标根；映射非默认时使用 `--config PATH`。Assembly Review 拒绝无效或冻结后内容改变的快照。
 
-`config/envs.yaml` is now ignored machine-local state. On an existing server
-checkout that still has this path tracked, the first pull containing that Git
-transition can delete the working-tree copy. Before that pull, save the active
-mapping outside the repository:
+<a id="first-pull-after-the-host-config-split"></a>
+
+## 主机配置拆分后的首次拉取
+
+`config/envs.yaml` 现在是忽略的机器本地状态。已有服务器检出若仍跟踪此路径，首次拉取 Git 跟踪切换提交可能删除工作树副本。拉取前先将活动映射备份到仓库外：
 
 ```bash
 mkdir -p "$HOME/gene-agent-host-config-backups"
 host_config_backup="$HOME/gene-agent-host-config-backups/envs.yaml.$(date +%Y%m%d%H%M%S)"
 cp -p config/envs.yaml "$host_config_backup"
 
-# Make the tracked path clean only after the external backup exists.
+# 仅在外部备份存在后，将已跟踪路径恢复为干净状态。
 git restore --source=HEAD --worktree -- config/envs.yaml
 git pull --ff-only
 
@@ -54,18 +42,13 @@ cp -p "$host_config_backup" config/envs.yaml
 git status --short --ignored -- config/envs.yaml
 ```
 
-The `git restore` above discards only the tracked working copy after its
-exact host mapping has been backed up outside the checkout. After the pull, the
-copy command restores that mapping at the now-ignored path. Git should report
-`!! config/envs.yaml`; then run the normal bootstrap preview and server checks.
-A fresh clone has only `docs/examples/envs.yaml.example`; the operator may
-create the active file manually or use interactive `gene-agent bootstrap`.
-Bootstrap may skip database or AutoHiC setup until those resources are
-installed, and creates the selected plan only after displaying it and receiving
-confirmation. Normal execution does not
-silently use the example when the active mapping is missing.
+上述 `git restore` 只在精确主机映射已备份到检出外之后丢弃跟踪的工作副本。拉取后复制命令将映射恢复到现已忽略的路径。Git 应显示 `!! config/envs.yaml`；随后执行正常 bootstrap 预览与服务器检查。
 
-## Mac workflow
+新克隆只有 `docs/examples/envs.yaml.example`；操作者可手动创建活动文件或使用交互 `gene-agent bootstrap`。数据库或 AutoHiC 尚未安装时可跳过；bootstrap 只有在展示选定计划并收到确认后才创建。正常执行在活动映射缺失时不会静默使用示例。
+
+<a id="mac-workflow"></a>
+
+## Mac 工作流
 
 ```bash
 git status --short
@@ -77,22 +60,17 @@ git commit -m "..."
 git push
 ```
 
-Only stage intended files. Do not add `.env`, real input paths, runtime data,
-checkpoints, reports, credentials, or caches. Small committed fixtures support
-local regression tests but do not replace a server real-data run.
+只暂存目标文件。不要加入 `.env`、真实输入路径、运行数据、checkpoint、报告、凭据或缓存。小型提交 fixture 支持本地回归，但不能替代服务器真实数据运行。
 
-## Server update workflow
+<a id="server-update-workflow"></a>
 
-Before pulling, inspect whether the checkout has active sessions. Sessions
-resume only with a compatible checkpoint representation; finish them before an
-incompatible update or keep the matching checkout and environment available.
+## 服务器更新工作流
 
-The ordinary update sequence below applies only after this host has completed
-the `config/envs.yaml` tracking split above. If
-`git check-ignore config/envs.yaml` does not identify the repository ignore
-rule, use the backup and first-pull sequence before any normal pull.
+拉取前先检查有无活动会话。会话只能在兼容 checkpoint 表示下恢复；不兼容更新前先完成会话，或保留匹配的检出和环境。
 
-Then update and verify:
+下面普通更新流程仅适用于该主机已完成上述 `config/envs.yaml` 跟踪拆分。若 `git check-ignore config/envs.yaml` 未识别仓库忽略规则，应先执行备份与首次拉取步骤。
+
+然后更新并验证：
 
 ```bash
 git status --short
@@ -101,24 +79,12 @@ bash scripts/server_test.sh
 bash scripts/server_check.sh
 ```
 
-The two scripts may be called by absolute path from another directory because
-they locate the repository root themselves.
+两个脚本会自行定位仓库根，可从其他目录用绝对路径调用。
 
-Do not blur their scope:
+各自范围如下：
 
-- `server_check.sh` validates orchestrator prerequisites and the fixed-stage
-  tool/package closure plus the BUSCO/NCBI database registry used by the
-  authoritative five-stage contig template.
-  Assembly method selection and candidate readiness are deferred to stage
-  entry. The script deliberately does not probe the real LLM endpoint or
-  private inputs.
-- `server_test.sh` runs code regression/compile/diff checks. It does not execute
-  Flye, Jellyfish, purge_dups, QUAST, BUSCO, or a real-data pipeline.
-- the actual `gene-agent run` preflight validates run-specific inputs and
-  services before freeze.
+- `server_check.sh` 验证编排器前置条件、固定阶段工具/包闭包，以及规范五阶段 contig 模板使用的 BUSCO/NCBI 数据库注册表。Assembly 选择和候选就绪延迟到阶段入口。脚本不探测真实 LLM 端点或私有输入。
+- `server_test.sh` 运行格式/lint/类型/代码回归/编译/diff 检查，显式排除 `real_tool`，不执行 Flye、Jellyfish、purge_dups、QUAST、BUSCO 或真实数据流水线。
+- 真实 `gene-agent run` 预检在冻结前验证运行专属输入与服务。
 
-After both scripts exit zero, copy/fill server-local templates and follow
-[Run and Recovery](../user_guide/run-and-recovery.md).
-
-New-host provisioning is documented separately in
-[New Host Setup](migration.md).
+两脚本均以零退出后，复制并填写服务器本地模板，遵循[运行与恢复](../user_guide/run-and-recovery.md)。新主机配置另见[新主机配置](migration.md)。

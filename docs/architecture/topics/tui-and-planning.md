@@ -1,29 +1,26 @@
-# TUI and Planning
+<a id="tui-and-planning"></a>
 
-> **Status:** implemented for raw HiFi/ONT and paired Hi-C intake; broader
-> midstage intake is planned separately.
-> **Read when:** changing conversational intake, Plan Draft behavior,
-> whole-run freeze, or draft recovery.  
-> **Comes from:** operator goal text, confirmed sample facts, descriptor-derived
-> method catalog, and machine configuration maintained manually or with the
-> optional [bootstrap assistant](bootstrap.md).
-> **Authority:** the frozen RunConfig owns stage occurrence and local-execution
-> consent; the Assembly stage owns method identity and method parameters after
-> upstream evidence exists. Intake text is a routing hint, never an execution
-> authority.
-> **Feeds into:** immutable frozen inputs and
-> [runtime orchestration](runtime-orchestration.md).  
-> **Contract dependencies:** [run data](../reference/data-contract.md),
-> [descriptors](../reference/descriptors.md), and
-> [stage contracts](../reference/stage-contracts.md).  
-> **Code evidence:** `app/entrypoints/tui.py`, `app/entrypoints/tui_intake.py`,
-> `app/entrypoints/ask_planner.py`, `app/entrypoints/planner_catalog.py`,
-> `app/schemas/tui_intake.py`, and `app/storage/frozen_inputs.py`.
+# TUI 与规划
 
-## Mutable draft boundary
+> **状态：** 已实现原始 HiFi/ONT 和配对 Hi-C 输入；更广的中途阶段入口另行规划。
+>
+> **阅读场景：** 修改对话输入采集、计划草稿、整次运行冻结或草稿恢复。
+>
+> **输入：** 操作者目标文本、确认的样本事实、描述符导出的方法目录，以及人工维护或由可选 [bootstrap 助手](bootstrap.md)维护的机器配置。
+>
+> **权威：** 冻结 RunConfig 拥有阶段 occurrence 和本地执行授权；上游证据具备后，Assembly 阶段拥有方法身份和参数。输入文本仅是路由提示，不是执行权威。
+>
+> **下游：** 不可变冻结输入与[运行时编排](runtime-orchestration.md)。
+>
+> **依赖契约：** [运行数据](../reference/data-contract.md)、[描述符](../reference/descriptors.md)、[阶段契约](../reference/stage-contracts.md)。
+>
+> **代码依据：** `app/entrypoints/tui.py`、`app/entrypoints/tui_intake.py`、`app/entrypoints/ask_planner.py`、`app/entrypoints/planner_catalog.py`、`app/schemas/tui_intake.py`、`app/storage/frozen_inputs.py`。
 
-`gene-agent tui` is an optional conversational new-run entry. Before
-confirmation it owns a versioned mutable draft with this lifecycle:
+<a id="mutable-draft-boundary"></a>
+
+## 可变草稿边界
+
+`gene-agent tui` 是可选的对话式新运行入口。确认前，它拥有带版本的可变草稿，生命周期如下：
 
 ```text
 intake -> planning -> ready_to_confirm -> frozen
@@ -31,133 +28,58 @@ intake -> planning -> ready_to_confirm -> frozen
                                       -> blocked_review | terminal
 ```
 
-The draft is not a graph checkpoint and is not an executable contract. It can
-be revised or resumed while unfrozen. The only top-level TUI command during
-normal conversation is `/resume`, which selects an existing draft or blocked
-session through the appropriate recovery path.
+草稿不是图 checkpoint，也不是可执行契约。未冻结时可以修改或恢复。正常对话中唯一的顶层 TUI 命令是 `/resume`，通过对应恢复路径选择已有草稿或阻塞会话。
 
-For real/operator runs with already prepared files, use the deterministic
-boundary instead: `gene-agent run --manifest PATH --run-config PATH --data-dir
-PATH`. It treats those files as the settled draft and converges on the same
-whole-run freeze and executor. Exact public RunConfig, occurrence, authorization,
-and review-policy fields belong to the [run-data contract](../reference/data-contract.md).
-An unfinished Plan Draft may still use `None` before stage selection; this is
-draft incompleteness, not a second executable runtime meaning.
+已有准备好的文件时，真实运行使用确定性入口 `gene-agent run --manifest PATH --run-config PATH --data-dir PATH`。它将文件视为已定稿草稿，汇入同一整次运行冻结边界和执行器。公共 RunConfig、occurrence、授权和评审策略字段见[运行数据契约](../reference/data-contract.md)。未完成的计划草稿在阶段选择前仍可使用 `None`，这表示草稿未完成，不构成第二种可执行运行时含义。
 
-Current intake directly models PacBio HiFi reads, ONT reads, explicit paired
-Hi-C lanes, an explicit no-Hi-C fact, species facts, and a telomere motif when
-supplied. It does not currently collect clean long reads, an existing assembly,
-CLR, CycloneSEQ, or short reads. Backend manifest and inventory support must
-not be mistaken for TUI support; see the
-[planned midstage node](tui-midstage-entry.md).
+当前输入模型直接支持 PacBio HiFi、ONT、明确配对的 Hi-C lane、明确无 Hi-C 的事实、物种事实及提供时的端粒基序。尚不采集 clean 长读段、已有组装、CLR、CycloneSEQ 或短读段。后端 manifest 和 Inventory 支持不等于 TUI 已支持；见[中途阶段入口规划](tui-midstage-entry.md)。
 
-## Intent is not the execution plan
+<a id="intent-is-not-the-execution-plan"></a>
 
-The intent parser decides which facts the TUI still needs to ask about. It does
-not authorize tools or own the final stage set. Once intake is complete, the
-planner receives the confirmed manifest view and a method catalog derived from
-the descriptor registry. It produces the editable Plan Draft for stages and
-attention items. Fixed-stage methods come from the registry's internal defaults
-rather than a user method field. Assembly is deferred: its stage later
-recommends and confirms `assembly_selection` after upstream QC/survey evidence,
-then recommends parameters for the bound method.
+## 意图与执行计划的边界
 
-Intent parsing may recognize a named assembly tool as a transient asset-role
-hint only. It asks whether HiFi, ONT, or both roles should be collected; the
-hint is not a durable `WorkflowIntent` field and must not create a second
-execution path, preselect `assembly_selection`, or feed a method name to the
-Plan Draft model. Durable intake documents containing a method field fail
-schema validation.
+意图解析器决定 TUI 还需要询问哪些事实，不授权工具，也不拥有最终阶段集合。采集完成后，规划器接收已确认 manifest 视图与描述符注册表导出的方法目录，生成可编辑的阶段与注意事项草稿。固定阶段方法取自注册表内部默认值，不是用户方法字段。Assembly 延迟绑定：阶段先依据上游 QC/Survey 证据推荐并确认 `assembly_selection`，再推荐已绑定方法的参数。
 
-Assembly Review is a recommendation, not a completion rule. The default
-Assembly recommendation may append `assembly_dedup -> assembly_review`. The
-canonical complete-genome/T2T occurrence sequence is owned by
-[stage contracts](../reference/stage-contracts.md) and generated for planners by
-`app.workflow.recommended_workflow_template`; this topic does not maintain a
-second literal array.
+输入解析可识别组装工具名，但仅作为临时资产角色提示，用于判断需要收集 HiFi、ONT 还是两者。它不是持久化 `WorkflowIntent` 字段，不得创建第二执行路径、预选 `assembly_selection` 或向计划草稿模型传递方法名。包含方法字段的持久化输入文档必须在 schema 校验时失败。
 
-The final Review is a second occurrence of the reusable stage. Freeze binds it
-to Base Polish, the nearest assembly-handoff producer. It evaluates the paired
-source and polished candidates even when the source was initially retained.
-The operator may remove, move, or
-repeat Review or other stages in the editable occurrence list. An intent or
-confirmed RunConfig containing T2T without a later Review remains valid;
-recommendation does not become validation policy.
+Assembly Review 是推荐，不是完成条件。默认 Assembly 推荐可以追加 `assembly_dedup -> assembly_review`。规范的完整基因组/T2T occurrence 序列由[阶段契约](../reference/stage-contracts.md)拥有，并由 `app.workflow.recommended_workflow_template` 提供给规划器；本页不维护第二份字面数组。
 
-`selected_stage_occurrences` is the one editable draft sequence. Duplicate
-stages remain distinct operator choices, each with its own local-process consent.
-Method identity and parameters are not user-authored or interactively collected
-draft fields. The TUI may edit only occurrence order, local-execution consent,
-and confirmation. Confirmation compiles the draft through the same canonical
-occurrence/freeze contract used by structured runs; missing required facts fail
-closed at that boundary instead of becoming a parameter prompt. Runtime
-recommendations that require upstream evidence remain deferred. If the planning
-model fails or returns an invalid draft, the planning attempt stops and the
-durable draft remains resumable; the TUI does not invent a deterministic
-fallback stage plan.
+最终 Review 是同一可复用阶段的第二次 occurrence。冻结将它绑定到最近的组装交接生产者 Base Polish；即使最初保留源组装，也评估源组装和抛光候选这对输入。操作者可在 occurrence 列表中删除、移动或重复 Review 及其他阶段。含 T2T 且之后没有 Review 的意图或已确认 RunConfig 仍合法；推荐不能变为校验策略。
 
-The draft uses three distinct selection states:
+`selected_stage_occurrences` 是唯一可编辑草稿序列。重复阶段仍是独立选择，各自具有本地进程授权。方法身份和参数不是用户编写或交互采集的草稿字段。TUI 仅编辑 occurrence 顺序、本地执行授权和确认。确认通过结构化运行共用的规范 occurrence/冻结契约编译草稿；缺失必需事实时在边界拒绝，不转为参数询问。需要上游证据的运行时推荐继续延迟。规划模型失败或返回非法草稿时停止本次规划，持久草稿仍可恢复；TUI 不自行编造确定性备用阶段计划。
+
+草稿区分三种选择状态：
 
 ```text
-None  -> stage sequence unanswered; ask the stage-selection question
-[]    -> explicit Inventory-only plan; ask neither consent, methods, nor parameters
-[...] -> exact ordered biological occurrences; continue normal planning
+None  -> 尚未回答阶段序列；询问阶段选择
+[]    -> 明确仅运行 Inventory；不询问授权、方法或参数
+[...] -> 精确有序的生物学 occurrence；继续正常规划
 ```
 
-Both plain-text and questionary stage prompts show an empty recommendation as
-`Inventory only`; Enter accepts it. The LLM Plan Draft payload likewise requires
-a JSON list rather than a non-empty list. An empty accepted list clears stale
-method and parameter choices, renders `Inventory only` in the final summary,
-and freezes as `requested_stages: []`.
+纯文本与 questionary 阶段提示都将空推荐显示为 `Inventory only`，回车即接受。LLM 计划草稿载荷要求 JSON 列表，但不要求非空。接受空列表后清除过期方法和参数选择，最终摘要显示 `Inventory only`，冻结为 `requested_stages: []`。
 
-## Whole-run freeze
+<a id="whole-run-freeze"></a>
 
-Final confirmation invokes the same transaction-like publication boundary used
-by the public structured `run` command:
+## 整次运行冻结
+
+最终确认调用公共结构化 `run` 命令使用的同一事务式发布边界：
 
 ```text
-confirmed draft -> verified frozen transaction -> execute_frozen_session
+已确认草稿 -> 已验证冻结事务 -> execute_frozen_session
 ```
 
-Exact frozen files, publication order, hashes, idempotence, and crash behavior
-belong to the [run-data contract](../reference/data-contract.md). A partial or
-invalid freeze fails closed instead of silently rebuilding inputs.
+精确冻结文件、发布顺序、哈希、幂等性和崩溃行为见[运行数据契约](../reference/data-contract.md)。部分完成或无效的冻结必须拒绝，不能静默重建输入。
 
-After final confirmation and the TTY check, the TUI computes one canonical
-effective local-method closure for fixed stages and captures the complete
-configured candidate scope needed by deferred Assembly. A read-only readiness
-pass probes the fixed closure plus any mandatory LLM endpoint; Assembly's
-selected method is preflighted when its stage binds it. Only after the checks
-needed for publication succeed does freeze store the dependency snapshot; no
-session is created on readiness failure. Bootstrap remains the broader
-machine-level diagnostic for all configured methods. After freeze, the executor
-resolves from the snapshot rather than later edits to `config/envs.yaml`.
+最终确认并通过 TTY 检查后，TUI 为固定阶段计算唯一规范的有效本地方法闭包，并捕获延迟 Assembly 所需的完整已配置候选范围。只读就绪检查探测固定闭包及必需 LLM 端点；Assembly 选定方法后再做该方法预检。发布所需检查通过后才保存依赖快照；就绪失败不创建会话。Bootstrap 仍是覆盖所有已配置方法的机器级诊断。冻结后执行器从快照解析依赖，不读取后来修改的 `config/envs.yaml`。
 
-Whole-run freeze does not generate every future method command. Planning-time
-shared-fact collection is derived from the declared deferred-Assembly scope:
-a local Assembly occurrence requires a normalized `read_type` when available,
-and requires either a manifest genome-size prior or a prior local Genome Survey;
-otherwise planning and freeze validation fail closed. Each selected stage later
-creates the narrower method-attempt freeze described in
-[Method execution](execution.md).
+整次运行冻结不生成所有未来方法命令。规划期共享事实采集由声明的延迟 Assembly 范围推导：本地 Assembly 在可获得时需要规范化 `read_type`，并且必须有 manifest 基因组大小先验或位于其前方的本地 Genome Survey；否则规划和冻结校验拒绝。各阶段之后再创建[方法执行](execution.md)所述更窄的方法尝试冻结。
 
-The mutable draft also carries the two independent recommendation modes defined
-by the [recommendation-policy contract](../reference/recommendation-policy.md).
-They are planning choices, not method selections, and become immutable at the
-same whole-run freeze boundary.
+可变草稿也携带[推荐策略契约](../reference/recommendation-policy.md)定义的两个独立推荐模式。它们是规划选择，不是方法选择；在同一整次运行冻结边界变为不可变。
 
-## Post-freeze convergence
+<a id="post-freeze-convergence"></a>
 
-The mutable TUI lifecycle ends at the whole-run freeze. Once the operator has
-confirmed the Plan Draft, the TUI must not retain a TUI-specific executor,
-review loop, countdown policy, or progress model. It calls the same
-`execute_frozen_session` boundary as a structured run. The confirmed draft
-must still have real stdin and stdout TTYs immediately before freeze; otherwise
-it remains editable and no frozen contract is published.
+## 冻结后汇合
 
-A structured `gene-agent run` does not reconstruct its complete manifest and
-RunConfig as a `TuiSessionDraft`. The supplied files are already the settled
-draft: validation failure stops before freeze, while success freezes their
-canonical meaning and immediately enters the shared interactive executor. This
-preserves fields that the conversational intake model does not represent and
-keeps Plan Draft editing solely on the TUI-authored path.
+可变 TUI 生命周期止于整次运行冻结。操作者确认计划草稿后，TUI 不得保留专属执行器、评审循环、倒计时策略或进度模型，而是调用结构化运行共用的 `execute_frozen_session`。冻结前一刻 stdin 和 stdout 必须仍是真实 TTY，否则草稿保持可编辑，不发布冻结契约。
+
+结构化 `gene-agent run` 不把完整 manifest 和 RunConfig 重建成 `TuiSessionDraft`。文件本身就是已定稿草稿：校验失败在冻结前停止；成功则冻结规范语义并立即进入共享交互执行器。这保留对话采集模型尚未表达的字段，并将计划草稿编辑限定在 TUI 创建路径。

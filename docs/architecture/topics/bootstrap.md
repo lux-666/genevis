@@ -1,161 +1,96 @@
-# Project Bootstrap
+<a id="project-bootstrap"></a>
 
-> **Status:** implemented as an optional machine-configuration assistant
->
-> **Read when:** initializing, manually editing, or repairing
-> `config/envs.yaml` and `.env`, or diagnosing configured package and Conda
-> readiness before freezing a run.
->
-> **Comes from:** operator-supplied machine paths and environment choices,
-> the host method catalog, and package/database declarations.
->
-> **Feeds into:** the dependency snapshot used by
-> [TUI and planning](tui-and-planning.md), [method execution](execution.md), and
-> the runtime requirements of [AutoHiC](autohic.md).
->
-> **Contract dependencies:** [descriptors](../reference/descriptors.md),
-> [governance](../reference/governance.md), and
-> [run data](../reference/data-contract.md).
->
-> **Code evidence:** `app/entrypoints/run.py::_run_bootstrap`,
-> `app/execution/project_bootstrap.py`,
-> `app/execution/package_bootstrap.py`,
-> `app/execution/method_preflight.py`, `app/execution/env_resolver.py`, and
-> `tests/test_project_bootstrap.py`.
+# 项目 Bootstrap
 
-## Boundary
+> **状态：** 已实现，为可选机器配置助手
+>
+> **阅读场景：** 初始化、手动编辑或修复 `config/envs.yaml` 与 `.env`，或在冻结运行前诊断已配置包与 Conda 就绪状态。
+>
+> **来源：** 操作者机器路径和环境选择、主机方法目录、软件包/数据库声明。
+>
+> **下游：** [TUI 与规划](tui-and-planning.md)、[方法执行](execution.md)使用的依赖快照，以及 [AutoHiC](autohic.md)运行需求。
+>
+> **依赖契约：** [描述符](../reference/descriptors.md)、[治理](../reference/governance.md)、[运行数据](../reference/data-contract.md)。
+>
+> **代码依据：** `app/entrypoints/run.py::_run_bootstrap`、`app/execution/project_bootstrap.py`、`app/execution/package_bootstrap.py`、`app/execution/method_preflight.py`、`app/execution/env_resolver.py`、`tests/test_project_bootstrap.py`。
 
-Bootstrap prepares mutable machine/project configuration. It is not a workflow
-run, it does not own biological inputs, and it is not required before every
-execution. An operator may create or edit `config/envs.yaml` and `.env`
-directly; bootstrap is the assisted path for generating, extending, validating,
-and applying bounded conformance to the same files.
+<a id="boundary"></a>
 
-`docs/examples/envs.yaml.example` is the committed generic seed. The default
-active `config/envs.yaml` is ignored, machine-local state created by bootstrap
-or the operator; execution never falls back to the example when the active file
-is missing. Active-config selection is shared with execution: explicit
-`bootstrap --config PATH`, then `GENE_AGENT_ENVS_CONFIG`, then the repository
-default. An override should be absolute when callers may use different current
-directories: relative overrides follow the caller's current directory, whereas
-the default `config/envs.yaml` is checkout-anchored.
+## 边界
 
-| Bootstrap owns | Bootstrap does not own |
+Bootstrap 准备可变机器/项目配置，不是工作流运行，不拥有生物学输入，也不是每次执行的必经步骤。操作者可直接创建或编辑 `config/envs.yaml`、`.env`；bootstrap 是生成、扩展、验证这些文件并实施有限布局修复的辅助入口。
+
+`docs/examples/envs.yaml.example` 是已提交的通用种子。默认活动 `config/envs.yaml` 是被 Git 忽略的机器本地状态，由 bootstrap 或操作者创建；活动文件缺失时，执行绝不回退到示例。活动配置选择与执行共享优先级：显式 `bootstrap --config PATH`、`GENE_AGENT_ENVS_CONFIG`、仓库默认值。调用者可能使用不同当前目录时，覆盖路径应为绝对路径：相对覆盖跟随调用者当前目录，默认 `config/envs.yaml` 则锚定检出目录。
+
+| Bootstrap 拥有 | Bootstrap 不拥有 |
 |---|---|
-| Assisted creation and repair of the active environment/package/database mapping | Exclusive authorship of the mapping; direct operator edits are supported |
-| Selected `GENE_AGENT_*` overrides in project `.env`, with secrets redacted and protected | Requiring `.env` to be created through bootstrap |
-| Validation of every environment, package, and database entry that is declared | Treating an undeclared optional database or AutoHiC group as malformed configuration |
-| Probing configured method environments with execution-time precedence | Proving that an arbitrary future workflow is ready |
-| The declared Juicer layout-conformance action | Installing arbitrary tools, Conda environments, reference databases, or workflow packages |
-| Previewing and atomically publishing the selected file changes | Freezing a session or rebuilding the dependency snapshot of an existing session |
+| 辅助创建和修复活动环境/包/数据库映射 | 映射独占写入权；支持操作者直接编辑 |
+| 项目 `.env` 中选定 `GENE_AGENT_*` 覆盖，隐藏并保护秘密 | 强制 `.env` 必须由 bootstrap 创建 |
+| 验证每个已声明环境、包、数据库项 | 将未声明的可选数据库或 AutoHiC 组判为非法 |
+| 按执行时优先级探测配置的方法环境 | 证明任意未来工作流就绪 |
+| 已声明的 Juicer 布局修复 | 安装任意工具、Conda 环境、参考数据库或工作流软件包 |
+| 预览并原子发布选定文件改动 | 冻结会话或重建既有会话依赖快照 |
 
-Per-run facts such as reads, an assembly, species metadata, restriction enzyme,
-stage choice, and review decisions belong to TUI/run inputs and durable run
-evidence. Putting them in `.env` or `config/envs.yaml` would cross the boundary.
+读段、组装、物种元数据、限制性内切酶、阶段选择和评审决策等每运行事实属于 TUI/运行输入与持久运行证据，放进 `.env` 或 `config/envs.yaml` 会越界。
 
-## Manual and assisted configuration
+<a id="manual-and-assisted-configuration"></a>
 
-Manual editing and bootstrap produce the same active configuration contract.
-There is no bootstrap marker, ownership bit, or alternate runtime format. After
-a manual edit, the operator may run bootstrap to validate configured entries;
-after a bootstrap edit, the operator may continue maintaining the file by hand.
+## 人工与辅助配置
 
-Host capabilities may be configured incrementally:
+手动编辑和 bootstrap 产出同一活动配置契约，没有 bootstrap 标记、所有权位或备用运行格式。手动编辑后可运行 bootstrap 校验；bootstrap 编辑后仍可继续人工维护。
 
-1. create the core mapping with the shared Conda environment or prefix;
-2. omit Assembly Review databases or AutoHiC while those resources are not
-   installed;
-3. install the resources later; and
-4. either add their complete YAML groups manually or rerun ordinary
-   `gene-agent bootstrap` and choose to configure the missing group.
+主机能力可逐步配置：
 
-An omitted optional group means “not configured on this host yet.” A group that
-is present remains strict: placeholders, missing required fields, nonexistent
-paths, invalid database contents, or missing package canaries are errors. A
-workflow that selects an omitted capability fails its run-specific readiness
-check before freeze.
+1. 用共享 Conda 环境或 prefix 创建核心映射。
+2. 尚未安装时，省略 Assembly Review 数据库或 AutoHiC。
+3. 之后安装所需资源。
+4. 手动添加完整 YAML 组，或重跑普通 `gene-agent bootstrap` 并选择配置缺失组。
 
-## Modes and write behavior
+省略可选组表示“该主机尚未配置”。已存在的组仍严格校验：占位符、缺必需字段、路径不存在、数据库内容无效或包探针缺失均为错误。选择未配置能力的工作流在冻结前的运行就绪检查失败。
 
-The default command builds and validates one plan, prints every configuration
-change and declared package-conformance action it will perform, and waits for
-an empty Enter confirmation before applying that same in-memory plan. It does
-not exit and reconstruct a second plan in a later invocation.
+<a id="modes-and-write-behavior"></a>
 
-On a missing active file, bootstrap always collects the shared Conda target and
-asks separately whether to configure Assembly Review databases and AutoHiC.
-Skipping either optional group removes its placeholders from the generated
-candidate and does not prevent `config/envs.yaml` or independent `.env` changes
-from being written. Rerunning the ordinary command later offers any still
-missing optional group again.
+## 模式与写入行为
 
-`--update` is the interactive replacement path for existing bootstrap-managed
-fields: the operator selects fields, sees `old -> new`, and uses the same final
-confirmation rule. Adding a currently absent database or AutoHiC group uses the
-ordinary command; `--update` does not maintain a second schema or provision a
-missing group. There is no separate `--apply` mode.
+默认命令构建并验证一个计划，打印将执行的全部配置变更和声明的包布局修复，等待空回车确认后应用同一内存计划，不退出再在下一次调用重建第二份计划。
 
-Existing valid values are preserved unless explicitly selected for update.
-Candidate configuration is loaded through the same `EnvResolver` used by
-execution; stale-plan and unrecorded-mutation checks prevent a concurrent edit
-from being silently overwritten. Secret values are never printed, and a new or
-updated `.env` is written with user-only permissions.
+活动文件缺失时，bootstrap 总是采集共享 Conda 目标，分别询问是否配置 Assembly Review 数据库和 AutoHiC。跳过可选组会从候选中移除占位符，不阻止写入 `config/envs.yaml` 或独立 `.env` 改动。以后重跑普通命令仍会询问缺失的可选组。
 
-## Validation and conformance
+`--update` 是既有 bootstrap 管理字段的交互替换入口：操作者选择字段，查看 `old -> new`，遵守同一最终确认规则。添加当前缺失数据库或 AutoHiC 组使用普通命令；`--update` 不维护第二 schema，也不配置缺失组。没有独立 `--apply` 模式。
 
-After a persisted candidate is available, bootstrap:
+有效现有值除非显式选择更新，否则保留。候选配置通过执行共用的 `EnvResolver` 加载；过期计划和未记录变更检查防止静默覆盖并发编辑。秘密不打印，新建或更新的 `.env` 使用仅当前用户权限。
 
-1. validates environment and package references;
-2. performs the implemented Juicer symlink conformance when the package opts in
-   and the chosen mode authorizes writes;
-3. verifies every declared package canary;
-4. groups configured method entries by Conda target and probes their required
-   executables;
-5. verifies every declared BUSCO lineage and every snapshot directly under the
-   configured NCBI reference root; and
-6. reports every configured package, method, database, target, missing
-   executable, and repair hint before returning.
+<a id="validation-and-conformance"></a>
 
-Bootstrap validates declared scope, not installation completeness for every
-possible workflow. `server_check.sh` owns the full readiness of its documented
-contig profile, including BUSCO and NCBI, while confirmed-run readiness checks
-the exact selected closure. Therefore a core-only bootstrap may succeed and a
-later contig readiness check may correctly fail until its databases or packages
-are added.
+## 验证与布局修复
 
-This is readiness validation, not installation. The only implemented
-package-layout mutation is the bounded Juicer link repair declared by the
-package config. A general environment solver, downloader, scheduler setup, or
-package installer is not implemented and must not be inferred from the word
-“bootstrap.”
+有可持久读取的候选后，bootstrap：
 
-## Relationship to the two freezes
+1. 验证环境和软件包引用。
+2. 包选择启用且模式授权写入时，执行已实现的 Juicer 符号链接修复。
+3. 验证所有已声明包的探针文件。
+4. 按 Conda 目标分组配置的方法，并探测必需可执行文件。
+5. 验证所有声明的 BUSCO lineage，以及配置的 NCBI 根目录直属快照。
+6. 返回前报告所有配置包、方法、数据库、目标、缺少的可执行文件和修复提示。
 
-`config/envs.yaml` is mutable machine state. When the operator later confirms a
-TUI plan, the whole-run freeze captures the selected environment/package
-closure and any required typed database registry in
-`control/dependency_manifest.json`. The frozen executor resolves from that
-snapshot, not from later bootstrap or manual edits. Each executable method then
-creates its narrower method-attempt freeze from the approved inputs and frozen
-dependency selection.
+Bootstrap 验证已声明范围，不证明所有可能工作流的安装完整性。`server_check.sh` 拥有文档规定的 contig 配置整体就绪（含 BUSCO/NCBI），已确认运行的检查只覆盖精确选定闭包。因此核心配置 bootstrap 可成功，后来 contig 就绪检查仍可因缺数据库或包而失败。
 
-The only implicit dotenv source is `.env` beside the project selected by the
-active host mapping: for `config/envs.yaml` it is the repository-root `.env`;
-for an explicit/`GENE_AGENT_ENVS_CONFIG` path under another `config/` directory
-it is that project's root `.env`. A caller's current-directory `.env` is never
-an alternate source. Already exported variables still win through setdefault
-loading.
+这是就绪验证，不是安装。唯一已实现包布局修改是包配置声明的有限 Juicer 链接修复。尚未实现通用环境求解器、下载器、调度器设置或包安装器，不能从“bootstrap”一词推断这些能力。
 
-Bootstrap probes every package and method entry declared in the active machine
-mapping. Separately, after a run's final confirmation and TTY check, both
-structured run and TUI perform a read-only readiness probe for only the
-canonical effective method closure and the mandatory LLM/database services for
-that workflow. The exact same closure is then frozen into the dependency
-snapshot. A failed run-specific probe creates no session.
+<a id="relationship-to-the-two-freezes"></a>
 
-Every locally executable method in that selected closure must resolve through
-the active config to a non-empty `required_tools` and/or `package_tools`
-declaration. Method-level entries may override a stage-level declaration, while
-stage-level requirements remain valid user-authored configuration. A bare
-default Conda target or an empty resolved requirement set fails closed, so a
-configuration omission cannot become a zero-tool pass.
+## 与两个冻结边界的关系
+
+`config/envs.yaml` 是可变机器状态。操作者之后确认 TUI 计划时，整次运行冻结将选定环境/包闭包及必需类型化数据库注册表捕获到 `control/dependency_manifest.json`。冻结执行器从快照解析，不使用后续 bootstrap 或手动修改。每个可执行方法再从已批准输入与冻结依赖创建更窄的方法尝试冻结。
+
+唯一隐式 dotenv 来源是活动主机映射所选项目旁的 `.env`：默认 `config/envs.yaml` 对应仓库根 `.env`；显式或 `GENE_AGENT_ENVS_CONFIG` 指向其他 `config/` 下路径时，对应那个项目根 `.env`。调用者当前目录的 `.env` 绝不是备用来源。已导出的变量仍通过 setdefault 加载保持优先。
+
+Bootstrap 探测活动机器映射声明的每个包和方法。另行地，运行最终确认并通过 TTY 检查后，结构化 run 和 TUI 仅对规范有效方法闭包及该工作流必需 LLM/数据库服务做只读就绪探测。同一闭包随后冻结到依赖快照；运行专属探测失败不创建会话。
+
+选定闭包内每个本地可执行方法，都必须通过活动配置解析到非空 `required_tools` 和/或 `package_tools` 声明。方法级项可覆盖阶段级声明，阶段级需求仍是合法用户配置。只有默认 Conda 目标或解析为空的需求集合必须拒绝，避免配置遗漏变为零工具通过。
+
+<a id="database-key-normalization"></a>
+
+## 数据库键规范化
+
+主机配置仅在输入规范化时接受旧 `databases.ncbi_metazoa` 键。`normalize_database_registry()` 为类型化加载器与 bootstrap 规划共同拥有该规则：即使值相同，同时声明新旧键也拒绝。运行时与冻结类型记录只暴露 `databases.ncbi`。普通 bootstrap 预览键重命名并在确认后写入；`--update` 保留未选择的源字段。运行时没有旧名称别名。

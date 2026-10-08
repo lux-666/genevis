@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from app.graph.builder import build_graph
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta
@@ -1922,22 +1924,24 @@ def _env_geno_exec_has_seqkit() -> bool:
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     )
     return probe.returncode == 0
 
 
-@unittest.skipUnless(
-    _env_geno_exec_has_seqkit(),
-    "env_geno_exec conda env with seqkit not available; skipping real smoke",
-)
+@pytest.mark.real_tool
 class Phase4ReadQCRealSmokeTests(unittest.TestCase):
     """Real-tool smoke: generated fixture -> env_geno_exec conda env -> SeqKit.
 
-    Skipped automatically when conda or env_geno_exec is not present so the
-    broader suite stays green on hosts without the bioinformatics env.
+    Selected only with pytest -m real_tool. Tool prerequisites are checked
+    during execution, never during collection.
     """
 
     def test_generated_fixture_smoke_produces_stats_summary_and_fofn(self):
+        self.assertTrue(
+            _env_geno_exec_has_seqkit(),
+            "real SeqKit smoke requires conda env_geno_exec with seqkit installed",
+        )
         from app.entrypoints.run import main as run_main
 
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,10 @@ from app.schemas.artifacts import (
     ASSEMBLY_METHOD_MODEL_REQUEST,
     ASSEMBLY_METHOD_MODEL_RESPONSE,
     ArtifactRef,
+)
+from app.stages.assembly.decision import (
+    AssemblyDecisionRequest,
+    make_assembly_decision,
 )
 from app.stages.assembly.nodes import (
     _recommend_route_with_decision_boundary,
@@ -267,3 +272,78 @@ def test_corrupt_request_blocks_new_retrieval_and_model_call(tmp_path, monkeypat
     result = _recommend_route_with_decision_boundary(state, {}, {})
     assert result["source"] == "llm_unavailable"
     assert "recovery failed" in result["uncertainty_notes"][0]
+
+
+@pytest.mark.parametrize("content", ["", " \n", None, [], 42])
+def test_text_extraction_failure_returns_invalid_decision(monkeypatch, content):
+    model = SimpleNamespace(invoke=lambda messages: SimpleNamespace(content=content))
+    monkeypatch.setattr("app.stages.assembly.decision.build_chat_model", lambda: model)
+    request = AssemblyDecisionRequest(
+        kind="route_selection",
+        session_id="s1",
+        prompt_payload={},
+        system_prompt="Select a route",
+        allowed_actions=["insufficient_data"],
+    )
+
+    result = make_assembly_decision(request)
+
+    assert not result.valid
+    assert result.parsed is None
+    assert result.raw_response == ""
+    assert result.error == "ValueError: LLM returned empty content"
+
+
+def test_empty_response_is_persisted_and_replayed_without_another_model_call(
+    tmp_path, monkeypatch
+):
+    state = fixtures.InputProfilerTests()._state(str(tmp_path))
+    prompt = {"allowed_methods": [], "allowed_actions": ["insufficient_data"]}
+    request_ref = publish(
+        state,
+        ASSEMBLY_METHOD_MODEL_REQUEST,
+        {
+            "kind": "route_selection",
+            "session_id": state["session_id"],
+            "allowed_actions": prompt["allowed_actions"],
+            "allowed_methods": prompt["allowed_methods"],
+            "prompt_payload": prompt,
+            "messages": [
+                {"role": "system", "content": "Select a route"},
+                {"role": "user", "content": json.dumps(prompt)},
+            ],
+        },
+    )
+
+    class EmptyModel:
+        calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return SimpleNamespace(content="")
+
+    model = EmptyModel()
+    monkeypatch.setattr("app.stages.assembly.decision.build_chat_model", lambda: model)
+    first = _recommend_route_with_decision_boundary(state, {}, {})
+    assert first["source"] == "llm_unavailable"
+    assert first["model_response_ref"] is not None
+    recovered = _recover_assembly_method_artifact(
+        state, ASSEMBLY_METHOD_MODEL_RESPONSE, request_ref=request_ref
+    )
+    assert recovered is not None
+    response_ref, record = recovered
+    assert record["request_sha256"] == request_ref.sha256
+    assert record["validity"] == "invalid"
+    assert record["raw_response"] == ""
+    assert record["error"] == "ValueError: LLM returned empty content"
+    response_path = resolve_artifact_ref(
+        state["data_dir"], state["session_id"], response_ref
+    )
+    persisted = response_path.read_bytes()
+
+    # Re-enter with the unchanged checkpoint, without applying the first result.
+    replay = _recommend_route_with_decision_boundary(state, {}, {})
+
+    assert model.calls == 1
+    assert replay == first
+    assert response_path.read_bytes() == persisted

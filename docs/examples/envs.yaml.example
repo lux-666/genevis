@@ -1,74 +1,74 @@
-# Stage- and method-specific conda environment mapping for real local
-# execution. Method-level entries override stage-level entries, which in turn
-# override the default fallback.
+# 真实本地执行使用的阶段/方法专属 Conda 环境映射。
+# 方法级项覆盖阶段级项，阶段级项再覆盖
+# 默认后备。
 #
-# SETUP INSTRUCTIONS:
-# 1. Either edit a machine-local config/envs.yaml manually or run
-#    `gene-agent bootstrap` as an optional assistant.
-# 2. Database and AutoHiC groups may be omitted until their resources are
-#    installed. Omit all of `databases` for the former; for the latter omit the
-#    four package entries and `methods.hic_scaffolding.candidate.autohic`.
-# 3. After installing a skipped resource, add its complete group manually or
-#    rerun ordinary bootstrap. Use --update to replace an existing managed
-#    value. Database paths never enter RunConfig.
+# 配置说明：
+# 1. 手动编辑机器本地 config/envs.yaml，或运行
+#    `gene-agent bootstrap` 作为可选助手。
+# 2. 数据库和 AutoHiC 资源尚未安装时可省略相应组。
+#    前者省略整个 `databases`；后者省略
+#    四个包项及 `methods.hic_scaffolding.candidate.autohic`。
+# 3. 安装跳过的资源后，手动添加完整组或
+#    重跑普通 bootstrap。--update 用于替换已有管理值。
+#    数据库路径永不进入 RunConfig。
 #
-# Two mutually exclusive target forms are supported on any entry:
-#   conda_env: env_geno_exec          # named env  → conda run -n env_geno_exec
-#   conda_prefix: /opt/conda/envs/x   # abs path   → conda run -p /opt/conda/envs/x
-# Using both on the same entry is rejected at load time.
+# 每个条目支持两种互斥目标形式：
+#   conda_env: env_geno_exec          # 命名环境 → conda run -n env_geno_exec
+#   conda_prefix: /opt/conda/envs/x   # 绝对路径 → conda run -p /opt/conda/envs/x
+# 同一条目同时使用两者会在加载时拒绝。
 #
-# The default section likewise accepts either fallback_env or fallback_prefix
-# (not both):
+# default 同样只接受 fallback_env 或 fallback_prefix 之一，
+# 不能同时使用：
 #   fallback_env: env_geno_exec
 #   fallback_prefix: /opt/conda/envs/env_geno_exec
 #
-# Most bioinformatics tools (seqkit, flye, quast.py, ...)
-# are expected to live in a single shared conda env. The `gene_agent` env is
-# reserved for the orchestrator itself and is not a candidate host for tool binaries.
+# 多数生物信息学工具（seqkit、flye、quast.py 等）
+# 预期位于同一共享 Conda 环境。`gene_agent` 环境
+# 仅用于编排器自身，不是工具二进制的候选环境。
 
 default:
   conda_bin: conda
-  fallback_env: your_tool_env              # REPLACE: e.g., env_geno_exec
-  # fallback_prefix: /path/to/your/env    # alternative: use abs path
+  fallback_env: your_tool_env              # 替换，例如 env_geno_exec
+  # fallback_prefix: /path/to/your/env    # 替代：使用绝对路径
 
-# Host-owned databases. RunConfig never carries these paths or selects a BUSCO
-# lineage. Assembly Review derives one installed lineage from the manifest NCBI
-# scientific name; freeze validates and records the compact projection below.
+# 数据库由主机拥有；RunConfig 不携带路径或选择 BUSCO lineage。
+# Assembly Review 从 manifest NCBI 学名推导已安装 lineage，
+# 冻结时验证并记录下方紧凑投影。
 databases:
   busco:
-    # Registry/bootstrap compatibility default only; Assembly Review does not
-    # fall back to it when species-based resolution fails.
+    # 仅注册表/bootstrap 兼容默认值；Assembly Review
+    # 在物种解析失败时不回退到该值。
     default_lineage: metazoa_odb10
     lineages:
       metazoa_odb10:
         path: /path/to/busco/metazoa_odb10
         version: odb10
         source: busco_downloads
-      # Add every target-appropriate lineage that automatic selection may
-      # resolve on this host, for example actinopterygii_odb10 for ray-finned fish.
+      # 添加自动选择可能解析到的全部目标适用 lineage，
+      # 例如辐鳍鱼使用 actinopterygii_odb10。
   ncbi:
-    # Root whose immediate children are snapshots such as metazoa/ and
-    # viridiplantae/. Each child owns one same-prefix four-file NCBI export.
+    # 直属子目录为 metazoa/、viridiplantae/ 等快照的根。
+    # 每个子目录拥有同前缀四文件 NCBI 导出。
     reference_dir: /path/to/databases/ncbi
 
-# AutoHiC, Juicer, and 3D-DNA are standalone git-clone
-# installs, not conda-env PATH tools. Declare each as a top-level entry under
-# `packages:` with `install_root` (absolute repo path) and `canary_paths`
-# (files relative to install_root). Preflight validates root + canary by
-# filesystem checks only — no PATH, no conda. `package_tools` on a method
-# references these keys by name. Confirm `gene-agent bootstrap` once after
-# filling to conform Juicer (build scripts -> CPU symlink, link in juicer_tools.jar).
+# AutoHiC、Juicer、3D-DNA 通过独立 git clone 安装，
+# 不是 Conda 环境 PATH 工具。分别在 `packages:` 下声明顶层项，
+# 包含 `install_root`（绝对仓库路径）和 `canary_paths`
+# （相对 install_root 的文件）。预检只以文件系统检查根与探针，
+# 不使用 PATH 或 Conda。方法的 `package_tools`
+# 按名称引用这些键。填写后确认运行一次 `gene-agent bootstrap`，
+# 修复 Juicer 布局（scripts -> CPU 符号链接及 juicer_tools.jar 链接）。
 #
-# Tested versions:
+# 已测试版本：
 #   Juicer: 1.6 (https://github.com/aidenlab/juicer)
 #   3D-DNA: 180922 (https://github.com/aidenlab/3d-dna)
 #   juicer_tools: 1.22.01 (https://github.com/aidenlab/juicer/wiki/Download)
 packages:
   autohic:
-    install_root: /path/to/AutoHiC         # REPLACE: AutoHiC repo root
+    install_root: /path/to/AutoHiC         # 替换为 AutoHiC 仓库根
     models:
-      error: /path/to/error_model.pth      # REPLACE: AutoHiC error model
-      chromosome: /path/to/chr_model.pth   # REPLACE: AutoHiC chromosome model
+      error: /path/to/error_model.pth      # 替换为 AutoHiC 错误模型
+      chromosome: /path/to/chr_model.pth   # 替换为 AutoHiC 染色体模型
     entrypoints:
       - autohic.py
     canary_paths:
@@ -76,18 +76,18 @@ packages:
       - src/common/run.sh
       - src/models/cfgs/error_model.py
   juicer:
-    install_root: /path/to/juicer          # REPLACE: repo root containing CPU/ and misc/
-    conform_on_bootstrap: true             # bootstrap builds scripts/ and links the jar
-    jar_root_ref: juicer_tools             # whose install_root supplies juicer_tools.jar
+    install_root: /path/to/juicer          # 替换为包含 CPU/ 和 misc/ 的仓库根
+    conform_on_bootstrap: true             # bootstrap 创建 scripts/ 并链接 jar
+    jar_root_ref: juicer_tools             # 该包的 install_root 提供 juicer_tools.jar
     entrypoints:
       - CPU/juicer.sh
     canary_paths:
       - CPU/juicer.sh
-      - CPU/common/chimeric_blacklist.awk  # Juicer 1.6+ renamed from chimeric_sam.awk
+      - CPU/common/chimeric_blacklist.awk  # Juicer 1.6+ 从 chimeric_sam.awk 重命名
       - misc/generate_site_positions.py
-      - scripts/common/juicer_tools.jar    # bootstrap deploys this symlink
+      - scripts/common/juicer_tools.jar    # bootstrap 部署此符号链接
   three_d_dna:
-    install_root: /path/to/3d-dna          # REPLACE: repo root
+    install_root: /path/to/3d-dna          # 替换为仓库根
     entrypoints:
       - run-asm-pipeline.sh
       - run-asm-pipeline-post-review.sh
@@ -97,13 +97,13 @@ packages:
       - edit/apply-edits-prep-for-next-round.sh
       - visualize/run-assembly-visualizer.sh
   juicer_tools:
-    install_root: /path/to/juicer_tools    # REPLACE: directory containing juicer_tools.jar v1.22.01
+    install_root: /path/to/juicer_tools    # 替换为包含 juicer_tools.jar v1.22.01 的目录
     canary_paths:
       - juicer_tools.jar
 
 stages:
   read_qc:
-    conda_env: your_tool_env               # REPLACE or omit to use default fallback
+    conda_env: your_tool_env               # 替换，或省略以使用默认后备
   genome_survey:
     conda_env: your_tool_env
   assembly:
@@ -125,7 +125,7 @@ methods:
       - racon
   gapcloser.tgs_gapcloser:
     conda_env: your_tool_env
-    # TGS-GapCloser 1.2.1; getopt must be the GNU implementation.
+    # TGS-GapCloser 1.2.1；getopt 必须为 GNU 实现。
     required_tools:
       - tgsgapcloser
       - minimap2
@@ -140,8 +140,8 @@ methods:
       - seqkit
   genome_survey.kmer_count.jellyfish:
     conda_env: your_tool_env
-    # Executable name only. Its Conda package is Bioconda `kmer-jellyfish`;
-    # conda-forge `jellyfish` is an unrelated Python string-matching library.
+    # 这里只填可执行名称；Conda 包为 Bioconda 的 `kmer-jellyfish`；
+    # conda-forge 的 `jellyfish` 是无关 Python 字符串匹配库。
     required_tools:
       - jellyfish
       - gzip
@@ -149,10 +149,10 @@ methods:
     conda_env: your_tool_env
     required_tools:
       - genomescope2
-  # Assembly method identity is selected at Assembly stage entry, not copied
-  # from each RunConfig. Keep a non-empty required_tools/package_tools contract
-  # for every candidate that a run may select; bootstrap checks this declared
-  # catalog and the selected candidate is checked again from the frozen snapshot.
+  # Assembly 方法身份在阶段入口选择，不从 RunConfig 复制。
+  # 为运行可能选择的每个候选保留非空 required_tools/package_tools 契约；
+  # bootstrap 检查该声明目录，所选候选执行前再从
+  # 冻结快照检查。
   assembly.candidate.flye:
     conda_env: your_tool_env
     required_tools:
@@ -192,7 +192,7 @@ methods:
     required_tools:
       - busco
   hic_scaffolding.candidate.autohic:
-    conda_env: autohic                     # AutoHiC's dedicated conda env
+    conda_env: autohic                     # AutoHiC 专属 Conda 环境
     required_tools:
       - python3.9
       - bwa

@@ -1,14 +1,14 @@
-# Full route: edit scientific facts and paths before freezing a real run.
-# Pair with hifi_complete_run_config.template.json. No invented enzyme/motif.
+# 完整路线：冻结真实运行前编辑科学事实与路径。
+# 配套 hifi_complete_run_config.template.json；不要编造酶或基序。
 session_id: hifi-complete-YYYYMMDD-a
 sample_id: REPLACE_SAMPLE
-genome_size_estimate: 500000000 # REPLACE with a defensible estimate in bases
+genome_size_estimate: 500000000 # 替换为有依据的碱基数估计
 user_metadata:
-  target_species: Solea ovata # REPLACE with the real NCBI scientific name
+  target_species: Solea ovata # 替换为真实 NCBI 学名
 assets:
   - asset_type: raw_long_reads
     paths:
-      - /ABS/PATH/TO/hifi.fastq.gz # List ALL members of this HiFi read set
+      - /ABS/PATH/TO/hifi.fastq.gz # 列出该 HiFi 读段集合的全部成员
     platform: pacbio_hifi
     layout: single
     format: fastq
@@ -21,7 +21,7 @@ assets:
     layout: paired
     format: fastq
     compression: gzip
-  # Optional reference for QUAST; absence leaves reference metrics unavailable.
+  # 可选 QUAST 参考；缺失时参考相关指标不可用。
   # - asset_type: reference_genome_fasta
   #   paths: [/ABS/PATH/TO/reference.fasta]
   #   format: fasta

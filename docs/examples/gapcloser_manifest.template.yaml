@@ -1,4 +1,4 @@
-# Pair with gapcloser_run_config.template.json. Replace all absolute paths.
+# 配套 gapcloser_run_config.template.json，替换全部绝对路径。
 session_id: hifi-gapcloser-YYYYMMDD-a
 sample_id: hifi_gapcloser_sample
 assets:
@@ -12,7 +12,7 @@ assets:
   - asset_type: raw_long_reads
     paths:
       - /ABS/PATH/TO/sample.hifi.fastq.gz
-      # List every member of this sample's HiFi read set here.
+      # 在此列出该样本 HiFi 读段集合的全部成员。
     format: fastq
     compression: gzip
     platform: pacbio_hifi

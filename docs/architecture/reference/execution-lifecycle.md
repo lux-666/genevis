@@ -1,346 +1,192 @@
-# Method Execution Lifecycle Contract
+<a id="method-execution-lifecycle-contract"></a>
 
-> **Status:** accepted and implemented.
-> **Read when:** whole-run readiness, exact freeze/run/collect routing, attempt
-> ownership, recovery, or failure policy matters.
-> **Comes from:** [Execution](../topics/execution.md).  
-> **Feeds into:** stage collection, review, and durable evidence.  
-> **Related contracts:** [Run data](data-contract.md),
-> [Execution evidence](execution-evidence.md),
-> [Parameter recommendation](parameter-recommendation.md).  
-> **Code evidence:** `app/entrypoints/run.py`,
-> `app/storage/frozen_inputs.py`, `app/execution/run_readiness.py`,
-> `app/execution/lifecycle.py`,
-> `app/execution/method_outcomes.py`,
-> `app/execution/attempt_owners.py`, `app/control/occurrence_settlement.py`.
+# 方法执行生命周期契约
 
-## Scope
+> **状态：** 已接受并实现。
+>
+> **阅读场景：** 整次运行就绪、精确 freeze/run/collect 路由、尝试所有权、恢复或失败策略。
+>
+> **来源：** [执行](../topics/execution.md)。
+>
+> **下游：** 阶段收集、评审、持久证据。
+>
+> **相关契约：** [运行数据](data-contract.md)、[执行证据](execution-evidence.md)、[参数推荐](parameter-recommendation.md)。
+>
+> **代码依据：** `app/entrypoints/run.py`、`app/storage/frozen_inputs.py`、`app/execution/run_readiness.py`、`app/execution/lifecycle.py`、`app/execution/method_outcomes.py`、`app/execution/attempt_owners.py`、`app/control/occurrence_settlement.py`。
 
-This specification owns the pre-freeze run-specific readiness boundary and the
-shared execution lifecycle for every executable method. It defines graph
-boundaries, attempt ownership, recovery routing, process-failure behavior, and
-the division between the execution kernel and stage adapters.
+<a id="scope"></a>
 
-The [run data contract](data-contract.md) owns durable fact placement and
-reference rules. [Execution Evidence](execution-evidence.md) owns the canonical
-process-result body. [Parameter Recommendation](parameter-recommendation.md) owns model
-request, response, parsing, and approval behavior. This specification connects
-those contracts without replacing them.
+## 范围
 
-## Whole-run Readiness Boundary
+本规范拥有冻结前运行专属就绪边界和每个可执行方法的共享执行生命周期，定义图边界、尝试所有权、恢复路由、进程失败行为，以及执行内核与阶段适配器的分工。
 
-After the real-TTY check and before publishing any frozen session input, both
-structured run and TUI compute the canonical effective local-method closure.
-Readiness resolves every fixed local method through the active machine mapping,
-requires a non-empty tool/package probe declaration, verifies its environment,
-and probes its declared tools. The same selected closure is then captured in
-the whole-run dependency snapshot. A readiness failure creates no session.
+[运行数据契约](data-contract.md)拥有持久事实位置和引用规则；[执行证据](execution-evidence.md)拥有规范进程结果正文；[参数推荐](parameter-recommendation.md)拥有模型请求、响应、解析和审批行为。本规范连接这些契约，不取代它们。
 
-Assembly remains the deferred-binding exception: whole-run readiness captures
-its configured candidate dependency scope but does not pretend that one
-candidate is already selected. The Assembly stage selects from that frozen
-scope after upstream evidence exists and preflights the selected method before
-freezing its attempt.
+<a id="whole-run-readiness-boundary"></a>
 
-Whether an LLM endpoint is mandatory is owned by the selected workflow and
-[recommendation policy](recommendation-policy.md#readiness-and-evidence). When
-required, readiness invokes the configured endpoint and accepts only the exact
-parsed JSON object `{"ready": true}`. Empty output, free text, a JSON array, or
-an object with a different shape fails the probe. This is a structured-output
-capability check, not merely an authentication or network-connectivity check.
+## 整次运行就绪边界
 
-This boundary is read-only. Bootstrap's broader configured-catalog validation
-and a method's later frozen-dependency verification remain distinct checks.
+真实 TTY 检查后、任何冻结会话输入发布前，结构化 run 和 TUI 都计算规范有效本地方法闭包。就绪检查通过活动机器映射解析每个固定本地方法，要求非空工具/包探测声明，验证环境并探测声明工具。随后同一选定闭包捕获到整次运行依赖快照。就绪失败不创建会话。
 
-## Canonical Flow
+Assembly 是延迟绑定例外：整次运行就绪捕获已配置候选依赖范围，但不假装某个候选已被选择。上游证据具备后，Assembly 从冻结范围选择，并在冻结方法尝试前预检所选方法。
 
-Every executable method uses the same execution and settlement boundaries:
+是否必需 LLM 端点由选定工作流和[推荐策略](recommendation-policy.md#readiness-and-evidence)决定。需要时，就绪检查调用配置端点，只接受精确解析 JSON 对象 `{"ready": true}`。空输出、自由文本、JSON 数组或其他结构对象都失败。这验证结构化输出能力，不只是认证或网络连通性。
+
+此边界只读。Bootstrap 对更广配置目录的验证，以及方法稍后的冻结依赖验证，仍是独立检查。
+
+<a id="canonical-flow"></a>
+
+## 规范流程
+
+所有可执行方法共用执行和结算边界：
 
 ```text
-fixed-stage frozen method roster
-  -> (Assembly: upstream evidence -> method recommendation/confirmation)
-  -> (parameter recommendation and approval, where applicable)
-  -> method-attempt freeze
+固定阶段冻结方法名单
+  ->（Assembly：上游证据 -> 方法推荐/确认）
+  ->（适用时：参数推荐与审批）
+  -> 方法尝试冻结
   -> run
   -> collect
-  -> settle method outcome
-  -> stage-owned review and commit
+  -> 结算方法结果
+  -> 阶段拥有的评审与提交
 ```
 
-`freeze -> run -> collect -> settle` is implemented by
-`app.execution.lifecycle.build_method_graph`. Parameter recommendation is an
-optional preparation capability, not a second execution track.
+`freeze -> run -> collect -> settle` 由 `app.execution.lifecycle.build_method_graph` 实现。参数推荐是可选准备能力，不是第二执行轨道。
 
-This lifecycle produces a typed **method outcome** for shared settlement and,
-when a Runner starts, an **attempt terminal**. Settlement persists the outcome
-as the method's one durable **method disposition**. Neither fact is a
-workflow-occurrence outcome. Only the parent settlement boundary records
-`stage_completed | stage_skipped | stage_failed` after the stage returns an
-explicit `workflow_step_outcome` and every delivery claim verifies. The exact
-orthogonal fact domains are owned by
-[`data-contract.md`](data-contract.md#45-ledger-is-a-causal-event-stream).
+生命周期为共享结算生成类型化**方法结果**，在 Runner 启动时还生成**尝试终态**。结算将方法结果持久化为方法唯一的**方法处置**。两者都不是工作流 occurrence 结果。只有父图结算边界在阶段返回明确 `workflow_step_outcome` 且全部交付声明验证后，记录 `stage_completed | stage_skipped | stage_failed`。正交事实域见[运行数据](data-contract.md#45-ledger-is-a-causal-event-stream)。
 
-Method disposition is not a duplicate attempt summary. An occurrence may select
-a planner-only method or deliberately skip local execution and therefore own no
-attempt; a retrying method may own several attempt terminals but only one final
-disposition. The occurrence outcome answers whether the stage delivered, not
-what happened to each selected method.
+方法处置不是重复的尝试摘要。一个 occurrence 可选 planner-only 方法或刻意跳过本地执行，因此没有尝试；可重试方法可有多个尝试终态，但只有一个最终处置。Occurrence 结果回答阶段是否交付，不回答各选定方法发生了什么。
 
-For fixed-method stages, selection is already frozen in the occurrence's
-`selected_method_names`. Assembly is the single deferred-binding exception:
-the roster may be omitted at whole-run freeze, and the Assembly stage must
-recommend and validate `assembly_selection` from upstream QC/survey evidence
-before binding `primary_method`. Runtime must not treat a displayed candidate
-as selected or replace a fixed roster after recovery. The dynamic method must
-be resolved from the frozen dependency snapshot, pass stage-time preflight, and
-be checked at settlement against `assembly_selection.primary_method`; its
-method disposition remains a required durable fact. This distinction makes
-`not_started` meaningful without forcing Assembly to guess a method before its
-evidence exists.
+固定方法阶段的选择已冻结在 occurrence 的 `selected_method_names`。Assembly 是唯一延迟绑定例外：整次运行冻结时可省略名单，阶段必须依据上游 QC/Survey 推荐并验证 `assembly_selection` 后才绑定 `primary_method`。运行时不能将展示的候选视为已选，也不能恢复后替换固定名单。动态方法必须从冻结依赖快照解析，通过阶段预检，并在结算时对照 `assembly_selection.primary_method`；其方法处置仍是必需持久事实。这样 `not_started` 才有明确含义，也无需 Assembly 在证据具备前猜方法。
 
-Only a durable, confirmed `assembly_selection` binds the Assembly method. The
-planning schema has no `method_selection` clarification or user-editable
-Assembly roster. Named tools and companion-read hints may guide transient asset
-collection, but are discarded before draft persistence and never reach runtime
-as selection facts.
+只有持久且确认的 `assembly_selection` 才绑定方法。规划 schema 不含 `method_selection` 澄清或用户可编辑 Assembly 名单。工具名称和伴随读段提示可指导临时资产收集，但在草稿持久化前丢弃，不能作为选择事实进入运行时。
 
-One `run` transition advances at most one frozen attempt. If an ordered direct
-batch still has pending cursors, the method graph keeps the frozen stage status,
-checkpoints the completed prefix, and routes back to `run`. Collection begins
-only after every owned attempt has durable execution evidence.
+一次 `run` 转换至多推进一个冻结尝试。有序直接批次若仍有待执行游标，方法图保持冻结状态、checkpoint 已完成前缀并返回 `run`。只有所有所属尝试都有持久执行证据才进入收集。
 
-At method-subgraph entry, the current stage status determines the recovery
-boundary:
+方法子图入口按当前阶段状态选择恢复边界：
 
-- the lifecycle's `frozen_status` enters `run` without rebuilding the command;
-- the lifecycle's `ran_status` enters `collect` without executing again;
-- every other status enters the stage-owned freeze callback.
+- 生命周期 `frozen_status` 直接进入 `run`，不重建命令。
+- `ran_status` 直接进入 `collect`，不再次执行。
+- 其他状态进入阶段拥有的 freeze 回调。
 
-After freeze and each run transition, a frozen status loops to the next pending
-attempt and the ran status enters collect. Every exit passes through the shared
-settlement node. A pure, lifecycle-specific outcome policy reads only the typed
-durable cursor/evidence produced by the preceding boundary and returns either a
-validated final `MethodOutcome` or no outcome while a retry/review continuation
-remains. It never guesses from an unregistered status string. Parent-stage
-routing owns subsequent failure, review, retry, and commit decisions.
+冻结和每次 run 后，冻结状态循环到下一待执行尝试，ran 状态进入 collect。所有出口经过共享结算节点。纯生命周期专属结果策略只读取前一边界产生的类型化持久游标/证据，返回已验证最终 `MethodOutcome`，或在重试/评审仍可继续时返回无结果，绝不从未注册状态字符串猜测。父阶段路由拥有后续失败、评审、重试和提交决策。
 
-## Lifecycle Specification
+<a id="lifecycle-specification"></a>
 
-`MethodExecutionLifecycle` contains only execution-level configuration:
+## 生命周期规格
 
-- canonical `stage` and `method_name` identities;
-- a diagnostic `name`;
-- `frozen_status` and `ran_status` recovery markers;
-- one attempt owner;
-- expected-output cleanup policy;
-- process-failure policy;
-- an optional bounded failure kind.
+`MethodExecutionLifecycle` 只包含执行级配置：
 
-The implemented process-failure policies are:
+- 规范 `stage` 和 `method_name` 身份。
+- 诊断 `name`。
+- `frozen_status`、`ran_status` 恢复标记。
+- 一个尝试所有者。
+- 预期输出清理策略。
+- 进程失败策略。
+- 可选有界失败类型。
 
-- `"fail"`: persist the failed process evidence and stop the lifecycle;
-- `"collect"`: run the ordered attempt batch and let collect translate
-  individual process outcomes into domain signals.
+已实现的进程失败策略：
 
-`"collect"` applies only to ordinary process outcomes. Identity, cursor,
-publication, ledger, or evidence-persistence failures stop the lifecycle
-immediately because continuing would make the batch unauditable.
+- `"fail"`：持久化失败进程证据并停止生命周期。
+- `"collect"`：运行有序尝试批次，由 collect 将个体进程结果翻译成领域信号。
 
-The lifecycle specification does not contain parameter catalogs, prompt
-rendering, biological schemas, review rules, or parent-stage routing.
+`"collect"` 仅适用于普通进程结果。身份、游标、发布、Ledger 或证据持久化失败立即停止，否则批次将不可审计。
 
-## Attempt Ownership
+生命周期规格不包含参数目录、提示词渲染、生物学 schema、评审规则或父阶段路由。
 
-Both ownership strategies enter the same run kernel.
+<a id="attempt-ownership"></a>
 
-### Direct attempts
+## 尝试所有权
 
-`DirectAttemptOwner` stores a non-empty ordered `execution_attempts` cursor
-list on the stage output. Stage-local adapters validate the cursor shape and
-own:
+两种所有权策略进入同一运行内核。
 
-- attempt and method identity;
-- `frozen` / `executed` / `execution_failed` status;
-- the immutable frozen-attempt ref;
-- the canonical execution-evidence ref after execution.
+<a id="direct-attempts"></a>
 
-One-command methods use a one-item list. Ordered evaluators such as QUAST and
-BUSCO use one item per candidate. Execution and collection preserve cursor
-order; each cursor's method, attempt identity, status, and refs are validated
-when loaded. During execution, a completed prefix and frozen suffix are valid;
-one transition advances only the first frozen cursor.
+### 直接尝试
 
-### Parameter attempts
+`DirectAttemptOwner` 在阶段输出上存储非空有序 `execution_attempts` 游标列表。阶段适配器验证结构，拥有：
 
-`ParameterAttemptOwner` binds exactly one frozen attempt and execution ref to
-the current approved `ParameterAttempt`. The frozen attempt must carry an
-explicit `parameter_attempt_id` matching the current cursor. The lifecycle
-validates the selected attempt only; append, retry, sealing, and timeline code
-own complete-chain validation.
+- 尝试和方法身份。
+- `frozen` / `executed` / `execution_failed` 状态。
+- 不可变冻结尝试引用。
+- 执行后的规范执行证据引用。
 
-No method-specific frozen or execution key duplicates refs already owned by a
-`ParameterAttempt`.
+单命令方法使用单项列表；QUAST、BUSCO 等有序评估器每个候选一项。执行和收集保留游标顺序，加载时验证方法、尝试身份、状态和引用。执行期间允许已完成前缀与冻结后缀；每次转换只推进第一个冻结游标。
 
-## Stage Adapter Boundary
+<a id="parameter-attempts"></a>
 
-A method adapter owns two callbacks:
+### 参数尝试
 
-- **freeze callback:** validate selected stage inputs and approved parameters,
-  write the method-specific script, build complete `FrozenAttemptSpec` values,
-  and call `freeze_method_attempts` to persist and bind them;
-- **collect callback:** load verified executions through
-  `load_method_executions`, validate required biological outputs, publish or
-  register them, record domain ledger facts, and return the next stage delta.
+`ParameterAttemptOwner` 将恰好一个冻结尝试和执行引用绑定到当前已批准 `ParameterAttempt`。冻结尝试必须显式携带与当前游标一致的 `parameter_attempt_id`。生命周期只验证选定尝试；追加、重试、封存和时间线代码负责完整链校验。
 
-Adapters do not invoke a Runner, publish command logs, persist canonical
-execution evidence, create stage-local lifecycle factories, or write method
-dispositions directly. Freeze, run, collect, and the shared no-attempt planning
-adapter leave a validated typed cursor/evidence boundary from which the
-registered outcome policy returns a `MethodOutcome`. That outcome binds the
-exact workflow occurrence, stage, canonical method name, disposition, bounded
-reason, and immutable evidence refs. It is an internal settlement value, not a
-new `TopLevelState` or `workflow_step_outcome` field.
+方法专属冻结或执行键不得重复存储 `ParameterAttempt` 已拥有的引用。
 
-The shared method-settlement node is the sole disposition writer:
+<a id="stage-adapter-boundary"></a>
 
-- a final pre-attempt prerequisite failure returns `not_started`;
-- a selected executable method deliberately not invoked returns `skipped`;
-- a selected planner-only pass-through returns `completed` after its no-process
-  contract is applied;
-- successful collection of all required work returns `completed`;
-- an execution or collection failure returns `failed` only after the method's
-  retry/review policy has no continuing path.
+## 阶段适配器边界
 
-Individual failed attempts during a permitted retry remain attempt facts and do
-not prematurely settle the method. Ordered batches settle only after the whole
-method collection boundary decides its final result. Exact replay returns the
-existing disposition; a different result conflicts. Planner/no-attempt paths
-use the same settlement node immediately after their explicit decision; stage
-modules supply only a pure outcome policy and never call the Ledger writer.
-Before writing, shared settlement rejects any method outside the effective
-roster. For fixed stages this is the frozen roster; for deferred Assembly it is
-the single validated `primary_method` selected by the stage. Before a stage
-terminal, shared occurrence settlement requires every effective-roster method,
-and no other method, to have exactly one durable disposition. Human blocking
-and retry continuation do not run this terminal coverage check.
+方法适配器拥有两个回调：
 
-The successful collect adapter also supplies the evidence required for
-`attempt_succeeded`; the run or collection failure boundary supplies
-`attempt_failed` evidence only when an attempt actually existed. Attempt facts
-remain causally before the final method disposition. Parent settlement alone
-owns the occurrence terminal.
+- **freeze 回调：** 验证选定阶段输入和批准参数，写方法脚本，构建完整 `FrozenAttemptSpec`，调用 `freeze_method_attempts` 持久化并绑定。
+- **collect 回调：** 通过 `load_method_executions` 加载验证后的执行，校验必需生物学输出，发布或注册产物，记录领域 Ledger 事实，返回下一阶段增量。
 
-## Run Boundary
+适配器不调用 Runner、不发布命令日志、不持久化规范执行证据、不创建阶段局部生命周期工厂、不直接写方法处置。Freeze、run、collect 及共享无尝试规划适配器留下已验证类型化游标/证据，由注册结果策略返回 `MethodOutcome`。结果绑定精确工作流 occurrence、阶段、规范方法名、处置、有界原因和不可变证据引用；它是内部结算值，不是新的 `TopLevelState` 或 `workflow_step_outcome` 字段。
 
-Before any recovery lookup, dependency check, or process starts, the shared run
-node validates the lifecycle status and owner cursor, then requires every
-pending frozen attempt to name the exact active `workflow_step_id` for the
-lifecycle stage. A missing or stale occurrence identity becomes the lifecycle's
-bounded failure update. It does not search for recoverable execution evidence,
-invoke the Runner, publish logs, or append attempt lifecycle events. Generic
-artifact loaders may inspect non-active attempts, but execution may not treat
-one as the active occurrence.
+共享方法结算节点是处置的唯一写入者：
 
-Only after that gate does the run node load the next frozen attempt through its
-verified ref. Stage, method, session, and attempt identities must match. The
-working directory must resolve below the
-current run's `work/steps/<workflow_step_id>/<stage>/` tree; the declared absolute script path must be
-lexically below that working directory and resolve somewhere inside the run;
-every expected output must resolve inside the run. The retained script must
-exist and match its frozen SHA-256. The Runner executes that exact declared path
-with the frozen working directory as cwd. Production local dispatch is direct
-argv execution: either `<interpreter> <script_path>` or a `conda run` wrapper
-followed by that pair, always with `shell=False`. A non-empty
-`FrozenAttemptSpec.env_setup` is unsupported and must fail before either
-dispatch path; environment overrides use the typed `env` mapping or a dedicated
-frozen setup script instead.
+- 尝试前最终前置条件失败返回 `not_started`。
+- 选定可执行方法被刻意不调用返回 `skipped`。
+- 选定 planner-only 透传方法应用无进程契约后返回 `completed`。
+- 所有必需工作成功收集返回 `completed`。
+- 执行或收集失败只有在方法重试/评审策略无继续路径后才返回 `failed`。
 
-After the occurrence gate and before checking live inputs or invoking the
-Runner, the run node searches the
-artifact index for one execution record with the same stage, method, attempt ID,
-and exact frozen-attempt ref. A unique verified match advances the owner cursor
-without rerunning. A mismatched or ambiguous record fails closed.
+允许重试中的单次失败仍是尝试事实，不提前结算方法。有序批次在整个方法收集边界决定最终结果后才结算。精确回放返回原处置，不同结果冲突。规划/无尝试路径在明确决策后立即使用同一结算节点；阶段模块只供纯结果策略，绝不调用 Ledger writer。共享结算写入前拒绝有效名单之外的方法。固定阶段使用冻结名单；延迟 Assembly 使用阶段验证后的单一 `primary_method`。阶段终态前，共享 occurrence 结算要求有效名单中的每个方法且仅这些方法恰好具有一份持久处置。人工阻塞和重试继续不执行终态覆盖检查。
 
-Each frozen attempt also declares typed `input_dependencies`. Registry-owned
-external assets freeze their asset ID, canonical path, size, and SHA-256;
-run-owned inputs freeze their complete `ArtifactRef` plus the exact command
-path. Explicit unregistered files freeze path, size, and SHA-256, while
-external directories freeze a deterministic tree hash, file count, and total
-byte count. The shared run node verifies every dependency immediately before
-invoking the Runner, including after resume. Missing, re-registered,
-path-drifted, or byte-drifted input fails without starting the process.
-Within one process, repeated SHA-256 requests reuse a bounded digest only while
-canonical path, device, inode, size, nanosecond mtime, and nanosecond ctime are
-unchanged; any fingerprint change forces a byte rehash. A resumed process
-starts with an empty cache.
+成功 collect 适配器还提供 `attempt_succeeded` 所需证据；run 或收集失败边界只有实际存在尝试时才提供 `attempt_failed` 证据。尝试事实因果上先于最终方法处置。Occurrence 终态仅由父图结算拥有。
 
-`run_frozen_attempt` owns Runner invocation, stdout/stderr publication,
-artifact-index registration, output cleanup policy, and attempt-started or
-attempt-failed ledger facts. The Runner result attempt ID is checked before any
-result-derived publication or persistence.
+<a id="run-boundary"></a>
 
-Every process outcome is converted to canonical `ExecutionEvidence` and
-persisted in an outer record that binds the exact frozen-attempt ref and lifecycle
-boundary disposition before its owner cursor advances. Expected infrastructure
-failures become bounded failed stage deltas. Unexpected programming errors
-remain visible to the graph failure boundary.
+## Run 边界
 
-This prevents replay once canonical execution evidence is committed. It does
-not provide process-level exactly-once behavior if the machine fails after a
-process exits but before that evidence is published; local subprocess execution
-has no scheduler identity that can be queried or reattached.
+任何恢复查找、依赖检查或进程启动前，共享 run 节点验证生命周期状态和所有者游标，再要求全部待执行冻结尝试的 `workflow_step_id` 精确匹配该阶段当前 occurrence。缺失或过期身份产生生命周期有界失败更新；不搜索可恢复执行证据、不调用 Runner、不发布日志、不追加尝试事件。通用产物加载器可检查非当前尝试，但执行不得将其视为当前 occurrence。
 
-## Collect Boundary
+该门禁通过后，run 才经验证引用加载下一冻结尝试；阶段、方法、会话、尝试身份必须一致。工作目录必须解析到当前运行 `work/steps/<workflow_step_id>/<stage>/` 内；声明的绝对脚本路径必须在字面上位于该工作目录内，并解析到运行内；所有预期输出也须解析到运行内。保留脚本必须存在且匹配冻结 SHA-256。Runner 以冻结工作目录为 cwd 执行精确声明路径。生产本地分发为直接 argv：`<interpreter> <script_path>` 或前加 `conda run` 包装，始终 `shell=False`。非空 `FrozenAttemptSpec.env_setup` 不受支持，在两种分发前都必须失败；环境覆盖使用类型化 `env` 映射或专门冻结的设置脚本。
 
-The shared graph wraps every collect callback with one expected-failure
-boundary. Filesystem, layout, ledger-format, ledger-conflict, and verified
-artifact-loading failures represented by the boundary's declared error types
-produce a bounded `failed` stage cursor. The boundary records causal ledger
-events on a best-effort basis; a broken ledger cannot suppress the failed state
-delta. Malformed typed cursors or evidence bodies may raise an ordinary
-`ValueError`, and ordinary callback `ValueError` and other programming errors
-are not converted into normal workflow outcomes.
+Occurrence 门禁后、实时输入检查和 Runner 调用前，run 在产物索引搜索阶段、方法、尝试 ID、精确冻结引用均相同的执行记录。唯一验证匹配可推进所有者游标而不重跑；不匹配或歧义记录拒绝。
 
-Collect adapters decide which biological outputs are required or optional and
-own attempt-succeeded facts after successful materialization. An expected
-collection failure may record `attempt_failed` if the attempt has not already
-terminated and returns a failed stage cursor. It must not write `stage_failed`;
-the parent consumes the stage's explicit failed `workflow_step_outcome`.
+每个冻结尝试还声明类型化 `input_dependencies`。注册表外部资产冻结资产 ID、规范路径、大小、SHA-256；运行内输入冻结完整 `ArtifactRef` 和精确命令路径；明确未注册文件冻结路径、大小、SHA-256；外部目录冻结确定性树哈希、文件数、总字节数。共享 run 在调用 Runner 前立即验证全部依赖，恢复后同样如此。缺失、重新注册、路径漂移或字节漂移均不启动进程。单进程中，只有规范路径、设备、inode、大小、纳秒 mtime/ctime 均不变时才复用有界 SHA-256 缓存；任何指纹变化强制重算字节哈希。恢复进程从空缓存开始。
 
-The Ledger append boundary permits exactly one of `attempt_succeeded` and
-`attempt_failed` per immutable attempt ID under its exclusive append lock.
-Checking for an earlier success in application code is only an optimization;
-it is not the invariant. Exact replay returns the existing terminal, while a
-different outcome, identity binding, summary, or ref set conflicts. Conflicting
-rows are conservatively projected as failed with an integrity
-diagnostic, never by last-event overwrite.
+`run_frozen_attempt` 拥有 Runner 调用、stdout/stderr 发布、产物索引登记、输出清理策略、attempt-started/attempt-failed Ledger 事实。任何依据结果的发布或持久化前，必须检查 Runner 返回的尝试 ID。
 
-## Conformance
+每个进程结果转为规范 `ExecutionEvidence`，在推进所有者游标前持久化到外层记录，绑定精确冻结引用和生命周期边界处置。预期基础设施失败转为有界失败阶段增量；意外编程错误仍交由图失败边界可见。
 
-The current implementation requires the following for methods using the shared
-lifecycle. The central checkpoint still supplies the common JSON/size boundary;
-these guarantees do not imply that every stage-local path projection is an
-`ArtifactRef` or that every cursor key is universally typed at that boundary:
+规范执行证据提交后可防重跑；但进程退出与证据发布之间发生机器故障时，不提供进程级 exactly-once。本地子进程没有可查询或重新附着的调度器身份。
 
-1. every executable production method reaches `build_method_graph` and the
-   shared run kernel;
-2. Assembly, AutoHiC, and T2T parameterized methods use
-   `ParameterAttemptOwner`;
-3. ordinary and batch methods use `DirectAttemptOwner`;
-4. process success and failure persist canonical execution evidence;
-5. resume after freeze does not rebuild a command, and committed execution
-   evidence is recovered before any rerun;
-6. every command input is bound through a typed frozen input dependency;
-7. ordered batches checkpoint after each attempt and retain a completed prefix;
-8. production code has no method-specific duplicate cursor key, wrapper
-   artifact, or stage-local lifecycle implementation.
-9. method disposition, attempt terminal, and workflow-occurrence outcome remain
-   distinct facts; no cursor status, attempt result, route marker, or cursor
-   advance synthesizes another domain's terminal.
-10. the effective occurrence roster and durable disposition set are equal before
-    any occurrence terminal is appended; deferred Assembly derives that roster
-    only from its validated stage-owned selection.
+<a id="collect-boundary"></a>
 
-Parameterized retries use a new attempt ID and an attempt-specific work/output
-directory. A completed predecessor remains immutable; a later attempt cannot
-reuse its mutable result directory or overwrite its published outputs.
+## Collect 边界
+
+共享图以统一预期失败边界包装每个 collect 回调。声明错误类型涵盖的文件系统、布局、Ledger 格式/冲突、已验证产物加载失败产生有界 `failed` 阶段游标。边界尽力记录因果 Ledger 事件；Ledger 损坏不能阻止失败状态增量。类型化游标或证据正文损坏可抛普通 `ValueError`；普通回调 `ValueError` 及其他编程错误不转为正常工作流结果。
+
+Collect 适配器决定必需/可选生物学输出，成功物化后拥有 attempt-succeeded 事实。预期收集失败在尝试尚未终结时可记录 `attempt_failed`，并返回失败阶段游标；不得写 `stage_failed`，由父图消费阶段明确失败的 `workflow_step_outcome`。
+
+Ledger 追加边界在独占追加锁内保证每个不可变尝试 ID 只有 `attempt_succeeded`、`attempt_failed` 之一。应用代码检查既有成功只是优化，不是该不变量。精确回放返回已有终态，不同结果、身份绑定、摘要或引用集冲突。冲突行保守投影为失败并附完整性诊断，不能按最后事件覆盖。
+
+<a id="conformance"></a>
+
+## 一致性
+
+使用共享生命周期的方法必须满足以下要求。中央 checkpoint 仍只提供公共 JSON/大小边界；这些保证不意味着每个阶段路径投影都是 `ArtifactRef`，或所有游标键在中央边界统一类型化：
+
+1. 每个生产可执行方法都经过 `build_method_graph` 和共享 run 内核。
+2. Assembly、AutoHiC、T2T 参数化方法使用 `ParameterAttemptOwner`。
+3. 普通方法和批次使用 `DirectAttemptOwner`。
+4. 进程成功与失败都持久化规范执行证据。
+5. 冻结后恢复不重建命令，任何重跑前先恢复已提交执行证据。
+6. 每个命令输入通过类型化冻结输入依赖绑定。
+7. 有序批次每次尝试后 checkpoint，保留已完成前缀。
+8. 生产代码无方法专属重复游标键、包装产物或阶段局部生命周期实现。
+9. 方法处置、尝试终态、工作流 occurrence 结果保持独立；不从游标状态、尝试结果、路由标记或游标推进合成另一个域的终态。
+10. 追加任何 occurrence 终态前，有效方法名单与持久处置集合相等；延迟 Assembly 仅从已验证阶段选择导出名单。
+
+参数重试使用新尝试 ID 和专属工作/输出目录。完成前驱保持不可变；后续尝试不能复用其可变结果目录或覆盖已发布输出。

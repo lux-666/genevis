@@ -1,16 +1,16 @@
-# Existing-assembly manifest template for a review-only run.
+# 仅 Review 运行的已有组装 manifest 模板。
 #
-# Copy this file and assembly_review_run_config.template.json to a server-local
-# directory, then replace the placeholders. The paired run config deliberately
-# requests only assembly_review. Other literal occurrence sequences remain
-# valid when every reached stage can satisfy its own input contract.
+# 将本文件和 assembly_review_run_config.template.json 复制到服务器本地
+# 目录并替换占位符。配套运行配置有意只请求 assembly_review；
+# 其他字面 occurrence 序列也合法，前提是每个到达阶段
+# 均满足自身输入契约。
 session_id: existing-assembly-review-YYYYMMDD-a
 sample_id: existing_assembly_sample
 user_metadata:
-  target_species: Solea ovata  # REPLACE with the real NCBI scientific name
+  target_species: Solea ovata  # 替换为真实 NCBI 学名
 assets:
-  # Optional reference genome for QUAST -r mode. This file is frozen as a
-  # per-run asset; databases.ncbi.reference_dir is a different evidence source.
+  # 可选 QUAST -r 参考基因组。该文件冻结为
+  # 每运行资产；databases.ncbi.reference_dir 是不同证据来源。
   # - asset_type: reference_genome_fasta
   #   paths:
   #     - /ABS/PATH/TO/reference_genome.fasta
@@ -24,4 +24,4 @@ assets:
     compression: none
     metadata:
       source: <assembler-or-accession>
-      note: replace with the one assembly FASTA to review
+      note: 替换为待评审的唯一组装 FASTA

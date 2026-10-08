@@ -1,9 +1,9 @@
-# Shared by base_polish, t2t and finishing RunConfig templates.
-# Use a different session_id for EVERY run; never edit a frozen session.
+# 供 base_polish、t2t、finishing RunConfig 模板共用。
+# 每次运行使用不同 session_id；不编辑冻结会话。
 session_id: finishing-slice-YYYYMMDD-a
 sample_id: REPLACE_SAMPLE
 user_metadata:
-  target_species: Solea ovata # REPLACE with the real NCBI scientific name
+  target_species: Solea ovata # 替换为真实 NCBI 学名
 assets:
   - asset_type: assembly_fasta_registered
     paths: [/ABS/PATH/TO/verified_assembly.fasta]
@@ -14,12 +14,12 @@ assets:
       source_sha256: REPLACE_WITH_SOURCE_FILE_SHA256
   - asset_type: raw_long_reads
     paths:
-      - /ABS/PATH/TO/hifi.fastq.gz # List ALL files of the selected sample read set
+      - /ABS/PATH/TO/hifi.fastq.gz # 列出所选样本读段集合的全部文件
     platform: pacbio_hifi
     layout: single
     format: fastq
     compression: gzip
-  # Optional independent reference for QUAST:
+  # 可选 QUAST 独立参考：
   # - asset_type: reference_genome_fasta
   #   paths: [/ABS/PATH/TO/reference.fasta]
   #   format: fasta

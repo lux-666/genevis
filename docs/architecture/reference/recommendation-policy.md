@@ -1,24 +1,22 @@
-# Recommendation Policy Contract
+<a id="recommendation-policy-contract"></a>
 
-> **Status:** implemented for Assembly method/route, Assembly parameter, and
-> AutoHiC parameter advisors.
-> **Read when:** changing ablation policy, deterministic baselines, advisor
-> preflight, or recommendation evidence.  
-> **Comes from:** operator draft policy or structured RunConfig.  
-> **Feeds into:** [Run data](data-contract.md), [stage contracts](stage-contracts.md),
-> [parameter recommendation](parameter-recommendation.md), and
-> [TUI and planning](../topics/tui-and-planning.md).  
-> **Code evidence:** `app/schemas/tui_intake.py`, `app/schemas/run_config.py`,
-> `app/entrypoints/ask_planner.py`, `app/entrypoints/run.py`,
-> `app/llm/json_response.py`, `app/stages/assembly/decision.py`,
-> `app/llm/parameters/assembly/recommender.py`,
-> `app/stages/assembly/nodes.py`,
-> `app/stages/assembly/parameters/workflow.py`, and
-> `app/stages/hic_scaffolding/parameters/workflow.py`.
+# 推荐策略契约
 
-## Definition
+> **状态：** Assembly 方法/路线顾问、Assembly 参数顾问和 AutoHiC 参数顾问已实现。
+>
+> **阅读场景：** 修改消融策略、确定性基线、顾问预检或推荐证据。
+>
+> **输入：** 操作者草稿策略或结构化 RunConfig。
+>
+> **下游：** [运行数据](data-contract.md)、[阶段契约](stage-contracts.md)、[参数推荐](parameter-recommendation.md)、[TUI 与规划](../topics/tui-and-planning.md)。
+>
+> **代码依据：** `app/schemas/tui_intake.py`、`app/schemas/run_config.py`、`app/entrypoints/ask_planner.py`、`app/entrypoints/run.py`、`app/llm/json_response.py`、`app/stages/assembly/decision.py`、`app/llm/parameters/assembly/recommender.py`、`app/stages/assembly/nodes.py`、`app/stages/assembly/parameters/workflow.py`、`app/stages/hic_scaffolding/parameters/workflow.py`。
 
-Assembly `RecommendationPolicy` owns two independent, frozen advisory modes:
+<a id="definition"></a>
+
+## 定义
+
+Assembly `RecommendationPolicy` 拥有两个独立且冻结的顾问模式：
 
 ```json
 {
@@ -27,112 +25,52 @@ Assembly `RecommendationPolicy` owns two independent, frozen advisory modes:
 }
 ```
 
-Each value is either `"advisor"` or `"deterministic_baseline"`. The modes are
-independent so an experiment can ablate one advisory boundary without changing
-the other. There is no generic enabled boolean.
+每个值为 `"advisor"` 或 `"deterministic_baseline"`。两者独立，使实验可以只消融一个顾问边界，不改变另一个；不存在通用 enabled 布尔开关。
 
-`RunConfig.hic_scaffolding.parameter_advisor` uses the same two values for the
-AutoHiC parameter boundary. AutoHiC has no method-selection advisor because its
-stage method is fixed.
+`RunConfig.hic_scaffolding.parameter_advisor` 在 AutoHiC 参数边界使用同样两个值。AutoHiC 的阶段方法固定，因此没有方法选择顾问。
 
-A policy may replace the *proposal source* for the two named advisors. It does
-not bypass the method/route human confirmation gate in advisor mode, and it does
-not bypass parameter approval in advisor mode. A deterministic parameter
-baseline records its own immutable policy decision and approved attempt; that is
-a distinct policy path, not an approval-gate bypass.
+策略可以替换这两个顾问的提案来源。在顾问模式下，不能绕过方法/路线人工确认，也不能绕过参数审批。确定性参数基线记录自己的不可变策略决策和已批准尝试；它是独立策略路径，不是审批门禁旁路。
 
-## Persisted advisor-response envelope
+<a id="persisted-advisor-response-envelope"></a>
 
-Assembly route and parameter-advisor writes share the envelope keys
-`schema_version`, `raw_response`, `validity`, `error`, and `model_id`.
-`app/llm/json_response.py` owns construction and validation of that common wire
-shape, including `validity` values `parsed` and `invalid`. It does not own
-version-specific replay compatibility.
+## 持久化顾问响应封装
 
-The schema-v1 route restorer normalizes an absent or non-string `model_id` to
-`null`; the schema-v2 Assembly parameter restorer rejects a non-string
-`model_id`. Their schema-specific restore policies must remain distinct. Writes
-emit a string or `null` in both schemas.
+Assembly 路线和参数顾问写入共用 `schema_version`、`raw_response`、`validity`、`error`、`model_id`。`app/llm/json_response.py` 拥有公共传输结构的构造与校验，包括 `validity` 的 `parsed` 和 `invalid` 值，但不拥有特定版本的回放兼容性。
 
-## Draft and freeze boundary
+schema-v1 路线恢复器将缺失或非字符串 `model_id` 规范化为 `null`；schema-v2 Assembly 参数恢复器拒绝非字符串 `model_id`。两者的 schema 专属恢复策略必须保持区别；两种 schema 的新写入均为字符串或 `null`。
 
-A mutable TUI draft carries `recommendation_policy` before planning. It is
-projected through `entry_request.recommendation_policy` into the planner and
-compiled into `RunConfig.assembly` at whole-run freeze. The frozen Assembly
-fields are `method_route_advisor` and `parameter_advisor`; structured RunConfig
-additionally freezes `hic_scaffolding.parameter_advisor`. These policies cannot
-be changed after freeze.
+<a id="draft-and-freeze-boundary"></a>
 
-The policy never reintroduces an Assembly method or parameter into RunConfig.
-Method identity remains stage-owned. A policy selects who proposes the method
-or parameter mapping, not an executable answer.
+## 草稿与冻结边界
 
-The planning schema carries no `method_selection` clarification kind. There is
-no user-editable Assembly method roster in a draft; fixed stages receive system
-defaults, and Assembly is bound at its stage-time recommendation boundary.
-Intake tool-name recognition and companion-read hints are transient
-asset-collection hints scoped to intake-function locals, not durable planning
-fields.
+可变 TUI 草稿在规划前携带 `recommendation_policy`，经 `entry_request.recommendation_policy` 投影给规划器，并在整次运行冻结时编译进 `RunConfig.assembly`。冻结的 Assembly 字段为 `method_route_advisor`、`parameter_advisor`；结构化 RunConfig 还冻结 `hic_scaffolding.parameter_advisor`。冻结后不可改变策略。
 
-## Method/route advisor
+策略不得把 Assembly 方法或参数重新塞回 RunConfig。方法身份仍属阶段；策略选择谁提出方法或参数映射，不是可执行答案。
 
-The [Assembly case consumer](casepack.md) defines the implemented advisory
-evidence policy: material/task matches across methods plus software capabilities
-inform a useful first choice. Paired performance comparisons can support the
-choice but are not required to offer advice. The parameter decision follows
-method confirmation and can use foreign-method cases without changing the
-confirmed executable method. This changes advisor evidence, not the independent
-advisor/baseline modes defined here.
+规划 schema 不含 `method_selection` 澄清类型。草稿没有用户可编辑的 Assembly 方法名单：固定阶段使用系统默认，Assembly 在阶段推荐边界绑定。输入中的工具名识别和伴随读段提示只存在于输入函数局部变量，不是持久规划字段。
 
-`advisor` is the normal transaction: after QC/survey evidence, the exact model
-request, raw response, parsed recommendation, and human confirmation are
-persisted before `assembly_selection` binds.
+<a id="methodroute-advisor"></a>
 
-`deterministic_baseline` skips the model call. It requires an explicit route,
-a normalized shared read type, or a single registered input platform. The
-default method for that read type is selected only when it is in the
-descriptor-backed compatible set. Mixed inputs without enough deterministic
-evidence fail closed. The resulting selection is written as a policy decision
-with `method_recommendation_mode="deterministic_baseline"` and does not open
-the method-advisor human gate.
+## 方法与路线顾问
 
-## Parameter advisor
+[Assembly 案例消费者](casepack.md)定义已实现的顾问证据策略：跨方法的材料/任务匹配与软件能力共同支持初次选择。成对性能比较可以提供支持，但不是给出建议的前提。参数决策在方法确认之后，可使用其他方法的案例而不改变确认的可执行方法。这改变顾问证据，不改变本页定义的独立顾问/基线模式。
 
-`advisor` is the schema-3 parameter recommendation transaction: immutable
-request, raw response, sparse mapping, approval gate, and approved attempt.
+`advisor` 使用常规事务：在 QC/Survey 证据具备后，先持久化精确模型请求、原始响应、解析推荐和人工确认，再绑定 `assembly_selection`。
 
-For Assembly and AutoHiC, `deterministic_baseline` builds an empty-L2 schema-3
-baseline from the same
-validated facts, catalog, context, and dependency refs. It records a policy
-summary, persists the exact request it would have sent plus explicit
-policy-owned response and parse records, and creates a hash-bound approved
-initial attempt with an automatic policy decision through the same schema-3
-manifest boundary. The decision metadata uses `source="policy"` and a complete
-automatic-resolution audit, so it is distinguishable from a foreground
-countdown. Execution adapters use the baseline resolver and must not apply an
-L2 mapping in this mode. For AutoHiC, an operator-provided restriction enzyme
-remains an L1 fact while the other values resolve from catalog L0 defaults.
-Retry is not supported by the initial baseline policy; a retry request fails
-closed rather than silently switching to advisor mode.
+`deterministic_baseline` 跳过模型调用，需要明确路线、规范共享读段类型或单一已注册输入平台。只有描述符支持的兼容集合包含该读段类型的默认方法时，才可选择它。混合输入缺乏充分确定性证据时必须拒绝。选择以策略决策写入，标记 `method_recommendation_mode="deterministic_baseline"`，不打开方法顾问人工门禁。
 
-## Readiness and evidence
+<a id="parameter-advisor"></a>
 
-Readiness follows the frozen policy. When both Assembly advisors use baselines,
-Assembly does not require an LLM endpoint; when AutoHiC's parameter advisor also
-uses a baseline, Hi-C does not require one either. Any remaining advisor stage,
-including T2T, still does. The exact structured endpoint probe and no-session-on-
-failure behavior are owned by the
-[execution lifecycle](execution-lifecycle.md#whole-run-readiness-boundary). The
-Assembly cursor persists both policy modes, and the
-parameter baseline marks every skipped-model record explicitly rather than
-relying on absent artifacts.
+## 参数顾问
 
-In advisor mode, the method-advisor request payload carries an explicit
-`evidence_status` map. Fields paired with `"unavailable"` upstream evidence are
-null and must not be inferred or treated as observations; the prompt rule
-requires `insufficient_data` unless available evidence supports one route. The
-model cannot recover a masked field by guessing, and a response that names a
-method without sufficient route/read-type compatibility fails closed at
-validation. See
-[Run data](data-contract.md#101-assembly-method-recommendation) for the durable
-placement of that status.
+`advisor` 使用 schema-3 参数推荐事务：不可变请求、原始响应、稀疏映射、审批门禁和已批准尝试。
+
+Assembly 与 AutoHiC 的 `deterministic_baseline` 从同样已验证的事实、目录、上下文和依赖引用生成空 L2 的 schema-3 基线。它记录策略摘要、原本将发送的精确请求以及显式策略响应和解析记录；通过同一 schema-3 manifest 边界，以自动策略决策创建哈希绑定的已批准初始尝试。决策元数据使用 `source="policy"` 并记录完整自动解决审计，从而区别于前台倒计时。执行适配器使用基线解析器，此模式不得应用 L2 映射。AutoHiC 中操作者提供的限制性内切酶仍是 L1 事实，其他值取目录 L0 默认。初始基线策略不支持重试；重试请求必须拒绝，不得静默切回顾问模式。
+
+<a id="readiness-and-evidence"></a>
+
+## 就绪检查与证据
+
+就绪检查遵循冻结策略。Assembly 两个顾问均为基线时不要求 LLM 端点；AutoHiC 参数顾问也为基线时，Hi-C 也不要求。其余仍使用顾问的阶段（包括 T2T）仍需要端点。精确结构化端点探测和失败不创建会话的语义由[执行生命周期](execution-lifecycle.md#whole-run-readiness-boundary)拥有。Assembly 游标持久化两个策略模式，参数基线显式标记每条跳过模型的记录，不能靠产物缺失来表达。
+
+顾问模式中，方法请求携带显式 `evidence_status` 映射。标为 `"unavailable"` 的上游字段为 null，不得推断或当作观测；除非现有证据支持一条路线，否则提示词要求返回 `insufficient_data`。模型不能猜测恢复屏蔽字段；缺乏充分路线/读段兼容性却指定方法的响应必须校验失败。持久位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。

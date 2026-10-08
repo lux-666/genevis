@@ -1,51 +1,42 @@
-# Developer Guide Index
+<a id="developer-guide-index"></a>
 
-This page is a navigation layer for contributors working on Gene Agent code,
-architecture, descriptors, tests, or documentation. It does not define runtime
-contracts. Exact rules belong to the linked architecture reference owners.
+# 开发者指南索引
 
-## Start here
+本页是 Gene Agent 代码、架构、描述符、测试与文档贡献者的导航层，不定义运行时契约。精确规则由链接的架构参考文档维护。
 
-- [Architecture map](../architecture/README.md) — topic router, reference
-  registry, status vocabulary, and documentation synchronization rules.
-- [System map](../architecture/topics/system-map.md) — module ownership and the
-  three graph scales.
-- [Governance](../architecture/reference/governance.md) — source-of-truth,
-  change control, boundary rules, and repository quality policy.
-- [Implementation map](../architecture/langgraph-implementation-map.md) — the
-  current graph/method wiring, verification evidence, and bounded debt. It is a
-  status projection, not a replacement for a contract.
-- [Conformance register](../architecture/reference/conformance.md) — accepted
-  design versus current-tree gaps.
+<a id="start-here"></a>
 
-## Route by change
+## 从这里开始
 
-| Change area | Read next |
+- [架构地图](../architecture/README.md)：专题导航、参考文档注册表、状态词汇与文档同步规则。
+- [系统地图](../architecture/topics/system-map.md)：模块职责与三级图结构。
+- [架构治理](../architecture/reference/governance.md)：权威来源、变更控制、边界规则和仓库质量政策。
+- [实现地图](../architecture/langgraph-implementation-map.md)：当前图与方法接线、验证证据和明确的欠账。它是状态投影，不替代契约。
+- [一致性缺口登记](../architecture/reference/conformance.md)：已接受设计与当前工作树的差距。
+
+<a id="route-by-change"></a>
+
+## 按改动类型导航
+
+| 改动范围 | 接下来阅读 |
 |---|---|
-| Parent routing, frozen occurrences, terminal behavior | [Runtime orchestration](../architecture/topics/runtime-orchestration.md), then [Run data contract](../architecture/reference/data-contract.md) |
-| Stage inputs, outputs, methods, or biological boundaries | [Stage contracts](../architecture/reference/stage-contracts.md), then the affected stage implementation under `app/stages/` |
-| Run-specific readiness, method freeze, runner, collection, or retry | [Method execution](../architecture/topics/execution.md), [Execution lifecycle](../architecture/reference/execution-lifecycle.md), and [Execution evidence](../architecture/reference/execution-evidence.md) |
-| Cross-stage files, resource resolution, or assembly delivery | [Resource handoff](../architecture/reference/resource-handoff.md) |
-| Genome size, platform/read type, or species identity | [Shared biological facts](../architecture/reference/shared-facts.md), then the consuming stage contract |
-| LLM parameters, approval, or retry chains | [Parameter recommendation](../architecture/reference/parameter-recommendation.md) and the corresponding stage parameter workflow |
-| Human gates, review, or resume | [Review and resume](../architecture/topics/review-and-resume.md), then the run-data and execution references it links |
-| Package/method registration or environment capability | [Descriptor contract](../architecture/reference/descriptors.md), `descriptors/registry.yaml`, and the referenced descriptor files |
-| Bootstrap or host configuration | [Project bootstrap](../architecture/topics/bootstrap.md), then committed `docs/examples/envs.yaml.example`, manually or bootstrap-maintained ignored `config/envs.yaml`, and the execution resolver |
+| 父图路由、冻结的阶段实例、终态行为 | [运行时编排](../architecture/topics/runtime-orchestration.md)，然后阅读[运行数据契约](../architecture/reference/data-contract.md) |
+| 阶段输入、输出、方法或生物学边界 | [阶段契约](../architecture/reference/stage-contracts.md)，然后查看 `app/stages/` 中受影响的阶段 |
+| 运行就绪检查、方法冻结、执行器、收集或重试 | [方法执行](../architecture/topics/execution.md)、[执行生命周期](../architecture/reference/execution-lifecycle.md)、[执行证据](../architecture/reference/execution-evidence.md) |
+| 跨阶段文件、资源解析或组装交付 | [资源交接](../architecture/reference/resource-handoff.md) |
+| 基因组大小、平台/reads 类型或物种身份 | [共享生物学事实](../architecture/reference/shared-facts.md)，然后阅读消费这些事实的阶段契约 |
+| LLM 参数、审批或重试链 | [参数推荐](../architecture/reference/parameter-recommendation.md)及对应阶段参数工作流 |
+| 人工关卡、评审或恢复 | [评审与恢复](../architecture/topics/review-and-resume.md)，然后阅读其链接的运行数据与执行参考契约 |
+| 软件包/方法注册或环境能力 | [描述符契约](../architecture/reference/descriptors.md)、`descriptors/registry.yaml` 及其引用的描述符文件 |
+| bootstrap 或主机配置 | [项目初始化](../architecture/topics/bootstrap.md)，然后查看提交到仓库的 `docs/examples/envs.yaml.example`、手工或 bootstrap 维护且被 Git 忽略的 `config/envs.yaml`，以及执行环境解析器 |
 
-## Tests and contribution entry
+<a id="tests-and-contribution-entry"></a>
 
-- [Test suite](../../tests/) — focused boundary tests and full regression
-  coverage. Start with the test file named by the implementation-map row you
-  are changing.
-- [Project scaffold tests](../../tests/test_project_scaffold.py) — structural
-  checks for stage order, storage boundaries, architecture roots, and removal
-  of retired planning tracks.
-- [Python/development metadata](../../pyproject.toml) — dependency and tool
-  configuration owner.
-- [Server verification helpers](../../scripts/) — host checks and regression
-  checks; deployment behavior is routed from the user guide below.
+## 测试与贡献入口
 
-Before a non-trivial behavior change, identify one owning reference contract,
-update focused tests with the code, then update affected topics and the
-implementation map only when wiring, status, evidence, or debt changed. Do not
-add a second architecture summary, phase report, or handoff snapshot.
+- [测试套件](../../tests/)：针对边界的测试与完整回归覆盖。从所修改实现地图条目列出的测试文件开始。
+- [项目结构测试](../../tests/test_project_scaffold.py)：阶段顺序、存储边界、架构入口和已退役规划路径的结构检查。
+- [Python/开发元数据](../../pyproject.toml)：依赖与工具配置权威。
+- [服务器验证助手](../../scripts/)：主机检查与回归检查；部署操作由用户指南导航。
+
+修改非简单行为前，确定唯一权威参考契约，同步修改代码及针对性测试。仅在接线、状态、证据或欠账改变时更新相关专题和实现地图。不要新增第二份架构摘要、阶段报告或交接快照。

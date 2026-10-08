@@ -26,12 +26,14 @@ class _FakeChat:
         self.content = content
         self.model_name = "fake-model-v1"
         self.bound_formats: list[dict] = []
+        self.invocation_count = 0
 
     def bind(self, **kwargs):
         self.bound_formats.append(kwargs)
         return self
 
     def invoke(self, messages):
+        self.invocation_count += 1
         self.messages = messages
         return _Response(self.content)
 
@@ -161,6 +163,7 @@ class ReviewRecommenderTests(unittest.TestCase):
             )
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
             self.assertEqual(artifact["model"], "fake-model-v1")
+            self.assertEqual(chat.invocation_count, 1)
             self.assertEqual(artifact["review_request_id"], persisted.review_request_id)
             self.assertEqual(artifact["request_hash"], persisted.request_hash)
             self.assertIn("raw_recommendation", artifact)
@@ -308,6 +311,40 @@ class ReviewRecommenderTests(unittest.TestCase):
                     data_dir=run_dir,
                     chat_model=_FakeChat(json.dumps({"decision": "purge"})),
                 )
+
+    def test_binding_fallback_invokes_once_and_preserves_provider_model_identity(self):
+        class FallbackChat(_FakeChat):
+            def bind(self, **kwargs):
+                if kwargs["response_format"]["type"] == "json_schema":
+                    self.bound_formats.append(kwargs)
+                    raise ValueError("native schemas unsupported")
+                return super().bind(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
+            persisted = _persist_request(
+                run_dir,
+                ReviewPayload(
+                    stage="assembly_review",
+                    reason="review",
+                    decisions_allowed=["stop_human_review"],
+                ),
+            )
+            chat = FallbackChat(json.dumps({"decision": "stop_human_review"}))
+            recommend_review_decision(
+                session_id="s1",
+                stage="assembly_review",
+                review_request_id=persisted.review_request_id,
+                request_ref=persisted.request_ref,
+                request_hash=persisted.request_hash,
+                data_dir=run_dir,
+                chat_model=chat,
+            )
+            self.assertEqual(chat.invocation_count, 1)
+            self.assertEqual(
+                [b["response_format"]["type"] for b in chat.bound_formats],
+                ["json_schema", "json_object"],
+            )
 
     def test_recommender_rejects_invalid_json(self):
         with tempfile.TemporaryDirectory() as tmp:

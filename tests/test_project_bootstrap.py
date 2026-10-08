@@ -30,6 +30,41 @@ from app.execution.project_bootstrap import (
 
 
 class ProjectBootstrapTests(unittest.TestCase):
+    def test_plain_bootstrap_previews_old_database_key_migration_without_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "envs.yaml"
+            document = _minimal_host_config(root)
+            document["databases"]["ncbi_metazoa"] = document["databases"].pop("ncbi")
+            source = yaml.safe_dump(document)
+            config_path.write_text(source)
+
+            plan = build_project_bootstrap_plan(config_path)
+            self.assertEqual(config_path.read_text(), source)
+            self.assertNotIn("ncbi_metazoa", plan.config_data["databases"])
+            self.assertIn("ncbi", plan.config_data["databases"])
+            migration = next(c for c in plan.changes if c.field == "databases.ncbi")
+            self.assertEqual(
+                migration.display_value(), "rename from databases.ncbi_metazoa"
+            )
+            self.assertTrue(plan.config_changed)
+
+    def test_bootstrap_rejects_dual_database_keys_before_prompt_or_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "envs.yaml"
+            document = _minimal_host_config(root)
+            document["databases"]["ncbi_metazoa"] = document["databases"]["ncbi"]
+            source = yaml.safe_dump(document)
+            config_path.write_text(source)
+            with patch("builtins.input") as prompt:
+                with self.assertRaisesRegex(ValueError, "cannot declare both"):
+                    collect_project_bootstrap_plan(config_path, prompt=prompt)
+                prompt.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "cannot declare both"):
+                build_project_bootstrap_plan(config_path, approved_overwrites=set())
+            self.assertEqual(config_path.read_text(), source)
+
     def test_cli_creates_consumable_autohic_config_and_redacts_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

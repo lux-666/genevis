@@ -347,7 +347,7 @@ class FrozenInputTests(unittest.TestCase):
             f"        path: {lineage}\n"
             "        version: odb10\n"
             "        source: test_fixture\n"
-            "  ncbi_metazoa:\n"
+            "  ncbi:\n"
             f"    reference_dir: {root / 'ncbi_metazoa'}\n",
             encoding="utf-8",
         )
@@ -1739,7 +1739,7 @@ class FrozenInputTests(unittest.TestCase):
                 "        path: /db/busco/embryophyta_odb10\n"
                 "        version: odb10\n"
                 "        source: busco_downloads\n"
-                "  ncbi_metazoa:\n"
+                "  ncbi:\n"
                 "    reference_dir: /db/ncbi_metazoa\n",
                 encoding="utf-8",
             )

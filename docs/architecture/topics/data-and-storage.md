@@ -1,146 +1,82 @@
-# Data and Storage
+<a id="data-and-storage"></a>
 
-> **Status:** accepted, with explicit conformance debt noted below
->
-> **Read when:** deciding where a fact belongs, following a file between
-> stages, or debugging publication, resume, audit, and reporting.
->
-> **Comes from:** [runtime orchestration](runtime-orchestration.md),
-> [method execution](execution.md), inventory, and human review.
->
-> **Feeds into:** [parameter recommendation](parameter-recommendation.md),
-> [AutoHiC](autohic.md), downstream stage resolution,
-> [review and resume](review-and-resume.md), and operator reports.
->
-> **Contract dependencies:** [run data](../reference/data-contract.md),
-> [resource handoff](../reference/resource-handoff.md),
-> [execution evidence](../reference/execution-evidence.md), and
-> [architecture conformance](../reference/conformance.md).
->
-> **Code evidence:** `app/schemas/state.py`, `app/schemas/resource_ref.py`,
-> `app/schemas/assets.py`, `app/storage/asset_registry.py`,
-> `app/storage/artifacts.py`, `app/storage/ledger.py`,
-> `app/control/occurrence_settlement.py`, `app/graph/checkpointer.py`,
-> `app/graph/checkpoint_compaction.py`,
-> `app/reports/review_report.py`, and `app/reports/trace_writer.py`.
+# 数据与存储
 
-## One run, several owners
+> **状态：** 已实现以下有界契约；尚未实现的运行级回放分类见[架构一致性](../reference/conformance.md)。
+>
+> **阅读场景：** 判断事实归属、追踪跨阶段文件，或调试发布、恢复、审计和报告。
+>
+> **来源：** [运行时编排](runtime-orchestration.md)、[方法执行](execution.md)、Inventory、人工评审。
+>
+> **下游：** [参数推荐](parameter-recommendation.md)、[AutoHiC](autohic.md)、下游阶段解析、[评审与恢复](review-and-resume.md)、操作者报告。
+>
+> **依赖契约：** [运行数据](../reference/data-contract.md)、[资源交接](../reference/resource-handoff.md)、[执行证据](../reference/execution-evidence.md)、[架构一致性](../reference/conformance.md)。
+>
+> **代码依据：** `app/schemas/state.py`、`app/schemas/resource_ref.py`、`app/schemas/assets.py`、`app/storage/asset_registry.py`、`app/storage/artifacts.py`、`app/storage/ledger.py`、`app/control/occurrence_settlement.py`、`app/graph/checkpointer.py`、`app/graph/checkpoint_compaction.py`、`app/reports/review_report.py`、`app/reports/trace_writer.py`。
 
-`runs/<session_id>/` is the logical ownership boundary for a workflow run.
-Within it, different stores answer different questions. They are not
-interchangeable copies of one database.
+<a id="one-run-several-owners"></a>
 
-| Layer | Authoritative for | Not authoritative for |
+## 一次运行，多个责任所有者
+
+`runs/<session_id>/` 是工作流运行的逻辑所有权边界。不同存储回答不同问题，不是同一个数据库的可互换副本。
+
+| 层 | 权威范围 | 非权威范围 |
 |---|---|---|
-| `resource_refs` | The current logical cross-stage routing projection, such as the adopted `assembly` or current `long_reads` | Immutable proof that a named occurrence delivered it, input-member provenance, execution history, or large evidence bodies |
-| Asset registry | Identity, declaration provenance, platform/format, path, and verification facts for inventory-registered external input members | Which derived output is currently adopted by later stages |
-| Immutable artifacts | Exact evidence and produced file bytes for recommendations, reviews, commands, executions, and biological outputs | Causal ordering by themselves |
-| Artifact index | Run-local artifact location, type, hash, size, producer identity, and compact dependency metadata | Business status, review decisions, model reasoning, or workflow routing |
-| Ledger | Idempotent causal events; occurrence/method/attempt terminal singletons; immutable assembly-delivery facts; shared review status; and the one canonical session terminal, with refs to evidence | Evidence bodies, asset registries, result tables, or the latest resume cursor |
-| Checkpoint | The latest bounded control frontier, latest `workflow_step_outcome` settlement handoff, and compact refs needed to continue | Audit history, durable terminal/delivery truth, reports, logs, commands, or model payloads |
-| Reports | Operator/read-model projections; session summaries are regenerable from durable records, while current-status and Assembly Review gaps are tracked below | Workflow control, artifact identity, causal events, review status, or resume |
+| `resource_refs` | 当前跨阶段逻辑路由投影，例如采纳的 `assembly`、当前 `long_reads` | 指定 occurrence 已交付资源的不可变证明、输入成员来源、执行历史、大型证据正文 |
+| 资产注册表 | Inventory 注册的外部输入成员身份、声明来源、平台/格式、路径、验证事实 | 下游当前采纳哪个派生输出 |
+| 不可变产物 | 推荐、评审、命令、执行和生物学输出的精确证据与文件字节 | 单靠自身确定因果顺序 |
+| 产物索引 | 运行内位置、类型、哈希、大小、生产者身份、紧凑依赖元数据 | 业务状态、评审决策、模型推理、工作流路由 |
+| Ledger | 幂等因果事件；occurrence/method/attempt 终态单例；不可变组装交付事实；共享评审状态；唯一规范会话终态及证据引用 | 证据正文、资产注册表、结果表、最新恢复游标 |
+| Checkpoint | 最新有界控制前沿、最新 `workflow_step_outcome` 结算交接、继续执行所需紧凑引用 | 审计历史、持久终态/交付真相、报告、日志、命令、模型载荷 |
+| 报告 | 尽力提供的操作者/读取模型投影；会话摘要使用持久记录，其他视图可使用实时紧凑状态 | 工作流控制、产物身份、因果事件、评审状态、恢复 |
 
-This ownership split is the core rule. A small immutable projection may appear
-outside its owner for routing or display, but the projection does not become a
-second authority. Exact placement, reference, size, retention, and crash rules
-belong to the [run-data contract](../reference/data-contract.md).
+职责划分是核心规则。其他位置可为路由或展示保留小型不可变投影，但投影不能成为第二权威。精确落点、引用、大小、保留和崩溃规则见[运行数据契约](../reference/data-contract.md)。
 
-## Progress is direct consumption, not another store
+<a id="progress-is-direct-consumption-not-another-store"></a>
 
-Interactive execution introduces no durable progress projection. Attached and
-detached surfaces call the same pure reducer. Its exact inputs, occurrence
-counting, conflict handling, and current-step rules are owned by the
-[run-data contract](../reference/data-contract.md#410-one-workflow-progress-reducer).
-Checkpoint availability, execution marker/lock, cursor, Ledger tail, and route
-trace remain diagnostic state rather than alternate progress owners. A caller
-may aggregate several read-only inspections outside the runs, but no such batch
-projection becomes workflow truth.
+## 进度直接消费事实，不新增存储
 
-## Cross-stage handoff
+交互执行不引入持久进度投影。附着和分离界面调用同一纯 reducer；精确输入、occurrence 计数、冲突处理和当前步骤规则由[运行数据契约](../reference/data-contract.md#410-one-workflow-progress-reducer)拥有。checkpoint 可用性、执行标记/锁、游标、Ledger 尾部、路线轨迹是诊断状态，不是其他进度权威。调用者可在运行目录外汇总多个只读检查，但批量投影不成为工作流真相。
 
-`TopLevelState.resource_refs` is the only table for passing file resources
-between stages. A stage publishes a logical resource; a downstream stage
-resolves that logical name. Stage-private cursors remain in `stage_outputs` and
-must not become a hidden second handoff protocol.
+<a id="cross-stage-handoff"></a>
 
-Resolution first uses the current `resource_refs` entry and then the asset
-registry according to the resource specification. It never scans another
-stage's output keys. The registry fallback is why original manifest inputs can
-seed a logical resource, while later adoption can replace that resource
-without rewriting the original input provenance. The exact resolver priority,
-logical resource set, and FOFN boundary live in the
-[resource-handoff contract](../reference/resource-handoff.md).
+## 跨阶段交接
 
-For assembly, the replaced current table is paired with an immutable
-occurrence-bound `resource_delivered` Ledger fact. That fact binds the producer
-occurrence to the exact executed-candidate and primary-output refs, including a
-pass-through occurrence that reuses older bytes. A downstream Review requires
-the completed producer terminal, delivery fact, and current projection to
-agree. Read QC likewise retains exact source-member/read-set lineage in its
-current handoff; the detailed payload rules remain owned by the resource and
-stage contracts.
+`TopLevelState.resource_refs` 是阶段间传递文件资源的唯一表。阶段发布逻辑资源，下游按逻辑名解析。阶段私有游标留在 `stage_outputs`，不得成为隐藏的第二交接协议。
 
-The asset registry itself is an immutable artifact. Checkpoint state carries
-only its verified `ArtifactRef`; consumers load the document, resolve ordered
-member IDs, and recheck member paths, sizes, and ready checksums. A
-`ResourceRef` may project those member IDs and compact provenance, but it does
-not embed the registry.
+解析优先使用当前 `resource_refs` 项，再按资源规格使用资产注册表，不扫描其他阶段的输出键。注册表后备让原始 manifest 输入可初始化逻辑资源，后续采纳可替换资源而不改写原始来源。精确优先级、逻辑资源集合和 FOFN 边界见[资源交接契约](../reference/resource-handoff.md)。
 
-## Publication and recovery
+组装当前表被替换时，配套记录绑定 occurrence 的不可变 `resource_delivered` Ledger 事实。它绑定生产者 occurrence 与精确执行候选、主输出引用，包括复用旧字节的透传 occurrence。下游 Review 要求生产者完成终态、交付事实、当前投影一致。Read QC 同样在当前交接中保留精确源成员/读段集合谱系；详细载荷由资源和阶段契约定义。
 
-A normal durable transition moves in one direction:
+资产注册表本身是不可变产物。checkpoint 仅持有其已验证 `ArtifactRef`；消费者加载文档、解析有序成员 ID，并重验成员路径、大小和就绪校验和。`ResourceRef` 可投影成员 ID 与紧凑来源，但不嵌入注册表。
+
+<a id="publication-and-recovery"></a>
+
+## 发布与恢复
+
+正常持久转换单向推进：
 
 ```text
-work file or in-memory record
-  -> immutable run artifact
-  -> idempotent artifact-index registration
-  -> method/review semantic ledger event
-  -> compact checkpoint update
-  -> optional report projection
+工作文件或内存记录
+  -> 不可变运行产物
+  -> 幂等产物索引登记
+  -> 方法/评审语义 Ledger 事件
+  -> 紧凑 checkpoint 更新
+  -> 可选报告投影
 ```
 
-Occurrence completion adds a shared settlement suffix, used by the controller
-and terminal recovery: validate the explicit `workflow_step_outcome`,
-append/replay each assembly `resource_delivered` fact, append/replay the one
-stage terminal, then render attached progress. A delivery without its completed
-terminal is a recoverable crash prefix, not a consumable handoff.
+Occurrence 完成增加共享结算后缀，控制器和终态恢复共用：验证明确的 `workflow_step_outcome`，追加/回放各组装 `resource_delivered` 事实，追加/回放唯一阶段终态，再渲染附着进度。只有交付却没有完成终态，是可恢复的崩溃前缀，不能供下游消费。
 
-The artifact index makes an `ArtifactRef` locatable and integrity-checkable.
-The ledger makes the transition causally reconstructible. The checkpoint tells
-LangGraph where to resume. A report makes the same facts convenient for a
-human. Replaying a publisher with the same immutable path and bytes is
-idempotent; conflicting bytes fail closed.
+产物索引使 `ArtifactRef` 可定位并可验完整性；Ledger 使转换可重建因果；checkpoint 告诉 LangGraph 从哪里恢复；报告方便人读取同一批事实。相同不可变路径和字节的重复发布幂等，冲突字节必须拒绝。
 
-Checkpoints are validated at the central write boundary for JSON shape, known
-stage names, size budgets, and accidental embedding of artifact or frozen
-attempt bodies. Most stages add typed cursor adapters, but the central boundary
-does not yet impose one universal schema on every stage-local cursor. Do not
-claim that stronger invariant.
+中央 checkpoint 写入边界验证 JSON 结构、已知阶段名、大小预算和误嵌入的产物/冻结尝试正文。多数阶段增加类型化游标适配器，但中央边界尚未对所有阶段局部游标施加统一 schema，不得宣称更强约束。
 
-Reports run behind `ProjectionBoundary`: a normal projection failure is retained
-as a bounded operational warning and cannot alter review status, checkpoint,
-Ledger terminal authority, or resume outcome. Deleting a report must not alter
-resume or audit truth. Session-summary views are regenerated from the Ledger
-and indexed artifacts. The current-status writer still consumes the live compact
-result supplied at a blocked or failed boundary. The stage-owned
-`assembly_review.md` projection is generated from live stage state and its
-indexed review packet and does not currently embed the standard watermark. Both
-regeneration limitations are recorded in
-[architecture conformance](../reference/conformance.md).
+报告通过 `ProjectionBoundary`：普通投影失败保留为有界运维警告，不得改变评审状态、checkpoint、Ledger 终态权威或恢复结果。删除报告不得改变恢复或审计真相。会话摘要从 Ledger 和已索引产物重建；当前状态 writer 仍消费阻塞或失败边界传入的实时紧凑结果；阶段拥有的 `assembly_review.md` 使用实时阶段状态和已索引评审包生成。不要求所有报告均可独立重建或具有等价水位线；恢复由 checkpoint 和持久证据负责。
 
-## Current limits and debt
+<a id="storage-audit-boundary"></a>
 
-- `storage-audit` is implemented as a read-only audit and can emit a dry-run
-  cleanup manifest. The deletion executor for unreachable immutable artifacts
-  and post-deletion artifact-index compaction are not implemented.
-- The cleanup projection currently marks every file under `reports/` as
-  regenerable. That is broader than the implemented regeneration paths, so it
-  must not become an apply list without per-report eligibility checks.
-- `work/` is retained because frozen attempts may still refer to scripts there;
-  it is outside automatic cleanup.
-- Reports are implemented projections, but a general automatic garbage
-  collector is planned/debt, not a current product capability.
-- `reports/current_status.json` is not currently reconstructed by a dedicated
-  Ledger/index-only path; its writer requires a supplied compact runtime result.
-- `reports/assembly_review.md` has no dedicated durable-record-only regeneration
-  command and does not embed the shared source watermark.
+## 存储审计边界
+
+`storage-audit` 只报告存储用量、重复内容、checkpoint 结构、产物完整性和可达性，不改变运行。不分类待删除文件，也不输出清理 manifest。自动删除文件和产物索引压缩不在当前契约内。
+
+保留冻结尝试和恢复所需的 `work/` 与持久证据。报告是可选操作者视图，不要求重建所有报告。

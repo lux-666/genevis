@@ -27,10 +27,9 @@ def state_for_polish(tmp_path: Path, platform: str = "pacbio_hifi", **inputs) ->
     return state
 
 
+@pytest.mark.real_tool
 def test_real_racon_hifi_smoke(tmp_path: Path) -> None:
     """Opt-in real minimap2/Racon slice; synthetic data is not CC1 acceptance."""
-    if os.environ.get("GENE_AGENT_RACON_REAL_SMOKE") != "1":
-        pytest.skip("set GENE_AGENT_RACON_REAL_SMOKE=1 with minimap2/racon on PATH")
     import random
     import shutil
 

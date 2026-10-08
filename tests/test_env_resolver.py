@@ -63,6 +63,35 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             self.assertEqual(resolver.config_path, config)
             self.assertEqual(resolver.resolve(stage="unknown").conda_env, "shared_env")
 
+    def test_old_database_key_normalizes_without_an_alias_or_source_mutation(self):
+        from copy import deepcopy
+
+        import yaml
+
+        from app.execution.env_resolver import DatabaseRegistry
+
+        template = Path("docs/examples/envs.yaml.example")
+        raw = yaml.safe_load(template.read_text())["databases"]
+        raw["ncbi_metazoa"] = raw.pop("ncbi")
+        original = deepcopy(raw)
+        registry = DatabaseRegistry.model_validate(raw)
+        self.assertEqual(raw, original)
+        self.assertEqual(set(registry.model_dump()), {"busco", "ncbi"})
+        self.assertFalse(hasattr(registry, "ncbi_metazoa"))
+
+    def test_dual_database_keys_are_rejected_even_for_equal_or_null_values(self):
+        import yaml
+
+        from app.execution.env_resolver import DatabaseRegistry
+
+        raw = yaml.safe_load(Path("docs/examples/envs.yaml.example").read_text())[
+            "databases"
+        ]
+        for legacy in (raw["ncbi"], None, {}):
+            with self.subTest(legacy=legacy):
+                with self.assertRaisesRegex(ValueError, "cannot declare both"):
+                    DatabaseRegistry.model_validate({**raw, "ncbi_metazoa": legacy})
+
     def test_env_template_loads_and_covers_core_mainline(self):
         template_path = (
             Path(__file__).resolve().parents[1]
@@ -137,7 +166,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
                             },
                         },
                     },
-                    "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+                    "ncbi": {"reference_dir": "/db/ncbi_metazoa"},
                 },
             }
         )
@@ -149,9 +178,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         self.assertEqual(
             resolver.resolve_busco_lineage("embryophyta_odb10").version, "odb10"
         )
-        self.assertEqual(
-            resolver.databases.ncbi_metazoa.reference_dir, "/db/ncbi_metazoa"
-        )
+        self.assertEqual(resolver.databases.ncbi.reference_dir, "/db/ncbi_metazoa")
 
     def test_database_registry_rejects_unknown_empty_and_missing_default_values(self):
         base = {
@@ -167,7 +194,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
                         }
                     },
                 },
-                "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+                "ncbi": {"reference_dir": "/db/ncbi_metazoa"},
             },
         }
         cases = (
@@ -186,7 +213,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
                                 }
                             },
                         },
-                        "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+                        "ncbi": {"reference_dir": "/db/ncbi_metazoa"},
                     }
                 },
             ),
@@ -198,7 +225,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
                             "default_lineage": "missing",
                             "lineages": base["databases"]["busco"]["lineages"],
                         },
-                        "ncbi_metazoa": {"reference_dir": "/db/ncbi_metazoa"},
+                        "ncbi": {"reference_dir": "/db/ncbi_metazoa"},
                     }
                 },
             ),

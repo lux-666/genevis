@@ -27,7 +27,9 @@ def response_text(response: Any) -> str:
             str(part.get("text", part)) if isinstance(part, dict) else str(part)
             for part in content
         )
-    return str(content).strip()
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("LLM returned empty content")
+    return content.strip()
 
 
 def parse_json_object(text: str) -> dict[str, Any]:

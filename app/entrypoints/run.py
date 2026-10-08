@@ -294,12 +294,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="json",
         help="Machine-readable output format",
     )
-    storage_audit_parser.add_argument(
-        "--dry-run-manifest",
-        action="store_true",
-        default=False,
-        help="Include a report-only cleanup manifest; never deletes files",
-    )
 
     resume_parser = subparsers.add_parser(
         "resume",
@@ -1367,24 +1361,18 @@ def generate_session_id(
 
 
 def _run_storage_audit(args: argparse.Namespace) -> int:
-    """Emit one read-only v2 storage audit and optional dry-run manifest."""
+    """Emit one read-only v2 storage audit."""
 
-    from app.storage.audit import audit_run_storage, build_cleanup_manifest
+    from app.storage.audit import audit_run_storage
 
     data_root = _resolve_data_dir(args.data_dir)
     run_root = SessionPaths(data_root, args.session_id).run_dir
     try:
         audit = audit_run_storage(run_root)
-        payload: dict[str, Any] = audit
-        if getattr(args, "dry_run_manifest", False):
-            payload = {
-                "audit": audit,
-                "cleanup_manifest": build_cleanup_manifest(audit),
-            }
     except (DataLayoutError, OSError, ValueError) as exc:
         print(f"error: storage audit failed: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    print(json.dumps(audit, ensure_ascii=False, sort_keys=True))
     return 0
 
 

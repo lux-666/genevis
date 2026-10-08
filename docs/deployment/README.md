@@ -1,102 +1,57 @@
-# Deployment Entry Points
+<a id="deployment-entry-points"></a>
 
-This page is the deployment boundary map. It keeps host preparation and
-run-evidence acceptance distinct; it does not duplicate the run, freeze, review, or resume
-contract owned by [`user_guide/run-and-recovery.md`](../user_guide/run-and-recovery.md).
+# 部署入口
 
-## One authority per operation
+本页是部署边界图，区分主机准备与运行证据验收。运行、冻结、评审和恢复契约由[运行与恢复](../user_guide/run-and-recovery.md)拥有，本页不重复定义。
 
-| Operation | Authoritative entry | Owns | Does not own |
+<a id="one-authority-per-operation"></a>
+
+## 每项操作一个权威入口
+
+| 操作 | 权威入口 | 职责 | 不负责 |
 |---|---|---|---|
-| Bootstrap | optional `gene-agent bootstrap` / `bootstrap --update` assistant | generating, extending, and validating the active environment mapping, declared package canaries, and every method entry declared in that mapping | exclusive authorship of the mapping, package installation, biological inputs, or a run session |
-| Host readiness | [`scripts/server_check.sh`](../../scripts/server_check.sh) | read-only orchestrator prerequisites, fixed-stage method/package closure, and host databases from an explicit RunConfig; defaults to the five-stage contig template | deferred Assembly-candidate readiness, LLM reachability, private inputs, or biological execution |
-| Code verification | [`scripts/server_test.sh`](../../scripts/server_test.sh) | pytest regression, compileall, and diff check; current conditional real-tool isolation caveat below | host readiness or proof of real-data E2E acceptance |
-| Route / slice evidence | `python -m app.diagnostics.route_acceptance --route SCOPE --run-dir PATH` | read-only scoped process/collection evidence, handoffs, final Review where requested, paired evaluation for polishing scopes; optional Hi-C no-rerun comparison | running tools, changing decisions, independent QV, or guaranteed biological improvement |
+| Bootstrap | 可选 `gene-agent bootstrap` / `bootstrap --update` 助手 | 生成、扩展、验证活动环境映射、声明的包探针及映射内每个方法项 | 映射独占写入、包安装、生物学输入或运行会话 |
+| 主机就绪 | [`scripts/server_check.sh`](../../scripts/server_check.sh) | 只读检查编排器前置条件、显式 RunConfig 的固定阶段方法/包闭包和主机数据库；默认五阶段 contig 模板 | 延迟 Assembly 候选就绪、LLM 可达性、私有输入或生物学执行 |
+| 代码验证 | [`scripts/server_test.sh`](../../scripts/server_test.sh) | 格式、lint、类型检查、普通 pytest、compileall、diff 检查 | 主机就绪或真实数据端到端验收证明 |
+| 路线/切片证据 | `python -m app.diagnostics.route_acceptance --route SCOPE --run-dir PATH` | 只读范围内进程/收集证据、交接、请求时的最终 Review、抛光范围的成对评估，以及可选 Hi-C 不重跑比较 | 运行工具、改变决策、独立 QV 或保证生物学改善 |
 
-## Host configuration lifecycle
+<a id="host-configuration-lifecycle"></a>
 
-`docs/examples/envs.yaml.example` is the generic seed used only when the active host
-mapping is missing. The default active mapping is `config/envs.yaml`; that file
-is machine-local deployment state and must remain ignored/untracked. All public
-readiness paths select the same mapping: an explicit `bootstrap --config PATH`
-wins for that bootstrap invocation, otherwise `GENE_AGENT_ENVS_CONFIG` wins,
-otherwise the repository default is used. Use an absolute override when commands
-may start outside the checkout; a relative override is resolved from the caller's
-current directory, while the default path is anchored to the checkout.
+## 主机配置生命周期
 
-Operators may create and edit the active mapping and project `.env` directly;
-bootstrap is optional. Manual and assisted edits use the same runtime format,
-and either route may be followed by bootstrap validation.
+`docs/examples/envs.yaml.example` 是通用种子，只在活动主机映射缺失时供初始化。默认活动映射 `config/envs.yaml` 是机器本地部署状态，必须保持忽略/未跟踪。所有公共就绪路径选择同一映射：显式 `bootstrap --config PATH` 对该次 bootstrap 优先，其次 `GENE_AGENT_ENVS_CONFIG`，最后仓库默认。命令可能从检出目录外启动时，应使用绝对覆盖路径；相对覆盖按调用者当前目录解析，默认路径锚定检出目录。
 
-The default bootstrap command collects the core Conda target and asks whether
-to configure the optional Assembly Review database and AutoHiC groups. A group
-may be skipped until its resources are installed; bootstrap still previews and
-publishes the valid remaining plan. Rerun the ordinary command later to add a
-missing group, or edit the YAML manually. `--update` replaces selected existing
-managed fields through the same preview/confirmation flow.
+操作者可直接创建和编辑活动映射及项目 `.env`，bootstrap 可选。人工和辅助编辑使用同一运行格式，之后均可运行 bootstrap 校验。
 
-Bootstrap checks every package, method, and database entry declared in the
-active mapping, including any Assembly candidates the host exposes. An omitted
-optional group is not a bootstrap error. `server_check.sh` or confirmed-run
-readiness still fails closed when its workflow requires that group.
+默认 bootstrap 采集核心 Conda 目标，并询问是否配置可选 Assembly Review 数据库和 AutoHiC 组。资源尚未安装时可以跳过，bootstrap 仍预览并发布其余有效计划。以后重跑普通命令或手改 YAML 添加缺失组。`--update` 通过同一预览/确认流程替换已管理的选定字段。
 
-Bootstrap does not install Conda environments, tools, databases, BUSCO lineages,
-models, or an LLM service. Those are provisioned by the operator and referenced
-by the active mapping or private environment configuration.
+Bootstrap 检查活动映射中每个声明的包、方法、数据库，包括主机暴露的 Assembly 候选。省略可选组不是 bootstrap 错误；但 `server_check.sh` 或确认运行的就绪检查在工作流需要该组时仍会拒绝。
 
-Commands assume the documented `gene_agent` orchestrator environment was
-activated once for the current shell. That name is an installation convention,
-not a value resolved from the host mapping; tool environments are resolved from
-the mapping.
+Bootstrap 不安装 Conda 环境、工具、数据库、BUSCO lineage、模型或 LLM 服务。它们由操作者配置，通过活动映射或私有环境配置引用。
+
+命令假定当前 shell 已激活文档约定的 `gene_agent` 编排器环境。该名称是安装惯例，不从主机映射解析；工具环境才从映射解析。
 
 ```bash
 gene-agent bootstrap
 ```
 
-This command is an assisted configuration route, not a mandatory predecessor
-to execution. A manually prepared active mapping may proceed directly to the
-appropriate readiness check.
+该命令是辅助配置入口，不是执行的强制前置步骤。人工准备的活动映射可直接进入相应就绪检查。
 
-## Verification sequence
+<a id="verification-sequence"></a>
 
-Run code verification immediately after installing and activating the
-orchestrator environment. Run contig acceptance after provisioning the host:
+## 验证顺序
+
+安装并激活编排器环境后立即运行代码验证。主机配置完成后检查 contig 就绪：
 
 ```bash
 bash /path/to/gene_agent/scripts/server_test.sh
 bash /path/to/gene_agent/scripts/server_check.sh
 ```
 
-`server_check.sh` derives its fixed-stage method closure through the same Python
-readiness code used by `gene-agent run`; it deliberately does not maintain a
-shell list of tools. Assembly method selection remains deferred until upstream
-evidence is available. The selected candidate is resolved and checked from the
-frozen dependency snapshot at Assembly stage entry. Because the authoritative
-contig template includes Assembly Review, the check also validates the BUSCO
-lineage and NCBI snapshots under the root declared in the active host mapping.
-The actual run additionally validates its manifest and selected LLM endpoint.
-For any independent slice or the complete HiFi route, pass the edited RunConfig
-as the script's first argument. Templates, execution, detached Hi-C resume and
-scoped post-run checks are owned by
-[Run and Recovery](../user_guide/run-and-recovery.md#independent-slice-server-runbook).
+`server_check.sh` 使用 `gene-agent run` 共用 Python 就绪代码导出固定阶段方法闭包，刻意不维护 shell 工具列表。Assembly 方法选择延迟到上游证据具备后，候选在 Assembly 入口从冻结依赖快照解析并检查。规范 contig 模板含 Assembly Review，因此也校验活动映射中 BUSCO lineage 与 NCBI 根下快照。真实运行还校验 manifest 和所选 LLM 端点。独立切片或完整 HiFi 路线应将编辑后的 RunConfig 作为脚本首参。模板、执行、分离 Hi-C 恢复及范围化运行后检查由[运行与恢复](../user_guide/run-and-recovery.md#independent-slice-server-runbook)拥有。
 
-A successful bootstrap is not a proof that `server_check.sh` will pass, and a
-successful `server_check.sh` is not a proof that every declaration in the active
-mapping is healthy. Their scopes differ, so run both on the checkout that will
-execute the work. If bootstrap used `--config PATH`, export that same absolute
-path as `GENE_AGENT_ENVS_CONFIG` for `server_check.sh` and the actual run.
+Bootstrap 成功不证明 `server_check.sh` 一定成功；`server_check.sh` 成功也不证明活动映射的全部声明健康。两者范围不同，应在实际执行的检出目录检查。若 bootstrap 使用 `--config PATH`，则为 `server_check.sh` 和真实运行导出同一绝对 `GENE_AGENT_ENVS_CONFIG`。
 
-`server_test.sh` is a code-level regression gate. It runs pytest, compileall,
-and `git diff --check`; it is not a real-data or biological-tool smoke test
-harness. The suite can auto-run SeqKit when its test environment is present;
-strict tool-free selection is pending. Follow the
-[staged acceptance order](../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)
-before a full-route run: code tests, small tool smokes, contig E2E, independent
-Hi-C/finishing slices, then complete real E2E. Reuse the operator's existing
-five-stage run evidence; do not force repeat smokes of already covered methods.
-The still-open full-path acceptance boundary is recorded only in
-[Architecture Conformance](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated).
+`server_test.sh` 是代码级回归门禁，运行格式、lint、mypy、普通 pytest、compileall 和 `git diff --check`，明确排除 `real_tool`。它不是实际数据或生物工具冒烟框架。完整路线前按[分层验收顺序](../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行：代码测试、小工具冒烟、contig 端到端、独立 Hi-C/finishing 切片、完整真实端到端。复用操作者已有五阶段运行证据，不强迫重跑已覆盖方法。未关闭的全路径验收边界只在[架构一致性](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated)记录。
 
-For new-host installation see [`migration.md`](migration.md). For the Mac/Git
-handoff see [`mac_dev_server_pull.md`](mac_dev_server_pull.md). For starting or
-recovering a session see [`Run and Recovery`](../user_guide/run-and-recovery.md).
+新主机安装见[新主机配置](migration.md)；Mac/Git 交接见[Mac 开发与服务器执行](mac_dev_server_pull.md)；启动和恢复会话见[运行与恢复](../user_guide/run-and-recovery.md)。

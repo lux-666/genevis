@@ -10,10 +10,7 @@ from pathlib import Path
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.storage.artifacts import register_artifact_records
-from app.storage.audit import (
-    audit_run_storage,
-    build_cleanup_manifest,
-)
+from app.storage.audit import audit_run_storage
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
@@ -186,19 +183,8 @@ class StorageAuditTests(unittest.TestCase):
         self.assertEqual(group["file_count"], 2)
         self.assertEqual(group["logical_duplicate_bytes"], len(duplicate_bytes))
 
-        reclaimable = audit["reclaimable"]
-        self.assertEqual(reclaimable["confirmed_report_bytes"], len(duplicate_bytes))
-        self.assertEqual(reclaimable["conditional_work_bytes"], len(duplicate_bytes))
-        manifest = build_cleanup_manifest(audit)
-        self.assertTrue(manifest["dry_run"])
-        self.assertFalse(manifest["deletion_performed"])
-        self.assertEqual(manifest["candidate_file_count"], 1)
-        self.assertEqual(manifest["candidate_bytes"], len(duplicate_bytes))
-        self.assertEqual(manifest["retained_work_file_count"], 1)
-        self.assertEqual(manifest["retained_work_bytes"], len(duplicate_bytes))
-        self.assertFalse(
-            any(item["path_ref"].startswith("work/") for item in manifest["entries"])
-        )
+        self.assertNotIn("reclaimable", audit)
+        self.assertNotIn("cleanup_manifest", audit)
 
     def test_requires_strict_v2_run_root(self) -> None:
         with self.assertRaises(DataLayoutError):
@@ -348,20 +334,6 @@ class StorageAuditTests(unittest.TestCase):
             self.skipTest("symlinks are unavailable")
         with self.assertRaisesRegex(DataLayoutError, "symlink is not allowed"):
             audit_run_storage(self.paths.run_dir)
-
-    def test_cleanup_manifest_rejects_injected_traversal(self) -> None:
-        audit = audit_run_storage(self.paths.run_dir)
-        audit["reclaimable"]["files"] = [
-            {
-                "path_ref": "../outside",
-                "sha256": "0" * 64,
-                "size_bytes": 1,
-                "reason": "injected",
-                "requires_output_verification": False,
-            }
-        ]
-        with self.assertRaises(ValueError):
-            build_cleanup_manifest(audit)
 
 
 if __name__ == "__main__":

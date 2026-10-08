@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
-from app.execution.env_resolver import EnvResolver
+from app.execution.env_resolver import EnvResolver, normalize_database_registry
 
 _SHARED_TARGET_KEY = "shared_conda_target"
 _AUTOHIC_TARGET_KEY = "autohic_conda_target"
@@ -198,6 +198,20 @@ def build_project_bootstrap_plan(
     changes: list[ProjectConfigChange] = []
     unresolved: list[str] = []
 
+    if "databases" in draft:
+        database_source = draft["databases"]
+        normalized = normalize_database_registry(database_source)
+        # Explicit --update edits only operator-selected fields. Plain bootstrap
+        # includes the host-key migration in its visible, confirmed write plan.
+        if not explicit_update and normalized != database_source:
+            draft["databases"] = normalized
+            _record(
+                changes,
+                config_path,
+                "databases.ncbi",
+                "rename from databases.ncbi_metazoa",
+            )
+
     default = _ensure_mapping(draft, "default")
     conda_bin = values.get(_CONDA_BIN_KEY)
     current_conda_bin = default.get("conda_bin")
@@ -338,6 +352,8 @@ def collect_project_bootstrap_plan(
     )
     source = _read_yaml(source_path) if source_path is not None else _minimal_config()
     inspect = deepcopy(source)
+    if "databases" in inspect:
+        inspect["databases"] = normalize_database_registry(inspect["databases"])
     if update and source_exists:
         return _collect_project_bootstrap_update_plan(
             config_path,
@@ -377,9 +393,7 @@ def collect_project_bootstrap_plan(
             )
             if entered:
                 values[_BUSCO_LINEAGE_PATH_KEY] = entered
-        ncbi = _mapping(databases.get("ncbi")) or _mapping(
-            databases.get("ncbi_metazoa")
-        )
+        ncbi = _mapping(databases.get("ncbi"))
         current_dir = ncbi.get("reference_dir")
         if not current_dir or _is_placeholder(current_dir):
             entered = _ask_text(prompt, "NCBI reference root directory")
@@ -947,17 +961,6 @@ def _configure_databases(
             f"databases.busco.lineages.{current_name or '<default>'}.path"
         )
 
-    legacy = databases.pop("ncbi_metazoa", None)
-    if isinstance(legacy, dict) and "ncbi" not in databases:
-        databases["ncbi"] = legacy
-        legacy_path = str(legacy.get("reference_dir") or "")
-        _record(
-            changes,
-            config_path,
-            "databases.ncbi.reference_dir",
-            legacy_path,
-            previous_value=legacy_path or None,
-        )
     ncbi = _ensure_mapping(databases, "ncbi")
     _fill_field(
         ncbi,

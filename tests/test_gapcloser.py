@@ -420,12 +420,9 @@ def test_missing_details_fails_without_adoption(tmp_path: Path) -> None:
     assert result.get("active_interrupt") is None
 
 
+@pytest.mark.real_tool
 def test_real_tgs_gapcloser_hifi_smoke(tmp_path: Path) -> None:
     """Opt-in real binaries on a deterministic synthetic gap, not a real sample."""
-    if os.environ.get("GENE_AGENT_TGS_REAL_SMOKE") != "1":
-        pytest.skip(
-            "set GENE_AGENT_TGS_REAL_SMOKE=1 with TGS-GapCloser/minimap2 on PATH"
-        )
     assert shutil.which("tgsgapcloser") and shutil.which("minimap2")
     import argparse
 

@@ -1,4 +1,4 @@
-"""Regenerable operator-status and session-summary report entry points."""
+"""Best-effort operator-status and session-summary report entry points."""
 
 from __future__ import annotations
 

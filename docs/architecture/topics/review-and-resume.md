@@ -1,183 +1,94 @@
-# Review and Resume
+<a id="review-and-resume"></a>
 
-> **Status:** implemented.
-> **Read when:** changing a human gate, decision persistence, approval binding,
-> resume validation, or post-review routing.  
-> **Comes from:** a stage-owned immutable review request and compact blocked
-> checkpoint.  
-> **Feeds into:** [runtime orchestration](runtime-orchestration.md), a new
-> parameter attempt, resource adoption, or terminal failure.  
-> **Contract dependencies:** [run data](../reference/data-contract.md),
-> [execution lifecycle](../reference/execution-lifecycle.md), and
-> [stage contracts](../reference/stage-contracts.md).  
-> **Code evidence:** `app/review/gates.py`, `app/review/persistence.py`,
-> `app/review/approval.py`, `app/review/recommender.py`,
-> `app/llm/json_response.py`, `app/control/resume_transaction.py`, and
-> `app/control/lifecycle.py`.
+# 评审与恢复
 
-## Durable gate model
+> **状态：** 已实现。
+>
+> **阅读场景：** 修改人工门禁、决策持久化、审批绑定、恢复校验或评审后路由。
+>
+> **来源：** 阶段拥有的不可变评审请求与紧凑阻塞 checkpoint。
+>
+> **下游：** [运行时编排](runtime-orchestration.md)、新参数尝试、资源采纳或终态失败。
+>
+> **依赖契约：** [运行数据](../reference/data-contract.md)、[执行生命周期](../reference/execution-lifecycle.md)、[阶段契约](../reference/stage-contracts.md)。
+>
+> **代码依据：** `app/review/gates.py`、`app/review/persistence.py`、`app/review/approval.py`、`app/review/recommender.py`、`app/llm/recommender.py`、`app/llm/json_response.py`、`app/control/resume_transaction.py`、`app/control/lifecycle.py`。
 
-A human gate is a four-state durable protocol:
+<a id="durable-gate-model"></a>
 
-1. `awaiting_decision`: the stage has published an immutable review-request
-   artifact and the checkpoint carries only a bounded interrupt cursor with
-   request ref, request hash, `workflow_step_id`, stage, gate, and bindings;
-2. `decision_committed`: a normalized `ResumeReviewRequest` has been written
-   as the immutable review intent for that exact request identity;
-3. `application_prepared`: the gate has prepared and published a typed review
-   application artifact, including its verified decision artifact and required
-   refs;
-4. `applied`: a verified decision exists and either a checkpoint re-read proves
-   that same verified application ref was projected or a proof-bound
-   `review_applied` event records that completed checkpoint transition. When
-   checkpoint proof exists but the event is missing, recovery backfills
-   `review_applied` before the graph continues.
+## 持久门禁模型
 
-The prompt shown to a person is a projection of the request, not the recovery
-authority. A checkpoint must not embed a full request, intent, decision, or
-application body, and a Ledger event must not replace those artifacts.
+人工门禁是四状态持久协议：
 
-Stage names are not review identities: a frozen plan can contain the same stage
-more than once. Every review request, decision, Ledger event, and review path
-is bound to the active occurrence's `workflow_step_id`; request and decision
-artifacts live below `artifacts/steps/<workflow_step_id>/<stage>/reviews/`.
-Resume rejects a request whose occurrence does not match the active frozen
-workflow step.
+1. `awaiting_decision`：阶段已发布不可变评审请求产物，checkpoint 仅携带有界中断游标，含请求引用、哈希、`workflow_step_id`、阶段、门禁和绑定。
+2. `decision_committed`：规范化的 `ResumeReviewRequest` 已作为该精确请求身份的不可变评审意图写入。
+3. `application_prepared`：门禁已准备并发布类型化评审应用产物，包含已验证的决策产物与必需引用。
+4. `applied`：存在已验证决策，且重读 checkpoint 能证明同一已验证应用引用已投影，或证明绑定的 `review_applied` 事件记录了已完成的 checkpoint 转换。若 checkpoint 有证明但事件缺失，恢复必须在图继续前补写 `review_applied`。
 
-Detached inspection follows the same authority boundary. If frozen workflow
-inputs are missing, invalid, or disagree with the request's stage/occurrence,
-it may expose the raw Ledger request for diagnosis but must suppress the
-current occurrence, active interrupt, decision requirements, and actionable
-review next step. An unverified Ledger projection cannot authorize resume.
+展示给人的提示是请求投影，不是恢复权威。checkpoint 不得嵌入完整请求、意图、决策或应用正文；Ledger 事件也不得替代这些产物。
 
-The optional LLM review recommender accepts only non-empty string content or a
-provider text-block list at its provider boundary. It never stringifies an
-arbitrary provider object into apparent model output. After that boundary,
-Markdown-fence removal and JSON-object-only parsing use the shared
-`parse_json_object` contract. Provider-content validation remains review-owned
-because its failure is a recommendation invocation error, not a generic JSON
-shape error.
+阶段名不是评审身份：冻结计划可多次包含同一阶段。每个评审请求、决策、Ledger 事件与评审路径都绑定当前 occurrence 的 `workflow_step_id`；请求和决策产物位于 `artifacts/steps/<workflow_step_id>/<stage>/reviews/`。恢复拒绝 occurrence 与当前冻结工作流步骤不匹配的请求。
 
-Both attached-state and detached-artifact inspection project a verified review
-request through `_review_request_decision_context`. Payload, bindings, stage,
-workflow step, gate, and review-request identity must project identically. The
-two callers keep their independent trust checks: attached inspection verifies
-the active interrupt and frozen occurrence, while detached inspection verifies
-the indexed immutable ref and Ledger-bound request identity before projection.
+分离检查遵循同一权威边界。冻结工作流输入缺失、无效或与请求的阶段/occurrence 不一致时，可暴露原始 Ledger 请求用于诊断，但必须隐藏当前 occurrence、活动中断、决策要求和可执行评审下一步。未经验证的 Ledger 投影不能授权恢复。
 
-The review registry centralizes gate declarations, allowed decisions,
-occurrence validation, typed prepare/apply dispatch, and timing metadata. The
-external resume DTO is one strict `ResumeReviewRequest` with a string decision
-field. Normalization validates a proposal without writes; prepare owns durable,
-gate-specific decision/evidence creation; verified apply is a pure projection
-of the registered typed application into checkpoint state. Parameter approval,
-assembly adoption, Hi-C adoption, and T2T adoption therefore remain different
-gate-scoped vocabularies and effects without entrypoints owning a second apply
-path.
+可选 LLM 评审推荐器通过共享 `StructuredRecommender` 调用和解析模型。提供方边界只接受非空字符串或提供方文本块列表，不把任意对象转成看似模型输出的字符串。移除 Markdown 围栏和仅接受 JSON 对象的解析使用共享 `parse_json_object` 契约。Review 保留响应格式绑定兼容处理、`RecommendationError` 分类、会话/阶段/允许决策校验及推荐持久化职责，不维护另一套提供方内容提取器。
 
-## Foreground review policy
+附着状态与分离产物检查均通过 `_review_request_decision_context` 投影已验证评审请求。载荷、绑定、阶段、工作流步骤、门禁和请求身份必须一致。两者保留独立信任检查：附着检查验证活动中断和冻结 occurrence；分离检查在投影前验证索引不可变引用及 Ledger 绑定请求身份。
 
-The effective frozen review policy is copied into the immutable request so the
-gate can be verified without consulting mutable current configuration. Exact
-defaults, allowed per-stage overrides, and numeric meanings are owned by the
-[review contract](../reference/data-contract.md#12-review-contract).
+评审注册表集中拥有门禁声明、允许决策、occurrence 校验、类型化 prepare/apply 分发和时序元数据。外部恢复 DTO 是唯一严格的 `ResumeReviewRequest`，decision 字段为字符串。规范化只验证提案，不写入；prepare 拥有门禁专属持久决策/证据创建；验证后 apply 是将注册类型化应用投影到 checkpoint 的纯函数。参数批准、Assembly 采纳、Hi-C 采纳和 T2T 采纳因此仍拥有不同门禁词汇与效果，入口不另设 apply 路径。
 
-The timer never supplies a default decision. Assembly Review retains its
-evidence eligibility and bound LLM recommendation artifact; assembly route
-selection uses its registered timeout-request normalizer. Assembly, AutoHiC,
-and T2T parameter approval use the same registered normalizer to bind only the
-recommendation in the immutable request. A gate with no eligible normalizer
-remains manual. A failed automatic transaction may return to manual review only
-while its `review_status` is `awaiting_decision` and the same verified
-`blocked_human` request remains. Once intent is committed, the operator cannot
-replace it: recovery re-enters the transaction with `request=None` and applies
-that committed intent. Any identity or integrity drift fails closed. Enter
-claims the gate, cancels the timer, and opens the normal manual prompts.
-The timer is not a durable scheduler: Ctrl-C, EOF, or process exit leaves the
-request and `blocked_human` checkpoint intact. Missing TTY capability prevents
-a new run from freezing in the first place. There is no daemon or background wake-up.
-Re-running the same frozen session detects the already-blocked checkpoint,
-does not invoke it, and prints manual recovery commands. A later `review` or
-`resume` is always a manual recovery action; it never reconstructs or expires
-a countdown from the prior `blocked_at` time. Strict/auto review modes and a
-public resume timeout override are not part of the interface.
+<a id="foreground-review-policy"></a>
 
-## Parameter-approval timeout behavior
+## 前台评审策略
 
-The countdown begins only after a parameter recommendation has been parsed,
-verified, persisted beneath its integrity root, and bound into an immutable
-`parameter_approval` request. It may resolve only that exact recommendation; it
-does not generate, edit, merge, or replace parameters. The precise timer-value
-contract remains in the run-data reference rather than being repeated here.
+有效冻结评审策略复制到不可变请求，使门禁可在不读取当前可变配置的情况下验证。精确默认值、允许的阶段覆盖及数值意义由[评审契约](../reference/data-contract.md#12-review-contract)拥有。
 
-One shared timeout-request normalizer enforces `decision=approve_parameters`
-and `decided_by=auto_rule` and enriches audit metadata. It performs no state
-or durable application mutation; the common intent/application protocol then
-delegates preparation and verified pure apply to the registered stage gate.
-Assembly, AutoHiC, and T2T retain their request, recommendation-manifest,
-attempt-chain, predecessor, and workflow-occurrence validation without timeout
-handling duplicating those stage rules.
+计时器不提供默认决策。Assembly Review 保留证据资格与绑定 LLM 推荐产物；Assembly 路线选择使用注册的超时请求规范化器。Assembly、AutoHiC、T2T 参数审批使用同一注册规范化器，只绑定不可变请求中的推荐。没有合格规范化器的门禁保持人工。自动事务失败后，仅当 `review_status` 仍为 `awaiting_decision` 且同一已验证 `blocked_human` 请求仍存在时，才可返回人工评审。意图一旦提交，操作者不得替换；恢复以 `request=None` 重入事务并应用已提交意图。任何身份或完整性漂移都拒绝。回车认领门禁后取消计时器并打开正常人工提示。
 
-The automatic decision binds the immutable review request and recommendation
-hash and records the foreground-countdown source plus configured and elapsed
-seconds. A claimed gate remains a human decision. If automatic normalization or
-transaction preparation fails before intent commit and the durable checkpoint
-still verifies as `blocked_human`, the same foreground terminal returns to
-manual review. A committed intent is recovered, never replaced by a manual
-decision. Broken request, evidence, checkpoint, or occurrence integrity fails
-closed instead of fabricating approval.
+计时器不是持久调度器：Ctrl-C、EOF 或进程退出保留请求和 `blocked_human` checkpoint。缺少 TTY 能力时，新运行在冻结前就失败。没有守护进程或后台唤醒。再次运行同一冻结会话会发现阻塞 checkpoint，不调用图，只打印人工恢复命令。后续 `review`/`resume` 始终是人工恢复，不从旧 `blocked_at` 重建或到期倒计时。接口不包含 strict/auto 评审模式或公开恢复超时覆盖。
 
-## Resume validation
+<a id="parameter-approval-timeout-behavior"></a>
 
-Before state changes, resume reloads the current checkpoint and verifies the
-session, workflow-step identity, stage, gate, request ID and hash, decision
-vocabulary, manifest identity, and any recommendation/attempt bindings. Missing, stale,
-cross-session, conflicting, or already-consumed input fails closed. Republishing
-the identical immutable bytes is idempotent, but it does not authorize applying
-an already-consumed gate a second time.
+## 参数审批超时行为
 
-Resume does not use elapsed wall time from a previous foreground invocation.
-It waits for the supplied manual decision (interactive `review` or a verified
-decision file) and never turns a durable block into an automatic approval.
-A countdown-triggered automatic decision is accepted only when the resume
-transaction's trusted source and hash-bound countdown metadata identify the
-active `foreground_countdown`. The decision origin and rationale still come
-from the gate's resolver (`llm_provisional` or `auto_rule`); a manual `review`
-or `resume` source cannot impersonate an automatic timeout even if a decision
-file claims otherwise.
+只有参数推荐已解析、验证、持久化到完整性根目录下并绑定到不可变 `parameter_approval` 请求后才开始倒计时。它只能解决该精确推荐，不能生成、编辑、合并或替换参数。精确计时数值契约留在运行数据参考中。
 
-The resume flow is:
+一个共享超时请求规范化器强制 `decision=approve_parameters` 和 `decided_by=auto_rule`，补充审计元数据。它不改变状态或持久应用；公共意图/应用协议随后委托注册阶段门禁完成准备和验证后的纯 apply。Assembly、AutoHiC、T2T 保留各自请求、推荐 manifest、尝试链、前驱、工作流 occurrence 校验，超时处理不复制这些规则。
+
+自动决策绑定不可变评审请求与推荐哈希，并记录前台倒计时来源、配置秒数和实际经过秒数。已认领门禁仍是人工决策。若自动规范化或事务准备在意图提交前失败，且持久 checkpoint 仍可验证为 `blocked_human`，同一前台终端返回人工评审。已提交意图只能恢复，不能人工替换。请求、证据、checkpoint 或 occurrence 完整性损坏时必须拒绝，不伪造审批。
+
+<a id="resume-validation"></a>
+
+## 恢复校验
+
+更改状态前，恢复重载当前 checkpoint，验证会话、工作流步骤身份、阶段、门禁、请求 ID 和哈希、决策词汇、manifest 身份及推荐/尝试绑定。缺失、过期、跨会话、冲突或已消费输入都拒绝。相同不可变字节的重复发布幂等，但不授权再次应用已消费门禁。
+
+恢复不使用前次前台调用已过去的墙钟时间。它等待提供的人工决策（交互 `review` 或已验证决策文件），不把持久阻塞转为自动批准。只有恢复事务的可信来源和哈希绑定倒计时元数据识别当前 `foreground_countdown` 时，才接受倒计时触发的自动决策。决策来源和理由仍来自门禁 resolver（`llm_provisional` 或 `auto_rule`）；即使决策文件自称自动超时，人工 `review`/`resume` 来源也不能冒充。
+
+恢复流程如下：
 
 ```text
-acquire the active FrozenExecutionLease
-  -> read checkpoint and project the shared review status
-  -> normalize the supplied proposal only when status is awaiting_decision
-  -> persist immutable intent
-  -> gate prepare creates typed decision/evidence effect
-  -> persist and verify immutable application
-  -> verified gate apply returns a pure compact state update
+获取活动 FrozenExecutionLease
+  -> 读取 checkpoint 并投影共享评审状态
+  -> 仅在 awaiting_decision 时规范化传入提案
+  -> 持久化不可变意图
+  -> gate prepare 创建类型化决策/证据效果
+  -> 持久化并验证不可变应用
+  -> 验证后的 gate apply 返回纯紧凑状态更新
   -> graph.update_state(...)
-  -> re-read the checkpoint and prove application in the checkpoint
+  -> 重读 checkpoint 并证明应用已落入 checkpoint
   -> record_review_applied
   -> graph.invoke(None, ...)
-  -> finalize the authoritative terminal singleton when reached
-  -> record resume completion or failure
+  -> 到达终态时完成权威终态单例
+  -> 记录恢复完成或失败
 ```
 
-This is an idempotence-aware saga across artifacts, Ledger, and SQLite
-checkpoint operations. It is not an ACID transaction spanning those stores.
-Each durable step is replay-aware and validates the evidence left by earlier
-steps. The shared status projection is the recovery decision point: a later
-call with `request=None` recovers a committed/application-prepared intent,
-whereas a replacement decision is legal only in `awaiting_decision`.
+这是跨产物、Ledger 和 SQLite checkpoint 操作的幂等感知 saga，不是跨存储 ACID 事务。每个持久步骤都支持回放并验证前序证据。共享状态投影是恢复决策点：后续 `request=None` 调用恢复已提交或已准备应用的意图；只有 `awaiting_decision` 允许替换决策。
 
-## Decision effects
+<a id="decision-effects"></a>
 
-A decision may approve parameters, accept or reject a biological candidate,
-keep a prior resource, authorize a bounded retry, or stop. It must not silently
-create an unregistered method or bypass the frozen-attempt boundary.
+## 决策效果
 
-Terminal completion or failure may trigger report generation and checkpoint
-compaction. Immutable review requests, decisions, execution evidence, and
-adopted biological artifacts remain retained independently of checkpoint
-history.
+决策可批准参数、接受/拒绝生物学候选、保留旧资源、授权有界重试或停止；不得静默创建未注册方法或绕过冻结尝试边界。
+
+终态完成或失败可触发报告生成与 checkpoint 压缩。不可变评审请求、决策、执行证据及已采纳生物学产物独立于 checkpoint 历史保留。
