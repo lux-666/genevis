@@ -51,7 +51,7 @@ python -m pytest -q -m real_tool \
 python -m pytest -q -m real_tool tests/test_read_qc.py::Phase4ReadQCRealSmokeTests
 ```
 
-Racon 切片需主机 PATH 中有两个二进制，检查成对比对、采纳门、收集回放，不建立代表性质量或独立 QV。其他所列方法尚无当前测试集证明的专属小数据真实冒烟，不能以伪工具替代。输入须满足真实约束（尤其 BUSCO/AutoHiC），不削弱校验以接受无效极小数据。合法 skip 与执行路径分别测试。
+GapCloser 与 Racon 切片读取活动环境注册表（默认 `config/envs.yaml`，可由 `GENE_AGENT_ENVS_CONFIG` 指定），冻结依赖后通过各方法的 Conda 映射执行；运行 pytest 的 Python 环境不需安装这些工具，也不需临时修改 PATH。两者明确采用单轮 `deterministic_baseline`，不调用顾问或最终 Review 的 QUAST/BUSCO。Racon 检查成对比对、采纳门、收集回放，不建立代表性质量或独立 QV。其他所列方法尚无当前测试集证明的专属小数据真实冒烟，不能以伪工具替代。输入须满足真实约束（尤其 BUSCO/AutoHiC），不削弱校验以接受无效极小数据。合法 skip 与执行路径分别测试。
 
 <a id="3-first-real-e2e-the-small-five-stage-contig-route"></a>
 
@@ -149,7 +149,7 @@ cp docs/examples/gapcloser_run_config.template.json /server/path/run_config.json
 
 此处不支持 ONT/CLR/CycloneSEQ/未知/混合读段。完整工作流推荐不保证输入兼容，应明确省略不支持 occurrence；Base Polish 当前也要求 HiFi。独立质量评估需显式追加 Review 并配置工具、数据库、物种。精确范围见[GapCloser 契约](../architecture/reference/stage-contracts.md#8-gapcloser)。
 
-配置主机可显式运行真实工具合成冒烟：冻结示例、运行 Inventory/GapCloser、关闭 SQLite，再经 CLI 恢复和最终 inspect。需 Conda，运行 pytest 的环境暴露 TGS/minimap2/GNU getopt（测试冻结 sys.prefix）：
+配置主机可显式运行真实工具合成冒烟：冻结示例、运行 Inventory/GapCloser、关闭 SQLite，再经 CLI 恢复和最终 inspect。活动环境注册表需将 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser/minimap2/GNU getopt 的 Conda 环境；Racon 切片对应 `base_polish.racon`，需 minimap2/Racon。沿用正式运行的注册表和冻结解析，不使用 pytest 解释器的环境前缀：
 
 ```bash
 python -m pytest -q -m real_tool tests/test_gapcloser.py -k real_tgs

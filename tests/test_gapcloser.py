@@ -4,8 +4,6 @@ import gzip
 import json
 import os
 import random
-import shutil
-import sys
 from pathlib import Path
 
 import pytest
@@ -316,14 +314,25 @@ def test_review_corruption_rejected_before_decision(
     )
 
 
-def test_example_frozen_parent_run_no_gap(tmp_path: Path) -> None:
+def test_example_frozen_parent_run_no_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    envs = tmp_path / "envs.yaml"
+    envs.write_text(json.dumps({"default": {"fallback_prefix": str(tmp_path)}}))
+    monkeypatch.setenv("GENE_AGENT_ENVS_CONFIG", str(envs))
     result, _ = _run_frozen_example(tmp_path, "AAAACCCC", "AAAACCCC")
     assert result["supervision_state"] == "completed", result
     assert result["resource_refs"]["assembly"]["source_stage"] == "gapcloser"
     assert "execution_attempts" not in result["stage_outputs"]["gapcloser"]
 
 
-def _run_frozen_example(tmp_path: Path, source: str, read: str) -> tuple[dict, Path]:
+def _run_frozen_example(
+    tmp_path: Path,
+    source: str,
+    read: str | list[str],
+    *,
+    stage: str = "gapcloser",
+) -> tuple[dict, Path]:
     import yaml
 
     from app.control.workflow_plan import workflow_steps_from_run_config
@@ -341,30 +350,29 @@ def _run_frozen_example(tmp_path: Path, source: str, read: str) -> tuple[dict, P
     draft = tmp_path / "assembly.fa"
     draft.write_text(f">chr1\n{source}\n")
     reads = tmp_path / "reads.fq.gz"
-    reads.write_bytes(gzip.compress(f"@r1\n{read}\n+\n{'I' * len(read)}\n".encode()))
-    manifest["session_id"] = "example-gapcloser"
-    manifest["assets"][0]["paths"] = [str(draft)]
-    manifest["assets"][1]["paths"] = [str(reads)]
-    envs = tmp_path / "envs.yaml"
-    envs.write_text(
-        json.dumps(
-            {
-                "default": {"fallback_prefix": sys.prefix},
-                "methods": {
-                    "gapcloser.tgs_gapcloser": {
-                        "conda_prefix": sys.prefix,
-                        "required_tools": ["tgsgapcloser", "minimap2", "getopt"],
-                    }
-                },
-            }
+    read_sequences = [read] if isinstance(read, str) else read
+    reads.write_bytes(
+        gzip.compress(
+            "".join(
+                f"@r{index}\n{sequence}\n+\n{'I' * len(sequence)}\n"
+                for index, sequence in enumerate(read_sequences)
+            ).encode()
         )
     )
+    manifest["session_id"] = f"example-{stage}"
+    manifest["assets"][0]["paths"] = [str(draft)]
+    manifest["assets"][1]["paths"] = [str(reads)]
+    config = json.loads(
+        (root / f"docs/examples/{stage}_run_config.template.json").read_text()
+    )
+    # A native-tool smoke isolates one baseline execution from advisor/Review QA.
+    config["requested_stages"] = [{"stage": stage, "allow_local_execution": True}]
+    config[stage].update(threads=1, recommendation_mode="deterministic_baseline")
     paths = SessionPaths.from_run_dir(tmp_path / "runs" / manifest["session_id"])
     frozen = freeze_session_inputs(
         paths,
         manifest_draft=manifest,
-        run_config_draft=root / "docs/examples/gapcloser_run_config.template.json",
-        config_path=envs,
+        run_config_draft=config,
         probe_environments=False,
     )
     Ledger(paths.run_dir).create_session(
@@ -387,6 +395,71 @@ def _run_frozen_example(tmp_path: Path, source: str, read: str) -> tuple[dict, P
     finally:
         graph.checkpointer.conn.close()
     return result, paths.run_dir
+
+
+@pytest.mark.parametrize("stage", ["gapcloser", "base_polish"])
+def test_tool_smoke_freezes_active_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    import shlex
+
+    from app.execution.dependency_snapshot import load_frozen_dependency_resolver
+    from tests.test_base_polish import fake_tools
+
+    if stage == "gapcloser":
+        _fake_tool(tmp_path)
+        minimap2 = tmp_path / "bin" / "minimap2"
+        minimap2.write_text("#!/bin/sh\necho 2.28\n")
+        minimap2.chmod(0o755)
+        source = "AAAANNNNCCCC"
+        method, tools = (
+            "gapcloser.tgs_gapcloser",
+            ["tgsgapcloser", "minimap2", "getopt"],
+        )
+    else:
+        fake_tools(tmp_path)
+        source = "AAAACCCC"
+        method, tools = "base_polish.racon", ["minimap2", "racon"]
+    conda = tmp_path / "conda"
+    conda.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do\n"
+        'case "$1" in run|--live-stream|--no-capture-output) shift;;\n'
+        '-n) test "$2" = registered-toolchain || exit 7; shift 2;;\n'
+        "*) break;; esac\ndone\n"
+        f'export PATH={shlex.quote(str(tmp_path / "bin"))}:"$PATH"\n'
+        'exec "$@"\n'
+    )
+    conda.chmod(0o755)
+    envs = tmp_path / "host-registry.yaml"
+    envs.write_text(
+        json.dumps(
+            {
+                "default": {"conda_bin": str(conda), "fallback_env": "wrong-fallback"},
+                "methods": {
+                    method: {
+                        "conda_env": "registered-toolchain",
+                        "required_tools": tools,
+                    }
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("GENE_AGENT_ENVS_CONFIG", str(envs))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+    result, run_dir = _run_frozen_example(tmp_path, source, "AAAATTCCCC", stage=stage)
+    assert result["supervision_state"] == "blocked_human", json.dumps(
+        result["stage_outputs"], indent=2, ensure_ascii=False
+    )
+    assert result["active_interrupt"]["gate_id"] == f"{stage}_adoption"
+    cursor = result["stage_outputs"][stage]
+    assert cursor["recommendation_mode"] == "deterministic_baseline"
+    assert "PATH" not in (cursor.get("env") or {})
+    resolver = load_frozen_dependency_resolver(run_dir)
+    assert resolver.config_path == envs
+    assert resolver.resolve(stage=stage, method_name=method).conda_env == (
+        "registered-toolchain"
+    )
 
 
 def test_collect_replay_after_publication_does_not_run_again(tmp_path: Path) -> None:
@@ -423,7 +496,6 @@ def test_missing_details_fails_without_adoption(tmp_path: Path) -> None:
 @pytest.mark.real_tool
 def test_real_tgs_gapcloser_hifi_smoke(tmp_path: Path) -> None:
     """Opt-in real binaries on a deterministic synthetic gap, not a real sample."""
-    assert shutil.which("tgsgapcloser") and shutil.which("minimap2")
     import argparse
 
     from app.control.lifecycle import inspect_session
@@ -433,7 +505,9 @@ def test_real_tgs_gapcloser_hifi_smoke(tmp_path: Path) -> None:
     truth = "".join(rng.choices("ACGT", k=10000))
     source = truth[:4500] + "N" * 1000 + truth[5500:]
     result, run_dir = _run_frozen_example(tmp_path, source, truth)
-    assert result["supervision_state"] == "blocked_human", result["stage_outputs"]
+    assert result["supervision_state"] == "blocked_human", json.dumps(
+        result["stage_outputs"], indent=2, ensure_ascii=False
+    )
     cursor = result["stage_outputs"]["gapcloser"]
     report = json.loads((run_dir / cursor["validation_ref"]["path_ref"]).read_text())
     assert report["input"]["internal_gaps"] == 1

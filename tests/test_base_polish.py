@@ -31,28 +31,23 @@ def state_for_polish(tmp_path: Path, platform: str = "pacbio_hifi", **inputs) ->
 def test_real_racon_hifi_smoke(tmp_path: Path) -> None:
     """Opt-in real minimap2/Racon slice; synthetic data is not CC1 acceptance."""
     import random
-    import shutil
 
-    from app.stages.base_polish.builder import build_stage
     from app.stages.base_polish.nodes import collect_base_polish
     from app.storage.ledger import Ledger
+    from tests.test_gapcloser import _run_frozen_example
 
-    assert shutil.which("minimap2") and shutil.which("racon")
     rng = random.Random(1943)
     truth = "".join(rng.choices("ACGT", k=10000))
     draft = list(truth)
     for index in (2500, 5000, 7500):
         draft[index] = next(base for base in "ACGT" if base != draft[index])
-    state = state_for_polish(
-        tmp_path, source_sequence="".join(draft), read_sequences=[truth] * 12
+    result, run_dir = _run_frozen_example(
+        tmp_path, "".join(draft), [truth] * 12, stage="base_polish"
     )
-    state["stage_outputs"] = {
-        "base_polish": {"threads": 1, "recommendation_mode": "deterministic_baseline"}
-    }
-    result = build_stage().invoke(state)
-    assert result["supervision_state"] == "blocked_human", result["stage_outputs"]
+    assert result["supervision_state"] == "blocked_human", json.dumps(
+        result["stage_outputs"], indent=2, ensure_ascii=False
+    )
     cursor = result["stage_outputs"]["base_polish"]
-    run_dir = Path(state["data_dir"])
     comparison = json.loads(
         (run_dir / cursor["comparison_ref"]["path_ref"]).read_text()
     )
@@ -60,11 +55,11 @@ def test_real_racon_hifi_smoke(tmp_path: Path) -> None:
     assert comparison["after"]["alignments"]["base_identity"] is not None
     assert comparison["independent_qv"] is None
     original = (run_dir / cursor["output_ref"]["path_ref"]).read_bytes()
-    ledger_before = Ledger(run_dir).read_events("s1")
+    ledger_before = Ledger(run_dir).read_events(result["session_id"])
     replay = collect_base_polish(result)
     assert replay["stage_outputs"]["base_polish"]["output_ref"] == cursor["output_ref"]
     assert (run_dir / cursor["output_ref"]["path_ref"]).read_bytes() == original
-    assert Ledger(run_dir).read_events("s1") == ledger_before
+    assert Ledger(run_dir).read_events(result["session_id"]) == ledger_before
 
 
 def fake_tools(tmp_path: Path, *, missing_after: bool = False) -> str:
