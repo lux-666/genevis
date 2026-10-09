@@ -850,18 +850,6 @@ parameters:
         adjustable: true
     description: "Filter out ultra-long reads shorter than INT."
 
-  ul_mode:
-    value_type: int
-    application:
-      kind: cli_option
-      flag: "--ul-m"
-      order: 250
-    allowed_values: [0, 1]
-    layers:
-      l2:
-        adjustable: true
-    description: "Hybrid ultra-long assembly mode."
-
   path_max_drop_ratio:
     value_type: float
     application:

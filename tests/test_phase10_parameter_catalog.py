@@ -769,23 +769,51 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
                 self.assertIn("--rl-cut", help_flags)
                 self.assertIn("--sc-cut", help_flags)
                 catalog = load_parameter_catalog(method_id)
-                catalog_flags = set()
+                hidden_args = []
                 for spec in catalog.parameters.values():
                     application = spec.application
-                    flag = getattr(application, "flag", None)
-                    if flag:
-                        catalog_flags.add(flag)
-                    catalog_flags.update(getattr(application, "flags", {}).values())
-                unsupported = sorted(catalog_flags - help_flags - {"-h", "--version"})
-                self.assertEqual(
-                    [],
-                    unsupported,
-                    (
-                        f"{method_id} catalog has flags not advertised by "
-                        f"{env.display_target()} hifiasm {runtime_version}: "
-                        f"{unsupported}"
-                    ),
-                )
+                    flags = list(getattr(application, "flags", {}).values())
+                    if getattr(application, "flag", None):
+                        flags.append(application.flag)
+                    for flag in flags:
+                        if flag in help_flags or flag in {"-h", "--version"}:
+                            continue
+                        hidden_args.append(flag)
+                        if application.kind != "cli_switch":
+                            hidden_args.append("0")
+                if hidden_args:
+                    # Put hidden options before -h to parse without starting assembly.
+                    rejected = subprocess.run(
+                        [*command, "--gene-agent-invalid-option", "-h"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        check=False,
+                        timeout=30,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+                    self.assertIn("unknown option", rejected.stdout.lower())
+                    parsed = subprocess.run(
+                        [*command, *hidden_args, "-h"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        check=False,
+                        timeout=30,
+                    )
+                    self.assertEqual(
+                        parsed.returncode,
+                        0,
+                        f"{method_id} in {env.display_target()} ({runtime_version}): "
+                        f"{hidden_args}\n{parsed.stdout}",
+                    )
+
+    def test_pending_ul_mode_is_not_exposed_as_an_effective_parameter(self):
+        for method_id in (
+            "assembly.candidate.hifiasm",
+            "assembly.candidate.hifiasm_ont",
+        ):
+            self.assertNotIn("ul_mode", load_parameter_catalog(method_id).parameters)
 
     def test_load_catalog_is_cwd_independent(self):
         old_cwd = os.getcwd()

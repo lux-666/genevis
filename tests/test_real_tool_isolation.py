@@ -61,7 +61,10 @@ def test_read_qc_real_smoke_uses_active_registry(tmp_path: Path, monkeypatch):
     assert all(line.startswith(str(prefix) + " ") for line in calls.splitlines())
 
 
-def test_hifiasm_cli_check_uses_each_registered_method(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("missing_hidden_flag", [False, True])
+def test_hifiasm_cli_check_uses_each_registered_method(
+    tmp_path: Path, monkeypatch, missing_hidden_flag: bool
+):
     from tests.test_phase10_parameter_catalog import (
         ParameterCatalogSchemaTests,
         _project_hifiasm_min_version,
@@ -82,11 +85,16 @@ def test_hifiasm_cli_check_uses_each_registered_method(tmp_path: Path, monkeypat
             if getattr(application, "flag", None):
                 flags.add(application.flag)
             flags.update(getattr(application, "flags", {}).values())
+        flags.difference_update({"--write-paf", "--max-od-ec"})
         help_text = "\n".join("  " + flag for flag in sorted(flags))
         binary.write_text(
             "#!/bin/sh\n"
-            f'case "$1" in --version) echo {version};;\n'
-            f"-h) printf '%s\\n' {shlex.quote(help_text)};; *) exit 2;; esac\n"
+            "while [ $# -gt 0 ]; do\n"
+            f'case "$1" in --version) echo {version}; exit 0;;\n'
+            f"-h) printf '%s\\n' {shlex.quote(help_text)}; exit 0;;\n"
+            + ("" if missing_hidden_flag else "--write-paf) shift;;\n")
+            + "--max-od-ec) test $# -gt 1 || exit 1; shift 2;;\n"
+            "*) echo '[ERROR] unknown option'; exit 1;; esac\ndone\nexit 1\n"
         )
         binary.chmod(0o755)
         methods[method_id] = {
@@ -106,12 +114,17 @@ def test_hifiasm_cli_check_uses_each_registered_method(tmp_path: Path, monkeypat
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("HIFIASM_BIN", "/invalid/legacy-hifiasm")
     smoke = ParameterCatalogSchemaTests()
+    if missing_hidden_flag:
+        with pytest.raises(AssertionError, match="unknown option"):
+            smoke.test_cataloged_hifiasm_flags_exist_in_runtime_help_when_binary_available()
+        return
     smoke.test_cataloged_hifiasm_flags_exist_in_runtime_help_when_binary_available()
     calls = (tmp_path / "calls.log").read_text().splitlines()
     for mapping in methods.values():
         prefix = mapping["conda_prefix"]
         assert f"{prefix} hifiasm --version" in calls
         assert f"{prefix} hifiasm -h" in calls
+        assert f"{prefix} hifiasm --write-paf --max-od-ec 0 -h" in calls
 
 
 @pytest.mark.parametrize("explicit", [False, True])

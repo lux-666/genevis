@@ -58,6 +58,8 @@ python -m pytest -q -m real_tool \
   tests/test_phase10_parameter_catalog.py::ParameterCatalogSchemaTests::test_cataloged_hifiasm_flags_exist_in_runtime_help_when_binary_available
 ```
 
+hifiasm 的简短帮助不列出所有已实现选项。检查对未显示的目录参数追加末尾 `-h`，验证真实解析器接受参数语法并退出，不启动组装；同时用不存在的选项验证解析器确实拒绝未知参数。参数值用占位值，仅证明选项可解析，不证明推荐值有效或组装质量。[0.25.0 官方源码](https://github.com/chhylp123/hifiasm/blob/0.25.0/CommandLines.cpp)中 `--ul-m` 的赋值处理尚被注释，两个目录已移除 `ul_mode`，避免顾问推荐不会生效的参数。
+
 GapCloser 与 Racon 切片读取活动环境注册表（默认 `config/envs.yaml`，可由 `GENE_AGENT_ENVS_CONFIG` 指定），冻结依赖后通过各方法的 Conda 映射执行；运行 pytest 的 Python 环境不需安装这些工具，也不需临时修改 PATH。两者明确采用单轮 `deterministic_baseline`，不调用顾问或最终 Review 的 QUAST/BUSCO。Racon 检查成对比对、采纳门、收集回放，不建立代表性质量或独立 QV。其他所列方法尚无当前测试集证明的专属小数据真实冒烟，不能以伪工具替代。输入须满足真实约束（尤其 BUSCO/AutoHiC），不削弱校验以接受无效极小数据。合法 skip 与执行路径分别测试。
 
 <a id="3-first-real-e2e-the-small-five-stage-contig-route"></a>
