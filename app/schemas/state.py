@@ -15,14 +15,13 @@ from typing import (
     Annotated,
     Any,
     Literal,
-    NotRequired,
-    Required,
     TypeAlias,
-    TypedDict,
     TypeVar,
     cast,
     get_args,
 )
+
+from typing_extensions import NotRequired, Required, TypedDict
 
 from app.schemas.limits import (
     ACTIVE_INTERRUPT_MAX_BYTES,
