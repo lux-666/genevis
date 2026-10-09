@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -205,6 +206,14 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
         )
     except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail(state, f"T2T motif snapshot persistence failed: {exc}")
+
+    if (
+        output.get("recommendation_mode") == "deterministic_baseline"
+        and not species_facts.supplied_telomere_motif
+    ):
+        return _fail(
+            state, "T2T deterministic_baseline requires a supplied telomere motif"
+        )
 
     if species_facts.supplied_telomere_motif:
         try:
@@ -583,6 +592,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
     output = read_t2t_stage_output(state)
     if output.get("status") != "motif_resolved":
         return {}
+    baseline = output.get("recommendation_mode") == "deterministic_baseline"
     read_inputs = output.get("long_read_inputs")
     if not isinstance(read_inputs, list) or not read_inputs:
         return {}
@@ -684,6 +694,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                 "prompt_bundle_id": PROMPT_BUNDLE,
                 "prompt_template_sha256": t2t_parameter_prompt_hash(),
                 "messages": messages,
+                "policy": "deterministic_baseline" if baseline else "advisor",
             },
             artifact_type=T2T_PARAMETER_MODEL_REQUEST,
             method_name=_RECOMMENDER_METHOD,
@@ -701,7 +712,23 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             method_name=_RECOMMENDER_METHOD,
         )
         if recovered is None:
-            decision = invoke_t2t_parameter_model(request, messages=messages)
+            if baseline:
+                decision = restore_t2t_parameter_decision(
+                    {
+                        "schema_version": 2,
+                        "raw_response": json.dumps(
+                            {
+                                "parameters": {},
+                                "summary": "Baseline: empty L2; model disabled.",
+                            }
+                        ),
+                        "validity": "parsed",
+                        "error": None,
+                        "model_id": "deterministic_baseline_policy",
+                    }
+                )
+            else:
+                decision = invoke_t2t_parameter_model(request, messages=messages)
         else:
             response_ref, record = recovered
             decision = restore_t2t_parameter_decision(record)
@@ -762,7 +789,14 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                     "recommendation_ref": recommendation_ref,
                     "response_parse_ref": parse_ref,
                 },
-                "summary": {"response_parsed": decision.valid},
+                "summary": {
+                    "response_parsed": decision.valid,
+                    **(
+                        {"policy": "deterministic_baseline", "model_invoked": False}
+                        if baseline
+                        else {}
+                    ),
+                },
             }
         )
         manifest_ref = write_t2t_parameter_artifact(
@@ -836,6 +870,63 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             "review_request_ref": persisted.request_ref,
         }
     )
+    if baseline:
+        decision_ref = persist_parameter_approval_decision(
+            state,
+            stage="t2t",
+            request_id=persisted.review_request_id,
+            request_ref=persisted.request_ref,
+            request=ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="t2t",
+                gate_id="parameter_approval",
+                review_request_id=persisted.review_request_id,
+                review_request_hash=persisted.request_hash,
+                decision="approve_parameters",
+                decided_by="auto_rule",
+                notes=["approved by deterministic_baseline policy"],
+                rationale_artifact_ref=recommendation_ref,
+                metadata={
+                    **bindings,
+                    "source": "policy",
+                    "configured_seconds": 0,
+                    "elapsed_seconds": 0,
+                    "automatic_resolution": {
+                        "source": "policy",
+                        "configured_seconds": 0,
+                        "elapsed_seconds": 0.0,
+                        "outcome": "approve_persisted_recommendation",
+                    },
+                },
+            ),
+            manifest_ref=manifest_ref,
+            method_name=_APPROVAL_METHOD,
+            artifact_type=T2T_PARAMETER_APPROVAL_DECISION,
+        )
+        attempt = ParameterAttempt(
+            schema_version=3,
+            attempt_id=0,
+            method_id=T2T_METHOD,
+            task="recommend_initial",
+            status="recommended",
+            previous_attempt_id=None,
+            recommendation_manifest_ref=manifest_ref,
+            approval_decision_ref=decision_ref,
+            recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
+        )
+        return update_t2t_stage_output(
+            state,
+            {
+                "status": "parameters_approved",
+                "active_interrupt": None,
+                "current_parameter_attempt_id": 0,
+                "proposed_parameter_attempt_id": None,
+                "parameter_attempts": [attempt.model_dump(mode="json")],
+                "current_parameter_recommendation": cursor.model_copy(
+                    update={"status": "approved"}
+                ).model_dump(mode="json"),
+            },
+        )
     interrupt = persisted.compact_interrupt(
         stage="t2t",
         gate_id="parameter_approval",

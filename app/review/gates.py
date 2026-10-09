@@ -568,3 +568,29 @@ register_review_gate(
         proposal_label="Purge_dups recommendation and result selection",
     )
 )
+
+
+for _finishing_stage in ("gapcloser", "t2t", "base_polish"):
+    register_review_gate(
+        ReviewGateDeclaration(
+            stage=_finishing_stage,
+            gate_id="finishing_recommendation",
+            decisions_allowed=(
+                "follow_recommendation",
+                "accept_candidate",
+                "keep_prior_assembly",
+                "stop_human_review",
+            ),
+            intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+            validate_intent_request="app.stages.finishing.review:validate_intent_request",
+            effect_kind="finishing.recommendation.v1",
+            effect_model="app.stages.finishing.review:FinishingReviewEffect",
+            prepare_application="app.stages.finishing.review:prepare_application",
+            apply_application="app.stages.finishing.review:apply_application",
+            template_preferred_decision="follow_recommendation",
+            required_resume_fields_by_decision={"accept_candidate": ("candidate_id",)},
+            proposal_label="Evidence-driven finishing recommendation",
+            parameter_recommendation_status="implemented",
+            plan_order=10,
+        )
+    )

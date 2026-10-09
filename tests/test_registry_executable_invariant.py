@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType
@@ -37,6 +38,8 @@ from app.stages.assembly_review import builder as assembly_review_builder
 from app.stages.assembly_review.method_application import busco, quast
 from app.stages.base_polish import builder as base_polish_builder
 from app.stages.base_polish import nodes as base_polish_nodes
+from app.stages.finishing import advisor as finishing_advisor
+from app.stages.finishing import workflow as finishing_workflow
 from app.stages.gapcloser import builder as gapcloser_builder
 from app.stages.gapcloser import nodes as gapcloser_nodes
 from app.stages.genome_survey import builder as genome_survey_builder
@@ -75,14 +78,14 @@ LOCAL_BINDINGS = (
         base_polish_nodes,
         base_polish_nodes.LIFECYCLE,
         base_polish_nodes.build_base_polish_graph,
-        base_polish_builder.build_stage,
+        base_polish_builder.build_baseline_stage,
         "racon",
     ),
     LocalBinding(
         gapcloser_nodes,
         gapcloser_nodes.LIFECYCLE,
         gapcloser_nodes.build_gapcloser_graph,
-        gapcloser_builder.build_stage,
+        gapcloser_builder.build_baseline_stage,
         "tgs_gapcloser",
     ),
     LocalBinding(
@@ -159,7 +162,7 @@ LOCAL_BINDINGS = (
         t2t_nodes,
         t2t_nodes.T2T_ALIGNMENT_LIFECYCLE,
         t2t_nodes.build_t2t_alignment_graph,
-        t2t_builder.build_stage,
+        t2t_builder.build_baseline_stage,
         "alignment",
     ),
     LocalBinding(
@@ -176,6 +179,18 @@ LOCAL_BINDINGS = (
         read_qc_builder.build_stage,
         "seqkit_length_filter",
     ),
+)
+
+
+LOCAL_BINDINGS += tuple(
+    LocalBinding(
+        finishing_advisor,
+        finishing_advisor.quast_lifecycle(stage),
+        partial(finishing_advisor.build_quast_graph, stage),
+        partial(finishing_workflow.build_stage, stage),
+        "evaluate",
+    )
+    for stage in ("gapcloser", "t2t", "base_polish")
 )
 
 

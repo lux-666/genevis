@@ -46,7 +46,9 @@ def test_real_racon_hifi_smoke(tmp_path: Path) -> None:
     state = state_for_polish(
         tmp_path, source_sequence="".join(draft), read_sequences=[truth] * 12
     )
-    state["stage_outputs"] = {"base_polish": {"threads": 1}}
+    state["stage_outputs"] = {
+        "base_polish": {"threads": 1, "recommendation_mode": "deterministic_baseline"}
+    }
     result = build_stage().invoke(state)
     assert result["supervision_state"] == "blocked_human", result["stage_outputs"]
     cursor = result["stage_outputs"]["base_polish"]
@@ -464,7 +466,10 @@ def test_sqlite_close_and_cli_resume(tmp_path: Path, decision: str) -> None:
             "requested_stages": [
                 {"stage": "base_polish", "allow_local_execution": True}
             ],
-            "base_polish": {"threads": 1},
+            "base_polish": {
+                "threads": 1,
+                "recommendation_mode": "deterministic_baseline",
+            },
             "review_policy": {"max_blocked_seconds": -1},
         },
         config_path=envs,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -125,6 +125,54 @@ def load_t2t_frozen_execution_inputs(
 
     if output is None:
         output = read_t2t_stage_output(state)
+    if output.get("finishing"):
+        from app.stages.finishing.advisor import load_json, loop, settings, source
+        from app.stages.finishing.review import approved_proposal
+
+        f = loop(state, "t2t")
+        if f.get("execution_context"):
+            f = {**f, **f["execution_context"]}
+            state = {
+                **state,
+                "stage_outputs": {
+                    **state["stage_outputs"],
+                    "t2t": cast(Any, {**dict(output), "finishing": f}),
+                },
+            }
+        approved = approved_proposal(state, "t2t", before_execution=False)
+        frozen = load_json(state, f["frozen_ref"])
+        inputs = T2TFrozenExecutionInputs.model_validate(frozen["execution_inputs"])
+        initial = settings(state, "t2t")
+        from app.stages.base import stage_work_dir
+
+        expected_work = stage_work_dir(
+            state, "t2t", "attempts", f"{f['attempt']:03d}", "t2t_finishing"
+        )
+        if (
+            inputs.resolved_telomere_motif != initial["resolved_telomere_motif"]
+            or inputs.motif_source != initial["resolved_telomere_motif_source"]
+            or inputs.work_dir != str(expected_work)
+            or [
+                item.model_dump(mode="json", exclude_none=True)
+                for item in inputs.long_read_inputs
+            ]
+            != initial.get("long_read_inputs", [])
+            or inputs.chromosome_list_ref != initial.get("chromosome_list_ref")
+        ):
+            raise ValueError("T2T frozen inputs differ from original settings")
+        if (
+            frozen["decision_ref"] != f["decision_ref"]
+            or frozen["recommendation_ref"] != f["recommendation_ref"]
+            or frozen["source_ref"] != f["source_ref"]
+            or approved.parameters is None
+            or inputs.thresholds.model_dump(mode="json")
+            != approved.parameters.model_dump(mode="json")
+            or inputs.input_assembly_ref
+            != str(source(state, "t2t").primary_output_path)
+            or inputs.mode != "auto_patch"
+        ):
+            raise ValueError("T2T adviser frozen execution input binding mismatch")
+        return inputs
     attempt = current_parameter_attempt(
         output,
         method_id=T2T_METHOD,

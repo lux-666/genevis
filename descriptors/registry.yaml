@@ -17,6 +17,9 @@ packages:
   tgsgapcloser: tgsgapcloser.yaml
   racon: racon.yaml
 methods:
+  base_polish.eval.quast: base_polish/quast_eval.yaml
+  t2t.eval.quast: t2t/quast_eval.yaml
+  gapcloser.eval.quast: gapcloser/quast_eval.yaml
   assembly.candidate.flye: assembly/flye_candidate.yaml
   assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
   assembly.candidate.hifiasm_ont: assembly/hifiasm_ont_candidate.yaml
@@ -57,8 +60,11 @@ by_stage:
   hic_scaffolding:
     - hic_scaffolding.candidate.autohic
   t2t:
+    - t2t.eval.quast
     - t2t.alignment.minimap2
   gapcloser:
+    - gapcloser.eval.quast
     - gapcloser.tgs_gapcloser
   base_polish:
+    - base_polish.eval.quast
     - base_polish.racon

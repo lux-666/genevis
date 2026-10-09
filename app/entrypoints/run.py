@@ -193,14 +193,26 @@ def _stage_seeds_from_run_config(
         }
         seeds["hic_scaffolding"] = hic_seed
 
-    if "t2t" in requested and run_config.t2t:
-        seeds["t2t"] = run_config.t2t.model_dump(mode="json", exclude_none=True)
+    from app.schemas.run_config import (
+        BasePolishRunConfig,
+        GapCloserRunConfig,
+        T2TRunConfig,
+    )
 
-    if "gapcloser" in requested and run_config.gapcloser:
-        seeds["gapcloser"] = run_config.gapcloser.model_dump(mode="json")
-
-    if "base_polish" in requested and run_config.base_polish:
-        seeds["base_polish"] = run_config.base_polish.model_dump(mode="json")
+    for stage, config_type in (
+        ("t2t", T2TRunConfig),
+        ("gapcloser", GapCloserRunConfig),
+        ("base_polish", BasePolishRunConfig),
+    ):
+        if stage in requested:
+            config = getattr(run_config, stage) or config_type()
+            seeds[stage] = config.model_dump(mode="json", exclude_none=True)
+            if (
+                stage == "t2t"
+                and config.recommendation_mode == "advisor"
+                and "mode" not in seeds[stage]
+            ):
+                seeds[stage]["mode"] = "auto_patch"
 
     for review_stage in registered_review_stages():
         if review_stage not in requested:

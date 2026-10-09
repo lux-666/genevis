@@ -35,6 +35,7 @@ ROUTE_STAGES = {
     "review": ["assembly_review"],
     "hic": ["hic_scaffolding"],
     "gapcloser": ["gapcloser"],
+    "dedup": ["assembly_dedup"],
     "t2t": ["t2t"],
     "base-polish": ["base_polish", "assembly_review"],
     "finishing": ["gapcloser", "t2t", "base_polish", "assembly_review"],
@@ -222,14 +223,20 @@ def final_comparison(
     final_step_id: str,
     request_ref: ArtifactRef,
 ) -> dict[str, Any]:
-    polish_records = [
-        r for r in records if r["artifact_type"] == "base_polish.comparison"
-    ]
-    if len(polish_records) != 1:
-        raise ValueError(
-            "complete route requires one source-bound polishing comparison"
-        )
-    comparison_ref = _ref(polish_records[0])
+    quality = final_evaluation(paths, final_step_id, request_ref)
+    selected_comparison = (quality.get("polishing_comparison") or {}).get("report_ref")
+    if not selected_comparison:
+        # A source-retention decision before any polishing execution has no pair.
+        if any(r["artifact_type"] == "base_polish.comparison" for r in records):
+            raise ValueError("final Review omitted an existing polishing comparison")
+        return {**quality, "comparison_status": "not_executed_source_retained"}
+    comparison_ref = ArtifactRef.model_validate(selected_comparison)
+    if not any(
+        _ref(r) == comparison_ref
+        for r in records
+        if r["artifact_type"] == "base_polish.comparison"
+    ):
+        raise ValueError("final Review polishing comparison is not indexed")
     report = _json(paths, comparison_ref)
     pair = [
         ArtifactRef.model_validate(report[key])
@@ -244,7 +251,6 @@ def final_comparison(
         ).bundle.candidate_id
         for ref in pair
     }
-    quality = final_evaluation(paths, final_step_id, request_ref)
     rows = quality["candidates"]
     if {c["candidate_id"] for c in rows} != ids or len(rows) != 2:
         raise ValueError("final Review did not evaluate exactly the polishing pair")

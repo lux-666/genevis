@@ -63,14 +63,14 @@ schema-v1 路线恢复器将缺失或非字符串 `model_id` 规范化为 `null`
 
 ## 参数顾问
 
-`advisor` 使用 schema-3 参数推荐事务：不可变请求、原始响应、稀疏映射、审批门禁和已批准尝试。
+Assembly/AutoHiC 的 advisor 使用 schema-3 稀疏参数事务；GapCloser/T2T/Base Polish 的 advisor 使用 finishing 完整提案、QUAST/原生证据反馈和 finishing_recommendation 人工门，持久布局见[运行数据](data-contract.md#finishing-task-evidence)。
 
-Assembly 与 AutoHiC 的 `deterministic_baseline` 从同样已验证的事实、目录、上下文和依赖引用生成空 L2 的 schema-3 基线。它记录策略摘要、原本将发送的精确请求以及显式策略响应和解析记录；通过同一 schema-3 manifest 边界，以自动策略决策创建哈希绑定的已批准初始尝试。决策元数据使用 `source="policy"` 并记录完整自动解决审计，从而区别于前台倒计时。执行适配器使用基线解析器，此模式不得应用 L2 映射。AutoHiC 中操作者提供的限制性内切酶仍是 L1 事实，其他值取目录 L0 默认。初始基线策略不支持重试；重试请求必须拒绝，不得静默切回顾问模式。
+Assembly、AutoHiC 与 T2T 的 `deterministic_baseline` 从同样已验证的事实、目录、上下文和依赖引用生成空 L2 的 schema-3 基线。它记录策略摘要、原本将发送的精确请求以及显式策略响应和解析记录；通过同一 schema-3 manifest 边界，以自动策略决策创建哈希绑定的已批准初始尝试。决策元数据使用 `source="policy"` 并记录完整自动解决审计，从而区别于前台倒计时。执行适配器使用基线解析器，此模式不得应用 L2 映射。AutoHiC 中操作者提供的限制性内切酶仍是 L1 事实，其他值取目录 L0 默认。T2T 基线要求已提供端粒基序，不调用阈值或基序模型，冻结目录 L0 后执行单轮，仍保留 t2t_review 人工采纳。初始基线策略不支持重试；重试请求必须拒绝，不得静默切回顾问模式。
 
 <a id="readiness-and-evidence"></a>
 
 ## 就绪检查与证据
 
-就绪检查遵循冻结策略。Assembly 两个顾问均为基线时不要求 LLM 端点；AutoHiC 参数顾问也为基线时，Hi-C 也不要求。其余仍使用顾问的阶段（包括 T2T）仍需要端点。精确结构化端点探测和失败不创建会话的语义由[执行生命周期](execution-lifecycle.md#whole-run-readiness-boundary)拥有。Assembly 游标持久化两个策略模式，参数基线显式标记每条跳过模型的记录，不能靠产物缺失来表达。
+就绪检查遵循冻结策略。Assembly 两个顾问均为基线时不要求 LLM 端点；AutoHiC 参数顾问也为基线时，Hi-C 也不要求。T2T 显式基线也不要求端点，但必须提供基序；其 advisor 和其他仍使用顾问的阶段要求端点。精确结构化端点探测和失败不创建会话的语义由[执行生命周期](execution-lifecycle.md#whole-run-readiness-boundary)拥有。Assembly 游标持久化两个策略模式，参数基线显式标记每条跳过模型的记录，不能靠产物缺失来表达。
 
 顾问模式中，方法请求携带显式 `evidence_status` 映射。标为 `"unavailable"` 的上游字段为 null，不得推断或当作观测；除非现有证据支持一条路线，否则提示词要求返回 `insufficient_data`。模型不能猜测恢复屏蔽字段；缺乏充分路线/读段兼容性却指定方法的响应必须校验失败。持久位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。

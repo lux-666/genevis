@@ -115,7 +115,7 @@
 | Hi-C `chromosome_assembly_review`、阻塞、采纳恢复 | `wired` | `implemented-no-process` | `tested` | `none` | 候选/当前资源替换声明 materialized 或 reused 交付，共享结算对照索引产物验证。`app/stages/hic_scaffolding/builder.py`、`nodes.py`；`tests/test_hic_scaffolding.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
 | GapCloser HiFi 执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser 无校正路线、原生坐标校验、持久人工采纳、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
 | T2T 输入/基序：`resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process`，条件模型调用 | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`；`tests/test_t2t_motif.py` |
-| T2T 阈值推荐、审批、`prepare_parameters` | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |
+| T2T 单轮 schema-3 基线/旧记录、策略审批、`prepare_parameters` | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |
 | T2T 扫描与 minimap2 比对 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py` |
 | T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
 | Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、人工交接；`tests/test_base_polish.py` |
@@ -124,7 +124,7 @@
 
 ## 注册方法清单
 
-`descriptors/registry.yaml` 当前包含 17 个注册方法：16 个 `local` 和 1 个 `planner_only`。可执行不变量将每个本地 ID 绑定到导入生命周期、嵌套方法图和外层阶段节点。唯一 `planner_only` 是有意无进程选择，真实规划到阶段路线有测试。注册表当前**没有仅描述符占位方法**。注册表和每层嵌套 YAML 都严格加载。
+`descriptors/registry.yaml` 当前包含 20 个注册方法：19 个 `local` 和 1 个 `planner_only`。可执行不变量将每个本地 ID 绑定到导入生命周期、嵌套方法图和外层阶段节点。唯一 `planner_only` 是有意无进程选择，真实规划到阶段路线有测试。注册表当前**没有仅描述符占位方法**。注册表和每层嵌套 YAML 都严格加载。
 
 下面适配器/生命周期和收集列只描述进程接线，不覆盖上方跨切面证据与结算边界。
 
@@ -152,6 +152,11 @@
 
 <a id="parameter-capability-map"></a>
 
+
+| `gapcloser.eval.quast` | local | `app/stages/finishing/advisor.py:quast_lifecycle` | 源与全部尝试同设置 QUAST，持久表与执行引用 |
+| `t2t.eval.quast` | local | `app/stages/finishing/advisor.py:quast_lifecycle` | 同上；阈值与候选支持证据反馈 |
+| `base_polish.eval.quast` | local | `app/stages/finishing/advisor.py:quast_lifecycle` | 同上；Racon 前后证据反馈 |
+
 ## 参数能力映射
 
 参数能力不是布尔值。目录、推荐、审批、冻结绑定、重试和生物学知识覆盖是独立事实。
@@ -163,14 +168,14 @@
 | Assembly：Hifiasm-ONT | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 必须保持 ONT 模式、读段状态与案例绑定差异 |
 | Assembly：NextDenovo | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 有原生来源设置；不能机械翻译外部工具参数 |
 | AutoHiC | 已实现 | 已实现 | 顾问模式必需 | 已实现 | 已实现 | 缺声明产品时收集拒绝；终态收集失败无自动重试 |
-| T2T/minimap2 阈值 | 已实现 | 基序解析后已实现 | 必需 | 已实现 | 仅初始推荐 | 无 T2T 参数重试路线 |
-| GapCloser | 有界静态 RunConfig | 无 LLM 推荐 | 人工结果采纳 | 共享冻结尝试 | 无自动重试 | HiFi-only TGS-GapCloser |
-| Base Polish | 有界静态 RunConfig | 无 LLM 参数推荐；成对 PAF/FASTA/版本证据 | 人工结果采纳/源保留 | 共享 minimap2/Racon 冻结尝试 | 无自动重试 | 一轮 HiFi Racon；无独立 QV |
+| T2T/minimap2 阈值 | 已实现 | 基序、源端部测量、过滤前分布/拒绝原因及全部候选支持数 | 逐动作人工批准 | 独立尝试与冻结输入 | 有界顾问循环；另有初始 schema-3 基线 | 实际补丁/保留源；无独立 QV |
+| GapCloser | 已实现 | 缺口与 QUAST/填补证据顾问 | 逐动作人工批准 | 每轮独立冻结 | max_attempts 有界参数尝试 | HiFi-only TGS-GapCloser；另有单轮基线 |
+| Base Polish | 已实现 | QUAST、成对 PAF/FASTA/版本证据顾问 | 逐动作人工批准 | 每轮从原组装独立冻结 | max_attempts 有界配置尝试 | 每候选一轮 HiFi Racon；无独立 QV |
 | Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`，支持注册前台 resolver | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |
 | Read QC、Survey、Review | 注册表默认方法与静态/操作者参数 | 无 schema-3 参数推荐；Review 可另有决策推荐 | 按各阶段门禁 | 可执行方法使用共享尝试冻结 | 按阶段契约 | 默认方法内部拥有，不暴露为用户方法选择字段 |
 | Inventory | 不需要 | 不需要 | 仅输入歧义评审 | 不适用 | 不适用 | 不应推断存在推荐器 |
 
-Assembly、AutoHiC、T2T 的正式 schema-3 链已实现；Assembly/AutoHiC 显式确定性基线以策略记录批准初始尝试，详见[推荐策略](reference/recommendation-policy.md)。Dedup 顾问使用独立类型化任务输出。剩余缺口是知识深度与真实结果验证；多数其他阶段有意使用静态/操作者配置。
+Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显式确定性基线以策略记录批准空 L2 初始尝试，T2T 要求已提供基序并禁用阈值/基序模型，详见[推荐策略](reference/recommendation-policy.md)。Dedup 和三个 finishing 顾问使用独立类型化任务输出，逐动作人工批准并保留全部尝试。默认 finishing 的持久任务契约不使用 schema-3 参数 manifest；T2T 的 schema-3 单轮执行/手工补丁路径通过 deterministic_baseline 保留，旧初始 LLM 调用仅供受控兼容路径。剩余缺口是独立准确率证据、方法范围与代表样本验证。
 
 <a id="finishing-capabilities-and-remaining-product-gaps"></a>
 

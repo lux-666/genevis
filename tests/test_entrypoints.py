@@ -40,7 +40,6 @@ from app.execution.env_resolver import EnvResolver
 from app.review.base import ReviewPayload
 from app.review.persistence import (
     PersistedReviewRequest,
-    load_review_request,
     persist_review_request,
 )
 from app.schemas.artifacts import (
@@ -52,10 +51,10 @@ from app.schemas.artifacts import (
 )
 from app.schemas.run_config import AssemblyRunConfig, RunConfig
 from app.schemas.state import initial_state
-from app.storage.artifacts import publish_artifact_record, read_artifact_records
+from app.storage.artifacts import publish_artifact_record
 from app.storage.frozen_inputs import FrozenExecutionLease, freeze_session_inputs
 from app.storage.ledger import Ledger
-from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
+from app.storage.paths import SessionPaths, ensure_run_layout
 from tests.busco_fixture import (
     assembly_review_config,
     busco_parameters,
@@ -307,42 +306,6 @@ def _write_assembly_review_request(
         workflow_step_id="step-000-inventory",
     )
     return run_dir, persisted
-
-
-def _artifact_types(data_dir: Path, session_id: str) -> list[str]:
-    session_dir = locate_session_data_dir(data_dir, session_id)
-    return [
-        record["artifact_type"]
-        for record in read_artifact_records(session_dir, session_id)
-    ]
-
-
-def _load_assembly_review_request(
-    data_root: Path,
-    session_id: str,
-) -> tuple[Path, ArtifactRef, dict]:
-    run_dir = locate_session_data_dir(data_root, session_id)
-    if run_dir is None:
-        raise AssertionError(f"missing v2 run for {session_id}")
-    record = next(
-        item
-        for item in read_artifact_records(run_dir, session_id)
-        if item["artifact_type"] == "assembly_review.request"
-    )
-    ref = ArtifactRef.model_validate(
-        {
-            key: record[key]
-            for key in (
-                "schema_version",
-                "artifact_id",
-                "path_ref",
-                "sha256",
-                "size_bytes",
-                "artifact_type",
-            )
-        }
-    )
-    return run_dir, ref, load_review_request(run_dir, ref, session_id=session_id)
 
 
 class EntrypointTests(unittest.TestCase):

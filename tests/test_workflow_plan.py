@@ -87,7 +87,7 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
         [],
         ["t2t.alignment.minimap2"],
         ["assembly_review.eval.quast", "assembly_review.eval.busco"],
-        ["t2t.alignment.minimap2"],
+        ["t2t.eval.quast", "t2t.alignment.minimap2"],
         ["assembly_review.eval.quast", "assembly_review.eval.busco"],
     ]
 

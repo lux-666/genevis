@@ -118,6 +118,15 @@ stages:
     conda_env: your_tool_env
 
 methods:
+  gapcloser.eval.quast:
+    conda_env: your_tool_env
+    required_tools: [quast.py]
+  t2t.eval.quast:
+    conda_env: your_tool_env
+    required_tools: [quast.py]
+  base_polish.eval.quast:
+    conda_env: your_tool_env
+    required_tools: [quast.py]
   base_polish.racon:
     conda_env: your_tool_env
     required_tools:

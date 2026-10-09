@@ -8,7 +8,7 @@
 
 ## 推荐出现的位置
 
-Assembly、AutoHiC、T2T 在执行方法确定后可请求参数。有效推荐先持久化，此时尚无执行尝试，然后通过 `parameter_approval` 门禁展示。
+Assembly、AutoHiC 在执行方法确定后可请求稀疏参数，先持久化再通过 `parameter_approval` 门禁展示。GapCloser、T2T、Base Polish 默认 advisor 使用 `finishing_recommendation`：先评估源，每轮执行后将源和全部候选证据反馈，提案可运行新配置、采纳已有候选、保留源或转人工判断。
 
 模型提出参数，不批准参数、不另选方法、不路由工作流、不启动进程。模型响应格式错误或不可用时拒绝，不静默回退到目录默认值。
 
@@ -24,13 +24,15 @@ Assembly、AutoHiC、T2T 在执行方法确定后可请求参数。有效推荐�
 - 数值是否适合目标读段、物种、基因组目标、资源和重试上下文。
 - 省略值应保持为已提供事实、执行器默认还是工具默认。
 
-提案可为空。省略键不会自动继承前次尝试；应用也不会背着操作者修正异常值。若批准值不能由工具安全表达，命令构造仍可拒绝。
+Assembly/AutoHiC 稀疏提案可为空；省略键不会自动继承前次尝试。Finishing 的 run 提案必须包含该阶段完整参数形状，accept 指定已完成 attempt_N，keep_source/human_review 不带参数。应用不会背着操作者修正异常值；命令构造仍可拒绝无法安全表达的值。
 
 <a id="approve-or-reject"></a>
 
 ## 批准或拒绝
 
-附着运行时遵循门禁提示。冻结评审策略决定门禁人工等待还是使用有资格的前台倒计时。允许自动参数批准时，只应用绑定当前请求的精确持久推荐，不重生成或编辑映射。
+附着运行时遵循门禁提示。Assembly/AutoHiC 的冻结评审策略允许有资格的前台倒计时。Finishing 门仅人工确认，每个 run/accept/keep 动作均绑定请求，不自动执行；非法或越预算提案转人工选择。详细动作见[finishing 验收](run-and-recovery.md#base-polish-and-t2t-acceptance-points)。
+
+GapCloser/Base Polish 的 `deterministic_baseline` 是操作者参数单轮路径。T2T 同名基线要求已提供端粒基序，不调用任何模型；使用目录 L0、空 L2 和不可变策略审批，经 schema-3 冻结后执行单轮。该审批不向操作者打开 `parameter_approval`，候选采纳仍使用 `t2t_review`；`manual_review` 可逐条选择补丁。旧 schema-3 LLM 初始阈值推荐代码仅保留既有记录读取/受控兼容调用，新 RunConfig 的 advisor 进入 finishing，不能将旧路径称为确定性基线。活动旧会话保留匹配检出，运行时不迁移 checkpoint。
 
 进程中断后，按[运行与恢复](run-and-recovery.md)检查和恢复。后续 `review` 或 `resume` 是人工恢复，不重建过期前台计时器。
 
@@ -40,7 +42,7 @@ Assembly、AutoHiC、T2T 在执行方法确定后可请求参数。有效推荐�
 
 ## 审计证据
 
-推荐证据存于当前工作流步骤的产物树，包含已验证输入/依据快照、精确模型请求与响应、解析推荐、解析结果、完整性 manifest。冻结执行参数前，审批绑定到该持久根。
+Assembly/AutoHiC 和 T2T 单轮基线的参数证据使用 schema-3 快照/manifest/批准尝试链；基线响应显式标记模型未调用。默认 finishing 使用阶段共同的 settings、request/response、assessment/history 引用和 T2T frozen.json，审批绑定到这些引用，不使用 schema-3 参数 manifest。两者复用 ArtifactRef 完整性、共享 intent/application 审批和执行生命周期；完整布局见[运行数据契约](../architecture/reference/data-contract.md#finishing-task-evidence)。
 
 通过会话摘要或产物索引定位当前推荐；不要原地编辑已存推荐文件。哈希、身份、阶段/方法和前驱不匹配均拒绝。
 

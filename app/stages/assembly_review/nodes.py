@@ -132,6 +132,7 @@ from app.storage.artifacts import (
     record_registered_artifacts,
     recover_published_artifact,
     register_artifact_records,
+    resolve_artifact_ref,
 )
 from app.storage.assembly_candidates import (
     VerifiedExecutedCandidate,
@@ -205,7 +206,7 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
         target: Mapping[str, Any] = step.get("review_target", {}) if step else {}
         producer = workflow_step_by_id(state, str(target.get("producer_step_id")))
         if producer["stage"] == "base_polish" and comparison_ref is None:
-            raise ValueError("Base Polish handoff requires the paired alternative")
+            _validate_unexecuted_polish_retention(state, assembly.metadata, producer)
         for metadata_key, raw_candidate_ref, source in candidate_inputs:
             verified = load_executed_candidate_bundle(
                 absolute_data_dir(state),
@@ -301,6 +302,49 @@ def resolve_candidates(state: TopLevelState) -> StateUpdate:
         payload["reason"] = "no_assembly_candidates_found"
 
     return update_assembly_review_output(state, payload)
+
+
+def _validate_unexecuted_polish_retention(
+    state: TopLevelState, metadata: Mapping[str, Any], producer: Mapping[str, Any]
+) -> None:
+    """A source-only Review requires the immutable finishing retention decision."""
+    decision_ref = ArtifactRef.model_validate(metadata.get("finishing_decision_ref"))
+    decision = json.loads(
+        resolve_artifact_ref(
+            state["data_dir"], state["session_id"], decision_ref
+        ).read_text()
+    )
+    request_ref = ArtifactRef.model_validate(decision["request_ref"])
+    request = load_review_request(
+        state["data_dir"], request_ref, session_id=state["session_id"]
+    )
+    context = request["payload"]["candidate_comparison_context"]
+    if (
+        metadata.get("finishing_history_refs") != []
+        or context.get("history_refs") != []
+        or context.get("source_ref") != metadata["candidate_bundle_ref"]
+        or decision["stage"] != "base_polish"
+        or decision["workflow_step_id"] != producer["step_id"]
+        or decision["gate_id"] != "finishing_recommendation"
+        or decision["request_hash"] != request_ref.sha256
+        or request["workflow_step_id"] != producer["step_id"]
+        or request["stage"] != "base_polish"
+        or request["gate_id"] != "finishing_recommendation"
+        or decision["decision"]["decided_by"] != "human"
+    ):
+        raise ValueError("Base Polish source retention evidence mismatch")
+    action = decision["decision"]["decision"]
+    if action == "follow_recommendation":
+        ref = ArtifactRef.model_validate(context["recommendation_ref"])
+        response = json.loads(
+            resolve_artifact_ref(
+                state["data_dir"], state["session_id"], ref
+            ).read_text()
+        )
+        if response["proposal"]["action"] != "keep_source":
+            raise ValueError("Base Polish source retention was not approved")
+    elif action != "keep_prior_assembly":
+        raise ValueError("Base Polish handoff requires the paired alternative")
 
 
 def _validate_review_target_handoff(state: TopLevelState) -> None:

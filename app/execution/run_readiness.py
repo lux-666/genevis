@@ -97,6 +97,17 @@ def effective_method_closure(
                 and run_config.assembly_dedup.automatic_purge_approved
             ):
                 continue
+            if method_name in {
+                "gapcloser.eval.quast",
+                "base_polish.eval.quast",
+                "t2t.eval.quast",
+            }:
+                config = getattr(run_config, stage)
+                if (
+                    config is not None
+                    and config.recommendation_mode == "deterministic_baseline"
+                ):
+                    continue
             add(stage, method_name)
         if stage == "read_qc":
             length_filter = (
@@ -128,6 +139,12 @@ def run_requires_llm(run_config: RunConfig) -> bool:
     ):
         return True
 
+    for stage in ("gapcloser", "base_polish"):
+        if stage in run_config.requested_stage_names():
+            config = getattr(run_config, stage)
+            if config is None or config.recommendation_mode == "advisor":
+                return True
+
     required_stages = _LLM_REQUIRED_STAGES.intersection(
         run_config.requested_stage_names()
     )
@@ -149,6 +166,12 @@ def run_requires_llm(run_config: RunConfig) -> bool:
         parameter_advisor = hic.parameter_advisor if hic is not None else "advisor"
         if parameter_advisor == "deterministic_baseline":
             required_stages = set(required_stages) - {"hic_scaffolding"}
+    if (
+        "t2t" in required_stages
+        and run_config.t2t is not None
+        and run_config.t2t.recommendation_mode == "deterministic_baseline"
+    ):
+        required_stages = set(required_stages) - {"t2t"}
     return bool(required_stages)
 
 

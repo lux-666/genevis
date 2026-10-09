@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
         ("review", "assembly_review", ["assembly_review"]),
         ("hic", "hic", ["hic_scaffolding"]),
         ("gapcloser", "gapcloser", ["gapcloser"]),
+        ("dedup", "dedup", ["assembly_dedup"]),
         ("t2t", "t2t", ["t2t"]),
         ("base-polish", "base_polish", ["base_polish", "assembly_review"]),
         (
@@ -240,8 +241,14 @@ def test_complete_examples_and_tool_closure() -> None:
     assert manifest.assets[0].platform == "pacbio_hifi"
     assert manifest.assets[1].paired_reads
     assert config.review_policy.max_blocked_seconds == -1
-    assert effective_method_closure(config)["base_polish"] == ("base_polish.racon",)
-    assert effective_method_closure(config)["gapcloser"] == ("gapcloser.tgs_gapcloser",)
+    assert effective_method_closure(config)["base_polish"] == (
+        "base_polish.eval.quast",
+        "base_polish.racon",
+    )
+    assert effective_method_closure(config)["gapcloser"] == (
+        "gapcloser.eval.quast",
+        "gapcloser.tgs_gapcloser",
+    )
     assert (
         workflow_steps_from_run_config(config)[-1]["review_target"]["producer_step_id"]
         == "step-009-base_polish"

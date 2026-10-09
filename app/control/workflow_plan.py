@@ -81,6 +81,15 @@ def _selected_method_names_for_request(
         and request.allow_local_execution
     ):
         return ("assembly_dedup.purge_dups",)
+    if request.stage in {"gapcloser", "t2t", "base_polish"}:
+        config = getattr(run_config, request.stage)
+        if not request.allow_local_execution or (
+            config is not None
+            and config.recommendation_mode == "deterministic_baseline"
+        ):
+            return tuple(
+                name for name in stage_methods if name != f"{request.stage}.eval.quast"
+            )
     if request.stage == "read_qc":
         length_filter = (
             run_config.read_qc.length_filter if run_config.read_qc is not None else None

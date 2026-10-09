@@ -145,7 +145,7 @@ gzip 输入的冻结脚本调用两个命令，因此所选机器方法映射必
 
 兼容性按所选读段类型和上游证据验证。推荐载荷显式标记上游证据状态；生产者未完成的字段为 null，不得当观测。路线/方法决策属于阶段，遵循冻结[推荐策略](recommendation-policy.md)。顾问模式从输入兼容的冻结候选中推荐，分别持久化请求、响应、解析推荐，并由人工确认绑定 `assembly_selection`。确定性基线跳过模型；路线/平台证据不足以确定兼容默认方法时拒绝。响应发布后崩溃按请求哈希回放，不再调用模型。
 
-Assembly、AutoHiC、T2T 参数推荐均在方法选择后；顾问模式在冻结尝试前通过参数审批。Assembly/AutoHiC 的显式确定性参数基线生成空 L2，并以不可变策略决策批准初始尝试，不打开人工参数门；T2T 无此基线。动态 Assembly 从冻结依赖快照解析并通过阶段预检，不读取实时环境。精确事实位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。每次推荐为尝试局部稀疏映射，重试不继承省略值，也不能用模型输出绕过审批。`assembly.threads` 是方法无关 RunConfig 执行资源，冻结到所选方法 L0。Hifiasm/Hifiasm-ONT 的已提供 `species_facts.ploidy` 作为 L1 绑定 `--n-hap`；缺失时保留目录二倍体默认 `2`。
+Assembly、AutoHiC 参数推荐在方法选择后，顾问在冻结尝试前通过 parameter_approval。两者及 T2T 的显式确定性参数基线生成空 L2，以不可变策略决策批准单轮，不打开人工参数门。T2T 基线要求提供基序，不调用模型；默认 advisor 使用 finishing 完整参数提案与结果反馈，进入 finishing_recommendation。动态 Assembly 从冻结依赖快照解析并通过阶段预检，不读取实时环境。精确事实位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。每次推荐为尝试局部稀疏映射，重试不继承省略值，也不能用模型输出绕过审批。`assembly.threads` 是方法无关 RunConfig 执行资源，冻结到所选方法 L0。Hifiasm/Hifiasm-ONT 的已提供 `species_facts.ploidy` 作为 L1 绑定 `--n-hap`；缺失时保留目录二倍体默认 `2`。
 
 缺必需参数、读段不兼容、执行失败、缺预期输出均为明确失败，不是规划成功。未授权本地执行不是成功 Assembly 规划：除非另有明确定义复用路径能交付已物化且契约有效候选，否则无交付失败，所选方法 `skipped`。仅 planned candidate 包不能支撑 `stage_completed`。
 
@@ -238,15 +238,25 @@ BUSCO 重复、大小膨胀、异常深度、证据缺失/不一致等信号阻�
 
 冻结就绪验证输入、本地工具、模型、声明输出位置，不预检尚未生成文件。进程成功且首次新发布前，收集要求所有冻结 `expected_outputs`（FASTA、`.hic`、`.assembly`、HTML）为文件，或已有匹配尝试的索引发布可恢复。缺任一且无恢复记录，则以 `failure_kind: collect` 终止，无评审候选、采纳门、评审包或产品发布。发布非事务：后续存储失败可留下早先已索引孤儿；孤儿无 `attempt_succeeded`、`artifact_registered` 语义事件，不开门、不自动重试或回滚。
 
+## Finishing 顾问共同契约
+
+GapCloser、T2T、Base Polish 的新 RunConfig 默认 `recommendation_mode: advisor`，初始预检冻结对应 `<stage>.eval.quast` 与生物方法；无本地执行授权仍不得运行。每阶段对源及全部已完成候选做同设置 QUAST，将原生校验/端部支持/前后比对报告纳入结构化请求。run/accept/keep_source/human_review 均经 `finishing_recommendation` 人工门；已完成候选按 attempt_N 精确选择，非法响应、跨阶段参数、重复配置、越预算与不可用候选禁止执行。max_attempts（默认 3）存入不可变设置引用，checkpoint 中的副本不能扩预算。
+
+每次尝试从同一已验证源组装开始；attempts/NNN 隔离工作及产物，设置/请求/响应/assessment 都落盘。批准决定、源、推荐、历史与工作流 occurrence 在生成脚本前复核，执行依赖包含批准/推荐引用。恢复复用已发布响应和共享 Runner 证据。结算只在整个循环终止时聚合一次方法处置，防止多轮 disposition 冲突。采纳早先候选时交付其主输出与比较证据。
+
+T2T 顾问目前要求 auto_patch，采纳仍需人工。源请求含端部 motif-copy 测量；反馈含扫描、过滤前每条 PAF 两端的 MAPQ/重叠/距离/尾部基序测量及全部拒绝原因。独立 alignment_observations.tsv 绑定冻结尝试、执行与 PAF，不改变补丁候选表语义；统计遍历全部行，最多 100 行示例，拒绝计数按比对端而非唯一读段计算。候选 supporting_reads 去重计数投影为 supporting_read_count，数值汇总覆盖所有行。最终报告重用所选轮次的冻结输入。Base Polish 暴露 Racon window/error/scoring 的有界参数，每候选只跑一轮。顾问必须将同批校正读段一致性视为样本内证据，不据此宣称独立 QV 或默认无限校正。
+
+`deterministic_baseline` 对 GapCloser/Base Polish 使用操作者配置单轮；对 T2T 使用冻结目录 L0、空 L2 的 schema-3 策略批准单轮，不调用阈值或基序模型。默认 finishing 有自己的[任务证据契约](data-contract.md#finishing-task-evidence)，不沿用 schema-3 参数 manifest。旧 T2T schema-3 初始 LLM 代码保留既有记录读取与受控兼容调用，新 RunConfig 不通过该路径请求模型；活动旧会话必须保留匹配检出，不迁移 checkpoint。真实工具与真实样本验收是独立门禁。
+
 ## 8. GapCloser
 
 目的：用明确分类的 PacBio HiFi 通过 TGS-GapCloser 填内部 N 缺口。首个实现仅支持无错误校正路线 `--ne --tgstype pb --minmap_arg '-x asm20'`。ONT、CLR、CycloneSEQ、未知、混合平台集合均拒绝，不重新分类；长度过滤后的含噪读段不推断为已校正读段。
 
 注册方法 `gapcloser.tgs_gapcloser` 通过现有解析器消费当前已验证候选与完整当前 HiFi 集合。验证 plain/gzip FASTA/FASTQ 并规范化为运行内 FASTA，索引输入记录保留源身份。原组装和读段不覆盖。每 occurrence 独立工具目录，因为上游工具使用固定 checkpoint 标签。
 
-RunConfig 携带有界操作者设置，没有 LLM 推荐。执行用共享 freeze/run/collect。原生 1.2.1 两项产品 `.scaff_seqs`、`.gap_fill_detail` 必需；上游 README 后缀不同，适配器遵循[已核验上游源码](https://github.com/BGI-Qingdao/TGS-GapCloser/tree/e1a7e01c6259e6651a8007e4e4c3b887bef38b19)。收集校验 scaffold 身份、片段坐标、复制源序列与 N 段，发布输入/输出缺口数和长度报告。这证明结构一致，不证明共识准确或生物学改善。无内部缺口 scaffold 必须不变；未填 N 段消费相同源 N，不能丢弃源前后缀。插入序列和重叠闭合（含无 F 段的相邻 S 段）必须在保留锚点间恰好桥接一个内部源缺口。只可修剪该缺口侧翼，并报告移除碱基。
+默认 advisor 根据源缺口、QUAST 和历次填补/校验报告推荐完整参数；显式 deterministic_baseline 使用 RunConfig 操作者设置，单轮无 LLM。执行用共享 freeze/run/collect。原生 1.2.1 两项产品 `.scaff_seqs`、`.gap_fill_detail` 必需；上游 README 后缀不同，适配器遵循[已核验上游源码](https://github.com/BGI-Qingdao/TGS-GapCloser/tree/e1a7e01c6259e6651a8007e4e4c3b887bef38b19)。收集校验 scaffold 身份、片段坐标、复制源序列与 N 段，发布输入/输出缺口数和长度报告。这证明结构一致，不证明共识准确或生物学改善。无内部缺口 scaffold 必须不变；未填 N 段消费相同源 N，不能丢弃源前后缀。插入序列和重叠闭合（含无 F 段的相邻 S 段）必须在保留锚点间恰好桥接一个内部源缺口。只可修剪该缺口侧翼，并报告移除碱基。
 
-独立纯人工门提供 `accept_candidate`、`keep_prior_assembly`、`stop_human_review`，超时不自动采纳。只有验证后的采纳替换中央资源；保留则 reused 交付。缺本地授权拒绝。组装无内部缺口时复用当前候选，不运行工具，方法记 skipped。执行后填零缺口是合法报告结果，不代表改善。真实工具验收与 fixture 集成分开报告。
+Advisor 使用 finishing_recommendation 人工门批准新 run、选择任意已完成候选或保留源。单轮基线使用 gapcloser_adoption 人工门，提供 accept_candidate、keep_prior_assembly、stop_human_review，超时不自动采纳。只有验证后的采纳替换中央资源；保留则 reused 交付。缺本地授权拒绝。组装无内部缺口时复用当前候选，不运行工具，方法记 skipped。执行后填零缺口是合法报告结果，不代表改善。真实工具验收与 fixture 集成分开报告。
 
 接受的位置/交接设计：
 
@@ -272,19 +282,19 @@ T2T 消费到达该冻结 occurrence 时的中央组装，不直接消费 `hic_r
 
 - `t2t.alignment.minimap2`。
 
-阈值推荐或扫描前，从规范已提供物种事实的 schema-3 快照解析一个端粒基序。已提供 `species_facts.telomere_motif` 直接验证并经证据链记录；否则持久 LLM 边界从提供学名解析。缺身份、模型未解析、v3 前 motif/config checkpoint 字段均拒绝，不能成为基序证据，也不假定常见重复。验证后的值、来源、引用绑定到 schema-3 阈值快照，是后续扫描/补丁唯一可用基序证据。随后取得人工批准的稀疏阈值推荐，再扫描或运行 minimap2。读段在一个冻结尝试内按平台预设分组，生成一份合并不可变 PAF。严格应用批准支持阈值，不增隐藏下限或接合点分布否决。记录来源归属的端粒扫描、尝试/执行绑定候选证据、接合点感知补丁、精修报告。
+阈值推荐或扫描前，从规范已提供物种事实的 schema-3 快照解析一个端粒基序。已提供 `species_facts.telomere_motif` 直接验证并经证据链记录；否则持久 LLM 边界从提供学名解析。缺身份、模型未解析、v3 前 motif/config checkpoint 字段均拒绝，不能成为基序证据，也不假定常见重复。Advisor 将验证后的基序与来源绑定到 finishing 设置及每轮 frozen.json，以 finishing_recommendation 人工批准完整阈值。Deterministic baseline 仅接受已提供基序，绑定 schema-3 快照，策略批准空 L2，解析目录 L0 后扫描或运行 minimap2；未提供基序明确失败。读段在一个冻结尝试内按平台预设分组，生成一份合并不可变 PAF。严格应用批准支持阈值，不增隐藏下限或接合点分布否决。记录来源归属的端粒扫描、尝试/执行绑定候选证据、接合点感知补丁、精修报告。
 
-`auto_patch` 先创建验证候选，再开独立人工采纳门；采纳前不改变共享 `assembly`。反链尾部转为目标正向；非零接合距离先修剪目标再延长。歧义、嵌合、重叠或冲突证据不静默物化，源 FASTA 永不覆盖。
+`auto_patch` 先创建验证候选；advisor 经 finishing_recommendation 比较/选择，单轮基线经 t2t_review 人工采纳。采纳前不改变共享 assembly。反链尾部转为目标正向；非零接合距离先修剪目标再延长。歧义、嵌合、重叠或冲突证据不静默物化，源 FASTA 永不覆盖。
 
 采纳改变组装时，T2T 验证当前候选与精确补丁主产物，发布绑定不可变采纳决策的派生 executed candidate 后替换资源，保留前驱候选和主输出谱系。保留旧组装则字节/关系不变，在当前 T2T occurrence 下重新发布引用。
 
 ## 10. Base Polish
 
-使用一轮仅 HiFi 的 minimap2/Racon 校正当前已验证组装的替换和小 indel。固定方法 `base_polish.racon`，完整当前集合必须明确为 `pacbio_hifi`。规范化以唯一 ID 保留每条读段。Racon 使用 `--include-unpolished --no-trimming`，scaffold ID 必须不变。这是操作者选择的校正尝试，不声称必能改善高质量 HiFi 组装。
+使用一轮仅 HiFi 的 minimap2/Racon 校正当前已验证组装的替换和小 indel。固定方法 `base_polish.racon`，完整当前集合必须明确为 `pacbio_hifi`。规范化以唯一 ID 保留每条读段。Racon 使用 `--include-unpolished --no-trimming`，scaffold ID 必须不变。Advisor 推荐 window/error/scoring 配置，每个候选从相同源开始执行一轮；deterministic_baseline 使用操作者参数单轮。两者都不声称必能改善高质量 HiFi 组装。
 
 采纳前，同一读段以相同 minimap2 `map-hifi -c --eqx --secondary=no` 设置映射源和候选。两个 PAF、候选 FASTA、工具版本、源绑定比较报告必需。报告比对读段数、映射碱基、碱基一致性、目标覆盖、scaffold/缺口/长度变化，并明确独立 QV 缺失。PAF match/block 计数须与 eqx CIGAR 一致，计入 minimap2 从这些统计排除的歧义碱基 `nn`。它是样本内比对一致性，不是无偏错误估计；一致性或 N50 更高都不自动批准。缺失/畸形产物在门禁前收集失败。
 
-持久人工门允许 `accept_candidate`、`keep_prior_assembly`、`stop_human_review`。采纳才改变资源；保留源发布 reused 交付。两个替代项与比较都是不可变产物。交接保留另一个候选，使后续 Review 即使在保留源之后，也用该 occurrence 相同 QUAST 设置/BUSCO lineage 评估两者；最终 Review 可选任一个。缺评估信号显式保留，不是质量通过。QUAST 参考相关错误、BUSCO 完整/单拷贝/重复/片段/缺失计数补充连续性；没有独立参考/读段真值则共识 QV 未测。
+Advisor 使用 finishing_recommendation，单轮基线使用 base_polish_adoption；两者支持人工采纳、保留源、停止，advisor 还可批准新配置或选择早先候选。采纳才改变资源；保留源发布 reused 交付。两个替代项与比较都是不可变产物。交接保留另一个候选，使后续 Review 即使在保留源之后，也用该 occurrence 相同 QUAST 设置/BUSCO lineage 评估两者；最终 Review 可选任一个。缺评估信号显式保留，不是质量通过。QUAST 参考相关错误、BUSCO 完整/单拷贝/重复/片段/缺失计数补充连续性；没有独立参考/读段真值则共识 QV 未测。
 
 接受的位置/交接设计：
 
@@ -295,6 +305,6 @@ T2T 消费到达该冻结 occurrence 时的中央组装，不直接消费 `hic_r
 
 服务器验收路线显式授权全部请求 occurrence。验收区分真实进程证据、声明方法 skip、验证阶段交付、质量评估、人工决策。只有 FASTA 或完成会话不足以证明全路线执行。收集证据必须标明完整索引输出；早先成功尝试不能抹除方法最终失败/skip。
 
-同一只读诊断支持明确范围 `complete`（默认）、`contig`、`review`、`hic`、`gapcloser`、`t2t`、`base-polish`、`finishing`。各范围要求精确 occurrence 序列；切片不报告为完整路线覆盖。独立切片经 Inventory 注册源 FASTA，验证首个工具消费该候选主输出。终态 Review 要求每个候选均有 QUAST/BUSCO 执行与收集指标。Base Polish + Review 结束的范围还要求相同评估设置下不可变源/抛光对。无 Review 范围明确无最终 QUAST/BUSCO 质量评估。合法 skip 仍使工具执行覆盖不完整。
+同一只读诊断支持明确范围 `complete`（默认）、`contig`、`review`、`hic`、`dedup`、`gapcloser`、`t2t`、`base-polish`、`finishing`。各范围要求精确 occurrence 序列；切片不报告为完整路线覆盖。独立切片经 Inventory 注册源 FASTA，验证首个工具消费该候选主输出。终态 Review 要求每个候选均有 QUAST/BUSCO 执行与收集指标。Base Polish 执行后进入 Review 的范围要求同设置不可变源/所选抛光对；advisor 未执行便保留源时，仅评估源并标记 not_executed_source_retained，不算 Racon 执行覆盖。无 Review 范围明确无最终 QUAST/BUSCO 质量评估。合法 skip 仍使工具执行覆盖不完整。
 
 单阶段 Hi-C 范围可比较执行后采纳门的只读审计与分离恢复后完成审计，绑定同一会话、冻结输入和请求，要求 attempt-start 事件、执行证据、收集输出哈希不变。它是执行回放检查，不是生物学验收，也不防御操作者故意伪造基线。参数重试是新执行，不能通过不重跑断言。

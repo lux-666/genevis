@@ -480,7 +480,10 @@ def test_frozen_closure_and_review_bind_to_gapcloser() -> None:
     config = RunConfig.model_validate(
         {
             "requested_stages": [{"stage": "gapcloser", "allow_local_execution": True}],
-            "gapcloser": {"threads": 3},
+            "gapcloser": {
+                "threads": 3,
+                "recommendation_mode": "deterministic_baseline",
+            },
         }
     )
     assert effective_method_closure(config) == {

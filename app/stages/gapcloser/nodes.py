@@ -36,6 +36,8 @@ from app.schemas.execution import InputDependency
 from app.schemas.run_config import GapCloserRunConfig
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.base import append_route_trace, stage_work_dir
+from app.stages.finishing.advisor import loop, work_parts
+from app.stages.finishing.review import approved_proposal
 from app.stages.gapcloser.state import read_gapcloser_stage_output as output
 from app.stages.gapcloser.state import update_gapcloser_stage_output as update
 from app.stages.gapcloser.validation import validate_gap_outputs
@@ -60,6 +62,8 @@ METHOD = "gapcloser.tgs_gapcloser"
 
 def method_outcome(state: TopLevelState) -> MethodOutcome | None:
     cursor = output(state)
+    if loop(state, "gapcloser"):
+        return None
     if cursor.get("validation_ref"):
         refs = tuple(
             ArtifactRef.model_validate(dict(cursor)[key])
@@ -169,6 +173,8 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
     if cursor.get("status") != "ready":
         return {}
     try:
+        if loop(state, "gapcloser"):
+            approved_proposal(state, "gapcloser")
         candidate = source_candidate(state)
         members = _hifi_members(state)
         parameters = GapCloserRunConfig.model_validate(
@@ -209,8 +215,22 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
                         state, [member.source_asset_id], [member.path]
                     )
                 )
+        if loop(state, "gapcloser"):
+            for key in ("decision_ref", "recommendation_ref", "config_ref"):
+                ref = ArtifactRef.model_validate(loop(state, "gapcloser")[key])
+                dependencies.append(
+                    artifact_input_dependency(
+                        state,
+                        ref,
+                        resolve_artifact_ref(
+                            state["data_dir"], state["session_id"], ref
+                        ),
+                    )
+                )
         verify_input_dependencies(state, dependencies)
-        work = stage_work_dir(state, "gapcloser", "tgs_gapcloser")
+        work = stage_work_dir(
+            state, "gapcloser", *work_parts(state, "gapcloser"), "tgs_gapcloser"
+        )
         work.mkdir(parents=True, exist_ok=True)
         normalized = work / "hifi.fasta"
         with normalized.open("w", encoding="ascii") as handle:
@@ -306,7 +326,10 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
             encoding="utf-8",
         )
         attempt = build_frozen_attempt(
-            attempt_id=f"{state['session_id']}-{current_workflow_step_id(state)}-tgs",
+            attempt_id=(
+                f"{state['session_id']}-{current_workflow_step_id(state)}-tgs-"
+                f"{loop(state, 'gapcloser').get('attempt', 0)}"
+            ),
             session_id=state["session_id"],
             stage="gapcloser",
             method_name=METHOD,
@@ -504,6 +527,16 @@ def deliver_candidate(
 
 
 def finish_no_gaps(state: TopLevelState) -> StateUpdate:
+    from app.execution.method_outcomes import method_is_selected
+
+    if method_is_selected(state, "gapcloser.eval.quast"):
+        settle_method_outcomes(
+            state,
+            stage="gapcloser",
+            outcomes=MethodOutcome(
+                "gapcloser.eval.quast", "skipped", reason="no_internal_N_gaps"
+            ),
+        )
     settle_method_outcomes(state, stage="gapcloser", outcomes=method_outcome(state))
     return {
         **deliver_candidate(state, source_candidate(state), materialized=False),

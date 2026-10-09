@@ -44,7 +44,7 @@ intake -> planning -> ready_to_confirm -> frozen
 
 Assembly Review 是推荐，不是完成条件。默认 Assembly 推荐可以追加 `assembly_dedup -> assembly_review`。规范的完整基因组/T2T occurrence 序列由[阶段契约](../reference/stage-contracts.md)拥有，并由 `app.workflow.recommended_workflow_template` 提供给规划器；本页不维护第二份字面数组。
 
-最终 Review 是同一可复用阶段的第二次 occurrence。冻结将它绑定到最近的组装交接生产者 Base Polish；即使最初保留源组装，也评估源组装和抛光候选这对输入。操作者可在 occurrence 列表中删除、移动或重复 Review 及其他阶段。含 T2T 且之后没有 Review 的意图或已确认 RunConfig 仍合法；推荐不能变为校验策略。
+最终 Review 是同一可复用阶段的第二次 occurrence。冻结将它绑定到最近的组装交接生产者 Base Polish；执行过 Base Polish 后，即使保留源组装，也评估源组装和所选抛光候选这对输入；若顾问在执行前保留源，则只评估源，验收报告标记 `not_executed_source_retained`，不计为 Racon 执行覆盖。操作者可在 occurrence 列表中删除、移动或重复 Review 及其他阶段。含 T2T 且之后没有 Review 的意图或已确认 RunConfig 仍合法；推荐不能变为校验策略。
 
 `selected_stage_occurrences` 是唯一可编辑草稿序列。重复阶段仍是独立选择，各自具有本地进程授权。方法身份和参数不是用户编写或交互采集的草稿字段。TUI 仅编辑 occurrence 顺序、本地执行授权和确认。确认通过结构化运行共用的规范 occurrence/冻结契约编译草稿；缺失必需事实时在边界拒绝，不转为参数询问。需要上游证据的运行时推荐继续延迟。规划模型失败或返回非法草稿时停止本次规划，持久草稿仍可恢复；TUI 不自行编造确定性备用阶段计划。
 

@@ -95,16 +95,32 @@ class RunConfigSharedParameters(BaseModel):
     species_facts: SpeciesFacts | None = None
 
 
-class BasePolishRunConfig(BaseModel):
-    """One operator-owned HiFi Racon round; no automatic quality adoption."""
+class FinishingAdvisorConfig(BaseModel):
+    """Bounded biological proposals; every action requires human approval."""
+
+    model_config = ConfigDict(extra="forbid")
+    recommendation_mode: RecommendationMode = "advisor"
+    recommendation_output_method: Literal[
+        "prompt_json", "json_schema", "function_calling"
+    ] = "json_schema"
+    max_attempts: int = Field(default=3, ge=0, le=10)
+
+
+class BasePolishRunConfig(FinishingAdvisorConfig):
+    """HiFi Racon resources and explicit baseline settings."""
 
     model_config = ConfigDict(extra="forbid")
 
     threads: int = Field(default=16, ge=1, le=1024)
+    window_length: int = Field(default=500, ge=1, le=10000)
+    error_threshold: float = Field(default=0.3, gt=0, le=1)
+    match: int = Field(default=3, ge=1, le=20)
+    mismatch: int = Field(default=-5, ge=-20, le=-1)
+    gap: int = Field(default=-4, ge=-20, le=-1)
 
 
-class GapCloserRunConfig(BaseModel):
-    """Operator-owned settings for the HiFi-only TGS-GapCloser route."""
+class GapCloserRunConfig(FinishingAdvisorConfig):
+    """HiFi TGS-GapCloser resources and explicit baseline settings."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -131,7 +147,7 @@ class T2TReadInput(BaseModel):
         return normalized
 
 
-class T2TRunConfig(BaseModel):
+class T2TRunConfig(FinishingAdvisorConfig):
     """Optional finishing controls for the top-level T2T stage."""
 
     model_config = ConfigDict(extra="forbid")

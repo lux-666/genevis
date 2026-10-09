@@ -39,6 +39,8 @@ from app.stages.base import append_route_trace, stage_work_dir
 from app.stages.base_polish.state import read_base_polish_stage_output as output
 from app.stages.base_polish.state import update_base_polish_stage_output as update
 from app.stages.base_polish.validation import compare_outputs, load_comparison
+from app.stages.finishing.advisor import loop, work_parts
+from app.stages.finishing.review import approved_proposal
 from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
@@ -61,6 +63,8 @@ METHOD = "base_polish.racon"
 
 def method_outcome(state: TopLevelState) -> MethodOutcome | None:
     cursor = output(state)
+    if loop(state, "base_polish"):
+        return None
     if cursor.get("comparison_ref"):
         refs = tuple(
             ArtifactRef.model_validate(dict(cursor)[key])
@@ -166,6 +170,8 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
     if cursor.get("status") != "ready":
         return {}
     try:
+        if loop(state, "base_polish"):
+            approved_proposal(state, "base_polish")
         candidate = source_candidate(state)
         members = _hifi_members(state)
         parameters = BasePolishRunConfig.model_validate(
@@ -206,8 +212,22 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
                         state, [member.source_asset_id], [member.path]
                     )
                 )
+        if loop(state, "base_polish"):
+            for key in ("decision_ref", "recommendation_ref", "config_ref"):
+                ref = ArtifactRef.model_validate(loop(state, "base_polish")[key])
+                dependencies.append(
+                    artifact_input_dependency(
+                        state,
+                        ref,
+                        resolve_artifact_ref(
+                            state["data_dir"], state["session_id"], ref
+                        ),
+                    )
+                )
         verify_input_dependencies(state, dependencies)
-        work = stage_work_dir(state, "base_polish", "racon")
+        work = stage_work_dir(
+            state, "base_polish", *work_parts(state, "base_polish"), "racon"
+        )
         work.mkdir(parents=True, exist_ok=True)
         normalized = work / "hifi.fasta"
         with normalized.open("w", encoding="ascii") as handle:
@@ -278,6 +298,10 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
                     "minimap2 -x map-hifi -c --eqx --secondary=no "
                     f"-t {parameters.threads} source.fasta reads.fasta > before.paf",
                     f"racon -u --no-trimming -t {parameters.threads} "
+                    f"-w {parameters.window_length} "
+                    f"-e {parameters.error_threshold} "
+                    f"-m {parameters.match} -x {parameters.mismatch} "
+                    f"-g {parameters.gap} "
                     "reads.fasta before.paf source.fasta > candidate.fasta",
                     "minimap2 -x map-hifi -c --eqx --secondary=no "
                     f"-t {parameters.threads} candidate.fasta reads.fasta > after.paf",
@@ -287,7 +311,10 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
             encoding="utf-8",
         )
         attempt = build_frozen_attempt(
-            attempt_id=f"{state['session_id']}-{current_workflow_step_id(state)}-racon",
+            attempt_id=(
+                f"{state['session_id']}-{current_workflow_step_id(state)}-racon-"
+                f"{loop(state, 'base_polish').get('attempt', 0)}"
+            ),
             session_id=state["session_id"],
             stage="base_polish",
             method_name=METHOD,

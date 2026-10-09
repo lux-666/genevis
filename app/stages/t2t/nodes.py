@@ -59,6 +59,7 @@ from app.review.persistence import (
     persist_review_request,
 )
 from app.schemas.artifacts import (
+    T2T_ALIGNMENT_OBSERVATIONS,
     T2T_ASSEMBLY_TELOMERE_SCAN,
     T2T_EXTENSION_CANDIDATES,
     T2T_FINISHING_REPORT,
@@ -145,6 +146,8 @@ def t2t_alignment_method_outcome(state: TopLevelState) -> MethodOutcome | None:
     """Project the final minimap2 disposition from durable T2T evidence."""
 
     output = read_t2t_stage_output(state)
+    if output.get("finishing"):
+        return None
     status = str(output.get("status") or "")
     paf_ref = output.get("alignment_paf_artifact_ref")
     candidates_ref = output.get("telomere_extension_candidates_artifact_ref")
@@ -713,11 +716,13 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
-    parameter_attempt = current_parameter_attempt(
-        out, method_id=T2T_ALIGNMENT_METHOD, label="T2T minimap2"
-    )
-    if parameter_attempt.frozen_parameters_ref is None:
-        return _fail(state, "t2t minimap2 has no frozen parameter evidence")
+    parameter_attempt = None
+    if not out.get("finishing"):
+        parameter_attempt = current_parameter_attempt(
+            out, method_id=T2T_ALIGNMENT_METHOD, label="T2T minimap2"
+        )
+        if parameter_attempt.frozen_parameters_ref is None:
+            return _fail(state, "t2t minimap2 has no frozen parameter evidence")
     try:
         input_dependencies = [
             _assembly_input_dependency(state, execution_inputs.input_assembly_ref)
@@ -732,6 +737,21 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
             input_dependencies.append(
                 artifact_input_dependency(state, reads_artifact_ref, reads_ref)
             )
+        if out.get("finishing"):
+            frozen_parameters_ref = ArtifactRef.model_validate(
+                out["finishing"]["frozen_ref"]
+            )
+            input_dependencies.append(
+                artifact_input_dependency(
+                    state,
+                    frozen_parameters_ref,
+                    resolve_artifact_ref(
+                        absolute_data_dir(state),
+                        state["session_id"],
+                        frozen_parameters_ref,
+                    ),
+                )
+            )
         verify_input_dependencies(state, input_dependencies)
     except (OSError, ValueError, DataLayoutError) as exc:
         return _fail(state, f"t2t alignment input dependency is invalid: {exc}")
@@ -739,7 +759,10 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
         *input_dependencies
     ]
     attempt = build_frozen_attempt(
-        attempt_id=f"{state['session_id']}-t2t-minimap2",
+        attempt_id=(
+            f"{state['session_id']}-{current_workflow_step_id(state)}-t2t-"
+            f"{(out.get('finishing') or {}).get('attempt', 0)}"
+        ),
         session_id=state["session_id"],
         stage="t2t",
         method_name=T2T_ALIGNMENT_METHOD,
@@ -750,13 +773,21 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
         env_spec=env_spec,
         input_dependencies=frozen_input_dependencies,
         metadata={
-            "parameter_attempt_id": parameter_attempt.attempt_id,
+            "parameter_attempt_id": parameter_attempt.attempt_id
+            if parameter_attempt
+            else (out.get("finishing") or {})["attempt"],
             "paf_path": str(paf_path),
             "assembly_ref": execution_inputs.input_assembly_ref,
             "reads_refs": alignment_reads_refs,
         },
     )
-    return freeze_method_attempts(state, T2T_ALIGNMENT_LIFECYCLE, [attempt])
+    from app.stages.finishing.workflow import t2t_lifecycle
+
+    return freeze_method_attempts(
+        state,
+        t2t_lifecycle() if out.get("finishing") else T2T_ALIGNMENT_LIFECYCLE,
+        [attempt],
+    )
 
 
 def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
@@ -766,9 +797,10 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
         return {}
     if out.get("status") == "candidates_built":
         return {}
+    from app.stages.finishing.workflow import t2t_lifecycle
+
     executions = load_method_executions(
-        state,
-        T2T_ALIGNMENT_LIFECYCLE,
+        state, t2t_lifecycle() if out.get("finishing") else T2T_ALIGNMENT_LIFECYCLE
     )
     if len(executions) != 1:
         raise DataLayoutError("t2t minimap2 requires exactly one execution attempt")
@@ -787,15 +819,19 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
             "execution_ref": execution.execution_ref.model_dump(mode="json"),
         },
     )
-    parameter_attempt = current_parameter_attempt(
-        out, method_id=T2T_ALIGNMENT_METHOD, label="T2T minimap2"
-    )
-    if parameter_attempt.frozen_attempt_ref is None:
-        raise DataLayoutError(
-            "t2t minimap2 parameter attempt has no frozen attempt ref"
+    if out.get("finishing"):
+        frozen_attempt_ref = ArtifactRef.model_validate(
+            out["execution_attempts"][0]["frozen_attempt_ref"]
         )
+    else:
+        parameter_attempt = current_parameter_attempt(
+            out, method_id=T2T_ALIGNMENT_METHOD, label="T2T minimap2"
+        )
+        if parameter_attempt.frozen_attempt_ref is None:
+            raise DataLayoutError("T2T parameter attempt has no frozen attempt ref")
+        frozen_attempt_ref = parameter_attempt.frozen_attempt_ref
     frozen_ref_json = json.dumps(
-        parameter_attempt.frozen_attempt_ref.model_dump(mode="json"),
+        frozen_attempt_ref.model_dump(mode="json"),
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -825,6 +861,7 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
             if execution_inputs.chromosome_names
             else None
         )
+        observations: list[dict[str, str]] = []
         raw = _candidate_rows(
             paf_artifact.path,
             assembly_ends,
@@ -834,8 +871,9 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
             execution_inputs.resolved_telomere_motif,
             allowed,
             execution_inputs.mode,
+            observations=observations,
         )
-        for row in raw:
+        for row in [*raw, *observations]:
             row["frozen_attempt_ref"] = frozen_ref_json
             row["execution_ref"] = execution_ref_json
             row["alignment_paf_ref"] = json.dumps(
@@ -856,9 +894,22 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_EXTENSION_CANDIDATES,
         metadata={
-            "frozen_attempt_ref": parameter_attempt.frozen_attempt_ref.model_dump(
-                mode="json"
-            ),
+            "frozen_attempt_ref": frozen_attempt_ref.model_dump(mode="json"),
+            "execution_ref": execution.execution_ref.model_dump(mode="json"),
+            "alignment_paf_ref": paf_artifact.ref.model_dump(mode="json"),
+        },
+    )
+    observations_source = Path(execution_inputs.work_dir) / "alignment_observations.tsv"
+    _write_tsv(observations_source, observations, _ALIGNMENT_OBSERVATION_FIELDS)
+    observations_artifact = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        observations_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_ALIGNMENT_OBSERVATIONS,
+        metadata={
+            "frozen_attempt_ref": frozen_attempt_ref.model_dump(mode="json"),
             "execution_ref": execution.execution_ref.model_dump(mode="json"),
             "alignment_paf_ref": paf_artifact.ref.model_dump(mode="json"),
         },
@@ -869,6 +920,7 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
         artifacts=[
             paf_artifact.ref.model_dump(mode="json"),
             candidate_artifact.ref.model_dump(mode="json"),
+            observations_artifact.ref.model_dump(mode="json"),
         ],
     )
     selected = sum(row["decision"] == "auto_patch" for row in raw)
@@ -884,6 +936,7 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
                 candidate_artifact.ref.model_dump(mode="json")
             ),
             "candidate_count": len(raw),
+            "alignment_observations_ref": str(observations_artifact.path),
             "selected_patch_count": selected,
             "proposed_candidate_count": proposed,
         },
@@ -976,7 +1029,7 @@ def write_t2t_report(state: TopLevelState) -> StateUpdate:
         return {}
     report_out = out
     execution_inputs = None
-    if out.get("parameter_attempts"):
+    if out.get("parameter_attempts") or out.get("finishing"):
         try:
             execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
         except ValueError as exc:
@@ -1029,7 +1082,9 @@ def write_t2t_report(state: TopLevelState) -> StateUpdate:
     ).path
     final_status = _final_status(report_out, summary)
     evidence_phase: Literal["pre_review", "final"] = (
-        "pre_review" if final_status == "blocked_human" else "final"
+        "pre_review"
+        if final_status == "blocked_human" or out.get("finishing")
+        else "final"
     )
     final_assembly = out.get("output_assembly_ref") or report_out["input_assembly_ref"]
     report_path, bundle_path, artifacts = _publish_t2t_finishing_evidence(
@@ -1076,7 +1131,7 @@ def commit_t2t(state: TopLevelState) -> StateUpdate:
     """Advance with the patched or original assembly reference."""
     out = _output(state)
     input_assembly_ref = out.get("input_assembly_ref")
-    if out.get("parameter_attempts"):
+    if out.get("parameter_attempts") or out.get("finishing"):
         try:
             input_assembly_ref = load_t2t_frozen_execution_inputs(
                 state, output=out
@@ -2581,29 +2636,20 @@ def _candidate_rows(
     motif: str,
     allowed_sequences: set[str] | None,
     mode: str,
+    *,
+    observations: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     grouped: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
     for paf in _iter_paf(paf_path):
         signal = read_signals.get(paf.query)
         sequence = read_sequences.get(paf.query)
         target = assembly_ends.get(paf.target)
-        if (
-            not signal
-            or not sequence
-            or not target
-            or (allowed_sequences and paf.target not in allowed_sequences)
-        ):
-            continue
         for read_end in ("left", "right"):
-            if signal.get(f"{read_end}_has_signal") != "true":
-                continue
             target_end = (
                 read_end
                 if paf.strand == "+"
                 else ("right" if read_end == "left" else "left")
             )
-            if target.get(f"{target_end}_has_signal") == "true":
-                continue
             target_distance = (
                 paf.target_start
                 if target_end == "left"
@@ -2614,15 +2660,10 @@ def _candidate_rows(
                 if read_end == "left"
                 else paf.query_length - paf.query_end
             )
-            if (
-                paf.mapq < thresholds["min_mapq"]
-                or paf.overlap_bp < thresholds["min_overlap_bp"]
-                or target_distance > thresholds["max_target_terminal_distance_bp"]
-                or tail_length <= 0
-            ):
-                continue
             oriented_sequence = (
-                sequence if paf.strand == "+" else _reverse_complement(sequence)
+                (sequence or "")
+                if paf.strand == "+"
+                else _reverse_complement(sequence or "")
             )
             oriented_query_start = (
                 paf.query_start
@@ -2639,8 +2680,62 @@ def _candidate_rows(
                 if target_end == "left"
                 else oriented_sequence[oriented_query_end:]
             )
-            if _max_motif_copies(tail, motif) < thresholds["min_motif_copies"]:
+            tail_motif_copies = _max_motif_copies(tail, motif)
+            reasons = [
+                reason
+                for rejected, reason in (
+                    (not signal, "missing_read_signal"),
+                    (not sequence, "missing_read_sequence"),
+                    (not target, "missing_assembly_end"),
+                    (
+                        bool(allowed_sequences and paf.target not in allowed_sequences),
+                        "target_not_selected",
+                    ),
+                    (
+                        (signal or {}).get(f"{read_end}_has_signal") != "true",
+                        "read_end_without_telomere_signal",
+                    ),
+                    (
+                        (target or {}).get(f"{target_end}_has_signal") == "true",
+                        "target_end_already_has_telomere",
+                    ),
+                    (paf.mapq < thresholds["min_mapq"], "mapq_below_threshold"),
+                    (
+                        paf.overlap_bp < thresholds["min_overlap_bp"],
+                        "overlap_below_threshold",
+                    ),
+                    (
+                        target_distance > thresholds["max_target_terminal_distance_bp"],
+                        "target_distance_above_threshold",
+                    ),
+                    (tail_length <= 0, "no_unaligned_tail"),
+                    (
+                        tail_motif_copies < thresholds["min_motif_copies"],
+                        "tail_motif_below_threshold",
+                    ),
+                )
+                if rejected
+            ]
+            if observations is not None:
+                observations.append(
+                    {
+                        "read_id": paf.query,
+                        "target": paf.target,
+                        "read_end": read_end,
+                        "target_end": target_end,
+                        "strand": paf.strand,
+                        "mapq": str(paf.mapq),
+                        "overlap_bp": str(paf.overlap_bp),
+                        "target_distance_bp": str(target_distance),
+                        "extension_length": str(tail_length),
+                        "tail_motif_copies": str(tail_motif_copies),
+                        "decision": "filtered" if reasons else "eligible_for_support",
+                        "rejection_reasons": ";".join(reasons),
+                    }
+                )
+            if reasons:
                 continue
+            assert signal is not None
             grouped[(paf.target, target_end)].append(
                 {
                     "target": paf.target,
@@ -3284,6 +3379,7 @@ def _register_artifacts(
         (out.get("reads_telomere_scan_ref"), T2T_READS_TELOMERE_SCAN),
         (out.get("telomeric_reads_ref"), T2T_TELOMERIC_READS),
         (out.get("telomere_extension_candidates_ref"), T2T_EXTENSION_CANDIDATES),
+        (out.get("alignment_observations_ref"), T2T_ALIGNMENT_OBSERVATIONS),
         (str(summary_path), T2T_STATUS_SUMMARY),
         (str(report_path), T2T_FINISHING_REPORT),
         (out.get("patched_assembly_ref"), T2T_PATCHED_ASSEMBLY),
@@ -3321,6 +3417,23 @@ _READ_SCAN_FIELDS = [
     "right_motif_copies",
     "left_has_signal",
     "right_has_signal",
+]
+_ALIGNMENT_OBSERVATION_FIELDS = [
+    "read_id",
+    "target",
+    "read_end",
+    "target_end",
+    "strand",
+    "mapq",
+    "overlap_bp",
+    "target_distance_bp",
+    "extension_length",
+    "tail_motif_copies",
+    "decision",
+    "rejection_reasons",
+    "frozen_attempt_ref",
+    "execution_ref",
+    "alignment_paf_ref",
 ]
 _CANDIDATE_FIELDS = [
     "candidate_id",

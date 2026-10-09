@@ -13,6 +13,11 @@ from app.stages.base import update_validated_stage_output, validated_stage_outpu
 
 @with_config(ConfigDict(extra="forbid"))
 class BasePolishStageCursor(TypedDict, total=False):
+    recommendation_mode: str
+    recommendation_output_method: str
+    max_attempts: int
+    finishing: dict[str, Any]
+
     status: str
     reason: str
     failure_kind: str
@@ -21,6 +26,11 @@ class BasePolishStageCursor(TypedDict, total=False):
     env_target: str
     missing_tools: list[str]
     method_name: str
+    window_length: int
+    error_threshold: float
+    match: int
+    mismatch: int
+    gap: int
     threads: int
     review_policy: dict[str, Any]
     execution_attempts: list[dict[str, Any]]

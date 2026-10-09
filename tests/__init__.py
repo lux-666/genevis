@@ -5,11 +5,9 @@ spill sqlite checkpoint files into temporary directories or the cwd.
 Tests that exercise the durable resume path (``test_durable_resume``,
 ``test_checkpointer``) override this explicitly.
 
-For this init to be executed by ``python -m unittest discover``, the
-discover invocation must use ``-t .`` so the runner imports ``tests``
-as a regular package; ``-s tests`` alone treats it as a namespace
-package and skips the init. All scripts and docs in this repo use
-``-t .``.
+The supported full-suite entry point is pytest via scripts/server_test.sh.
+For focused unittest-only checks, use discovery with ``-t .`` so this package
+is imported; unittest discovery does not collect the pytest function tests.
 """
 
 from __future__ import annotations

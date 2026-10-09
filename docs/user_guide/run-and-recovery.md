@@ -143,7 +143,7 @@ cp docs/examples/gapcloser_manifest.template.yaml /server/path/manifest.yaml
 cp docs/examples/gapcloser_run_config.template.json /server/path/run_config.json
 ```
 
-替换组装/读段路径、会话 ID，提供完整当前 HiFi 集。活动主机配置（默认 `config/envs.yaml`）须把 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser 1.2.1、minimap2、GNU getopt（不是 macOS BSD）的环境。使用下方普通 run；此切片不需 LLM 或评估数据库。上游 PB 阈值作为操作者设置暴露，不称最优 HiFi 推荐。
+替换组装/读段路径、会话 ID，提供完整当前 HiFi 集。活动主机配置（默认 `config/envs.yaml`）须把 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser 1.2.1、minimap2、GNU getopt（不是 macOS BSD）的环境。默认 advisor 模板还需 `gapcloser.eval.quast` 环境和 LLM 端点，通过缺口/填补报告与 QUAST 反馈推荐参数；不需 BUSCO 数据库。显式 `deterministic_baseline` 才使用操作者设置执行单轮，不调用 LLM 或 QUAST，不称最优 HiFi 推荐。
 
 工具生成候选 FASTA、原生片段细节、索引校验报告，测量缺口/长度变化与复制片段一致性，不是 QV 或改善。用 review 或请求绑定文件执行 accept_candidate、keep_prior_assembly、stop_human_review。不自动采纳；完成后 inspect 报告最终采纳/复用组装。无内部 N 缺口则不调用工具，复用输入。
 
@@ -166,6 +166,7 @@ python -m pytest -q -m real_tool tests/test_gapcloser.py -k real_tgs
 | slice / 审计范围 | RunConfig 模板 | Manifest 模板 | 工作 |
 |---|---|---|---|
 | `hic` | [hic](../examples/hic_run_config.template.json) | [hic](../examples/hic_manifest.template.yaml) | AutoHiC、收集、采纳、分离恢复 |
+| `dedup` | [dedup](../examples/dedup_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | purge_dups 顾问多轮、早先候选采纳、保留源 |
 | `gapcloser` | [gapcloser](../examples/gapcloser_run_config.template.json) | [gapcloser](../examples/gapcloser_manifest.template.yaml) | TGS 与采纳/无缺口复用 |
 | `base-polish` | [base_polish](../examples/base_polish_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | Racon 与成对最终 QUAST/BUSCO |
 | `t2t` | [t2t](../examples/t2t_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | 端部延长证据、补丁采纳/保留 |
@@ -184,6 +185,7 @@ acceptance_work=/server/path/acceptance/hic-a
 acceptance_data=/server/path/data
 case "$slice" in
   hic) config_stem=hic; manifest_stem=hic ;;
+  dedup) config_stem=dedup; manifest_stem=hifi_finishing ;;
   gapcloser) config_stem=gapcloser; manifest_stem=gapcloser ;;
   base-polish) config_stem=base_polish; manifest_stem=hifi_finishing ;;
   t2t) config_stem=t2t; manifest_stem=hifi_finishing ;;
@@ -200,7 +202,7 @@ cp -n "docs/examples/${config_stem}_run_config.template.json" "$acceptance_work/
 
 - Hi-C 需同样本 R1/R2、AutoHiC 包/模型及完整工具闭包。已知时设置真实的 `hic_scaffolding.autohic_parameters.restriction_enzyme`，否则参数门解析；本切片无评估数据库。
 - Base Polish/finishing 需 HiFi、真实物种、minimap2/Racon、QUAST/BUSCO 与主机 BUSCO/NCBI。两模板含最终 Review，不能删掉再声称质量验收。
-- T2T 需读段和验证的物种/基序。已知时填 `shared_parameters.species_facts.telomere_motif`（及适当 ploidy），否则用持久 resolver；参数门批准阈值。auto_patch 不代表自动采纳。此切片无最终 QUAST/BUSCO，需要时另用 review。
+- T2T 需读段和验证的物种/基序。已知时填 `shared_parameters.species_facts.telomere_motif`（及适当 ploidy），否则用持久 resolver；顾问根据端部测量与历次结果推荐阈值。auto_patch 不代表自动采纳。此切片无最终 QUAST/BUSCO，需要时另用 review。
 - GapCloser 无缺口复用合法，但没执行 TGS；T2T 无支持延长也不是 bug 或成功延长证明。真实工具执行后保留源仍算执行覆盖。
 - 保持人工门 `max_blocked_seconds: -1`；配置的 LLM resolver 仍需端点，server_check.sh 不检查它。
 
@@ -275,9 +277,32 @@ python -m app.diagnostics.route_acceptance --route hic \
 
 ### Base Polish 与 T2T 验收要点
 
-Base-polish 检查必需比较、前后 PAF、原生候选，采纳或保留。随后 Review 检查**两个**候选 QUAST/BUSCO 并选最终组装，保留原始合法。该范围要求同设置下两候选均执行两评估器，单 FASTA 不够。
+新模板对 GapCloser、T2T、Base Polish 显式使用 `recommendation_mode: advisor`、`max_attempts: 3`。每阶段先对源做 QUAST；每次执行后，源与全部历次候选在相同设置下重新比较，再进入 `finishing_recommendation` 门。执行前与执行后都是这个门，通过请求绑定区分轮次。需要原单轮路径时显式设置 `deterministic_baseline`。
 
-T2T 检查精修报告、端部扫描、比对支持、补丁记录。采纳用 `accept_selected_candidates` 和真实 ID；保留用 `continue_without_patch`；`stop_pipeline` 是停止，不是成功保留。合法无延长如实报告。分离恢复用门生成模板，不伪造载荷。切片后验证多阶段精修交接时，用新会话/源组装重复操作手册并设 slice=finishing。
+三个独立顾问切片都需要 QUAST 和可用的 LLM 端点；按新版 [envs.yaml.example](../examples/envs.yaml.example) 增加 `gapcloser.eval.quast`、`t2t.eval.quast`、`base_polish.eval.quast` 环境映射，可共用已有 QUAST 环境。Finishing/看校正质量的 Base Polish 还需最终 Review 的 BUSCO 数据库。当前 Hi-C 活动会话保留原检出与环境；本次升级通过新会话验收。
+
+- `follow_recommendation`：查看 response.json 的 action。`run` 批准新参数；`accept` 采纳 selected_attempt；`keep_source` 保留本阶段原组装。`human_review`、非法响应、重复参数、预算耗尽后建议 run，都不会开放 follow。
+- `accept_candidate`：覆盖顾问建议，指定候选 `candidate_id: attempt_0` 等；可选回早先的完整候选。T2T 只有实际形成补丁的轮次可采纳。
+- `keep_prior_assembly`：成功保留本阶段原组装；`stop_human_review`：终态失败。
+- 每个动作均需人工批准；保持 `max_blocked_seconds: -1`。未批准的建议不会执行。T2T 顾问模式目前要求 `mode: auto_patch`；原逐条补丁选择走 `deterministic_baseline`。
+
+T2T 的 `deterministic_baseline` 不调用阈值模型或基序模型，要求显式提供 `species_facts.telomere_motif`，否则明确失败。基线使用冻结目录的 L0 阈值、空 L2 与策略审批，经原 schema-3 已批准尝试链执行单轮；不打开人工 `parameter_approval`，补丁采纳仍保留 `t2t_review` 人工门。`manual_review`/`propose_only`/`auto_patch` 控制补丁方式，与推荐策略独立。
+
+全部新尝试从相同源组装开始，不把上轮 polishing 结果继续校正。`work/steps/<step>/<stage>/attempts/NNN/` 隔离工具运行，`artifacts/steps/<step>/<stage>/advisor/` 保存设置、QUAST、请求/响应、assessment；approval 决定在 review 目录。顾问依据真实测量作方案选择，仍只能选择已实现的 TGS-GapCloser、端部补丁和 Racon 方法，不能提议未安装的新工具。没有参考的 QUAST 与同批读段一致性不构成独立准确率证明。
+
+在测试机按以下矩阵收口，每个分支使用新会话：
+
+| 范围 | 必须检查 |
+|---|---|
+| GapCloser | 有缺口真实 TGS；填补/结构报告进入下一次请求；不同参数第二轮；早先候选采纳；保留源；无缺口复用 |
+| T2T | 源端部 motif 测量、读段扫描、过滤前每比对两端 MAPQ/重叠/距离及全部拒绝原因进入请求；支持数统计覆盖全部候选行；支持补丁与无延长；两轮隔离；早先补丁采纳时 final bundle 对应其证据；基线零模型调用 |
+| Base Polish | Racon window/error/scoring 参数进入命令；源/候选 before/after PAF；同批数据限制明确；不同配置从同一源执行；早先候选采纳/保留源；最终 Review 的源/所选候选 QUAST/BUSCO |
+| 共通 | 模型非法响应、重复配置、预算耗尽后继续 run 均转人工；执行后退出，再恢复 accept/keep 不新增生物工具启动；新 run 才增加 attempt |
+| 串联 | 新 finishing 会话逐阶段核对 source 与前阶段交付一致；最后 Review 选择最终组装 |
+
+恢复验证先在执行后顾问门保存 `route_acceptance` JSON 和 inspect，退出进程，生成/编辑决策模板，CLI resume 后再次保存审计 JSON。选择 accept/keep 后，同一阶段的 `attempt_starts`、已收集产物哈希应不变；选择 run 则应增加新的独立尝试。T2T 无支持延长、GapCloser 无缺口，以及顾问在执行前建议保留源都是合法结果，但审计退出 2 会如实表明对应工具执行分支未覆盖，不得据此宣布真实工具验收通过。
+
+Base-polish/finishing：执行过 polishing 后，最终 Review 检查源与所选候选同设置的 QUAST/BUSCO。顾问未运行便保留源时，Review 只评估源，报告 `comparison_status: not_executed_source_retained`，该分支不证明 Racon 执行覆盖。多个候选时，验收脚本按最终 Review 实际绑定的 comparison_ref 核对，不要求全会话只有一份 comparison。
 
 <a id="complete-hifihi-c-server-acceptance"></a>
 <a id="complete-hifihic-server-acceptance"></a>
@@ -298,7 +323,7 @@ gene-agent run --manifest /server/path/manifest.yaml \
   --run-config /server/path/run_config.json --data-dir /server/path/data
 ```
 
-逐门评审。Base Polish 在相同设置的两次 minimap2 间执行一轮 Racon、保留源，要求 accept_candidate、keep_prior_assembly 或 stop_human_review。后续 Review 不论先前选择，均同设置评估两者，由人工选最终。无声明参考时 QUAST 参考相关错误不可用；读段一致性是样本内指标，绝非独立 QV。
+逐门评审。GapCloser、T2T 和 Base Polish 使用上述顾问循环。每个 Racon 候选均在相同设置的两次 minimap2 间执行一轮，执行后可采纳任意已完成候选或保留源。后续 Review 同设置评估源与所选 polishing 候选，由人工选最终。无声明参考时 QUAST 参考相关错误不可用；读段一致性是样本内指标，绝非独立 QV。
 
 运行后只读验收：
 

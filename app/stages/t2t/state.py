@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import NotRequired, Required, TypedDict
@@ -100,6 +100,11 @@ T2TStatus = Literal[
 
 @with_config(ConfigDict(extra="forbid"))
 class T2TStageCursor(TypedDict, total=False):
+    recommendation_mode: str
+    recommendation_output_method: str
+    max_attempts: int
+    finishing: dict[str, Any]
+
     """All JSON-serializable keys owned by the T2T stage."""
 
     # Run configuration copied into the stage slot.
@@ -130,6 +135,7 @@ class T2TStageCursor(TypedDict, total=False):
     output_assembly_ref: str
     notes: list[str]
     thresholds: T2TThresholdsJson
+    alignment_observations_ref: str
 
     # Motif-resolution evidence chain.
     resolved_telomere_motif: str
@@ -151,6 +157,8 @@ class T2TStageCursor(TypedDict, total=False):
     proposed_parameter_attempt_id: int | None
     parameter_attempts: list[ParameterAttemptJson]
     current_parameter_recommendation: ParameterRecommendationJson
+
+    execution_attempts: list[dict[str, Any]]
 
     # Tool preflight fields returned by the shared execution boundary.
     env_target: str

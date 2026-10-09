@@ -20,7 +20,7 @@
 
 参数推荐器在方法选择后运行。Assembly 的方法选择有意属于阶段：上游 QC/Survey 证据具备后，持久化并确认 `assembly_selection`，推荐器再接收已验证 `primary_method`。它请求 LLM 提出参数，绑定到可评审的审批请求，不选择方法、不路由父图、不批准自身答案、不合成后备答案。
 
-Assembly、Hi-C、T2T 共享生命周期和持久化概念，但没有一个通用生物学 DTO。
+本页 schema-3 事务适用于 Assembly、Hi-C、T2T 单轮基线与旧初始推荐记录；没有通用生物学 DTO。新版 T2T advisor 与 GapCloser/Base Polish 使用独立的 finishing 共同任务契约，见[运行数据](data-contract.md#finishing-task-evidence)。本页的稀疏映射、parameter_approval 和 ParameterAttempt 规则不适用于 finishing 提案。
 
 <a id="reusable-model-boundary"></a>
 
@@ -30,7 +30,7 @@ Assembly、Hi-C、T2T 共享生命周期和持久化概念，但没有一个通�
 
 支持 `prompt_json`、原生 `json_schema`、通过唯一 `submit_recommendation` 函数强制 `function_calling`。函数仅提交数据；不会执行模型给出的函数名。没有隐式传输回退或额外模型重试。端点能力必须匹配所选传输；严格提供方 schema 要符合其支持的 JSON Schema 子集，本地解析仍必需。
 
-Assembly、Hi-C、T2T 参数推荐器和 T2T 基序解析复用此边界，同时保留既有 prompt-JSON 契约、稀疏映射和持久封装。任务请求构建器和规范化器仍独立。Review 决策也复用调用/解析边界，同时保留请求/决策校验与发布。调用者拥有的格式适配器保留绑定时 `json_schema` 到 `json_object` 的既有后备（以及没有 `bind` 的可注入模型），绝不重试失败的模型调用。新任务可像 `app/llm/dedup.py:PurgeRecommender` 一样继承边界并使用不同类型化输出。
+Assembly、Hi-C、T2T 参数推荐器和 T2T 基序解析复用此边界，同时保留既有 prompt-JSON 契约、稀疏映射和持久封装。任务请求构建器和规范化器仍独立。Review 决策也复用调用/解析边界，同时保留请求/决策校验与发布。调用者拥有的格式适配器保留绑定时 `json_schema` 到 `json_object` 的既有后备（以及没有 `bind` 的可注入模型），绝不重试失败的模型调用。FinishingRecommender 也继承此边界，支持三种结构化输出；模型调用组件复用不意味着持久参数链复用。
 
 Dedup 的 QUAST/执行/推荐/评审循环由阶段拥有，不隐藏在模型基类中。评审门禁拥有确认与前台倒计时，执行生命周期拥有进程恢复。见[去冗余阶段契约](stage-contracts.md#5-assembly-dedup)和[操作者配置](../../user_guide/parameter_recommendation.md#iterative-purge_dups-recommendations)。
 
@@ -135,7 +135,7 @@ AutoHiC `AutoHiCParameterRequest` 包含：
 - 类型化 `autohic_context`：文库协议、明确提供的限制性内切酶、重试时有界时间顺序历史。
 - 可调整 AutoHiC 目录：限制性内切酶、编辑轮次、校正开关、错误检测阈值。
 
-T2T `T2TParameterRequest` 包含：
+旧单轮初始推荐记录的 T2T `T2TParameterRequest` 包含（新版 advisor 不使用此 DTO）：
 
 - schema-3 与推荐契约。
 - 当前任务和固定 minimap2 方法 ID。
@@ -143,7 +143,7 @@ T2T `T2TParameterRequest` 包含：
 - 类型化 `t2t_context`：解析后的端粒基序、来源、保留平台的输入集合中精确规范长读段成员数。
 - 可调整端粒与比对阈值目录。
 
-阈值请求前，仅当规范已提供物种事实没有基序时，T2T 才单独调用基序解析。已提供基序经校验后以 `provided_species_fact` 持久化，不调用模型；否则要求提供学名，持久化精确消息、原始响应、解析结果和解析来源。当前 schema 之外的 motif/config checkpoint 字段拒绝。阈值快照绑定已验证基序解析引用，所有扫描/补丁消费者只使用该证据。
+Advisor 或旧初始推荐路径中，仅当规范已提供物种事实没有基序时，T2T 才单独调用基序解析。Deterministic baseline 要求提供基序，缺失时失败且不调用模型；其阈值策略响应为空 L2，manifest 标记 policy=deterministic_baseline、model_invoked=false，经策略审批冻结目录 L0。已提供基序经校验后以 `provided_species_fact` 持久化，不调用模型；否则要求提供学名，持久化精确消息、原始响应、解析结果和解析来源。当前 schema 之外的 motif/config checkpoint 字段拒绝。单轮 schema-3 阈值快照绑定已验证基序解析引用；finishing 则绑定 config.json/每轮 frozen.json，所有扫描/补丁消费者只使用相应已批准证据。
 
 全部 DTO 禁止未知顶层字段，排除会话身份、路径、产物 ID/哈希、存储元数据、凭据及无限制注册表元数据。审计产物可保留这些事实，模型 DTO 不可。
 

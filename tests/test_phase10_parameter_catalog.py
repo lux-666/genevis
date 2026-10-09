@@ -114,7 +114,6 @@ from app.storage.artifacts import (
     resolve_artifact_ref,
 )
 from app.storage.parameter_evidence import (
-    load_approved_parameter_chain_v3,
     load_parameter_recommendation_chain_v3,
     publish_parameter_json,
 )
@@ -614,57 +613,6 @@ def _persist_parameter_attempt(
         frozen_parameters_ref=frozen_parameters_ref,
         frozen_attempt_ref=frozen_attempt_ref,
         execution_ref=execution_ref,
-    ).model_dump(mode="json")
-
-
-def _attach_frozen_parameter_sources(
-    state: dict,
-    attempt_value: dict,
-    *,
-    status: str,
-) -> dict:
-    attempt = ParameterAttempt.model_validate(attempt_value)
-    bundle = load_approved_parameter_chain_v3(
-        state,
-        attempt=attempt,
-        expected_stage="assembly",
-        expected_method_id=attempt.method_id,
-    )
-    resolved = resolve_assembly_parameters(
-        catalog=bundle.chain.catalog,
-        snapshot=bundle.chain.input_snapshot,
-        approved_l2=bundle.approved_l2,
-        l0_executor_values=_l0_executor_values(attempt.method_id),
-    )
-    frozen_parameters_ref = write_attempt_json_artifact(
-        state,
-        attempt.attempt_id,
-        "frozen_parameters.json",
-        {
-            "schema_version": 3,
-            "stage": "assembly",
-            "attempt_id": attempt.attempt_id,
-            "method_id": attempt.method_id,
-            "recommendation_manifest_ref": (
-                attempt.recommendation_manifest_ref.model_dump(mode="json")
-            ),
-            "approval_decision_ref": attempt.approval_decision_ref.model_dump(
-                mode="json"
-            ),
-            **parameter_sources_payload(resolved),
-        },
-        artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
-        method_name=attempt.method_id,
-    )
-    return ParameterAttempt.model_validate(
-        {
-            **attempt.model_dump(mode="json"),
-            "status": status,
-            "frozen_parameters_ref": frozen_parameters_ref.model_dump(mode="json"),
-            "frozen_attempt_ref": _frozen_attempt_ref(attempt.attempt_id).model_dump(
-                mode="json"
-            ),
-        }
     ).model_dump(mode="json")
 
 

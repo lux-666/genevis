@@ -13,6 +13,11 @@ from app.stages.base import update_validated_stage_output, validated_stage_outpu
 
 @with_config(ConfigDict(extra="forbid"))
 class GapCloserStageCursor(TypedDict, total=False):
+    recommendation_mode: str
+    recommendation_output_method: str
+    max_attempts: int
+    finishing: dict[str, Any]
+
     status: str
     reason: str
     failure_kind: str

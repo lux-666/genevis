@@ -1,7 +1,17 @@
 {
   "requested_stages": [
-    {"stage": "t2t", "allow_local_execution": true}
+    {
+      "stage": "t2t",
+      "allow_local_execution": true
+    }
   ],
-  "review_policy": {"max_blocked_seconds": -1},
-  "t2t": {"mode": "auto_patch"}
+  "review_policy": {
+    "max_blocked_seconds": -1
+  },
+  "t2t": {
+    "mode": "auto_patch",
+    "recommendation_mode": "advisor",
+    "recommendation_output_method": "json_schema",
+    "max_attempts": 3
+  }
 }

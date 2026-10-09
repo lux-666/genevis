@@ -36,8 +36,7 @@ app/entrypoints/graph_showcase.ipynb
 dist/
 build/
 
-# HPC integration tests
-tests/hpc/hpc_env.sh
+# Local server acceptance output
 data_hpc_test/
 .claude/
 .superpowers/

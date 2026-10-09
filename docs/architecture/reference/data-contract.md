@@ -24,7 +24,19 @@
 
 Gene Agent 运行带参数推荐、人工评审、重试、大型工具输出和持久恢复的长时生物学工作流。数据模型必须使其可审计，同时避免同一可变事实散布于产物、索引、Ledger、checkpoint 和报告。
 
-当前契约为所有阶段建立共享表示。已实现的 Assembly、AutoHiC、T2T 参数推荐循环共用持久化契约，不采用阶段专属审计封装。
+所有阶段共用 ArtifactRef、Ledger、评审 intent/application 与执行生命周期。参数持久化有明确任务范围：Assembly/AutoHiC 及 T2T 单轮 schema-3 路径使用参数快照/manifest/批准尝试；GapCloser、T2T、Base Polish 默认 advisor 使用 finishing 共同任务记录，不沿用 schema-3 参数 manifest。两种记录不可互换。
+
+<a id="finishing-task-evidence"></a>
+
+### Finishing 任务证据
+
+`app/stages/finishing/` 拥有 GapCloser/T2T/Base Polish 顾问的设置、源绑定历史、请求/响应、结果选择和执行审批。当前 occurrence 的 `advisor/config.json` 固定源候选与设置/预算；`recommendations/NNN/request.json` 保存精确消息、QUAST 与各轮原生测量，`response.json` 保存解析完整提案、原始模型输出和错误。`attempts/NNN/assessment.json` 绑定源、参数、推荐、人工决策、候选主输出、原生证据与执行引用。T2T 的每轮 `frozen.json` 固定阈值、基序、源/读段/工作目录与审批引用。Checkpoint 保留 finishing 游标和引用，不保存模型正文。
+
+`finishing_recommendation` 复用持久评审请求和 intent/application，但其效应为 `finishing.recommendation.v1`，不创建 schema-3 ParameterAttempt。审批精确绑定设置、源、历次 assessment、推荐与 QUAST；执行前重验 occurrence、参数、预算和来源。同源的新参数尝试目录隔离；恢复复用已发布响应与执行证据；早先候选的交付与最终 T2T 报告使用所选轮次证据。
+
+T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行。补丁候选表继续只包含进入支持分组的行；其中 supporting_reads 去重后的支持数汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。
+
+T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不打开人工参数门，补丁采纳仍走 t2t_review。旧 schema-3 初始 LLM 代码保留既有记录读取与受控兼容调用，不是新版 advisor 入口。旧活动会话保留匹配检出；本运行时不迁移 checkpoint。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
 
 <a id="2-product-decisions"></a>
 

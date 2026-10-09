@@ -5,6 +5,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.execution.lifecycle import CompiledMethodGraph
 from app.execution.method_outcomes import method_outcome_settlement_node
 from app.schemas.state import TopLevelState
 from app.stages.t2t.nodes import (
@@ -46,13 +47,18 @@ from app.stages.t2t.routing import (
 )
 
 
-def build_stage() -> CompiledStateGraph[
+def build_baseline_stage() -> CompiledStateGraph[
     TopLevelState,
     None,
     TopLevelState,
     TopLevelState,
 ]:
-    """Build the scan -> evidence -> optional patch T2T subgraph."""
+    """Single-pass schema-3 executor for explicit deterministic baselines.
+
+    Already-approved schema-3 cursors retain their execution consumer. Unseeded
+    internal callers retain the legacy initial recommendation boundary; public
+    RunConfig always seeds advisor or deterministic_baseline explicitly.
+    """
     graph = StateGraph(TopLevelState)
     graph.add_node("enter", enter_t2t)
     graph.add_node("resolve_inputs", resolve_t2t_inputs)
@@ -132,7 +138,11 @@ def build_stage() -> CompiledStateGraph[
     graph.add_conditional_edges(
         "recommend_parameters",
         route_after_parameter_recommendation,
-        {"block": "block", "fail": "settle_alignment_before_failure"},
+        {
+            "block": "block",
+            "prepare_parameters": "prepare_parameters",
+            "fail": "settle_alignment_before_failure",
+        },
     )
     graph.add_conditional_edges(
         "prepare_parameters",
@@ -205,4 +215,21 @@ def build_stage() -> CompiledStateGraph[
     graph.add_edge("settle_alignment_before_patches", "apply_patches")
     graph.add_edge("settle_alignment_before_report", "report")
     graph.add_edge("settle_alignment_before_failure", "fail")
+    return graph.compile()
+
+
+def build_stage() -> CompiledMethodGraph:
+    from app.stages.finishing.advisor import advisor_enabled
+    from app.stages.finishing.workflow import build_stage as build_advisor_stage
+
+    graph = StateGraph(TopLevelState)
+    graph.add_node("advisor", build_advisor_stage("t2t"))
+    graph.add_node("baseline", build_baseline_stage())
+    graph.add_conditional_edges(
+        START,
+        lambda s: "advisor" if advisor_enabled(s, "t2t") else "baseline",
+        ["advisor", "baseline"],
+    )
+    graph.add_edge("advisor", END)
+    graph.add_edge("baseline", END)
     return graph.compile()

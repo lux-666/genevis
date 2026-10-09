@@ -1,12 +1,17 @@
 {
   "requested_stages": [
-    {"stage": "gapcloser", "allow_local_execution": true}
+    {
+      "stage": "gapcloser",
+      "allow_local_execution": true
+    }
   ],
   "gapcloser": {
     "threads": 16,
-    "min_identity": 0.2,
-    "min_match": 200,
-    "gap_size_check": false
+    "recommendation_mode": "advisor",
+    "recommendation_output_method": "json_schema",
+    "max_attempts": 3
   },
-  "review_policy": {"max_blocked_seconds": -1}
+  "review_policy": {
+    "max_blocked_seconds": -1
+  }
 }

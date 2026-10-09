@@ -1,0 +1,21 @@
+method_name: base_polish.eval.quast
+stage: base_polish
+package_ref: quast
+goal: "Compare source and finishing attempts for evidence-grounded recommendations."
+required_inputs:
+  - name: draft_assembly
+    type: draft_assembly
+    description: "Verified source and completed finishing candidates."
+expected_outputs:
+  - name: quast_report
+    type: quast_report
+    description: "Full QUAST comparison table with stable source/attempt labels."
+optional_inputs:
+  - name: reference_genome
+    type: reference_genome_fasta
+    description: "One registered reference, when supplied, used for every compared candidate."
+resource_hints:
+  cpu_cores: 8
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 4.0

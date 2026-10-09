@@ -1139,7 +1139,10 @@ class FrozenHelperTests(unittest.TestCase):
                                 "allow_local_execution": False,
                             },
                         ],
-                        "t2t": {"mode": "manual_review"},
+                        "t2t": {
+                            "mode": "manual_review",
+                            "recommendation_mode": "deterministic_baseline",
+                        },
                         "assembly_review": {"busco": _busco_config(str(self._lineage))},
                         "review_policy": {
                             "max_blocked_seconds": 300,
@@ -1240,6 +1243,9 @@ class FrozenHelperTests(unittest.TestCase):
                 },
                 "t2t": {
                     "mode": "manual_review",
+                    "recommendation_mode": "deterministic_baseline",
+                    "recommendation_output_method": "json_schema",
+                    "max_attempts": 3,
                     "read_inputs": [],
                     "review_policy": {"max_blocked_seconds": 0},
                 },

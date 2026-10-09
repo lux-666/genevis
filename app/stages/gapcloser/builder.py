@@ -27,7 +27,7 @@ def route(state: TopLevelState) -> str:
     return "fail"
 
 
-def build_stage() -> CompiledMethodGraph:
+def build_baseline_stage() -> CompiledMethodGraph:
     graph = StateGraph(TopLevelState)
     graph.add_node("enter", enter_gapcloser)
     graph.add_node("tgs_gapcloser", build_gapcloser_graph())
@@ -40,4 +40,21 @@ def build_stage() -> CompiledMethodGraph:
     graph.add_conditional_edges("tgs_gapcloser", route, destinations)
     for name in ("review", "no_gaps", "fail"):
         graph.add_edge(name, END)
+    return graph.compile()
+
+
+def build_stage() -> CompiledMethodGraph:
+    from app.stages.finishing.advisor import advisor_enabled
+    from app.stages.finishing.workflow import build_stage as build_advisor_stage
+
+    graph = StateGraph(TopLevelState)
+    graph.add_node("advisor", build_advisor_stage("gapcloser"))
+    graph.add_node("baseline", build_baseline_stage())
+    graph.add_conditional_edges(
+        START,
+        lambda s: "advisor" if advisor_enabled(s, "gapcloser") else "baseline",
+        ["advisor", "baseline"],
+    )
+    graph.add_edge("advisor", END)
+    graph.add_edge("baseline", END)
     return graph.compile()
