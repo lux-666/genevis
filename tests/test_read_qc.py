@@ -7,7 +7,6 @@ import inspect
 import json
 import math
 import os
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -1903,45 +1902,15 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
 
-def _env_geno_exec_has_seqkit() -> bool:
-    """True if the configured env_geno_exec conda env exposes seqkit."""
-    if shutil.which("conda") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "conda",
-            "run",
-            "--live-stream",
-            "--no-capture-output",
-            "-n",
-            "env_geno_exec",
-            "sh",
-            "-c",
-            'command -v "$1"',
-            "preflight",
-            "seqkit",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    return probe.returncode == 0
-
-
 @pytest.mark.real_tool
 class Phase4ReadQCRealSmokeTests(unittest.TestCase):
-    """Real-tool smoke: generated fixture -> env_geno_exec conda env -> SeqKit.
+    """Real-tool smoke: generated fixture -> active registry -> frozen SeqKit run.
 
     Selected only with pytest -m real_tool. Tool prerequisites are checked
     during execution, never during collection.
     """
 
     def test_generated_fixture_smoke_produces_stats_summary_and_fofn(self):
-        self.assertTrue(
-            _env_geno_exec_has_seqkit(),
-            "real SeqKit smoke requires conda env_geno_exec with seqkit installed",
-        )
         from app.entrypoints.run import main as run_main
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1959,17 +1928,6 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            envs = root / "envs.yaml"
-            envs.write_text(
-                "default:\n"
-                "  fallback_env: env_geno_exec\n"
-                "stages:\n"
-                "  read_qc:\n"
-                "    conda_env: env_geno_exec\n"
-                "    required_tools: [seqkit]\n"
-                "packages: {}\n",
-                encoding="utf-8",
-            )
             argv = [
                 "run",
                 "--manifest",
@@ -1979,12 +1937,9 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
                 "--run-config",
                 str(run_config),
             ]
-            with (
-                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}),
-                patch(
-                    "app.entrypoints.run._foreground_review_available",
-                    return_value=True,
-                ),
+            with patch(
+                "app.entrypoints.run._foreground_review_available",
+                return_value=True,
             ):
                 rc = run_main(argv)
             self.assertEqual(rc, 0)

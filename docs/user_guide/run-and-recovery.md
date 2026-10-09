@@ -30,7 +30,7 @@
 | Base Polish 恢复 | `test_base_polish.py` 用伪工具覆盖收集回放、损坏证据拒绝、成对评估、SQLite/CLI 恢复 | 真实 Racon/minimap2 冒烟及代表性质量验收 |
 | 占位边界 | `test_registry_executable_invariant.py`、`test_finishing_plan.py`；Base Polish 已可执行 | 未来请求占位必须确定失败、记录失败、无成功交付、不进下游。不支持输入不是占位或成功 skip |
 
-**真实工具检查必须显式选择。** 普通 `pytest -q`、`server_test.sh` 排除 `real_tool`。收集测试不探测 Conda 或生物工具；被选择测试在执行时检查前置条件，缺工具则失败。`Phase4ReadQCRealSmokeTests` 在 `env_geno_exec` 执行 SeqKit；标记的 hifiasm help/version 是 CLI 兼容检查，不是组装冒烟。开发主机缺二进制不是代码缺陷；取消选择不证明真实执行成功。
+**真实工具检查必须显式选择。** 普通 `pytest -q`、`server_test.sh` 排除 `real_tool`。收集测试不探测 Conda 或生物工具；被选择测试在执行时检查前置条件，缺工具则失败。`Phase4ReadQCRealSmokeTests` 使用活动注册表中 `read_qc.long_read_stats.seqkit_stats` 的映射，经正式 CLI 预检、冻结后执行 SeqKit；标记的 hifiasm help/version 分别使用 `assembly.candidate.hifiasm` 和 `assembly.candidate.hifiasm_ont` 的映射，不使用 `HIFIASM_BIN` 或外层 PATH 选择二进制。这是 CLI 兼容检查，不是组装冒烟。开发主机缺二进制不是代码缺陷；取消选择不证明真实执行成功。
 
 <a id="2-run-small-real-tool-smoke-tests-for-each-key-stage"></a>
 
@@ -49,6 +49,13 @@ python -m pytest -q -m real_tool \
 
 ```bash
 python -m pytest -q -m real_tool tests/test_read_qc.py::Phase4ReadQCRealSmokeTests
+```
+
+单独选择 hifiasm CLI 兼容检查（两个方法可映射到不同环境）：
+
+```bash
+python -m pytest -q -m real_tool \
+  tests/test_phase10_parameter_catalog.py::ParameterCatalogSchemaTests::test_cataloged_hifiasm_flags_exist_in_runtime_help_when_binary_available
 ```
 
 GapCloser 与 Racon 切片读取活动环境注册表（默认 `config/envs.yaml`，可由 `GENE_AGENT_ENVS_CONFIG` 指定），冻结依赖后通过各方法的 Conda 映射执行；运行 pytest 的 Python 环境不需安装这些工具，也不需临时修改 PATH。两者明确采用单轮 `deterministic_baseline`，不调用顾问或最终 Review 的 QUAST/BUSCO。Racon 检查成对比对、采纳门、收集回放，不建立代表性质量或独立 QV。其他所列方法尚无当前测试集证明的专属小数据真实冒烟，不能以伪工具替代。输入须满足真实约束（尤其 BUSCO/AutoHiC），不削弱校验以接受无效极小数据。合法 skip 与执行路径分别测试。

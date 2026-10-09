@@ -6,7 +6,6 @@ import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -19,6 +18,7 @@ from pydantic import ValidationError
 
 from app.control.lifecycle import normalize_resume_review_request
 from app.domains.parameter_recommendation.facts import build_canonical_facts
+from app.execution.env_resolver import EnvResolver, preflight
 from app.execution.evidence import (
     load_execution_evidence,
     persist_execution_result,
@@ -134,18 +134,6 @@ class _FakeModel:
     def invoke(self, messages):
         self.messages = messages
         return _FakeResponse(json.dumps(self.payload))
-
-
-def _runtime_hifiasm_binary() -> str | None:
-    explicit = os.environ.get("HIFIASM_BIN")
-    if explicit:
-        binary = explicit if os.path.sep in explicit else shutil.which(explicit)
-        if binary and os.access(binary, os.X_OK):
-            return binary
-        raise AssertionError(
-            f"HIFIASM_BIN does not point to an executable hifiasm binary: {explicit}"
-        )
-    return shutil.which("hifiasm")
 
 
 def _extract_hifiasm_help_flags(help_text: str) -> set[str]:
@@ -747,56 +735,57 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
 
     @pytest.mark.real_tool
     def test_cataloged_hifiasm_flags_exist_in_runtime_help_when_binary_available(self):
-        binary = _runtime_hifiasm_binary()
-        self.assertIsNotNone(
-            binary, "real hifiasm CLI check requires HIFIASM_BIN or hifiasm on PATH"
-        )
-
-        version_result = subprocess.run(
-            [binary, "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-        )
-        runtime_version = version_result.stdout.strip()
-        self.assertGreaterEqual(
-            _parse_semver_prefix(runtime_version), _project_hifiasm_min_version()
-        )
-
-        help_result = subprocess.run(
-            [binary, "-h"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-        )
-        help_flags = _extract_hifiasm_help_flags(help_result.stdout)
-        self.assertIn("--ont", help_flags)
-        self.assertIn("--rl-cut", help_flags)
-        self.assertIn("--sc-cut", help_flags)
-
+        resolver = EnvResolver()
         for method_id in (
             "assembly.candidate.hifiasm",
             "assembly.candidate.hifiasm_ont",
         ):
-            catalog = load_parameter_catalog(method_id)
-            catalog_flags = set()
-            for spec in catalog.parameters.values():
-                application = spec.application
-                flag = getattr(application, "flag", None)
-                if flag:
-                    catalog_flags.add(flag)
-                catalog_flags.update(getattr(application, "flags", {}).values())
-            unsupported = sorted(catalog_flags - help_flags - {"-h", "--version"})
-            self.assertEqual(
-                [],
-                unsupported,
-                (
-                    f"{method_id} catalog has flags not advertised by "
-                    f"{binary} {runtime_version}: {unsupported}"
-                ),
-            )
+            env = resolver.resolve(stage="assembly", method_name=method_id)
+            with self.subTest(method_id=method_id, env_target=env.display_target()):
+                check = preflight(env)
+                self.assertEqual(check.status, "ok", check.model_dump_json(indent=2))
+                command = [*env.conda_run_prefix(), "hifiasm"]
+                version_result = subprocess.run(
+                    [*command, "--version"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=True,
+                )
+                runtime_version = version_result.stdout.strip()
+                self.assertGreaterEqual(
+                    _parse_semver_prefix(runtime_version),
+                    _project_hifiasm_min_version(),
+                )
+                help_result = subprocess.run(
+                    [*command, "-h"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=True,
+                )
+                help_flags = _extract_hifiasm_help_flags(help_result.stdout)
+                self.assertIn("--ont", help_flags)
+                self.assertIn("--rl-cut", help_flags)
+                self.assertIn("--sc-cut", help_flags)
+                catalog = load_parameter_catalog(method_id)
+                catalog_flags = set()
+                for spec in catalog.parameters.values():
+                    application = spec.application
+                    flag = getattr(application, "flag", None)
+                    if flag:
+                        catalog_flags.add(flag)
+                    catalog_flags.update(getattr(application, "flags", {}).values())
+                unsupported = sorted(catalog_flags - help_flags - {"-h", "--version"})
+                self.assertEqual(
+                    [],
+                    unsupported,
+                    (
+                        f"{method_id} catalog has flags not advertised by "
+                        f"{env.display_target()} hifiasm {runtime_version}: "
+                        f"{unsupported}"
+                    ),
+                )
 
     def test_load_catalog_is_cwd_independent(self):
         old_cwd = os.getcwd()
