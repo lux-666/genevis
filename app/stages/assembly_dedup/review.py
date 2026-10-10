@@ -23,6 +23,7 @@ from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly_dedup.advisor import (
     GATE,
     STAGE,
+    execution_capabilities,
     history,
     load_json,
     validate_proposal,
@@ -41,7 +42,14 @@ def validate_approved_attempt(state: TopLevelState) -> None:
     proposal = PurgeRecommendation.model_validate(
         load_json(state, cursor["recommendation_ref"])["proposal"]
     )
-    validate_proposal(proposal, records, cursor.get("max_attempts", 3))
+    validate_proposal(
+        proposal,
+        records,
+        cursor.get("max_attempts", 3),
+        available_coverage_modes=execution_capabilities(state)[
+            "available_coverage_modes"
+        ],
+    )
     decision = load_json(state, cursor["decision_ref"])
     request = load_review_request(
         state["data_dir"],
@@ -138,7 +146,14 @@ def validate_intent_request(
         proposal = PurgeRecommendation.model_validate(
             load_json(state, cursor["recommendation_ref"])["proposal"]
         )
-        validate_proposal(proposal, records, cursor.get("max_attempts", 3))
+        validate_proposal(
+            proposal,
+            records,
+            cursor.get("max_attempts", 3),
+            available_coverage_modes=execution_capabilities(state)[
+                "available_coverage_modes"
+            ],
+        )
         if proposal.action == "human_review":
             raise ResumeValidationError("dedup recommendation requires human judgment")
     elif request.decision == "accept_candidate":
@@ -266,7 +281,14 @@ def apply_application(
         proposal = PurgeRecommendation.model_validate(
             load_json(state, effect.recommendation_ref)["proposal"]
         )
-        validate_proposal(proposal, records, cursor.get("max_attempts", 3))
+        validate_proposal(
+            proposal,
+            records,
+            cursor.get("max_attempts", 3),
+            available_coverage_modes=execution_capabilities(state)[
+                "available_coverage_modes"
+            ],
+        )
         if proposal.action != "run" or proposal.parameters != effect.parameters:
             raise ResumeValidationError(
                 "approved dedup parameters differ from proposal"

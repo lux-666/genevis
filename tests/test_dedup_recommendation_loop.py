@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -106,10 +107,13 @@ def test_structured_modes_validate_and_keep_raw(method):
 def test_budget_and_duplicate_config_stop_new_attempts():
     parsed = PurgeRecommendation.model_validate(proposal())
     with pytest.raises(ValueError, match="budget"):
-        validate_proposal(parsed, [], 0)
+        validate_proposal(parsed, [], 0, available_coverage_modes=["self_alignment"])
     with pytest.raises(ValueError, match="repeats"):
         validate_proposal(
-            parsed, [{"attempt": 0, "parameters": parsed.parameters.model_dump()}], 2
+            parsed,
+            [{"attempt": 0, "parameters": parsed.parameters.model_dump()}],
+            2,
+            available_coverage_modes=["self_alignment"],
         )
 
 
@@ -159,8 +163,11 @@ cat "$last" > "${prefix}.purged.fa"
   shift
 done
 mkdir -p "$out"
-report="$out/report.tsv"
-printf 'Assembly\\t%s\\nN50\\t1200\\nTotal length\\t1200\\n' "$labels" > "$report"
+printf '%s\\n' "$labels" | awk -F, 'BEGIN {OFS="\\t"} {
+  printf "Assembly"; for(i=1;i<=NF;i++) printf "\\t%s", $i; printf "\\n";
+  printf "N50"; for(i=1;i<=NF;i++) printf "\\t1200"; printf "\\n";
+  printf "Total length"; for(i=1;i<=NF;i++) printf "\\t1200"; printf "\\n";
+}' > "$out/report.tsv"
 """,
     }
     for name, script in scripts.items():
@@ -421,6 +428,53 @@ def test_disabled_execution_does_not_invoke_quast_or_model(tmp_path):
     model.assert_not_called()
     assert result["stage_outputs"]["assembly_dedup"]["purge_dups_status"] == "skipped"
     assert result["workflow_step_outcome"]["deliveries"][0]["delivery_mode"] == "reused"
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        "Assembly\tsource\nN50\t1200\n",
+        "Assembly\tattempt_0\tsource\nN50\t1200\t1200\n",
+        "Assembly\tsource\tattempt_0\nN50\t1200\n",
+        "Assembly\tsource\tattempt_0\n",
+        "Assembly\tsource\tattempt_0\nN50\t1200\t\n",
+    ],
+)
+def test_incomplete_quast_report_stops_before_candidate_advice(tmp_path, report):
+    state, _ = _state(tmp_path)
+    model = Model(
+        [
+            AIMessage(content=json.dumps(proposal())),
+            AIMessage(content=json.dumps(proposal("accept", selected=0))),
+        ]
+    )
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        graph = build_stage()
+        blocked = graph.invoke(state)
+        tool = tmp_path / "bin" / "quast.py"
+        # Preserve the fixture argv parser, replace only report generation.
+        original = tool.read_text().split("mkdir -p")[0]
+        tool.write_text(
+            original
+            + 'mkdir -p "$out"\n'
+            + f'printf %s {shlex.quote(report)} > "$out/report.tsv"\n'
+        )
+        final = graph.invoke(_approve(blocked))
+    cursor = final["stage_outputs"]["assembly_dedup"]
+    assert cursor["status"] == "failed"
+    assert "QUAST roster/table mismatch" in cursor["reason"]
+    assert cursor["failure_kind"] == "collect"
+    assert len(history(final)) == 1
+    assert len(model.messages) == 1
+    dispositions = {
+        event["method_name"]: event["disposition"]
+        for event in Ledger(state["data_dir"]).read_events("s1")
+        if event["event_type"] == "method_disposition_recorded"
+    }
+    assert dispositions == {
+        "assembly_dedup.purge_dups": "completed",
+        "assembly_dedup.eval.quast": "failed",
+    }
 
 
 def test_invalid_model_response_requires_human_result_selection(tmp_path):

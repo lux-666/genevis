@@ -372,14 +372,8 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         source_candidate = _dedup_source_candidate(state, dedup_out)
         if dedup_out.get("coverage_mode") == "self_alignment":
             selected_members = []
-        elif source_candidate.bundle.input_type == "assembly_fasta_registered":
-            selected_members = _registered_assembly_read_members(state)
         else:
-            selected_members = _selected_primary_members(
-                state,
-                list(dedup_out.get("input_member_ids") or []),
-                list(dedup_out.get("input_member_platforms") or []),
-            )
+            selected_members = read_depth_members(state, dedup_out)
         mapping_presets = [
             _minimap2_preset(member.platform) for member in selected_members
         ]
@@ -1042,6 +1036,20 @@ def _selected_primary_members(
             )
         selected.append(selected_member)
     return selected
+
+
+def read_depth_members(
+    state: TopLevelState, output: AssemblyDedupCursor
+) -> list[RuntimeReadMember]:
+    """Resolve depth evidence for both advice and execution."""
+    candidate = _dedup_source_candidate(state, output)
+    if candidate.bundle.input_type == "assembly_fasta_registered":
+        return _registered_assembly_read_members(state)
+    return _selected_primary_members(
+        state,
+        list(output.get("input_member_ids") or []),
+        list(output.get("input_member_platforms") or []),
+    )
 
 
 def _minimap2_preset(platform: str) -> str:

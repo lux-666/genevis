@@ -32,10 +32,13 @@ from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.assembly_dedup.nodes import (
     ASSEMBLY_DEDUP_METHOD,
     _dedup_source_candidate,
+    _minimap2_preset,
+    read_depth_members,
 )
 from app.stages.assembly_dedup.state import assembly_dedup_output as output
 from app.stages.assembly_dedup.state import update_assembly_dedup_output as update
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.quast import validate_quast_comparison
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import QUAST_REFERENCE_SPEC
 from app.storage.artifacts import (
@@ -297,6 +300,7 @@ def collect_quast(state: TopLevelState) -> StateUpdate:
         artifact_type="assembly_dedup.quast_report",
         metadata={"dependency_refs": [execution.execution_ref.model_dump(mode="json")]},
     )
+    validate_quast_comparison(report.path, execution.attempt.metadata["labels"])
     Ledger(absolute_data_dir(state)).record_attempt_succeeded(
         state["session_id"],
         execution.attempt,
@@ -312,13 +316,44 @@ def collect_quast(state: TopLevelState) -> StateUpdate:
     )
 
 
+def execution_capabilities(state: TopLevelState) -> dict[str, Any]:
+    """Project the same input requirements used by the purge executor."""
+    members = []
+    reason = None
+    presets = []
+    try:
+        members = read_depth_members(state, output(state))
+        presets = [_minimap2_preset(member.platform) for member in members]
+    except (OSError, TypeError, ValueError) as exc:
+        reason = str(exc)
+    return {
+        "long_reads": {
+            "available": bool(members),
+            "members": [
+                {"member_id": member.member_id, "platform": member.platform}
+                for member in members
+            ],
+            "mapping_presets": presets,
+        },
+        "available_coverage_modes": ["self_alignment"]
+        + (["read_depth"] if reason is None else []),
+        "read_depth_unavailable_reason": reason,
+    }
+
+
 def validate_proposal(
-    proposal: PurgeRecommendation, records: list[dict[str, Any]], maximum: int
+    proposal: PurgeRecommendation,
+    records: list[dict[str, Any]],
+    maximum: int,
+    *,
+    available_coverage_modes: Sequence[str],
 ) -> None:
     if proposal.action == "run":
         if len(records) >= maximum:
             raise ValueError("dedup attempt budget exhausted")
         assert proposal.parameters is not None
+        if proposal.parameters.coverage_mode not in available_coverage_modes:
+            raise ValueError("dedup proposal selects an unavailable coverage_mode")
         if any(
             row["parameters"] == proposal.parameters.model_dump() for row in records
         ):
@@ -343,7 +378,9 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
     recommender = PurgeRecommender(
         cursor.get("recommendation_output_method", "json_schema")
     )
+    capabilities = execution_capabilities(state)
     evidence = {
+        "execution_capabilities": capabilities,
         "max_attempts": cursor.get("max_attempts", 3),
         "remaining_attempts": max(0, cursor.get("max_attempts", 3) - round_id),
         "source_method": source.bundle.method_name,
@@ -411,7 +448,12 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
     if response.get("proposal") is not None:
         try:
             proposal = PurgeRecommendation.model_validate(response["proposal"])
-            validate_proposal(proposal, records, cursor.get("max_attempts", 3))
+            validate_proposal(
+                proposal,
+                records,
+                cursor.get("max_attempts", 3),
+                available_coverage_modes=capabilities["available_coverage_modes"],
+            )
         except ValueError as exc:
             proposal, error = None, str(exc)
     decisions = ["keep_prior_assembly", "stop_human_review"]

@@ -173,6 +173,8 @@ RunConfig 同时冻结本地执行和 `assembly_dedup.automatic_purge_approved` 
 
 `recommendation_mode: advisor` 先对源候选运行 QUAST，再打开持久 `dedup_recommendation`。每个获批提案可从同一原始组装执行新配置；下一提案前 QUAST 比较源和全部完成候选。模型输入是完整 QUAST 表、实际命令、历史设置和推荐，没有硬编码质量分数。可选参考基因组对所有候选使用同一注册参考。
 
+Dedup 顾问请求包含执行器解析的长读段可用性、成员平台和可执行 coverage_mode 列表。缺读段、来源成员不匹配或平台无法映射时，read_depth 不可推荐执行；self_alignment 不消费读段。提案解析、审批应用和执行冻结均重验同一能力约束，不延迟到获批后才发现策略不可执行。
+
 `max_attempts` 限制 purge 执行次数。每次使用唯一工作/产物目录及候选身份。重复配置和不存在候选选择校验失败。最终提案可选任一完成尝试或保留源。确认复用既有前台 `review_policy` 倒计时，只能自动遵循精确保存提案。无效推荐或明确 `human_review` 没有合格自动决策。
 
 中断后恢复请求/响应产物而不再调用模型。审批绑定请求、来源、历史、提案、occurrence；命令冻结重验绑定和参数相等性。方法处置在循环选定交付或失败时结算，不在中间成功尝试后结算。执行/收集失败停止 occurrence，保留完成候选作证据。各方法按自身执行证据及对应收集结果分别结算：本方法已开始但执行或收集失败为 `failed`，从未执行为 `not_started`；另一方法失败不能覆盖已有成功事实，旧 QUAST 报告也不能掩盖新一轮 QUAST 失败。
@@ -247,6 +249,8 @@ BUSCO 重复、大小膨胀、异常深度、证据缺失/不一致等信号阻�
 GapCloser、T2T、Base Polish 的新 RunConfig 默认 `recommendation_mode: advisor`，初始预检冻结对应 `<stage>.eval.quast` 与生物方法；无本地执行授权仍不得运行。每阶段对源及全部已完成候选做同设置 QUAST，将原生校验/端部支持/前后比对报告纳入结构化请求。run/accept/keep_source/human_review 均经 `finishing_recommendation` 人工门；已完成候选按 attempt_N 精确选择，非法响应、跨阶段参数、重复配置、越预算与不可用候选禁止执行。max_attempts（默认 3）存入不可变设置引用，checkpoint 中的副本不能扩预算。
 
 每次尝试从同一已验证源组装开始；attempts/NNN 隔离工作及产物，设置/请求/响应/assessment 都落盘。批准决定、源、推荐、历史与工作流 occurrence 在生成脚本前复核，执行依赖包含批准/推荐引用。恢复复用已发布响应和共享 Runner 证据。结算只在整个循环终止时聚合一次方法处置，防止多轮 disposition 冲突。采纳早先候选时交付其主输出与比较证据。
+
+Dedup 与 finishing 的 QUAST 收集共用结构校验：Assembly 标题、精确有序的冻结候选列、至少一行指标、完整且等宽的表格。报告不合格属于预期收集失败，记录 QUAST 尝试失败并停止阶段；不能归责给已成功并收集的生物方法，也不能把旧报告作为本轮成功证据。
 
 T2T 顾问目前要求 auto_patch，采纳仍需人工。源请求含端部 motif-copy 测量；反馈含扫描、过滤前每条 PAF 两端的 MAPQ/重叠/距离/尾部基序测量及全部拒绝原因。独立 alignment_observations.tsv 绑定冻结尝试、执行与 PAF，不改变补丁候选表语义；统计遍历全部行，最多 100 行示例，拒绝计数按比对端而非唯一读段计算。候选 supporting_reads 去重计数投影为 supporting_read_count，数值汇总覆盖所有行。最终报告重用所选轮次的冻结输入。Base Polish 暴露 Racon window/error/scoring 的有界参数，每候选只跑一轮。顾问必须将同批校正读段一致性视为样本内证据，不据此宣称独立 QV 或默认无限校正。
 

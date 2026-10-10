@@ -30,6 +30,7 @@ from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.execution import InputDependency
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.base import stage_artifacts_dir, stage_output, stage_work_dir
+from app.stages.quast import validate_quast_comparison
 from app.stages.read_resolution import resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import QUAST_REFERENCE_SPEC, assembly_resource_spec
@@ -362,13 +363,7 @@ def collect_quast(state: TopLevelState, stage: str) -> StateUpdate:
         artifact_type=f"{stage}.quast_report",
         metadata={"dependency_refs": [execution.execution_ref.model_dump(mode="json")]},
     )
-    rows = list(csv.reader(report.path.read_text().splitlines(), delimiter="\t"))
-    if (
-        not rows
-        or rows[0][1:] != execution.attempt.metadata["labels"]
-        or any(len(row) != len(rows[0]) for row in rows)
-    ):
-        raise ValueError("finishing QUAST roster/table mismatch")
+    validate_quast_comparison(report.path, execution.attempt.metadata["labels"])
     Ledger(state["data_dir"]).record_attempt_succeeded(
         state["session_id"],
         execution.attempt,

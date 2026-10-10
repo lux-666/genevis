@@ -20,7 +20,7 @@ from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests import test_assembly as fixtures
-from tests.test_dedup_recommendation_loop import Model, _state, proposal
+from tests.test_dedup_recommendation_loop import Model, _approve, _state, proposal
 
 
 def freeze_parent(tmp_path, assets, run_config, methods):
@@ -135,6 +135,106 @@ ASSEMBLY_MODES = [
     ("hifiasm_ont", "ont", "ont_hq", "ont"),
     ("hifiasm_ont", "cycloneseq", "cyclone", "ont"),
 ]
+
+
+@pytest.mark.parametrize("platform", [None, "unknown", "pacbio_hifi", "clr", "ont"])
+def test_registered_assembly_advisor_constrains_depth_to_available_reads(
+    tmp_path, platform
+):
+    from app.control.lifecycle import ResumeValidationError
+    from app.stages.assembly_dedup.advisor import execution_capabilities
+    from app.stages.assembly_dedup.nodes import freeze_purge_dups_attempt
+
+    _, source = _state(tmp_path)
+    assets = [
+        {
+            "asset_type": "assembly_fasta_registered",
+            "paths": [str(source)],
+            "format": "fasta",
+            "compression": "none",
+        }
+    ]
+    if platform:
+        reads = tmp_path / "reads.fastq"
+        reads.write_text("@r1\nACGT\n+\n!!!!\n")
+        assets.append(
+            {
+                "asset_type": "raw_long_reads",
+                "paths": [str(reads)],
+                "format": "fastq",
+                "compression": "none",
+                "platform": platform,
+            }
+        )
+    paths, frozen, initial = freeze_parent(
+        tmp_path,
+        assets,
+        {
+            "requested_stages": [
+                {"stage": "assembly_dedup", "allow_local_execution": True}
+            ],
+            "assembly_dedup": {
+                "automatic_purge_approved": True,
+                "recommendation_mode": "advisor",
+            },
+            "review_policy": {"max_blocked_seconds": -1},
+        },
+        {
+            "assembly_dedup.purge_dups": [
+                "minimap2",
+                "split_fa",
+                "purge_dups",
+                "get_seqs",
+            ],
+            "assembly_dedup.eval.quast": ["quast.py"],
+        },
+    )
+    item = proposal()
+    item["parameters"]["coverage_mode"] = "read_depth"
+    model = Model([AIMessage(content=json.dumps(item))])
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        blocked = checkpoint(paths, frozen, initial)
+    caps = json.loads(model.messages[0][1]["content"])["execution_capabilities"]
+    decisions = load_json(blocked, blocked["active_interrupt"]["request_ref"])[
+        "payload"
+    ]["decisions_allowed"]
+    assert caps == execution_capabilities(blocked)
+    assert caps["long_reads"]["available"] == bool(platform)
+    assert [m["platform"] for m in caps["long_reads"]["members"]] == (
+        [platform] if platform else []
+    )
+    if platform in {None, "unknown"}:
+        assert caps["available_coverage_modes"] == ["self_alignment"]
+        assert caps["read_depth_unavailable_reason"]
+        assert "follow_recommendation" not in decisions
+        with pytest.raises((ValueError, ResumeValidationError)):
+            _approve(blocked)
+    else:
+        assert "read_depth" in caps["available_coverage_modes"]
+        assert caps["long_reads"]["mapping_presets"] == [
+            {
+                "pacbio_hifi": "map-hifi",
+                "clr": "map-pb",
+                "ont": "map-ont",
+            }[platform]
+        ]
+        assert "follow_recommendation" in decisions
+        approved = _approve(blocked)
+        # Recheck the resolved inputs after advice and after approval.
+        with patch(
+            "app.stages.assembly_dedup.nodes.resolve_long_read_members", return_value=[]
+        ):
+            with pytest.raises(ValueError, match="unavailable coverage_mode"):
+                _approve(blocked)
+            with patch(
+                "app.stages.assembly_dedup.nodes.freeze_method_attempts"
+            ) as freeze:
+                rejected = freeze_purge_dups_attempt(approved)
+                freeze.assert_not_called()
+        assert (
+            "unavailable coverage_mode"
+            in rejected["stage_outputs"]["assembly_dedup"]["reason"]
+        )
 
 
 def test_registered_assembly_depth_requires_unambiguous_registered_reads():

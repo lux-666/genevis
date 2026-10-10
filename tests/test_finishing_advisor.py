@@ -791,7 +791,10 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
 
 
 @pytest.mark.parametrize("stage", ["gapcloser", "base_polish", "t2t"])
-def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
+@pytest.mark.parametrize("malformed_report", [False, True])
+def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(
+    tmp_path, stage, malformed_report
+):
     import argparse
     import shlex
 
@@ -936,7 +939,15 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
                 )
             )
 
-        assert resume(blocked) == 0
+        if malformed_report:
+            tool = tmp_path / "bin" / "quast.py"
+            tool.write_text(
+                tool.read_text().replace(
+                    "labels=args[args.index('--labels')+1].split(',')",
+                    "labels=['source']",
+                )
+            )
+        assert resume(blocked) == (1 if malformed_report else 0)
         graph = build_graph(
             backend="sqlite", data_dir=str(paths.run_dir), verified_inputs=frozen
         )
@@ -947,6 +958,20 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
         finally:
             graph.checkpointer.conn.close()
         assert len(history(blocked, stage)) == 1
+        if malformed_report:
+            assert blocked["supervision_state"] == "failed_terminal"
+            assert "collect failed" in blocked["stage_outputs"][stage]["reason"]
+            outcomes = {
+                event["method_name"]: event["disposition"]
+                for event in Ledger(paths.run_dir).read_events(paths.session_id)
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            assert outcomes == {
+                biological: "completed",
+                f"{stage}.eval.quast": "failed",
+            }
+            assert len(model.messages) == 1
+            return
         before = [
             r["subject_id"]
             for r in Ledger(paths.run_dir).read_event_rows(paths.session_id)
