@@ -353,6 +353,66 @@ def test_countdown_cannot_change_approved_settings_or_bypass_budget(tmp_path):
         validate_approved_attempt(exhausted)
 
 
+@pytest.mark.parametrize("method", ["quast", "purge_dups"])
+@pytest.mark.parametrize("prior_purge", [False, True])
+@pytest.mark.parametrize("failure", ["execution", "collect"])
+def test_method_failures_settle_their_own_evidence(
+    tmp_path, method, prior_purge, failure
+):
+    state, _ = _state(tmp_path)
+    model = Model(
+        [
+            AIMessage(content=json.dumps(proposal())),
+            AIMessage(content=json.dumps(proposal(preset="asm10"))),
+        ]
+    )
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        graph = build_stage()
+        if prior_purge or method == "purge_dups":
+            state = graph.invoke(state)
+        if prior_purge and method == "purge_dups":
+            state = graph.invoke(_approve(state))
+            assert len(history(state)) == 1
+        old_report = state["stage_outputs"]["assembly_dedup"].get("quast_report_ref")
+        if method == "purge_dups" or prior_purge:
+            state = _approve(state)
+        if failure == "execution":
+            tool = "quast.py" if method == "quast" else "purge_dups"
+            (tmp_path / "bin" / tool).write_text("#!/bin/sh\nexit 9\n")
+            final = graph.invoke(state)
+        else:
+            target = (
+                "app.stages.assembly_dedup.advisor.collect_quast"
+                if method == "quast"
+                else "app.stages.assembly_dedup.nodes._collect_purge_dups_result"
+            )
+            with patch(target, side_effect=OSError("injected collect failure")):
+                final = build_stage().invoke(state)
+    cursor = final["stage_outputs"]["assembly_dedup"]
+    assert cursor["status"] == "failed"
+    dispositions = {
+        event["method_name"]: event["disposition"]
+        for event in Ledger(state["data_dir"]).read_events("s1")
+        if event["event_type"] == "method_disposition_recorded"
+    }
+    assert dispositions == {
+        "assembly_dedup.eval.quast": "failed" if method == "quast" else "completed",
+        "assembly_dedup.purge_dups": (
+            "failed"
+            if method == "purge_dups"
+            else "completed"
+            if prior_purge
+            else "not_started"
+        ),
+    }
+    if method == "quast" and old_report:
+        assert cursor["quast_report_ref"] == old_report
+    [attempt] = cursor["execution_attempts"]
+    execution = load_json(final, attempt["execution_ref"])
+    assert execution["result"]["return_code"] == (9 if failure == "execution" else 0)
+    assert len(history(final)) == int(prior_purge)
+
+
 def test_disabled_execution_does_not_invoke_quast_or_model(tmp_path):
     state, _ = _state(tmp_path)
     state["stage_outputs"]["assembly_dedup"]["automatic_purge_approved"] = False

@@ -147,6 +147,8 @@ gzip 输入的冻结脚本调用两个命令，因此所选机器方法映射必
 
 Assembly、AutoHiC 参数推荐在方法选择后，顾问在冻结尝试前通过 parameter_approval。两者及 T2T 的显式确定性参数基线生成空 L2，以不可变策略决策批准单轮，不打开人工参数门。T2T 基线要求提供基序，不调用模型；默认 advisor 使用 finishing 完整参数提案与结果反馈，进入 finishing_recommendation。动态 Assembly 从冻结依赖快照解析并通过阶段预检，不读取实时环境。精确事实位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。每次推荐为尝试局部稀疏映射，重试不继承省略值，也不能用模型输出绕过审批。`assembly.threads` 是方法无关 RunConfig 执行资源，冻结到所选方法 L0。Hifiasm/Hifiasm-ONT 的已提供 `species_facts.ploidy` 作为 L1 绑定 `--n-hap`；缺失时保留目录二倍体默认 `2`。
 
+NextDenovo 的 NextGraph `-a` 是输出格式，L0 固定为 `1`（FASTA），不能由 LLM 调整。实际读取的 `run.cfg`、`input.fofn` 在冻结时发布为不可变输入产物，与读段一起纳入共享执行前完整性校验。适配器使用 `task=all、input_type=raw`；官方 v2.5.2 对 HiFi 也执行自纠错，不能把 HiFi 模式解释为跳过纠错；其他版本的实际行为仍需验收。
+
 缺必需参数、读段不兼容、执行失败、缺预期输出均为明确失败，不是规划成功。未授权本地执行不是成功 Assembly 规划：除非另有明确定义复用路径能交付已物化且契约有效候选，否则无交付失败，所选方法 `skipped`。仅 planned candidate 包不能支撑 `stage_completed`。
 
 ## 5. Assembly Dedup
@@ -173,7 +175,7 @@ RunConfig 同时冻结本地执行和 `assembly_dedup.automatic_purge_approved` 
 
 `max_attempts` 限制 purge 执行次数。每次使用唯一工作/产物目录及候选身份。重复配置和不存在候选选择校验失败。最终提案可选任一完成尝试或保留源。确认复用既有前台 `review_policy` 倒计时，只能自动遵循精确保存提案。无效推荐或明确 `human_review` 没有合格自动决策。
 
-中断后恢复请求/响应产物而不再调用模型。审批绑定请求、来源、历史、提案、occurrence；命令冻结重验绑定和参数相等性。方法处置在循环选定交付或失败时结算，不在中间成功尝试后结算。执行/收集失败停止 occurrence，保留完成候选作证据。
+中断后恢复请求/响应产物而不再调用模型。审批绑定请求、来源、历史、提案、occurrence；命令冻结重验绑定和参数相等性。方法处置在循环选定交付或失败时结算，不在中间成功尝试后结算。执行/收集失败停止 occurrence，保留完成候选作证据。各方法按自身执行证据及对应收集结果分别结算：本方法已开始但执行或收集失败为 `failed`，从未执行为 `not_started`；另一方法失败不能覆盖已有成功事实，旧 QUAST 报告也不能掩盖新一轮 QUAST 失败。
 
 `self_alignment` 生成 `purge_dups self.paf.gz`，省略覆盖相关 `-2 -T/-c`；`end_only` 控制 `get_seqs -e`。空重复 BED 合法，输出 haplotig FASTA 保留。该策略是可选替代，不是普遍质量保证。
 

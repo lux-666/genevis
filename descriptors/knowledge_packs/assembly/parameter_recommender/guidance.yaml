@@ -34,26 +34,15 @@ guidance:
     guidance: >-
       read_cutoff excludes shorter reads before NextDenovo assembly. Increasing
       it changes retained coverage as well as read length; justify a cutoff using
-      the observed length distribution and remaining support. ONT and CLR raw
-      reads use correction, whereas HiFi does not require that correction path.
+      the observed length distribution and remaining support. The adapter fixes
+      task=all and input_type=raw. In NextDenovo v2.5.2 this executes correction
+      for ONT, CLR and HiFi, including HiFi self-correction; read_type=hifi does
+      not skip the correction workflow.
     caveats:
       - Read N50 alone cannot quantify coverage remaining after a cutoff.
       - The executor freezes read_type and input FOFN; recommendations cannot change either.
-      - "Source: https://github.com/Nextomics/NextDenovo/blob/master/doc/OPTION.rst ; historical version equivalence is not established."
-
-  - guidance_id: nextdenovo.graph.pruning.v1
-    methods: [assembly.candidate.nextdenovo]
-    parameters: [nextgraph_a]
-    relevant_metrics: [genome_survey.heterozygosity, assembly_review.assembly_size_ratio, assembly_review.busco_duplicate]
-    guidance: >-
-      nextgraph_a is rendered as NextGraph -a in nextgraph_options. Evaluate a
-      change against completeness, duplication and assembly size together; N50
-      alone cannot justify graph pruning. Retain the native option's semantics
-      and do not translate hifiasm purge parameters into this setting.
-    caveats:
-      - Biological duplication and polyploidy can resemble redundant sequence.
-      - The catalog exposes only -a; other NextGraph settings remain outside the executable recommendation contract.
-      - "Source: https://github.com/Nextomics/NextDenovo/blob/master/doc/OPTION.rst ; historical version equivalence is not established."
+      - Corrected input is not supported by this adapter; behavior in other allowed tool versions requires verification.
+      - "Source: https://github.com/Nextomics/NextDenovo/blob/v2.5.2/nextDenovo ; https://github.com/Nextomics/NextDenovo/blob/v2.5.2/doc/OPTION.rst ; version equivalence is not established."
 
   - guidance_id: hifiasm.connectivity.low_coverage.v1
     methods: [assembly.candidate.hifiasm, assembly.candidate.hifiasm_ont]

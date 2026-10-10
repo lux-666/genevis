@@ -24,6 +24,8 @@ from app.execution.evidence import (
     persist_execution_result,
     persist_frozen_attempt,
 )
+from app.execution.lifecycle import run_method_attempts
+from app.execution.local_runner import LocalRunner
 from app.execution.method_runner import build_frozen_attempt
 from app.integrity import sha256_file
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
@@ -656,11 +658,12 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
             catalog.parameters["read_type"].allowed_values, list(FLYE_READ_TYPE_FLAGS)
         )
 
-    def test_nextdenovo_catalog_keeps_behavior_knobs_in_l2(self):
+    def test_nextdenovo_catalog_fixes_format_and_keeps_cutoff_in_l2(self):
         catalog = load_parameter_catalog("assembly.candidate.nextdenovo")
 
         self.assertIsNotNone(catalog.parameters["read_cutoff"].layers.l2)
-        self.assertIsNotNone(catalog.parameters["nextgraph_a"].layers.l2)
+        self.assertIsNone(catalog.parameters["nextgraph_a"].layers.l2)
+        self.assertEqual(catalog.parameters["nextgraph_a"].layers.l0.value, 1)
 
     def test_catalogs_cover_supported_hifiasm_cli_surface(self):
         expected_keys = {
@@ -1237,14 +1240,14 @@ class CommandBuilderTests(unittest.TestCase):
         resolved = resolve_assembly_parameters(
             catalog=catalog,
             snapshot=_snapshot(method_id),
-            approved_l2={"read_cutoff": 7777, "nextgraph_a": 2},
+            approved_l2={"read_cutoff": 7777},
             l0_executor_values=_l0_executor_values(method_id),
         )
 
         rendered = render_assembly_config(catalog, resolved)
 
         self.assertEqual(rendered["read_cutoff"], 7777)
-        self.assertEqual(rendered["nextgraph_a"], 2)
+        self.assertEqual(rendered["nextgraph_a"], 1)
 
     def test_quantity_facts_reject_legacy_string_and_boolean_values(self):
         for raw in ("500m", True, float("nan"), float("inf")):
@@ -2230,7 +2233,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
     def test_nextdenovo_freeze_renders_l2_read_cutoff(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._nextdenovo_state(
-                tmpdir, recommended_params={"read_cutoff": 7777, "nextgraph_a": 2}
+                tmpdir, recommended_params={"read_cutoff": 7777}
             )
             with patch(
                 "app.stages.assembly.method_application.nextdenovo.resolve_method_env",
@@ -2253,9 +2256,9 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             command["parameter_sources"]["l2_approved"]["read_cutoff"], 7777
         )
         self.assertEqual(command["rendered_parameters"]["read_cutoff"], 7777)
-        self.assertEqual(command["rendered_parameters"]["nextgraph_a"], 2)
+        self.assertEqual(command["rendered_parameters"]["nextgraph_a"], 1)
         self.assertIn("read_cutoff = 7777", run_cfg_text)
-        self.assertIn("nextgraph_options = -a 2", run_cfg_text)
+        self.assertIn("nextgraph_options = -a 1", run_cfg_text)
 
     def test_nextdenovo_freeze_rejects_corrupt_l2_integer_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2272,6 +2275,62 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         self.assertEqual(assembly["status"], "failed")
         self.assertIn("NextDenovo parameter sources are invalid", assembly["reason"])
         self.assertIn("read_cutoff cannot be rendered as int", assembly["reason"])
+
+
+@pytest.mark.parametrize("changed_file", [None, "run.cfg", "input.fofn"])
+@pytest.mark.parametrize("mutation", ["same_size", "delete"])
+def test_nextdenovo_frozen_config_integrity_before_local_runner(
+    tmp_path, changed_file, mutation
+):
+    from app.stages.assembly.method_application.nextdenovo import LIFECYCLE
+    from tests.test_assembly import AssemblyStageTests
+
+    helper = MethodFreezeParameterFailureTests()
+    state = helper._nextdenovo_state(str(tmp_path), recommended_params={})
+    marker = tmp_path / "nextdenovo-called"
+    bins = AssemblyStageTests()._fake_nextdenovo_bin(str(tmp_path), marker=marker)
+    output = state["stage_outputs"]["assembly"]
+    output["env"] = {"PATH": f"{bins}{os.pathsep}{os.environ['PATH']}"}
+    output[ASSEMBLY_EXECUTION_CONTRACT_KEY] = build_assembly_execution_contract(
+        output, method_id="assembly.candidate.nextdenovo"
+    ).model_dump(mode="json")
+    with patch(
+        "app.stages.assembly.method_application.nextdenovo.resolve_method_env",
+        return_value=(None, [], None),
+    ):
+        state = {**state, **freeze_nextdenovo_attempt(state)}
+    # Rehydrate the persisted cursor before resuming through the real Runner.
+    state = json.loads(json.dumps(state))
+    output = state["stage_outputs"]["assembly"]
+    frozen = read_json_artifact(
+        state, output["parameter_attempts"][0]["frozen_attempt_ref"]
+    )["attempt"]
+    cfg = Path(frozen["metadata"]["run_cfg"])
+    fofn = Path(frozen["metadata"]["input_fofn"])
+    assert {str(cfg), str(fofn)} <= {d["path"] for d in frozen["input_dependencies"]}
+    assert f"input_fofn = {fofn}\n" in cfg.read_text()
+    if changed_file:
+        path = cfg if changed_file == "run.cfg" else fofn
+        if mutation == "delete":
+            path.unlink()
+        else:
+            original = path.read_text()
+            altered = (
+                original.replace("pa_correction = 3", "pa_correction = 9")
+                if changed_file == "run.cfg"
+                else original.replace("reads.fastq", "other.fastq")
+            )
+            assert original != altered and len(original) == len(altered)
+            path.write_text(altered)
+    result = run_method_attempts(state, LIFECYCLE, runner=LocalRunner())
+    cursor = result["stage_outputs"]["assembly"]
+    if changed_file:
+        assert cursor["status"] == "failed"
+        assert "input integrity check failed" in cursor["reason"]
+        assert not marker.exists()
+    else:
+        assert cursor["status"] == "nextdenovo_ran"
+        assert marker.is_file()
 
 
 if __name__ == "__main__":

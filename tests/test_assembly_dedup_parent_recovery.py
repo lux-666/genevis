@@ -343,6 +343,12 @@ def test_assembly_modes_parent_cli_recovery(
             "run.cfg",
         ).read_text()
         assert f"read_type = {native_mode}\n" in cfg
+        assert "nextgraph_options = -a 1\n" in cfg
+        # Execution inputs remain verifiable after collect and terminal work cleanup.
+        assert Path(command["argv"][1]).read_text() == cfg
+        assert Path(
+            command["rendered_parameters"]["input_fofn"]
+        ).read_text().splitlines() == [str(path) for path in expected_reads]
         assert bundle["input_member_ids"]["primary"]
         assert len(bundle["input_member_ids"]["primary"]) == len(expected_reads)
         # The fixture reads the run.cfg-bound input.fofn at execution time;

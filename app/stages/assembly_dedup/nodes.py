@@ -28,7 +28,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
-from app.execution.method_outcomes import MethodOutcome
+from app.execution.method_outcomes import MethodOutcome, has_execution_result
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -123,18 +123,33 @@ def purge_dups_method_outcome_policy(state: TopLevelState) -> MethodOutcome | No
     """Map durable purge_dups collect/failure facts to one method outcome."""
 
     output = _output(state)
+    if output.get("status") == "failed" and has_execution_result(
+        output, ASSEMBLY_DEDUP_METHOD
+    ):
+        executions = load_method_executions(state, PURGE_DUPS_LIFECYCLE)
+        ledger = Ledger(absolute_data_dir(state))
+        if any(
+            not execution.evidence.success
+            or not ledger.has_attempt_success(
+                state["session_id"], execution.attempt.attempt_id
+            )
+            for execution in executions
+        ):
+            return MethodOutcome(
+                method_name=ASSEMBLY_DEDUP_METHOD,
+                disposition="failed",
+                reason=str(
+                    output.get("reason") or "purge_dups execution/collect failed"
+                ),
+                refs=tuple(execution.execution_ref for execution in executions),
+            )
     if output.get("recommendation_mode") == "advisor":
         if output.get("status") not in {"failed", "pass_through", "dedup_selected"}:
             return None
         if output.get("history_refs"):
             return MethodOutcome(
                 method_name=ASSEMBLY_DEDUP_METHOD,
-                disposition="failed"
-                if output.get("status") == "failed"
-                else "completed",
-                reason=output.get("reason", "dedup loop failed")
-                if output.get("status") == "failed"
-                else None,
+                disposition="completed",
                 refs=tuple(
                     ArtifactRef.model_validate(ref) for ref in output["history_refs"]
                 ),

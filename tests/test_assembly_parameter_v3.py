@@ -30,6 +30,7 @@ from app.schemas.parameter_recommendation import (
 )
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import (
+    ParameterCommandError,
     parameter_sources_payload,
     render_assembly_cli,
     render_assembly_config,
@@ -49,6 +50,7 @@ from app.stages.assembly.parameters.context import (
     build_assembly_recommendation_context,
 )
 from app.storage.parameter_evidence import ParameterEvidenceError
+from app.storage.paths import SessionPaths, ensure_run_layout
 
 
 def _assembly_state(run_dir: Path, output: dict) -> dict:
@@ -326,14 +328,9 @@ class AssemblyRenderingV3Tests(unittest.TestCase):
             "assembly_output_dir": "/work/nextdenovo_work",
             "assembly_threads": 12,
         }
-        cases = (
-            ({}, False, False),
-            ({"read_cutoff": 1000}, True, False),
-            ({"nextgraph_a": 2}, False, True),
-            ({"read_cutoff": 1000, "nextgraph_a": 2}, True, True),
-        )
+        cases = (({}, False), ({"read_cutoff": 1000}, True))
 
-        for approved_l2, has_cutoff, has_nextgraph in cases:
+        for approved_l2, has_cutoff in cases:
             with self.subTest(approved_l2=approved_l2):
                 resolved = resolve_assembly_parameters(
                     catalog=catalog,
@@ -347,7 +344,32 @@ class AssemblyRenderingV3Tests(unittest.TestCase):
                 self.assertEqual(rendered["workdir"], "/work/nextdenovo_work")
                 self.assertIn("workdir = /work/nextdenovo_work", text)
                 self.assertEqual("read_cutoff = 1000" in text, has_cutoff)
-                self.assertEqual("nextgraph_options = -a 2" in text, has_nextgraph)
+                self.assertIn("nextgraph_options = -a 1\n", text)
+                self.assertEqual(
+                    resolved.effective_source_by_parameter["nextgraph_a"], "l0"
+                )
+
+        for value in (0, 1, 2, 3, 4, 5, 10):
+            with self.subTest(nextgraph_a=value):
+                with self.assertRaisesRegex(
+                    ParameterCommandError, "not cataloged as L2-adjustable"
+                ):
+                    resolve_assembly_parameters(
+                        catalog=catalog,
+                        snapshot=_snapshot(NEXTDENOVO_METHOD),
+                        approved_l2={"nextgraph_a": value},
+                        l0_executor_values=l0,
+                    )
+                if value != 1:
+                    with self.assertRaisesRegex(ValueError, "FASTA"):
+                        _run_cfg(
+                            read_type="ont",
+                            input_fofn="/work/input.fofn",
+                            workdir="/work/nextdenovo_work",
+                            genome_size=2500000,
+                            threads=12,
+                            nextgraph_a=value,
+                        )
 
     def test_hifiasm_commands_do_not_fabricate_route_inputs(self):
         forbidden = {
@@ -650,7 +672,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as tmp,
             ):
                 run_dir = Path(tmp) / "runs" / "s1"
-                run_dir.mkdir(parents=True)
+                ensure_run_layout(SessionPaths.from_run_dir(run_dir))
                 output = {
                     "status": status,
                     "input_ref": "/reads/long.fastq.gz",
@@ -813,7 +835,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as tmp,
             ):
                 run_dir = Path(tmp) / "runs" / "s1"
-                run_dir.mkdir(parents=True)
+                ensure_run_layout(SessionPaths.from_run_dir(run_dir))
                 output = {
                     "status": status,
                     "input_ref": "/reads/long.fastq.gz",

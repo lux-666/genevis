@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_execution_evidence
 from app.execution.input_integrity import (
     artifact_input_dependency,
     asset_input_dependencies,
@@ -20,7 +21,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
-from app.execution.method_outcomes import MethodOutcome
+from app.execution.method_outcomes import MethodOutcome, has_execution_result
 from app.execution.method_runner import build_frozen_attempt
 from app.llm.dedup import PurgeParameters, PurgeRecommendation, PurgeRecommender
 from app.review.base import ReviewPayload
@@ -157,12 +158,45 @@ def quast_outcome(state: TopLevelState) -> MethodOutcome | None:
         return None
     if cursor.get("status") not in {"dedup_selected", "pass_through", "failed"}:
         return None
+    ledger = Ledger(absolute_data_dir(state))
+    if has_execution_result(cursor, QUAST):
+        executions = load_method_executions(state, QUAST_LIFECYCLE)
+        if any(
+            not execution.evidence.success
+            or not ledger.has_attempt_success(
+                state["session_id"], execution.attempt.attempt_id
+            )
+            for execution in executions
+        ):
+            return MethodOutcome(
+                method_name=QUAST,
+                disposition="failed",
+                reason=str(cursor.get("reason") or "QUAST execution/collect failed"),
+                refs=tuple(execution.execution_ref for execution in executions),
+            )
     ref = cursor.get("quast_report_ref")
+    execution_ref = cursor.get("quast_execution_ref")
+    if ref and execution_ref:
+        evidence = load_execution_evidence(
+            state,
+            execution_ref,
+            expected_stage=STAGE,
+            expected_method_name=QUAST,
+        )
+        report_ref = ArtifactRef.model_validate(ref)
+        resolve_artifact_ref(absolute_data_dir(state), state["session_id"], report_ref)
+        if evidence.success and ledger.has_attempt_success(
+            state["session_id"], evidence.attempt_id
+        ):
+            return MethodOutcome(
+                method_name=QUAST,
+                disposition="completed",
+                refs=(report_ref, ArtifactRef.model_validate(execution_ref)),
+            )
     return MethodOutcome(
         method_name=QUAST,
-        disposition="completed" if ref else "not_started",
-        reason=None if ref else cursor.get("reason", "quast_not_started"),
-        refs=(ArtifactRef.model_validate(ref),) if ref else (),
+        disposition="not_started",
+        reason=cursor.get("reason", "quast_not_started"),
     )
 
 

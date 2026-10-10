@@ -31,7 +31,6 @@ def test_checked_in_guidance_loads_and_covers_mvp_areas():
         "flye.disjointigs.coverage.v1",
         "flye.overlaps.connectivity.v1",
         "nextdenovo.reads.cutoff.v1",
-        "nextdenovo.graph.pruning.v1",
         "hifiasm.connectivity.low_coverage.v1",
         "hifiasm.purging.heterozygosity.v1",
         "hifiasm.repeats.graph_handling.v1",

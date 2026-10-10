@@ -183,9 +183,7 @@ class _ParameterModel:
     def invoke(self, _messages: list[dict[str, str]]) -> _ParameterResponse:
         request = json.loads(_messages[1]["content"])
         parameters = (
-            {"read_cutoff": 1000, "nextgraph_a": 1}
-            if request["method_id"].endswith("nextdenovo")
-            else {}
+            {"read_cutoff": 1000} if request["method_id"].endswith("nextdenovo") else {}
         )
         return _ParameterResponse(parameters)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from app.domains.assembly.constants import NEXTDENOVO_METHOD
 from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.input_integrity import artifact_input_dependency
 from app.execution.lifecycle import (
     CompiledMethodGraph,
     MethodExecutionLifecycle,
@@ -21,6 +23,7 @@ from app.execution.lifecycle import (
 from app.execution.parameter_attempts import (
     current_parameter_attempt,
 )
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly.command_builder import (
     ParameterCommandError,
@@ -45,6 +48,7 @@ from app.stages.assembly.state import (
     validated_assembly_stage_payload,
 )
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.storage.artifacts import publish_artifact_record
 from app.storage.publish import publish_file, shell_publish_file
 
 LIFECYCLE = MethodExecutionLifecycle(
@@ -123,8 +127,8 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
         output.get("input_type"),
         attempt_id=parameter_attempt_id,
     )
-    if error:
-        return fail_update(state, error)
+    if error or fofn is None:
+        return fail_update(state, error or "NextDenovo input FOFN is missing")
     attempt_scope = f"{parameter_attempt_id:03d}"
     working_dir = stage_work_dir(
         state, "assembly", "attempts", attempt_scope, "nextdenovo"
@@ -138,6 +142,10 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     draft = artifact_dir / "draft_assembly.fasta"
     run_cfg = working_dir / "run.cfg"
+    input_dir = stage_artifacts_dir(
+        state, "assembly", "attempts", attempt_scope, "inputs", "nextdenovo"
+    )
+    durable_fofn = input_dir / "input.fofn"
     script = working_dir / "run_nextdenovo.sh"
     try:
         catalog = approved_bundle.chain.catalog
@@ -147,16 +155,56 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
             approved_l2=approved_bundle.approved_l2,
             l0_executor_values={
                 "assembly_method_read_type": read_type,
-                "assembly_input_reads": str(fofn),
+                "assembly_input_reads": str(durable_fofn),
                 "assembly_output_dir": str(nextdenovo_work_dir),
                 **thread_binding,
             },
         )
         rendered_parameters = render_assembly_config(catalog, resolved)
         parameter_sources = parameter_sources_payload(resolved)
+        config_text = _run_cfg(**rendered_parameters)
     except ParameterCommandError as exc:
         return fail_update(state, f"NextDenovo parameter sources are invalid: {exc}")
-    run_cfg.write_text(_run_cfg(**rendered_parameters), encoding="utf-8")
+    try:
+        input_dependencies = build_read_input_dependencies(
+            state, output, "primary", read_paths
+        )
+        frozen_fofn = publish_artifact_record(
+            data_dir,
+            session_id,
+            ArtifactMeta.from_file(
+                fofn,
+                stage="assembly",
+                method_name=NEXTDENOVO_METHOD,
+                artifact_type="assembly.nextdenovo_input_fofn",
+            ),
+            destination=durable_fofn,
+        )
+        run_cfg.write_text(config_text, encoding="utf-8")
+        frozen_cfg = publish_artifact_record(
+            data_dir,
+            session_id,
+            ArtifactMeta.from_file(
+                run_cfg,
+                stage="assembly",
+                method_name=NEXTDENOVO_METHOD,
+                artifact_type="assembly.nextdenovo_execution_config",
+                metadata={"dependency_refs": [frozen_fofn.ref.model_dump(mode="json")]},
+            ),
+            destination=input_dir / "run.cfg",
+        )
+        run_cfg = frozen_cfg.path
+        fofn = frozen_fofn.path
+        input_dependencies.extend(
+            [
+                artifact_input_dependency(state, frozen_fofn.ref, fofn),
+                artifact_input_dependency(state, frozen_cfg.ref, run_cfg),
+            ]
+        )
+    except (OSError, ValueError) as exc:
+        return fail_update(
+            state, f"NextDenovo execution inputs could not be frozen: {exc}"
+        )
     candidates = [
         nextdenovo_work_dir / "03.ctg_graph" / "nd.asm.fasta",
         nextdenovo_work_dir / "03.ctg_graph" / "nextdenovo.asm.fasta",
@@ -178,14 +226,6 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
         encoding="utf-8",
     )
     script.chmod(0o755)
-    try:
-        input_dependencies = build_read_input_dependencies(
-            state, output, "primary", read_paths
-        )
-    except ValueError as exc:
-        return fail_update(
-            state, f"NextDenovo input dependency cardinality error: {exc}"
-        )
     return freeze_parameterized_attempt(
         state,
         LIFECYCLE,
@@ -255,7 +295,11 @@ def collect_nextdenovo_artifacts(state: TopLevelState) -> StateUpdate:
         "run.cfg",
     )
     try:
-        publish_file(Path(str(run_cfg_value)), durable_run_cfg)
+        # Retain the execution dependency at its frozen path when publishing
+        # the candidate's native config output; publish_file consumes sources.
+        native_copy = execution.attempt.working_dir / "native.run.cfg"
+        shutil.copyfile(Path(str(run_cfg_value)), native_copy)
+        publish_file(native_copy, durable_run_cfg)
     except (FileNotFoundError, FileExistsError, OSError) as exc:
         return fail_update(state, f"NextDenovo run.cfg could not be published: {exc}")
 
@@ -311,13 +355,14 @@ def _run_cfg(
     genome_size: int,
     threads: int,
     read_cutoff: int | None = None,
-    nextgraph_a: int | None = None,
+    nextgraph_a: int = 1,
 ) -> str:
+    if nextgraph_a != 1:
+        raise ParameterCommandError(
+            "NextDenovo requires NextGraph -a 1 for FASTA output"
+        )
     read_cutoff_line = (
         f"read_cutoff = {read_cutoff}\n" if read_cutoff is not None else ""
-    )
-    nextgraph_line = (
-        f"nextgraph_options = -a {nextgraph_a}\n" if nextgraph_a is not None else ""
     )
     return (
         "[General]\n"
@@ -339,5 +384,5 @@ def _run_cfg(
         f"correction_options = -p {threads}\n\n"
         "[assemble_option]\n"
         f"minimap2_options_cns = -t {threads}\n"
-        f"{nextgraph_line}"
+        "nextgraph_options = -a 1\n"
     )

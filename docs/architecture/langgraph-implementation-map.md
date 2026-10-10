@@ -188,7 +188,7 @@ Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显�
 | hifiasm | PacBio HiFi；补充 ONT/Hi-C 须显式绑定 | 默认 auto 确认后恢复；完整多文件 HiFi 和显式单文件覆盖；既有机制指导 | 实际 primary/haplotype GFA、倍性、版本与补充输入 |
 | hifiasm-ONT | ONT raw/HQ、CycloneSEQ 映射 `--ont` | 三类输入的父图恢复、命令模式、GFA/候选交接 | 读段质量/读长/覆盖与版本支持；CycloneSEQ 适用性须独立验证 |
 | Flye | nano-raw、nano-hq、pacbio-raw、pacbio-hifi；CycloneSEQ 映射 nano-raw | 全模式多文件父图恢复；覆盖截取/overlap 指导引用官方文档并冻结 | 各模式真实工具与样本；corrected、meta 模式尚未接入 |
-| NextDenovo | ont（含 ONT HQ/CycloneSEQ 映射）、clr、hifi | 各模式父图恢复、FOFN、原生 run.cfg/产物交接；cutoff/NextGraph 官方指导 | 实际纠错/组装目录、HiFi 行为、版本和失败恢复；corrected 输入尚未接入 |
+| NextDenovo | ont（含 ONT HQ/CycloneSEQ 映射）、clr、hifi | 各模式父图恢复、FOFN、原生 run.cfg/产物交接；固定 FASTA 格式、配置/FOFN 完整性校验；cutoff 与 v2.5.2 HiFi 自纠错官方指导 | 实际纠错/组装目录、HiFi 行为、版本和失败恢复；corrected 输入尚未接入 |
 | Dedup read_depth | Assembly 候选的原始读段；外部组装的当前注册长读段 | 两轮 SQLite/CLI 恢复；外部 FASTA ID 不当读段 ID，缺读段明确失败 | 各平台 preset、深度/cutoff 合理性；当前比对读段不能推断为外部组装原始来源 |
 | Dedup self_alignment | 已物化组装 | 两轮恢复、无覆盖工具调用；采纳早先候选或保留源，旧候选哈希不变，最终选择不重跑 | 自比对/边界截取与过度去冗余证据；N50 不能替代完整性和准确性 |
 
