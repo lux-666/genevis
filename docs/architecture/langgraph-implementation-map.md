@@ -177,6 +177,27 @@
 
 Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显式确定性基线以策略记录批准空 L2 初始尝试，T2T 要求已提供基序并禁用阈值/基序模型，详见[推荐策略](reference/recommendation-policy.md)。Dedup 和三个 finishing 顾问使用独立类型化任务输出，逐动作人工批准并保留全部尝试。默认 finishing 的持久任务契约不使用 schema-3 参数 manifest；T2T 的 schema-3 单轮执行/手工补丁路径通过 deterministic_baseline 保留，旧初始 LLM 调用仅供受控兼容路径。剩余缺口是独立准确率证据、方法范围与代表样本验证。
 
+<a id="assembly-dedup-validation-map"></a>
+
+## Assembly / Dedup 验证边界
+
+各方法共享冻结输入、方法确认、参数审批、执行生命周期和候选交接。`tests/test_assembly_dedup_parent_recovery.py` 从默认 `assembly_route: auto` 开始，覆盖人工方法确认、参数审批之间的 SQLite 关闭重开及 CLI 恢复；多文件含空格路径，工具只执行一次。fixture 验证不代表工具版本适配、组装质量或服务器分离进程验收。
+
+| 方法 | 已接入输入模式 | 代码验证与知识覆盖 | 仍待真实验收 |
+|---|---|---|---|
+| hifiasm | PacBio HiFi；补充 ONT/Hi-C 须显式绑定 | 默认 auto 确认后恢复；完整多文件 HiFi 和显式单文件覆盖；既有机制指导 | 实际 primary/haplotype GFA、倍性、版本与补充输入 |
+| hifiasm-ONT | ONT raw/HQ、CycloneSEQ 映射 `--ont` | 三类输入的父图恢复、命令模式、GFA/候选交接 | 读段质量/读长/覆盖与版本支持；CycloneSEQ 适用性须独立验证 |
+| Flye | nano-raw、nano-hq、pacbio-raw、pacbio-hifi；CycloneSEQ 映射 nano-raw | 全模式多文件父图恢复；覆盖截取/overlap 指导引用官方文档并冻结 | 各模式真实工具与样本；corrected、meta 模式尚未接入 |
+| NextDenovo | ont（含 ONT HQ/CycloneSEQ 映射）、clr、hifi | 各模式父图恢复、FOFN、原生 run.cfg/产物交接；cutoff/NextGraph 官方指导 | 实际纠错/组装目录、HiFi 行为、版本和失败恢复；corrected 输入尚未接入 |
+| Dedup read_depth | Assembly 候选的原始读段；外部组装的当前注册长读段 | 两轮 SQLite/CLI 恢复；外部 FASTA ID 不当读段 ID，缺读段明确失败 | 各平台 preset、深度/cutoff 合理性；当前比对读段不能推断为外部组装原始来源 |
+| Dedup self_alignment | 已物化组装 | 两轮恢复、无覆盖工具调用；采纳早先候选或保留源，旧候选哈希不变，最终选择不重跑 | 自比对/边界截取与过度去冗余证据；N50 不能替代完整性和准确性 |
+
+contig 模板显式启用 Dedup advisor/json_schema/三次尝试上限；审核策略沿用既有配置。三轮循环、响应回放、预算/重复配置、源候选保护仍由 `tests/test_dedup_recommendation_loop.py` 覆盖。独立 QUAST/BUSCO、生物学质量及推荐收益计为待验，不能由 fixture 关闭。
+
+新菌种的 PacBio 必须先确定 HiFi/CLR，再复用规范 manifest、contig RunConfig 和 `gene-agent run`/`resume`。Illumina DNA 已进入 Read QC/Genome Survey，短读段存在时优先用于 k-mer 调查；没有新增短读段组装或 polish。Hi-C 可提供推荐上下文，仅明确批准的 hifiasm phasing 或独立 AutoHiC 阶段实际消费读对。ONT/CycloneSEQ 没有对应输入时单列待验，不能由 PacBio 菌种代验。模板中的大小、倍性、学名均是示例，执行时按材料替换。
+
+GapCloser、T2T、Base Polish 的已报告 smoke 与阶段/串联验收欠账由[一致性记录](reference/conformance.md)维护。代表性样本验收须保留输入身份、工具版本、运行目录、实际命令、评估和采纳记录。
+
 <a id="finishing-capabilities-and-remaining-product-gaps"></a>
 
 ## 精修能力与剩余产品缺口

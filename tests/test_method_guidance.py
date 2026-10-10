@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from app.domains.assembly.constants import HIFIASM_METHOD, HIFIASM_ONT_METHOD
+from app.domains.assembly.constants import (
+    ASSEMBLY_CANDIDATES,
+    HIFIASM_METHOD,
+    HIFIASM_ONT_METHOD,
+)
 from app.domains.assembly.method_guidance import (
     DEFAULT_GUIDANCE_PATH,
     load_method_guidance,
@@ -24,6 +28,10 @@ def test_checked_in_guidance_loads_and_covers_mvp_areas():
 
     assert DEFAULT_GUIDANCE_PATH.exists()
     assert set(registry.by_id) == {
+        "flye.disjointigs.coverage.v1",
+        "flye.overlaps.connectivity.v1",
+        "nextdenovo.reads.cutoff.v1",
+        "nextdenovo.graph.pruning.v1",
         "hifiasm.connectivity.low_coverage.v1",
         "hifiasm.purging.heterozygosity.v1",
         "hifiasm.repeats.graph_handling.v1",
@@ -38,7 +46,9 @@ def test_model_cards_are_method_filtered_and_deterministic():
     hifi_cards = registry.model_cards_for_method(HIFIASM_METHOD)
     ont_cards = registry.model_cards_for_method(HIFIASM_ONT_METHOD)
 
-    assert [card["guidance_id"] for card in hifi_cards] == sorted(registry.by_id)
+    assert [card["guidance_id"] for card in hifi_cards] == sorted(
+        key for key in registry.by_id if key.startswith("hifiasm.")
+    )
     assert hifi_cards == ont_cards
     assert hifi_cards == registry.model_cards_for_method(HIFIASM_METHOD)
     assert all(
@@ -118,3 +128,18 @@ def test_unknown_method_projection_is_rejected():
 
     with pytest.raises(ValueError, match="Unknown method id"):
         registry.model_cards_for_method("hifiasm")
+
+
+@pytest.mark.parametrize("method_id", ASSEMBLY_CANDIDATES)
+def test_guidance_parameters_belong_to_the_target_adjustable_catalog(method_id):
+    from app.domains.parameter_recommendation.catalog import (
+        load_method_parameter_catalog,
+    )
+
+    cards = load_method_guidance().model_cards_for_method(method_id)
+    catalog = load_method_parameter_catalog(method_id)
+    assert cards
+    for card in cards:
+        assert card["methods"] == [method_id] or method_id in card["methods"]
+        for name in card["parameters"]:
+            assert catalog.parameters[name].layers.l2 is not None

@@ -303,7 +303,17 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
         primary_members = _members_for_read_type(all_members, hinted_read_type)
         if not primary_members and platforms == ["unknown"]:
             primary_members = list(all_members)
-    explicit_hifi_ref = assembly_out.get("hifi_reads_ref")
+    # The resolved first-file hint is not an operator override. On re-entry
+    # after method confirmation it must not collapse a multi-file HiFi set.
+    assembly_seed = (state.get("stage_seeds") or {}).get("assembly") or {}
+    explicit_hifi_ref_raw = assembly_seed.get("hifi_reads_ref") or (
+        assembly_out.get("hifi_reads_ref")
+        if "hifi_read_refs" not in assembly_out
+        else None
+    )
+    explicit_hifi_ref = (
+        str(explicit_hifi_ref_raw) if isinstance(explicit_hifi_ref_raw, str) else None
+    )
     if hinted_read_type == "pacbio_hifi" and explicit_hifi_ref:
         try:
             primary_members = resolve_long_read_members(

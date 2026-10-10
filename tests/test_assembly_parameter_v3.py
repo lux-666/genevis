@@ -143,9 +143,14 @@ class AssemblyCatalogV3Tests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Unknown method descriptor"):
                     load_parameter_catalog(catalog_id)
 
-    def test_guidance_uses_only_stable_hifiasm_method_ids(self):
+    def test_guidance_uses_only_stable_assembly_method_ids(self):
         registry = load_method_guidance()
-        stable_ids = {HIFIASM_METHOD, HIFIASM_ONT_METHOD}
+        stable_ids = {
+            FLYE_METHOD,
+            NEXTDENOVO_METHOD,
+            HIFIASM_METHOD,
+            HIFIASM_ONT_METHOD,
+        }
 
         self.assertTrue(registry.records)
         for record in registry.records:
@@ -153,6 +158,24 @@ class AssemblyCatalogV3Tests(unittest.TestCase):
 
 
 class AssemblyContextV3Tests(unittest.TestCase):
+    def test_context_uses_confirmed_selected_route_when_run_config_is_auto(self):
+        selection = AssemblySelection(
+            read_type="pacbio_hifi",
+            primary_method=HIFIASM_METHOD,
+            source="human",
+            rationale="confirmed",
+        ).model_dump(mode="json")
+        context = build_assembly_recommendation_context(
+            {},
+            assembly_out={
+                "assembly_selection": selection,
+                "assembly_route": "auto",
+                "selected_route": "hifi",
+                "target_level": "draft",
+            },
+        )
+        self.assertEqual(context.assembly_route, "hifi")
+
     def test_context_uses_selection_and_explicit_stage_fields_only(self):
         retry = RecommendationRetryContext(
             trigger=ExecutionFailureTrigger(status="execution_failed"),

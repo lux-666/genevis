@@ -15,7 +15,7 @@ from typing import Any, Final
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.domains.assembly.constants import HIFIASM_METHOD, HIFIASM_ONT_METHOD
+from app.domains.assembly.constants import ASSEMBLY_CANDIDATES
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_GUIDANCE_PATH: Final = (
@@ -26,7 +26,7 @@ DEFAULT_GUIDANCE_PATH: Final = (
     / "parameter_recommender"
     / "guidance.yaml"
 )
-KNOWN_GUIDANCE_METHODS: Final = frozenset({HIFIASM_METHOD, HIFIASM_ONT_METHOD})
+KNOWN_GUIDANCE_METHODS: Final = frozenset(ASSEMBLY_CANDIDATES)
 
 
 class MethodGuidance(BaseModel):

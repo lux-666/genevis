@@ -165,6 +165,8 @@ Assembly、AutoHiC 参数推荐在方法选择后，顾问在冻结尝试前通�
 
 RunConfig 同时冻结本地执行和 `assembly_dedup.automatic_purge_approved` 后，阶段按所选策略物化证据：默认 read_depth 包含深度、cutoff、自比对、重复区、purged 序列；self_alignment 省略覆盖度估计。保留原候选供 Review 比较或保留。没有明确 purge 授权则原样透传。物化输入缺失显式表示，不合成成功 purge。
 
+由 Inventory 注册的已有组装，其候选 primary 成员是 FASTA 资产。read_depth 绑定当前运行已注册的完整长读段集合为比对证据，缺读段失败；平台为 unknown 或无法映射 minimap2 preset 时，在冻结尝试前返回结构化失败，purge 方法为 not_started。self_alignment 不消费读段，不要求映射 preset。不能把 FASTA 资产 ID 当读段 ID，也不能把本次比对读段推断为原始组装来源。Assembly 产生的候选仍按 primary 读段 ID 和平台严格匹配。
+
 `recommendation_mode: deterministic_baseline` 保留单次路径；`coverage_mode: self_alignment` 选择无覆盖估计替代路线。默认仍是 `read_depth` 与自动 `calcuts`。
 
 `recommendation_mode: advisor` 先对源候选运行 QUAST，再打开持久 `dedup_recommendation`。每个获批提案可从同一原始组装执行新配置；下一提案前 QUAST 比较源和全部完成候选。模型输入是完整 QUAST 表、实际命令、历史设置和推荐，没有硬编码质量分数。可选参考基因组对所有候选使用同一注册参考。

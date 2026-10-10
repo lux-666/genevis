@@ -355,15 +355,19 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
 
     try:
         source_candidate = _dedup_source_candidate(state, dedup_out)
-        selected_members = (
-            []
-            if dedup_out.get("coverage_mode") == "self_alignment"
-            else _selected_primary_members(
+        if dedup_out.get("coverage_mode") == "self_alignment":
+            selected_members = []
+        elif source_candidate.bundle.input_type == "assembly_fasta_registered":
+            selected_members = _registered_assembly_read_members(state)
+        else:
+            selected_members = _selected_primary_members(
                 state,
                 list(dedup_out.get("input_member_ids") or []),
                 list(dedup_out.get("input_member_platforms") or []),
             )
-        )
+        mapping_presets = [
+            _minimap2_preset(member.platform) for member in selected_members
+        ]
     except (OSError, TypeError, ValueError) as exc:
         return _fail(
             state,
@@ -398,7 +402,6 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         work_dir / f"primary_member_{index:03d}.paf.gz"
         for index in range(len(selected_members))
     ]
-    mapping_presets = [_minimap2_preset(member.platform) for member in selected_members]
     threads = int(dedup_out.get("threads", 8))
     get_seqs_exclude_flag = (
         "-e " if dedup_out.get("get_seqs_exclude_haplotigs", True) else ""
@@ -973,6 +976,25 @@ def _dedup_source_candidate(
     ):
         raise ValueError("dedup primary member intent drifted from candidate bundle")
     return verified
+
+
+def _registered_assembly_read_members(
+    state: TopLevelState,
+) -> list[RuntimeReadMember]:
+    """Bind current reads for depth evaluation of a registered external assembly.
+
+    Its primary member identifies the FASTA asset, not the original assembly reads.
+    Current reads provide mapping evidence only, never inferred assembly provenance.
+    """
+
+    members = resolve_long_read_members(state)
+    if not members:
+        raise ValueError(
+            "registered assembly read_depth requires registered long reads"
+        )
+    if len({member.member_id for member in members}) != len(members):
+        raise ValueError("runtime long-read member ID is duplicated")
+    return members
 
 
 def _selected_primary_members(

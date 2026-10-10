@@ -34,7 +34,9 @@ def build_assembly_recommendation_context(
         assembly_out = assembly_stage_output(state)
 
     selection = _require_selection(assembly_out.get("assembly_selection"))
-    assembly_route = _require_route(assembly_out.get("assembly_route"))
+    assembly_route = _require_route(
+        assembly_out.get("selected_route") or assembly_out.get("assembly_route")
+    )
     target_level = _require_target_level(assembly_out.get("target_level"))
 
     return AssemblyRecommendationContext(

@@ -20,6 +20,8 @@
 
 ## 未关闭缺口
 
+截至 2026-10-09，操作者确认本轮 finishing smoke 已完成；GapCloser、T2T、Base Polish 的独立阶段验收和串联验收均尚未执行，暂缓推进。本记录未附运行目录、工具版本或 smoke 日志，不将 smoke 扩大解释为这三个阶段的完整覆盖。Assembly 各方法及 Dedup 的代码覆盖与待验边界见[实现地图](../langgraph-implementation-map.md#assembly-dedup-validation-map)。新菌种实测与测试机操作仍未启动；操作者已有 PacBio、Illumina、Hi-C 数据，PacBio 的具体类型须在执行时确认。
+
 <a id="gapcloser-representative-sample-acceptance-and-noisy-read-routes"></a>
 
 ### GapCloser 代表性样本验收与含噪读段路线
@@ -44,7 +46,7 @@
 
 ### Assembly 软件解释覆盖
 
-单一 Assembly 消费者、跨方法检索和冻结的方法/参数基础已实现。来源设置独立保留，不受目标 L2 键影响。解释目前来自可执行目录与既有 hifiasm 机制指导，尚未覆盖全部外部/历史设置或版本交互；无法解释的设置保留为未知。
+单一 Assembly 消费者、跨方法检索和冻结的方法/参数基础已实现。来源设置独立保留，不受目标 L2 键影响。解释来自可执行目录及 hifiasm、Flye、NextDenovo 的机制指导；新增指导引用官方说明且在目标方法参数请求中冻结。尚未覆盖全部外部/历史设置或版本交互；无法解释的设置保留为未知。
 
 - 当前证据：`app/domains/assembly/software_knowledge.py`、`method_guidance.py`、`app/knowledge/assembly_retrieval.py`。
 - 契约所有者：[Assembly 案例消费](casepack.md)。
@@ -64,9 +66,9 @@
 
 ### Dedup 顾问真实工具验收
 
-结构化推荐和有界 purge_dups/QUAST 评审循环已实现。聚焦图测试覆盖三次 purge 尝试、四次累积 QUAST 评估/模型请求、响应恢复与评审期间早先文件不变、冻结原始草稿输入，以及采纳首个候选。fixture 可执行检查不能证明真实工具的生物学质量，也不能证明服务器进程重启验收。
+结构化推荐和有界 purge_dups/QUAST 评审循环已实现。聚焦图测试覆盖三次 purge 尝试、四次累积 QUAST 评估/模型请求、响应恢复与评审期间早先文件不变、冻结原始草稿输入，以及采纳首个候选。父图 fixture 测试另覆盖 read_depth/self_alignment 两条路径的 SQLite 关闭重开、CLI 恢复、两轮 purge 后采纳早先候选或保留源；最终选择不重复执行工具。外部注册组装可绑定本次长读段为深度比对证据，不能将这些读段推断为原始组装来源。fixture 检查不能证明真实工具的生物学质量，也不能证明服务器分离进程验收。
 
-- 当前证据：`app/stages/assembly_dedup/`、`tests/test_dedup_recommendation_loop.py`。
+- 当前证据：`app/stages/assembly_dedup/`、`tests/test_dedup_recommendation_loop.py`、`tests/test_assembly_dedup_parent_recovery.py`。
 - 契约所有者：[Assembly Dedup](stage-contracts.md#5-assembly-dedup)。
 - 关闭条件：使用真实工具验证隔离阶段，包括分离进程恢复，并在声称代表性样本验收前保留验收证据。
 
