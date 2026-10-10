@@ -215,7 +215,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
                     "summary": "Focused test recommendation.",
                 }
             )
-            update = recommend_t2t_parameters(state)
+            update = recommend_t2t_parameters(
+                state, allow_legacy_threshold_producer=True
+            )
         return self._merge(state, update)
 
     def _blocked_parameter_approval(self, tmpdir: str) -> dict:
@@ -771,7 +773,12 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError("zero assets must bypass recommendation"),
             ):
-                self.assertEqual(recommend_t2t_parameters(resolved), {})
+                self.assertEqual(
+                    recommend_t2t_parameters(
+                        resolved, allow_legacy_threshold_producer=True
+                    ),
+                    {},
+                )
 
     def test_threshold_rejects_motif_checkpoint_that_disagrees_with_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -788,7 +795,12 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError("changed motif checkpoint must fail first"),
             ):
-                failed = self._merge(resolved, recommend_t2t_parameters(resolved))
+                failed = self._merge(
+                    resolved,
+                    recommend_t2t_parameters(
+                        resolved, allow_legacy_threshold_producer=True
+                    ),
+                )
             output = stage_output(failed, "t2t")
             self.assertEqual(output["status"], "failed")
             self.assertIn("does not match its evidence chain", output["reason"])

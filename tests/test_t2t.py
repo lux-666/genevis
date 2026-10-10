@@ -325,7 +325,7 @@ class T2TStageTests(unittest.TestCase):
 
         # Exercise the explicit schema-3 consumer rather than the finishing loop.
         state["stage_outputs"].setdefault("t2t", {})["recommendation_mode"] = "advisor"
-        graph = build_baseline_stage()
+        graph = build_baseline_stage(allow_legacy_threshold_producer=True)
         current = state
         for _ in range(3):
             with (
@@ -1932,7 +1932,9 @@ class T2TStageTests(unittest.TestCase):
                     )
                 )
                 state["stage_outputs"]["t2t"]["recommendation_mode"] = "advisor"
-                blocked = build_baseline_stage().invoke(state)
+                blocked = build_baseline_stage(
+                    allow_legacy_threshold_producer=True
+                ).invoke(state)
 
             request = load_review_request(
                 blocked["data_dir"], blocked["active_interrupt"]["request_ref"]

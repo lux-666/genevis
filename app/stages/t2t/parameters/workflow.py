@@ -39,9 +39,6 @@ from app.llm.parameters.t2t.recommender import (
     restore_t2t_parameter_decision,
     t2t_parameter_prompt_hash,
 )
-from app.llm.parameters.t2t.recommender import (
-    recommend_t2t_parameters as invoke_t2t_parameter_model,
-)
 from app.llm.parameters.t2t.request import (
     PARAMETER_RECOMMENDATION_CONTRACT,
     T2T_METHOD,
@@ -591,8 +588,17 @@ def _fail_with_motif_refs(
     )
 
 
-def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
-    """Persist one sparse recommendation and block at mandatory approval."""
+def recommend_t2t_parameters(
+    state: TopLevelState,
+    *,
+    allow_legacy_threshold_producer: bool = False,
+) -> StateUpdate:
+    """Persist a baseline/recovered recommendation and block at approval.
+
+    New runs use the finishing advisor for threshold proposals. The explicit
+    compatibility switch is only for old schema-3 fixtures/records; the
+    production graph leaves it disabled.
+    """
 
     output = read_t2t_stage_output(state)
     if output.get("status") != "motif_resolved":
@@ -736,8 +742,13 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                 if output.get("recommendation_mode") != "advisor":
                     return _fail(
                         state,
-                        "T2T requires explicit advisor or deterministic_baseline mode",
+                        "T2T threshold producer is retired; use the finishing advisor "
+                        "or deterministic_baseline",
                     )
+                from app.llm.parameters.t2t.recommender import (
+                    recommend_t2t_parameters as invoke_t2t_parameter_model,
+                )
+
                 decision = invoke_t2t_parameter_model(request, messages=messages)
         else:
             response_ref, record = recovered

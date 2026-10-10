@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -47,7 +49,9 @@ from app.stages.t2t.routing import (
 )
 
 
-def build_baseline_stage() -> CompiledStateGraph[
+def build_baseline_stage(
+    *, allow_legacy_threshold_producer: bool = False
+) -> CompiledStateGraph[
     TopLevelState,
     None,
     TopLevelState,
@@ -62,7 +66,13 @@ def build_baseline_stage() -> CompiledStateGraph[
     graph.add_node("enter", enter_t2t)
     graph.add_node("resolve_inputs", resolve_t2t_inputs)
     graph.add_node("resolve_telomere_motif", resolve_t2t_telomere_motif)
-    graph.add_node("recommend_parameters", recommend_t2t_parameters)
+    graph.add_node(
+        "recommend_parameters",
+        partial(
+            recommend_t2t_parameters,
+            allow_legacy_threshold_producer=allow_legacy_threshold_producer,
+        ),
+    )
     graph.add_node("prepare_parameters", freeze_t2t_parameters)
     graph.add_node("scan_assembly", scan_assembly_telomeres)
     graph.add_node("prepare_reads", prepare_t2t_reads)

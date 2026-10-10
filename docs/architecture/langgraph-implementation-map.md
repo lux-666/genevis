@@ -171,7 +171,7 @@
 | T2T/minimap2 阈值 | 已实现 | 基序、源端部测量、过滤前分布/拒绝原因及全部候选支持数 | 逐动作人工批准 | 独立尝试与冻结输入 | 有界顾问循环；另有初始 schema-3 基线 | 实际补丁/保留源；无独立 QV |
 | GapCloser | 已实现 | 缺口与 QUAST/填补证据顾问 | 逐动作人工批准 | 每轮独立冻结 | max_attempts 有界参数尝试 | HiFi-only TGS-GapCloser；另有单轮基线 |
 | Base Polish | 已实现 | QUAST、成对 PAF/FASTA/版本证据顾问 | 逐动作人工批准 | 每轮从原组装独立冻结 | max_attempts 有界配置尝试 | 每候选一轮 HiFi Racon；无独立 QV |
-| Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`，支持注册前台 resolver | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |
+| Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`，每轮提案或既有候选选择均需人工决策 | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |
 | Read QC、Survey、Review | 注册表默认方法与静态/操作者参数 | 无 schema-3 参数推荐；Review 可另有决策推荐 | 按各阶段门禁 | 可执行方法使用共享尝试冻结 | 按阶段契约 | 默认方法内部拥有，不暴露为用户方法选择字段 |
 | Inventory | 不需要 | 不需要 | 仅输入歧义评审 | 不适用 | 不适用 | 不应推断存在推荐器 |
 

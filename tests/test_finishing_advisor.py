@@ -438,10 +438,6 @@ def test_t2t_explicit_baseline_never_calls_model_and_freezes_catalog(tmp_path, m
             "app.llm.recommender.build_chat_model",
             side_effect=AssertionError("model disabled"),
         ),
-        patch(
-            "app.stages.t2t.parameters.workflow.invoke_t2t_parameter_model",
-            side_effect=AssertionError("threshold model disabled"),
-        ),
     ):
         final = build_t2t().invoke(state)
     cursor = final["stage_outputs"]["t2t"]
