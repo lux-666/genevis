@@ -29,7 +29,7 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
-from app.stages.t2t.builder import build_stage
+from app.stages.t2t.builder import build_baseline_stage, build_stage
 from app.stages.t2t.nodes import (
     _CANDIDATE_FIELDS,
     T2TReviewEffectV1,
@@ -134,6 +134,19 @@ class T2TDescriptorTests(unittest.TestCase):
 
 
 class T2TStageTests(unittest.TestCase):
+    def test_new_unseeded_t2t_rejects_implicit_llm_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+            with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+                result = build_stage().invoke(state)
+            model.assert_not_called()
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn(
+                "explicit advisor or deterministic_baseline", result["last_error"]
+            )
+
     def test_missing_persisted_review_interrupt_settles_alignment_before_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, _reads = self._write_inputs(tmpdir)
@@ -310,7 +323,9 @@ class T2TStageTests(unittest.TestCase):
     ) -> dict:
         """Run T2T while approving only its mandatory parameter gate."""
 
-        graph = build_stage()
+        # Exercise the explicit schema-3 consumer rather than the finishing loop.
+        state["stage_outputs"].setdefault("t2t", {})["recommendation_mode"] = "advisor"
+        graph = build_baseline_stage()
         current = state
         for _ in range(3):
             with (
@@ -376,6 +391,8 @@ class T2TStageTests(unittest.TestCase):
             )
             update = apply_t2t_parameter_approval_application(result, verified)
             current = {**result, **update}
+            # Old approved cursors must remain executable without a mode field.
+            current["stage_outputs"]["t2t"].pop("recommendation_mode", None)
         self.fail("T2T exceeded the bounded parameter-approval loop")
 
     def _state(self, tmpdir: str, assembly: Path, reads: Path | None = None):
@@ -1914,7 +1931,8 @@ class T2TStageTests(unittest.TestCase):
                         }
                     )
                 )
-                blocked = build_stage().invoke(state)
+                state["stage_outputs"]["t2t"]["recommendation_mode"] = "advisor"
+                blocked = build_baseline_stage().invoke(state)
 
             request = load_review_request(
                 blocked["data_dir"], blocked["active_interrupt"]["request_ref"]

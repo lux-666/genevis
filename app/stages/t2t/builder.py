@@ -55,9 +55,8 @@ def build_baseline_stage() -> CompiledStateGraph[
 ]:
     """Single-pass schema-3 executor for explicit deterministic baselines.
 
-    Already-approved schema-3 cursors retain their execution consumer. Unseeded
-    internal callers retain the legacy initial recommendation boundary; public
-    RunConfig always seeds advisor or deterministic_baseline explicitly.
+    Already-approved schema-3 cursors and saved recommendations retain their
+    consumers. New model requests require an explicit recommendation mode.
     """
     graph = StateGraph(TopLevelState)
     graph.add_node("enter", enter_t2t)

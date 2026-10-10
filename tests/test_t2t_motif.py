@@ -145,6 +145,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "status": "resolved",
                 "execution_mode": "local",
                 "mode": "auto_patch",
+                "recommendation_mode": "advisor",
                 "chromosome_list_ref": None,
                 "long_read_refs": [str(item["path"]) for item in read_inputs],
                 "long_read_inputs": read_inputs,
@@ -435,6 +436,32 @@ class T2TMotifResolutionTests(unittest.TestCase):
             replayed = self._merge(first, update)
             self.assertEqual(
                 stage_output(replayed, "t2t")["resolved_telomere_motif"], "TTAGG"
+            )
+
+    def test_saved_motif_response_replays_without_recommendation_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir, species_facts={"scientific_name": "Homo sapiens"}
+            )
+            with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+                model.return_value.invoke.return_value = self._response(
+                    {
+                        "status": "resolved",
+                        "telomere_motif": "TTAGGG",
+                        "summary": "Saved legacy response.",
+                    }
+                )
+                first = self._merge(state, resolve_t2t_telomere_motif(state))
+            cursor = first["stage_outputs"]["t2t"]
+            cursor.pop("recommendation_mode")
+            cursor.pop("telomere_motif_resolution_manifest_ref")
+            cursor["status"] = "resolved"
+            with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+                replay = self._merge(first, resolve_t2t_telomere_motif(first))
+            model.assert_not_called()
+            self.assertEqual(stage_output(replay, "t2t")["status"], "motif_resolved")
+            self.assertEqual(
+                stage_output(replay, "t2t")["resolved_telomere_motif"], "TTAGGG"
             )
 
     def test_provided_resolution_rejects_motif_that_disagrees_with_snapshot(self):

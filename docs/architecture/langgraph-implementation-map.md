@@ -175,7 +175,7 @@
 | Read QC、Survey、Review | 注册表默认方法与静态/操作者参数 | 无 schema-3 参数推荐；Review 可另有决策推荐 | 按各阶段门禁 | 可执行方法使用共享尝试冻结 | 按阶段契约 | 默认方法内部拥有，不暴露为用户方法选择字段 |
 | Inventory | 不需要 | 不需要 | 仅输入歧义评审 | 不适用 | 不适用 | 不应推断存在推荐器 |
 
-Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显式确定性基线以策略记录批准空 L2 初始尝试，T2T 要求已提供基序并禁用阈值/基序模型，详见[推荐策略](reference/recommendation-policy.md)。Dedup 和三个 finishing 顾问使用独立类型化任务输出，逐动作人工批准并保留全部尝试。默认 finishing 的持久任务契约不使用 schema-3 参数 manifest；T2T 的 schema-3 单轮执行/手工补丁路径通过 deterministic_baseline 保留，旧初始 LLM 调用仅供受控兼容路径。剩余缺口是独立准确率证据、方法范围与代表样本验证。
+Assembly 路线选择也使用共享 StructuredRecommender 调用/解析边界，仍保留 schema-v1 路线记录。Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显式确定性基线以策略记录批准空 L2 初始尝试，T2T 要求已提供基序并禁用阈值/基序模型，详见[推荐策略](reference/recommendation-policy.md)。Dedup 和三个 finishing 顾问使用独立类型化任务输出，逐动作人工批准并保留全部尝试。默认 finishing 的持久任务契约不使用 schema-3 参数 manifest；T2T 的 schema-3 单轮执行/手工补丁路径通过 deterministic_baseline 保留，缺少模式的新调用不进入旧 LLM 路径，保留既有响应恢复与已批准执行消费者。剩余缺口是独立准确率证据、方法范围与代表样本验证。
 
 <a id="assembly-dedup-validation-map"></a>
 
@@ -188,7 +188,7 @@ Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显�
 | hifiasm | PacBio HiFi；补充 ONT/Hi-C 须显式绑定 | 默认 auto 确认后恢复；完整多文件 HiFi 和显式单文件覆盖；既有机制指导 | 实际 primary/haplotype GFA、倍性、版本与补充输入 |
 | hifiasm-ONT | ONT raw/HQ、CycloneSEQ 映射 `--ont` | 三类输入的父图恢复、命令模式、GFA/候选交接 | 读段质量/读长/覆盖与版本支持；CycloneSEQ 适用性须独立验证 |
 | Flye | nano-raw、nano-hq、pacbio-raw、pacbio-hifi；CycloneSEQ 映射 nano-raw | 全模式多文件父图恢复；覆盖截取/overlap 指导引用官方文档并冻结 | 各模式真实工具与样本；corrected、meta 模式尚未接入 |
-| NextDenovo | ont（含 ONT HQ/CycloneSEQ 映射）、clr、hifi | 各模式父图恢复、FOFN、原生 run.cfg/产物交接；固定 FASTA 格式、配置/FOFN 完整性校验；cutoff 与 v2.5.2 HiFi 自纠错官方指导 | 实际纠错/组装目录、HiFi 行为、版本和失败恢复；corrected 输入尚未接入 |
+| NextDenovo | ont（含 ONT HQ/CycloneSEQ 映射）、clr、hifi | 各模式父图恢复、FOFN、原生 run.cfg/产物交接；固定 FASTA 格式、配置/FOFN 完整性校验、原生路径字符约束；cutoff 与 v2.5.2 HiFi 自纠错官方指导 | 实际纠错/组装目录、HiFi 行为、版本和失败恢复；corrected 输入尚未接入 |
 | Dedup read_depth | Assembly 候选的原始读段；外部组装的当前注册长读段 | 两轮 SQLite/CLI 恢复；外部 FASTA ID 不当读段 ID，缺读段明确失败 | 各平台 preset、深度/cutoff 合理性；当前比对读段不能推断为外部组装原始来源 |
 | Dedup self_alignment | 已物化组装 | 两轮恢复、无覆盖工具调用；采纳早先候选或保留源，旧候选哈希不变，最终选择不重跑 | 自比对/边界截取与过度去冗余证据；N50 不能替代完整性和准确性 |
 

@@ -53,6 +53,40 @@ from app.storage.parameter_evidence import ParameterEvidenceError
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 
+class NextDenovoNativePathTests(unittest.TestCase):
+    def test_native_config_rejects_unquoted_shell_paths(self):
+        for field in ("input_fofn", "workdir"):
+            for suffix in (" a", "\ta", ";cmd", "$(cmd)", "*", "'", "中文"):
+                with self.subTest(field=field, suffix=suffix):
+                    params = dict(
+                        read_type="hifi",
+                        input_fofn="/inputs/input.fofn",
+                        workdir="/work/nd",
+                        genome_size=1000,
+                        threads=1,
+                    )
+                    params[field] += suffix
+                    with self.assertRaisesRegex(ParameterCommandError, "native paths"):
+                        _run_cfg(**params)
+
+    def test_fofn_rejects_unsupported_member_before_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "s1"
+            state = _assembly_state(run_dir, {})
+            with patch.object(
+                nextdenovo_adapter,
+                "resolve_assembly_read_paths",
+                return_value=[Path("/reads/first.fq"), Path("/reads/two reads.fq")],
+            ):
+                fofn, paths, error = nextdenovo_adapter._fofn(
+                    state, "/reads/list.fofn", "pacbio_hifi", attempt_id=0
+                )
+            self.assertIsNone(fofn)
+            self.assertEqual(paths, [])
+            self.assertIn("native paths", error)
+            self.assertFalse(run_dir.exists())
+
+
 def _assembly_state(run_dir: Path, output: dict) -> dict:
     state = initial_state(
         session_id="s1",

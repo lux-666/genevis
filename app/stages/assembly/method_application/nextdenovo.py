@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 from pathlib import Path
@@ -336,7 +337,9 @@ def _fofn(
 ) -> tuple[Path | None, list[Path], str | None]:
     try:
         paths = resolve_assembly_read_paths(input_ref, input_type)
-    except AssemblyInputError as exc:
+        for path in paths:
+            _validate_native_path(str(path))
+    except (AssemblyInputError, ParameterCommandError) as exc:
         return None, [], f"NextDenovo local execution {exc}"
 
     fofn = stage_work_dir(
@@ -357,6 +360,8 @@ def _run_cfg(
     read_cutoff: int | None = None,
     nextgraph_a: int = 1,
 ) -> str:
+    for path in (input_fofn, workdir):
+        _validate_native_path(path)
     if nextgraph_a != 1:
         raise ParameterCommandError(
             "NextDenovo requires NextGraph -a 1 for FASTA output"
@@ -386,3 +391,13 @@ def _run_cfg(
         f"minimap2_options_cns = -t {threads}\n"
         "nextgraph_options = -a 1\n"
     )
+
+
+def _validate_native_path(path: str) -> None:
+    # NextDenovo v2.5.2 interpolates native paths into unquoted shell commands.
+    if not re.fullmatch(r"[A-Za-z0-9_./+\-]+", path):
+        raise ParameterCommandError(
+            "NextDenovo native paths require only ASCII letters, digits, "
+            "'_', '.', '/', '+', '-'; whitespace and shell metacharacters "
+            f"are unsupported: {path!r}"
+        )

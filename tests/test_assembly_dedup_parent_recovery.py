@@ -329,7 +329,8 @@ def test_assembly_modes_parent_cli_recovery(
             1,
         )
     )
-    reads = [tmp_path / "reads one.fq", tmp_path / "reads two.fq"]
+    separator = "_" if method == "nextdenovo" else " "
+    reads = [tmp_path / f"reads{separator}one.fq", tmp_path / f"reads{separator}two.fq"]
     for path in reads:
         path.write_text("@r1\nACGT\n+\n!!!!\n")
     method_id = f"assembly.candidate.{method}"

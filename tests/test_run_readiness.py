@@ -15,6 +15,7 @@ from app.execution.run_readiness import (
     effective_method_closure,
     preflight_run_readiness,
     probe_llm_endpoint,
+    required_llm_output_methods,
     run_requires_llm,
 )
 from app.schemas.run_config import RunConfig
@@ -34,6 +35,93 @@ def test_llm_probe_rejects_non_json_connectivity_text() -> None:
     with patch("app.llm.factory.build_chat_model", return_value=model):
         with pytest.raises(ValueError):
             probe_llm_endpoint()
+
+
+@pytest.mark.parametrize("method", ["json_schema", "function_calling"])
+def test_llm_probe_uses_selected_protocol(method) -> None:
+    bindings = []
+    response = SimpleNamespace(content='{"ready":true}')
+    if method == "function_calling":
+        response.additional_kwargs = {
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_recommendation",
+                        "arguments": '{"ready":true}',
+                    }
+                }
+            ]
+        }
+    model = SimpleNamespace(invoke=lambda _messages: response)
+    model.bind = lambda **kwargs: bindings.append(kwargs) or model
+    with patch("app.llm.factory.build_chat_model", return_value=model):
+        probe_llm_endpoint(method)
+    assert len(bindings) == 1
+    assert ("tools" if method == "function_calling" else "response_format") in bindings[
+        0
+    ]
+
+
+@pytest.mark.parametrize("method", ["json_schema", "function_calling"])
+def test_llm_probe_rejects_protocol_unsupported_by_endpoint(method) -> None:
+    def reject(**_kwargs):
+        raise ValueError("unsupported protocol")
+
+    model = SimpleNamespace(bind=reject)
+    with patch("app.llm.factory.build_chat_model", return_value=model):
+        with pytest.raises(ValueError, match="unsupported protocol"):
+            probe_llm_endpoint(method)
+
+
+def test_llm_protocol_scope_preserves_distinct_advisor_contracts() -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "assembly_dedup", "allow_local_execution": True},
+                {"stage": "gapcloser", "allow_local_execution": True},
+                {"stage": "base_polish", "allow_local_execution": True},
+            ],
+            "assembly_dedup": {
+                "automatic_purge_approved": True,
+                "recommendation_mode": "advisor",
+                "recommendation_output_method": "function_calling",
+            },
+            "gapcloser": {"recommendation_output_method": "json_schema"},
+            "base_polish": {"recommendation_mode": "deterministic_baseline"},
+        }
+    )
+    assert required_llm_output_methods(config) == (
+        "prompt_json",
+        "function_calling",
+        "json_schema",
+    )
+
+
+def test_preflight_checks_all_selected_protocols_and_stops_on_failure(tmp_path) -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "gapcloser", "allow_local_execution": True},
+            ],
+            "gapcloser": {"recommendation_output_method": "function_calling"},
+        }
+    )
+    with patch(
+        "app.execution.run_readiness.probe_llm_endpoint",
+        side_effect=[None, ValueError("unsupported function protocol")],
+    ) as probe:
+        with pytest.raises(RunReadinessError, match="unsupported function protocol"):
+            preflight_run_readiness(
+                config,
+                effective_methods={},
+                config_path=_env_config(tmp_path / "envs.yaml"),
+            )
+    assert [call.args for call in probe.call_args_list] == [
+        ("prompt_json",),
+        ("function_calling",),
+    ]
 
 
 def _write_ncbi_reference(root: Path) -> Path:

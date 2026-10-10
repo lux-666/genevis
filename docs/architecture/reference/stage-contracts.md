@@ -147,7 +147,7 @@ gzip 输入的冻结脚本调用两个命令，因此所选机器方法映射必
 
 Assembly、AutoHiC 参数推荐在方法选择后，顾问在冻结尝试前通过 parameter_approval。两者及 T2T 的显式确定性参数基线生成空 L2，以不可变策略决策批准单轮，不打开人工参数门。T2T 基线要求提供基序，不调用模型；默认 advisor 使用 finishing 完整参数提案与结果反馈，进入 finishing_recommendation。动态 Assembly 从冻结依赖快照解析并通过阶段预检，不读取实时环境。精确事实位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。每次推荐为尝试局部稀疏映射，重试不继承省略值，也不能用模型输出绕过审批。`assembly.threads` 是方法无关 RunConfig 执行资源，冻结到所选方法 L0。Hifiasm/Hifiasm-ONT 的已提供 `species_facts.ploidy` 作为 L1 绑定 `--n-hap`；缺失时保留目录二倍体默认 `2`。
 
-NextDenovo 的 NextGraph `-a` 是输出格式，L0 固定为 `1`（FASTA），不能由 LLM 调整。实际读取的 `run.cfg`、`input.fofn` 在冻结时发布为不可变输入产物，与读段一起纳入共享执行前完整性校验。适配器使用 `task=all、input_type=raw`；官方 v2.5.2 对 HiFi 也执行自纠错，不能把 HiFi 模式解释为跳过纠错；其他版本的实际行为仍需验收。
+NextDenovo 的 NextGraph `-a` 是输出格式，L0 固定为 `1`（FASTA），不能由 LLM 调整。实际读取的 `run.cfg`、`input.fofn` 在冻结时发布为不可变输入产物，与读段一起纳入共享执行前完整性校验。适配器使用 `task=all、input_type=raw`；官方 v2.5.2 对 HiFi 也执行自纠错，不能把 HiFi 模式解释为跳过纠错；其他版本的实际行为仍需验收。因 v2.5.2 内部命令直接展开原生路径，冻结前要求输入读段、FOFN 和 workdir 路径仅含 ASCII 字母、数字、`_ . / + -`，拒绝空白及 shell 元字符；外层脚本引用不能消除工具内部限制。
 
 缺必需参数、读段不兼容、执行失败、缺预期输出均为明确失败，不是规划成功。未授权本地执行不是成功 Assembly 规划：除非另有明确定义复用路径能交付已物化且契约有效候选，否则无交付失败，所选方法 `skipped`。仅 planned candidate 包不能支撑 `stage_completed`。
 
@@ -254,7 +254,7 @@ Dedup 与 finishing 的 QUAST 收集共用结构校验：Assembly 标题、精�
 
 T2T 顾问目前要求 auto_patch，采纳仍需人工。源请求含端部 motif-copy 测量；反馈含扫描、过滤前每条 PAF 两端的 MAPQ/重叠/距离/尾部基序测量及全部拒绝原因。独立 alignment_observations.tsv 绑定冻结尝试、执行与 PAF，不改变补丁候选表语义；统计遍历全部行，最多 100 行示例，拒绝计数按比对端而非唯一读段计算。候选 supporting_reads 去重计数投影为 supporting_read_count，数值汇总覆盖所有行。最终报告重用所选轮次的冻结输入。Base Polish 暴露 Racon window/error/scoring 的有界参数，每候选只跑一轮。顾问必须将同批校正读段一致性视为样本内证据，不据此宣称独立 QV 或默认无限校正。
 
-`deterministic_baseline` 对 GapCloser/Base Polish 使用操作者配置单轮；对 T2T 使用冻结目录 L0、空 L2 的 schema-3 策略批准单轮，不调用阈值或基序模型。默认 finishing 有自己的[任务证据契约](data-contract.md#finishing-task-evidence)，不沿用 schema-3 参数 manifest。旧 T2T schema-3 初始 LLM 代码保留既有记录读取与受控兼容调用，新 RunConfig 不通过该路径请求模型；活动旧会话必须保留匹配检出，不迁移 checkpoint。真实工具与真实样本验收是独立门禁。
+`deterministic_baseline` 对 GapCloser/Base Polish 使用操作者配置单轮；对 T2T 使用冻结目录 L0、空 L2 的 schema-3 策略批准单轮，不调用阈值或基序模型。默认 finishing 有自己的[任务证据契约](data-contract.md#finishing-task-evidence)，不沿用 schema-3 参数 manifest。旧 T2T schema-3 代码保留既有记录读取与已批准执行消费者；缺少 recommendation_mode 的新调用禁止发起阈值或基序模型请求。新 RunConfig 明确选择 advisor 或 deterministic_baseline，不通过旧隐式路径请求模型；活动旧会话必须保留匹配检出，不迁移 checkpoint。真实工具与真实样本验收是独立门禁。
 
 ## 8. GapCloser
 

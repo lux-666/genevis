@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field, model_validator
 from app.llm.factory import build_chat_model
 from app.llm.json_response import (
     parse_json_object,
-    response_text,
     validate_model_response_record,
 )
+from app.llm.recommender import StructuredRecommender
 
 AssemblyDecisionKind = Literal["route_selection"]
 
@@ -74,36 +74,23 @@ def make_assembly_decision(
         messages if messages is not None else render_assembly_decision_messages(request)
     )
 
-    try:
-        model = build_chat_model()
-        response = model.invoke(invocation_messages)
-    except Exception as exc:
-        return AssemblyDecisionResult(
-            kind=request.kind,
-            raw_response="",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
-    raw_content = ""
-    try:
-        raw_content = response_text(response)
-        parsed = parse_json_object(raw_content)
+    def parse(parsed: dict[str, Any]) -> dict[str, Any]:
         _validate_route_selection(
             parsed, request.allowed_actions, request.allowed_methods
         )
-        return AssemblyDecisionResult(
-            kind=request.kind,
-            raw_response=raw_content,
-            parsed=parsed,
-            valid=True,
-            model_id=type(model).__name__,
-        )
-    except Exception as exc:
-        return AssemblyDecisionResult(
-            kind=request.kind,
-            raw_response=raw_content,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        return parsed
+
+    result = StructuredRecommender(parse).invoke(
+        invocation_messages, model_factory=build_chat_model
+    )
+    return AssemblyDecisionResult(
+        kind=request.kind,
+        raw_response=result.raw_response,
+        parsed=result.parsed,
+        valid=result.valid,
+        error=result.error,
+        model_id=result.model_id,
+    )
 
 
 def _validate_route_selection(

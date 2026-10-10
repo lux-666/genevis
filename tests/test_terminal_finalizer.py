@@ -141,7 +141,27 @@ def test_failure_update_that_raises_after_commit_is_reconciled(tmp_path) -> None
     ] == ["stage_failed", "session_terminal"]
 
 
-def test_runtime_failure_closes_missing_fixed_method_dispositions(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    [
+        ([("a", "attempt_failed")], "failed"),
+        ([("a", "attempt_started")], "failed"),
+        ([("a", "attempt_started"), ("a", "attempt_succeeded")], "completed"),
+        (
+            [
+                ("a", "attempt_failed"),
+                ("b", "attempt_started"),
+                ("b", "attempt_succeeded"),
+            ],
+            "completed",
+        ),
+        ([("a", "attempt_succeeded"), ("b", "attempt_started")], "failed"),
+        ([("a", "attempt_started"), ("b", "attempt_succeeded")], "failed"),
+    ],
+)
+def test_runtime_failure_closes_missing_fixed_method_dispositions(
+    tmp_path, events, expected
+) -> None:
     run_dir = v2_run_dir(tmp_path / "data", "s1")
     ledger = Ledger(run_dir)
     ledger.create_session("s1", "control/manifest.yaml")
@@ -153,18 +173,16 @@ def test_runtime_failure_closes_missing_fixed_method_dispositions(tmp_path) -> N
     ledger.record_stage_completed(
         "s1", "inventory", workflow_step_id="step-000-inventory"
     )
-    ledger.record_event(
-        "s1",
-        "attempt_failed",
-        {
-            "method_name": "read_qc.long_read_stats.seqkit_stats",
-            "error": "worker crashed",
-        },
-        stage="read_qc",
-        workflow_step_id="step-001-read_qc",
-        subject_id="s1:step-001-read_qc:seqkit",
-        idempotency_key="attempt:s1:step-001-read_qc:seqkit:failed",
-    )
+    for subject, event in events:
+        ledger.record_event(
+            "s1",
+            event,
+            {"method_name": "read_qc.long_read_stats.seqkit_stats"},
+            stage="read_qc",
+            workflow_step_id="step-001-read_qc",
+            subject_id=f"s1:step-001-read_qc:seqkit:{subject}",
+            idempotency_key=f"attempt:seqkit:{subject}:{event}",
+        )
     result = finalize_authoritative_terminal(
         _TerminalGraph(state),
         {"configurable": {"thread_id": "s1"}},
@@ -181,7 +199,7 @@ def test_runtime_failure_closes_missing_fixed_method_dispositions(tmp_path) -> N
         if row["event_type"] == "method_disposition_recorded"
     }
     assert dispositions == {
-        "read_qc.long_read_stats.seqkit_stats": "failed",
+        "read_qc.long_read_stats.seqkit_stats": expected,
         "read_qc.length_filter.skip": "not_started",
     }
     assert result.terminal_event["summary"]["outcome"] == "failed"

@@ -281,6 +281,11 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
             method_name=_MOTIF_RESOLVER_METHOD,
         )
         if recovered is None:
+            if output.get("recommendation_mode") != "advisor":
+                return _fail(
+                    state,
+                    "T2T requires explicit advisor or deterministic_baseline mode",
+                )
             decision = invoke_t2t_motif_model(request, messages=messages)
         else:
             response_ref, record = recovered
@@ -728,6 +733,11 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                     }
                 )
             else:
+                if output.get("recommendation_mode") != "advisor":
+                    return _fail(
+                        state,
+                        "T2T requires explicit advisor or deterministic_baseline mode",
+                    )
                 decision = invoke_t2t_parameter_model(request, messages=messages)
         else:
             response_ref, record = recovered

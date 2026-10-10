@@ -22,6 +22,7 @@ from app.control.workflow_plan import (
     fail_workflow_step,
     workflow_steps_from_run_config,
 )
+from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
 from app.review.application import (
     ReviewApplicationError,
     canonicalize_review_intent_request,
@@ -459,26 +460,43 @@ def _settle_runtime_failure_method_dispositions(
         if row.get("event_type") == "method_disposition_recorded"
         and row.get("workflow_step_id") == step_id
     }
-    attempted = {
-        (row.get("summary") or {}).get("method_name")
-        for row in rows
-        if row.get("event_type")
-        in {"attempt_started", "attempt_succeeded", "attempt_failed"}
-        and row.get("workflow_step_id") == step_id
-    }
+    latest_attempts = {}
+    unfinished: dict[str, set[str]] = {}
+    for row in rows:
+        if row.get("workflow_step_id") == step_id and row.get("event_type") in {
+            "attempt_started",
+            "attempt_succeeded",
+            "attempt_failed",
+        }:
+            method = (row.get("summary") or {}).get("method_name")
+            if not isinstance(method, str):
+                continue
+            latest_attempts[method] = row
+            pending = unfinished.setdefault(method, set())
+            if row["event_type"] == "attempt_started":
+                pending.add(row["subject_id"])
+            else:
+                pending.discard(row["subject_id"])
     reason = str(outcome.get("reason") or state.get("last_error") or "runtime failure")
+    outcomes = []
     for method_name in roster:
         if method_name in disposed:
             continue
-        failed = method_name in attempted
-        ledger.record_method_disposition(
-            state["session_id"],
-            stage,
-            step_id,
-            method_name,
-            "failed" if failed else "not_started",
-            reason=reason if failed else None,
+        attempt = latest_attempts.get(method_name)
+        succeeded = (
+            attempt is not None
+            and attempt["event_type"] == "attempt_succeeded"
+            and not unfinished.get(method_name)
         )
+        failed = attempt is not None and not succeeded
+        outcomes.append(
+            MethodOutcome(
+                method_name,
+                "completed" if succeeded else "failed" if failed else "not_started",
+                reason=reason if failed else None,
+            )
+        )
+    settle_method_outcomes(state, stage=stage, outcomes=outcomes)
 
 
 def inspect_state(

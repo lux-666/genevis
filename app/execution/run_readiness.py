@@ -19,6 +19,7 @@ from app.execution.env_resolver import (
     package_preflight,
     preflight,
 )
+from app.llm.recommender import OutputMethod, StructuredRecommender
 from app.schemas.run_config import RunConfig
 
 
@@ -60,7 +61,6 @@ def assembly_candidate_method_scope() -> tuple[str, ...]:
 
 
 _NON_EXECUTABLE_METHODS = {"read_qc.length_filter.skip"}
-_LLM_REQUIRED_STAGES = {"assembly", "hic_scaffolding", "t2t"}
 _BUSCO_METHOD = "assembly_review.eval.busco"
 
 
@@ -131,48 +131,37 @@ def effective_method_closure(
 def run_requires_llm(run_config: RunConfig) -> bool:
     """Return whether the confirmed workflow reaches a mandatory LLM boundary."""
 
-    if (
-        "assembly_dedup" in run_config.requested_stage_names()
-        and run_config.assembly_dedup is not None
-        and run_config.assembly_dedup.automatic_purge_approved
-        and run_config.assembly_dedup.recommendation_mode == "advisor"
-    ):
-        return True
+    return bool(required_llm_output_methods(run_config))
 
-    for stage in ("gapcloser", "base_polish"):
-        if stage in run_config.requested_stage_names():
-            config = getattr(run_config, stage)
+
+def required_llm_output_methods(run_config: RunConfig) -> tuple[OutputMethod, ...]:
+    """Select transport protocols from the same frozen advisor choices."""
+    methods: list[OutputMethod] = []
+    for stage in run_config.requested_stage_names():
+        config = getattr(run_config, stage, None)
+        if stage in {"assembly", "hic_scaffolding"}:
+            if stage == "assembly":
+                enabled = config is None or (
+                    config.method_route_advisor == "advisor"
+                    or config.parameter_advisor == "advisor"
+                )
+            else:
+                enabled = config is None or config.parameter_advisor == "advisor"
+            if enabled:
+                methods.append("prompt_json")
+        elif stage in {"assembly_dedup", "gapcloser", "t2t", "base_polish"}:
+            if stage == "assembly_dedup" and (
+                config is None or not config.automatic_purge_approved
+            ):
+                continue
             if config is None or config.recommendation_mode == "advisor":
-                return True
-
-    required_stages = _LLM_REQUIRED_STAGES.intersection(
-        run_config.requested_stage_names()
-    )
-    if "assembly" in required_stages:
-        assembly = run_config.assembly
-        method_advisor = (
-            assembly.method_route_advisor if assembly is not None else "advisor"
-        )
-        parameter_advisor = (
-            assembly.parameter_advisor if assembly is not None else "advisor"
-        )
-        if (
-            method_advisor == "deterministic_baseline"
-            and parameter_advisor == "deterministic_baseline"
-        ):
-            required_stages = set(required_stages) - {"assembly"}
-    if "hic_scaffolding" in required_stages:
-        hic = run_config.hic_scaffolding
-        parameter_advisor = hic.parameter_advisor if hic is not None else "advisor"
-        if parameter_advisor == "deterministic_baseline":
-            required_stages = set(required_stages) - {"hic_scaffolding"}
-    if (
-        "t2t" in required_stages
-        and run_config.t2t is not None
-        and run_config.t2t.recommendation_mode == "deterministic_baseline"
-    ):
-        required_stages = set(required_stages) - {"t2t"}
-    return bool(required_stages)
+                methods.append(
+                    config.recommendation_output_method if config else "json_schema"
+                )
+                # T2T motif resolution retains its own prompt-JSON contract.
+                if stage == "t2t":
+                    methods.append("prompt_json")
+    return tuple(dict.fromkeys(methods))
 
 
 def preflight_run_readiness(
@@ -257,7 +246,11 @@ def preflight_run_readiness(
 
     if run_requires_llm(run_config):
         try:
-            (llm_probe or probe_llm_endpoint)()
+            if llm_probe is not None:
+                llm_probe()
+            else:
+                for method in required_llm_output_methods(run_config):
+                    probe_llm_endpoint(method)
         except Exception as exc:
             raise RunReadinessError(f"mandatory LLM readiness failed: {exc}") from exc
     return methods
@@ -325,25 +318,37 @@ def _pad_version(version: tuple[int, ...], size: int) -> tuple[int, ...]:
     return version + (0,) * max(0, size - len(version))
 
 
-def probe_llm_endpoint() -> None:
+def probe_llm_endpoint(method: OutputMethod = "prompt_json") -> None:
     """Prove the configured model can return the structured output we consume."""
 
     from app.llm.factory import build_chat_model
-    from app.llm.json_response import parse_json_object, response_text
 
-    model = build_chat_model()
-    response = model.invoke(
+    def parse(payload: dict[str, Any]) -> dict[str, Any]:
+        if payload != {"ready": True}:
+            raise ValueError("LLM endpoint failed the structured-output probe")
+        return payload
+
+    result = StructuredRecommender(
+        parse,
+        method=method,
+        schema={
+            "type": "object",
+            "properties": {"ready": {"type": "boolean", "enum": [True]}},
+            "required": ["ready"],
+            "additionalProperties": False,
+        },
+    ).invoke(
         [
             (
                 "system",
                 'This is a structured-output probe. Reply exactly {"ready":true}.',
             ),
             ("human", "Return the requested JSON object."),
-        ]
+        ],
+        model_factory=build_chat_model,
     )
-    payload = parse_json_object(response_text(response))
-    if payload != {"ready": True}:
-        raise ValueError("LLM endpoint failed the structured-output probe")
+    if not result.valid:
+        raise ValueError(f"LLM {method} readiness probe failed: {result.error}")
 
 
 def _normalize_selected_methods(

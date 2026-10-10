@@ -76,11 +76,7 @@
 
 ### 运行级回放能力尚未声明
 
-数据契约将 `fully_materialized`、`verified_external_dependencies`、`audit_only` 定义为运行级执行回放词汇，并预留 `control/run.json` 作为未来所有者；但生产路径 API、写入器和加载器尚未实现该记录。冻结控制输入与每次尝试的依赖记录提供底层证据，却没有可查询的单一持久声明。
-
-- 当前证据：`app/storage/frozen_inputs.py`、`app/execution/dependency_snapshot.py`；仓库搜索找不到 `control/run.json` 路径 API、写入器或读取器。
-- 契约所有者：[运行数据](data-contract.md)。
-- 关闭条件：发布并校验一个由冻结依赖/物化事实导出的回放枚举运行元数据记录，或从已接受契约和路径 API 中移除该枚举及 `run.json` 目标。
+运行级回放摘要留作[运行数据契约](data-contract.md#3-replay-terminology)中的规划项，尚未实现，不属于当前收口门禁。当前执行恢复继续核验冻结控制输入、机器依赖与每次尝试依赖；不存在可替代这些证据的单一 `control/run.json` 声明。
 
 <a id="five-stage-real-tool-contig-acceptance-is-not-automated"></a>
 
