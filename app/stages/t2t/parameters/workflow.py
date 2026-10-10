@@ -739,7 +739,7 @@ def recommend_t2t_parameters(
                     }
                 )
             else:
-                if output.get("recommendation_mode") != "advisor":
+                if not allow_legacy_threshold_producer:
                     return _fail(
                         state,
                         "T2T threshold producer is retired; use the finishing advisor "

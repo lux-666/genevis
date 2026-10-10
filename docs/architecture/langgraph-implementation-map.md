@@ -175,7 +175,7 @@
 | Read QC、Survey、Review | 注册表默认方法与静态/操作者参数 | 无 schema-3 参数推荐；Review 可另有决策推荐 | 按各阶段门禁 | 可执行方法使用共享尝试冻结 | 按阶段契约 | 默认方法内部拥有，不暴露为用户方法选择字段 |
 | Inventory | 不需要 | 不需要 | 仅输入歧义评审 | 不适用 | 不适用 | 不应推断存在推荐器 |
 
-Assembly 路线选择也使用共享 StructuredRecommender 调用/解析边界，仍保留 schema-v1 路线记录。Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显式确定性基线以策略记录批准空 L2 初始尝试，T2T 要求已提供基序并禁用阈值/基序模型，详见[推荐策略](reference/recommendation-policy.md)。Dedup 和三个 finishing 顾问使用独立类型化任务输出，逐动作人工批准并保留全部尝试。默认 finishing 的持久任务契约不使用 schema-3 参数 manifest；T2T 的 schema-3 单轮执行/手工补丁路径通过 deterministic_baseline 保留，缺少模式的新调用不进入旧 LLM 路径，保留既有响应恢复与已批准执行消费者。剩余缺口是独立准确率证据、方法范围与代表样本验证。
+Assembly 路线选择也使用共享 StructuredRecommender 调用/解析边界，仍保留 schema-v1 路线记录。Assembly、AutoHiC 及 T2T 单轮消费者的 schema-3 链已实现；三者显式确定性基线以策略记录批准空 L2 初始尝试，T2T 要求已提供基序并禁用阈值/基序模型，详见[推荐策略](reference/recommendation-policy.md)。Dedup 和三个 finishing 顾问使用独立类型化任务输出并保留全部尝试；Dedup 支持前台倒计时自动遵循已保存提案，候选选择仍需人工决策，三个 finishing 顾问则强制人工确认。默认 finishing 的持久任务契约不使用 schema-3 参数 manifest；T2T 的 schema-3 单轮执行/手工补丁路径通过 deterministic_baseline 保留，缺少模式的新调用不进入旧 LLM 路径，保留既有响应恢复与已批准执行消费者。剩余缺口是独立准确率证据、方法范围与代表样本验证。
 
 <a id="assembly-dedup-validation-map"></a>
 

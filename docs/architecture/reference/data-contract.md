@@ -36,7 +36,7 @@ Gene Agent 运行带参数推荐、人工评审、重试、大型工具输出和
 
 T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行。补丁候选表继续只包含进入支持分组的行；其中 supporting_reads 去重后的支持数汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。
 
-T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不打开人工参数门，补丁采纳仍走 t2t_review。旧 schema-3 初始 LLM 代码保留既有记录读取与受控兼容调用，不是新版 advisor 入口。旧活动会话保留匹配检出；本运行时不迁移 checkpoint。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
+T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不打开人工参数门，补丁采纳仍走 t2t_review。旧 schema-3 初始 LLM 响应只允许读取既有持久记录，不允许生产新响应；仅测试或迁移工具可显式开启兼容生产者，不是新版 advisor 入口。旧活动会话保留匹配检出；本运行时不迁移 checkpoint。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
 
 <a id="2-product-decisions"></a>
 

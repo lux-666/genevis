@@ -178,6 +178,25 @@ class T2TMotifResolutionTests(unittest.TestCase):
             merged["stage_outputs"] = update["stage_outputs"]
         return merged
 
+    def test_retired_threshold_producer_cannot_be_enabled_by_advisor_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                species_facts={
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                },
+            )
+            resolved = self._resolve_provided(state)
+            with patch(
+                "app.llm.parameters.base.build_chat_model",
+                side_effect=AssertionError("retired producer must not invoke model"),
+            ):
+                failed = self._merge(resolved, recommend_t2t_parameters(resolved))
+            output = stage_output(failed, "t2t")
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("threshold producer is retired", output["reason"])
+
     def test_model_requests_require_typed_canonical_inputs(self):
         with self.assertRaises(ValueError):
             T2TMotifRequest.model_validate(
