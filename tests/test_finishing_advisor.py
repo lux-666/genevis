@@ -467,7 +467,6 @@ def test_t2t_explicit_baseline_never_calls_model_and_freezes_catalog(tmp_path, m
 
 
 def test_t2t_baseline_without_motif_fails_without_model(tmp_path):
-    from app.execution.run_readiness import run_requires_llm
     from app.schemas.run_config import RunConfig
     from app.stages.t2t.builder import build_stage as build_t2t
 
@@ -482,13 +481,13 @@ def test_t2t_baseline_without_motif_fails_without_model(tmp_path):
     assert (
         "requires a supplied telomere motif" in final["stage_outputs"]["t2t"]["reason"]
     )
-    config = RunConfig.model_validate(
-        {
-            "requested_stages": [{"stage": "t2t", "allow_local_execution": True}],
-            "t2t": {"recommendation_mode": "deterministic_baseline"},
-        }
-    )
-    assert not run_requires_llm(config)
+    with pytest.raises(ValueError, match="deterministic_baseline requires"):
+        RunConfig.model_validate(
+            {
+                "requested_stages": [{"stage": "t2t", "allow_local_execution": True}],
+                "t2t": {"recommendation_mode": "deterministic_baseline"},
+            }
+        )
 
 
 @pytest.mark.parametrize("stage", ["gapcloser", "base_polish", "t2t"])

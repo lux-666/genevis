@@ -407,6 +407,25 @@ class RunConfig(BaseModel):
     review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
 
     @model_validator(mode="after")
+    def _t2t_baseline_requires_motif(self) -> "RunConfig":
+        requested_t2t = any(request.stage == "t2t" for request in self.requested_stages)
+        t2t = self.t2t
+        if (
+            requested_t2t
+            and t2t is not None
+            and t2t.recommendation_mode == "deterministic_baseline"
+        ):
+            facts = (
+                self.shared_parameters.species_facts if self.shared_parameters else None
+            )
+            if facts is None or facts.telomere_motif is None:
+                raise ValueError(
+                    "t2t deterministic_baseline requires "
+                    "shared_parameters.species_facts.telomere_motif"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _require_fixed_stage_execution_config(self) -> "RunConfig":
         if (
             self.any_occurrence_allows_local_execution("hic_scaffolding")

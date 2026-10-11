@@ -1139,6 +1139,9 @@ class FrozenHelperTests(unittest.TestCase):
                                 "allow_local_execution": False,
                             },
                         ],
+                        "shared_parameters": {
+                            "species_facts": {"telomere_motif": "TTAGGG"}
+                        },
                         "t2t": {
                             "mode": "manual_review",
                             "recommendation_mode": "deterministic_baseline",

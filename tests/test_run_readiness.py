@@ -113,8 +113,20 @@ def test_t2t_readiness_only_requires_motif_protocol_when_motif_is_missing() -> N
             "t2t": {"mode": "auto_patch"},
         }
     )
+    with pytest.raises(ValueError, match="deterministic_baseline requires"):
+        RunConfig.model_validate(
+            {**base, "t2t": {"recommendation_mode": "deterministic_baseline"}}
+        )
     assert required_llm_output_methods(missing) == ("json_schema", "prompt_json")
     assert required_llm_output_methods(supplied) == ("json_schema",)
+    baseline = RunConfig.model_validate(
+        {
+            **base,
+            "shared_parameters": {"species_facts": {"telomere_motif": "TTAGGG"}},
+            "t2t": {"recommendation_mode": "deterministic_baseline"},
+        }
+    )
+    assert required_llm_output_methods(baseline) == ()
 
 
 def test_preflight_checks_all_selected_protocols_and_stops_on_failure(tmp_path) -> None:
