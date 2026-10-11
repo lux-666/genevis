@@ -98,6 +98,25 @@ def test_llm_protocol_scope_preserves_distinct_advisor_contracts() -> None:
     )
 
 
+def test_t2t_readiness_only_requires_motif_protocol_when_motif_is_missing() -> None:
+    base = {"requested_stages": [{"stage": "t2t", "allow_local_execution": True}]}
+    missing = RunConfig.model_validate({**base, "t2t": {"mode": "auto_patch"}})
+    supplied = RunConfig.model_validate(
+        {
+            **base,
+            "shared_parameters": {
+                "species_facts": {
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                }
+            },
+            "t2t": {"mode": "auto_patch"},
+        }
+    )
+    assert required_llm_output_methods(missing) == ("json_schema", "prompt_json")
+    assert required_llm_output_methods(supplied) == ("json_schema",)
+
+
 def test_preflight_checks_all_selected_protocols_and_stops_on_failure(tmp_path) -> None:
     config = RunConfig.model_validate(
         {

@@ -158,10 +158,19 @@ def required_llm_output_methods(run_config: RunConfig) -> tuple[OutputMethod, ..
                 methods.append(
                     config.recommendation_output_method if config else "json_schema"
                 )
-                # T2T motif resolution retains its own prompt-JSON contract.
-                if stage == "t2t":
+                # T2T motif resolution is a separate prompt-JSON call only
+                # when no motif was supplied in the frozen shared facts.
+                if stage == "t2t" and not _t2t_motif_is_supplied(run_config):
                     methods.append("prompt_json")
     return tuple(dict.fromkeys(methods))
+
+
+def _t2t_motif_is_supplied(run_config: RunConfig) -> bool:
+    """Return whether T2T can skip its optional motif resolver model."""
+
+    shared = run_config.shared_parameters
+    facts = shared.species_facts if shared is not None else None
+    return facts is not None and facts.telomere_motif is not None
 
 
 def preflight_run_readiness(
