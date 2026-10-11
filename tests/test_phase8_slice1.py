@@ -23,11 +23,7 @@ from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
     ArtifactMeta,
     AssemblyInputProfile,
-    AssemblyQCSummary,
-    AssemblyReviewTaskItem,
-    AssemblyReviewTasks,
     AssemblyRouteDecision,
-    AssemblyT2TReadiness,
 )
 from app.schemas.run_config import DEFAULT_REVIEW_MAX_BLOCKED_SECONDS
 from app.schemas.state import initial_state
@@ -77,40 +73,8 @@ class Phase8SchemaTests(unittest.TestCase):
             decided_by="auto_rule",
             rationale="HiFi reads available",
         )
-        qc = AssemblyQCSummary(
-            session_id="s1",
-            candidate_id="c1",
-            method_name="assembly.candidate.hifiasm",
-            qc_passed=True,
-        )
-        readiness = AssemblyT2TReadiness(
-            session_id="s1",
-            candidate_id="c1",
-            t2t_verdict="near_t2t",
-            llm_confidence=0.8,
-            llm_reasoning="near complete",
-            uncertainty_notes=["Hi-C absent"],
-        )
-        tasks = AssemblyReviewTasks(
-            session_id="s1",
-            candidate_id="c1",
-            t2t_status_estimate="near_t2t",
-            confidence=0.8,
-            tasks=[
-                AssemblyReviewTaskItem(
-                    priority="high",
-                    category="telomere",
-                    finding="missing telomere signal",
-                    action="inspect contig ends",
-                )
-            ],
-        )
-
         self.assertEqual(profile.uncertainty_notes, ["coverage not estimated"])
         self.assertEqual(decision.selected_route, "hifi")
-        self.assertTrue(qc.qc_passed)
-        self.assertEqual(readiness.uncertainty_notes, ["Hi-C absent"])
-        self.assertEqual(tasks.tasks[0].category, "telomere")
 
 
 class KnowledgePackTests(unittest.TestCase):
@@ -151,7 +115,7 @@ class KnowledgePackTests(unittest.TestCase):
             try:
                 os.chdir(tmpdir)
                 ctx = load_knowledge_pack(
-                    "qc_interpretation",
+                    "route_selector",
                     strict=False,
                     include_actions=True,
                     required_files=(),
@@ -159,11 +123,8 @@ class KnowledgePackTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-        self.assertIn("safety_boundaries", ctx["rules"])
-        self.assertIn(
-            "all_candidates_fragmented",
-            ctx["rules"]["safety_boundaries"]["always_block_human"],
-        )
+        self.assertIn("hifi", ctx["rules"]["routes"])
+        self.assertIn("Assembly Method and Route Advice", ctx["skill_text"])
 
     def test_load_route_selector_context_partial(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -37,7 +37,6 @@ from app.stages.t2t.nodes import (
     _materialize_t2t_patches,
     _t2t_adoption_decision_ref,
     apply_t2t_review_application,
-    block_t2t,
     build_t2t_candidates,
     commit_t2t,
     prepare_t2t_review_application,
@@ -140,36 +139,6 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn(
                 "explicit advisor or deterministic_baseline", result["last_error"]
-            )
-
-    def test_missing_persisted_review_interrupt_settles_alignment_before_failure(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, _reads = self._write_inputs(tmpdir)
-            state = self._state(tmpdir, assembly)
-            state["stage_outputs"] = {
-                "t2t": {
-                    "execution_mode": "local",
-                    "recommendation_mode": "deterministic_baseline",
-                }
-            }
-
-            update = block_t2t(state)
-
-            self.assertEqual(update["supervision_state"], "failed_terminal")
-            dispositions = [
-                event["summary"]
-                for event in Ledger(state["data_dir"]).read_event_rows("s1")
-                if event["event_type"] == "method_disposition_recorded"
-            ]
-            self.assertEqual(
-                dispositions,
-                [
-                    {
-                        "method_name": "t2t.alignment.minimap2",
-                        "disposition": "not_started",
-                        "reason": "T2T review block has no persisted interrupt",
-                    }
-                ],
             )
 
     def test_nonselection_review_clears_candidate_ids_without_reordering_notes(self):

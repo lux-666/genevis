@@ -286,16 +286,16 @@ python -m app.diagnostics.route_acceptance --route hic \
 
 ### Base Polish 与 T2T 验收要点
 
-新模板对 GapCloser、T2T、Base Polish 显式使用 `recommendation_mode: advisor`、`max_attempts: 3`。每阶段先对源做 QUAST；每次执行后，源与全部历次候选在相同设置下重新比较，再进入 `finishing_recommendation` 门。执行前与执行后都是这个门，通过请求绑定区分轮次。需要原单轮路径时显式设置 `deterministic_baseline`。
+模板对 GapCloser、T2T、Base Polish 显式使用 `recommendation_mode: advisor`、`max_attempts: 3`。每阶段先对源做 QUAST；每次执行后，源与全部历次候选在相同设置下重新比较，再进入 `finishing_recommendation` 门。执行前与执行后都是这个门，通过请求绑定区分轮次。需要单轮基线时显式设置 `deterministic_baseline`。
 
-三个独立顾问切片都需要 QUAST 和可用的 LLM 端点；按新版 [envs.yaml.example](../examples/envs.yaml.example) 增加 `gapcloser.eval.quast`、`t2t.eval.quast`、`base_polish.eval.quast` 环境映射，可共用已有 QUAST 环境。Finishing/看校正质量的 Base Polish 还需最终 Review 的 BUSCO 数据库。当前 Hi-C 活动会话保留原检出与环境；本次升级通过新会话验收。
+三个独立顾问切片都需要 QUAST 和可用的 LLM 端点；按 [envs.yaml.example](../examples/envs.yaml.example) 增加 `gapcloser.eval.quast`、`t2t.eval.quast`、`base_polish.eval.quast` 环境映射，可共用已有 QUAST 环境。Finishing/看校正质量的 Base Polish 还需最终 Review 的 BUSCO 数据库。
 
-- `follow_recommendation`：查看 response.json 的 action。合格前台 resolver 可自动 follow `run`（执行新参数）、`accept`（采纳 selected_attempt）或 `keep_source`（保留本阶段原组装）；操作者也可显式选择。`human_review`、非法响应、重复参数、预算耗尽后建议 run，都不会开放 follow。
+- `follow_recommendation`：查看 response.json 的 action。操作者确认后执行提案中的 `run`（执行新参数）、`accept`（采纳 selected_attempt）或 `keep_source`（保留本阶段原组装）；此 finishing 门不自动 follow。`human_review`、非法响应、重复参数、预算耗尽后建议 run，都不会开放 follow。
 - `accept_candidate`：覆盖顾问建议，指定候选 `candidate_id: attempt_0` 等；可选回早先的完整候选。T2T 只有实际形成补丁的轮次可采纳。
 - `keep_prior_assembly`：成功保留本阶段原组装；`stop_human_review`：终态失败。
 - Finishing 的每个动作仍需人工确认；Dedup 的合格前台 resolver 可按冻结策略自动 follow 已保存提案。保持 `max_blocked_seconds: -1` 时不自动触发倒计时。T2T advisor 要求 `mode: auto_patch`，baseline 使用独立策略证据。
 
-T2T 的 `deterministic_baseline` 不调用阈值模型或基序模型，要求显式提供 `species_facts.telomere_motif`，否则明确失败。基线使用冻结目录的 L0 阈值、空 L2 与 schema-3 策略请求与批准记录，经 `source=policy` 的已批准链执行单轮；不建立交互式 `parameter_approval` 门，补丁采纳仍保留 `t2t_review` 人工门。`manual_review`/`propose_only`/`auto_patch` 控制补丁方式，与推荐策略独立。
+T2T 的 `deterministic_baseline` 不调用阈值模型或基序模型，要求显式提供 `species_facts.telomere_motif`，否则明确失败。基线使用冻结目录的 L0 阈值、空 L2 与 schema-3 策略请求与批准记录，经 `source=policy` 的已批准链执行单轮；不建立交互式 `parameter_approval` 门，补丁采纳仍保留 `t2t_review` 人工门。T2T advisor 只接受 `auto_patch`；`manual_review` 和 `propose_only` 要求显式选择 `deterministic_baseline`，不兼容组合在配置校验时拒绝。
 
 全部新尝试从相同源组装开始，不把上轮 polishing 结果继续校正。`work/steps/<step>/<stage>/attempts/NNN/` 隔离工具运行，`artifacts/steps/<step>/<stage>/advisor/` 保存设置、QUAST、请求/响应、assessment；approval 决定在 review 目录。顾问依据真实测量作方案选择，仍只能选择已实现的 TGS-GapCloser、端部补丁和 Racon 方法，不能提议未安装的新工具。没有参考的 QUAST 与同批读段一致性不构成独立准确率证明。
 

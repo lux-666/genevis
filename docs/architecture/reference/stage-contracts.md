@@ -252,7 +252,7 @@ GapCloser、T2T、Base Polish 的新 RunConfig 默认 `recommendation_mode: advi
 
 Dedup 与 finishing 的 QUAST 收集共用结构校验：Assembly 标题、精确有序的冻结候选列、至少一行指标、完整且等宽的表格。报告不合格属于预期收集失败，记录 QUAST 尝试失败并停止阶段；不能归责给已成功并收集的生物方法，也不能把旧报告作为本轮成功证据。
 
-T2T 顾问目前要求 auto_patch，采纳仍需人工。源请求含端部 motif-copy 测量；反馈含扫描、过滤前每条 PAF 两端的 MAPQ/重叠/距离/尾部基序测量及全部拒绝原因。独立 alignment_observations.tsv 绑定冻结尝试、执行与 PAF，不改变补丁候选表语义；统计遍历全部行，最多 100 行示例，拒绝计数按比对端而非唯一读段计算。候选 supporting_reads 去重计数投影为 supporting_read_count，数值汇总覆盖所有行。最终报告重用所选轮次的冻结输入。Base Polish 暴露 Racon window/error/scoring 的有界参数，每候选只跑一轮。顾问必须将同批校正读段一致性视为样本内证据，不据此宣称独立 QV 或默认无限校正。
+T2T 顾问要求 auto_patch，采纳仍需人工。RunConfig 校验拒绝 advisor 与 manual_review/propose_only 的组合；这两种补丁模式仅用于 deterministic_baseline。源请求含端部 motif-copy 测量；反馈含扫描、过滤前每条 PAF 两端的 MAPQ/重叠/距离/尾部基序测量及全部拒绝原因。独立 alignment_observations.tsv 绑定冻结尝试、执行与 PAF，不改变补丁候选表语义；统计遍历全部行，最多 100 行示例，拒绝计数按比对端而非唯一读段计算。候选 supporting_reads 去重计数投影为 supporting_read_count，数值汇总覆盖所有行。最终报告重用所选轮次的冻结输入。Base Polish 暴露 Racon window/error/scoring 的有界参数，每候选只跑一轮。顾问必须将同批校正读段一致性视为样本内证据，不据此宣称独立 QV 或默认无限校正。
 
 `deterministic_baseline` 对 GapCloser/Base Polish 使用操作者配置单轮；对 T2T 使用冻结目录 L0、空 L2 的 schema-3 策略批准单轮，不调用阈值或基序模型，也不建立交互式 `parameter_approval` 门。默认 finishing 有自己的[任务证据契约](data-contract.md#finishing-task-evidence)，不沿用 schema-3 参数 manifest。新 RunConfig 明确选择 advisor 或 deterministic_baseline；T2T advisor 只能进入 finishing，baseline 执行只能加载 `source=policy` 的 schema-3 已批准链。真实工具与真实样本验收是独立门禁。
 

@@ -1243,7 +1243,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             selected_methods={"t2t": "t2t.alignment.minimap2"},
             method_parameters={
                 "t2t.alignment.minimap2": {
-                    "mode": "manual_review",
+                    "mode": "auto_patch",
                     "telomere_motif": "TTAGGG",
                     "threshold_min_motif_copies": 5,
                     "threshold_terminal_window_bp": 12000,
@@ -1261,9 +1261,22 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(
             _local_execution_stage_names(payload), ["t2t", "assembly_review"]
         )
-        self.assertEqual(payload["t2t"]["mode"], "manual_review")
+        self.assertEqual(payload["t2t"]["mode"], "auto_patch")
         self.assertNotIn("telomere_motif", payload["t2t"])
         self.assertNotIn("thresholds", payload["t2t"])
+
+    def test_build_run_config_rejects_incompatible_t2t_advisor_patch_modes(self):
+        for mode in ("manual_review", "propose_only"):
+            with self.subTest(mode=mode):
+                plan = _base_plan(
+                    stage_names=["t2t"],
+                    method_parameters={"t2t.alignment.minimap2": {"mode": mode}},
+                    confirmed=True,
+                )
+                with self.assertRaisesRegex(
+                    ValidationError, "t2t advisor requires mode=auto_patch"
+                ):
+                    build_run_config_payload(plan)
 
     def test_build_run_config_uses_selected_read_qc_filter(self):
         plan = _base_plan(

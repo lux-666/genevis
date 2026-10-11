@@ -317,22 +317,6 @@ def enter_t2t(state: TopLevelState) -> StateUpdate:
     return {"supervision_state": "running_stage"}
 
 
-def block_t2t(state: TopLevelState) -> StateUpdate:
-    """Surface a persisted T2T candidate-review interrupt at the top-level boundary."""
-
-    interrupt_value = _output(state).get("active_interrupt")
-    interrupt = (
-        _top_level_interrupt(interrupt_value) if interrupt_value is not None else None
-    )
-    if not interrupt:
-        return _fail_terminal(state, "T2T review block has no persisted interrupt")
-    return {
-        "current_stage": "t2t",
-        "supervision_state": "blocked_human",
-        "active_interrupt": interrupt,
-    }
-
-
 def resolve_t2t_inputs(state: TopLevelState) -> StateUpdate:
     """Resolve the assembly and complete canonical long-read input list."""
     existing = _output(state)

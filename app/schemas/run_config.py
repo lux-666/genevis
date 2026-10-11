@@ -158,6 +158,18 @@ class T2TRunConfig(FinishingAdvisorConfig):
     read_inputs: list[T2TReadInput] = Field(default_factory=list)
 
     @model_validator(mode="after")
+    def _patch_mode_must_match_recommendation_policy(self) -> "T2TRunConfig":
+        if self.recommendation_mode == "advisor" and self.mode not in {
+            None,
+            "auto_patch",
+        }:
+            raise ValueError(
+                "t2t advisor requires mode=auto_patch; manual_review and "
+                "propose_only require recommendation_mode=deterministic_baseline"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _read_inputs_must_not_repeat_paths(self) -> "T2TRunConfig":
         paths = [item.path for item in self.read_inputs]
         if len(paths) != len(set(paths)):

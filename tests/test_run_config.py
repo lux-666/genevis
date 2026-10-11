@@ -737,6 +737,41 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertIsNotNone(config.t2t)
         self.assertIsNone(config.t2t.mode)
 
+    def test_t2t_rejects_incompatible_advisor_patch_modes(self):
+        for mode in ("manual_review", "propose_only"):
+            for policy in ({}, {"recommendation_mode": "advisor"}):
+                with self.subTest(mode=mode, policy=policy):
+                    with self.assertRaisesRegex(
+                        ValidationError, "t2t advisor requires mode=auto_patch"
+                    ):
+                        RunConfig.model_validate(
+                            {
+                                "requested_stages": _local_stage_requests("t2t"),
+                                "t2t": {"mode": mode, **policy},
+                            }
+                        )
+
+    def test_t2t_accepts_supported_policy_and_patch_mode_combinations(self):
+        for policy, modes in (
+            ("advisor", (None, "auto_patch")),
+            (
+                "deterministic_baseline",
+                (None, "auto_patch", "manual_review", "propose_only"),
+            ),
+        ):
+            for mode in modes:
+                with self.subTest(policy=policy, mode=mode):
+                    config = RunConfig.model_validate(
+                        {
+                            "requested_stages": _local_stage_requests("t2t"),
+                            "t2t": {"recommendation_mode": policy, "mode": mode},
+                            "shared_parameters": {
+                                "species_facts": {"telomere_motif": "TTAGGG"}
+                            },
+                        }
+                    )
+                    self.assertEqual(config.t2t.mode, mode)
+
     def test_autohic_run_config_rejects_catalog_owned_parameters(self):
         for name, value in (
             ("number_of_edit_rounds", 3),
