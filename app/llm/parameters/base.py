@@ -1,7 +1,6 @@
 """Shared prompt-invoke-restore core for parameter recommendation models.
 
-HiC and T2T recommenders delegate all generic logic here; each thin wrapper
-only binds a ``PROMPT_BUNDLE`` name and re-exports stage-specific aliases.
+Sparse parameter recommenders share prompt rendering and response parsing.
 """
 
 from __future__ import annotations

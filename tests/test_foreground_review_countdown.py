@@ -97,13 +97,13 @@ def _human_request(
 def test_parameter_approval_gates_share_the_foreground_timeout_normalizer():
     normalizer_paths = {
         get_review_gate(stage, "parameter_approval").normalize_timeout_request
-        for stage in ("assembly", "hic_scaffolding", "t2t")
+        for stage in ("assembly", "hic_scaffolding")
     }
 
     assert normalizer_paths == {
         "app.review.approval:normalize_parameter_approval_timeout_request"
     }
-    for stage in ("assembly", "hic_scaffolding", "t2t"):
+    for stage in ("assembly", "hic_scaffolding"):
         gate = get_review_gate(stage, "parameter_approval")
         assert gate.template_preferred_decision == "approve_parameters"
         assert (

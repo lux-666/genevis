@@ -640,7 +640,8 @@ class PlanPreviewRenderTests(unittest.TestCase):
             points[("t2t", "t2t_review")]["parameter_recommendation_status"],
             "implemented",
         )
-        self.assertIn(("t2t", "parameter_approval"), points)
+        self.assertNotIn(("t2t", "parameter_approval"), points)
+        self.assertIn(("t2t", "finishing_recommendation"), points)
 
         with patch("sys.stdout", new_callable=io.StringIO) as stdout:
             _render_plan_summary(summary, title="Execution Plan")

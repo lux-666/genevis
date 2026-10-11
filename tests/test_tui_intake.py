@@ -205,7 +205,7 @@ class TuiIntakeTests(unittest.TestCase):
             },
         )
 
-        ablation = draft.model_copy(
+        policy_variant = draft.model_copy(
             update={
                 "recommendation_policy": RecommendationPolicy(
                     method_route_advisor="deterministic_baseline",
@@ -213,7 +213,7 @@ class TuiIntakeTests(unittest.TestCase):
                 )
             }
         )
-        plan = _planner_state_from_tui_draft(ablation)
+        plan = _planner_state_from_tui_draft(policy_variant)
         self.assertEqual(
             plan.entry_request["recommendation_policy"],
             {

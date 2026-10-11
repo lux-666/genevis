@@ -1091,7 +1091,7 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "method selection is deferred"):
             build_run_config_payload(plan)
 
-    def test_build_run_config_projects_recommendation_ablation_policy(self):
+    def test_build_run_config_projects_recommendation_policy(self):
         plan = _base_plan(
             stage_names=["assembly"],
             shared_parameters={

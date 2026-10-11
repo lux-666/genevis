@@ -73,7 +73,6 @@ class T2TInterruptJson(TypedDict, total=False):
 T2TStatus = Literal[
     "resolved",
     "motif_resolved",
-    "parameter_response_invalid",
     "blocked_human",
     "parameters_approved",
     "parameters_ready",

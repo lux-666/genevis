@@ -13,10 +13,10 @@ from pydantic import ValidationError
 from app.domains.assembly.material_query import build_material_query
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
+from app.schemas.t2t import T2TThresholds
 from app.stages.assembly.nodes import resolve_extended_inputs
 from app.stages.inventory.builder import build_stage as build_inventory_stage
 from app.stages.t2t.parameters.execution import (
-    T2TExecutionThresholds,
     T2TFrozenExecutionInputs,
     T2TLongReadInput,
     load_chromosome_names_snapshot,
@@ -268,7 +268,7 @@ class MultiplatformLongReadTests(unittest.TestCase):
             chromosome_names = load_chromosome_names_snapshot(str(chromosome_list))
             platforms = ("cycloneseq", "ont", "clr", "pacbio_hifi")
             frozen = T2TFrozenExecutionInputs(
-                thresholds=T2TExecutionThresholds(
+                thresholds=T2TThresholds(
                     min_motif_copies=1,
                     terminal_window_bp=1000,
                     min_mapq=1,

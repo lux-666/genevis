@@ -985,3 +985,17 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(
     )
     assert len(model.messages) == 2
     assert fixture["current_stage"] == stage
+
+
+def test_t2t_baseline_graph_rejects_advisor_before_motif_resolution(tmp_path):
+    from app.stages.t2t.builder import build_baseline_stage
+
+    state = state_for("t2t", tmp_path)
+    state["shared_parameters"]["species_facts"].pop("telomere_motif", None)
+    with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+        failed = build_baseline_stage().invoke(state)
+    model.assert_not_called()
+    assert failed["supervision_state"] == "failed_terminal"
+    assert (
+        "single-pass execution requires deterministic_baseline" in failed["last_error"]
+    )

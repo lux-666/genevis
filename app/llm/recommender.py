@@ -33,7 +33,7 @@ class StructuredRecommender(Generic[T]):
 
     Subclasses may provide prompts and business validation. A forced function
     call submits structured data; this class never executes a model-named tool.
-    Legacy sparse contracts can retain prompt JSON and their existing parser.
+    Sparse contracts can retain prompt JSON and their existing parser.
     """
 
     def __init__(

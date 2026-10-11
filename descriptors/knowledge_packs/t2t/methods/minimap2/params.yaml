@@ -1,7 +1,7 @@
 catalog_id: minimap2
 method_id: t2t.alignment.minimap2
 tool: Gene Agent T2T finishing
-description: "Sparse adjustable evidence thresholds for T2T finishing."
+description: "Baseline defaults and patch mode for T2T finishing."
 
 parameters:
   mode:
@@ -24,7 +24,6 @@ parameters:
 
   min_motif_copies:
     value_type: int
-    min: 1
     application:
       kind: stage_value
       key: min_motif_copies
@@ -33,13 +32,10 @@ parameters:
       l0:
         kind: materialized_default
         value: 4
-      l2:
-        adjustable: true
     description: "Minimum consecutive telomere motif copies in a terminal window or read tail."
 
   terminal_window_bp:
     value_type: int
-    min: 1
     application:
       kind: stage_value
       key: terminal_window_bp
@@ -48,13 +44,10 @@ parameters:
       l0:
         kind: materialized_default
         value: 10000
-      l2:
-        adjustable: true
     description: "Number of terminal bases inspected for telomere signal."
 
   min_mapq:
     value_type: int
-    min: 0
     application:
       kind: stage_value
       key: min_mapq
@@ -63,13 +56,10 @@ parameters:
       l0:
         kind: materialized_default
         value: 20
-      l2:
-        adjustable: true
     description: "Minimum mapping quality for a patch candidate."
 
   max_target_terminal_distance_bp:
     value_type: int
-    min: 0
     application:
       kind: stage_value
       key: max_target_terminal_distance_bp
@@ -78,13 +68,10 @@ parameters:
       l0:
         kind: materialized_default
         value: 1000
-      l2:
-        adjustable: true
     description: "Maximum target bases replaced between the alignment junction and terminus."
 
   min_overlap_bp:
     value_type: int
-    min: 1
     application:
       kind: stage_value
       key: min_overlap_bp
@@ -93,13 +80,10 @@ parameters:
       l0:
         kind: materialized_default
         value: 500
-      l2:
-        adjustable: true
     description: "Minimum aligned query overlap supporting a patch candidate."
 
   min_supporting_reads:
     value_type: int
-    min: 1
     application:
       kind: stage_value
       key: min_supporting_reads
@@ -108,6 +92,4 @@ parameters:
       l0:
         kind: materialized_default
         value: 1
-      l2:
-        adjustable: true
     description: "Minimum compatible reads supporting the selected tail."

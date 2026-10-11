@@ -490,37 +490,6 @@ register_review_gate(
 register_review_gate(
     ReviewGateDeclaration(
         stage="t2t",
-        gate_id="parameter_approval",
-        decisions_allowed=("approve_parameters", "reject_parameters"),
-        intent_metadata_model="app.review.approval:ParameterApprovalMetadataV1",
-        validate_intent_request=(
-            "app.stages.t2t.parameters.workflow:validate_t2t_parameter_intent_request"
-        ),
-        effect_kind="t2t.parameter_approval.v1",
-        effect_model="app.review.approval:ParameterApprovalEffectV1",
-        prepare_application=(
-            "app.stages.t2t.parameters.workflow:"
-            "prepare_t2t_parameter_approval_application"
-        ),
-        apply_application=(
-            "app.stages.t2t.parameters.workflow:"
-            "apply_t2t_parameter_approval_application"
-        ),
-        normalize_timeout_request=(
-            "app.review.approval:normalize_parameter_approval_timeout_request"
-        ),
-        prompt_adapter="generic",
-        template_preferred_decision="approve_parameters",
-        proposal_kind="parameter_recommendation",
-        proposal_label="T2T threshold proposal",
-        parameter_recommendation_status="implemented",
-        plan_order=20,
-    )
-)
-
-register_review_gate(
-    ReviewGateDeclaration(
-        stage="t2t",
         gate_id="t2t_review",
         decisions_allowed=(
             "accept_selected_candidates",
@@ -541,7 +510,6 @@ register_review_gate(
         proposal_kind="finishing_candidate_review",
         proposal_label="T2T finishing candidate review",
         parameter_recommendation_status="implemented",
-        related_parameter_gate=("t2t", "parameter_approval"),
         plan_order=30,
     )
 )

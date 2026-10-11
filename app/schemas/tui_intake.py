@@ -253,7 +253,7 @@ RecommendationMode = Literal["advisor", "deterministic_baseline"]
 
 
 class RecommendationPolicy(BaseModel):
-    """Independent ablation switches for stage-local advisory decisions."""
+    """Independent recommendation strategies for stage-local decisions."""
 
     model_config = ConfigDict(extra="forbid")
 

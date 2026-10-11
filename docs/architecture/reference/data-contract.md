@@ -36,7 +36,7 @@ Gene Agent 运行带参数推荐、人工评审、重试、大型工具输出和
 
 T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行。补丁候选表继续只包含进入支持分组的行；其中 supporting_reads 去重后的支持数汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。
 
-T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不打开人工参数门，补丁采纳仍走 t2t_review。旧 schema-3 初始 LLM 响应只允许读取既有持久记录，不允许生产新响应；仅测试或迁移工具可显式开启兼容生产者，不是新版 advisor 入口。旧活动会话保留匹配检出；本运行时不迁移 checkpoint。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
+T2T 的 deterministic_baseline 使用单轮 schema-3 策略请求与批准记录，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不建立交互式 `parameter_approval` 门，补丁采纳仍走 `t2t_review`。默认 T2T advisor 使用 finishing 共同任务记录，设置、请求/响应、assessment/history 和每轮 `frozen.json` 按 finishing 证据链保存。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
 
 <a id="2-product-decisions"></a>
 
@@ -194,8 +194,8 @@ RunConfig 和持久规划记录不携带 Assembly 方法或方法参数块。规
 | 组装主产品与方法原生产物 | 不可变 executed candidate 包 + 索引 | 包引用、选定方法/候选 ID |
 | 推荐使用的精确 profile | 输入/profile 快照产物 | 引用、哈希 |
 | 描述符、目录、案例、策略依据 | 不可变运行证据快照；案例只保存每次推荐选中内容 | 引用、哈希、选定 ID |
-| 精确模型调用 | `model_request.json` | 请求引用、模型 ID |
-| 原始模型结果 | `model_response.json` | 响应引用、有效性枚举 |
+| 模型或策略请求 | Assembly/AutoHiC 的 `model_request.json`；T2T baseline 的 `policy_request.json` | 请求引用、模型 ID（调用时） |
+| 模型或策略响应 | Assembly/AutoHiC 的 `model_response.json`；T2T baseline 的 `policy_response.json` | 响应引用、解析状态 |
 | 解析的方法/参数推荐 | `recommendation.json` | 引用/哈希、紧凑接受投影 |
 | 响应结构解析结果 | `response_parse.json` | 引用、parsed/invalid、解析错误 |
 | 人工请求 | 不可变请求产物 | 请求 ID/引用/哈希、门 ID、步骤 ID |

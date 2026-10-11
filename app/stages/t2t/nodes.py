@@ -305,13 +305,20 @@ def _fail_terminal(state: TopLevelState, reason: str) -> StateUpdate:
 
 
 def enter_t2t(state: TopLevelState) -> StateUpdate:
-    """Mark T2T finishing as the active stage."""
-    _output(state)
+    """Enter the single-pass executor under an explicit recommendation policy."""
+    output = _output(state)
+    mode = output.get("recommendation_mode")
+    if mode not in {"advisor", "deterministic_baseline"}:
+        return _fail(
+            state, "T2T requires explicit advisor or deterministic_baseline mode"
+        )
+    if output.get("execution_mode") == "local" and mode != "deterministic_baseline":
+        return _fail(state, "T2T single-pass execution requires deterministic_baseline")
     return {"supervision_state": "running_stage"}
 
 
 def block_t2t(state: TopLevelState) -> StateUpdate:
-    """Surface a persisted T2T parameter interrupt at the top-level boundary."""
+    """Surface a persisted T2T candidate-review interrupt at the top-level boundary."""
 
     interrupt_value = _output(state).get("active_interrupt")
     interrupt = (

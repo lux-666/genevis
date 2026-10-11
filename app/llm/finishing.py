@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.llm.recommender import OutputMethod, StructuredRecommender
+from app.schemas.t2t import T2TThresholds
 
 
 class GapParameters(BaseModel):
@@ -27,27 +28,17 @@ class PolishParameters(BaseModel):
     gap: int = Field(ge=-20, le=-1)
 
 
-class TelomereParameters(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-    min_motif_copies: int = Field(ge=1)
-    terminal_window_bp: int = Field(ge=1)
-    min_mapq: int = Field(ge=0, le=255)
-    max_target_terminal_distance_bp: int = Field(ge=0)
-    min_overlap_bp: int = Field(ge=1)
-    min_supporting_reads: int = Field(ge=1)
-
-
 PARAMETERS: dict[str, type[BaseModel]] = {
     "gapcloser": GapParameters,
     "base_polish": PolishParameters,
-    "t2t": TelomereParameters,
+    "t2t": T2TThresholds,
 }
 
 
 class FinishingRecommendation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     action: Literal["run", "accept", "keep_source", "human_review"]
-    parameters: GapParameters | PolishParameters | TelomereParameters | None
+    parameters: GapParameters | PolishParameters | T2TThresholds | None
     selected_attempt: int | None = Field(ge=0)
     reason: str = Field(min_length=1)
     evidence_gaps: list[str]

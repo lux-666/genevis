@@ -1,1 +1,1 @@
-"""T2T parameter request, prompt, and sparse-response contracts."""
+"""T2T species motif model boundary."""

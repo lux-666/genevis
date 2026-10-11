@@ -326,8 +326,16 @@ class ReviewGateRegistryTests(unittest.TestCase):
             self.assertEqual(template["candidate_id"], "candidate-a")
             self.assertNotIn("candidate_id", summary["next_action"]["required_fields"])
 
+    def test_t2t_only_exposes_current_candidate_and_finishing_gates(self):
+        with self.assertRaises(KeyError):
+            get_review_gate("t2t", "parameter_approval")
+        self.assertEqual(get_review_gate("t2t", "t2t_review").stage, "t2t")
+        self.assertEqual(
+            get_review_gate("t2t", "finishing_recommendation").stage, "t2t"
+        )
+
     def test_parameter_approval_gates_default_templates_to_approval(self):
-        for stage in ("assembly", "hic_scaffolding", "t2t"):
+        for stage in ("assembly", "hic_scaffolding"):
             with self.subTest(stage=stage):
                 gate = get_review_gate(stage, "parameter_approval")
                 self.assertEqual(
@@ -357,7 +365,6 @@ class ReviewGateRegistryTests(unittest.TestCase):
             ("assembly", "route_selection"),
             ("hic_scaffolding", "parameter_approval"),
             ("hic_scaffolding", "hic_scaffolding"),
-            ("t2t", "parameter_approval"),
             ("t2t", "t2t_review"),
         )
         with tempfile.TemporaryDirectory() as tmp:

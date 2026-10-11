@@ -32,7 +32,7 @@ Assembly/AutoHiC 稀疏提案可为空；省略键不会自动继承前次尝试
 
 附着运行时遵循门禁提示。Assembly/AutoHiC 的冻结评审策略允许有资格的前台倒计时。Finishing 门仅人工确认，每个 run/accept/keep 动作均绑定请求，不自动执行；非法或越预算提案转人工选择。详细动作见[finishing 验收](run-and-recovery.md#base-polish-and-t2t-acceptance-points)。
 
-GapCloser/Base Polish 的 `deterministic_baseline` 是操作者参数单轮路径。T2T 同名基线要求已提供端粒基序，不调用任何模型；使用目录 L0、空 L2 和不可变策略审批，经 schema-3 冻结后执行单轮。该审批不向操作者打开 `parameter_approval`，候选采纳仍使用 `t2t_review`；`manual_review` 可逐条选择补丁。旧 schema-3 LLM 初始阈值推荐代码仅保留既有记录读取/受控兼容调用，新 RunConfig 的 advisor 进入 finishing，不能将旧路径称为确定性基线。活动旧会话保留匹配检出，运行时不迁移 checkpoint。
+GapCloser/Base Polish 的 `deterministic_baseline` 是操作者参数单轮路径。T2T 同名基线要求已提供端粒基序，不调用任何模型；使用目录 L0、空 L2 和 schema-3 策略请求与批准记录冻结后执行单轮，不建立交互式 `parameter_approval` 门。候选采纳仍使用 `t2t_review`；`manual_review` 可逐条选择补丁。默认 T2T advisor 进入 finishing。
 
 进程中断后，按[运行与恢复](run-and-recovery.md)检查和恢复。后续 `review` 或 `resume` 是人工恢复，不重建过期前台计时器。
 
@@ -42,25 +42,25 @@ GapCloser/Base Polish 的 `deterministic_baseline` 是操作者参数单轮路�
 
 ## 审计证据
 
-Assembly/AutoHiC 和 T2T 单轮基线的参数证据使用 schema-3 快照/manifest/批准尝试链；基线响应显式标记模型未调用。默认 finishing 使用阶段共同的 settings、request/response、assessment/history 引用和 T2T frozen.json，审批绑定到这些引用，不使用 schema-3 参数 manifest。两者复用 ArtifactRef 完整性、共享 intent/application 审批和执行生命周期；完整布局见[运行数据契约](../architecture/reference/data-contract.md#finishing-task-evidence)。
+Assembly/AutoHiC 和 T2T baseline 的参数证据使用 schema-3 快照/manifest/批准尝试链；确定性 baseline 保存空 L2 策略证据和批准记录，并显式标记模型未调用。默认 finishing 使用阶段共同的 settings、request/response、assessment/history 引用和 T2T `frozen.json`，审批绑定到这些引用，不使用 schema-3 参数 manifest。两者复用 ArtifactRef 完整性、共享 intent/application 审批和执行生命周期；完整布局见[运行数据契约](../architecture/reference/data-contract.md#finishing-task-evidence)。
 
 通过会话摘要或产物索引定位当前推荐；不要原地编辑已存推荐文件。哈希、身份、阶段/方法和前驱不匹配均拒绝。
 
 精确文件名、schema 版本、接受的响应字段、来源优先级、T2T 基序解析规则和重试链不变量不在此重复；调试或修改时使用参考契约。
 
-<a id="compare-llm-only-and-literature-assisted-parameters"></a>
+<a id="parameter-recommendation-smoke"></a>
 
-## 比较纯 LLM 与文献辅助参数
+## 参数推荐烟测
 
-使用带检索案例的初始 Assembly `model_request.json` 及相邻 `input_snapshot.json`，先在不联系模型的情况下准备两个试验臂：
+使用一次真实 Assembly `model_request.json` 及相邻 `input_snapshot.json` 运行单请求烟测，检查请求解析、目录校验和原始响应保存；该诊断不批准参数或启动组装：
 
 ```bash
 python -m app.diagnostics.parameter_recommendation_smoke \
   --model-request /path/to/model_request.json \
-  --output-dir /path/to/new-prepared-pair --prepare-pair
+  --output-dir /path/to/new-smoke
 ```
 
-检查各臂的 `model_request.json`。通过配置 LLM 评估两臂时，改用 `--paired` 并指定新输出目录。该诊断使用既有参数解析器/目录检查并保存原始响应，不批准参数或启动组装。重复成对试验与真实组装结果分开比较。精确控制变量见[推荐契约](../architecture/reference/parameter-recommendation.md#assembly-case-evidence)。
+参数请求的完整证据边界见[推荐契约](../architecture/reference/parameter-recommendation.md#assembly-case-evidence)。
 
 <a id="iterative-purge_dups-recommendations"></a>
 
@@ -93,12 +93,12 @@ python -m app.diagnostics.parameter_recommendation_smoke \
 
 每项提案都通过既有评审系统打开 `dedup_recommendation`：
 
-- `follow_recommendation` 应用精确持久提案。
+- `follow_recommendation` 应用精确持久提案；在满足冻结策略和 resolver 资格时，前台倒计时可自动执行提案的 `run`、`accept` 或 `keep_source` 动作。
 - `accept_candidate` 显式选择已完成 `attempt_N`。
 - `keep_prior_assembly` 交付原始草稿。
 - `stop_human_review` 停止该 occurrence。
 
-既有 `max_blocked_seconds` 控制确认：`-1` 无限等待，`0` 立即使用合格前台 resolver，正值等待指定秒数。超时遵循已存推荐，不生成替代提案或覆盖无效提案。前台进程退出后，后台经过时间不会产生自动审批。
+既有 `max_blocked_seconds` 控制确认：`-1` 无限等待，`0` 立即使用合格前台 resolver，正值等待指定秒数。超时可遵循已存推荐并执行其合格的 `run`、`accept` 或 `keep_source` 动作，不生成替代提案或覆盖无效提案。显式人工选择仍可覆盖建议；前台进程退出后，后台经过时间不会产生自动审批。
 
 `max_attempts` 接受 1–10，计数 purge 执行，不计模型调用或 QUAST 评估。最终评估仍可推荐采纳哪个已完成候选。重复配置和超预算尝试被拒绝。无效模型输出将结果选择交给操作者。执行或收集失败停止 occurrence，不静默采纳未经评审结果。
 

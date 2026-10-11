@@ -53,8 +53,6 @@ def route_after_parameter_recommendation(state: TopLevelState) -> str:
     output = _output(state)
     if output.get("status") == "parameters_approved":
         return "prepare_parameters"
-    if output.get("status") == "blocked_human":
-        return "block"
     return "fail"
 
 

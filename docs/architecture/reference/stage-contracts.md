@@ -171,7 +171,7 @@ RunConfig 同时冻结本地执行和 `assembly_dedup.automatic_purge_approved` 
 
 `recommendation_mode: deterministic_baseline` 保留单次路径；`coverage_mode: self_alignment` 选择无覆盖估计替代路线。默认仍是 `read_depth` 与自动 `calcuts`。
 
-`recommendation_mode: advisor` 先对源候选运行 QUAST，再打开持久 `dedup_recommendation`。每个获批提案可从同一原始组装执行新配置；下一提案前 QUAST 比较源和全部完成候选。模型输入是完整 QUAST 表、实际命令、历史设置和推荐，没有硬编码质量分数。可选参考基因组对所有候选使用同一注册参考。
+`recommendation_mode: advisor` 先对源候选运行 QUAST，再打开持久 `dedup_recommendation`。每个获批提案可从同一原始组装执行新配置；下一提案前 QUAST 比较源和全部完成候选。模型输入是完整 QUAST 表、实际命令、历史设置和推荐，没有硬编码质量分数。合格前台 resolver 可在倒计时后自动 follow 提案的 `run`、`accept` 或 `keep_source`；操作者也可显式选择候选或保留源。可选参考基因组对所有候选使用同一注册参考。
 
 Dedup 顾问请求包含执行器解析的长读段可用性、成员平台和可执行 coverage_mode 列表。缺读段、来源成员不匹配或平台无法映射时，read_depth 不可推荐执行；self_alignment 不消费读段。提案解析、审批应用和执行冻结均重验同一能力约束，不延迟到获批后才发现策略不可执行。
 
@@ -254,7 +254,7 @@ Dedup 与 finishing 的 QUAST 收集共用结构校验：Assembly 标题、精�
 
 T2T 顾问目前要求 auto_patch，采纳仍需人工。源请求含端部 motif-copy 测量；反馈含扫描、过滤前每条 PAF 两端的 MAPQ/重叠/距离/尾部基序测量及全部拒绝原因。独立 alignment_observations.tsv 绑定冻结尝试、执行与 PAF，不改变补丁候选表语义；统计遍历全部行，最多 100 行示例，拒绝计数按比对端而非唯一读段计算。候选 supporting_reads 去重计数投影为 supporting_read_count，数值汇总覆盖所有行。最终报告重用所选轮次的冻结输入。Base Polish 暴露 Racon window/error/scoring 的有界参数，每候选只跑一轮。顾问必须将同批校正读段一致性视为样本内证据，不据此宣称独立 QV 或默认无限校正。
 
-`deterministic_baseline` 对 GapCloser/Base Polish 使用操作者配置单轮；对 T2T 使用冻结目录 L0、空 L2 的 schema-3 策略批准单轮，不调用阈值或基序模型。默认 finishing 有自己的[任务证据契约](data-contract.md#finishing-task-evidence)，不沿用 schema-3 参数 manifest。旧 T2T schema-3 代码保留既有记录读取与已批准执行消费者；缺少 recommendation_mode 的新调用禁止发起阈值或基序模型请求。新 RunConfig 明确选择 advisor 或 deterministic_baseline，不通过旧隐式路径请求模型；活动旧会话必须保留匹配检出，不迁移 checkpoint。真实工具与真实样本验收是独立门禁。
+`deterministic_baseline` 对 GapCloser/Base Polish 使用操作者配置单轮；对 T2T 使用冻结目录 L0、空 L2 的 schema-3 策略批准单轮，不调用阈值或基序模型，也不建立交互式 `parameter_approval` 门。默认 finishing 有自己的[任务证据契约](data-contract.md#finishing-task-evidence)，不沿用 schema-3 参数 manifest。新 RunConfig 明确选择 advisor 或 deterministic_baseline；T2T advisor 只能进入 finishing，baseline 执行只能加载 `source=policy` 的 schema-3 已批准链。真实工具与真实样本验收是独立门禁。
 
 ## 8. GapCloser
 
@@ -276,6 +276,8 @@ Advisor 使用 finishing_recommendation 人工门批准新 run、选择任意已
 
 ## 9. T2T Finishing
 
+六项数值阈值由 `app/schemas/t2t.py::T2TThresholds` 唯一定义，finishing 顾问提案与冻结执行输入共用严格校验：`min_motif_copies`、`terminal_window_bp`、`min_overlap_bp`、`min_supporting_reads` 至少为 1，`max_target_terminal_distance_bp` 至少为 0，`min_mapq` 范围为 0–255。Baseline 目录只拥有默认值、补丁模式及执行应用绑定，不提供 L2 调整入口；目录默认值在冻结执行前也必须通过同一阈值校验。
+
 目的：检查端部端粒证据，保守延长受支持的组装末端，不覆盖输入 FASTA。
 
 输入/输出：
@@ -290,7 +292,7 @@ T2T 消费到达该冻结 occurrence 时的中央组装，不直接消费 `hic_r
 
 - `t2t.alignment.minimap2`。
 
-阈值推荐或扫描前，从规范已提供物种事实的 schema-3 快照解析一个端粒基序。已提供 `species_facts.telomere_motif` 直接验证并经证据链记录；否则持久 LLM 边界从提供学名解析。缺身份、模型未解析、v3 前 motif/config checkpoint 字段均拒绝，不能成为基序证据，也不假定常见重复。Advisor 将验证后的基序与来源绑定到 finishing 设置及每轮 frozen.json，以 finishing_recommendation 人工批准完整阈值。Deterministic baseline 仅接受已提供基序，绑定 schema-3 快照，策略批准空 L2，解析目录 L0 后扫描或运行 minimap2；未提供基序明确失败。读段在一个冻结尝试内按平台预设分组，生成一份合并不可变 PAF。严格应用批准支持阈值，不增隐藏下限或接合点分布否决。记录来源归属的端粒扫描、尝试/执行绑定候选证据、接合点感知补丁、精修报告。
+阈值推荐或扫描前，finishing advisor 从规范物种事实解析并验证端粒基序；已提供 `species_facts.telomere_motif` 直接验证并经证据链记录，否则该 advisor 才可从提供学名调用基序解析。缺身份、模型未解析、当前 schema 之外的 motif/config checkpoint 字段均拒绝，不能成为基序证据，也不假定常见重复。Advisor 将验证后的基序与来源绑定到 finishing 设置及每轮 `frozen.json`，以 `finishing_recommendation` 人工批准完整阈值。Deterministic baseline 仅接受已提供基序，绑定 schema-3 策略证据，策略批准空 L2，解析目录 L0 后扫描或运行 minimap2；未提供基序明确失败。读段在一个冻结尝试内按平台预设分组，生成一份合并不可变 PAF。严格应用批准支持阈值，不增隐藏下限或接合点分布否决。记录来源归属的端粒扫描、尝试/执行绑定候选证据、接合点感知补丁、精修报告。
 
 `auto_patch` 先创建验证候选；advisor 经 finishing_recommendation 比较/选择，单轮基线经 t2t_review 人工采纳。采纳前不改变共享 assembly。反链尾部转为目标正向；非零接合距离先修剪目标再延长。歧义、嵌合、重叠或冲突证据不静默物化，源 FASTA 永不覆盖。
 

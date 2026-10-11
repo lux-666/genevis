@@ -50,7 +50,7 @@
 
 - 当前证据：`app/domains/assembly/software_knowledge.py`、`method_guidance.py`、`app/knowledge/assembly_retrieval.py`。
 - 契约所有者：[Assembly 案例消费](casepack.md)。
-- 关闭条件：为真实案例库中遇到的设置补充经引用的机制/版本指导，超出当前目录的覆盖范围。这是内容覆盖，不是第二消费者，也不要求将外部设置翻译成可执行参数。Hi-C/T2T 仍在规划中。
+- 关闭条件：为真实案例库中遇到的设置补充经引用的机制/版本指导，超出当前目录的覆盖范围。这是内容覆盖，不是第二消费者，也不要求将外部设置翻译成可执行参数。Hi-C/T2T 工作流及推荐器已实现；待补的是对应案例与文献方法知识覆盖。
 
 <a id="assembly-corpus-handoff-and-measured-recommendation-coverage"></a>
 

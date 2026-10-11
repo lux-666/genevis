@@ -178,7 +178,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.target_level, "near_t2t")
         self.assertEqual(config.assembly.assembly_route, "hifi")
 
-    def test_assembly_recommendation_policy_defaults_and_ablation_modes(self):
+    def test_assembly_recommendation_policy_defaults_and_strategy_modes(self):
         config = RunConfig.model_validate(
             {
                 "requested_stages": _local_stage_requests("assembly"),
