@@ -37,6 +37,8 @@
 
 父图是控制器循环，不是无条件线性流水线：选择当前不可变 `workflow_step`，调用对应子图，再回控制器。Occurrence 身份、结算、字面顺序、重复阶段、Review 目标和游标规则由[运行数据](reference/data-contract.md)及[阶段契约](reference/stage-contracts.md)拥有，本页只记录接线和证据。
 
+执行计划是有序步骤链，不提供分支并行调度。冻结前检查可静态判断的输入依赖；进入组装消费步骤时核对精确生产 occurrence，见[资源交接](reference/resource-handoff.md#logical-resources)。阶段内审批与重试保留为局部回路，不改变冻结计划。
+
 父图没有生物学阶段之间的直接边，每个编译阶段返回 `route_controller`。子图拥有生物学选择与证据；父图记录阶段进入并调用共享结算；权威终结器拥有会话终态。操作者报告由执行器/投影边界生成，不由父控制器生成。
 
 | 父图单元 | 接线 | 实现 | 验证 | 欠账 | 证据 |

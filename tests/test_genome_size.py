@@ -166,7 +166,7 @@ def test_frozen_inputs_reject_unsupportable_deferred_assembly_genome_size():
 
         with pytest.raises(
             FrozenInputValidationError,
-            match="deferred Assembly requires input_manifest.genome_size_estimate",
+            match="step-001-assembly requires input_manifest.genome_size_estimate",
         ):
             prepare_session_inputs(
                 manifest_draft=manifest,
@@ -219,7 +219,7 @@ def test_frozen_inputs_reject_prior_local_survey_without_execution_parameters():
 
         with pytest.raises(
             FrozenInputValidationError,
-            match="prior locally executed Genome Survey occurrence",
+            match="step-001-genome_survey requires .*configured local Survey execution",
         ):
             prepare_session_inputs(
                 manifest_draft={

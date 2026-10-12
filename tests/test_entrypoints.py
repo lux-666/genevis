@@ -213,8 +213,8 @@ def _write_assembly_review_request(
 ) -> tuple[Path, PersistedReviewRequest]:
     run_dir = v2_run_dir(data_root, session_id)
     paths = SessionPaths.from_run_dir(run_dir)
-    reads = run_dir / "fixture_reads.fastq"
-    reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    reads = run_dir / "fixture_assembly.fa"
+    reads.write_text(">ctg\nACGT\n", encoding="utf-8")
     lineage = ensure_busco_lineage(run_dir)
     envs = run_dir / "envs.yaml"
     _frozen_database_resolver(run_dir, lineage)
@@ -225,10 +225,9 @@ def _write_assembly_review_request(
             "user_metadata": {"target_species": "Fixture species"},
             "assets": [
                 {
-                    "asset_type": "raw_long_reads",
+                    "asset_type": "assembly_fasta_registered",
                     "paths": [str(reads.resolve())],
-                    "platform": "ont",
-                    "format": "fastq",
+                    "format": "fasta",
                 }
             ],
         },

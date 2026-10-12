@@ -137,7 +137,7 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
 
     # app.workflow imports DomainStage from this module, so defer this import
     # until validation rather than creating an import-time schema cycle.
-    from app.workflow import ASSEMBLY_HANDOFF_PRODUCER_STAGES, analyze_review_sequence
+    from app.workflow import ASSEMBLY_HANDOFF_PRODUCER_STAGES, analyze_assembly_sequence
 
     if not isinstance(value, list) or not value:
         raise TypeError("workflow_steps must be a non-empty list")
@@ -263,9 +263,11 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
     if any(step["stage"] == "inventory" for step in steps[1:]):
         raise ValueError("inventory may appear only as the first workflow step")
 
-    review_bindings = analyze_review_sequence([step["stage"] for step in steps[1:]])
+    review_bindings = analyze_assembly_sequence([step["stage"] for step in steps[1:]])
     for review_index, producer_index in review_bindings.items():
         review_step = steps[review_index]
+        if review_step["stage"] != "assembly_review":
+            continue
         target = review_step["review_target"]
         producer_step_id = target["producer_step_id"]
         matching_indexes = [

@@ -54,12 +54,7 @@ def test_unapproved_polishing_fails_closed_with_durable_evidence(
         )
         state["current_stage"] = stage  # type: ignore[typeddict-item]
         state["workflow_step_index"] = 1
-        state["entered_workflow_step_index"] = 0
-        state["workflow_step_outcome"] = {
-            "workflow_step_id": "step-000-inventory",
-            "stage": "inventory",
-            "outcome": "completed",
-        }
+        state["entered_workflow_step_index"] = 1
 
         result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
             state,

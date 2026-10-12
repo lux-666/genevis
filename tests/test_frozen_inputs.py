@@ -431,7 +431,9 @@ class FrozenInputTests(unittest.TestCase):
                     input_manifest_ref="control/input_manifest.yaml",
                 )
 
-    def _fixture(self, root: Path) -> tuple[SessionPaths, Path, Path, Path]:
+    def _fixture(
+        self, root: Path, *, with_assembly: bool = False
+    ) -> tuple[SessionPaths, Path, Path, Path]:
         root.mkdir(parents=True, exist_ok=True)
         lineage = _write_database_registry(root)
         reads = root / "reads.fastq"
@@ -448,6 +450,14 @@ class FrozenInputTests(unittest.TestCase):
             "    format: fastq\n",
             encoding="utf-8",
         )
+        if with_assembly:
+            (root / "assembly.fa").write_text(">ctg\nACGT\n", encoding="utf-8")
+            with manifest.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "  - asset_type: assembly_fasta_registered\n"
+                    "    paths: [assembly.fa]\n"
+                    "    format: fasta\n"
+                )
         run_config = root / "run_config_draft.json"
         run_config.write_text('{"requested_stages": []}\n', encoding="utf-8")
         envs = root / "envs.yaml"
@@ -578,7 +588,7 @@ class FrozenInputTests(unittest.TestCase):
     def test_requested_review_without_busco_uses_species_derived_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            paths, manifest, run_config, envs = self._fixture(root)
+            paths, manifest, run_config, envs = self._fixture(root, with_assembly=True)
             run_config.write_text(
                 json.dumps(
                     {
@@ -691,7 +701,9 @@ class FrozenInputTests(unittest.TestCase):
         for kind in ("missing", "file"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                paths, manifest, run_config, envs = self._fixture(root)
+                paths, manifest, run_config, envs = self._fixture(
+                    root, with_assembly=True
+                )
                 lineage = root / "invalid_lineage"
                 if kind == "file":
                     lineage.write_text("not a directory\n", encoding="utf-8")
@@ -734,7 +746,9 @@ class FrozenInputTests(unittest.TestCase):
         ):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                paths, manifest, run_config, envs = self._fixture(root)
+                paths, manifest, run_config, envs = self._fixture(
+                    root, with_assembly=True
+                )
                 lineage = root / "embryophyta_odb10"
                 dataset_config = lineage / "dataset.cfg"
                 if kind == "empty_lineage":
@@ -790,7 +804,9 @@ class FrozenInputTests(unittest.TestCase):
         for kind, expected in cases.items():
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                paths, manifest, run_config, envs = self._fixture(root)
+                paths, manifest, run_config, envs = self._fixture(
+                    root, with_assembly=True
+                )
                 lineage = ensure_busco_lineage(root)
                 overrides: dict[str, object] = {}
                 if kind == "empty_lineage":
@@ -879,7 +895,9 @@ class FrozenInputTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as tmp,
             ):
                 root = Path(tmp)
-                _paths, manifest, run_config, _ = self._fixture(root)
+                _paths, manifest, run_config, _ = self._fixture(
+                    root, with_assembly=True
+                )
                 lineage = ensure_busco_lineage(root, lineage_name=lineage_name)
                 self.assertEqual((lineage / "lengths_cutoff").exists(), expects_lengths)
                 run_config.write_text(

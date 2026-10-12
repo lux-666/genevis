@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from app.configuration import load_descriptor_registry
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RequestedStage, RunConfig
 from app.schemas.state import (
     DomainStage,
@@ -17,7 +18,7 @@ from app.schemas.state import (
     validate_stage_outputs,
     validate_workflow_steps,
 )
-from app.workflow import analyze_review_sequence
+from app.workflow import analyze_assembly_sequence
 
 if TYPE_CHECKING:
     from app.schemas.descriptors import FrozenAttemptSpec
@@ -33,7 +34,9 @@ def workflow_steps_from_run_config(run_config: RunConfig) -> list[WorkflowStep]:
     """Freeze one validated RunConfig into its exact runtime sequence."""
 
     requests = run_config.requested_stages
-    review_bindings = analyze_review_sequence([request.stage for request in requests])
+    assembly_bindings = analyze_assembly_sequence(
+        [request.stage for request in requests]
+    )
     steps: list[WorkflowStep] = [
         {
             "step_id": workflow_step_id(0, "inventory"),
@@ -58,7 +61,7 @@ def workflow_steps_from_run_config(run_config: RunConfig) -> list[WorkflowStep]:
             step["selected_method_names"] = list(selected_method_names)
         steps.append(step)
         if stage == "assembly_review":
-            producer = steps[review_bindings[index]]
+            producer = steps[assembly_bindings[index]]
             steps[-1]["review_target"] = {
                 "resource_type": "assembly",
                 "producer_step_id": producer["step_id"],
@@ -190,10 +193,45 @@ def seed_current_workflow_step(state: TopLevelState) -> StateUpdate:
         cursor.pop("execution_mode", None)
     outputs = dict(state.get("stage_outputs") or {})
     outputs[stage] = cursor
-    return {
+    update: StateUpdate = {
         "entered_workflow_step_index": index,
         "stage_outputs": validate_stage_outputs(outputs),
     }
+
+    # The sequential plan determines the producer; ResourceRef proves which
+    # occurrence handed over the actual input. A skipped/missing producer must
+    # not silently fall back to an older assembly from Inventory.
+    reason = None
+    steps = state["workflow_steps"]
+    producer_index = analyze_assembly_sequence(
+        [item["stage"] for item in steps[1:]]
+    ).get(index)
+    if producer_index is not None:
+        producer = steps[producer_index]
+        raw_ref = (state.get("resource_refs") or {}).get("assembly")
+        if raw_ref is None:
+            reason = (
+                f"{step['step_id']} requires assembly from {producer['step_id']}; "
+                "the central assembly ResourceRef is missing"
+            )
+        else:
+            resource = ResourceRef.from_dict(raw_ref)
+            if (
+                resource.resource_type != "assembly"
+                or resource.workflow_step_id != producer["step_id"]
+                or resource.source_stage != producer["stage"]
+            ):
+                reason = (
+                    f"{step['step_id']} requires assembly from {producer['step_id']}; "
+                    f"got {resource.workflow_step_id!r} ({resource.source_stage!r})"
+                )
+
+    if reason is not None:
+        return {
+            **update,
+            **fail_workflow_step({**state, **update}, step["stage"], reason),
+        }
+    return update
 
 
 def advance_workflow_step(

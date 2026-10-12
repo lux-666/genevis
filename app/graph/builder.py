@@ -92,6 +92,36 @@ def build_graph(
                 data_dir=runtime_data_dir,
             )
 
+            # Entry dependency rejection is a terminal outcome of the new
+            # occurrence. Settle the previous one first, then record this
+            # failure because routing will stop without another controller call.
+            if route_update.get("workflow_step_outcome") is not None:
+                from app.execution.method_outcomes import (
+                    MethodOutcome,
+                    settle_method_outcomes,
+                )
+
+                step = current_workflow_step(routed_state)
+                assert step is not None
+                ledger.record_stage_entered(
+                    session_id,
+                    step["stage"],
+                    workflow_step_id=step["step_id"],
+                    route_node="route_controller",
+                    idempotency_key=f"stage-entered:{step['step_id']}",
+                )
+                settle_method_outcomes(
+                    routed_state,
+                    stage=step["stage"],
+                    outcomes=[
+                        MethodOutcome(
+                            name, "not_started", reason=routed_state.get("last_error")
+                        )
+                        for name in step.get("selected_method_names", [])
+                    ],
+                )
+                settle_workflow_step_outcome(routed_state, data_dir=runtime_data_dir)
+
             if routed_state.get("supervision_state") not in {
                 "failed_terminal",
                 "completed",

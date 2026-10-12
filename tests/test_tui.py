@@ -768,10 +768,12 @@ class TuiWorkflowTests(unittest.TestCase):
         with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}):
             freeze_session_inputs(
                 SessionPaths(data_dir, parent.session_id),
-                manifest_draft=materialize_manifest_draft(parent),
+                manifest_draft=materialize_manifest_draft(parent).model_copy(
+                    update={"genome_size_estimate": 1000}
+                ),
                 run_config_draft={
                     "requested_stages": [
-                        {"stage": "assembly", "allow_local_execution": False},
+                        {"stage": "assembly", "allow_local_execution": True},
                         {"stage": "assembly_review", "allow_local_execution": False},
                     ],
                     "assembly_review": {

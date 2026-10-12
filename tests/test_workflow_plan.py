@@ -11,6 +11,7 @@ from app.control.workflow_plan import (
     workflow_steps_from_run_config,
 )
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig as _ProductionRunConfig
 from app.schemas.state import (
     freeze_workflow_steps,
@@ -108,14 +109,25 @@ def test_repeated_stages_keep_order_reset_cursor_and_scope_local_consent() -> No
     )
 
     _apply(state, seed_current_workflow_step(state))
+    state["resource_refs"] = {
+        "assembly": ResourceRef(
+            "assembly", ["/data/assembly.fa"], "inventory", "step-000-inventory"
+        ).to_dict()
+    }
     _apply(state, advance_workflow_step(state, "inventory", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
     assert state["stage_outputs"]["t2t"] == {"status": "seeded"}
     first_attempt = bind_attempt_to_current_workflow_step(state, _attempt())
 
     state["stage_outputs"]["t2t"] = {"status": "first-completed"}
+    state["resource_refs"]["assembly"] = ResourceRef(
+        "assembly", ["/data/assembly.fa"], "t2t", "step-001-t2t"
+    ).to_dict()
     _apply(state, advance_workflow_step(state, "t2t", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
+    state["resource_refs"]["assembly"] = ResourceRef(
+        "assembly", ["/data/assembly.fa"], "assembly_review", "step-002-assembly_review"
+    ).to_dict()
     _apply(
         state,
         advance_workflow_step(state, "assembly_review", outcome="completed"),
@@ -465,6 +477,11 @@ def test_prebound_attempt_still_receives_canonical_occurrence_namespace() -> Non
         workflow_steps=workflow_steps_from_run_config(config),
     )
     _apply(state, seed_current_workflow_step(state))
+    state["resource_refs"] = {
+        "assembly": ResourceRef(
+            "assembly", ["/data/assembly.fa"], "inventory", "step-000-inventory"
+        ).to_dict()
+    }
     _apply(state, advance_workflow_step(state, "inventory", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
 
@@ -493,6 +510,11 @@ def test_prebound_attempt_rejects_another_occurrence_namespace() -> None:
         workflow_steps=workflow_steps_from_run_config(config),
     )
     _apply(state, seed_current_workflow_step(state))
+    state["resource_refs"] = {
+        "assembly": ResourceRef(
+            "assembly", ["/data/assembly.fa"], "inventory", "step-000-inventory"
+        ).to_dict()
+    }
     _apply(state, advance_workflow_step(state, "inventory", outcome="completed"))
     _apply(state, seed_current_workflow_step(state))
 

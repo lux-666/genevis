@@ -71,9 +71,11 @@ def _run(
     if create:
         reads = paths.run_dir / "fixture_reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        assembly = paths.run_dir / "fixture_assembly.fa"
+        assembly.write_text(">ctg\nACGT\n", encoding="utf-8")
         run_config: dict[str, object] = {
             "requested_stages": [
-                {"stage": stage, "allow_local_execution": False}
+                {"stage": stage, "allow_local_execution": stage == "assembly"}
                 for stage in requested_stages
             ]
         }
@@ -87,6 +89,7 @@ def _run(
             paths,
             manifest_draft={
                 "session_id": session_id,
+                "genome_size_estimate": 1000,
                 **(
                     {"user_metadata": {"target_species": "Fixture species"}}
                     if "assembly_review" in requested_stages
@@ -98,7 +101,12 @@ def _run(
                         "paths": [str(reads.resolve())],
                         "platform": "ont",
                         "format": "fastq",
-                    }
+                    },
+                    {
+                        "asset_type": "assembly_fasta_registered",
+                        "paths": [str(assembly)],
+                        "format": "fasta",
+                    },
                 ],
             },
             run_config_draft=run_config,
@@ -296,7 +304,7 @@ def _workflow_state(paths: SessionPaths, *, workflow_step_index: int) -> dict:
             **({"selected_method_names": []} if stage != "assembly" else {}),
             "step_id": f"step-{index:03d}-{stage}",
             "stage": stage,
-            "allow_local_execution": False,
+            "allow_local_execution": stage == "assembly",
         }
         for index, stage in enumerate(("inventory", *_DEFAULT_REQUESTED_STAGES))
     ]

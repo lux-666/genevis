@@ -460,6 +460,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         """Give local AutoHiC tests the same immutable dependency contract as a run."""
         manifest_read = Path(tmpdir) / "frozen_dependency_input.fastq"
         manifest_read.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        manifest_mate = Path(tmpdir) / "frozen_dependency_mate.fastq"
+        manifest_mate.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        manifest_assembly = Path(tmpdir) / "frozen_dependency_assembly.fa"
+        manifest_assembly.write_text(">ctg\nACGT\n", encoding="utf-8")
         paths = SessionPaths(Path(tmpdir), "s1")
         freeze_session_inputs(
             paths,
@@ -467,11 +471,18 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "session_id": "s1",
                 "assets": [
                     {
-                        "asset_type": "raw_long_reads",
-                        "paths": [str(manifest_read)],
-                        "platform": "ont",
+                        "asset_type": "hic_reads_registered",
+                        "paired_reads": [
+                            {"r1": str(manifest_read), "r2": str(manifest_mate)}
+                        ],
+                        "platform": "illumina",
                         "format": "fastq",
-                    }
+                    },
+                    {
+                        "asset_type": "assembly_fasta_registered",
+                        "paths": [str(manifest_assembly)],
+                        "format": "fasta",
+                    },
                 ],
             },
             run_config_draft={

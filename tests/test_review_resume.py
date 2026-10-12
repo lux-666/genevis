@@ -1637,9 +1637,15 @@ def _freeze_review_test_inputs(
     reads = paths.run_dir / "fixture_reads.fastq"
     reads.parent.mkdir(parents=True, exist_ok=True)
     reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    assembly = paths.run_dir / "fixture_assembly.fa"
+    assembly.write_text(">ctg\nACGT\n", encoding="utf-8")
+    hic = paths.run_dir / "fixture_hic.fastq"
+    hic.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    mate = paths.run_dir / "fixture_mate.fastq"
+    mate.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
     run_config: dict[str, object] = {
         "requested_stages": [
-            {"stage": stage, "allow_local_execution": False}
+            {"stage": stage, "allow_local_execution": stage == "assembly"}
             for stage in requested_stages
         ]
     }
@@ -1653,6 +1659,7 @@ def _freeze_review_test_inputs(
         paths,
         manifest_draft={
             "session_id": paths.session_id,
+            "genome_size_estimate": 1000,
             **(
                 {"user_metadata": {"target_species": "Fixture species"}}
                 if "assembly_review" in requested_stages
@@ -1664,7 +1671,18 @@ def _freeze_review_test_inputs(
                     "paths": [str(reads.resolve())],
                     "platform": "ont",
                     "format": "fastq",
-                }
+                },
+                {
+                    "asset_type": "assembly_fasta_registered",
+                    "paths": [str(assembly)],
+                    "format": "fasta",
+                },
+                {
+                    "asset_type": "hic_reads_registered",
+                    "paired_reads": [{"r1": str(hic), "r2": str(mate)}],
+                    "platform": "illumina",
+                    "format": "fastq",
+                },
             ],
         },
         run_config_draft=run_config,
@@ -2098,7 +2116,7 @@ def _frozen_workflow_steps(stages: list[str]) -> list[dict]:
             **({"selected_method_names": []} if item != "assembly" else {}),
             "step_id": step_id,
             "stage": item,
-            "allow_local_execution": False,
+            "allow_local_execution": item == "assembly",
         }
         if item == "t2t":
             step["selected_method_names"] = ["t2t.alignment.minimap2"]
