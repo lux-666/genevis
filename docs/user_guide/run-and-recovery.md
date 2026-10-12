@@ -32,6 +32,16 @@
 
 **真实工具检查必须显式选择。** 普通 `pytest -q`、`server_test.sh` 排除 `real_tool`。收集测试不探测 Conda 或生物工具；被选择测试在执行时检查前置条件，缺工具则失败。`Phase4ReadQCRealSmokeTests` 使用活动注册表中 `read_qc.long_read_stats.seqkit_stats` 的映射，经正式 CLI 预检、冻结后执行 SeqKit；标记的 hifiasm help/version 分别使用 `assembly.candidate.hifiasm` 和 `assembly.candidate.hifiasm_ont` 的映射，不使用 `HIFIASM_BIN` 或外层 PATH 选择二进制。这是 CLI 兼容检查，不是组装冒烟。开发主机缺二进制不是代码缺陷；取消选择不证明真实执行成功。
 
+Read QC 也支持独立的 paired short-DNA 输入：在 `read_qc.short_reads` 中冻结
+fastp 参数即可按每个 lane 的 R1/R2 执行，不要求 long reads。Hi-C 使用
+`read_qc.hic_reads`；默认 `preserve_hic_junction: true`，避免 adapter trimming
+破坏连接位点。完成后通过 `resource_refs` 交付 clean reads、paired-member
+身份、read-set manifest 和 fastp 报告；恢复时可以删除 work 目录，collect 会从
+已发布 artifact 恢复而不重跑 fastp。下游 AutoHiC/Hifiasm 消费 clean artifact，
+即使选择锚点来自原始资产也不会回退到 raw 路径。可直接复制
+`docs/examples/contig_run_config.template.json` 或
+`docs/examples/hifi_complete_run_config.template.json` 的 `read_qc` 段。
+
 <a id="2-run-small-real-tool-smoke-tests-for-each-key-stage"></a>
 
 ### 2. 对关键阶段运行小型真实工具冒烟

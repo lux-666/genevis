@@ -147,6 +147,14 @@ methods:
     conda_env: your_tool_env
     required_tools:
       - seqkit
+  read_qc.short_reads.fastp:
+    conda_env: your_tool_env
+    required_tools:
+      - fastp
+  read_qc.hic_reads.fastp:
+    conda_env: your_tool_env
+    required_tools:
+      - fastp
   genome_survey.kmer_count.jellyfish:
     conda_env: your_tool_env
     # 这里只填可执行名称；Conda 包为 Bioconda 的 `kmer-jellyfish`；

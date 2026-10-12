@@ -90,5 +90,5 @@ checkpoint 是恢复游标，不是工作流数据库。当前逻辑文件通过
 - 冻结命令与进程证据：[方法执行](execution.md)。
 - 人工阻塞与持久恢复：[评审与恢复](review-and-resume.md)。
 - 精确契约：沿主题页明确列出的参考链接阅读。
-- 已接受但尚不可用的 TUI 输入：[TUI 中途阶段入口](tui-midstage-entry.md)。
+- 从 clean 长读段或已有组装进入：[TUI 中途阶段入口](tui-midstage-entry.md)。
 - 已知差距：[架构一致性](../reference/conformance.md)。

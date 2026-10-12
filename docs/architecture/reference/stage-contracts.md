@@ -76,20 +76,31 @@ read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
 
 ## 2. Read QC
 
-目的：检查长读段，可选执行获批长度过滤，准备工具局部交接产物。
+目的：检查长读段和已声明的 paired short-DNA/Hi-C 读段，并按获批方法
+发布可恢复、可消费的清洁读段资源。Read QC 不要求长读段存在：short-only
+输入可以独立执行 `fastp`；缺少某一读段族只跳过该族，不伪造输入。
 
 逻辑输入/输出：
 
-- 要求 `long_reads`。
-- 获批过滤后更新 `long_reads`。
+- 可消费 `long_reads`、`short_reads` 和 `hic_reads`；至少一个已声明且可用的
+  读段族必须通过输入校验。
+- 获批长读段过滤后更新 `long_reads`。
+- 选中 `read_qc.short_reads.fastp` 时，按冻结的
+  `manifest_entry_ordinal/pair_index/mate` 处理每个 R1/R2 lane，并更新
+  `resource_refs["short_reads"]`。
+- 选中 `read_qc.hic_reads.fastp` 时采用同一 paired-member 契约，并更新
+  `resource_refs["hic_reads"]`。默认 `preserve_hic_junction=true`，因此命令
+  禁用 adapter trimming；不得静默破坏 Hi-C junction。
 
 注册方法：
 
 - `read_qc.long_read_stats.seqkit_stats`。
 - `read_qc.length_filter.skip`。
 - `read_qc.length_filter.seqkit_seq`。
+- `read_qc.short_reads.fastp`。
+- `read_qc.hic_reads.fastp`。
 
-SeqKit 统计始终描述选定长读段资源。只有冻结阶段请求已有正 `min_len` 和明确批准标志时才过滤。不存在阶段局部 Read QC 评审门或已实现的过量读段损失自动阈值；阈值缺失或未批准选择注册 skip。FOFN 是内部产物，下游消费规范路径列表。输入缺失/不可用或执行失败终止阶段，不打开 Read QC 评审门。
+SeqKit 统计始终描述选定长读段资源。只有冻结阶段请求已有正 `min_len` 和明确批准标志时才过滤；平台独立阈值可在同一请求中按成员解析。不存在阶段局部 Read QC 评审门或已实现的过量读段损失自动阈值；阈值缺失或未批准选择注册 skip。FOFN 是内部产物，下游消费规范路径列表。输入缺失/不可用或执行失败终止阶段，不打开 Read QC 评审门。
 
 接受的 Read QC 事实包闭合且可重算：
 
@@ -99,6 +110,11 @@ SeqKit 统计始终描述选定长读段资源。只有冻结阶段请求已有�
 - 汇总拥有读段数、总碱基、最小/最大/算术平均长度、全集 N50、Q20/Q30 碱基百分比、平均质量。FASTA 质量明确不适用，不填零。零序列零碱基 FASTQ 的规范值为 `Q20=0.0`、`Q30=0.0`、`AvgQual=0.0`，无论 SeqKit 该版本输出零还是空。解析器在不变量比较前对逐文件/全集行统一应用规则。
 - 汇总直接依赖冻结读段，不能声称来源是逐文件统计。仅含汇总指标的摘要依赖汇总；嵌入逐文件诊断则列两个引用。
 - 过滤资源发布不可变 read-set manifest，将每个派生成员绑定源资产/引用及批准参数。
+- fastp 对每个 lane 发布清洁 R1/R2、JSON/HTML 报告和 read-set manifest；资源
+  metadata 保留有序 `paired_members`。每个成员同时保存 clean `ArtifactRef`、
+  `source_asset_id`、平台、lane/pair/mate 身份。下游必须消费 clean 路径，不能
+  用 source asset ID 回查并替换成原始路径；`selection_anchor` 若指向原始成员，
+  只用于选择对应 lane，实际执行路径仍是 clean 后代。
 
 批准过滤后零保留仍可完成方法并发布零值汇总，但 occurrence 以 `no_reads_retained` 失败，不以空文件替换 `long_reads`。这不同于冻结前即拒绝的声明空输入。
 
@@ -144,6 +160,10 @@ gzip 输入的冻结脚本调用两个命令，因此所选机器方法映射必
 - `assembly.candidate.nextdenovo`。
 
 兼容性按所选读段类型和上游证据验证。推荐载荷显式标记上游证据状态；生产者未完成的字段为 null，不得当观测。路线/方法决策属于阶段，遵循冻结[推荐策略](recommendation-policy.md)。顾问模式从输入兼容的冻结候选中推荐，分别持久化请求、响应、解析推荐，并由人工确认绑定 `assembly_selection`。确定性基线跳过模型；路线/平台证据不足以确定兼容默认方法时拒绝。响应发布后崩溃按请求哈希回放，不再调用模型。
+
+每个 Assembly occurrence 只执行一个确认方法。`assembly.hifiasm_inputs` 显式绑定联合材料：HiFi 为主体，`ultralong_ont_reads_ref` 经 `--ul` 加入超长 ONT；普通 ONT 不自动视为超长，ONT-only 使用独立 `hifiasm_ont` 方法的 `--ont`。`assembly.hifiasm_inputs.hic_reads_ref` 绑定完整 Hi-C 读对进入 `--h1/--h2`；Trio 的两个父母角色先分别流式归一化全部文件，再经 `yak count` 生成 `-1/-2` 的 k-mer 数据库。Trio 不要求父母文件数相同，父母资产与子代资源隔离。联合角色约束方法候选为 Hifiasm，不能选其他方法后静默忽略支持材料。
+
+Assembly 分相模式选择 Trio 或 Hi-C 之一；Trio 后可另设 Hi-C scaffolding occurrence。两种分相均要求 hap1/hap2 完整输出，并分别发布 FASTA 和原生 GFA。当前单值 `assembly` 主资源使用 hap1，hap2 保留在同一候选包的独立原生产物中；不连接两个单倍型为伪 primary。QUAST/BUSCO 下游默认评估该主资源，不能把结果解释为两个单倍型均已评估。`tests/test_hifiasm_joint_delivery.py` 验证多文件父母、压缩输入、UL 联合命令、分相交付及缺失输出失败；真实样本质量仍需独立验收。
 
 Assembly、AutoHiC 参数推荐在方法选择后，顾问在冻结尝试前通过 parameter_approval。两者及 T2T 的显式确定性参数基线生成空 L2，以不可变策略决策批准单轮，不打开人工参数门。T2T 基线要求提供基序，不调用模型；默认 advisor 使用 finishing 完整参数提案与结果反馈，进入 finishing_recommendation。动态 Assembly 从冻结依赖快照解析并通过阶段预检，不读取实时环境。精确事实位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。每次推荐为尝试局部稀疏映射，重试不继承省略值，也不能用模型输出绕过审批。`assembly.threads` 是方法无关 RunConfig 执行资源，冻结到所选方法 L0。Hifiasm/Hifiasm-ONT 的已提供 `species_facts.ploidy` 作为 L1 绑定 `--n-hap`；缺失时保留目录二倍体默认 `2`。
 

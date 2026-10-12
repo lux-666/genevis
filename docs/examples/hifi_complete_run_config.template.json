@@ -44,6 +44,12 @@
   "review_policy": {
     "max_blocked_seconds": -1
   },
+  "read_qc": {
+    "hic_reads": {
+      "threads": 16,
+      "preserve_hic_junction": true
+    }
+  },
   "genome_survey": {
     "survey_parameters": {
       "kmer_size": 21,

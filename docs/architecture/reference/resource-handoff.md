@@ -75,6 +75,12 @@
 
 Inventory 同一逻辑资源同时含 clean/raw 资产时，由 `ResourceSpec.asset_type_priority_groups` 决定首选类型。后续阶段一旦发布中央资源引用，就不得静默回退到旧 Inventory 资产。
 
+Trio 母本和父本文件是例外的注册范围而非中央资源：Inventory 保留它们在
+asset registry 中，供已冻结且带有 `metadata.intake_role` 的显式 Trio 输入引用
+使用，但不会发布到中央 `long_reads` 或 `short_reads`。因此中央资源缺失时的
+registry fallback 也必须过滤 `trio_maternal_reads` / `trio_paternal_reads`；
+Genome Survey 和 Read QC 不得把父母读段当作子代读段。
+
 阶段使用 `update_resource_ref(...)` 发布；它返回新验证表，不修改传入状态。
 
 <a id="logical-resources"></a>
@@ -84,7 +90,7 @@ Inventory 同一逻辑资源同时含 clean/raw 资产时，由 `ResourceSpec.as
 | 阶段 | 必需 | 产生或更新 |
 |---|---|---|
 | `inventory` | — | 按 manifest 注册 `long_reads`、`short_reads`、`hic_reads`、`assembly` |
-| `read_qc` | `long_reads` | `long_reads` |
+| `read_qc` | `long_reads`（可选）、`short_reads`（可选）、`hic_reads`（可选）；至少一族可用 | `long_reads`、`short_reads`、`hic_reads`（按选中方法） |
 | `genome_survey` | 完整 Survey 至少需要 `short_reads` 或 `long_reads`，优先短读段族；族内 clean/raw 优先级在阶段前解析；明确基因组大小允许无读段 skip | 仅标量测量证据 |
 | `assembly` | `long_reads` | `assembly` |
 | `assembly_dedup` | `assembly`；`read_depth` 策略还需 `long_reads` | `assembly` |
@@ -158,6 +164,26 @@ Read QC 谱系不创建第二读段资源协议。未过滤完成时，重新发
 Read QC 发布中央 `long_reads` 后，下游不得回退到旧 raw 资产集。过滤后零读段仍发布方法证据与零值汇总统计，但不以空文件替换中央资源；Read QC occurrence 以 `no_reads_retained` 交付失败。
 
 FOFN、逐文件统计和摘要报告属于产物或适配器局部文件，不是并列交接机制。精确测量来源由[阶段契约](stage-contracts.md)的 Read QC 节拥有。
+
+### paired short-DNA 与 Hi-C fastp
+
+`read_qc.short_reads.fastp` 和 `read_qc.hic_reads.fastp` 使用同一个严格的
+paired-member 契约。Inventory 的 raw `short_reads`/`hic_reads` 交接只需提供有序
+`asset_ids`、注册表引用以及注册表内的 pair/mate provenance；它不要求复制
+`paired_members`。只有 fastp 派生资源必须同时提供 `read_set_manifest_ref` 和有序
+`paired_members`；每个 pair 具有非负
+`manifest_entry_ordinal`、`pair_index`，并且恰好有 `mate=R1` 与 `mate=R2`。
+R1/R2 不能共享 `source_asset_id`，不得通过文件名推断配对。非对象 lane、缺失
+mate、重复 lane 或 pair-index gap 都是输入错误，不是可静默丢弃的记录。
+
+fastp 的资源 `paths` 和 paired members 指向发布后的 clean artifact；原始资产
+只作为 `source_asset_id` 谱系锚点。Hi-C/Assembly 消费者通过
+`resolve_hic_pairs` 读取 paired members，因此即使 `selection_anchor` 指向原始
+资产路径，也只选择对应 pair group，返回的 R1/R2 仍是 clean 后代及其
+`ArtifactRef`。这保证 AutoHiC/Hifiasm 不会因 registry 回查而重新使用 raw reads。
+
+一个只含 short-DNA paired reads 的运行是合法的：不需要 long-read 资源，也不
+会凭空创建 `long_reads` 交接。无选中 fastp 方法的族不产生对应 resource ref。
 
 <a id="sequencing-member-identity"></a>
 

@@ -13,6 +13,8 @@
 | 新主机或缺少工具环境 | [新主机安装](../deployment/migration.md) | 主机检查成功后阅读[运行与恢复](run-and-recovery.md) |
 | 从 Mac checkout 同步到服务器 | [Mac 开发与服务器执行](../deployment/mac_dev_server_pull.md) | 实际 session 操作见[运行与恢复](run-and-recovery.md) |
 | 从原始 reads 运行 contig 流程 | [运行与恢复](run-and-recovery.md) | [Contig manifest](../examples/contig_manifest.template.yaml) 与 [contig RunConfig](../examples/contig_run_config.template.json) |
+| 从材料描述选择单一路线 | [材料与组装路线](materials-and-assembly.md) | 提供材料、读长/平台与已有数据状态；该指南给出推荐路线与所需输入 |
+| 对话中从 clean 长读段或已有组装开始 | `gene-agent tui`，明确说明“已清洗 ONT/HiFi 读段”或“已有组装” | 提供文件路径；已有组装只接受一个 FASTA，clean 读段须明确平台；见[中途入口](../architecture/topics/tui-midstage-entry.md) |
 | 评价已有组装 | [已有组装 manifest](../examples/existing_assembly_manifest.template.yaml) | [组装评价 RunConfig](../examples/assembly_review_run_config.template.json)，然后阅读[运行与恢复](run-and-recovery.md) |
 | 理解或决定 LLM 参数 | [参数推荐](parameter_recommendation.md) | 需要精确字段或持久化规则时阅读[参数契约](../architecture/reference/parameter-recommendation.md) |
 | 恢复阻塞或中断的 session | [运行与恢复](run-and-recovery.md) | 使用其 `review` 或决策文件 `resume` 路径，不要手工启动第二套工作流 |
