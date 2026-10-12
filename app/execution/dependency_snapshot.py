@@ -10,9 +10,12 @@ shape and a resolver that uses only that stored contract.
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as installed_version
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -30,6 +33,7 @@ from app.execution.env_resolver import (
 )
 from app.integrity import sha256_file, validate_sha256
 from app.storage.paths import SessionPaths
+from app.version import __version__
 
 DEPENDENCY_MANIFEST_SCHEMA_VERSION = 2
 
@@ -52,6 +56,18 @@ class DependencyConfigIdentity(BaseModel):
         return validate_sha256(value)
 
 
+class RuntimeProvenance(BaseModel):
+    """Source and installed-package identity captured at freeze time."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    package_name: str = "gene-agent"
+    source_version: str
+    installed_version: str | None = None
+    git_revision: str | None = None
+    git_dirty: bool | None = None
+
+
 class DependencySnapshot(BaseModel):
     """Serializable, secret-free machine dependency contract for one run."""
 
@@ -60,6 +76,7 @@ class DependencySnapshot(BaseModel):
     schema_version: int = DEPENDENCY_MANIFEST_SCHEMA_VERSION
     captured_at: str
     config: DependencyConfigIdentity
+    runtime: RuntimeProvenance
     selected_methods: list[str] = Field(default_factory=list)
     default_environment: EnvSpec
     stage_environments: dict[str, EnvSpec] = Field(default_factory=dict)
@@ -68,7 +85,6 @@ class DependencySnapshot(BaseModel):
     databases: DatabaseRegistry | None = None
     # NCBI snapshots are external directories, so their content identities are
     # frozen separately from the registry path.
-    ncbi_manifest_sha256: str | None = None
     ncbi_manifest_sha256s: dict[str, str] = Field(default_factory=dict)
     environment_preflight: dict[str, PreflightResult] = Field(default_factory=dict)
     package_preflight: dict[str, PackagePreflightResult] = Field(default_factory=dict)
@@ -97,7 +113,6 @@ class FrozenDependencyResolver:
         self.config_path = Path(snapshot.config.source_path)
         self.packages = dict(snapshot.packages)
         self.databases = snapshot.databases
-        self.ncbi_manifest_sha256 = snapshot.ncbi_manifest_sha256
         self.ncbi_manifest_sha256s = dict(snapshot.ncbi_manifest_sha256s)
 
     def resolve(self, *, stage: str, method_name: str | None = None) -> EnvSpec:
@@ -148,6 +163,7 @@ def capture_dependency_snapshot(
     preflight_runner: Callable[..., Any] | None = None,
     probe_environments: bool | None = None,
     resolver: EnvResolver | None = None,
+    required_tools_by_method: Mapping[str, Sequence[str]] | None = None,
 ) -> DependencySnapshot:
     """Capture resolved environments and packages from active machine config.
 
@@ -219,6 +235,17 @@ def capture_dependency_snapshot(
             )
             for method in method_names
         }
+        for method, additions in (required_tools_by_method or {}).items():
+            if method not in method_environments:
+                continue
+            spec = method_environments[method]
+            method_environments[method] = spec.model_copy(
+                update={
+                    "required_tools": list(
+                        dict.fromkeys([*spec.required_tools, *map(str, additions)])
+                    )
+                }
+            )
         databases = resolver.databases
     except (FileNotFoundError, OSError, ValueError, TypeError) as exc:
         raise DependencySnapshotError(
@@ -258,6 +285,7 @@ def capture_dependency_snapshot(
             source_path=str(source),
             sha256=config_sha256 or sha256_file(source),
         ),
+        runtime=capture_runtime_provenance(),
         selected_methods=selected_method_scope or [],
         default_environment=default_environment,
         stage_environments=stage_environments,
@@ -267,6 +295,52 @@ def capture_dependency_snapshot(
         ncbi_manifest_sha256s=ncbi_manifest_sha256s,
         environment_preflight=environment_preflight,
         package_preflight=package_results,
+    )
+
+
+def capture_runtime_provenance() -> RuntimeProvenance:
+    """Capture the code/package identity without making it an execution input."""
+
+    try:
+        installed = installed_version("gene-agent")
+    except PackageNotFoundError:
+        installed = None
+    source_root = Path(__file__).resolve().parents[2]
+    revision: str | None = None
+    dirty: bool | None = None
+    try:
+        if not (source_root / ".git").exists():
+            raise FileNotFoundError("installed package has no source checkout")
+        revision_result = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        revision = revision_result.stdout.strip() or None
+        status_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        dirty = bool(status_result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return RuntimeProvenance(
+        source_version=__version__,
+        installed_version=installed,
+        git_revision=revision,
+        git_dirty=dirty,
     )
 
 

@@ -90,26 +90,25 @@ def _reuse_existing_snapshot(source_path: Path, destination_path: Path) -> Path:
 
 def shell_publish_file(source: str | Path, destination: str | Path) -> str:
     """Return a replay-safe shell command that atomically moves a snapshot."""
-    source_q = shlex.quote(str(source))
-    destination_q = shlex.quote(str(destination))
-    return (
-        f"if test -e {destination_q}; then "
-        f"if test -e {source_q}; then cmp -s {source_q} {destination_q} "
-        f"&& rm -f {source_q} || {{ echo 'published artifact conflicts with existing "
-        f"snapshot: {destination_q}' >&2; false; }}; fi; "
-        f"else mv {source_q} {destination_q}; fi"
-    )
+    return _shell_publish(shlex.quote(str(source)), destination)
 
 
 def shell_publish_variable(variable: str, destination: str | Path) -> str:
     """Return a replay-safe atomic move for a shell variable source."""
+    if not variable.isascii() or not variable.isidentifier():
+        raise ValueError("source must be a shell variable name")
+    return _shell_publish(f'"${variable}"', destination)
+
+
+def _shell_publish(source_q: str, destination: str | Path) -> str:
     destination_q = shlex.quote(str(destination))
-    source_q = f'"${variable}"'
+    conflict = shlex.quote(
+        f"published artifact conflicts with existing snapshot: {destination}"
+    )
     return (
         f"if test -e {destination_q}; then "
         f"if test -e {source_q}; then cmp -s {source_q} {destination_q} "
-        f"&& rm -f {source_q} || {{ echo 'published artifact conflicts with existing "
-        f"snapshot: {destination_q}' >&2; false; }}; fi; "
+        f"&& rm -f {source_q} || {{ printf '%s\\n' {conflict} >&2; false; }}; fi; "
         f"else mv {source_q} {destination_q}; fi"
     )
 

@@ -197,6 +197,18 @@ def _preferred_records(
 ) -> list[AssetRecord]:
     """Apply lifecycle priority without collapsing distinct read platforms."""
 
+    # Trio parent files are deliberately registered so the Trio adapter can
+    # resolve their explicit role refs.  They are not offspring genomic
+    # resources, however, and must never be recovered by the generic central
+    # long/short-read fallback used by Survey or Read QC.
+    if resource_spec.resource_type in {"long_reads", "short_reads"}:
+        records = [
+            record
+            for record in records
+            if record.metadata.get("intake_role")
+            not in {"trio_maternal_reads", "trio_paternal_reads"}
+        ]
+
     groups = resource_spec.asset_type_priority_groups or [
         [asset_type] for asset_type in resource_spec.asset_types
     ]

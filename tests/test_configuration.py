@@ -62,7 +62,7 @@ def test_descriptor_registry_loading_is_cwd_independent(tmp_path, monkeypatch) -
     registry = load_descriptor_registry()
 
     assert "assembly.candidate.flye" in registry.methods
-    assert len(registry.methods) == 20
+    assert len(registry.methods) == 22
     assert registry.methods["assembly_dedup.purge_dups"].defaults == {
         "automatic_purge_approved": False,
         "cutoffs_strategy": "calcuts_auto",
@@ -77,6 +77,7 @@ def test_descriptor_registry_loading_is_cwd_independent(tmp_path, monkeypatch) -
     }
     assert "--offline" in busco.entry_patterns[0]
     assert "--auto-lineage" not in busco.entry_patterns[0]
+    assert registry.packages["hifiasm"].conditional_required_tools == {"trio": ["yak"]}
     assert registry.root_dir.name == "descriptors"
 
 

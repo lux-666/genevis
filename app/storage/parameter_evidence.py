@@ -10,11 +10,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence, cast
+from typing import Any, Callable, Literal, Mapping, Sequence, cast
 from uuid import uuid4
 
-from app.control.workflow_plan import current_workflow_step_id
-from app.llm.parameters.assembly.request import validate_recorded_parameter_request
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_BASIS,
@@ -35,8 +33,8 @@ from app.schemas.artifacts import (
     T2T_PARAMETER_APPROVAL_DECISION,
     T2T_PARAMETER_BASIS,
     T2T_PARAMETER_INPUT_SNAPSHOT,
-    T2T_PARAMETER_MODEL_REQUEST,
-    T2T_PARAMETER_MODEL_RESPONSE,
+    T2T_PARAMETER_POLICY_REQUEST,
+    T2T_PARAMETER_POLICY_RESPONSE,
     T2T_PARAMETER_RECOMMENDATION,
     T2T_PARAMETER_RECOMMENDATION_MANIFEST,
     T2T_PARAMETER_RESPONSE_PARSE,
@@ -50,13 +48,12 @@ from app.schemas.parameter_recommendation import (
     RecommendationDependencyRefs,
     RecommendationInputSnapshotV3,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import TopLevelState, active_workflow_step_id
 from app.storage.artifacts import (
-    artifact_ref_for_path,
+    ArtifactIndexView,
     publish_artifact_record,
-    read_artifact_records,
+    read_artifact_index_view,
     recover_published_artifact,
-    resolve_artifact_ref,
 )
 from app.storage.paths import SessionPaths
 
@@ -162,8 +159,8 @@ _PARAMETER_ARTIFACT_TYPES: dict[
     "t2t": ParameterRecommendationArtifactTypes(
         input_snapshot=T2T_PARAMETER_INPUT_SNAPSHOT,
         basis_snapshot=T2T_PARAMETER_BASIS,
-        model_request=T2T_PARAMETER_MODEL_REQUEST,
-        model_response=T2T_PARAMETER_MODEL_RESPONSE,
+        model_request=T2T_PARAMETER_POLICY_REQUEST,
+        model_response=T2T_PARAMETER_POLICY_RESPONSE,
         response_parse=T2T_PARAMETER_RESPONSE_PARSE,
         recommendation=T2T_PARAMETER_RECOMMENDATION,
         recommendation_manifest=T2T_PARAMETER_RECOMMENDATION_MANIFEST,
@@ -178,21 +175,26 @@ def load_parameter_recommendation_chain_v3(
     manifest_ref: ArtifactRef | Mapping[str, Any],
     expected_stage: Literal["assembly", "hic_scaffolding", "t2t"],
     expected_method_id: str,
+    index_view: ArtifactIndexView | None = None,
+    request_validator: Callable[..., Any] | None = None,
 ) -> ParameterRecommendationChainV3:
     """Load one exact v3 chain; pre-v3 roots and mixed identities fail closed."""
 
     types = _PARAMETER_ARTIFACT_TYPES[expected_stage]
+    index_view = index_view or _artifact_index_view(state)
     workflow_step_id = _active_workflow_step_id(state, expected_stage=expected_stage)
     ref = _verified_current_occurrence_ref(
         state,
         manifest_ref,
         workflow_step_id=workflow_step_id,
         label="recommendation manifest",
+        index_view=index_view,
     )
     manifest_record = read_parameter_json(
         state,
         ref,
         expected_type=types.recommendation_manifest,
+        index_view=index_view,
     )
     _require_schema(manifest_record, 3, "recommendation manifest")
     try:
@@ -217,6 +219,7 @@ def load_parameter_recommendation_chain_v3(
             manifest.previous_attempt_manifest_ref,
             workflow_step_id=workflow_step_id,
             label="previous attempt manifest",
+            index_view=index_view,
         )
 
     refs = manifest.refs
@@ -225,11 +228,13 @@ def load_parameter_recommendation_chain_v3(
         refs.input_snapshot_ref,
         workflow_step_id=workflow_step_id,
         label="recommendation input snapshot",
+        index_view=index_view,
     )
     input_record = read_parameter_json(
         state,
         input_snapshot_ref,
         expected_type=types.input_snapshot,
+        index_view=index_view,
     )
     _require_schema(input_record, 3, "recommendation input snapshot")
     try:
@@ -244,11 +249,13 @@ def load_parameter_recommendation_chain_v3(
         refs.basis_snapshot_ref,
         workflow_step_id=workflow_step_id,
         label="recommendation basis snapshot",
+        index_view=index_view,
     )
     basis_snapshot = read_parameter_json(
         state,
         basis_snapshot_ref,
         expected_type=types.basis_snapshot,
+        index_view=index_view,
     )
     _require_schema(basis_snapshot, 3, "recommendation basis snapshot")
     if basis_snapshot.get("method_id") != expected_method_id:
@@ -270,16 +277,22 @@ def load_parameter_recommendation_chain_v3(
         refs.model_request_ref,
         workflow_step_id=workflow_step_id,
         label="parameter model request",
+        index_view=index_view,
     )
     model_request = read_parameter_json(
         state,
         model_request_ref,
         expected_type=types.model_request,
+        index_view=index_view,
     )
     _require_schema(model_request, 3, "parameter model request")
     if expected_stage == "assembly":
+        if request_validator is None:
+            raise ParameterEvidenceError(
+                "Assembly parameter request validator is required"
+            )
         try:
-            validate_recorded_parameter_request(
+            request_validator(
                 model_request,
                 input_snapshot=input_snapshot,
                 input_snapshot_sha256=input_snapshot_ref.sha256,
@@ -294,11 +307,13 @@ def load_parameter_recommendation_chain_v3(
         refs.model_response_ref,
         workflow_step_id=workflow_step_id,
         label="parameter model response",
+        index_view=index_view,
     )
     model_response = read_parameter_json(
         state,
         model_response_ref,
         expected_type=types.model_response,
+        index_view=index_view,
     )
     _require_schema(model_response, 2, "parameter model response")
     response_parse_ref = _verified_current_occurrence_ref(
@@ -306,11 +321,13 @@ def load_parameter_recommendation_chain_v3(
         refs.response_parse_ref,
         workflow_step_id=workflow_step_id,
         label="parameter response parse",
+        index_view=index_view,
     )
     response_parse = read_parameter_json(
         state,
         response_parse_ref,
         expected_type=types.response_parse,
+        index_view=index_view,
     )
     _require_schema(response_parse, 1, "parameter response parse")
     recommendation_ref = _verified_current_occurrence_ref(
@@ -318,11 +335,13 @@ def load_parameter_recommendation_chain_v3(
         refs.recommendation_ref,
         workflow_step_id=workflow_step_id,
         label="parameter recommendation",
+        index_view=index_view,
     )
     recommendation = read_parameter_json(
         state,
         recommendation_ref,
         expected_type=types.recommendation,
+        index_view=index_view,
     )
     _require_schema(recommendation, 2, "parameter recommendation")
 
@@ -367,6 +386,7 @@ def load_approved_parameter_chain_v3(
     attempt: ParameterAttempt | Mapping[str, Any],
     expected_stage: Literal["assembly", "hic_scaffolding", "t2t"],
     expected_method_id: str,
+    request_validator: Callable[..., Any] | None = None,
 ) -> ApprovedParameterBundleV3:
     """Load the immutable snapshot/catalog/L2 bundle approved for execution."""
 
@@ -384,11 +404,14 @@ def load_approved_parameter_chain_v3(
     if validated_attempt.method_id != expected_method_id:
         raise ParameterEvidenceError("approved parameter attempt method mismatch")
     workflow_step_id = _active_workflow_step_id(state, expected_stage=expected_stage)
+    index_view = _artifact_index_view(state)
     chain = load_parameter_recommendation_chain_v3(
         state,
         manifest_ref=validated_attempt.recommendation_manifest_ref,
         expected_stage=expected_stage,
         expected_method_id=expected_method_id,
+        index_view=index_view,
+        request_validator=request_validator,
     )
     manifest = chain.manifest
     if (
@@ -408,11 +431,13 @@ def load_approved_parameter_chain_v3(
         validated_attempt.approval_decision_ref,
         workflow_step_id=workflow_step_id,
         label="parameter approval decision",
+        index_view=index_view,
     )
     approval = read_parameter_json(
         state,
         approval_decision_ref,
         expected_type=types.approval_decision,
+        index_view=index_view,
     )
     _require_schema(approval, 2, "parameter approval decision")
     if (
@@ -449,6 +474,7 @@ def load_approved_parameter_chain_v3(
         approved_manifest_ref,
         workflow_step_id=workflow_step_id,
         label="parameter approval manifest",
+        index_view=index_view,
     )
 
     request_ref_value = approval.get("request_ref")
@@ -466,7 +492,7 @@ def load_approved_parameter_chain_v3(
         workflow_step_id=workflow_step_id,
         label="parameter approval request",
     )
-    review_request = read_parameter_json(state, request_ref)
+    review_request = read_parameter_json(state, request_ref, index_view=index_view)
     _require_schema(review_request, 2, "parameter approval request")
     if (
         review_request.get("review_request_id") != approval.get("review_request_id")
@@ -497,6 +523,7 @@ def load_approved_parameter_chain_v3(
         requested_manifest_ref,
         workflow_step_id=workflow_step_id,
         label="parameter approval request manifest",
+        index_view=index_view,
     )
 
     # Force shape validation at the approved boundary, including unknown L2 keys
@@ -532,20 +559,21 @@ def build_recommendation_dependency_refs(
 ) -> RecommendationDependencyRefs:
     """Build verified dependency refs in canonical role order."""
 
+    index_view = _artifact_index_view(state)
     fact_refs: dict[
         Literal["read_qc_summary", "genome_survey_result"],
         ArtifactRef,
     ] = {}
     for role, value in sorted((fact_source_paths or {}).items()):
         if value is not None:
-            fact_refs[role] = _dependency_ref(state, value)
+            fact_refs[role] = _dependency_ref(state, value, index_view=index_view)
 
     stage_refs: list[ArtifactRef] = []
     seen: set[tuple[str, str, str]] = set()
     for _role, value in sorted((stage_input_paths or {}).items()):
         if value is None:
             continue
-        ref = _dependency_ref(state, value)
+        ref = _dependency_ref(state, value, index_view=index_view)
         identity = (ref.artifact_type, ref.path_ref, ref.sha256)
         if identity in seen:
             raise ParameterEvidenceError(
@@ -558,15 +586,16 @@ def build_recommendation_dependency_refs(
         fact_source_refs=fact_refs,
         stage_input_refs=tuple(stage_refs),
         initial_input_snapshot_ref=(
-            _dependency_ref(state, initial_input_snapshot_ref)
+            _dependency_ref(state, initial_input_snapshot_ref, index_view=index_view)
             if initial_input_snapshot_ref is not None
             else None
         ),
         prior_attempt_manifest_refs=tuple(
-            _dependency_ref(state, ref) for ref in prior_attempt_manifest_refs
+            _dependency_ref(state, ref, index_view=index_view)
+            for ref in prior_attempt_manifest_refs
         ),
         motif_resolution_ref=(
-            _dependency_ref(state, motif_resolution_ref)
+            _dependency_ref(state, motif_resolution_ref, index_view=index_view)
             if motif_resolution_ref is not None
             else None
         ),
@@ -616,7 +645,7 @@ def publish_parameter_json(
     ).encode("utf-8")
     paths, _session_id = _session_paths(state)
     stage_component = _safe_component(stage, label="stage")
-    workflow_step_id = current_workflow_step_id(
+    workflow_step_id = active_workflow_step_id(
         cast(TopLevelState, state), expected_stage=stage_component
     )
     file_component = _safe_component(filename, label="filename")
@@ -712,6 +741,7 @@ def read_parameter_json(
     value: ArtifactRef | Mapping[str, Any],
     *,
     expected_type: str | None = None,
+    index_view: ArtifactIndexView | None = None,
 ) -> dict[str, Any]:
     """Resolve and integrity-check one immutable parameter-evidence object."""
 
@@ -730,7 +760,7 @@ def read_parameter_json(
         )
     paths, session_id = _session_paths(state)
     try:
-        path = resolve_artifact_ref(paths.run_dir, session_id, ref)
+        path = (index_view or _artifact_index_view(state)).resolve(ref)
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise ParameterEvidenceError(
@@ -810,7 +840,7 @@ def _parameter_evidence_location(
     stage_component = _safe_component(stage, label="stage")
     file_component = _safe_component(filename, label="filename")
     paths, session_id = _session_paths(state)
-    workflow_step_id = current_workflow_step_id(
+    workflow_step_id = active_workflow_step_id(
         cast(TopLevelState, state), expected_stage=stage_component
     )
     directory = "parameter_recommendations" if scope == "recommendation" else "attempts"
@@ -842,6 +872,8 @@ def _require_schema(record: Mapping[str, Any], expected: int, label: str) -> Non
 def _verified_ref(
     state: Mapping[str, Any],
     value: ArtifactRef | Mapping[str, Any],
+    *,
+    index_view: ArtifactIndexView | None = None,
 ) -> ArtifactRef:
     try:
         ref = (
@@ -850,7 +882,7 @@ def _verified_ref(
             else ArtifactRef.model_validate(value)
         )
         paths, session_id = _session_paths(state)
-        resolve_artifact_ref(paths.run_dir, session_id, ref)
+        (index_view or _artifact_index_view(state)).resolve(ref)
     except (OSError, ValueError) as exc:
         raise ParameterEvidenceError(
             "invalid or unreadable parameter artifact ref"
@@ -866,7 +898,7 @@ def _active_workflow_step_id(
     """Return the active occurrence ID required by parameter execution."""
 
     try:
-        return current_workflow_step_id(
+        return active_workflow_step_id(
             cast(TopLevelState, state), expected_stage=expected_stage
         )
     except (TypeError, ValueError) as exc:
@@ -881,22 +913,16 @@ def _verified_current_occurrence_ref(
     *,
     workflow_step_id: str,
     label: str,
+    index_view: ArtifactIndexView | None = None,
 ) -> ArtifactRef:
     """Verify a ref and require its indexed artifact to belong to this occurrence."""
 
-    ref = _verified_ref(state, value)
-    paths, session_id = _session_paths(state)
-    matches = [
-        record
-        for record in read_artifact_records(paths.run_dir, session_id)
-        if record.get("artifact_id") == ref.artifact_id
-        and record.get("path_ref") == ref.path_ref
-        and record.get("sha256") == ref.sha256
-        and record.get("artifact_type") == ref.artifact_type
-    ]
-    if len(matches) != 1:
+    view = index_view or _artifact_index_view(state)
+    ref = _verified_ref(state, value, index_view=view)
+    record = view.by_id.get(ref.artifact_id)
+    if record is None:
         raise ParameterEvidenceError(f"{label} artifact identity is ambiguous")
-    if matches[0].get("workflow_step_id") != workflow_step_id:
+    if record.get("workflow_step_id") != workflow_step_id:
         raise ParameterEvidenceError(f"{label} targets another workflow occurrence")
     return ref
 
@@ -904,12 +930,14 @@ def _verified_current_occurrence_ref(
 def _dependency_ref(
     state: Mapping[str, Any],
     value: ArtifactRef | Mapping[str, Any] | str | Path,
+    *,
+    index_view: ArtifactIndexView | None = None,
 ) -> ArtifactRef:
     if isinstance(value, (ArtifactRef, Mapping)):
-        return _verified_ref(state, value)
+        return _verified_ref(state, value, index_view=index_view)
     try:
         paths, session_id = _session_paths(state)
-        return artifact_ref_for_path(paths.run_dir, session_id, value)
+        return (index_view or _artifact_index_view(state)).ref_for_path(value)
     except (OSError, ValueError) as exc:
         raise ParameterEvidenceError(
             f"dependency path is not a verified run artifact: {value}"
@@ -926,6 +954,11 @@ def _session_paths(state: Mapping[str, Any]) -> tuple[SessionPaths, str]:
     paths = SessionPaths.from_run_dir(data_dir)
     paths.require_session_id(session_id)
     return paths, session_id
+
+
+def _artifact_index_view(state: Mapping[str, Any]) -> ArtifactIndexView:
+    paths, session_id = _session_paths(state)
+    return read_artifact_index_view(paths.run_dir, session_id)
 
 
 def _safe_component(value: str, *, label: str) -> str:

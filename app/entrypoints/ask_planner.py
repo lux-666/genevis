@@ -300,8 +300,22 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
             "method_route_advisor": policy.get("method_route_advisor", "advisor"),
             "parameter_advisor": policy.get("parameter_advisor", "advisor"),
         }
+        hifiasm_inputs = (plan.entry_request or {}).get("hifiasm_inputs")
+        if hifiasm_inputs:
+            payload["assembly"]["hifiasm_inputs"] = hifiasm_inputs
     if "read_qc" in local_stages:
-        payload["read_qc"] = {"length_filter": _read_qc_length_filter_config(plan)}
+        read_qc_payload: dict[str, Any] = {
+            "length_filter": _read_qc_length_filter_config(plan)
+        }
+        read_families = _tui_read_qc_families(plan)
+        if read_families["short_reads"]:
+            # The paired-read cleaner is an input-family binding, not a
+            # selectable length-filter method.  Keep it explicit in the
+            # RunConfig so roster construction can bind fastp_short_reads.
+            read_qc_payload["short_reads"] = {}
+        if read_families["hic_reads"]:
+            read_qc_payload["hic_reads"] = {}
+        payload["read_qc"] = read_qc_payload
     if "genome_survey" in local_stages:
         survey_config = _build_genome_survey_config(plan)
         if survey_config:
@@ -319,6 +333,37 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
     ]
     RunConfig.model_validate(payload)
     return payload
+
+
+def _tui_read_qc_families(plan: AskPlanState) -> dict[str, bool]:
+    """Project only confirmed TUI read families into read-QC configuration.
+
+    ``raw_short_dna_reads`` is the canonical material type for paired short
+    DNA reads.  Explicit Trio maternal/paternal intake roles are the only
+    parent exception; they must not enable offspring short-read fastp.  A
+    manifest supplied outside TUI has no intake role, so its short-DNA asset
+    is treated as offspring short-read input by default.
+    """
+
+    manifest = _load_manifest(plan.manifest_ref)
+    explicit = (plan.entry_request or {}).get("read_qc_inputs") or {}
+    if "short_reads" in explicit or "hic_reads" in explicit:
+        return {
+            "short_reads": bool(explicit.get("short_reads")),
+            "hic_reads": bool(explicit.get("hic_reads")),
+        }
+    if manifest is None:
+        return {"short_reads": False, "hic_reads": False}
+    parent_roles = {"trio_maternal_reads", "trio_paternal_reads"}
+    short_reads = any(
+        asset.asset_type in {"raw_short_dna_reads", "clean_short_dna_reads"}
+        and asset.metadata.get("intake_role") not in parent_roles
+        for asset in manifest.assets
+    )
+    hic_reads = any(
+        asset.asset_type == "hic_reads_registered" for asset in manifest.assets
+    )
+    return {"short_reads": short_reads, "hic_reads": hic_reads}
 
 
 def _build_assembly_execution_config(

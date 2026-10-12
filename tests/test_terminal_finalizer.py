@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.control.lifecycle import (
+from app.control.terminal import (
     TerminalFinalizationError,
     finalize_authoritative_terminal,
 )
@@ -85,22 +85,24 @@ def test_completed_terminal_is_recorded_only_after_checkpoint_proof(tmp_path) ->
     assert terminals == [result.terminal_event]
 
 
-def test_legacy_workflow_step_without_roster_remains_terminal_compatible(
-    tmp_path,
-) -> None:
+def test_terminal_checkpoint_requires_frozen_inventory_roster(tmp_path) -> None:
     run_dir = v2_run_dir(tmp_path / "data", "s1")
-    Ledger(run_dir).create_session("s1", "control/manifest.yaml")
+    ledger = Ledger(run_dir)
+    ledger.create_session("s1", "control/manifest.yaml")
     state = _completed_state(run_dir)
     state["workflow_steps"][0].pop("selected_method_names")
-    result = finalize_authoritative_terminal(
-        _TerminalGraph(state),
-        {"configurable": {"thread_id": "s1"}},
-        state,
-        "s1",
-        run_dir,
-        "memory",
-    )
-    assert result.terminal_event["summary"]["outcome"] == "completed"
+    with pytest.raises(
+        TerminalFinalizationError, match="checkpoint could not be verified"
+    ):
+        finalize_authoritative_terminal(
+            _TerminalGraph(state),
+            {"configurable": {"thread_id": "s1"}},
+            state,
+            "s1",
+            run_dir,
+            "memory",
+        )
+    assert ledger.read_canonical_terminal("s1") is None
 
 
 def test_failure_update_that_raises_after_commit_is_reconciled(tmp_path) -> None:
@@ -141,7 +143,27 @@ def test_failure_update_that_raises_after_commit_is_reconciled(tmp_path) -> None
     ] == ["stage_failed", "session_terminal"]
 
 
-def test_runtime_failure_closes_missing_fixed_method_dispositions(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    [
+        ([("a", "attempt_failed")], "failed"),
+        ([("a", "attempt_started")], "failed"),
+        ([("a", "attempt_started"), ("a", "attempt_succeeded")], "completed"),
+        (
+            [
+                ("a", "attempt_failed"),
+                ("b", "attempt_started"),
+                ("b", "attempt_succeeded"),
+            ],
+            "completed",
+        ),
+        ([("a", "attempt_succeeded"), ("b", "attempt_started")], "failed"),
+        ([("a", "attempt_started"), ("b", "attempt_succeeded")], "failed"),
+    ],
+)
+def test_runtime_failure_closes_missing_fixed_method_dispositions(
+    tmp_path, events, expected
+) -> None:
     run_dir = v2_run_dir(tmp_path / "data", "s1")
     ledger = Ledger(run_dir)
     ledger.create_session("s1", "control/manifest.yaml")
@@ -153,18 +175,16 @@ def test_runtime_failure_closes_missing_fixed_method_dispositions(tmp_path) -> N
     ledger.record_stage_completed(
         "s1", "inventory", workflow_step_id="step-000-inventory"
     )
-    ledger.record_event(
-        "s1",
-        "attempt_failed",
-        {
-            "method_name": "read_qc.long_read_stats.seqkit_stats",
-            "error": "worker crashed",
-        },
-        stage="read_qc",
-        workflow_step_id="step-001-read_qc",
-        subject_id="s1:step-001-read_qc:seqkit",
-        idempotency_key="attempt:s1:step-001-read_qc:seqkit:failed",
-    )
+    for subject, event in events:
+        ledger.record_event(
+            "s1",
+            event,
+            {"method_name": "read_qc.long_read_stats.seqkit_stats"},
+            stage="read_qc",
+            workflow_step_id="step-001-read_qc",
+            subject_id=f"s1:step-001-read_qc:seqkit:{subject}",
+            idempotency_key=f"attempt:seqkit:{subject}:{event}",
+        )
     result = finalize_authoritative_terminal(
         _TerminalGraph(state),
         {"configurable": {"thread_id": "s1"}},
@@ -181,7 +201,7 @@ def test_runtime_failure_closes_missing_fixed_method_dispositions(tmp_path) -> N
         if row["event_type"] == "method_disposition_recorded"
     }
     assert dispositions == {
-        "read_qc.long_read_stats.seqkit_stats": "failed",
+        "read_qc.long_read_stats.seqkit_stats": expected,
         "read_qc.length_filter.skip": "not_started",
     }
     assert result.terminal_event["summary"]["outcome"] == "failed"

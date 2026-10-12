@@ -15,6 +15,7 @@ from app.execution.run_readiness import (
     effective_method_closure,
     preflight_run_readiness,
     probe_llm_endpoint,
+    required_llm_output_methods,
     run_requires_llm,
 )
 from app.schemas.run_config import RunConfig
@@ -36,6 +37,124 @@ def test_llm_probe_rejects_non_json_connectivity_text() -> None:
             probe_llm_endpoint()
 
 
+@pytest.mark.parametrize("method", ["json_schema", "function_calling"])
+def test_llm_probe_uses_selected_protocol(method) -> None:
+    bindings = []
+    response = SimpleNamespace(content='{"ready":true}')
+    if method == "function_calling":
+        response.additional_kwargs = {
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_recommendation",
+                        "arguments": '{"ready":true}',
+                    }
+                }
+            ]
+        }
+    model = SimpleNamespace(invoke=lambda _messages: response)
+    model.bind = lambda **kwargs: bindings.append(kwargs) or model
+    with patch("app.llm.factory.build_chat_model", return_value=model):
+        probe_llm_endpoint(method)
+    assert len(bindings) == 1
+    assert ("tools" if method == "function_calling" else "response_format") in bindings[
+        0
+    ]
+
+
+@pytest.mark.parametrize("method", ["json_schema", "function_calling"])
+def test_llm_probe_rejects_protocol_unsupported_by_endpoint(method) -> None:
+    def reject(**_kwargs):
+        raise ValueError("unsupported protocol")
+
+    model = SimpleNamespace(bind=reject)
+    with patch("app.llm.factory.build_chat_model", return_value=model):
+        with pytest.raises(ValueError, match="unsupported protocol"):
+            probe_llm_endpoint(method)
+
+
+def test_llm_protocol_scope_preserves_distinct_advisor_contracts() -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "assembly_dedup", "allow_local_execution": True},
+                {"stage": "gapcloser", "allow_local_execution": True},
+                {"stage": "base_polish", "allow_local_execution": True},
+            ],
+            "assembly_dedup": {
+                "automatic_purge_approved": True,
+                "recommendation_mode": "advisor",
+                "recommendation_output_method": "function_calling",
+            },
+            "gapcloser": {"recommendation_output_method": "json_schema"},
+            "base_polish": {"recommendation_mode": "deterministic_baseline"},
+        }
+    )
+    assert required_llm_output_methods(config) == (
+        "prompt_json",
+        "function_calling",
+        "json_schema",
+    )
+
+
+def test_t2t_readiness_only_requires_motif_protocol_when_motif_is_missing() -> None:
+    base = {"requested_stages": [{"stage": "t2t", "allow_local_execution": True}]}
+    missing = RunConfig.model_validate({**base, "t2t": {"mode": "auto_patch"}})
+    supplied = RunConfig.model_validate(
+        {
+            **base,
+            "shared_parameters": {
+                "species_facts": {
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                }
+            },
+            "t2t": {"mode": "auto_patch"},
+        }
+    )
+    with pytest.raises(ValueError, match="deterministic_baseline requires"):
+        RunConfig.model_validate(
+            {**base, "t2t": {"recommendation_mode": "deterministic_baseline"}}
+        )
+    assert required_llm_output_methods(missing) == ("json_schema", "prompt_json")
+    assert required_llm_output_methods(supplied) == ("json_schema",)
+    baseline = RunConfig.model_validate(
+        {
+            **base,
+            "shared_parameters": {"species_facts": {"telomere_motif": "TTAGGG"}},
+            "t2t": {"recommendation_mode": "deterministic_baseline"},
+        }
+    )
+    assert required_llm_output_methods(baseline) == ()
+
+
+def test_preflight_checks_all_selected_protocols_and_stops_on_failure(tmp_path) -> None:
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "assembly", "allow_local_execution": True},
+                {"stage": "gapcloser", "allow_local_execution": True},
+            ],
+            "gapcloser": {"recommendation_output_method": "function_calling"},
+        }
+    )
+    with patch(
+        "app.execution.run_readiness.probe_llm_endpoint",
+        side_effect=[None, ValueError("unsupported function protocol")],
+    ) as probe:
+        with pytest.raises(RunReadinessError, match="unsupported function protocol"):
+            preflight_run_readiness(
+                config,
+                effective_methods={},
+                config_path=_env_config(tmp_path / "envs.yaml"),
+            )
+    assert [call.args for call in probe.call_args_list] == [
+        ("prompt_json",),
+        ("function_calling",),
+    ]
+
+
 def _write_ncbi_reference(root: Path) -> Path:
     reference = root / "ncbi_metazoa"
     reference.mkdir(parents=True, exist_ok=True)
@@ -53,9 +172,7 @@ def _write_ncbi_reference(root: Path) -> Path:
 def _assembly_config(
     *,
     review_local: bool = True,
-    lineage_version: str = "odb10",
 ) -> RunConfig:
-    lineage_name = f"embryophyta_{lineage_version}"
     return RunConfig.model_validate(
         {
             "requested_stages": [
@@ -68,7 +185,6 @@ def _assembly_config(
             ],
             "assembly_review": {
                 "busco": {
-                    "lineage": lineage_name,
                     "threads": 4,
                 }
             },
@@ -76,7 +192,7 @@ def _assembly_config(
     )
 
 
-def _env_config(path: Path) -> Path:
+def _env_config(path: Path, *, lineage_version: str = "odb10") -> Path:
     busco_root = path.parent / "busco"
     lineage_names = (
         "embryophyta_odb10",
@@ -101,7 +217,7 @@ def _env_config(path: Path) -> Path:
         "packages: {}\n"
         "databases:\n"
         "  busco:\n"
-        "    default_lineage: embryophyta_odb10\n"
+        f"    default_lineage: embryophyta_{lineage_version}\n"
         "    lineages:\n" + lineage_yaml + "  ncbi:\n"
         f"    reference_dir: {reference}\n"
         "methods:\n"
@@ -301,6 +417,59 @@ def test_preflight_probes_selected_methods_then_mandatory_llm(tmp_path: Path) ->
     assert llm_calls == ["called"]
 
 
+def test_trio_hifiasm_preflight_requires_yak_only_when_trio_enabled(
+    tmp_path: Path,
+) -> None:
+    probed_commands: list[list[str]] = []
+
+    def runner(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        probed_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    trio_config = RunConfig.model_validate(
+        {
+            "requested_stages": [{"stage": "assembly", "allow_local_execution": True}],
+            "assembly": {
+                "hifiasm_inputs": {
+                    "trio_maternal_reads_ref": ["/tmp/maternal.fasta"],
+                    "trio_paternal_reads_ref": ["/tmp/paternal.fasta"],
+                }
+            },
+        }
+    )
+    preflight_run_readiness(
+        trio_config,
+        effective_methods={"assembly": ("assembly.candidate.hifiasm",)},
+        config_path=_env_config(tmp_path / "trio-envs.yaml"),
+        runner=runner,
+        llm_probe=lambda: None,
+    )
+    hifiasm_commands = [
+        command for command in probed_commands if command[-1] == "hifiasm"
+    ]
+    assert hifiasm_commands
+    assert any(command[-1] == "yak" for command in probed_commands)
+
+    probed_commands.clear()
+    non_trio_config = RunConfig.model_validate(
+        {"requested_stages": [{"stage": "assembly", "allow_local_execution": True}]}
+    )
+    preflight_run_readiness(
+        non_trio_config,
+        effective_methods={"assembly": ("assembly.candidate.hifiasm",)},
+        config_path=_env_config(tmp_path / "non-trio-envs.yaml"),
+        runner=runner,
+        llm_probe=lambda: None,
+    )
+    hifiasm_commands = [
+        command for command in probed_commands if command[-1] == "hifiasm"
+    ]
+    assert hifiasm_commands
+    assert all("yak" not in command for command in hifiasm_commands)
+
+
 def test_odb12_2_rejects_busco_before_6_1(tmp_path: Path) -> None:
     llm_calls: list[str] = []
 
@@ -310,7 +479,8 @@ def test_odb12_2_rejects_busco_before_6_1(tmp_path: Path) -> None:
         stdout = "BUSCO 6.0.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12.2")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12.2")
     with pytest.raises(
         RunReadinessError,
         match=r"BUSCO 6\.0\.0 does not satisfy >=6\.1 required for "
@@ -319,7 +489,7 @@ def test_odb12_2_rejects_busco_before_6_1(tmp_path: Path) -> None:
         preflight_run_readiness(
             run_config,
             effective_methods=_assembly_selected_closure(run_config),
-            config_path=_env_config(tmp_path / "envs.yaml"),
+            config_path=env_config,
             runner=runner,
             llm_probe=lambda: llm_calls.append("called"),
         )
@@ -334,11 +504,12 @@ def test_odb12_2_accepts_busco_6_1(tmp_path: Path) -> None:
         stdout = "BUSCO 6.1.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12.2")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12.2")
     methods = preflight_run_readiness(
         run_config,
         effective_methods=_assembly_selected_closure(run_config),
-        config_path=_env_config(tmp_path / "envs.yaml"),
+        config_path=env_config,
         runner=runner,
         llm_probe=lambda: None,
     )
@@ -355,7 +526,8 @@ def test_odb12_rejects_busco_before_5_8(tmp_path: Path) -> None:
         stdout = "BUSCO 5.7.1\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12")
     with pytest.raises(
         RunReadinessError,
         match=r"BUSCO 5\.7\.1 does not satisfy >=5\.8 required for "
@@ -364,7 +536,7 @@ def test_odb12_rejects_busco_before_5_8(tmp_path: Path) -> None:
         preflight_run_readiness(
             run_config,
             effective_methods=_assembly_selected_closure(run_config),
-            config_path=_env_config(tmp_path / "envs.yaml"),
+            config_path=env_config,
             runner=runner,
             llm_probe=lambda: llm_calls.append("called"),
         )
@@ -379,11 +551,12 @@ def test_odb12_accepts_busco_5_8(tmp_path: Path) -> None:
         stdout = "BUSCO 5.8.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12")
     methods = preflight_run_readiness(
         run_config,
         effective_methods=_assembly_selected_closure(run_config),
-        config_path=_env_config(tmp_path / "envs.yaml"),
+        config_path=env_config,
         runner=runner,
         llm_probe=lambda: None,
     )
@@ -398,11 +571,12 @@ def test_odb10_accepts_descriptor_minimum_busco_5_4(tmp_path: Path) -> None:
         stdout = "BUSCO 5.4.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb10")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb10")
     methods = preflight_run_readiness(
         run_config,
         effective_methods=_assembly_selected_closure(run_config),
-        config_path=_env_config(tmp_path / "envs.yaml"),
+        config_path=env_config,
         runner=runner,
         llm_probe=lambda: None,
     )
@@ -548,9 +722,7 @@ def test_review_only_path_does_not_require_llm(tmp_path: Path) -> None:
             "requested_stages": [
                 {"stage": "assembly_review", "allow_local_execution": False}
             ],
-            "assembly_review": {
-                "busco": {"lineage": "embryophyta_odb10", "threads": 4}
-            },
+            "assembly_review": {"busco": {"threads": 4}},
         }
     )
     assert not run_requires_llm(review_only)

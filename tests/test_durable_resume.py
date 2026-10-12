@@ -63,6 +63,7 @@ def _freeze_durable_inputs(
         json.dumps(
             {
                 "session_id": paths.session_id,
+                "genome_size_estimate": 1000,
                 "user_metadata": {"target_species": "Fixture species"},
                 "assets": [
                     {
@@ -77,7 +78,7 @@ def _freeze_durable_inputs(
         encoding="utf-8",
     )
     requested_stages = [
-        {"stage": "assembly", "allow_local_execution": False},
+        {"stage": "assembly", "allow_local_execution": True},
         {"stage": "assembly_review", "allow_local_execution": False},
     ]
     if include_downstream_stage:

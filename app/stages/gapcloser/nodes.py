@@ -37,6 +37,7 @@ from app.schemas.run_config import GapCloserRunConfig
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.base import append_route_trace, stage_work_dir
 from app.stages.finishing.advisor import loop, work_parts
+from app.stages.finishing.read_inputs import write_normalized_fasta
 from app.stages.finishing.review import approved_proposal
 from app.stages.gapcloser.state import read_gapcloser_stage_output as output
 from app.stages.gapcloser.state import update_gapcloser_stage_output as update
@@ -44,7 +45,7 @@ from app.stages.gapcloser.validation import validate_gap_outputs
 from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
-from app.stages.sequences import fasta_records, read_sequences, sequence_summary
+from app.stages.sequences import fasta_records, sequence_summary
 from app.storage.artifacts import (
     PublishedArtifact,
     publish_or_recover_work_artifact,
@@ -233,12 +234,7 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
         )
         work.mkdir(parents=True, exist_ok=True)
         normalized = work / "hifi.fasta"
-        with normalized.open("w", encoding="ascii") as handle:
-            for index, member in enumerate(members):
-                for ordinal, (_, sequence) in enumerate(
-                    read_sequences(Path(member.path), member.format)
-                ):
-                    handle.write(f">member_{index}_read_{ordinal}\n{sequence}\n")
+        write_normalized_fasta(normalized, members)
         verify_input_dependencies(state, dependencies)
         normalized_artifact = _publish(
             state,

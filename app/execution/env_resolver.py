@@ -223,29 +223,6 @@ class DatabaseRegistry(BaseModel):
     busco: BuscoDatabaseSpec
     ncbi: NcbiDatabaseSpec
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_database_keys(cls, value: object) -> object:
-        return normalize_database_registry(value)
-
-
-def normalize_database_registry(value: object) -> object:
-    """Normalize old host-file keys before either loading or bootstrap planning.
-
-    Preserve values for the typed loader to validate; reject ambiguous dual
-    declarations even when one value is null. Runtime records emit only ncbi.
-    """
-    if not isinstance(value, Mapping):
-        return value
-    normalized = dict(value)
-    if "ncbi_metazoa" in normalized:
-        if "ncbi" in normalized:
-            raise ValueError(
-                "databases cannot declare both ncbi and legacy ncbi_metazoa"
-            )
-        normalized["ncbi"] = normalized.pop("ncbi_metazoa")
-    return normalized
-
 
 def package_preflight(package: PackageSpec) -> PackagePreflightResult:
     """Filesystem-only validation of one package's root + canary paths.

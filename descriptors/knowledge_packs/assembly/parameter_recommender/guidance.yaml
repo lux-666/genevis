@@ -1,4 +1,49 @@
 guidance:
+  - guidance_id: flye.disjointigs.coverage.v1
+    methods: [assembly.candidate.flye]
+    parameters: [asm_coverage]
+    relevant_metrics: [read_qc.raw_coverage, read_qc.read_n50]
+    guidance: >-
+      asm_coverage selects a subset of the longest reads for initial disjointig
+      assembly to reduce memory use; it is not a final assembly coverage target.
+      Consider it only with a supported genome-size estimate and enough effective
+      coverage. Omission keeps the tool default rather than inheriting a prior retry.
+    caveats:
+      - Nominal coverage does not establish uniform coverage or read quality.
+      - Subsampling limited coverage can remove support for genuine sequence.
+      - "Source: https://github.com/fenderglass/Flye/blob/flye/docs/USAGE.md#parameter-descriptions ; historical version equivalence is not established."
+
+  - guidance_id: flye.overlaps.connectivity.v1
+    methods: [assembly.candidate.flye]
+    parameters: [min_overlap]
+    relevant_metrics: [read_qc.read_n50, read_qc.raw_coverage, genome_survey.repeat_fraction]
+    guidance: >-
+      Flye normally chooses minimum overlap from the read-length distribution.
+      Raising it can simplify repeat-graph connectivity but can also introduce
+      assembly gaps. Diagnose read length, effective coverage and fragmentation
+      before overriding the default; a global repeat fraction does not locate repeats.
+    caveats:
+      - The selected nano-raw, nano-hq, pacbio-raw or pacbio-hifi mode is frozen input identity, not an adjustable recommendation.
+      - Short or low-quality reads may not support the proposed overlap length.
+      - "Source: https://github.com/fenderglass/Flye/blob/flye/docs/USAGE.md#parameter-descriptions ; historical version equivalence is not established."
+
+  - guidance_id: nextdenovo.reads.cutoff.v1
+    methods: [assembly.candidate.nextdenovo]
+    parameters: [read_cutoff]
+    relevant_metrics: [read_qc.read_n50, read_qc.raw_coverage]
+    guidance: >-
+      read_cutoff excludes shorter reads before NextDenovo assembly. Increasing
+      it changes retained coverage as well as read length; justify a cutoff using
+      the observed length distribution and remaining support. The adapter fixes
+      task=all and input_type=raw. In NextDenovo v2.5.2 this executes correction
+      for ONT, CLR and HiFi, including HiFi self-correction; read_type=hifi does
+      not skip the correction workflow.
+    caveats:
+      - Read N50 alone cannot quantify coverage remaining after a cutoff.
+      - The executor freezes read_type and input FOFN; recommendations cannot change either.
+      - Corrected input is not supported by this adapter; behavior in other allowed tool versions requires verification.
+      - "Source: https://github.com/Nextomics/NextDenovo/blob/v2.5.2/nextDenovo ; https://github.com/Nextomics/NextDenovo/blob/v2.5.2/doc/OPTION.rst ; version equivalence is not established."
+
   - guidance_id: hifiasm.connectivity.low_coverage.v1
     methods: [assembly.candidate.hifiasm, assembly.candidate.hifiasm_ont]
     parameters:

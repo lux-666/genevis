@@ -97,13 +97,13 @@ def _human_request(
 def test_parameter_approval_gates_share_the_foreground_timeout_normalizer():
     normalizer_paths = {
         get_review_gate(stage, "parameter_approval").normalize_timeout_request
-        for stage in ("assembly", "hic_scaffolding", "t2t")
+        for stage in ("assembly", "hic_scaffolding")
     }
 
     assert normalizer_paths == {
         "app.review.approval:normalize_parameter_approval_timeout_request"
     }
-    for stage in ("assembly", "hic_scaffolding", "t2t"):
+    for stage in ("assembly", "hic_scaffolding"):
         gate = get_review_gate(stage, "parameter_approval")
         assert gate.template_preferred_decision == "approve_parameters"
         assert (
@@ -274,7 +274,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
 
     def test_zero_falls_back_to_manual_when_existing_resolver_fails(self):
         with patch(
-            "app.control.lifecycle.build_foreground_auto_resume_request",
+            "app.control.resume.build_foreground_auto_resume_request",
             side_effect=ResumeValidationError("missing binding"),
         ):
             final, execute, collect, waiter = self._run_loop(
@@ -294,7 +294,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
             "review_request_verification_error": "request hash mismatch",
         }
         with patch(
-            "app.control.lifecycle.build_foreground_auto_resume_request",
+            "app.control.resume.build_foreground_auto_resume_request",
             side_effect=ResumeValidationError("missing binding"),
         ):
             final, execute, collect, waiter = self._run_loop(

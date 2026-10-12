@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_execution_evidence
 from app.execution.input_integrity import (
     artifact_input_dependency,
     asset_input_dependencies,
@@ -20,7 +21,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
-from app.execution.method_outcomes import MethodOutcome
+from app.execution.method_outcomes import MethodOutcome, has_execution_result
 from app.execution.method_runner import build_frozen_attempt
 from app.llm.dedup import PurgeParameters, PurgeRecommendation, PurgeRecommender
 from app.review.base import ReviewPayload
@@ -31,10 +32,13 @@ from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.assembly_dedup.nodes import (
     ASSEMBLY_DEDUP_METHOD,
     _dedup_source_candidate,
+    _minimap2_preset,
+    read_depth_members,
 )
 from app.stages.assembly_dedup.state import assembly_dedup_output as output
 from app.stages.assembly_dedup.state import update_assembly_dedup_output as update
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.quast import validate_quast_comparison
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import QUAST_REFERENCE_SPEC
 from app.storage.artifacts import (
@@ -157,12 +161,45 @@ def quast_outcome(state: TopLevelState) -> MethodOutcome | None:
         return None
     if cursor.get("status") not in {"dedup_selected", "pass_through", "failed"}:
         return None
+    ledger = Ledger(absolute_data_dir(state))
+    if has_execution_result(cursor, QUAST):
+        executions = load_method_executions(state, QUAST_LIFECYCLE)
+        if any(
+            not execution.evidence.success
+            or not ledger.has_attempt_success(
+                state["session_id"], execution.attempt.attempt_id
+            )
+            for execution in executions
+        ):
+            return MethodOutcome(
+                method_name=QUAST,
+                disposition="failed",
+                reason=str(cursor.get("reason") or "QUAST execution/collect failed"),
+                refs=tuple(execution.execution_ref for execution in executions),
+            )
     ref = cursor.get("quast_report_ref")
+    execution_ref = cursor.get("quast_execution_ref")
+    if ref and execution_ref:
+        evidence = load_execution_evidence(
+            state,
+            execution_ref,
+            expected_stage=STAGE,
+            expected_method_name=QUAST,
+        )
+        report_ref = ArtifactRef.model_validate(ref)
+        resolve_artifact_ref(absolute_data_dir(state), state["session_id"], report_ref)
+        if evidence.success and ledger.has_attempt_success(
+            state["session_id"], evidence.attempt_id
+        ):
+            return MethodOutcome(
+                method_name=QUAST,
+                disposition="completed",
+                refs=(report_ref, ArtifactRef.model_validate(execution_ref)),
+            )
     return MethodOutcome(
         method_name=QUAST,
-        disposition="completed" if ref else "not_started",
-        reason=None if ref else cursor.get("reason", "quast_not_started"),
-        refs=(ArtifactRef.model_validate(ref),) if ref else (),
+        disposition="not_started",
+        reason=cursor.get("reason", "quast_not_started"),
     )
 
 
@@ -263,6 +300,7 @@ def collect_quast(state: TopLevelState) -> StateUpdate:
         artifact_type="assembly_dedup.quast_report",
         metadata={"dependency_refs": [execution.execution_ref.model_dump(mode="json")]},
     )
+    validate_quast_comparison(report.path, execution.attempt.metadata["labels"])
     Ledger(absolute_data_dir(state)).record_attempt_succeeded(
         state["session_id"],
         execution.attempt,
@@ -278,13 +316,44 @@ def collect_quast(state: TopLevelState) -> StateUpdate:
     )
 
 
+def execution_capabilities(state: TopLevelState) -> dict[str, Any]:
+    """Project the same input requirements used by the purge executor."""
+    members = []
+    reason = None
+    presets = []
+    try:
+        members = read_depth_members(state, output(state))
+        presets = [_minimap2_preset(member.platform) for member in members]
+    except (OSError, TypeError, ValueError) as exc:
+        reason = str(exc)
+    return {
+        "long_reads": {
+            "available": bool(members),
+            "members": [
+                {"member_id": member.member_id, "platform": member.platform}
+                for member in members
+            ],
+            "mapping_presets": presets,
+        },
+        "available_coverage_modes": ["self_alignment"]
+        + (["read_depth"] if reason is None else []),
+        "read_depth_unavailable_reason": reason,
+    }
+
+
 def validate_proposal(
-    proposal: PurgeRecommendation, records: list[dict[str, Any]], maximum: int
+    proposal: PurgeRecommendation,
+    records: list[dict[str, Any]],
+    maximum: int,
+    *,
+    available_coverage_modes: Sequence[str],
 ) -> None:
     if proposal.action == "run":
         if len(records) >= maximum:
             raise ValueError("dedup attempt budget exhausted")
         assert proposal.parameters is not None
+        if proposal.parameters.coverage_mode not in available_coverage_modes:
+            raise ValueError("dedup proposal selects an unavailable coverage_mode")
         if any(
             row["parameters"] == proposal.parameters.model_dump() for row in records
         ):
@@ -309,7 +378,9 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
     recommender = PurgeRecommender(
         cursor.get("recommendation_output_method", "json_schema")
     )
+    capabilities = execution_capabilities(state)
     evidence = {
+        "execution_capabilities": capabilities,
         "max_attempts": cursor.get("max_attempts", 3),
         "remaining_attempts": max(0, cursor.get("max_attempts", 3) - round_id),
         "source_method": source.bundle.method_name,
@@ -364,6 +435,7 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
             "raw_response": result.raw_response,
             "raw_message": result.raw_message,
             "model_id": result.model_id,
+            "model_call": result.model_call.model_dump(mode="json"),
             "error": result.error,
             "proposal": result.parsed.model_dump(mode="json")
             if result.parsed
@@ -377,7 +449,12 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
     if response.get("proposal") is not None:
         try:
             proposal = PurgeRecommendation.model_validate(response["proposal"])
-            validate_proposal(proposal, records, cursor.get("max_attempts", 3))
+            validate_proposal(
+                proposal,
+                records,
+                cursor.get("max_attempts", 3),
+                available_coverage_modes=capabilities["available_coverage_modes"],
+            )
         except ValueError as exc:
             proposal, error = None, str(exc)
     decisions = ["keep_prior_assembly", "stop_human_review"]

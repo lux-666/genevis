@@ -72,7 +72,11 @@ class ReadSetMember(BaseModel):
     platform: str = Field(min_length=1)
     format: str = Field(min_length=1)
     transformation_method: str = Field(min_length=1)
+    compression: Literal["none", "gzip"] = "none"
     attempt_id: str = Field(min_length=1)
+    manifest_entry_ordinal: int | None = Field(default=None, ge=0)
+    pair_index: int | None = Field(default=None, ge=0)
+    mate: Literal["R1", "R2"] | None = None
 
 
 class ReadSetManifest(BaseModel):

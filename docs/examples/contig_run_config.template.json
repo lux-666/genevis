@@ -46,6 +46,9 @@
 
   "assembly_dedup": {
     "automatic_purge_approved": true,
+    "recommendation_mode": "advisor",
+    "recommendation_output_method": "json_schema",
+    "max_attempts": 3,
     "threads": 8,
     "get_seqs_exclude_haplotigs": true
   },

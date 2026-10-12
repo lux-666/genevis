@@ -195,7 +195,7 @@ gene-agent inspect \
 
 Assembly 每次新方法推荐和参数推荐（含重试）直接读取配置的活动案例目录。
 配置 `assembly.case_source` 指向包含 `recommendation-cases.v1` JSON 的目录
-（相对路径以配置文件为基准）；不配置时只用当前材料与软件知识，不回退旧案例库。
+（相对路径以配置文件为基准）；不配置时只用当前材料与软件知识，不加载其他案例来源。
 来源方法、原生参数、材料状态和结果限定均保留，跨方法案例可参与推理，
 但执行输出只能包含已确认方法的 L2 参数。
 每条 case 的 `parameter_eligible` 单独标记是否有可用于调参的明确设置；
@@ -238,7 +238,7 @@ python scripts/build_assembly_cases.py \
 case 保留方法原生参数、材料/结果对象、评价口径、来源定位和缺口。
 一个 case 只对应一次 Assembly 操作；Hi-C 参与组装器分相的直接输入保留，
 后续 scaffolding/T2T 不混入该操作参数。结果明确区分直接输出、下游上下文和混合对象。
-旧 casepack/V1/pilot 配置不兼容。Hi-C、T2T 推荐器的扩展不在本次范围。
+当前案例目录只覆盖 Assembly；Hi-C/T2T 运行时推荐器已实现，待补的是对应案例与文献方法知识扩展。
 指标绑定及推荐效果的待验收边界见
 [Assembly corpus conformance](docs/architecture/reference/conformance.md#assembly-corpus-handoff-and-measured-recommendation-coverage)。
 案例可加载、可检索不等于参数资格、指标绑定或推荐效果已完成验收。

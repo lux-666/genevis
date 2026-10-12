@@ -4,7 +4,7 @@ language: cli
 install_channel: conda
 entry_patterns:
   - "flye --nano-raw {reads} --out-dir {output_dir} --threads {threads}"
-help_summary: "Long-read de novo assembler candidate for noisy long-read genome projects."
+help_summary: "Long-read de novo assembler candidate for ONT, PacBio CLR, and PacBio HiFi genome projects."
 known_pitfalls:
   - "Platform-specific read profile selection needs human approval before execution."
 resource_defaults:

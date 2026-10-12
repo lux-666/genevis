@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
+from app.domains.assembly.material_query import resolved_material_context
 from app.domains.assembly.selection import (
     AssemblySelection,
     validate_assembly_selection,
@@ -34,7 +35,9 @@ def build_assembly_recommendation_context(
         assembly_out = assembly_stage_output(state)
 
     selection = _require_selection(assembly_out.get("assembly_selection"))
-    assembly_route = _require_route(assembly_out.get("assembly_route"))
+    assembly_route = _require_route(
+        assembly_out.get("selected_route") or assembly_out.get("assembly_route")
+    )
     target_level = _require_target_level(assembly_out.get("target_level"))
 
     return AssemblyRecommendationContext(
@@ -42,6 +45,7 @@ def build_assembly_recommendation_context(
         assembly_route=assembly_route,
         read_type=selection.read_type,
         target_level=target_level,
+        material_inputs=resolved_material_context(assembly_out),
         retry=retry_context,
     )
 

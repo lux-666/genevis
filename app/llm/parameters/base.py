@@ -1,20 +1,20 @@
 """Shared prompt-invoke-restore core for parameter recommendation models.
 
-HiC and T2T recommenders delegate all generic logic here; each thin wrapper
-only binds a ``PROMPT_BUNDLE`` name and re-exports stage-specific aliases.
+Sparse parameter recommenders share prompt rendering and response parsing.
 """
 
 from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Literal, Mapping
 
 from app.llm.factory import build_chat_model
 from app.llm.json_response import parse_json_object
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
+from app.llm.provenance import ModelCallProvenance
 from app.llm.recommender import StructuredRecommender
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
@@ -33,6 +33,7 @@ class ParameterDecision:
     valid: bool
     error: str | None = None
     model_id: str | None = None
+    model_call: ModelCallProvenance = field(default_factory=ModelCallProvenance)
 
 
 def normalize_sparse_recommendation(response: dict[str, Any]) -> dict[str, Any]:
@@ -114,6 +115,7 @@ def invoke_parameter_model(
         result.valid,
         result.error,
         result.model_id,
+        result.model_call,
     )
 
 
@@ -133,13 +135,21 @@ def restore_parameter_decision(record: Mapping[str, Any]) -> ParameterDecision:
     if model_id is not None and not isinstance(model_id, str):
         raise ValueError("persisted model response has an invalid model_id field")
     if validity == "invalid":
-        return ParameterDecision(raw, None, False, error, model_id)
+        return ParameterDecision(
+            raw,
+            None,
+            False,
+            error,
+            model_id,
+            ModelCallProvenance.model_validate(record.get("model_call", {})),
+        )
     return ParameterDecision(
         raw,
         normalize_sparse_recommendation(parse_json_object(raw)),
         True,
         error,
         model_id,
+        ModelCallProvenance.model_validate(record.get("model_call", {})),
     )
 
 

@@ -1,13 +1,14 @@
-"""T2T adjustable-threshold catalog loader."""
+"""T2T baseline defaults and patch-mode catalog."""
 
 from typing import Literal
 
 from app.domains.parameter_recommendation.catalog import load_method_parameter_catalog
-from app.llm.parameters.t2t.request import T2T_METHOD
 from app.schemas.parameter_catalog import (
     MethodParameterCatalog,
     RuntimeExecutorSource,
 )
+
+T2T_METHOD: Literal["t2t.alignment.minimap2"] = "t2t.alignment.minimap2"
 
 T2TMode = Literal["propose_only", "manual_review", "auto_patch"]
 

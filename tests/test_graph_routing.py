@@ -212,8 +212,8 @@ class GraphRoutingTests(unittest.TestCase):
     def test_failed_occurrence_takes_precedence_over_same_update_skip_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = v2_run_dir(tmp, "failed-over-skip")
-            reads = run_dir / "reads.fastq"
-            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            reads = run_dir / "assembly.fa"
+            reads.write_text(">ctg\nACGT\n", encoding="utf-8")
             manifest = run_dir / "control" / "manifest.yaml"
             manifest.write_text(
                 json.dumps(
@@ -221,9 +221,9 @@ class GraphRoutingTests(unittest.TestCase):
                         "session_id": "failed-over-skip",
                         "assets": [
                             {
-                                "asset_type": "raw_long_reads",
+                                "asset_type": "assembly_fasta_registered",
                                 "paths": [str(reads)],
-                                "platform": "ont",
+                                "format": "fasta",
                             }
                         ],
                     }

@@ -93,4 +93,4 @@ Bootstrap 探测活动机器映射声明的每个包和方法。另行地，运�
 
 ## 数据库键规范化
 
-主机配置仅在输入规范化时接受旧 `databases.ncbi_metazoa` 键。`normalize_database_registry()` 为类型化加载器与 bootstrap 规划共同拥有该规则：即使值相同，同时声明新旧键也拒绝。运行时与冻结类型记录只暴露 `databases.ncbi`。普通 bootstrap 预览键重命名并在确认后写入；`--update` 保留未选择的源字段。运行时没有旧名称别名。
+主机数据库配置只接受 `databases.busco` 和 `databases.ncbi`。类型化加载器拒绝未知组；bootstrap 在询问或写入前按同一字段集合检查组名，修复已声明组内的缺失设置。运行时与冻结记录使用相同名称。

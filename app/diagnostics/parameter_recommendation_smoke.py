@@ -11,15 +11,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from copy import deepcopy
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from app.domains.parameter_recommendation.resolution import resolve_parameters
 from app.entrypoints.environment import load_dotenv_without_override
 from app.llm.config import load_llm_profile
-from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 from app.llm.parameters.assembly.recommender import (
     AssemblyParameterDecision,
     recommend_assembly_parameters,
@@ -216,102 +213,6 @@ def run_probe(
     return result, summary_path
 
 
-def prepare_parameter_pair(request_dto: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Hold sample, method and software knowledge fixed; ablate literature only."""
-    request = AssemblyParameterRequestDTO.model_validate(request_dto)
-    if request.task != "recommend_initial":
-        raise ValueError(
-            "paired comparison requires an initial request, not retry history"
-        )
-    cases = request.knowledge_evidence.get("cases")
-    if (
-        not isinstance(cases, list)
-        or not cases
-        or not all(isinstance(c, dict) for c in cases)
-    ):
-        raise ValueError("paired comparison requires a RAG request with selected cases")
-    rag = deepcopy(request_dto)
-    # Method-choice prose may already contain retrieved literature. The experiment
-    # conditions on the confirmed method, so omit that prose from both arms.
-    rag["method_decision"] = {"method_id": request.method_id, "rationale": ""}
-    baseline = deepcopy(rag)
-    baseline["knowledge_evidence"] = {
-        "purpose": "parameters",
-        "stage": "assembly",
-        "task": "contig_assembly",
-        "cases": [],
-        "limitations": [],
-    }
-    return {"llm_only": baseline, "rag": rag}
-
-
-def run_pair(
-    *, model_request_ref: str | Path, output_dir: str | Path, live: bool = False
-) -> tuple[dict[str, Any], Path]:
-    """Prepare or evaluate isolated B/C arms without approval or tool execution."""
-    source = Path(model_request_ref).expanduser().resolve(strict=True)
-    request = load_request_artifact(source)
-    snapshot = RecommendationInputSnapshotV3.model_validate_json(
-        source.with_name("input_snapshot.json").read_text(encoding="utf-8")
-    )
-    dto = AssemblyParameterRequestDTO.model_validate(request)
-    if (snapshot.method_id, snapshot.task, snapshot.facts, snapshot.stage_context) != (
-        dto.method_id,
-        dto.task,
-        dto.facts,
-        dto.assembly_context,
-    ):
-        raise ValueError("model request does not match its input snapshot")
-    arms = prepare_parameter_pair(request)
-    destination = Path(output_dir).expanduser().resolve()
-    destination.mkdir(parents=True, exist_ok=False)
-    summary: dict[str, Any] = {
-        "schema_version": 1,
-        "method_id": dto.method_id,
-        "source_model_request": str(source),
-        "source_sha256": sha256(source.read_bytes()).hexdigest(),
-        "status": "prepared",
-        "changed_factor": "knowledge_evidence",
-        "method_rationale_removed_from_both_arms": True,
-        "biological_quality_evaluated": False,
-        "arms": {},
-    }
-    summary_path = destination / "summary.json"
-    for name, arm in arms.items():
-        folder = destination / name
-        folder.mkdir()
-        messages = render_assembly_parameter_messages(arm)
-        (folder / "model_request.json").write_text(
-            json.dumps({"messages": messages}, ensure_ascii=False, indent=2) + "\n"
-        )
-        (folder / "input_snapshot.json").write_text(snapshot.model_dump_json(indent=2))
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
-    if live:
-        profile = load_llm_profile()
-        summary["model_profile"] = {
-            "provider": profile.provider,
-            "model": profile.model,
-            "temperature": profile.temperature,
-            "max_tokens": profile.max_tokens,
-        }
-        for name, arm in arms.items():
-            result = evaluate_parameter_request(arm, input_snapshot=snapshot)
-            (destination / name / "summary.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=2) + "\n"
-            )
-            summary["arms"][name] = result
-            summary["status"] = "partial"
-            summary_path.write_text(
-                json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
-            )
-        summary["status"] = "evaluated"
-        summary["passed"] = all(r["passed"] for r in summary["arms"].values())
-        summary_path.write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
-        )
-    return summary, summary_path
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -321,46 +222,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-request", required=True)
     parser.add_argument("--output-dir", required=True)
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--prepare-pair",
-        action="store_true",
-        help="Write B/C requests without model calls",
-    )
-    mode.add_argument(
-        "--paired",
-        action="store_true",
-        help="Evaluate B/C with the same configured model",
-    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.prepare_pair:
-            _, path = run_pair(
-                model_request_ref=args.model_request, output_dir=args.output_dir
-            )
-            print(f"prepared_pair: {path}")
-            return 0
         dotenv_ref = load_dotenv_without_override()
         llm_profile = load_llm_profile()
         if not llm_profile.api_key:
             raise ValueError(
                 "GENE_AGENT_LLM_API_KEY was neither exported nor found in .env"
             )
-        if args.paired:
-            summary, summary_ref = run_pair(
-                model_request_ref=args.model_request,
-                output_dir=args.output_dir,
-                live=True,
-            )
-        else:
-            summary, summary_ref = run_probe(
-                model_request_ref=args.model_request,
-                output_dir=args.output_dir,
-            )
+        summary, summary_ref = run_probe(
+            model_request_ref=args.model_request,
+            output_dir=args.output_dir,
+        )
     except Exception as exc:
         print(
             f"error: parameter LLM smoke setup failed: {type(exc).__name__}: {exc}",
@@ -374,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"dotenv_ref: {dotenv_ref or 'none (exported environment only)'}")
     print(f"passed: {summary['passed']}")
     print(f"summary_ref: {summary_ref}")
-    if not summary["passed"] and not args.paired:
+    if not summary["passed"]:
         for violation in summary["validation"]["violations"]:
             reason = violation.get("reason") or "validation failed"
             print(f"violation: {reason}", file=sys.stderr)

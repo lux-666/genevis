@@ -57,6 +57,7 @@ from app.storage.assembly_candidates import (
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from tests.busco_fixture import ensure_busco_lineage, isolated_frozen_busco_resolver
 from tests.data_v2 import v2_run_dir
 
 
@@ -358,7 +359,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             "stage_outputs": {"assembly_review": {}},
         }
         state["workflow_steps"][2].pop("selected_method_names")
-        with self.assertRaisesRegex(ValueError, "missing its frozen method roster"):
+        with self.assertRaisesRegex(ValueError, "selected_method_names is required"):
             quast_method_outcome(state)
 
     def test_repeated_review_uses_only_the_active_occurrence_roster(self):
@@ -725,6 +726,21 @@ class AssemblyReviewStageTests(unittest.TestCase):
             "related_species_reference_dir": str(self._test_reference_dir(state))
         }
         state["stage_outputs"] = stage_outputs
+        reference_patch = patch(
+            "app.stages.assembly_review.statistics._related_species_reference_dir",
+            side_effect=lambda _out, *, state: self._test_reference_dir(state),
+        )
+        reference_patch.start()
+        self.addCleanup(reference_patch.stop)
+        busco_patch = patch(
+            "app.stages.assembly_review.method_application.busco."
+            "load_frozen_dependency_resolver",
+            side_effect=lambda _dir: isolated_frozen_busco_resolver(
+                state["stage_outputs"]["assembly_review"]["busco_parameters"]
+            ),
+        )
+        busco_patch.start()
+        self.addCleanup(busco_patch.stop)
         if candidate_bundles:
             candidate_refs = [
                 self._write_candidate_bundle(
@@ -1261,8 +1277,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_quast_bin(tmpdir)
             self._fake_busco_bin(tmpdir)
-            lineage = Path(tmpdir) / "embryophyta_odb10"
-            lineage.mkdir()
+            lineage = ensure_busco_lineage(tmpdir)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["current_stage"] = "assembly_review"
             state["stage_outputs"]["assembly"] = {
@@ -1276,10 +1291,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
-                    "lineage_path": str(lineage),
+                    "lineage_path": str(lineage.resolve()),
                     "lineage_name": "embryophyta_odb10",
                     "lineage_version": "odb10",
                     "lineage_source": "test_fixture",
+                    "mode": "genome",
                     "threads": 1,
                 },
             }
@@ -1390,8 +1406,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_quast_bin(tmpdir)
             self._fake_busco_bin(tmpdir)
-            lineage = Path(tmpdir) / "embryophyta_odb10"
-            lineage.mkdir()
+            lineage = ensure_busco_lineage(tmpdir)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {
                 "status": "draft_ready",
@@ -1404,10 +1419,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
-                    "lineage_path": str(lineage),
+                    "lineage_path": str(lineage.resolve()),
                     "lineage_name": "embryophyta_odb10",
                     "lineage_version": "odb10",
                     "lineage_source": "test_fixture",
+                    "mode": "genome",
                     "threads": 1,
                 },
             }
@@ -1457,8 +1473,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"
             draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
-            lineage = Path(tmpdir) / "embryophyta_odb10"
-            lineage.mkdir()
+            lineage = ensure_busco_lineage(tmpdir)
             candidate_ref = self._write_candidate_bundle(
                 tmpdir,
                 candidate_id="flye_01",
@@ -1480,10 +1495,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
-                    "lineage_path": str(lineage),
+                    "lineage_path": str(lineage.resolve()),
                     "lineage_name": "embryophyta_odb10",
                     "lineage_version": "odb10",
                     "lineage_source": "operator_offline_cache",
+                    "mode": "genome",
                     "threads": 1,
                 },
             }
@@ -1600,8 +1616,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"
             draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
-            lineage = Path(tmpdir) / "embryophyta_odb10"
-            lineage.mkdir()
+            lineage = ensure_busco_lineage(tmpdir)
             candidate_ref = self._write_candidate_bundle(
                 tmpdir,
                 candidate_id="flye_01",
@@ -1622,10 +1637,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "quast_parameters": {"threads": 1},
                 "busco_parameters": {
-                    "lineage_path": str(lineage),
+                    "lineage_path": str(lineage.resolve()),
                     "lineage_name": "embryophyta_odb10",
                     "lineage_version": "odb10",
                     "lineage_source": "operator_offline_cache",
+                    "mode": "genome",
                     "threads": 1,
                 },
             }
@@ -1662,8 +1678,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             fake_bin = self._fake_quast_bin(tmpdir, fail=True)
             self._fake_busco_bin(tmpdir)
-            lineage = Path(tmpdir) / "embryophyta_odb10"
-            lineage.mkdir()
+            lineage = ensure_busco_lineage(tmpdir)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {
                 "status": "draft_ready",
@@ -1675,10 +1690,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "related_species_reference_dir": str(self._test_reference_dir(state)),
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "busco_parameters": {
-                    "lineage_path": str(lineage),
+                    "lineage_path": str(lineage.resolve()),
                     "lineage_name": "embryophyta_odb10",
                     "lineage_version": "odb10",
                     "lineage_source": "test_fixture",
+                    "mode": "genome",
                     "threads": 1,
                 },
             }
@@ -2294,6 +2310,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
     ) -> dict:
         """Build a Flye-candidate state blocked at the assembly-review gate."""
         stage_tests = AssemblyReviewStageTests()
+        self.addCleanup(stage_tests.doCleanups)
         session_id = "test-rerun-session"
         assembly_fasta = Path(tmpdir) / "draft.fasta"
         assembly_fasta.write_text(">ctg1\\nACGTACGT\\n", encoding="utf-8")
@@ -2404,7 +2421,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
                 )
 
     def test_unsupported_review_decision_fails_closed(self):
-        from app.control.lifecycle import ResumeValidationError
+        from app.control.errors import ResumeValidationError
         from app.review.application import persist_review_intent
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (
@@ -2431,7 +2448,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
                 prepare_assembly_review_application(state, intent.intent)
 
     def test_validates_rejected_candidate_set_and_rejects_unknown_ids(self):
-        from app.control.lifecycle import ResumeValidationError
+        from app.control.errors import ResumeValidationError
         from app.review.approval import load_verified_interrupt_request
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (
@@ -2504,7 +2521,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
             self.assertEqual(stopped.metadata, {})
 
     def test_transform_intent_rejects_external_and_missing_file_refs(self):
-        from app.control.lifecycle import ResumeValidationError
+        from app.control.errors import ResumeValidationError
         from app.review.approval import load_verified_interrupt_request
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (

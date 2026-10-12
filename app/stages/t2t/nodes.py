@@ -2,26 +2,19 @@
 
 from __future__ import annotations
 
-import bz2
 import csv
-import gzip
 import json
-import lzma
-import re
 import shlex
-from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TextIO, cast, overload
+from typing import Any, Literal, TextIO, cast
 
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import TypeAdapter
 from typing_extensions import TypedDict
 
 from app.configuration import load_descriptor_registry
-from app.control.lifecycle import ResumeValidationError
 from app.control.workflow_plan import (
     advance_workflow_step,
     assembly_delivery,
@@ -44,18 +37,8 @@ from app.execution.lifecycle import (
 from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
 from app.execution.method_runner import build_frozen_attempt
 from app.execution.parameter_attempts import current_parameter_attempt
-from app.integrity import SHA256_PATTERN
-from app.review.application import (
-    PreparedReviewApplication,
-    ReviewIntentV1,
-    VerifiedReviewApplication,
-)
-from app.review.base import ResumeReviewRequest, ReviewPayload
-from app.review.candidates import candidate_ids_from_review_request_payload
+from app.review.base import ReviewPayload
 from app.review.persistence import (
-    ReviewPersistenceError,
-    load_review_request,
-    persist_review_decision,
     persist_review_request,
 )
 from app.schemas.artifacts import (
@@ -72,8 +55,6 @@ from app.schemas.artifacts import (
     ArtifactRef,
     ArtifactRefJson,
     T2TFinishingBundle,
-    T2TReviewDecisionArtifact,
-    canonical_artifact_refs,
 )
 from app.schemas.execution import InputDependency
 from app.schemas.resource_ref import ResourceRef
@@ -81,17 +62,17 @@ from app.schemas.state import (
     ActiveInterrupt,
     StateUpdate,
     TopLevelState,
-    validate_top_level_state,
 )
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
-    resolve_run_ref,
     stage_work_dir,
 )
 from app.stages.read_resolution import resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
+from app.stages.sequences import open_sequence_text, read_sequences, reverse_complement
+from app.stages.t2t.algorithms import candidate_rows, terminal_signal
 from app.stages.t2t.parameters.catalog import T2TMode, resolve_t2t_mode
 from app.stages.t2t.parameters.execution import (
     T2TFrozenExecutionInputs,
@@ -260,24 +241,6 @@ def build_t2t_alignment_graph() -> CompiledStateGraph[
     return graph
 
 
-@dataclass(frozen=True)
-class PafRecord:
-    query: str
-    query_length: int
-    query_start: int
-    query_end: int
-    strand: str
-    target: str
-    target_length: int
-    target_start: int
-    target_end: int
-    mapq: int
-
-    @property
-    def overlap_bp(self) -> int:
-        return self.query_end - self.query_start
-
-
 def _output(state: TopLevelState) -> T2TStageCursor:
     return read_t2t_stage_output(state)
 
@@ -305,25 +268,16 @@ def _fail_terminal(state: TopLevelState, reason: str) -> StateUpdate:
 
 
 def enter_t2t(state: TopLevelState) -> StateUpdate:
-    """Mark T2T finishing as the active stage."""
-    _output(state)
+    """Enter the single-pass executor under an explicit recommendation policy."""
+    output = _output(state)
+    mode = output.get("recommendation_mode")
+    if mode not in {"advisor", "deterministic_baseline"}:
+        return _fail(
+            state, "T2T requires explicit advisor or deterministic_baseline mode"
+        )
+    if output.get("execution_mode") == "local" and mode != "deterministic_baseline":
+        return _fail(state, "T2T single-pass execution requires deterministic_baseline")
     return {"supervision_state": "running_stage"}
-
-
-def block_t2t(state: TopLevelState) -> StateUpdate:
-    """Surface a persisted T2T parameter interrupt at the top-level boundary."""
-
-    interrupt_value = _output(state).get("active_interrupt")
-    interrupt = (
-        _top_level_interrupt(interrupt_value) if interrupt_value is not None else None
-    )
-    if not interrupt:
-        return _fail_terminal(state, "T2T review block has no persisted interrupt")
-    return {
-        "current_stage": "t2t",
-        "supervision_state": "blocked_human",
-        "active_interrupt": interrupt,
-    }
 
 
 def resolve_t2t_inputs(state: TopLevelState) -> StateUpdate:
@@ -543,14 +497,14 @@ def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
             for read_input in execution_inputs.long_read_inputs:
                 member_id = read_input.member_id
                 preset = _minimap2_preset(read_input.platform)
-                for source_read_id, sequence in _iter_sequences(Path(read_input.path)):
+                for source_read_id, sequence in read_sequences(Path(read_input.path)):
                     read_id = f"{member_id}::{source_read_id}"
                     if read_id in seen_read_ids:
                         raise ValueError(
                             f"duplicate read identifier within source asset: {read_id}"
                         )
                     seen_read_ids.add(read_id)
-                    left, right = _terminal_signal(
+                    left, right = terminal_signal(
                         sequence,
                         execution_inputs.resolved_telomere_motif,
                         thresholds,
@@ -761,7 +715,7 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
     attempt = build_frozen_attempt(
         attempt_id=(
             f"{state['session_id']}-{current_workflow_step_id(state)}-t2t-"
-            f"{(out.get('finishing') or {}).get('attempt', 0)}"
+            f"{out['finishing']['attempt'] if out.get('finishing') else 0}"
         ),
         session_id=state["session_id"],
         stage="t2t",
@@ -775,7 +729,7 @@ def freeze_t2t_alignment(state: TopLevelState) -> StateUpdate:
         metadata={
             "parameter_attempt_id": parameter_attempt.attempt_id
             if parameter_attempt
-            else (out.get("finishing") or {})["attempt"],
+            else out["finishing"]["attempt"],
             "paf_path": str(paf_path),
             "assembly_ref": execution_inputs.input_assembly_ref,
             "reads_refs": alignment_reads_refs,
@@ -862,7 +816,7 @@ def build_t2t_candidates(state: TopLevelState) -> StateUpdate:
             else None
         )
         observations: list[dict[str, str]] = []
-        raw = _candidate_rows(
+        raw = candidate_rows(
             paf_artifact.path,
             assembly_ends,
             read_signals,
@@ -1320,877 +1274,6 @@ def fail_t2t(state: TopLevelState) -> StateUpdate:
     return _fail_terminal(state, str(out.get("reason", "t2t failed")))
 
 
-class T2TReviewEffectV1(BaseModel):
-    """The bounded durable result of one T2T review application."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal[1] = 1
-    decision: Literal[
-        "accept_selected_candidates", "continue_without_patch", "stop_pipeline"
-    ]
-    review_request_id: str = Field(min_length=1)
-    review_request_hash: str = Field(pattern=SHA256_PATTERN)
-    review_request_ref: ArtifactRef
-    selected_candidate_ids: tuple[str, ...] = ()
-    decision_ref: ArtifactRef
-    notes: tuple[str, ...] = ()
-    decided_by: Literal["human", "llm_provisional", "auto_rule"] = "human"
-    rationale_artifact_ref: ArtifactRef | None = None
-    adopted_patch: bool = False
-    output_candidate_bundle_ref: ArtifactRef | None = None
-    output_primary_ref: ArtifactRef | None = None
-    input_candidate_bundle_ref: ArtifactRef | None = None
-    input_primary_ref: ArtifactRef | None = None
-    patched_assembly_ref: ArtifactRef | None = None
-    patch_records_ref: ArtifactRef | None = None
-    patched_telomere_scan_ref: ArtifactRef | None = None
-    telomere_status_summary_ref: ArtifactRef | None = None
-    t2t_finishing_report_ref: ArtifactRef | None = None
-    bundle_ref: ArtifactRef | None = None
-    artifact_refs: tuple[ArtifactRef, ...] = ()
-    status: Literal["completed", "completed_with_warnings"] | None = None
-
-    @model_validator(mode="after")
-    def validate_projection(self) -> "T2TReviewEffectV1":
-        if self.selected_candidate_ids != tuple(
-            sorted(set(self.selected_candidate_ids))
-        ):
-            raise ValueError("t2t selected_candidate_ids must be sorted and unique")
-        if self.artifact_refs != canonical_artifact_refs(self.artifact_refs):
-            raise ValueError("t2t artifact_refs must be sorted and unique")
-        if self.decision == "stop_pipeline":
-            terminal_values = (
-                self.output_candidate_bundle_ref,
-                self.output_primary_ref,
-                self.telomere_status_summary_ref,
-                self.t2t_finishing_report_ref,
-                self.bundle_ref,
-                self.status,
-            )
-            if any(value is not None for value in terminal_values):
-                raise ValueError("stop_pipeline effect cannot contain a final handoff")
-            return self
-        required = (
-            self.output_candidate_bundle_ref,
-            self.output_primary_ref,
-            self.telomere_status_summary_ref,
-            self.t2t_finishing_report_ref,
-            self.bundle_ref,
-            self.status,
-        )
-        if any(value is None for value in required):
-            raise ValueError("T2T review effect is missing final durable evidence")
-        if self.adopted_patch and (
-            self.input_candidate_bundle_ref is None
-            or self.input_primary_ref is None
-            or self.patched_assembly_ref is None
-        ):
-            raise ValueError("adopted patch effect is missing candidate provenance")
-        return self
-
-
-T2T_REVIEW_EFFECT_KIND = "t2t.review_application.v1"
-
-
-class _PreparedT2TSelectedOutput(TypedDict):
-    status: Literal["completed", "patched_validated"]
-    output_assembly_ref: str
-    patched_assembly_ref: str | None
-    patch_records_ref: str | None
-    patched_telomere_scan_ref: str | None
-
-
-def prepare_t2t_review_application(
-    state: TopLevelState, intent: ReviewIntentV1
-) -> PreparedReviewApplication:
-    """Persist the selected T2T result and all final evidence before apply."""
-
-    if intent.stage != "t2t" or intent.gate_id != "t2t_review":
-        raise ResumeValidationError("t2t review application has the wrong gate")
-    _require_t2t_review_intent_binding(state, intent)
-    request = validate_t2t_intent_request(
-        state,
-        intent.request,
-        load_review_request(
-            state["data_dir"], intent.request_ref, session_id=state["session_id"]
-        ),
-    )
-    out = _output(state)
-    try:
-        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
-    except ValueError as exc:
-        raise ResumeValidationError(
-            f"T2T frozen execution inputs are invalid: {exc}"
-        ) from exc
-    decision = _t2t_review_decision(request)
-    accepted_candidate_ids = (
-        list(request.candidate_ids) if decision == "accept_selected_candidates" else []
-    )
-    if decision == "accept_selected_candidates" and not accepted_candidate_ids:
-        raise ResumeValidationError(
-            "t2t accept_selected_candidates requires candidate_ids"
-        )
-    if decision == "accept_selected_candidates" and request.decided_by != "human":
-        raise ResumeValidationError(
-            "t2t candidate adoption requires a human review decision"
-        )
-
-    if decision == "stop_pipeline":
-        return _prepare_stopped_t2t_review_application(
-            state, intent, execution_inputs, accepted_candidate_ids
-        )
-
-    current_assembly = _require_current_t2t_review_assembly(state, execution_inputs)
-    source_candidate = _verify_t2t_adopted_candidate(
-        state,
-        current_assembly_metadata=current_assembly.metadata,
-        assembly_path=execution_inputs.input_assembly_ref,
-    )
-    prepared = _prepare_t2t_selected_output(
-        state,
-        out,
-        execution_inputs,
-        decision=decision,
-        accepted_candidate_ids=accepted_candidate_ids,
-    )
-    decision_ref = _persist_t2t_review_decision(
-        state,
-        intent,
-        T2TReviewDecisionArtifact(
-            session_id=state["session_id"],
-            decision=decision,
-            candidate_ids=accepted_candidate_ids,
-            input_assembly_ref=execution_inputs.input_assembly_ref,
-            output_assembly_ref=prepared["output_assembly_ref"],
-            patched_assembly_ref=prepared.get("patched_assembly_ref"),
-            notes=list(request.notes),
-            metadata={
-                **request.metadata,
-                "decided_by": request.decided_by,
-                "rationale_artifact_ref": (
-                    request.rationale_artifact_ref.model_dump(mode="json")
-                    if request.rationale_artifact_ref is not None
-                    else None
-                ),
-            },
-        ),
-    )
-    stage_payload = {
-        "status": prepared["status"],
-        "decision": decision,
-        "selected_candidate_ids": accepted_candidate_ids,
-        "selected_patch_count": len(accepted_candidate_ids),
-        "patched_assembly_ref": prepared.get("patched_assembly_ref"),
-        "patch_records_ref": prepared.get("patch_records_ref"),
-        "output_assembly_ref": prepared["output_assembly_ref"],
-        "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-        "notes": list(request.notes),
-        "decided_by": request.decided_by,
-        "rationale_artifact_ref": (
-            request.rationale_artifact_ref.path_ref
-            if request.rationale_artifact_ref is not None
-            else None
-        ),
-    }
-    if prepared.get("patched_telomere_scan_ref") is not None:
-        stage_payload["patched_telomere_scan_ref"] = prepared[
-            "patched_telomere_scan_ref"
-        ]
-    stage_update = update_t2t_stage_output(state, stage_payload)
-    reviewed_state = validate_top_level_state(
-        {
-            **state,
-            **dict(stage_update),
-            "active_interrupt": None,
-            "supervision_state": "running_stage",
-        }
-    )
-    try:
-        final_evidence_update = _finalize_t2t_evidence(
-            reviewed_state, read_t2t_stage_output(reviewed_state)
-        )
-    except (OSError, ValueError, DataLayoutError) as exc:
-        raise ResumeValidationError(
-            f"t2t final evidence could not be persisted: {exc}"
-        ) from exc
-    finalized_state = validate_top_level_state(
-        {**reviewed_state, **dict(final_evidence_update)}
-    )
-    finalized = read_t2t_stage_output(finalized_state)
-    adopted_patch = (
-        prepared["output_assembly_ref"] != execution_inputs.input_assembly_ref
-    )
-    if adopted_patch:
-        output_primary_ref = artifact_ref_for_path(
-            absolute_data_dir(state),
-            state["session_id"],
-            prepared["output_assembly_ref"],
-            expected_type=T2T_PATCHED_ASSEMBLY,
-        )
-        output_candidate = publish_derived_assembly_candidate(
-            absolute_data_dir(state),
-            state["session_id"],
-            workflow_step_id=current_workflow_step_id(state, expected_stage="t2t"),
-            source_candidate=source_candidate,
-            primary_output_ref=output_primary_ref,
-            stage="t2t",
-            method_name=T2T_CONTRACT_METHOD,
-            action_identity=decision_ref.artifact_id,
-        )
-    else:
-        output_candidate = source_candidate
-        output_primary_ref = source_candidate.primary_output_ref
-    effect = _t2t_review_effect_from_finalized_output(
-        state,
-        intent,
-        finalized,
-        decision=decision,
-        selected_candidate_ids=accepted_candidate_ids,
-        decision_ref=decision_ref,
-        request=request,
-        adopted_patch=adopted_patch,
-        source_candidate=source_candidate,
-        output_candidate=output_candidate,
-        output_primary_ref=output_primary_ref,
-    )
-    return PreparedReviewApplication(
-        effect_kind=T2T_REVIEW_EFFECT_KIND,
-        effect=effect,
-        decision_ref=decision_ref,
-        required_refs=canonical_artifact_refs(
-            (
-                decision_ref,
-                *effect.artifact_refs,
-                output_candidate.ref,
-                output_primary_ref,
-            )
-        ),
-    )
-
-
-def apply_t2t_review_application(
-    state: TopLevelState, application: VerifiedReviewApplication
-) -> StateUpdate:
-    """Purely project a verified T2T effect into its checkpoint state."""
-
-    if application.application.effect_kind != T2T_REVIEW_EFFECT_KIND:
-        raise ResumeValidationError("t2t review application has the wrong effect kind")
-    if not isinstance(application.effect, T2TReviewEffectV1):
-        raise ResumeValidationError("t2t review application has the wrong effect model")
-    if (
-        application.application.stage != "t2t"
-        or application.application.gate_id != "t2t_review"
-    ):
-        raise ResumeValidationError("t2t review application has the wrong gate")
-    effect = application.effect
-    if effect.decision == "stop_pipeline":
-        reason = "t2t stopped by human review decision"
-        stage_update = update_t2t_stage_output(
-            state,
-            {
-                "status": "failed_terminal",
-                "decision": effect.decision,
-                "selected_candidate_ids": [],
-                "selected_patch_count": 0,
-                "review_decision_artifact_ref": effect.decision_ref.model_dump(
-                    mode="json"
-                ),
-                "notes": list(effect.notes),
-                "decided_by": effect.decided_by,
-                "rationale_artifact_ref": (
-                    effect.rationale_artifact_ref.path_ref
-                    if effect.rationale_artifact_ref is not None
-                    else None
-                ),
-            },
-        )
-        return {
-            **_settle_terminal_alignment(state, stage_update),
-            **fail_workflow_step(state, "t2t", reason),
-            "current_stage": "t2t",
-            "supervision_state": "failed_terminal",
-            "active_interrupt": None,
-            **stage_update,
-            "last_error": reason,
-        }
-    if (
-        effect.output_candidate_bundle_ref is None
-        or effect.output_primary_ref is None
-        or effect.telomere_status_summary_ref is None
-        or effect.t2t_finishing_report_ref is None
-        or effect.bundle_ref is None
-        or effect.status is None
-    ):
-        raise ResumeValidationError(
-            "t2t review effect is missing final durable evidence"
-        )
-    stage_payload = {
-        "status": effect.status,
-        "decision": effect.decision,
-        "selected_candidate_ids": list(effect.selected_candidate_ids),
-        "selected_patch_count": len(effect.selected_candidate_ids),
-        "patched_assembly_ref": _effect_ref_path(state, effect.patched_assembly_ref),
-        "patch_records_ref": _effect_ref_path(state, effect.patch_records_ref),
-        "output_assembly_ref": _effect_ref_path(state, effect.output_primary_ref),
-        "telomere_status_summary_ref": _effect_ref_path(
-            state, effect.telomere_status_summary_ref
-        ),
-        "t2t_finishing_report_ref": _effect_ref_path(
-            state, effect.t2t_finishing_report_ref
-        ),
-        "bundle_ref": _effect_ref_path(state, effect.bundle_ref),
-        "finishing_evidence_phase": "final",
-        "artifact_refs": [_effect_ref_path(state, ref) for ref in effect.artifact_refs],
-        "review_decision_artifact_ref": effect.decision_ref.model_dump(mode="json"),
-        "notes": list(effect.notes),
-        "decided_by": effect.decided_by,
-        "rationale_artifact_ref": (
-            effect.rationale_artifact_ref.path_ref
-            if effect.rationale_artifact_ref is not None
-            else None
-        ),
-    }
-    if effect.patched_telomere_scan_ref is not None:
-        stage_payload["patched_telomere_scan_ref"] = _effect_ref_path(
-            state, effect.patched_telomere_scan_ref
-        )
-    stage_update = update_t2t_stage_output(state, stage_payload)
-    raw_assembly = (state.get("resource_refs") or {}).get("assembly")
-    if raw_assembly is None:
-        raise ResumeValidationError("t2t review application has no assembly resource")
-    current_resource = (
-        ResourceRef.from_dict(raw_assembly)
-        if isinstance(raw_assembly, dict)
-        else raw_assembly
-    )
-    metadata = {
-        **dict(current_resource.metadata),
-        "patched": effect.adopted_patch,
-        "candidate_bundle_ref": effect.output_candidate_bundle_ref.model_dump(
-            mode="json"
-        ),
-        "primary_output_ref": effect.output_primary_ref.model_dump(mode="json"),
-    }
-    if effect.adopted_patch:
-        if (
-            effect.input_candidate_bundle_ref is None
-            or effect.input_primary_ref is None
-        ):
-            raise ResumeValidationError(
-                "t2t adopted effect is missing input provenance"
-            )
-        metadata.update(
-            {
-                "input_candidate_bundle_ref": (
-                    effect.input_candidate_bundle_ref.model_dump(mode="json")
-                ),
-                "input_primary_output_ref": effect.input_primary_ref.model_dump(
-                    mode="json"
-                ),
-            }
-        )
-    output_path = _effect_ref_path(state, effect.output_primary_ref)
-    return {
-        **advance_workflow_step(
-            state,
-            "t2t",
-            outcome="completed",
-            deliveries=(
-                assembly_delivery(
-                    effect.output_candidate_bundle_ref.model_dump(mode="json"),
-                    effect.output_primary_ref.model_dump(mode="json"),
-                    delivery_mode=(
-                        "materialized" if effect.adopted_patch else "reused"
-                    ),
-                ),
-            ),
-        ),
-        "active_interrupt": None,
-        "route_trace": append_route_trace(state, "t2t_stage"),
-        "stage_outputs": stage_update["stage_outputs"],
-        "resource_refs": update_resource_ref(
-            state,
-            "assembly",
-            [output_path],
-            "t2t",
-            metadata,
-        ),
-    }
-
-
-def _t2t_review_decision(
-    request: ResumeReviewRequest,
-) -> Literal["accept_selected_candidates", "continue_without_patch", "stop_pipeline"]:
-    if request.decision in {
-        "accept_selected_candidates",
-        "continue_without_patch",
-        "stop_pipeline",
-    }:
-        return cast(
-            Literal[
-                "accept_selected_candidates",
-                "continue_without_patch",
-                "stop_pipeline",
-            ],
-            request.decision,
-        )
-    raise ResumeValidationError(
-        f"unsupported t2t review decision: {request.decision!r}"
-    )
-
-
-def validate_t2t_intent_request(
-    state: TopLevelState,
-    request: ResumeReviewRequest,
-    request_record: Mapping[str, Any],
-) -> ResumeReviewRequest:
-    """Validate and canonicalize one T2T intent request."""
-
-    decision = _t2t_review_decision(request)
-    if decision != "accept_selected_candidates":
-        return request.model_copy(update={"candidate_ids": []})
-    if request.decided_by != "human":
-        raise ResumeValidationError(
-            "t2t candidate adoption requires a human review decision"
-        )
-    candidate_ids = sorted(set(request.candidate_ids))
-    if not candidate_ids:
-        raise ResumeValidationError(
-            "t2t accept_selected_candidates requires candidate_ids"
-        )
-    immutable_candidate_ids = candidate_ids_from_review_request_payload(
-        request_record.get("payload")
-    )
-    unknown_immutable = sorted(set(candidate_ids).difference(immutable_candidate_ids))
-    if unknown_immutable:
-        raise ResumeValidationError(
-            "unknown t2t candidate_ids in immutable review request: "
-            f"{', '.join(unknown_immutable)}"
-        )
-    selectable_candidate_ids = _selectable_t2t_candidate_ids(state)
-    unknown_selectable = sorted(set(candidate_ids).difference(selectable_candidate_ids))
-    if unknown_selectable:
-        raise ResumeValidationError(
-            "unknown t2t candidate_ids in current selectable evidence: "
-            f"{', '.join(unknown_selectable)}"
-        )
-    return request.model_copy(update={"candidate_ids": candidate_ids})
-
-
-def _selectable_t2t_candidate_ids(state: TopLevelState) -> set[str]:
-    out = _output(state)
-    try:
-        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
-        candidate_rows = _read_tsv(Path(out["telomere_extension_candidates_ref"]))
-    except (KeyError, OSError, ValueError) as exc:
-        raise ResumeValidationError(
-            f"t2t selectable candidate evidence is unavailable: {exc}"
-        ) from exc
-    allowed = {"auto_patch"} if execution_inputs.mode == "auto_patch" else {"proposed"}
-    return {
-        str(row["candidate_id"])
-        for row in candidate_rows
-        if row.get("candidate_id") and row.get("decision") in allowed
-    }
-
-
-def _require_t2t_review_intent_binding(
-    state: TopLevelState, intent: ReviewIntentV1
-) -> None:
-    """Require the immutable intent to target this blocked T2T occurrence."""
-
-    if intent.session_id != state["session_id"]:
-        raise ResumeValidationError("t2t review intent session does not match")
-    if state.get("supervision_state") != "blocked_human":
-        raise ResumeValidationError("t2t review application requires blocked_human")
-    interrupt: Mapping[str, Any] = state.get("active_interrupt") or {}
-    expected = {
-        "stage": "t2t",
-        "gate_id": "t2t_review",
-        "workflow_step_id": intent.workflow_step_id,
-        "review_request_id": intent.review_request_id,
-        "request_hash": intent.request_hash,
-    }
-    for field, value in expected.items():
-        if interrupt.get(field) != value:
-            raise ResumeValidationError(
-                f"t2t review active_interrupt {field} does not match intent"
-            )
-    try:
-        interrupt_ref = ArtifactRef.model_validate(interrupt.get("request_ref"))
-    except (TypeError, ValueError) as exc:
-        raise ResumeValidationError(
-            "t2t review active_interrupt has no valid request_ref"
-        ) from exc
-    if interrupt_ref != intent.request_ref:
-        raise ResumeValidationError(
-            "t2t review active_interrupt request_ref does not match intent"
-        )
-    if current_workflow_step_id(state, expected_stage="t2t") != intent.workflow_step_id:
-        raise ResumeValidationError(
-            "t2t review current workflow step does not match intent"
-        )
-
-
-def _require_current_t2t_review_assembly(
-    state: TopLevelState, execution_inputs: T2TFrozenExecutionInputs
-) -> Any:
-    try:
-        current_assembly = resolve_stage_resource(
-            state,
-            resource_spec=assembly_resource_spec(),
-        )
-    except (OSError, TypeError, ValueError) as exc:
-        raise ResumeValidationError(
-            f"t2t assembly resource provenance is invalid: {exc}"
-        ) from exc
-    if (
-        not current_assembly.found
-        or not current_assembly.path
-        or _canonical_path(current_assembly.path)
-        != _canonical_path(execution_inputs.input_assembly_ref)
-    ):
-        raise ResumeValidationError(
-            "t2t assembly resource changed since input resolution; refusing to apply "
-            "a stale review decision"
-        )
-    return current_assembly
-
-
-def _prepare_t2t_selected_output(
-    state: TopLevelState,
-    out: T2TStageCursor,
-    execution_inputs: T2TFrozenExecutionInputs,
-    *,
-    decision: Literal["accept_selected_candidates", "continue_without_patch"],
-    accepted_candidate_ids: list[str],
-) -> _PreparedT2TSelectedOutput:
-    """Validate or materialize the selected output before publishing the decision."""
-
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-    if decision == "continue_without_patch":
-        return {
-            "status": "completed",
-            "output_assembly_ref": execution_inputs.input_assembly_ref,
-            "patched_assembly_ref": (
-                out.get("patched_assembly_ref")
-                if execution_inputs.mode == "auto_patch"
-                else None
-            ),
-            "patch_records_ref": out.get("patch_records_ref"),
-            "patched_telomere_scan_ref": (
-                out.get("patched_telomere_scan_ref")
-                if execution_inputs.mode == "auto_patch"
-                else None
-            ),
-        }
-
-    try:
-        review_dependencies = [
-            _assembly_input_dependency(state, execution_inputs.input_assembly_ref)
-        ]
-        review_evidence = [
-            (out["telomere_extension_candidates_ref"], T2T_EXTENSION_CANDIDATES),
-            *[
-                (path, T2T_TELOMERIC_READS)
-                for path in sorted(
-                    (out.get("telomeric_reads_fasta_refs") or {}).values()
-                )
-            ],
-        ]
-        for path_value, artifact_type in review_evidence:
-            artifact_ref = artifact_ref_for_path(
-                data_dir,
-                session_id,
-                path_value,
-                expected_type=artifact_type,
-            )
-            review_dependencies.append(
-                artifact_input_dependency(state, artifact_ref, path_value)
-            )
-        verify_input_dependencies(state, review_dependencies)
-    except (OSError, ValueError, DataLayoutError) as exc:
-        raise ResumeValidationError(
-            f"t2t review evidence changed before adoption: {exc}"
-        ) from exc
-
-    candidate_rows = _read_tsv(Path(out["telomere_extension_candidates_ref"]))
-    allowed_candidate_decisions = (
-        {"auto_patch"} if execution_inputs.mode == "auto_patch" else {"proposed"}
-    )
-    selectable = {
-        row["candidate_id"]: row
-        for row in candidate_rows
-        if row.get("candidate_id")
-        and row.get("decision") in allowed_candidate_decisions
-    }
-    unknown = sorted(set(accepted_candidate_ids).difference(selectable))
-    if unknown:
-        raise ResumeValidationError(f"unknown t2t candidate_ids: {', '.join(unknown)}")
-    if execution_inputs.mode == "auto_patch":
-        if set(accepted_candidate_ids) != set(selectable):
-            raise ResumeValidationError(
-                "t2t post-patch adoption must accept the complete validated candidate "
-                "assembly"
-            )
-        patched_assembly_ref = out.get("patched_assembly_ref")
-        patched_telomere_scan_ref = out.get("patched_telomere_scan_ref")
-        patch_records_ref = out.get("patch_records_ref")
-        if (
-            not patched_assembly_ref
-            or not Path(patched_assembly_ref).is_file()
-            or not patched_telomere_scan_ref
-            or not Path(patched_telomere_scan_ref).is_file()
-        ):
-            raise ResumeValidationError(
-                "t2t validated candidate patch evidence is unavailable"
-            )
-        try:
-            adoption_dependencies = []
-            for path_value, artifact_type in (
-                (patched_assembly_ref, T2T_PATCHED_ASSEMBLY),
-                (patched_telomere_scan_ref, T2T_ASSEMBLY_TELOMERE_SCAN),
-            ):
-                artifact_ref = artifact_ref_for_path(
-                    data_dir,
-                    session_id,
-                    path_value,
-                    expected_type=artifact_type,
-                )
-                adoption_dependencies.append(
-                    artifact_input_dependency(state, artifact_ref, path_value)
-                )
-            verify_input_dependencies(state, adoption_dependencies)
-        except (OSError, ValueError, DataLayoutError) as exc:
-            raise ResumeValidationError(
-                f"t2t candidate patch evidence changed before adoption: {exc}"
-            ) from exc
-        return {
-            "status": "patched_validated",
-            "output_assembly_ref": patched_assembly_ref,
-            "patched_assembly_ref": patched_assembly_ref,
-            "patch_records_ref": patch_records_ref,
-            "patched_telomere_scan_ref": patched_telomere_scan_ref,
-        }
-
-    materialized = _materialize_t2t_patches(
-        state,
-        out,
-        execution_inputs=execution_inputs,
-        selected_candidate_ids=set(accepted_candidate_ids),
-        allowed_decisions={"proposed"},
-    )
-    if not materialized:
-        raise ResumeValidationError(
-            "t2t selected candidates could not be materialized into a patched assembly"
-        )
-    if materialized.get("error"):
-        raise ResumeValidationError(
-            "t2t selected candidates are internally inconsistent: "
-            f"{materialized['error']}"
-        )
-    patched_assembly_ref = materialized["patched_assembly_ref"]
-    try:
-        scan_rows = list(
-            _scan_fasta_ends(
-                Path(patched_assembly_ref),
-                execution_inputs.resolved_telomere_motif,
-                execution_inputs.thresholds.model_dump(mode="json"),
-            )
-        )
-    except (OSError, ValueError) as exc:
-        raise ResumeValidationError(
-            f"t2t patched assembly validation failed: {exc}"
-        ) from exc
-    scan_source = Path(execution_inputs.work_dir) / "patched_telomere_scan.tsv"
-    _write_tsv(scan_source, scan_rows, _ASSEMBLY_SCAN_FIELDS)
-    patched_telomere_scan_ref = str(
-        publish_or_recover_work_artifact(
-            data_dir,
-            session_id,
-            scan_source,
-            stage="t2t",
-            method_name=T2T_CONTRACT_METHOD,
-            artifact_type=T2T_ASSEMBLY_TELOMERE_SCAN,
-        ).path
-    )
-    return {
-        "status": "patched_validated",
-        "output_assembly_ref": patched_assembly_ref,
-        "patched_assembly_ref": patched_assembly_ref,
-        "patch_records_ref": materialized["patch_records_ref"],
-        "patched_telomere_scan_ref": patched_telomere_scan_ref,
-    }
-
-
-def _prepare_stopped_t2t_review_application(
-    state: TopLevelState,
-    intent: ReviewIntentV1,
-    execution_inputs: T2TFrozenExecutionInputs,
-    accepted_candidate_ids: list[str],
-) -> PreparedReviewApplication:
-    request = intent.request
-    decision_ref = _persist_t2t_review_decision(
-        state,
-        intent,
-        T2TReviewDecisionArtifact(
-            session_id=state["session_id"],
-            decision="stop_pipeline",
-            candidate_ids=accepted_candidate_ids,
-            input_assembly_ref=execution_inputs.input_assembly_ref,
-            output_assembly_ref=execution_inputs.input_assembly_ref,
-            notes=list(request.notes),
-            metadata={
-                **request.metadata,
-                "decided_by": request.decided_by,
-                "rationale_artifact_ref": (
-                    request.rationale_artifact_ref.model_dump(mode="json")
-                    if request.rationale_artifact_ref is not None
-                    else None
-                ),
-            },
-        ),
-    )
-    return PreparedReviewApplication(
-        effect_kind=T2T_REVIEW_EFFECT_KIND,
-        effect=T2TReviewEffectV1(
-            decision="stop_pipeline",
-            review_request_id=intent.review_request_id,
-            review_request_hash=intent.request_hash,
-            review_request_ref=intent.request_ref,
-            selected_candidate_ids=tuple(accepted_candidate_ids),
-            decision_ref=decision_ref,
-            notes=tuple(request.notes),
-            decided_by=request.decided_by,
-            rationale_artifact_ref=request.rationale_artifact_ref,
-        ),
-        decision_ref=decision_ref,
-    )
-
-
-def _persist_t2t_review_decision(
-    state: TopLevelState,
-    intent: ReviewIntentV1,
-    decision: T2TReviewDecisionArtifact,
-) -> ArtifactRef:
-    try:
-        return persist_review_decision(
-            absolute_data_dir(state),
-            session_id=state["session_id"],
-            review_request_id=intent.review_request_id,
-            stage="t2t",
-            gate_id="t2t_review",
-            decision=decision,
-            request_hash=intent.request_hash,
-            request_ref=intent.request_ref,
-            method_name=T2T_CONTRACT_METHOD,
-            artifact_type="t2t.review_decision",
-        )
-    except (OSError, ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError(
-            "t2t review decision could not be persisted"
-        ) from exc
-
-
-def _t2t_review_effect_from_finalized_output(
-    state: TopLevelState,
-    intent: ReviewIntentV1,
-    out: T2TStageCursor,
-    *,
-    decision: Literal["accept_selected_candidates", "continue_without_patch"],
-    selected_candidate_ids: list[str],
-    decision_ref: ArtifactRef,
-    request: ResumeReviewRequest,
-    adopted_patch: bool,
-    source_candidate: VerifiedExecutedCandidate,
-    output_candidate: VerifiedExecutedCandidate,
-    output_primary_ref: ArtifactRef,
-) -> T2TReviewEffectV1:
-    def ref(key: str, artifact_type: str, *, required: bool) -> ArtifactRef | None:
-        value = out.get(key)
-        if not value:
-            if required:
-                raise ResumeValidationError(f"t2t final evidence has no {key}")
-            return None
-        return artifact_ref_for_path(
-            absolute_data_dir(state),
-            state["session_id"],
-            str(value),
-            expected_type=artifact_type,
-        )
-
-    patched_assembly_ref = ref(
-        "patched_assembly_ref", T2T_PATCHED_ASSEMBLY, required=False
-    )
-    patch_records_ref = ref("patch_records_ref", T2T_PATCH_RECORDS, required=False)
-    patched_scan_ref = ref(
-        "patched_telomere_scan_ref", T2T_ASSEMBLY_TELOMERE_SCAN, required=False
-    )
-    summary_ref = ref("telomere_status_summary_ref", T2T_STATUS_SUMMARY, required=True)
-    report_ref = ref("t2t_finishing_report_ref", T2T_FINISHING_REPORT, required=True)
-    bundle_ref = ref("bundle_ref", "t2t.bundle", required=True)
-    assert summary_ref is not None and report_ref is not None and bundle_ref is not None
-    artifact_refs = canonical_artifact_refs(
-        (
-            ref_value
-            for ref_value in (
-                patched_assembly_ref,
-                patch_records_ref,
-                patched_scan_ref,
-                summary_ref,
-                report_ref,
-                bundle_ref,
-            )
-            if ref_value is not None
-        )
-    )
-    status = out.get("status")
-    if status not in {"completed", "completed_with_warnings"}:
-        raise ResumeValidationError(
-            f"t2t final evidence has invalid status: {status!r}"
-        )
-    return T2TReviewEffectV1(
-        decision=decision,
-        review_request_id=intent.review_request_id,
-        review_request_hash=intent.request_hash,
-        review_request_ref=intent.request_ref,
-        selected_candidate_ids=tuple(selected_candidate_ids),
-        decision_ref=decision_ref,
-        notes=tuple(request.notes),
-        decided_by=request.decided_by,
-        rationale_artifact_ref=request.rationale_artifact_ref,
-        adopted_patch=adopted_patch,
-        output_candidate_bundle_ref=output_candidate.ref,
-        output_primary_ref=output_primary_ref,
-        input_candidate_bundle_ref=source_candidate.ref if adopted_patch else None,
-        input_primary_ref=source_candidate.primary_output_ref
-        if adopted_patch
-        else None,
-        patched_assembly_ref=patched_assembly_ref,
-        patch_records_ref=patch_records_ref,
-        patched_telomere_scan_ref=patched_scan_ref,
-        telomere_status_summary_ref=summary_ref,
-        t2t_finishing_report_ref=report_ref,
-        bundle_ref=bundle_ref,
-        artifact_refs=artifact_refs,
-        status=status,
-    )
-
-
-@overload
-def _effect_ref_path(state: TopLevelState, ref: ArtifactRef) -> str: ...
-
-
-@overload
-def _effect_ref_path(state: TopLevelState, ref: None) -> None: ...
-
-
-def _effect_ref_path(state: TopLevelState, ref: ArtifactRef | None) -> str | None:
-    return str(resolve_run_ref(state, ref.path_ref)) if ref is not None else None
-
-
 def _verify_t2t_adopted_candidate(
     state: TopLevelState,
     *,
@@ -2392,7 +1475,7 @@ def _validate_long_read_inputs(
         if not reads_path.exists() or not reads_path.is_file():
             raise ValueError(f"long-read input is not a file: {reads_path}")
         try:
-            next(_iter_sequences(reads_path))
+            next(read_sequences(reads_path))
         except StopIteration as exc:
             raise ValueError(f"long-read input is empty: {reads_path}") from exc
         except (OSError, ValueError) as exc:
@@ -2522,79 +1605,40 @@ def _skip_no_reads(
 
 def _looks_like_fasta(path: Path) -> bool:
     try:
-        with _open_text(path) as handle:
+        with open_sequence_text(path) as handle:
             return handle.read(1) == ">"
-    except OSError:
+    except (OSError, UnicodeError):
         return False
-
-
-def _open_text(path: Path) -> TextIO:
-    suffix = path.suffix.lower()
-    if suffix in {".gz", ".gzip"}:
-        return gzip.open(path, "rt", encoding="utf-8")
-    if suffix in {".bz2", ".bzip2"}:
-        return bz2.open(path, "rt", encoding="utf-8")
-    if suffix == ".xz":
-        return lzma.open(path, "rt", encoding="utf-8")
-    return path.open("r", encoding="utf-8")
-
-
-def _iter_sequences(path: Path) -> Iterator[tuple[str, str]]:
-    with _open_text(path) as handle:
-        first = handle.readline()
-        if not first:
-            raise ValueError("empty sequence file")
-        if first.startswith(">"):
-            name = first[1:].strip().split()[0]
-            sequence_lines: list[str] = []
-            for line in handle:
-                if line.startswith(">"):
-                    if not name:
-                        raise ValueError("FASTA record has no identifier")
-                    yield name, "".join(sequence_lines).upper()
-                    name = line[1:].strip().split()[0]
-                    sequence_lines = []
-                else:
-                    sequence_lines.append(line.strip())
-            if not name:
-                raise ValueError("FASTA record has no identifier")
-            yield name, "".join(sequence_lines).upper()
-            return
-        if not first.startswith("@"):
-            raise ValueError("expected FASTA or FASTQ")
-        header = first
-        while header:
-            name = header[1:].strip().split()[0]
-            sequence_text = handle.readline().strip()
-            plus = handle.readline()
-            quality = handle.readline()
-            if not name or not sequence_text or not plus.startswith("+") or not quality:
-                raise ValueError("invalid FASTQ record")
-            yield name, sequence_text.upper()
-            header = handle.readline()
-            if header and not header.startswith("@"):
-                raise ValueError("invalid FASTQ header")
 
 
 def _load_telomeric_read_sequences(
     fasta_refs: Mapping[str, str],
+    *,
+    selected_ids: set[str] | None = None,
 ) -> dict[str, str]:
     sequences: dict[str, str] = {}
+    seen: set[str] = set()
     for _preset, path_value in sorted(fasta_refs.items()):
-        for read_id, sequence in _iter_sequences(Path(path_value)):
-            if read_id in sequences:
+        for read_id, sequence in read_sequences(Path(path_value)):
+            if read_id in seen:
                 raise ValueError(
                     f"duplicate telomeric read across preset groups: {read_id}"
                 )
-            sequences[read_id] = sequence
+            seen.add(read_id)
+            if selected_ids is None or read_id in selected_ids:
+                sequences[read_id] = sequence
     return sequences
 
 
 def _scan_fasta_ends(
     path: Path, motif: str, thresholds: dict[str, int]
 ) -> Iterable[dict[str, str]]:
-    for name, sequence in _iter_sequences(path):
-        left, right = _terminal_signal(sequence, motif, thresholds)
+    seen: set[str] = set()
+    for name, sequence in read_sequences(path):
+        if name in seen:
+            raise ValueError(f"duplicate scaffold identifier: {name}")
+        seen.add(name)
+        left, right = terminal_signal(sequence, motif, thresholds)
         yield {
             "sequence": name,
             "length": str(len(sequence)),
@@ -2605,292 +1649,28 @@ def _scan_fasta_ends(
         }
 
 
-def _terminal_signal(
-    sequence: str, motif: str, thresholds: dict[str, int]
-) -> tuple[int, int]:
-    window = min(len(sequence), int(thresholds["terminal_window_bp"]))
-    return _max_motif_copies(sequence[:window], motif), _max_motif_copies(
-        sequence[-window:], motif
-    )
-
-
-def _max_motif_copies(sequence: str, motif: str) -> int:
-    alternatives = [re.escape(motif), re.escape(_reverse_complement(motif))]
-    match_lengths = [
-        len(match.group(0)) // len(motif)
-        for match in re.finditer(f"(?:{'|'.join(alternatives)})+", sequence)
-    ]
-    return max(match_lengths, default=0)
-
-
-def _reverse_complement(sequence: str) -> str:
-    return sequence.upper().translate(str.maketrans("ACGTN", "TGCAN"))[::-1]
-
-
-def _candidate_rows(
-    paf_path: Path,
-    assembly_ends: dict[str, dict[str, str]],
-    read_signals: dict[str, dict[str, str]],
-    read_sequences: dict[str, str],
-    thresholds: dict[str, int],
-    motif: str,
-    allowed_sequences: set[str] | None,
-    mode: str,
-    *,
-    observations: list[dict[str, str]] | None = None,
-) -> list[dict[str, str]]:
-    grouped: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
-    for paf in _iter_paf(paf_path):
-        signal = read_signals.get(paf.query)
-        sequence = read_sequences.get(paf.query)
-        target = assembly_ends.get(paf.target)
-        for read_end in ("left", "right"):
-            target_end = (
-                read_end
-                if paf.strand == "+"
-                else ("right" if read_end == "left" else "left")
-            )
-            target_distance = (
-                paf.target_start
-                if target_end == "left"
-                else paf.target_length - paf.target_end
-            )
-            tail_length = (
-                paf.query_start
-                if read_end == "left"
-                else paf.query_length - paf.query_end
-            )
-            oriented_sequence = (
-                (sequence or "")
-                if paf.strand == "+"
-                else _reverse_complement(sequence or "")
-            )
-            oriented_query_start = (
-                paf.query_start
-                if paf.strand == "+"
-                else paf.query_length - paf.query_end
-            )
-            oriented_query_end = (
-                paf.query_end
-                if paf.strand == "+"
-                else paf.query_length - paf.query_start
-            )
-            tail = (
-                oriented_sequence[:oriented_query_start]
-                if target_end == "left"
-                else oriented_sequence[oriented_query_end:]
-            )
-            tail_motif_copies = _max_motif_copies(tail, motif)
-            reasons = [
-                reason
-                for rejected, reason in (
-                    (not signal, "missing_read_signal"),
-                    (not sequence, "missing_read_sequence"),
-                    (not target, "missing_assembly_end"),
-                    (
-                        bool(allowed_sequences and paf.target not in allowed_sequences),
-                        "target_not_selected",
-                    ),
-                    (
-                        (signal or {}).get(f"{read_end}_has_signal") != "true",
-                        "read_end_without_telomere_signal",
-                    ),
-                    (
-                        (target or {}).get(f"{target_end}_has_signal") == "true",
-                        "target_end_already_has_telomere",
-                    ),
-                    (paf.mapq < thresholds["min_mapq"], "mapq_below_threshold"),
-                    (
-                        paf.overlap_bp < thresholds["min_overlap_bp"],
-                        "overlap_below_threshold",
-                    ),
-                    (
-                        target_distance > thresholds["max_target_terminal_distance_bp"],
-                        "target_distance_above_threshold",
-                    ),
-                    (tail_length <= 0, "no_unaligned_tail"),
-                    (
-                        tail_motif_copies < thresholds["min_motif_copies"],
-                        "tail_motif_below_threshold",
-                    ),
-                )
-                if rejected
-            ]
-            if observations is not None:
-                observations.append(
-                    {
-                        "read_id": paf.query,
-                        "target": paf.target,
-                        "read_end": read_end,
-                        "target_end": target_end,
-                        "strand": paf.strand,
-                        "mapq": str(paf.mapq),
-                        "overlap_bp": str(paf.overlap_bp),
-                        "target_distance_bp": str(target_distance),
-                        "extension_length": str(tail_length),
-                        "tail_motif_copies": str(tail_motif_copies),
-                        "decision": "filtered" if reasons else "eligible_for_support",
-                        "rejection_reasons": ";".join(reasons),
-                    }
-                )
-            if reasons:
-                continue
-            assert signal is not None
-            grouped[(paf.target, target_end)].append(
-                {
-                    "target": paf.target,
-                    "target_end": target_end,
-                    "target_start": str(paf.target_start),
-                    "target_stop": str(paf.target_end),
-                    "junction_coordinate": str(
-                        paf.target_start if target_end == "left" else paf.target_end
-                    ),
-                    "target_bases_trimmed": str(target_distance),
-                    "read_id": paf.query,
-                    "source_asset_id": signal.get("source_asset_id", ""),
-                    "source_read_id": signal.get("source_read_id", paf.query),
-                    "read_end": read_end,
-                    "strand": paf.strand,
-                    "mapq": str(paf.mapq),
-                    "overlap_bp": str(paf.overlap_bp),
-                    "target_distance_bp": str(target_distance),
-                    "extension_length": str(tail_length),
-                    "query_start": str(paf.query_start),
-                    "query_end": str(paf.query_end),
-                    "oriented_query_start": str(oriented_query_start),
-                    "oriented_query_end": str(oriented_query_end),
-                    "tail": tail,
-                }
-            )
-    rows: list[dict[str, str]] = []
-    for candidates in grouped.values():
-        candidates.sort(
-            key=lambda row: (int(row["mapq"]), int(row["overlap_bp"])), reverse=True
-        )
-        representative = candidates[0]
-        candidate_id = f"{representative['target']}:{representative['target_end']}"
-        supporting = [
-            row
-            for row in candidates
-            if _tails_compatible(representative["tail"], row["tail"])
-        ]
-        support_ids = list(dict.fromkeys(row["read_id"] for row in supporting))
-        accepted = len(support_ids) >= thresholds["min_supporting_reads"]
-        for index, row in enumerate(candidates):
-            decision = "rejected"
-            reason = "insufficient_or_conflicting_read_support"
-            if accepted and row is representative:
-                decision = "auto_patch" if mode == "auto_patch" else "proposed"
-                reason = "approved_read_support_threshold"
-            elif accepted and row in supporting:
-                reason = "supporting_read"
-            rows.append(
-                {
-                    **{key: value for key, value in row.items() if key != "tail"},
-                    "candidate_id": candidate_id,
-                    "supporting_reads": ",".join(support_ids),
-                    "decision": decision,
-                    "reason": reason,
-                }
-            )
-    return rows
-
-
-def _tails_compatible(first: str, second: str) -> bool:
-    if not first or not second:
-        return False
-    if abs(len(first) - len(second)) > max(
-        100, int(max(len(first), len(second)) * 0.2)
-    ):
-        return False
-    k = 11
-    if min(len(first), len(second)) < k:
-        return first == second
-    first_kmers = {first[i : i + k] for i in range(len(first) - k + 1)}
-    second_kmers = {second[i : i + k] for i in range(len(second) - k + 1)}
-    return (
-        len(first_kmers & second_kmers) / min(len(first_kmers), len(second_kmers))
-        >= 0.2
-    )
-
-
-def _iter_paf(path: Path) -> Iterator[PafRecord]:
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            fields = line.rstrip("\r\n").split("\t")
-            if len(fields) < 12:
-                raise ValueError(
-                    f"malformed PAF line {line_number}: expected at least 12 "
-                    "tab-delimited fields"
-                )
-            try:
-                record = PafRecord(
-                    query=fields[0],
-                    query_length=int(fields[1]),
-                    query_start=int(fields[2]),
-                    query_end=int(fields[3]),
-                    strand=fields[4],
-                    target=fields[5],
-                    target_length=int(fields[6]),
-                    target_start=int(fields[7]),
-                    target_end=int(fields[8]),
-                    mapq=int(fields[11]),
-                )
-            except ValueError as exc:
-                raise ValueError(
-                    f"malformed PAF line {line_number}: invalid numeric field"
-                ) from exc
-            if (
-                not record.query
-                or not record.target
-                or record.strand not in {"+", "-"}
-                or record.query_length < 0
-                or record.query_start < 0
-                or record.query_end < record.query_start
-                or record.query_end > record.query_length
-                or record.target_length < 0
-                or record.target_start < 0
-                or record.target_end < record.target_start
-                or record.target_end > record.target_length
-                or not 0 <= record.mapq <= 255
-            ):
-                raise ValueError(
-                    f"malformed PAF line {line_number}: invalid field values"
-                )
-            yield record
-
-
 def _write_patched_fasta(
     source: Path,
     destination: Path,
     patches: dict[str, dict[str, Any]],
 ) -> None:
-    records = []
-    for name, sequence in _iter_sequences(source):
-        plan = patches.get(name) or {}
-        left = plan.get("left")
-        right = plan.get("right")
-        left_cut = int(left["cut"]) if left else 0
-        right_cut = int(right["cut"]) if right else len(sequence)
-        if left_cut < 0 or right_cut > len(sequence) or left_cut > right_cut:
-            raise ValueError(
-                f"invalid T2T patch interval for {name}: {left_cut}>{right_cut}"
+    with destination.open("w", encoding="utf-8") as handle:
+        for name, sequence in read_sequences(source):
+            plan = patches.get(name) or {}
+            left = plan.get("left")
+            right = plan.get("right")
+            left_cut = int(left["cut"]) if left else 0
+            right_cut = int(right["cut"]) if right else len(sequence)
+            if left_cut < 0 or right_cut > len(sequence) or left_cut > right_cut:
+                raise ValueError(
+                    f"invalid T2T patch interval for {name}: {left_cut}>{right_cut}"
+                )
+            patched = (
+                (str(left["tail"]) if left else "")
+                + sequence[left_cut:right_cut]
+                + (str(right["tail"]) if right else "")
             )
-        patched = (
-            (str(left["tail"]) if left else "")
-            + sequence[left_cut:right_cut]
-            + (str(right["tail"]) if right else "")
-        )
-        records.append((name, patched))
-    _write_fasta(destination, records)
-
-
-def _write_fasta(path: Path, records: Iterable[tuple[str, str]]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        for name, sequence in records:
-            _write_fasta_record(handle, name, sequence)
+            _write_fasta_record(handle, name, patched)
 
 
 def _write_fasta_record(handle: TextIO, name: str, sequence: str) -> None:
@@ -2959,21 +1739,26 @@ def _materialize_t2t_patches(
     ]
     if not selected:
         return None
-    read_sequences = _load_telomeric_read_sequences(
-        out.get("telomeric_reads_fasta_refs") or {}
+    telomeric_sequences = _load_telomeric_read_sequences(
+        out.get("telomeric_reads_fasta_refs") or {},
+        selected_ids={row["read_id"] for row in selected},
     )
-    assembly_sequences = dict(
-        _iter_sequences(Path(execution_inputs.input_assembly_ref))
-    )
+    assembly_lengths: dict[str, int] = {}
+    for name, scaffold_sequence in read_sequences(
+        Path(execution_inputs.input_assembly_ref)
+    ):
+        if name in assembly_lengths:
+            raise ValueError(f"duplicate scaffold identifier: {name}")
+        assembly_lengths[name] = len(scaffold_sequence)
     patches: dict[str, dict[str, Any]] = {}
     records: list[dict[str, str]] = []
     error: str | None = None
     for row in selected:
-        sequence = read_sequences.get(row["read_id"])
+        sequence = telomeric_sequences.get(row["read_id"])
         if not sequence:
             error = f"selected_read_sequence_unavailable:{row['read_id']}"
             break
-        oriented = sequence if row["strand"] == "+" else _reverse_complement(sequence)
+        oriented = sequence if row["strand"] == "+" else reverse_complement(sequence)
         oriented_start = int(row["oriented_query_start"])
         oriented_end = int(row["oriented_query_end"])
         tail = (
@@ -2984,12 +1769,12 @@ def _materialize_t2t_patches(
         if not tail:
             error = f"empty_replacement_tail:{row['candidate_id']}"
             break
-        target_sequence = assembly_sequences.get(row["target"])
-        if target_sequence is None:
+        target_length = assembly_lengths.get(row["target"])
+        if target_length is None:
             error = f"patch_target_missing:{row['target']}"
             break
         cut = int(row["junction_coordinate"])
-        if cut < 0 or cut > len(target_sequence):
+        if cut < 0 or cut > target_length:
             error = f"invalid_junction_coordinate:{row['candidate_id']}:{cut}"
             break
         target_plan = patches.setdefault(row["target"], {})
@@ -3008,7 +1793,7 @@ def _materialize_t2t_patches(
                 "extension_length": str(len(tail)),
                 "target_cut_coordinate": str(cut),
                 "target_bases_removed": str(
-                    cut if row["target_end"] == "left" else len(target_sequence) - cut
+                    cut if row["target_end"] == "left" else target_length - cut
                 ),
                 "bases_added": str(len(tail)),
                 "supporting_reads": row["supporting_reads"],

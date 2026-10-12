@@ -1,25 +1,21 @@
-"""T2T sparse threshold recommendation and mandatory approval workflow."""
+"""T2T motif resolution and deterministic baseline evidence workflow."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
-from app.control.lifecycle import ResumeValidationError
-from app.control.workflow_plan import fail_workflow_step
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.domains.parameter_recommendation.resolution import (
     render_stage_values,
     resolve_parameters,
 )
-from app.execution.method_outcomes import settle_method_outcomes
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
     update_current_parameter_attempt,
 )
+from app.llm.parameters.base import PARAMETER_RECOMMENDATION_CONTRACT
 from app.llm.parameters.t2t.motif import (
     MOTIF_RESOLUTION_CONTRACT,
     build_t2t_motif_request,
@@ -33,33 +29,8 @@ from app.llm.parameters.t2t.motif import (
 from app.llm.parameters.t2t.motif import (
     resolve_t2t_motif as invoke_t2t_motif_model,
 )
-from app.llm.parameters.t2t.recommender import (
-    PROMPT_BUNDLE,
-    render_t2t_parameter_messages,
-    restore_t2t_parameter_decision,
-    t2t_parameter_prompt_hash,
-)
-from app.llm.parameters.t2t.recommender import (
-    recommend_t2t_parameters as invoke_t2t_parameter_model,
-)
-from app.llm.parameters.t2t.request import (
-    PARAMETER_RECOMMENDATION_CONTRACT,
-    T2T_METHOD,
-    build_t2t_parameter_request,
-)
-from app.review.application import (
-    PreparedReviewApplication,
-    ReviewIntentV1,
-    VerifiedReviewApplication,
-)
 from app.review.approval import (
-    ParameterApprovalEffectV1,
-    ensure_decision_allowed,
-    load_verified_interrupt_request,
-    parameter_approval_decision,
     persist_parameter_approval_decision,
-    validate_parameter_approval_bindings,
-    validate_parameter_recommendation_manifest,
 )
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
@@ -77,8 +48,8 @@ from app.schemas.artifacts import (
     T2T_PARAMETER_BASIS,
     T2T_PARAMETER_FROZEN_PARAMETERS,
     T2T_PARAMETER_INPUT_SNAPSHOT,
-    T2T_PARAMETER_MODEL_REQUEST,
-    T2T_PARAMETER_MODEL_RESPONSE,
+    T2T_PARAMETER_POLICY_REQUEST,
+    T2T_PARAMETER_POLICY_RESPONSE,
     T2T_PARAMETER_RECOMMENDATION,
     T2T_PARAMETER_RECOMMENDATION_MANIFEST,
     T2T_PARAMETER_RESPONSE_PARSE,
@@ -100,14 +71,15 @@ from app.schemas.parameter_recommendation import (
 )
 from app.schemas.shared_parameters import DnaMotif, normalize_dna_motif
 from app.schemas.state import StateUpdate, TopLevelState
-from app.stages.base import absolute_data_dir
-from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
+from app.schemas.t2t import T2TThresholds
+from app.stages.t2t.parameters.catalog import T2T_METHOD, load_t2t_parameter_catalog
 from app.stages.t2t.parameters.context import build_t2t_recommendation_context
 from app.stages.t2t.parameters.execution import (
-    T2TExecutionThresholds,
     T2TFrozenExecutionInputs,
     load_chromosome_names_snapshot,
+    load_t2t_baseline_bundle,
 )
+from app.stages.t2t.parameters.policy import baseline_request, baseline_response
 from app.stages.t2t.parameters.storage import (
     ParameterPersistenceError,
 )
@@ -124,40 +96,15 @@ from app.stages.t2t.state import (
     read_t2t_stage_output,
     update_t2t_stage_output,
 )
-from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
     build_recommendation_dependency_refs,
     canonical_parameter_dependency,
-    load_approved_parameter_chain_v3,
-    load_parameter_recommendation_chain_v3,
 )
 
 _RECOMMENDER_METHOD = "t2t.parameter_recommender"
 _APPROVAL_METHOD = "t2t.parameter_approval"
 _MOTIF_RESOLVER_METHOD = T2T_MOTIF_RESOLVER_ID
-
-
-def _settle_terminal_alignment(
-    state: TopLevelState,
-    stage_update: StateUpdate,
-) -> StateUpdate:
-    """Use the shared settlement boundary for a rejected parameter gate."""
-
-    # ``nodes`` imports this module to run recommendation logic; defer the
-    # outcome-policy import to avoid a module initialization cycle.
-    from app.stages.t2t.nodes import (
-        T2T_ALIGNMENT_METHOD,
-        t2t_alignment_method_outcome,
-    )
-
-    projected = cast(TopLevelState, {**state, **stage_update})
-    return settle_method_outcomes(
-        projected,
-        stage="t2t",
-        outcomes=t2t_alignment_method_outcome(projected),
-        expected_method_names=(T2T_ALIGNMENT_METHOD,),
-    )
 
 
 def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
@@ -166,6 +113,10 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
     output = read_t2t_stage_output(state)
     if output.get("status") != "resolved":
         return {}
+    if output.get("recommendation_mode") not in {"advisor", "deterministic_baseline"}:
+        return _fail(
+            state, "T2T requires explicit advisor or deterministic_baseline mode"
+        )
     existing_manifest_ref = output.get("telomere_motif_resolution_manifest_ref")
     if existing_manifest_ref is not None:
         try:
@@ -296,6 +247,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
                     "validity": "parsed" if decision.valid else "invalid",
                     "error": decision.error,
                     "model_id": decision.model_id,
+                    "model_call": decision.model_call.model_dump(mode="json"),
                 },
                 artifact_type=T2T_MOTIF_MODEL_RESPONSE,
                 method_name=_MOTIF_RESOLVER_METHOD,
@@ -447,6 +399,14 @@ def _hydrate_t2t_motif_resolution(
         expected_mode=manifest.resolution_mode,
         expected_status=manifest.status,
     )
+    if (
+        read_t2t_stage_output(state).get("recommendation_mode")
+        == "deterministic_baseline"
+        and manifest.resolution_mode != "provided_species_fact"
+    ):
+        raise ValueError(
+            "T2T deterministic_baseline requires a supplied telomere motif"
+        )
     if manifest.resolution_mode == "provided_species_fact":
         supplied = snapshot.facts.supplied_telomere_motif
         if (
@@ -587,12 +547,13 @@ def _fail_with_motif_refs(
 
 
 def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
-    """Persist one sparse recommendation and block at mandatory approval."""
+    """Persist and approve the empty-L2 deterministic baseline policy."""
 
     output = read_t2t_stage_output(state)
     if output.get("status") != "motif_resolved":
         return {}
-    baseline = output.get("recommendation_mode") == "deterministic_baseline"
+    if output.get("recommendation_mode") != "deterministic_baseline":
+        return _fail(state, "T2T schema-3 parameters require deterministic_baseline")
     read_inputs = output.get("long_read_inputs")
     if not isinstance(read_inputs, list) or not read_inputs:
         return {}
@@ -653,9 +614,6 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             motif_resolution_ref=output.get("telomere_motif_resolution_ref"),
         )
         catalog = load_t2t_parameter_catalog()
-        request = build_t2t_parameter_request(
-            facts=facts, context=context, catalog=catalog
-        ).model_dump(mode="json", exclude_none=True)
         input_snapshot_ref = write_t2t_parameter_artifact(
             state,
             0,
@@ -684,19 +642,12 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             artifact_type=T2T_PARAMETER_BASIS,
             method_name=_RECOMMENDER_METHOD,
         )
-        messages = render_t2t_parameter_messages(request)
         request_ref = write_t2t_parameter_artifact(
             state,
             0,
-            "model_request.json",
-            {
-                "schema_version": 3,
-                "prompt_bundle_id": PROMPT_BUNDLE,
-                "prompt_template_sha256": t2t_parameter_prompt_hash(),
-                "messages": messages,
-                "policy": "deterministic_baseline" if baseline else "advisor",
-            },
-            artifact_type=T2T_PARAMETER_MODEL_REQUEST,
+            "policy_request.json",
+            baseline_request(input_snapshot_ref, basis_ref),
+            artifact_type=T2T_PARAMETER_POLICY_REQUEST,
             method_name=_RECOMMENDER_METHOD,
         )
     except (OSError, ValueError, ParameterPersistenceError) as exc:
@@ -707,47 +658,28 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
         recovered = recover_t2t_parameter_artifact(
             state,
             0,
-            "model_response.json",
-            expected_type=T2T_PARAMETER_MODEL_RESPONSE,
+            "policy_response.json",
+            expected_type=T2T_PARAMETER_POLICY_RESPONSE,
             method_name=_RECOMMENDER_METHOD,
         )
-        if recovered is None:
-            if baseline:
-                decision = restore_t2t_parameter_decision(
-                    {
-                        "schema_version": 2,
-                        "raw_response": json.dumps(
-                            {
-                                "parameters": {},
-                                "summary": "Baseline: empty L2; model disabled.",
-                            }
-                        ),
-                        "validity": "parsed",
-                        "error": None,
-                        "model_id": "deterministic_baseline_policy",
-                    }
-                )
-            else:
-                decision = invoke_t2t_parameter_model(request, messages=messages)
-        else:
+        policy_record = baseline_response()
+        if recovered is not None:
             response_ref, record = recovered
-            decision = restore_t2t_parameter_decision(record)
+            if record != policy_record:
+                return _fail(state, "T2T baseline response does not match its policy")
         if response_ref is None:
             response_ref = write_t2t_parameter_artifact(
                 state,
                 0,
-                "model_response.json",
-                {
-                    "schema_version": 2,
-                    "raw_response": decision.raw_response,
-                    "validity": "parsed" if decision.valid else "invalid",
-                    "error": decision.error,
-                    "model_id": decision.model_id,
-                },
-                artifact_type=T2T_PARAMETER_MODEL_RESPONSE,
+                "policy_response.json",
+                policy_record,
+                artifact_type=T2T_PARAMETER_POLICY_RESPONSE,
                 method_name=_RECOMMENDER_METHOD,
             )
-        recommendation = decision.recommendation or {}
+        recommendation = {
+            "parameters": policy_record["parameters"],
+            "summary": policy_record["summary"],
+        }
         recommendation_ref = write_t2t_parameter_artifact(
             state,
             0,
@@ -765,7 +697,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             state,
             0,
             "response_parse.json",
-            {"schema_version": 1, "parsed": decision.valid, "error": decision.error},
+            {"schema_version": 1, "parsed": True, "error": None},
             artifact_type=T2T_PARAMETER_RESPONSE_PARSE,
             method_name="t2t.parameter_response_parser",
         )
@@ -777,7 +709,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                 "method_id": T2T_METHOD,
                 "task": "recommend_initial",
                 "recommendation_id": 0,
-                "status": "pending_approval" if decision.valid else "response_invalid",
+                "status": "pending_approval",
                 "previous_attempt_id": None,
                 "previous_attempt_manifest_ref": None,
                 "previous_attempt_seal_hash": None,
@@ -790,12 +722,9 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                     "response_parse_ref": parse_ref,
                 },
                 "summary": {
-                    "response_parsed": decision.valid,
-                    **(
-                        {"policy": "deterministic_baseline", "model_invoked": False}
-                        if baseline
-                        else {}
-                    ),
+                    "response_parsed": True,
+                    "policy": "deterministic_baseline",
+                    "model_invoked": False,
                 },
             }
         )
@@ -815,20 +744,10 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
         recommendation_id=0,
         method_id=T2T_METHOD,
         task="recommend_initial",
-        status="pending_approval" if decision.valid else "response_invalid",
+        status="pending_approval",
         manifest_ref=manifest_ref,
         recommendation_hash=manifest_ref.sha256,
     )
-    if not decision.valid:
-        return update_t2t_stage_output(
-            state,
-            {
-                "status": "parameter_response_invalid",
-                "reason": "T2T parameter recommendation response could not be parsed",
-                "current_parameter_recommendation": cursor.model_dump(mode="json"),
-            },
-        )
-
     bindings = {
         "attempt_id": 0,
         "task": "recommend_initial",
@@ -840,7 +759,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             state,
             stage="t2t",
             gate_id="parameter_approval",
-            reason="t2t_parameter_approval_required",
+            reason="t2t_baseline_policy_approval",
             payload={
                 "schema_version": 2,
                 "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
@@ -855,7 +774,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
                 "rationale": recommendation.get("summary"),
                 "response_parse_ref": parse_ref.model_dump(mode="json"),
                 "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-                "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                "decisions_allowed": ["approve_parameters"],
                 "auto_decidable": False,
             },
             method_name=_APPROVAL_METHOD,
@@ -870,336 +789,62 @@ def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
             "review_request_ref": persisted.request_ref,
         }
     )
-    if baseline:
-        decision_ref = persist_parameter_approval_decision(
-            state,
+    decision_ref = persist_parameter_approval_decision(
+        state,
+        stage="t2t",
+        request_id=persisted.review_request_id,
+        request_ref=persisted.request_ref,
+        request=ResumeReviewRequest(
+            session_id=state["session_id"],
             stage="t2t",
-            request_id=persisted.review_request_id,
-            request_ref=persisted.request_ref,
-            request=ResumeReviewRequest(
-                session_id=state["session_id"],
-                stage="t2t",
-                gate_id="parameter_approval",
-                review_request_id=persisted.review_request_id,
-                review_request_hash=persisted.request_hash,
-                decision="approve_parameters",
-                decided_by="auto_rule",
-                notes=["approved by deterministic_baseline policy"],
-                rationale_artifact_ref=recommendation_ref,
-                metadata={
-                    **bindings,
+            gate_id="parameter_approval",
+            review_request_id=persisted.review_request_id,
+            review_request_hash=persisted.request_hash,
+            decision="approve_parameters",
+            decided_by="auto_rule",
+            notes=["approved by deterministic_baseline policy"],
+            rationale_artifact_ref=recommendation_ref,
+            metadata={
+                **bindings,
+                "source": "policy",
+                "configured_seconds": 0,
+                "elapsed_seconds": 0,
+                "automatic_resolution": {
                     "source": "policy",
                     "configured_seconds": 0,
-                    "elapsed_seconds": 0,
-                    "automatic_resolution": {
-                        "source": "policy",
-                        "configured_seconds": 0,
-                        "elapsed_seconds": 0.0,
-                        "outcome": "approve_persisted_recommendation",
-                    },
+                    "elapsed_seconds": 0.0,
+                    "outcome": "approve_persisted_recommendation",
                 },
-            ),
-            manifest_ref=manifest_ref,
-            method_name=_APPROVAL_METHOD,
-            artifact_type=T2T_PARAMETER_APPROVAL_DECISION,
-        )
-        attempt = ParameterAttempt(
-            schema_version=3,
-            attempt_id=0,
-            method_id=T2T_METHOD,
-            task="recommend_initial",
-            status="recommended",
-            previous_attempt_id=None,
-            recommendation_manifest_ref=manifest_ref,
-            approval_decision_ref=decision_ref,
-            recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
-        )
-        return update_t2t_stage_output(
-            state,
-            {
-                "status": "parameters_approved",
-                "active_interrupt": None,
-                "current_parameter_attempt_id": 0,
-                "proposed_parameter_attempt_id": None,
-                "parameter_attempts": [attempt.model_dump(mode="json")],
-                "current_parameter_recommendation": cursor.model_copy(
-                    update={"status": "approved"}
-                ).model_dump(mode="json"),
             },
-        )
-    interrupt = persisted.compact_interrupt(
-        stage="t2t",
-        gate_id="parameter_approval",
-        reason="t2t_parameter_approval_required",
-        bindings=bindings,
+        ),
+        manifest_ref=manifest_ref,
+        method_name=_APPROVAL_METHOD,
+        artifact_type=T2T_PARAMETER_APPROVAL_DECISION,
     )
-    Ledger(absolute_data_dir(state)).record_review_requested(
-        state["session_id"],
-        "t2t",
-        reason="t2t_parameter_approval_required",
-        review_request_artifact_ref=persisted.request_ref.path_ref,
-        review_request_id=persisted.review_request_id,
-        auto_decidable=False,
+    attempt = ParameterAttempt(
+        schema_version=3,
+        attempt_id=0,
+        method_id=T2T_METHOD,
+        task="recommend_initial",
+        status="recommended",
+        previous_attempt_id=None,
+        recommendation_manifest_ref=manifest_ref,
+        approval_decision_ref=decision_ref,
+        recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
     )
     return update_t2t_stage_output(
         state,
         {
-            "status": "blocked_human",
-            "block_reason": "t2t_parameter_approval_required",
-            "active_interrupt": interrupt,
-            "current_parameter_attempt_id": 0,
-            "proposed_parameter_attempt_id": 0,
-            "parameter_attempts": [],
-            "current_parameter_recommendation": cursor.model_dump(mode="json"),
-        },
-    )
-
-
-@dataclass(frozen=True)
-class _ValidatedT2TParameterApproval:
-    request: ResumeReviewRequest
-    decision: Literal["approve_parameters", "reject_parameters"]
-    request_id: str
-    request_ref: ArtifactRef
-    cursor: ParameterRecommendationCursor
-    manifest_ref: ArtifactRef
-    manifest: ParameterRecommendationManifestV3
-
-
-def _validate_t2t_parameter_approval(
-    state: TopLevelState,
-    request: ResumeReviewRequest,
-    request_record: dict[str, Any],
-) -> _ValidatedT2TParameterApproval:
-    """Validate one exact T2T parameter-approval occurrence without writes."""
-
-    if request.stage != "t2t" or request.gate_id != "parameter_approval":
-        raise ResumeValidationError(
-            "T2T parameter approval requires t2t/parameter_approval"
-        )
-    output = read_t2t_stage_output(state)
-    interrupt = state.get("active_interrupt") or output.get("active_interrupt")
-    if (
-        not isinstance(interrupt, dict)
-        or interrupt.get("stage") != "t2t"
-        or interrupt.get("gate_id") != "parameter_approval"
-    ):
-        raise ResumeValidationError("no unresolved T2T parameter_approval gate")
-
-    validate_parameter_approval_bindings(interrupt, request)
-    decision = parameter_approval_decision(request)
-    request_ref, verified_record = load_verified_interrupt_request(state, interrupt)
-    if request_record != verified_record:
-        raise ResumeValidationError("T2T parameter approval request record is stale")
-    ensure_decision_allowed(verified_record, request)
-
-    payload = verified_record.get("payload") or {}
-    try:
-        ArtifactRef.model_validate(interrupt.get("request_ref"))
-        cursor = ParameterRecommendationCursor.model_validate(
-            output.get("current_parameter_recommendation")
-        )
-    except (ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError(
-            "T2T parameter approval request is missing or changed"
-        ) from exc
-    if request_record.get("reason") != "t2t_parameter_approval_required":
-        raise ResumeValidationError("T2T parameter approval request identity mismatch")
-    try:
-        manifest_ref = ArtifactRef.model_validate(
-            payload.get("recommendation_manifest_ref")
-        )
-    except ValueError as exc:
-        raise ResumeValidationError(
-            "T2T parameter approval request has no valid recommendation manifest"
-        ) from exc
-    if (
-        cursor.status != "pending_approval"
-        or cursor.review_request_id != interrupt.get("review_request_id")
-        or cursor.review_request_ref != request_ref
-        or cursor.recommendation_id != interrupt.get("attempt_id")
-        or cursor.method_id != T2T_METHOD
-        or cursor.method_id != payload.get("method_id")
-        or cursor.task != interrupt.get("task")
-        or cursor.task != payload.get("task")
-        or cursor.previous_attempt_id != interrupt.get("previous_attempt_id")
-        or cursor.manifest_ref != manifest_ref
-        or cursor.recommendation_hash != manifest_ref.sha256
-        or cursor.recommendation_hash != interrupt.get("recommendation_hash")
-        or cursor.recommendation_hash != payload.get("recommendation_manifest_hash")
-    ):
-        raise ResumeValidationError("T2T parameter approval cursor is stale")
-
-    try:
-        chain = load_parameter_recommendation_chain_v3(
-            state,
-            manifest_ref=manifest_ref,
-            expected_stage="t2t",
-            expected_method_id=T2T_METHOD,
-        )
-    except (
-        OSError,
-        ValueError,
-        ParameterEvidenceError,
-        ParameterPersistenceError,
-    ) as exc:
-        raise ResumeValidationError(
-            "T2T parameter recommendation evidence is missing or changed"
-        ) from exc
-    validate_parameter_recommendation_manifest(cursor, chain.manifest)
-    manifest = chain.manifest
-
-    attempts = output.get("parameter_attempts")
-    if not isinstance(attempts, list):
-        raise ResumeValidationError("T2T parameter attempt chain is invalid")
-    if attempts:
-        raise ResumeValidationError("T2T parameter approval gate was already resolved")
-    if (
-        cursor.recommendation_id != 0
-        or cursor.task != "recommend_initial"
-        or cursor.previous_attempt_id is not None
-        or cursor.previous_attempt_seal_hash is not None
-        or manifest.previous_attempt_manifest_ref is not None
-        or output.get("current_parameter_attempt_id") != 0
-        or output.get("proposed_parameter_attempt_id") != 0
-    ):
-        raise ResumeValidationError("T2T initial parameter approval chain head changed")
-    recommendation = chain.recommendation.get("recommendation")
-    if not isinstance(recommendation, dict) or not isinstance(
-        recommendation.get("parameters"), dict
-    ):
-        raise ResumeValidationError(
-            "T2T parameter recommendation has no parameters mapping"
-        )
-    request_id = interrupt.get("review_request_id")
-    if not isinstance(request_id, str) or not request_id:
-        raise ResumeValidationError("T2T parameter approval request ID is missing")
-
-    return _ValidatedT2TParameterApproval(
-        request=request,
-        decision=decision,
-        request_id=request_id,
-        request_ref=request_ref,
-        cursor=cursor,
-        manifest_ref=manifest_ref,
-        manifest=manifest,
-    )
-
-
-def validate_t2t_parameter_intent_request(
-    state: TopLevelState,
-    request: ResumeReviewRequest,
-    request_record: dict[str, Any],
-) -> ResumeReviewRequest:
-    """Registry hook validating a T2T parameter approval before intent write."""
-
-    return _validate_t2t_parameter_approval(state, request, request_record).request
-
-
-def prepare_t2t_parameter_approval_application(
-    state: TopLevelState, intent: ReviewIntentV1
-) -> PreparedReviewApplication:
-    """Recheck and durably prepare one T2T parameter decision."""
-
-    output = read_t2t_stage_output(state)
-    interrupt = state.get("active_interrupt") or output.get("active_interrupt")
-    if not isinstance(interrupt, dict):
-        raise ResumeValidationError("no unresolved T2T parameter_approval gate")
-    _request_ref, request_record = load_verified_interrupt_request(state, interrupt)
-    validated = _validate_t2t_parameter_approval(state, intent.request, request_record)
-
-    decision_ref = persist_parameter_approval_decision(
-        state,
-        stage="t2t",
-        request_id=validated.request_id,
-        request_ref=validated.request_ref,
-        request=validated.request,
-        manifest_ref=validated.manifest_ref,
-        method_name=_APPROVAL_METHOD,
-        artifact_type=T2T_PARAMETER_APPROVAL_DECISION,
-    )
-    approved_attempt = None
-    if validated.decision == "approve_parameters":
-        approved_attempt = ParameterAttempt(
-            schema_version=3,
-            attempt_id=validated.manifest.recommendation_id,
-            method_id=validated.manifest.method_id,
-            status="recommended",
-            task=validated.manifest.task,
-            previous_attempt_id=validated.manifest.previous_attempt_id,
-            recommendation_manifest_ref=validated.manifest_ref,
-            approval_decision_ref=decision_ref,
-            recommendation_contract=validated.manifest.recommendation_contract,
-            previous_attempt_seal_hash=validated.manifest.previous_attempt_seal_hash,
-        )
-    return PreparedReviewApplication(
-        effect_kind="t2t.parameter_approval.v1",
-        effect=ParameterApprovalEffectV1(
-            decision=validated.decision,
-            decision_ref=decision_ref,
-            manifest_ref=validated.manifest_ref,
-            cursor=validated.cursor,
-            approved_attempt=approved_attempt,
-            rejection_reason="t2t_parameter_recommendation_rejected_by_human",
-        ),
-        decision_ref=decision_ref,
-        required_refs=(validated.manifest_ref,),
-    )
-
-
-def apply_t2t_parameter_approval_application(
-    state: TopLevelState,
-    application: VerifiedReviewApplication,
-) -> StateUpdate:
-    """Project a verified T2T approval effect without durable side effects."""
-
-    effect = application.effect
-    if not isinstance(effect, ParameterApprovalEffectV1):
-        raise TypeError("T2T parameter approval has an invalid effect model")
-    cursor = effect.cursor
-    if effect.decision == "reject_parameters":
-        stage_update = update_t2t_stage_output(
-            state,
-            {
-                "status": "failed",
-                "reason": effect.rejection_reason,
-                "active_interrupt": None,
-                "current_parameter_recommendation": cursor.model_copy(
-                    update={"status": "rejected"}
-                ).model_dump(mode="json"),
-                "proposed_parameter_attempt_id": None,
-            },
-        )
-        return {
-            **_settle_terminal_alignment(state, stage_update),
-            **fail_workflow_step(state, "t2t", str(effect.rejection_reason)),
-            "current_stage": "t2t",
-            "supervision_state": "failed_terminal",
-            "active_interrupt": None,
-            "last_error": effect.rejection_reason,
-            **stage_update,
-        }
-    if effect.approved_attempt is None:
-        raise TypeError("approved T2T parameter effect has no attempt")
-    stage_update = update_t2t_stage_output(
-        state,
-        {
             "status": "parameters_approved",
             "active_interrupt": None,
-            "current_parameter_attempt_id": cursor.recommendation_id,
-            "parameter_attempts": [effect.approved_attempt.model_dump(mode="json")],
+            "current_parameter_attempt_id": 0,
+            "proposed_parameter_attempt_id": None,
+            "parameter_attempts": [attempt.model_dump(mode="json")],
             "current_parameter_recommendation": cursor.model_copy(
                 update={"status": "approved"}
             ).model_dump(mode="json"),
-            "proposed_parameter_attempt_id": None,
         },
     )
-    return {
-        "current_stage": "t2t",
-        "supervision_state": "running_stage",
-        "active_interrupt": None,
-        **stage_update,
-    }
 
 
 def freeze_t2t_parameters(state: TopLevelState) -> StateUpdate:
@@ -1210,12 +855,7 @@ def freeze_t2t_parameters(state: TopLevelState) -> StateUpdate:
         return {}
     try:
         attempt = current_parameter_attempt(output, method_id=T2T_METHOD, label="T2T")
-        bundle = load_approved_parameter_chain_v3(
-            state,
-            attempt=attempt,
-            expected_stage="t2t",
-            expected_method_id=T2T_METHOD,
-        )
+        bundle = load_t2t_baseline_bundle(state, output=output)
         resolved = resolve_parameters(
             bundle.chain.catalog,
             l0_executor_values=(
@@ -1226,7 +866,7 @@ def freeze_t2t_parameters(state: TopLevelState) -> StateUpdate:
         )
         stage_values = render_stage_values(resolved, bundle.chain.catalog)
         mode = stage_values.pop("mode", None)
-        effective = T2TExecutionThresholds.model_validate(stage_values)
+        effective = T2TThresholds.model_validate(stage_values)
         context = bundle.chain.input_snapshot.stage_context
         if not isinstance(context, T2TRecommendationContext):
             raise ValueError("approved snapshot does not contain T2T context")

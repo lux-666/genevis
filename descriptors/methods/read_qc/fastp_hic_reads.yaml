@@ -1,0 +1,22 @@
+method_name: read_qc.hic_reads.fastp
+stage: read_qc
+package_ref: fastp
+goal: "Quality-filter and adapter-trim paired Hi-C reads lane by lane."
+required_inputs:
+  - name: paired_hic_reads
+    type: hic_reads_registered
+    description: "Manifest-owned R1/R2 Hi-C lane pairs."
+expected_outputs:
+  - name: cleaned_hic_reads
+    type: read_qc.cleaned_hic_reads
+    description: "One cleaned R1/R2 pair for every frozen input lane."
+  - name: fastp_report
+    type: read_qc.fastp_report
+    description: "JSON and HTML fastp reports for every lane."
+planner:
+  selection_role: configured
+resource_hints:
+  cpu_cores: 4
+  memory_gb: 4.0
+  gpu_required: false
+  walltime_hours: 4.0

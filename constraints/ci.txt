@@ -1,0 +1,19 @@
+# Tested by the Python 3.12 developer environment on 2026-10-12.
+# Keep this file as the deployment/CI resolution boundary; pyproject.toml
+# remains the direct dependency declaration for library metadata.
+langgraph==1.2.11
+langgraph-checkpoint==4.2.0
+langgraph-checkpoint-sqlite==3.1.1
+langchain-core==1.6.3
+langchain-openai==1.6.2
+pydantic==2.13.5
+PyYAML==6.0.3
+typing-extensions==4.16.0
+numpy==2.2.6
+matplotlib==3.11.2
+nbformat==5.11.1
+pytest==9.1.1
+pytest-cov==7.0.0
+ruff==0.16.8
+mypy==2.3.1
+types-PyYAML==6.0.12.20250915

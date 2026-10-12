@@ -340,7 +340,7 @@ def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators(
     assert "retrieval_trace_ref" not in request_text
 
 
-def test_methods_without_guidance_or_cases_produce_serializable_dtos() -> None:
+def test_other_methods_receive_only_their_own_guidance_without_cases() -> None:
     facts = _facts()
     for method_id in (FLYE_METHOD, NEXTDENOVO_METHOD):
         catalog = load_parameter_catalog(method_id)
@@ -361,5 +361,6 @@ def test_methods_without_guidance_or_cases_produce_serializable_dtos() -> None:
         )
 
         json.dumps(request)
-        assert request["method_guidance"] == []
+        assert request["method_guidance"]
+        assert all(method_id in card["methods"] for card in request["method_guidance"])
         assert "literature_cases" not in request

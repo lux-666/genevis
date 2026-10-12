@@ -33,8 +33,13 @@ from app.execution.method_runner import (
 )
 from app.execution.runner import Runner
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.schemas.state import JsonValue, StateUpdate, TopLevelState
-from app.stages.base import stage_output, update_stage_output
+from app.schemas.state import (
+    JsonValue,
+    StateUpdate,
+    TopLevelState,
+    stage_output,
+    update_stage_output,
+)
 from app.storage.ledger import LedgerConflictError
 from app.storage.paths import DataLayoutError
 

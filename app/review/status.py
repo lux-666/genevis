@@ -7,7 +7,6 @@ from typing import Any, Literal, Mapping, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from app.control.workflow_plan import workflow_steps_from_run_config
 from app.review.application import (
     REVIEW_APPLICATION_ARTIFACT_TYPE,
     REVIEW_INTENT_ARTIFACT_TYPE,
@@ -23,11 +22,8 @@ from app.schemas.artifacts import ArtifactRef
 from app.schemas.state import (
     DomainStage,
     TopLevelState,
-    WorkflowStep,
-    validate_workflow_steps,
 )
 from app.storage.artifacts import artifact_ref_for_path
-from app.storage.frozen_inputs import validate_frozen_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 
@@ -41,7 +37,6 @@ ReviewResolutionBasis = Literal[
     "none",
     "checkpoint",
     "review_applied",
-    "historical_progression",
     "terminal_precedes_request",
 ]
 
@@ -60,7 +55,6 @@ class ReviewStatusProjection(BaseModel):
     request_sequence: int | None = None
     decision_sequence: int | None = None
     applied_sequence: int | None = None
-    progression_sequence: int | None = None
     resolution_basis: ReviewResolutionBasis = "none"
     integrity_error: str | None = None
 
@@ -92,7 +86,6 @@ class ReviewStatusProjection(BaseModel):
             "request_sequence": self.request_sequence,
             "decision_sequence": self.decision_sequence,
             "applied_sequence": self.applied_sequence,
-            "progression_sequence": self.progression_sequence,
             "resolution_basis": self.resolution_basis,
             "integrity_error": self.integrity_error,
         }
@@ -170,7 +163,6 @@ def project_review_status(
     terminal_read = ledger.read_canonical_terminal(identity.session_id)
     request_event = _request_event_for_identity(events, identity)
     request_sequence = _event_sequence(request_event)
-    steps = _steps_from_state(state)
     return _project_identity_status(
         paths,
         identity,
@@ -181,7 +173,6 @@ def project_review_status(
         canonical_terminal=(
             terminal_read.get("canonical") if terminal_read is not None else None
         ),
-        workflow_steps=steps,
     )
 
 
@@ -204,7 +195,6 @@ def project_review_history(
     terminal_integrity = (
         terminal_read.get("terminal_integrity") if terminal_read is not None else None
     )
-    workflow_steps, plan_error = _steps_from_frozen_inputs(paths)
     diagnostics: list[str] = []
     if terminal_integrity is not None:
         diagnostics.append(
@@ -242,7 +232,6 @@ def project_review_history(
             request_sequence=_event_sequence(event),
             checkpoint_application_ref=checkpoint_ref,
             canonical_terminal=canonical_terminal,
-            workflow_steps=workflow_steps,
         )
         occurrences.append(occurrence)
         if occurrence.integrity_error is not None:
@@ -253,10 +242,6 @@ def project_review_history(
                 )
             )
 
-    if plan_error is not None and any(
-        occurrence.status != "applied" for occurrence in occurrences
-    ):
-        diagnostics.append(plan_error)
     occurrences.sort(key=lambda item: item.request_sequence or 0)
     return ReviewHistoryProjection(
         occurrences=tuple(occurrences),
@@ -279,7 +264,6 @@ def _project_identity_status(
     request_sequence: int | None,
     checkpoint_application_ref: Any,
     canonical_terminal: Mapping[str, Any] | None,
-    workflow_steps: tuple[WorkflowStep, ...],
 ) -> ReviewStatusProjection:
     intent_path = _record_path(paths, identity, "intent.json")
     application_path = _record_path(paths, identity, "application.json")
@@ -296,7 +280,6 @@ def _project_identity_status(
             "review_requested occurs after the canonical session terminal",
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=terminal_sequence,
             resolution_basis="terminal_precedes_request",
         )
 
@@ -308,24 +291,13 @@ def _project_identity_status(
         events,
         terminal_sequence=terminal_sequence,
     )
-    progression_sequence = _historical_progression_sequence(
-        identity,
-        request_sequence=request_sequence,
-        events=events_before_or_at_terminal,
-        canonical_terminal=canonical_terminal,
-        workflow_steps=workflow_steps,
-    )
     if post_terminal_diagnostic is not None:
         return _error(
-            "applied" if progression_sequence is not None else "awaiting_decision",
+            "awaiting_decision",
             identity,
             post_terminal_diagnostic,
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis=(
-                "historical_progression" if progression_sequence is not None else "none"
-            ),
         )
 
     identity_diagnostic = _review_event_identity_diagnostic(
@@ -335,15 +307,11 @@ def _project_identity_status(
     )
     if identity_diagnostic is not None:
         return _error(
-            "applied" if progression_sequence is not None else "awaiting_decision",
+            "awaiting_decision",
             identity,
             identity_diagnostic,
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis=(
-                "historical_progression" if progression_sequence is not None else "none"
-            ),
         )
 
     try:
@@ -354,15 +322,11 @@ def _project_identity_status(
         )
     except Exception as exc:
         return _error(
-            "applied" if progression_sequence is not None else "awaiting_decision",
+            "awaiting_decision",
             identity,
             f"invalid review intent: {exc}",
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis=(
-                "historical_progression" if progression_sequence is not None else "none"
-            ),
         )
 
     matching_decisions = _matching_events(
@@ -378,28 +342,18 @@ def _project_identity_status(
         after_sequence=request_sequence,
     )
     if intent_ref is None:
-        legacy_fact = bool(
+        has_unbound_evidence = bool(
             decision_path.exists()
             or matching_decisions
             or applied_events
             or application_path.exists()
         )
-        if progression_sequence is not None:
-            return ReviewStatusProjection(
-                status="applied",
-                identity=identity,
-                request_event=request_event,
-                request_sequence=request_sequence,
-                progression_sequence=progression_sequence,
-                resolution_basis="historical_progression",
-            )
-        if legacy_fact:
+        if has_unbound_evidence:
             return _error(
                 "awaiting_decision",
                 identity,
-                "legacy partial review decision exists without intent/application "
-                "or verified later progression; same-decision automatic recovery "
-                "cannot be proven",
+                "review evidence exists without a verified intent/application; "
+                "same-decision automatic recovery cannot be proven",
                 request_event=request_event,
                 request_sequence=request_sequence,
             )
@@ -418,16 +372,12 @@ def _project_identity_status(
         )
     except Exception as exc:
         return _error(
-            "applied" if progression_sequence is not None else "decision_committed",
+            "decision_committed",
             identity,
             f"invalid committed review intent: {exc}",
             intent_ref=intent_ref,
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis=(
-                "historical_progression" if progression_sequence is not None else "none"
-            ),
         )
 
     try:
@@ -438,28 +388,14 @@ def _project_identity_status(
         )
     except Exception as exc:
         return _error(
-            "applied" if progression_sequence is not None else "decision_committed",
+            "decision_committed",
             identity,
             f"invalid review application: {exc}",
             intent_ref=intent_ref,
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis=(
-                "historical_progression" if progression_sequence is not None else "none"
-            ),
         )
     if application_ref is None:
-        if progression_sequence is not None:
-            return ReviewStatusProjection(
-                status="applied",
-                identity=identity,
-                intent_ref=intent_ref,
-                request_event=request_event,
-                request_sequence=request_sequence,
-                progression_sequence=progression_sequence,
-                resolution_basis="historical_progression",
-            )
         if applied_events:
             return _error(
                 "decision_committed",
@@ -485,17 +421,13 @@ def _project_identity_status(
         )
     except Exception as exc:
         return _error(
-            "applied" if progression_sequence is not None else "application_prepared",
+            "application_prepared",
             identity,
             f"invalid prepared review application: {exc}",
             intent_ref=intent_ref,
             application_ref=application_ref,
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis=(
-                "historical_progression" if progression_sequence is not None else "none"
-            ),
         )
 
     application_id = verified.application.application_id
@@ -506,7 +438,7 @@ def _project_identity_status(
     )
     if decision_diagnostic is not None:
         return _error(
-            "applied" if progression_sequence is not None else "application_prepared",
+            "application_prepared",
             identity,
             decision_diagnostic,
             intent_ref=intent_ref,
@@ -514,10 +446,6 @@ def _project_identity_status(
             application_id=application_id,
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis=(
-                "historical_progression" if progression_sequence is not None else "none"
-            ),
         )
     checkpoint_ref: ArtifactRef | None = None
     if checkpoint_application_ref is not None:
@@ -565,9 +493,7 @@ def _project_identity_status(
             resolution_basis="review_applied",
         )
     if decision_sequence is None and (
-        checkpoint_ref == application_ref
-        or bool(matching_applied)
-        or progression_sequence is not None
+        checkpoint_ref == application_ref or bool(matching_applied)
     ):
         return _error(
             "application_prepared",
@@ -578,7 +504,6 @@ def _project_identity_status(
             application_id=application_id,
             request_event=request_event,
             request_sequence=request_sequence,
-            progression_sequence=progression_sequence,
         )
     applied_sequence = (
         _event_sequence(matching_applied[0]) if matching_applied else None
@@ -607,21 +532,7 @@ def _project_identity_status(
             request_sequence=request_sequence,
             decision_sequence=decision_sequence,
             applied_sequence=applied_sequence,
-            progression_sequence=applied_sequence,
             resolution_basis="review_applied",
-        )
-    if progression_sequence is not None:
-        return ReviewStatusProjection(
-            status="applied",
-            identity=identity,
-            intent_ref=intent_ref,
-            application_ref=application_ref,
-            application_id=application_id,
-            request_event=request_event,
-            request_sequence=request_sequence,
-            decision_sequence=decision_sequence,
-            progression_sequence=progression_sequence,
-            resolution_basis="historical_progression",
         )
     return ReviewStatusProjection(
         status="application_prepared",
@@ -866,95 +777,6 @@ def _post_terminal_occurrence_diagnostic(
     return None
 
 
-def _historical_progression_sequence(
-    identity: ReviewApplicationIdentity,
-    *,
-    request_sequence: int | None,
-    events: list[dict[str, Any]],
-    canonical_terminal: Mapping[str, Any] | None,
-    workflow_steps: tuple[WorkflowStep, ...],
-) -> int | None:
-    if request_sequence is None or not workflow_steps:
-        return None
-    indices = {step["step_id"]: index for index, step in enumerate(workflow_steps)}
-    request_index = indices.get(identity.workflow_step_id)
-    if request_index is None:
-        return None
-    request_step = workflow_steps[request_index]
-    if request_step["stage"] != identity.stage:
-        return None
-
-    for event in events:
-        sequence = _event_sequence(event)
-        if sequence is None or sequence <= request_sequence:
-            continue
-        step_id = event.get("workflow_step_id")
-        stage = event.get("stage")
-        event_type = event.get("event_type")
-        if step_id == identity.workflow_step_id and stage == identity.stage:
-            if event_type in {"stage_completed", "stage_skipped", "stage_failed"}:
-                return sequence
-            continue
-        later_index = indices.get(str(step_id))
-        if later_index is None or later_index <= request_index:
-            continue
-        if workflow_steps[later_index]["stage"] != stage:
-            continue
-        if event_type in {
-            "stage_entered",
-            "stage_completed",
-            "stage_skipped",
-            "stage_failed",
-            "attempt_started",
-            "attempt_succeeded",
-            "attempt_failed",
-        }:
-            return sequence
-
-    terminal = canonical_terminal
-    terminal_sequence = _event_sequence(terminal)
-    if terminal_sequence is None or terminal_sequence <= request_sequence:
-        return None
-    assert terminal is not None
-    summary = terminal.get("summary")
-    outcome = summary.get("outcome") if isinstance(summary, Mapping) else None
-    if outcome == "completed":
-        return terminal_sequence
-    terminal_stage = terminal.get("stage")
-    matching_terminal_indices = [
-        index
-        for index, step in enumerate(workflow_steps)
-        if step["stage"] == terminal_stage
-    ]
-    if (
-        outcome == "failed"
-        and len(matching_terminal_indices) == 1
-        and matching_terminal_indices[0] >= request_index
-    ):
-        return terminal_sequence
-    return None
-
-
-def _steps_from_state(state: TopLevelState) -> tuple[WorkflowStep, ...]:
-    try:
-        return tuple(validate_workflow_steps(state.get("workflow_steps")))
-    except (TypeError, ValueError):
-        return ()
-
-
-def _steps_from_frozen_inputs(
-    paths: SessionPaths,
-) -> tuple[tuple[WorkflowStep, ...], str | None]:
-    try:
-        bundle = validate_frozen_inputs(paths)
-        return tuple(workflow_steps_from_run_config(bundle.run_config)), None
-    except (OSError, ValueError, TypeError) as exc:
-        return (), _bounded_error(
-            "verified frozen workflow plan is unavailable for review progression: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-
 def _optional_record_ref(
     paths: SessionPaths,
     path: Path,
@@ -1037,7 +859,6 @@ def _error(
     application_id: str | None = None,
     request_event: dict[str, Any] | None = None,
     request_sequence: int | None = None,
-    progression_sequence: int | None = None,
     resolution_basis: ReviewResolutionBasis = "none",
 ) -> ReviewStatusProjection:
     return ReviewStatusProjection(
@@ -1048,7 +869,6 @@ def _error(
         application_id=application_id,
         request_event=request_event,
         request_sequence=request_sequence,
-        progression_sequence=progression_sequence,
         resolution_basis=resolution_basis,
         integrity_error=_bounded_error(message),
     )

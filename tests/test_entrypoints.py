@@ -14,14 +14,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.control.lifecycle import TerminalFinalizationError, TerminalFinalizationResult
 from app.control.projections import ProjectionBoundary
 from app.control.resume_transaction import (
     ResumeTransactionError,
     ResumeTransactionResult,
 )
+from app.control.terminal import TerminalFinalizationError, TerminalFinalizationResult
 from app.entrypoints.run import (
-    _build_assembly_selection,
     _execute_verified_frozen_session,
     _load_dotenv_without_override,
     _parse_args,
@@ -49,7 +48,7 @@ from app.schemas.artifacts import (
     ArtifactRef,
     AssemblyCandidateBundle,
 )
-from app.schemas.run_config import AssemblyRunConfig, RunConfig
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.storage.artifacts import publish_artifact_record
 from app.storage.frozen_inputs import FrozenExecutionLease, freeze_session_inputs
@@ -214,8 +213,8 @@ def _write_assembly_review_request(
 ) -> tuple[Path, PersistedReviewRequest]:
     run_dir = v2_run_dir(data_root, session_id)
     paths = SessionPaths.from_run_dir(run_dir)
-    reads = run_dir / "fixture_reads.fastq"
-    reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+    reads = run_dir / "fixture_assembly.fa"
+    reads.write_text(">ctg\nACGT\n", encoding="utf-8")
     lineage = ensure_busco_lineage(run_dir)
     envs = run_dir / "envs.yaml"
     _frozen_database_resolver(run_dir, lineage)
@@ -226,10 +225,9 @@ def _write_assembly_review_request(
             "user_metadata": {"target_species": "Fixture species"},
             "assets": [
                 {
-                    "asset_type": "raw_long_reads",
+                    "asset_type": "assembly_fasta_registered",
                     "paths": [str(reads.resolve())],
-                    "platform": "ont",
-                    "format": "fastq",
+                    "format": "fasta",
                 }
             ],
         },
@@ -273,11 +271,13 @@ def _write_assembly_review_request(
         "current_stage": "assembly_review",
         "workflow_steps": [
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-001-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,
@@ -498,14 +498,6 @@ class EntrypointTests(unittest.TestCase):
             )
 
         self.assertEqual(session_id, "gene-20260508-000001")
-
-    def test_build_selection_keeps_route_as_stage_time_method_hint(self):
-        selection = _build_assembly_selection(
-            assembly=AssemblyRunConfig(assembly_route="ont"),
-            shared_parameters=None,
-        )
-
-        self.assertIsNone(selection)
 
     def test_inspect_missing_session_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -871,7 +863,6 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
             if isinstance(review, dict) and isinstance(review.get("busco"), dict):
                 requested = review["busco"]
                 review["busco"] = {
-                    "lineage": "embryophyta_odb10",
                     "mode": requested.get("mode", "genome"),
                     "threads": requested.get("threads", 4),
                 }
@@ -901,7 +892,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     side_effect=fake_initial_state,
                 ),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ),
                 patch("app.entrypoints.run.project_workflow_state"),
@@ -1034,7 +1025,7 @@ class FrozenRunConfigSeedingTests(unittest.TestCase):
                     side_effect=build_with_failed_projection,
                 ),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=TerminalFinalizationError("checkpoint mismatch"),
                 ),
             ):
@@ -1423,11 +1414,13 @@ class ResumeCLITests(unittest.TestCase):
                 data_dir=str(run_dir),
                 workflow_steps=[
                     {
+                        "selected_method_names": [],
                         "step_id": "step-000-inventory",
                         "stage": "inventory",
                         "allow_local_execution": False,
                     },
                     {
+                        "selected_method_names": [],
                         "step_id": "step-001-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,

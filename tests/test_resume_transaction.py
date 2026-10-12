@@ -21,6 +21,7 @@ from tests.data_v2 import v2_run_dir
 
 _INVENTORY_WORKFLOW_STEPS = [
     {
+        "selected_method_names": [],
         "step_id": "step-000-inventory",
         "stage": "inventory",
         "allow_local_execution": False,

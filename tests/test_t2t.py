@@ -8,10 +8,9 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
 from app.integrity import sha256_file
 from app.review.application import (
@@ -29,28 +28,25 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
-from app.stages.t2t.builder import build_stage
+from app.schemas.t2t import T2TThresholds
+from app.stages.t2t.algorithms import candidate_rows
+from app.stages.t2t.builder import build_baseline_stage, build_stage
 from app.stages.t2t.nodes import (
     _CANDIDATE_FIELDS,
-    T2TReviewEffectV1,
-    _candidate_rows,
     _materialize_t2t_patches,
     _t2t_adoption_decision_ref,
-    apply_t2t_review_application,
-    block_t2t,
     build_t2t_candidates,
     commit_t2t,
-    prepare_t2t_review_application,
     scan_read_telomeres,
 )
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.execution import (
-    T2TExecutionThresholds,
     T2TFrozenExecutionInputs,
 )
-from app.stages.t2t.parameters.workflow import (
-    apply_t2t_parameter_approval_application,
-    prepare_t2t_parameter_approval_application,
+from app.stages.t2t.review import (
+    T2TReviewEffectV1,
+    apply_t2t_review_application,
+    prepare_t2t_review_application,
 )
 from app.stages.t2t.state import update_t2t_stage_output
 from app.storage.artifacts import publish_artifact_record, read_artifact_records
@@ -134,33 +130,21 @@ class T2TDescriptorTests(unittest.TestCase):
 
 
 class T2TStageTests(unittest.TestCase):
-    def test_missing_persisted_review_interrupt_settles_alignment_before_failure(self):
+    def test_new_unseeded_t2t_rejects_implicit_llm_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, _reads = self._write_inputs(tmpdir)
-            state = self._state(tmpdir, assembly)
-            state["stage_outputs"] = {"t2t": {"execution_mode": "local"}}
-
-            update = block_t2t(state)
-
-            self.assertEqual(update["supervision_state"], "failed_terminal")
-            dispositions = [
-                event["summary"]
-                for event in Ledger(state["data_dir"]).read_event_rows("s1")
-                if event["event_type"] == "method_disposition_recorded"
-            ]
-            self.assertEqual(
-                dispositions,
-                [
-                    {
-                        "method_name": "t2t.alignment.minimap2",
-                        "disposition": "not_started",
-                        "reason": "T2T review block has no persisted interrupt",
-                    }
-                ],
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+            with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+                result = build_stage().invoke(state)
+            model.assert_not_called()
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn(
+                "explicit advisor or deterministic_baseline", result["last_error"]
             )
 
     def test_nonselection_review_clears_candidate_ids_without_reordering_notes(self):
-        from app.stages.t2t.nodes import validate_t2t_intent_request
+        from app.stages.t2t.review import validate_t2t_intent_request
 
         request = ResumeReviewRequest(
             session_id="s1",
@@ -177,7 +161,7 @@ class T2TStageTests(unittest.TestCase):
         self.assertEqual(canonical.notes, ["first note", "second note"])
 
     def test_accept_review_canonicalizes_and_validates_candidate_ids(self):
-        from app.stages.t2t.nodes import validate_t2t_intent_request
+        from app.stages.t2t.review import validate_t2t_intent_request
 
         request = ResumeReviewRequest(
             session_id="s1",
@@ -197,7 +181,7 @@ class T2TStageTests(unittest.TestCase):
         }
 
         with patch(
-            "app.stages.t2t.nodes._selectable_t2t_candidate_ids",
+            "app.stages.t2t.review._selectable_t2t_candidate_ids",
             return_value={"chr1:left", "chr2:right"},
         ):
             canonical = validate_t2t_intent_request({}, request, request_record)
@@ -218,7 +202,7 @@ class T2TStageTests(unittest.TestCase):
                 )
 
         with patch(
-            "app.stages.t2t.nodes._selectable_t2t_candidate_ids",
+            "app.stages.t2t.review._selectable_t2t_candidate_ids",
             return_value={"chr1:left"},
         ):
             with self.assertRaisesRegex(ResumeValidationError, "current selectable"):
@@ -302,81 +286,16 @@ class T2TStageTests(unittest.TestCase):
             state["data_dir"], state["session_id"], artifact
         ).ref.model_dump(mode="json")
 
-    def _invoke_with_parameter_approval(
+    def _invoke_baseline(
         self,
         state: dict,
-        *,
-        recommended_parameters: dict | None = None,
     ) -> dict:
-        """Run T2T while approving only its mandatory parameter gate."""
+        """Run T2T from the explicit, model-free baseline policy."""
 
-        graph = build_stage()
-        current = state
-        for _ in range(3):
-            with (
-                patch("app.llm.parameters.t2t.motif.build_chat_model") as motif_model,
-                patch("app.llm.parameters.base.build_chat_model") as build_model,
-            ):
-                motif_model.return_value.invoke.return_value = SimpleNamespace(
-                    content=json.dumps(
-                        {
-                            "status": "resolved",
-                            "telomere_motif": "TTAGGG",
-                            "summary": "Test species uses the canonical repeat.",
-                        }
-                    )
-                )
-                build_model.return_value.invoke.return_value = SimpleNamespace(
-                    content=json.dumps(
-                        {
-                            "parameters": recommended_parameters or {},
-                            "summary": "Use executor-owned defaults.",
-                        }
-                    )
-                )
-                result = graph.invoke(current)
-            interrupt = result.get("active_interrupt") or {}
-            if not (
-                result.get("supervision_state") == "blocked_human"
-                and interrupt.get("gate_id") == "parameter_approval"
-            ):
-                return result
-            metadata_keys = (
-                "attempt_id",
-                "task",
-                "previous_attempt_id",
-                "recommendation_hash",
-            )
-            request = ResumeReviewRequest(
-                session_id=result["session_id"],
-                stage="t2t",
-                gate_id="parameter_approval",
-                decision="approve_parameters",
-                review_request_id=interrupt["review_request_id"],
-                review_request_hash=interrupt["request_hash"],
-                metadata={key: interrupt[key] for key in metadata_keys},
-            )
-            persisted_intent = persist_review_intent(
-                result, request, source="test_t2t_parameter_approval"
-            )
-            prepared = prepare_t2t_parameter_approval_application(
-                result, persisted_intent.intent
-            )
-            application_ref = persist_review_application(
-                result,
-                intent=persisted_intent,
-                prepared=prepared,
-            )
-            verified = load_verified_review_application(
-                result["data_dir"],
-                application_ref,
-                expected_identity=ReviewApplicationIdentity.from_intent(
-                    persisted_intent.intent
-                ),
-            )
-            update = apply_t2t_parameter_approval_application(result, verified)
-            current = {**result, **update}
-        self.fail("T2T exceeded the bounded parameter-approval loop")
+        state["stage_outputs"].setdefault("t2t", {})["recommendation_mode"] = (
+            "deterministic_baseline"
+        )
+        return build_baseline_stage().invoke(state)
 
     def _state(self, tmpdir: str, assembly: Path, reads: Path | None = None):
         state = initial_state(
@@ -461,7 +380,11 @@ class T2TStageTests(unittest.TestCase):
             },
         ).to_dict()
         state["shared_parameters"] = {
-            "species_facts": {"scientific_name": "Homo sapiens", "taxon_id": 9606}
+            "species_facts": {
+                "scientific_name": "Homo sapiens",
+                "taxon_id": 9606,
+                "telomere_motif": "TTAGGG",
+            }
         }
         return state
 
@@ -567,7 +490,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
 
             self.assertEqual(blocked["current_stage"], "t2t")
             self.assertEqual(blocked["supervision_state"], "blocked_human")
@@ -636,7 +559,7 @@ class T2TStageTests(unittest.TestCase):
             assembly, reads = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly, reads)
             expected_assembly = state["resource_refs"]["assembly"]["paths"][0]
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
 
             self.assertEqual(result["current_stage"], "assembly_review")
             t2t = result["stage_outputs"]["t2t"]
@@ -674,7 +597,7 @@ class T2TStageTests(unittest.TestCase):
                 workflow_step_id="step-001-hic_scaffolding",
             ).to_dict()
 
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
 
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["source_stage"], "hic_scaffolding")
@@ -688,6 +611,7 @@ class T2TStageTests(unittest.TestCase):
             state = self._state(tmpdir, assembly, reads)
             state["stage_outputs"]["t2t"] = {
                 "assembly_fasta_ref": str(bypass),
+                "recommendation_mode": "deterministic_baseline",
             }
 
             result = build_stage().invoke(state)
@@ -703,7 +627,11 @@ class T2TStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "not_fasta.txt"
             assembly.write_text("not a fasta\n", encoding="utf-8")
-            result = build_stage().invoke(self._state(tmpdir, assembly))
+            state = self._state(tmpdir, assembly)
+            state["stage_outputs"]["t2t"] = {
+                "recommendation_mode": "deterministic_baseline"
+            }
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "t2t")
             self.assertEqual(result["supervision_state"], "failed_terminal")
@@ -721,7 +649,7 @@ class T2TStageTests(unittest.TestCase):
                     + os.environ["PATH"]
                 },
             }
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
 
             t2t = blocked["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "blocked_human")
@@ -783,30 +711,42 @@ class T2TStageTests(unittest.TestCase):
                 candidate_record["producer_event_id"], decision_ref["artifact_id"]
             )
 
-    def test_approved_two_read_threshold_still_blocks_single_read_evidence(self):
+    def test_custom_support_threshold_rejects_single_read_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, reads = self._write_inputs(tmpdir)
-            state = self._state(tmpdir, assembly, reads)
-            state["stage_outputs"]["t2t"] = {
-                "execution_mode": "local",
-                "env": {
-                    "PATH": str(self._fake_minimap2(tmpdir, support_count=1))
-                    + os.pathsep
-                    + os.environ["PATH"]
+            paf = Path(tmpdir) / "alignment.paf"
+            paf.write_text(
+                "r1\t600\t0\t500\t+\tchr1\t10000\t0\t9500\t9500\t9500\t60\n",
+                encoding="utf-8",
+            )
+            rows = candidate_rows(
+                paf,
+                {"chr1": {"left_has_signal": "false", "right_has_signal": "false"}},
+                {
+                    "r1": {
+                        "left_has_signal": "false",
+                        "right_has_signal": "true",
+                        "source_asset_id": "reads",
+                        "source_read_id": "r1",
+                    }
                 },
-            }
-            result = self._invoke_with_parameter_approval(
-                state,
-                recommended_parameters={"min_supporting_reads": 2},
+                {"r1": "A" * 576 + "TTAGGG" * 4},
+                {
+                    "min_motif_copies": 4,
+                    "min_mapq": 20,
+                    "min_overlap_bp": 500,
+                    "max_target_terminal_distance_bp": 1000,
+                    "min_supporting_reads": 2,
+                },
+                "TTAGGG",
+                None,
+                "auto_patch",
             )
 
-            t2t = result["stage_outputs"]["t2t"]
-            self.assertEqual(t2t["status"], "completed_with_warnings")
-            self.assertNotIn("patched_assembly_ref", t2t)
-            candidate_rows = Path(t2t["telomere_extension_candidates_ref"]).read_text(
-                encoding="utf-8"
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["decision"], "rejected")
+            self.assertEqual(
+                rows[0]["reason"], "insufficient_or_conflicting_read_support"
             )
-            self.assertIn("insufficient_or_conflicting_read_support", candidate_rows)
 
     def test_build_candidates_reentry_preserves_existing_candidate_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -880,7 +820,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            completed = self._invoke_with_parameter_approval(state)
+            completed = self._invoke_baseline(state)
             original = completed["stage_outputs"]["t2t"]
             paf_work_path = Path(original["work_dir"]) / "long_reads_to_assembly.paf"
             self.assertFalse(paf_work_path.exists())
@@ -931,7 +871,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("malformed PAF line 1", result["last_error"])
@@ -972,7 +912,7 @@ class T2TStageTests(unittest.TestCase):
                 "app.stages.t2t.builder.write_t2t_report",
                 new=fail_report,
             ):
-                result = self._invoke_with_parameter_approval(state)
+                result = self._invoke_baseline(state)
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertEqual(result["last_error"], "forced report failure")
@@ -1022,7 +962,10 @@ class T2TStageTests(unittest.TestCase):
                     }
                 ),
             )
-            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "recommendation_mode": "deterministic_baseline",
+            }
 
             with patch(
                 "app.llm.parameters.base.build_chat_model",
@@ -1049,7 +992,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
 
             self.assertEqual(result["current_stage"], "t2t")
             self.assertEqual(result["supervision_state"], "blocked_human")
@@ -1083,16 +1026,13 @@ class T2TStageTests(unittest.TestCase):
                 "execution_mode": "local",
                 "mode": "manual_review",
                 "env": {
-                    "PATH": str(self._fake_minimap2(tmpdir, support_count=1))
+                    "PATH": str(self._fake_minimap2(tmpdir, support_count=0))
                     + os.pathsep
                     + os.environ["PATH"]
                 },
             }
 
-            result = self._invoke_with_parameter_approval(
-                state,
-                recommended_parameters={"min_supporting_reads": 2},
-            )
+            result = self._invoke_baseline(state)
 
             self.assertEqual(result["current_stage"], "assembly_review")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
@@ -1113,7 +1053,7 @@ class T2TStageTests(unittest.TestCase):
                     + os.environ["PATH"]
                 },
             }
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="t2t",
@@ -1154,7 +1094,7 @@ class T2TStageTests(unittest.TestCase):
                     + os.environ["PATH"]
                 },
             }
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="t2t",
@@ -1283,7 +1223,7 @@ class T2TStageTests(unittest.TestCase):
                     + os.environ["PATH"]
                 },
             }
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
             resumed = self._apply_t2t_review(
                 blocked,
                 ResumeReviewRequest(
@@ -1323,7 +1263,7 @@ class T2TStageTests(unittest.TestCase):
                     + os.environ["PATH"]
                 },
             }
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
             candidates = Path(
                 blocked["stage_outputs"]["t2t"]["telomere_extension_candidates_ref"]
             )
@@ -1379,7 +1319,7 @@ class T2TStageTests(unittest.TestCase):
                         + os.environ["PATH"]
                     },
                 }
-                blocked = self._invoke_with_parameter_approval(state)
+                blocked = self._invoke_baseline(state)
                 stale = Path(tmpdir) / "newer.fa"
                 stale.write_text(">newer\nACGT\n", encoding="utf-8")
                 published_stale = self._publish_assembly_input(
@@ -1441,7 +1381,7 @@ class T2TStageTests(unittest.TestCase):
                     + os.environ["PATH"]
                 },
             }
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
             artifacts_before = read_artifact_records(blocked["data_dir"], "s1")
             events_before = Ledger(blocked["data_dir"]).read_events("s1")
 
@@ -1492,7 +1432,7 @@ class T2TStageTests(unittest.TestCase):
                         + os.environ["PATH"]
                     },
                 }
-                blocked = self._invoke_with_parameter_approval(state)
+                blocked = self._invoke_baseline(state)
                 request = ResumeReviewRequest(
                     session_id="s1",
                     stage="t2t",
@@ -1546,7 +1486,7 @@ class T2TStageTests(unittest.TestCase):
                     + os.environ["PATH"]
                 },
             }
-            blocked = self._invoke_with_parameter_approval(state)
+            blocked = self._invoke_baseline(state)
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="t2t",
@@ -1576,7 +1516,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
 
             self.assertEqual(result["current_stage"], "assembly_review")
             self.assertNotEqual(result["supervision_state"], "blocked_human")
@@ -1602,7 +1542,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
 
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["read_count"], 3)
@@ -1659,7 +1599,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
 
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(
@@ -1717,7 +1657,7 @@ class T2TStageTests(unittest.TestCase):
                 chromosome_list_ref=None,
                 work_dir=str(work_dir),
                 execution_enabled=True,
-                thresholds=T2TExecutionThresholds.model_validate(
+                thresholds=T2TThresholds.model_validate(
                     {
                         "min_motif_copies": 4,
                         "terminal_window_bp": 10_000,
@@ -1814,7 +1754,7 @@ class T2TStageTests(unittest.TestCase):
                 },
             }
 
-            result = self._invoke_with_parameter_approval(state)
+            result = self._invoke_baseline(state)
             t2t = result["stage_outputs"]["t2t"]
 
             self.assertEqual(
@@ -1836,7 +1776,10 @@ class T2TStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, _ = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly)
-            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "recommendation_mode": "deterministic_baseline",
+            }
 
             with patch(
                 "app.llm.parameters.base.build_chat_model",
@@ -1869,7 +1812,10 @@ class T2TStageTests(unittest.TestCase):
             malformed = Path(tmpdir) / "malformed.fq"
             malformed.write_text("not fasta or fastq\n", encoding="utf-8")
             state = self._state(tmpdir, assembly, malformed)
-            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "recommendation_mode": "deterministic_baseline",
+            }
 
             with patch(
                 "app.llm.parameters.base.build_chat_model",
@@ -1892,40 +1838,6 @@ class T2TStageTests(unittest.TestCase):
                 [("t2t.alignment.minimap2", "not_started")],
             )
 
-    def test_one_key_sparse_recommendation_is_preserved_in_approval_payload(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, reads = self._write_inputs(tmpdir)
-            state = self._state(tmpdir, assembly, reads)
-            state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
-            with (
-                patch("app.llm.parameters.t2t.motif.build_chat_model") as motif_model,
-                patch("app.llm.parameters.base.build_chat_model") as build_model,
-            ):
-                motif_model.return_value.invoke.return_value = SimpleNamespace(
-                    content=json.dumps(
-                        {"status": "resolved", "telomere_motif": "TTAGGG"}
-                    )
-                )
-                build_model.return_value.invoke.return_value = SimpleNamespace(
-                    content=json.dumps(
-                        {
-                            "parameters": {"min_supporting_reads": 2},
-                            "summary": "Require two supporting reads.",
-                        }
-                    )
-                )
-                blocked = build_stage().invoke(state)
-
-            request = load_review_request(
-                blocked["data_dir"], blocked["active_interrupt"]["request_ref"]
-            )
-            self.assertEqual(
-                request["payload"]["parameters"], {"min_supporting_reads": 2}
-            )
-            serialized = json.dumps(request["payload"], sort_keys=True)
-            self.assertNotIn("omitted_parameters", serialized)
-            self.assertNotIn("terminal_window_bp", request["payload"]["parameters"])
-
     def test_reverse_strand_tail_is_selected_in_target_forward_orientation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             oriented = "A" * 80 + "TTAGGG" * 4
@@ -1936,7 +1848,7 @@ class T2TStageTests(unittest.TestCase):
                 f"{read_id}\t104\t24\t104\t-\tchr1\t100\t0\t90\t80\t80\t60\n",
                 encoding="utf-8",
             )
-            rows = _candidate_rows(
+            rows = candidate_rows(
                 paf,
                 {
                     "chr1": {
@@ -2072,7 +1984,7 @@ class T2TStageTests(unittest.TestCase):
                 "telomere_extension_candidates_ref": str(candidates),
             }
             execution_inputs = T2TFrozenExecutionInputs(
-                thresholds=T2TExecutionThresholds(
+                thresholds=T2TThresholds(
                     min_motif_copies=4,
                     terminal_window_bp=10_000,
                     min_mapq=20,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Mapping, TypedDict, cast
 
+from app.llm.provenance import ModelCallProvenance
+
 ModelResponseValidity = Literal["parsed", "invalid"]
 
 
@@ -16,6 +18,7 @@ class ModelResponseRecord(TypedDict):
     validity: ModelResponseValidity
     error: str | None
     model_id: str | None
+    model_call: dict[str, Any]
 
 
 def response_text(response: Any) -> str:
@@ -23,10 +26,15 @@ def response_text(response: Any) -> str:
 
     content = getattr(response, "content", response)
     if isinstance(content, list):
-        content = "".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            else:
+                raise ValueError("LLM content blocks must contain text")
+        content = "".join(parts)
     if not isinstance(content, str) or not content.strip():
         raise ValueError("LLM returned empty content")
     return content.strip()
@@ -56,6 +64,7 @@ def model_response_record(
     valid: bool,
     error: str | None,
     model_id: str | None,
+    model_call: dict[str, Any] | None = None,
 ) -> ModelResponseRecord:
     """Build the shared raw-response envelope used by persisted LLM evidence."""
 
@@ -65,6 +74,9 @@ def model_response_record(
         "validity": "parsed" if valid else "invalid",
         "error": error,
         "model_id": model_id,
+        "model_call": ModelCallProvenance.model_validate(model_call or {}).model_dump(
+            mode="json"
+        ),
     }
     return validate_model_response_record(
         record,
@@ -105,4 +117,7 @@ def validate_model_response_record(
         "validity": cast(ModelResponseValidity, validity),
         "error": error,
         "model_id": model_id,
+        "model_call": ModelCallProvenance.model_validate(
+            record.get("model_call", {})
+        ).model_dump(mode="json"),
     }

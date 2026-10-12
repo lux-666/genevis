@@ -28,7 +28,7 @@ from app.execution.lifecycle import (
     freeze_method_attempts,
     load_method_executions,
 )
-from app.execution.method_outcomes import MethodOutcome
+from app.execution.method_outcomes import MethodOutcome, has_execution_result
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -123,18 +123,33 @@ def purge_dups_method_outcome_policy(state: TopLevelState) -> MethodOutcome | No
     """Map durable purge_dups collect/failure facts to one method outcome."""
 
     output = _output(state)
+    if output.get("status") == "failed" and has_execution_result(
+        output, ASSEMBLY_DEDUP_METHOD
+    ):
+        executions = load_method_executions(state, PURGE_DUPS_LIFECYCLE)
+        ledger = Ledger(absolute_data_dir(state))
+        if any(
+            not execution.evidence.success
+            or not ledger.has_attempt_success(
+                state["session_id"], execution.attempt.attempt_id
+            )
+            for execution in executions
+        ):
+            return MethodOutcome(
+                method_name=ASSEMBLY_DEDUP_METHOD,
+                disposition="failed",
+                reason=str(
+                    output.get("reason") or "purge_dups execution/collect failed"
+                ),
+                refs=tuple(execution.execution_ref for execution in executions),
+            )
     if output.get("recommendation_mode") == "advisor":
         if output.get("status") not in {"failed", "pass_through", "dedup_selected"}:
             return None
         if output.get("history_refs"):
             return MethodOutcome(
                 method_name=ASSEMBLY_DEDUP_METHOD,
-                disposition="failed"
-                if output.get("status") == "failed"
-                else "completed",
-                reason=output.get("reason", "dedup loop failed")
-                if output.get("status") == "failed"
-                else None,
+                disposition="completed",
                 refs=tuple(
                     ArtifactRef.model_validate(ref) for ref in output["history_refs"]
                 ),
@@ -355,15 +370,13 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
 
     try:
         source_candidate = _dedup_source_candidate(state, dedup_out)
-        selected_members = (
-            []
-            if dedup_out.get("coverage_mode") == "self_alignment"
-            else _selected_primary_members(
-                state,
-                list(dedup_out.get("input_member_ids") or []),
-                list(dedup_out.get("input_member_platforms") or []),
-            )
-        )
+        if dedup_out.get("coverage_mode") == "self_alignment":
+            selected_members = []
+        else:
+            selected_members = read_depth_members(state, dedup_out)
+        mapping_presets = [
+            _minimap2_preset(member.platform) for member in selected_members
+        ]
     except (OSError, TypeError, ValueError) as exc:
         return _fail(
             state,
@@ -398,7 +411,6 @@ def freeze_purge_dups_attempt(state: TopLevelState) -> StateUpdate:
         work_dir / f"primary_member_{index:03d}.paf.gz"
         for index in range(len(selected_members))
     ]
-    mapping_presets = [_minimap2_preset(member.platform) for member in selected_members]
     threads = int(dedup_out.get("threads", 8))
     get_seqs_exclude_flag = (
         "-e " if dedup_out.get("get_seqs_exclude_haplotigs", True) else ""
@@ -975,6 +987,25 @@ def _dedup_source_candidate(
     return verified
 
 
+def _registered_assembly_read_members(
+    state: TopLevelState,
+) -> list[RuntimeReadMember]:
+    """Bind current reads for depth evaluation of a registered external assembly.
+
+    Its primary member identifies the FASTA asset, not the original assembly reads.
+    Current reads provide mapping evidence only, never inferred assembly provenance.
+    """
+
+    members = resolve_long_read_members(state)
+    if not members:
+        raise ValueError(
+            "registered assembly read_depth requires registered long reads"
+        )
+    if len({member.member_id for member in members}) != len(members):
+        raise ValueError("runtime long-read member ID is duplicated")
+    return members
+
+
 def _selected_primary_members(
     state: TopLevelState,
     member_ids: list[str],
@@ -1005,6 +1036,20 @@ def _selected_primary_members(
             )
         selected.append(selected_member)
     return selected
+
+
+def read_depth_members(
+    state: TopLevelState, output: AssemblyDedupCursor
+) -> list[RuntimeReadMember]:
+    """Resolve depth evidence for both advice and execution."""
+    candidate = _dedup_source_candidate(state, output)
+    if candidate.bundle.input_type == "assembly_fasta_registered":
+        return _registered_assembly_read_members(state)
+    return _selected_primary_members(
+        state,
+        list(output.get("input_member_ids") or []),
+        list(output.get("input_member_platforms") or []),
+    )
 
 
 def _minimap2_preset(platform: str) -> str:

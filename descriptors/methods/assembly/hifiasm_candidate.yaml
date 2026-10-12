@@ -17,10 +17,24 @@ optional_inputs:
   - name: hic_r2_reads
     type: hic_reads_registered
     description: "Ordered Hi-C R2 lane files passed with --h2."
+  - name: trio_maternal_reads
+    type: raw_short_dna_reads
+    description: "Explicit maternal FASTQ files, normalized and counted by yak for -2."
+  - name: trio_paternal_reads
+    type: raw_short_dna_reads
+    description: "Explicit paternal FASTQ files, normalized and counted by yak for -1."
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly
     description: "Draft assembly FASTA path for the hifiasm candidate when local execution is enabled."
+  - name: phased_hap1_fasta
+    type: assembly_fasta_registered
+    required: false
+    description: "Separate hap1 FASTA required when Trio or Hi-C phasing is enabled."
+  - name: phased_hap2_fasta
+    type: assembly_fasta_registered
+    required: false
+    description: "Separate hap2 FASTA required when Trio or Hi-C phasing is enabled."
 review_rules:
   - candidate_bundle_exists
   - compatibility_route_explicitly_requested

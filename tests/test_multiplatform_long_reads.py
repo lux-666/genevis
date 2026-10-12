@@ -13,10 +13,10 @@ from pydantic import ValidationError
 from app.domains.assembly.material_query import build_material_query
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
+from app.schemas.t2t import T2TThresholds
 from app.stages.assembly.nodes import resolve_extended_inputs
 from app.stages.inventory.builder import build_stage as build_inventory_stage
 from app.stages.t2t.parameters.execution import (
-    T2TExecutionThresholds,
     T2TFrozenExecutionInputs,
     T2TLongReadInput,
     load_chromosome_names_snapshot,
@@ -105,6 +105,7 @@ class MultiplatformLongReadTests(unittest.TestCase):
                 data_dir=str(run_dir),
                 workflow_steps=[
                     {
+                        "selected_method_names": [],
                         "step_id": "step-000-inventory",
                         "stage": "inventory",
                         "allow_local_execution": False,
@@ -115,6 +116,7 @@ class MultiplatformLongReadTests(unittest.TestCase):
                         "allow_local_execution": True,
                     },
                     {
+                        "selected_method_names": [],
                         "step_id": "step-002-assembly_review",
                         "stage": "assembly_review",
                         "allow_local_execution": False,
@@ -159,6 +161,18 @@ class MultiplatformLongReadTests(unittest.TestCase):
             )
 
             registered["entered_workflow_step_index"] = 1
+            registered["stage_seeds"] = {
+                "assembly": {
+                    "hifiasm_inputs": {
+                        "ultralong_ont_reads_ref": [str(path) for path in ont],
+                        "hic_reads_ref": [
+                            path
+                            for r1, r2 in zip(hic_r1, hic_r2, strict=True)
+                            for path in (str(r1), str(r2))
+                        ],
+                    }
+                }
+            }
             registered["stage_outputs"]["assembly"] = {
                 "assembly_route": "hifi",
                 "assembly_selection": {
@@ -166,10 +180,6 @@ class MultiplatformLongReadTests(unittest.TestCase):
                     "primary_method": "assembly.candidate.hifiasm",
                     "source": "run_config",
                     "rationale": "explicit mixed-input Hifiasm test",
-                },
-                "hifiasm_parameters": {
-                    "use_ultralong_ont": True,
-                    "use_hic_phasing": True,
                 },
             }
 
@@ -197,10 +207,17 @@ class MultiplatformLongReadTests(unittest.TestCase):
                     role: len(ids)
                     for role, ids in assembly["assembly_input_member_ids"].items()
                 },
-                {"primary": 2, "ultralong": 2, "hic_r1": 2, "hic_r2": 2},
+                {
+                    "primary": 2,
+                    "ultralong": 2,
+                    "hic_r1": 2,
+                    "hic_r2": 2,
+                    "trio_maternal": 0,
+                    "trio_paternal": 0,
+                },
             )
 
-            registered["stage_outputs"]["assembly"]["hifiasm_parameters"] = {}
+            registered["stage_seeds"]["assembly"]["hifiasm_inputs"] = {}
             unphased = resolve_extended_inputs(registered)["stage_outputs"]["assembly"]
             self.assertTrue(unphased["has_hic"])
             self.assertIsNone(unphased["hic_reads_ref"])
@@ -268,7 +285,7 @@ class MultiplatformLongReadTests(unittest.TestCase):
             chromosome_names = load_chromosome_names_snapshot(str(chromosome_list))
             platforms = ("cycloneseq", "ont", "clr", "pacbio_hifi")
             frozen = T2TFrozenExecutionInputs(
-                thresholds=T2TExecutionThresholds(
+                thresholds=T2TThresholds(
                     min_motif_copies=1,
                     terminal_window_bp=1000,
                     min_mapq=1,

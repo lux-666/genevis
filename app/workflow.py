@@ -49,26 +49,26 @@ TERMINAL_FAILURE_STATUSES: frozenset[ExecutionFailureStatus] = frozenset(
 )
 
 
-def analyze_review_sequence(stages: Sequence[str]) -> dict[int, int]:
-    """Bind each explicit Review to the nearest assembly-handoff occurrence.
+def analyze_assembly_sequence(stages: Sequence[str]) -> dict[int, int]:
+    """Bind each assembly consumer to the nearest assembly-handoff occurrence.
 
     ``stages`` excludes the implicit Inventory occurrence.  Returned keys and
     values are frozen workflow-step indexes, where Inventory is index zero.
-    Review placement remains literal RunConfig data: this function never
-    inserts Review and never rejects a sequence merely because Review is absent.
+    This derives dependencies from the literal order, never inserts stages or
+    assumes that a planned producer has actually delivered its output.
     """
 
     latest_producer_index = 0
-    review_bindings: dict[int, int] = {}
+    bindings: dict[int, int] = {}
 
     for index, stage in enumerate(stages, start=1):
-        if stage == "assembly_review":
-            review_bindings[index] = latest_producer_index
+        if stage in ASSEMBLY_HANDOFF_PRODUCER_STAGES - {"inventory", "assembly"}:
+            bindings[index] = latest_producer_index
 
         if stage in ASSEMBLY_HANDOFF_PRODUCER_STAGES:
             latest_producer_index = index
 
-    return review_bindings
+    return bindings
 
 
 def is_terminal_failure(

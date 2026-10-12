@@ -30,6 +30,7 @@ from app.schemas.parameter_recommendation import (
 )
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import (
+    ParameterCommandError,
     parameter_sources_payload,
     render_assembly_cli,
     render_assembly_config,
@@ -49,6 +50,41 @@ from app.stages.assembly.parameters.context import (
     build_assembly_recommendation_context,
 )
 from app.storage.parameter_evidence import ParameterEvidenceError
+from app.storage.paths import SessionPaths, ensure_run_layout
+
+
+class NextDenovoNativePathTests(unittest.TestCase):
+    def test_native_config_rejects_unquoted_shell_paths(self):
+        for field in ("input_fofn", "workdir"):
+            for suffix in (" a", "\ta", ";cmd", "$(cmd)", "*", "'", "中文"):
+                with self.subTest(field=field, suffix=suffix):
+                    params = dict(
+                        read_type="hifi",
+                        input_fofn="/inputs/input.fofn",
+                        workdir="/work/nd",
+                        genome_size=1000,
+                        threads=1,
+                    )
+                    params[field] += suffix
+                    with self.assertRaisesRegex(ParameterCommandError, "native paths"):
+                        _run_cfg(**params)
+
+    def test_fofn_rejects_unsupported_member_before_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "s1"
+            state = _assembly_state(run_dir, {})
+            with patch.object(
+                nextdenovo_adapter,
+                "resolve_assembly_read_paths",
+                return_value=[Path("/reads/first.fq"), Path("/reads/two reads.fq")],
+            ):
+                fofn, paths, error = nextdenovo_adapter._fofn(
+                    state, "/reads/list.fofn", "pacbio_hifi", attempt_id=0
+                )
+            self.assertIsNone(fofn)
+            self.assertEqual(paths, [])
+            self.assertIn("native paths", error)
+            self.assertFalse(run_dir.exists())
 
 
 def _assembly_state(run_dir: Path, output: dict) -> dict:
@@ -58,6 +94,7 @@ def _assembly_state(run_dir: Path, output: dict) -> dict:
         data_dir=str(run_dir),
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
@@ -68,6 +105,7 @@ def _assembly_state(run_dir: Path, output: dict) -> dict:
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-002-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,
@@ -143,9 +181,14 @@ class AssemblyCatalogV3Tests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Unknown method descriptor"):
                     load_parameter_catalog(catalog_id)
 
-    def test_guidance_uses_only_stable_hifiasm_method_ids(self):
+    def test_guidance_uses_only_stable_assembly_method_ids(self):
         registry = load_method_guidance()
-        stable_ids = {HIFIASM_METHOD, HIFIASM_ONT_METHOD}
+        stable_ids = {
+            FLYE_METHOD,
+            NEXTDENOVO_METHOD,
+            HIFIASM_METHOD,
+            HIFIASM_ONT_METHOD,
+        }
 
         self.assertTrue(registry.records)
         for record in registry.records:
@@ -153,6 +196,24 @@ class AssemblyCatalogV3Tests(unittest.TestCase):
 
 
 class AssemblyContextV3Tests(unittest.TestCase):
+    def test_context_uses_confirmed_selected_route_when_run_config_is_auto(self):
+        selection = AssemblySelection(
+            read_type="pacbio_hifi",
+            primary_method=HIFIASM_METHOD,
+            source="human",
+            rationale="confirmed",
+        ).model_dump(mode="json")
+        context = build_assembly_recommendation_context(
+            {},
+            assembly_out={
+                "assembly_selection": selection,
+                "assembly_route": "auto",
+                "selected_route": "hifi",
+                "target_level": "draft",
+            },
+        )
+        self.assertEqual(context.assembly_route, "hifi")
+
     def test_context_uses_selection_and_explicit_stage_fields_only(self):
         retry = RecommendationRetryContext(
             trigger=ExecutionFailureTrigger(status="execution_failed"),
@@ -303,14 +364,9 @@ class AssemblyRenderingV3Tests(unittest.TestCase):
             "assembly_output_dir": "/work/nextdenovo_work",
             "assembly_threads": 12,
         }
-        cases = (
-            ({}, False, False),
-            ({"read_cutoff": 1000}, True, False),
-            ({"nextgraph_a": 2}, False, True),
-            ({"read_cutoff": 1000, "nextgraph_a": 2}, True, True),
-        )
+        cases = (({}, False), ({"read_cutoff": 1000}, True))
 
-        for approved_l2, has_cutoff, has_nextgraph in cases:
+        for approved_l2, has_cutoff in cases:
             with self.subTest(approved_l2=approved_l2):
                 resolved = resolve_assembly_parameters(
                     catalog=catalog,
@@ -324,7 +380,32 @@ class AssemblyRenderingV3Tests(unittest.TestCase):
                 self.assertEqual(rendered["workdir"], "/work/nextdenovo_work")
                 self.assertIn("workdir = /work/nextdenovo_work", text)
                 self.assertEqual("read_cutoff = 1000" in text, has_cutoff)
-                self.assertEqual("nextgraph_options = -a 2" in text, has_nextgraph)
+                self.assertIn("nextgraph_options = -a 1\n", text)
+                self.assertEqual(
+                    resolved.effective_source_by_parameter["nextgraph_a"], "l0"
+                )
+
+        for value in (0, 1, 2, 3, 4, 5, 10):
+            with self.subTest(nextgraph_a=value):
+                with self.assertRaisesRegex(
+                    ParameterCommandError, "not cataloged as L2-adjustable"
+                ):
+                    resolve_assembly_parameters(
+                        catalog=catalog,
+                        snapshot=_snapshot(NEXTDENOVO_METHOD),
+                        approved_l2={"nextgraph_a": value},
+                        l0_executor_values=l0,
+                    )
+                if value != 1:
+                    with self.assertRaisesRegex(ValueError, "FASTA"):
+                        _run_cfg(
+                            read_type="ont",
+                            input_fofn="/work/input.fofn",
+                            workdir="/work/nextdenovo_work",
+                            genome_size=2500000,
+                            threads=12,
+                            nextgraph_a=value,
+                        )
 
     def test_hifiasm_commands_do_not_fabricate_route_inputs(self):
         forbidden = {
@@ -463,7 +544,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
     def test_execution_contract_has_no_legacy_field_fallback(self):
         output = {
             "env": {"PATH": "/legacy"},
-            "flye_parameters": {"threads": 8},
+            "threads": 8,
         }
 
         with self.assertRaisesRegex(
@@ -478,7 +559,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
     def test_execution_contract_freezes_l0_value_and_provenance(self):
         output = {
             "env": {"PATH": "/frozen"},
-            "flye_parameters": {"threads": 8},
+            "threads": 8,
         }
 
         contract = assembly_support.build_assembly_execution_contract(
@@ -486,7 +567,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
             method_id=FLYE_METHOD,
         )
         output["env"]["PATH"] = "/mutated"
-        output["flye_parameters"]["threads"] = 64
+        output["threads"] = 64
 
         self.assertEqual(contract.schema_version, 3)
         self.assertEqual(contract.environment.values, {"PATH": "/frozen"})
@@ -497,7 +578,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
     def test_execution_contract_rejects_falsey_non_mapping_sources(self):
         for output, field in (
             ({"env": []}, "env must be a mapping"),
-            ({"flye_parameters": []}, "flye_parameters must be a mapping"),
+            ({"threads": []}, "invalid Assembly execution contract parameter"),
         ):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(ValueError, field):
@@ -535,6 +616,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
             attempt=attempt,
             expected_stage="assembly",
             expected_method_id=FLYE_METHOD,
+            request_validator=assembly_support.validate_recorded_parameter_request,
         )
 
     def test_support_turns_v3_evidence_errors_into_stage_friendly_errors(self):
@@ -570,7 +652,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_flye_attempt",
                 FLYE_METHOD,
                 "flye_execution_planned",
-                "flye_parameters",
                 "flye",
                 "pacbio-raw",
                 "nano-hq",
@@ -581,7 +662,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_nextdenovo_attempt",
                 NEXTDENOVO_METHOD,
                 "nextdenovo_execution_planned",
-                "nextdenovo_parameters",
                 "nextdenovo",
                 "clr",
                 "ont",
@@ -592,7 +672,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_hifiasm_attempt",
                 HIFIASM_METHOD,
                 "hifiasm_execution_planned",
-                "hifiasm_parameters",
                 "hifiasm",
                 "ont",
                 None,
@@ -603,7 +682,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_hifiasm_ont_attempt",
                 HIFIASM_ONT_METHOD,
                 "hifiasm_ont_execution_planned",
-                "hifiasm_ont_parameters",
                 "hifiasm_ont",
                 "hifi",
                 None,
@@ -616,7 +694,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
             freeze_name,
             method_id,
             status,
-            parameter_key,
             prior_key,
             mutable_read_type,
             expected_method_read_type,
@@ -627,15 +704,12 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as tmp,
             ):
                 run_dir = Path(tmp) / "runs" / "s1"
-                run_dir.mkdir(parents=True)
+                ensure_run_layout(SessionPaths.from_run_dir(run_dir))
                 output = {
                     "status": status,
                     "input_ref": "/reads/long.fastq.gz",
                     "input_type": "ont_raw",
-                    parameter_key: {
-                        "read_type": mutable_read_type,
-                        "threads": 6,
-                    },
+                    "threads": 6,
                     "read_type_prior": {prior_key: mutable_read_type},
                     "assembly_input_member_ids": {"primary": ["fixture-member-0"]},
                 }
@@ -646,7 +720,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 output[assembly_support.ASSEMBLY_EXECUTION_CONTRACT_KEY] = (
                     contract.model_dump(mode="json")
                 )
-                output[parameter_key]["threads"] = 99
+                output["threads"] = 99
                 output["env"] = {"PATH": "/mutable/not-frozen"}
                 state = _assembly_state(run_dir, output)
                 bundle = SimpleNamespace(
@@ -759,43 +833,38 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_flye_attempt",
                 FLYE_METHOD,
                 "flye_execution_planned",
-                "flye_parameters",
             ),
             (
                 nextdenovo_adapter,
                 "freeze_nextdenovo_attempt",
                 NEXTDENOVO_METHOD,
                 "nextdenovo_execution_planned",
-                "nextdenovo_parameters",
             ),
             (
                 hifiasm_adapter,
                 "freeze_hifiasm_attempt",
                 HIFIASM_METHOD,
                 "hifiasm_execution_planned",
-                "hifiasm_parameters",
             ),
             (
                 hifiasm_ont_adapter,
                 "freeze_hifiasm_ont_attempt",
                 HIFIASM_ONT_METHOD,
                 "hifiasm_ont_execution_planned",
-                "hifiasm_ont_parameters",
             ),
         )
 
-        for adapter, freeze_name, method_id, status, parameter_key in cases:
+        for adapter, freeze_name, method_id, status in cases:
             with (
                 self.subTest(method_id=method_id),
                 tempfile.TemporaryDirectory() as tmp,
             ):
                 run_dir = Path(tmp) / "runs" / "s1"
-                run_dir.mkdir(parents=True)
+                ensure_run_layout(SessionPaths.from_run_dir(run_dir))
                 output = {
                     "status": status,
                     "input_ref": "/reads/long.fastq.gz",
                     "input_type": "ont_raw",
-                    parameter_key: {"read_type": "mutable-value"},
                     "read_type_prior": {"mutable": "mutable-value"},
                     "assembly_input_member_ids": {"primary": ["fixture-member-0"]},
                 }
@@ -806,7 +875,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 output[assembly_support.ASSEMBLY_EXECUTION_CONTRACT_KEY] = (
                     contract.model_dump(mode="json")
                 )
-                output[parameter_key]["threads"] = 99
+                output["threads"] = 99
                 state = _assembly_state(run_dir, output)
                 bundle = SimpleNamespace(
                     attempt=SimpleNamespace(attempt_id=0),

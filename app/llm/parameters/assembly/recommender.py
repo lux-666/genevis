@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.llm.factory import build_chat_model
 from app.llm.json_response import (
@@ -13,6 +13,7 @@ from app.llm.json_response import (
 )
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 from app.llm.parameters.assembly.response import normalize_parameter_recommendation
+from app.llm.provenance import ModelCallProvenance
 from app.llm.recommender import StructuredRecommender
 
 
@@ -24,6 +25,7 @@ class AssemblyParameterDecision(BaseModel):
     valid: bool = False
     error: str | None = None
     model_id: str | None = None
+    model_call: ModelCallProvenance = Field(default_factory=ModelCallProvenance)
 
 
 def recommend_assembly_parameters(
@@ -47,6 +49,7 @@ def recommend_assembly_parameters(
         valid=result.valid,
         error=result.error,
         model_id=result.model_id,
+        model_call=result.model_call,
     )
 
 
@@ -67,6 +70,7 @@ def restore_assembly_parameter_decision(
             valid=False,
             error=envelope["error"],
             model_id=envelope["model_id"],
+            model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
         )
     parsed = normalize_parameter_recommendation(
         parse_json_object(envelope["raw_response"]),
@@ -78,4 +82,5 @@ def restore_assembly_parameter_decision(
         valid=True,
         error=envelope["error"],
         model_id=envelope["model_id"],
+        model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
     )

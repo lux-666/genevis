@@ -8,28 +8,36 @@ from langgraph.graph.state import CompiledStateGraph
 from app.execution.method_outcomes import method_outcome_settlement_node
 from app.schemas.state import TopLevelState
 from app.stages.read_qc.constants import (
+    HIC_READS_FASTP_METHOD_NAME,
     LENGTH_FILTER_METHOD_NAME,
     LENGTH_FILTER_SKIP_METHOD_NAME,
     METHOD_NAME,
+    SHORT_READS_FASTP_METHOD_NAME,
 )
 from app.stages.read_qc.method_application import (
+    build_hic_reads_fastp_graph,
     build_seqkit_length_filter_graph,
     build_seqkit_stats_graph,
+    build_short_reads_fastp_graph,
 )
+from app.stages.read_qc.method_application.fastp import fastp_outcome
 from app.stages.read_qc.method_application.seqkit_length_filter import (
     seqkit_length_filter_outcome,
 )
 from app.stages.read_qc.method_application.seqkit_stats import seqkit_stats_outcome
+from app.stages.read_qc.method_application.support import read_qc_output
 from app.stages.read_qc.nodes import (
     commit_read_qc,
     enter_read_qc,
     fail_read_qc,
     length_filter_skip_outcome,
+    plan_fastp_family,
     plan_length_filter,
     plan_seqkit_stats,
     resolve_raw_long_reads,
 )
 from app.stages.read_qc.routing import (
+    route_after_fastp,
     route_after_length_filter,
     route_after_plan,
     route_after_resolve,
@@ -52,6 +60,16 @@ def build_stage() -> CompiledStateGraph[
     graph.add_node("seqkit_stats", build_seqkit_stats_graph())
     graph.add_node("plan_length_filter", plan_length_filter)
     graph.add_node("seqkit_length_filter", build_seqkit_length_filter_graph())
+    graph.add_node(
+        "plan_short_reads_fastp",
+        lambda state: plan_fastp_family(state, "short_reads"),
+    )
+    graph.add_node("short_reads_fastp", build_short_reads_fastp_graph())
+    graph.add_node(
+        "plan_hic_reads_fastp",
+        lambda state: plan_fastp_family(state, "hic_reads"),
+    )
+    graph.add_node("hic_reads_fastp", build_hic_reads_fastp_graph())
     graph.add_node(
         "settle_seqkit_stats_outcome",
         method_outcome_settlement_node(
@@ -78,6 +96,22 @@ def build_stage() -> CompiledStateGraph[
     )
     graph.add_node("commit", commit_read_qc)
     graph.add_node("fail", fail_read_qc)
+    graph.add_node(
+        "settle_short_reads_fastp_outcome",
+        method_outcome_settlement_node(
+            stage="read_qc",
+            method_name=SHORT_READS_FASTP_METHOD_NAME,
+            outcome_policy=fastp_outcome("short_reads"),
+        ),
+    )
+    graph.add_node(
+        "settle_hic_reads_fastp_outcome",
+        method_outcome_settlement_node(
+            stage="read_qc",
+            method_name=HIC_READS_FASTP_METHOD_NAME,
+            outcome_policy=fastp_outcome("hic_reads"),
+        ),
+    )
 
     graph.add_edge(START, "enter")
     graph.add_edge("enter", "resolve_raw_long_reads")
@@ -109,7 +143,37 @@ def build_stage() -> CompiledStateGraph[
     graph.add_conditional_edges(
         "settle_length_filter_skip_outcome",
         route_after_length_filter,
-        {"commit": "commit", "fail": "fail"},
+        {"short": "plan_short_reads_fastp", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "plan_short_reads_fastp",
+        lambda state: (
+            "run"
+            if read_qc_output(state).get("status") == "short_reads_fastp_planned"
+            else "settle"
+        ),
+        {"run": "short_reads_fastp", "settle": "settle_short_reads_fastp_outcome"},
+    )
+    graph.add_edge("short_reads_fastp", "settle_short_reads_fastp_outcome")
+    graph.add_conditional_edges(
+        "settle_short_reads_fastp_outcome",
+        route_after_fastp,
+        {"fail": "fail", "continue": "plan_hic_reads_fastp"},
+    )
+    graph.add_conditional_edges(
+        "plan_hic_reads_fastp",
+        lambda state: (
+            "run"
+            if read_qc_output(state).get("status") == "hic_reads_fastp_planned"
+            else "settle"
+        ),
+        {"run": "hic_reads_fastp", "settle": "settle_hic_reads_fastp_outcome"},
+    )
+    graph.add_edge("hic_reads_fastp", "settle_hic_reads_fastp_outcome")
+    graph.add_conditional_edges(
+        "settle_hic_reads_fastp_outcome",
+        route_after_fastp,
+        {"fail": "fail", "continue": "commit"},
     )
     graph.add_edge("commit", END)
     graph.add_edge("fail", END)

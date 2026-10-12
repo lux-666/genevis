@@ -26,7 +26,7 @@ if [[ ! -f "docs/examples/envs.yaml.example" ]]; then
   exit 1
 fi
 
-INSTALL_COMMAND="python -m pip install -e '.[dev]'"
+INSTALL_COMMAND="python -m pip install -c constraints/ci.txt -e '.[dev]'"
 
 if ! python -c 'from importlib.metadata import version; version("gene-agent")' >/dev/null 2>&1; then
   printf "error: gene-agent is not installed in this Python environment; run: %s\n" "${INSTALL_COMMAND}" >&2

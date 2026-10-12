@@ -7,7 +7,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import app.storage.artifacts as artifact_storage
 from app.execution.evidence import (
     ExecutionEvidence,
     execution_log_paths,
@@ -25,6 +27,7 @@ from app.storage.artifacts import (
     publish_artifact_record,
     publish_artifact_records,
     publish_or_recover_work_artifact,
+    read_artifact_index_view,
     read_artifact_records,
     register_artifact_records,
     resolve_artifact_ref,
@@ -403,6 +406,55 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             self.assertNotIn("file_hash", records[0])
             self.assertNotIn("metadata", records[0])
             self.assertNotIn("business_status", records[0])
+
+    def test_index_view_reuses_one_parse_and_keeps_file_integrity_checks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            source = paths.workflow_step_work_path(
+                "step-001", "inventory", "registry.json"
+            )
+            source.parent.mkdir(parents=True)
+            source.write_text('{"assets": 1}\n', encoding="utf-8")
+            artifact = ArtifactMeta.from_file(
+                source,
+                stage="inventory",
+                method_name="inventory.register_assets",
+                artifact_type="asset_registry",
+            )
+            [ref] = publish_artifact_records(paths.run_dir, "s1", [artifact])
+
+            with patch(
+                "app.storage.artifacts._load_records",
+                wraps=artifact_storage._load_records,
+            ) as load:
+                # The view API is the caller-owned read boundary; lookups below
+                # must not reopen or reparse the append-only index.
+                view = read_artifact_index_view(paths.run_dir, "s1")
+
+            for _ in range(10):
+                self.assertEqual(
+                    view.ref_for_path(paths.resolve_ref(ref.path_ref)), ref
+                )
+                self.assertEqual(
+                    view.record_for_ref(ref)["artifact_id"], ref.artifact_id
+                )
+                self.assertEqual(
+                    view.resolve(ref).read_text(encoding="utf-8"), '{"assets": 1}\n'
+                )
+            self.assertEqual(load.call_count, 1)
+
+            with self.assertRaises(TypeError):
+                view.by_id[ref.artifact_id]["sha256"] = "0" * 64  # type: ignore[index]
+            with self.assertRaises(TypeError):
+                view.by_path[ref.path_ref] = {}  # type: ignore[index]
+            detached = view.record_for_ref(ref)
+            detached["sha256"] = "0" * 64
+            self.assertEqual(view.record_for_ref(ref)["sha256"], ref.sha256)
+
+            published = paths.resolve_ref(ref.path_ref)
+            published.write_text('{"assets": 2}\n', encoding="utf-8")
+            with self.assertRaises(DataLayoutError):
+                view.resolve(ref)
 
     def test_work_product_is_published_without_repeating_session_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:

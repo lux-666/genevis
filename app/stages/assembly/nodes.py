@@ -28,6 +28,7 @@ from app.domains.assembly.constants import (
     HIFIASM_ONT_METHOD,
     NEXTDENOVO_METHOD,
 )
+from app.domains.assembly.inputs import HifiasmInputConfig
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     PLATFORMS_BY_SHARED_READ_TYPE,
@@ -124,6 +125,7 @@ from app.stages.read_resolution import (
     RuntimeReadMember,
     resolve_hic_pairs,
     resolve_long_read_members,
+    resolve_trio_parent_members,
 )
 from app.stages.resource_resolution import update_resource_ref
 from app.storage.artifacts import (
@@ -303,7 +305,17 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
         primary_members = _members_for_read_type(all_members, hinted_read_type)
         if not primary_members and platforms == ["unknown"]:
             primary_members = list(all_members)
-    explicit_hifi_ref = assembly_out.get("hifi_reads_ref")
+    # The resolved first-file hint is not an operator override. On re-entry
+    # after method confirmation it must not collapse a multi-file HiFi set.
+    assembly_seed = (state.get("stage_seeds") or {}).get("assembly") or {}
+    explicit_hifi_ref_raw = assembly_seed.get("hifi_reads_ref") or (
+        assembly_out.get("hifi_reads_ref")
+        if "hifi_read_refs" not in assembly_out
+        else None
+    )
+    explicit_hifi_ref = (
+        str(explicit_hifi_ref_raw) if isinstance(explicit_hifi_ref_raw, str) else None
+    )
     if hinted_read_type == "pacbio_hifi" and explicit_hifi_ref:
         try:
             primary_members = resolve_long_read_members(
@@ -330,26 +342,57 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
     elif platforms == ["unknown"] and hinted_read_type in {"ont_raw", "ont_hq"}:
         ont_members = list(primary_members)
 
-    hifiasm_parameters = assembly_out.get("hifiasm_parameters") or {}
-    use_ultralong_ont = bool(hifiasm_parameters.get("use_ultralong_ont"))
-    use_hic_phasing = bool(hifiasm_parameters.get("use_hic_phasing"))
+    raw_hifiasm_inputs = (state.get("stage_seeds") or {}).get("assembly", {}).get(
+        "hifiasm_inputs"
+    ) or {}
+    try:
+        hifiasm_inputs = HifiasmInputConfig.model_validate(raw_hifiasm_inputs)
+    except ValueError as exc:
+        return _fail_update(state, f"Assembly input roles are invalid: {exc}")
+    use_ultralong_ont = hifiasm_inputs.ultralong_ont_reads_ref is not None
+    use_hic_phasing = hifiasm_inputs.hic_reads_ref is not None
     selected_method = existing_selection.primary_method if existing_selection else None
-    if (use_ultralong_ont or use_hic_phasing) and selected_method != HIFIASM_METHOD:
+    if (
+        use_ultralong_ont or use_hic_phasing or hifiasm_inputs.trio_enabled
+    ) and not hifi_members:
+        return _fail_update(state, "Hifiasm joint assembly requires child HiFi reads")
+    if (
+        (use_ultralong_ont or use_hic_phasing or hifiasm_inputs.trio_enabled)
+        and selected_method is not None
+        and selected_method != HIFIASM_METHOD
+    ):
         return _fail_update(
             state,
             "Hifiasm supplementary inputs require assembly.candidate.hifiasm",
         )
+    if use_ultralong_ont:
+        try:
+            ont_members = resolve_long_read_members(
+                state,
+                override_paths=hifiasm_inputs.ultralong_ont_reads_ref,
+            )
+        except ValueError as exc:
+            return _fail_update(state, f"ONT companion provenance is invalid: {exc}")
     if use_ultralong_ont and not ont_members:
         return _fail_update(
             state,
             "use_ultralong_ont requires at least one registered ONT member",
         )
+    if use_ultralong_ont and any(member.platform != "ont" for member in ont_members):
+        return _fail_update(
+            state,
+            "Hifiasm --ul requires explicitly registered ONT ultra-long material; "
+            "PacBio, unknown, or unclassified long reads cannot be used as --ul",
+        )
     if use_hic_phasing:
         try:
-            hic_pairs = resolve_hic_pairs(
-                state,
-                selection_anchor=assembly_out.get("hic_reads_ref"),
-            )
+            selected_pairs = {}
+            for anchor in hifiasm_inputs.hic_reads_ref or []:
+                for pair in resolve_hic_pairs(state, selection_anchor=anchor):
+                    selected_pairs[(pair.manifest_entry_ordinal, pair.pair_index)] = (
+                        pair
+                    )
+            hic_pairs = [selected_pairs[key] for key in sorted(selected_pairs)]
         except ValueError as exc:
             return _fail_update(state, f"Hi-C provenance is invalid: {exc}")
         if not hic_pairs:
@@ -359,6 +402,61 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
             )
     else:
         hic_pairs = []
+
+    trio_maternal_members: list[RuntimeReadMember] = []
+    trio_paternal_members: list[RuntimeReadMember] = []
+    if hifiasm_inputs.trio_enabled:
+        try:
+            trio_maternal_members = resolve_trio_parent_members(
+                state,
+                override_paths=hifiasm_inputs.trio_maternal_reads_ref,
+            )
+            trio_paternal_members = resolve_trio_parent_members(
+                state,
+                override_paths=hifiasm_inputs.trio_paternal_reads_ref,
+            )
+        except ValueError as exc:
+            return _fail_update(state, f"Trio provenance is invalid: {exc}")
+        for role, members in (
+            ("maternal", trio_maternal_members),
+            ("paternal", trio_paternal_members),
+        ):
+            if not members:
+                return _fail_update(state, f"Trio {role} reads are empty")
+            if any(
+                member.format not in {"fasta", "fastq", "unknown"} for member in members
+            ):
+                return _fail_update(
+                    state,
+                    f"Trio {role} reads must be registered FASTA/FASTQ parental reads",
+                )
+        parent_ids = {
+            member.member_id
+            for member in [*trio_maternal_members, *trio_paternal_members]
+        }
+        if len(parent_ids) != len(trio_maternal_members) + len(trio_paternal_members):
+            return _fail_update(
+                state, "Trio maternal and paternal reads must be distinct"
+            )
+        parent_member_ids = {
+            member.member_id
+            for member in [*trio_maternal_members, *trio_paternal_members]
+        }
+        primary_members = [
+            member
+            for member in primary_members
+            if member.member_id not in parent_member_ids
+        ]
+        if not primary_members:
+            return _fail_update(
+                state,
+                "Trio assembly requires a distinct primary HiFi read set",
+            )
+        hifi_members = [
+            member
+            for member in hifi_members
+            if member.member_id not in parent_member_ids
+        ]
 
     primary_refs = [member.path for member in primary_members]
     hifi_refs = [member.path for member in hifi_members]
@@ -405,33 +503,39 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
             "ultralong_read_refs": ont_refs if use_ultralong_ont else [],
             "hifi_reads_ref": hifi_refs[0] if hifi_refs else None,
             "hifi_read_refs": hifi_refs,
-            "hic_reads_ref": (
-                assembly_out.get("hic_reads_ref")
-                or (hic_r1_reads[0] if hic_r1_reads else None)
-            ),
+            "hic_reads_ref": hic_r1_reads[0] if hic_r1_reads else None,
             "hic_r1_reads": hic_r1_reads,
             "hic_r2_reads": hic_r2_reads,
+            "trio_maternal_read_refs": [
+                member.path for member in trio_maternal_members
+            ],
+            "trio_paternal_read_refs": [
+                member.path for member in trio_paternal_members
+            ],
+            "trio_maternal_member_ids": [
+                member.member_id for member in trio_maternal_members
+            ],
+            "trio_paternal_member_ids": [
+                member.member_id for member in trio_paternal_members
+            ],
+            "trio_enabled": hifiasm_inputs.trio_enabled,
             "assembly_input_member_ids": {
                 "primary": [member.member_id for member in primary_members],
-                "ultralong": (
-                    [member.member_id for member in ont_members]
-                    if use_ultralong_ont
-                    else []
-                ),
+                "ultralong": [member.member_id for member in ont_members],
                 "hic_r1": (
                     [pair.r1.member_id for pair in hic_pairs] if use_hic_phasing else []
                 ),
                 "hic_r2": (
                     [pair.r2.member_id for pair in hic_pairs] if use_hic_phasing else []
                 ),
+                "trio_maternal": [member.member_id for member in trio_maternal_members],
+                "trio_paternal": [member.member_id for member in trio_paternal_members],
             },
             "assembly_input_member_platforms": {
                 "primary": [member.platform for member in primary_members],
-                "ultralong": (
-                    [member.platform for member in ont_members]
-                    if use_ultralong_ont
-                    else []
-                ),
+                "ultralong": [member.platform for member in ont_members],
+                "trio_maternal": [member.platform for member in trio_maternal_members],
+                "trio_paternal": [member.platform for member in trio_paternal_members],
                 "hic_r1": (
                     [pair.r1.platform for pair in hic_pairs] if use_hic_phasing else []
                 ),
@@ -496,6 +600,28 @@ def resolve_extended_inputs(state: TopLevelState) -> StateUpdate:
                     if use_hic_phasing
                     else []
                 ),
+                "trio_maternal": [
+                    (
+                        cast(
+                            ArtifactRefJson,
+                            member.read_artifact_ref.model_dump(mode="json"),
+                        )
+                        if member.read_artifact_ref
+                        else None
+                    )
+                    for member in trio_maternal_members
+                ],
+                "trio_paternal": [
+                    (
+                        cast(
+                            ArtifactRefJson,
+                            member.read_artifact_ref.model_dump(mode="json"),
+                        )
+                        if member.read_artifact_ref
+                        else None
+                    )
+                    for member in trio_paternal_members
+                ],
             },
             "use_ultralong_ont": use_ultralong_ont,
             "use_hic_phasing": use_hic_phasing,
@@ -1529,6 +1655,12 @@ def commit_assembly_plan(state: TopLevelState) -> StateUpdate:
         "ultralong_read_refs",
         "hic_r1_reads",
         "hic_r2_reads",
+        "trio_maternal_read_refs",
+        "trio_paternal_read_refs",
+        "trio_maternal_member_ids",
+        "trio_paternal_member_ids",
+        "trio_enabled",
+        "phased_output_refs",
     ]
     serialized_output = ASSEMBLY_STAGE_CURSOR_ADAPTER.dump_python(
         assembly_out, mode="json"
@@ -1848,10 +1980,7 @@ def _requested_method(
                 else:
                     method = default_primary_method(read_type)
         candidates = _assembly_method_candidates(assembly_out)
-        strict_recommendation = bool(
-            assembly_out.get("assembly_method_model_request_ref")
-        )
-        if strict_recommendation and candidates and method not in candidates:
+        if candidates and method not in candidates:
             raise ResumeValidationError(
                 f"assembly method {method!r} is not available for current inputs"
             )
@@ -2054,6 +2183,7 @@ def _recommend_route_with_decision_boundary(
                                 valid=decision.valid,
                                 error=decision.error,
                                 model_id=decision.model_id,
+                                model_call=decision.model_call.model_dump(mode="json"),
                             ),
                         },
                         artifact_type=ASSEMBLY_METHOD_MODEL_RESPONSE,
@@ -2258,6 +2388,12 @@ def _assembly_method_candidates(assembly_out: AssemblyStageCursor) -> list[str]:
 
     observed = _assembly_observed_read_types(assembly_out)
     registry = load_descriptor_registry()
+    if (
+        assembly_out.get("use_ultralong_ont")
+        or assembly_out.get("use_hic_phasing")
+        or assembly_out.get("trio_enabled")
+    ):
+        return [HIFIASM_METHOD] if HIFIASM_METHOD in registry.methods else []
     compatible = {
         method for read_type in observed for method in compatible_methods(read_type)
     }

@@ -15,12 +15,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app.entrypoints.run as run_entry
-from app.control.lifecycle import TerminalFinalizationResult
 from app.control.projections import (
     ProjectionBoundary,
     progress_projection_input,
 )
 from app.control.resume_transaction import ResumeTransactionError
+from app.control.terminal import TerminalFinalizationResult
 from app.execution.dependency_snapshot import (
     FrozenDependencyResolver,
     capture_dependency_snapshot,
@@ -46,9 +46,8 @@ def _capture_call(function, *args, **kwargs):
     return result, stdout.getvalue(), stderr.getvalue()
 
 
-def _busco_config(lineage_path: str) -> dict[str, object]:
+def _busco_config() -> dict[str, object]:
     return {
-        "lineage": Path(lineage_path).name,
         "threads": 4,
     }
 
@@ -120,9 +119,7 @@ def _prepared_inputs(
         ],
     }
     if "assembly_review" in stages:
-        payload["assembly_review"] = {
-            "busco": _busco_config("/data/busco/embryophyta_odb10")
-        }
+        payload["assembly_review"] = {"busco": _busco_config()}
     return SimpleNamespace(
         manifest=SimpleNamespace(session_id=session_id),
         run_config=RunConfig.model_validate(payload),
@@ -319,11 +316,13 @@ class AttachedProgressTests(unittest.TestCase):
         state = {
             "workflow_steps": [
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-001-read_qc",
                     "stage": "read_qc",
                     "allow_local_execution": False,
@@ -365,6 +364,7 @@ class AttachedProgressTests(unittest.TestCase):
             "session_id": "s1",
             "workflow_steps": [
                 {
+                    **({"selected_method_names": []} if stage != "assembly" else {}),
                     "step_id": f"step-{index:03d}-{stage}",
                     "stage": stage,
                     "allow_local_execution": False,
@@ -415,11 +415,13 @@ class AttachedProgressTests(unittest.TestCase):
             "session_id": "s1",
             "workflow_steps": [
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-001-read_qc",
                     "stage": "read_qc",
                     "allow_local_execution": False,
@@ -872,7 +874,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
-                        "assembly_review": {"busco": _busco_config(str(lineage))},
+                        "assembly_review": {"busco": _busco_config()},
                     }
                 ),
                 encoding="utf-8",
@@ -949,7 +951,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
-                        "assembly_review": {"busco": _busco_config(str(lineage))},
+                        "assembly_review": {"busco": _busco_config()},
                     }
                 ),
                 encoding="utf-8",
@@ -1139,11 +1141,14 @@ class FrozenHelperTests(unittest.TestCase):
                                 "allow_local_execution": False,
                             },
                         ],
+                        "shared_parameters": {
+                            "species_facts": {"telomere_motif": "TTAGGG"}
+                        },
                         "t2t": {
                             "mode": "manual_review",
                             "recommendation_mode": "deterministic_baseline",
                         },
-                        "assembly_review": {"busco": _busco_config(str(self._lineage))},
+                        "assembly_review": {"busco": _busco_config()},
                         "review_policy": {
                             "max_blocked_seconds": 300,
                             "stages": {
@@ -1159,7 +1164,7 @@ class FrozenHelperTests(unittest.TestCase):
                 patch("app.entrypoints.run.Ledger"),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ),
                 patch("app.entrypoints.run.project_workflow_state"),
@@ -1343,7 +1348,7 @@ class FrozenHelperTests(unittest.TestCase):
                 ) as initial,
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ),
                 patch("app.entrypoints.run.project_workflow_state"),
@@ -1491,7 +1496,9 @@ class FrozenHelperTests(unittest.TestCase):
             }
             graph = Mock()
             graph.get_state.return_value = SimpleNamespace(values=terminal_state)
-            reconcile_target = run_entry.reconcile_canonical_terminal_checkpoint
+            reconcile_target = (
+                run_entry.terminal.reconcile_canonical_terminal_checkpoint
+            )
             with (
                 patch("app.entrypoints.run.Ledger") as ledger,
                 patch(
@@ -1500,11 +1507,11 @@ class FrozenHelperTests(unittest.TestCase):
                 ),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.reconcile_canonical_terminal_checkpoint",
+                    "app.control.terminal.reconcile_canonical_terminal_checkpoint",
                     wraps=reconcile_target,
                 ) as reconcile,
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=run_entry.TerminalFinalizationError(
                         "canonical Ledger terminal stage conflicts with the checkpoint"
                     ),
@@ -1543,7 +1550,7 @@ class FrozenHelperTests(unittest.TestCase):
                         {"stage": "assembly", "allow_local_execution": False},
                         {"stage": "assembly_review", "allow_local_execution": False},
                     ],
-                    assembly_review={"busco": _busco_config(str(self._lineage))},
+                    assembly_review={"busco": _busco_config()},
                 ),
             )
             graph = Mock()
@@ -1555,7 +1562,7 @@ class FrozenHelperTests(unittest.TestCase):
                 patch("app.entrypoints.run.Ledger") as ledger,
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ) as finalize,
             ):

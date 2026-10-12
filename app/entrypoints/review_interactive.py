@@ -1216,7 +1216,7 @@ def load_blocked_gate_summary(
 ) -> dict[str, Any]:
     """Load the verified checkpoint summary used by foreground and manual review."""
 
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
 
     return _checkpoint_blocked_summary(
         session_id,
@@ -1233,7 +1233,8 @@ def _checkpoint_blocked_summary(
 ) -> dict[str, Any] | None:
     """Return a blocked-state summary from sqlite checkpoint state, if present."""
     try:
-        from app.control.lifecycle import build_result_next_action, inspect_state
+        from app.control.inspection import inspect_state
+        from app.control.next_action import build_result_next_action
         from app.graph.builder import build_graph
         from app.graph.checkpointer import checkpoint_db_path
 
@@ -1350,7 +1351,7 @@ def run_interactive_review(
     """Full interactive review flow: inspect → prompt → validate → persist → resume."""
     located = locate_session_data_dir(data_dir, session_id)
     data_dir = str(located or SessionPaths(data_dir, session_id).run_dir)
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
     from app.control.resume_transaction import (
         ResumeTransactionError,
         execute_resume_transaction,

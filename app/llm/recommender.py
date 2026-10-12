@@ -10,6 +10,11 @@ from pydantic import BaseModel
 
 from app.llm.factory import build_chat_model
 from app.llm.json_response import parse_json_object, response_text
+from app.llm.provenance import (
+    ModelCallProvenance,
+    model_call_provenance,
+    returned_model_provenance,
+)
 
 T = TypeVar("T")
 OutputMethod = Literal["prompt_json", "json_schema", "function_calling"]
@@ -23,6 +28,8 @@ class RecommendationResult(Generic[T]):
     model_id: str | None = None
     raw_message: dict[str, Any] = field(default_factory=dict)
 
+    model_call: ModelCallProvenance = field(default_factory=ModelCallProvenance)
+
     @property
     def valid(self) -> bool:
         return self.error is None and self.parsed is not None
@@ -33,7 +40,7 @@ class StructuredRecommender(Generic[T]):
 
     Subclasses may provide prompts and business validation. A forced function
     call submits structured data; this class never executes a model-named tool.
-    Legacy sparse contracts can retain prompt JSON and their existing parser.
+    Sparse contracts can retain prompt JSON and their existing parser.
     """
 
     def __init__(
@@ -60,9 +67,11 @@ class StructuredRecommender(Generic[T]):
         raw = ""
         raw_message: dict[str, Any] = {}
         model_id = None
+        model_call = ModelCallProvenance()
         try:
             model = (model_factory or build_chat_model)()
-            original_model_id = type(model).__name__
+            model_call = model_call_provenance(model, self.method)
+            model_id = model_call.configured_model
             if self.method == "json_schema":
                 model = model.bind(
                     response_format={
@@ -96,7 +105,8 @@ class StructuredRecommender(Generic[T]):
                     parallel_tool_calls=False,
                 )
             response = model.invoke(messages)
-            model_id = original_model_id
+            model_call = returned_model_provenance(model_call, response)
+            model_id = model_call.returned_model or model_call.configured_model
             if isinstance(response, BaseModel):
                 raw_message = response.model_dump(mode="json")
             if self.method == "function_calling":
@@ -114,7 +124,9 @@ class StructuredRecommender(Generic[T]):
             else:
                 raw = response_text(response)
             parsed = self.parse(parse_json_object(raw))
-            return RecommendationResult(raw, parsed, None, model_id, raw_message)
+            return RecommendationResult(
+                raw, parsed, None, model_id, raw_message, model_call
+            )
         except Exception as exc:
             return RecommendationResult(
                 raw if isinstance(raw, str) else "",
@@ -122,4 +134,5 @@ class StructuredRecommender(Generic[T]):
                 f"{type(exc).__name__}: {exc}",
                 model_id,
                 raw_message,
+                model_call,
             )

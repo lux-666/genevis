@@ -264,7 +264,16 @@ def _collect_sample_assets(draft: Any) -> Any | None:
             continue
 
         focused_role = clarification.role
-        if focused_role not in {"hifi_reads", "ont_reads", "hic_reads"}:
+        if focused_role not in {
+            "hifi_reads",
+            "ont_reads",
+            "hic_reads",
+            "short_reads",
+            "trio_maternal_reads",
+            "trio_paternal_reads",
+            "clean_long_reads",
+            "existing_assembly",
+        }:
             raise RuntimeError("asset collection clarification requires an asset role")
         result = apply_asset_answer(
             draft,
@@ -379,15 +388,33 @@ def _collect_run_plan(draft: Any) -> tuple[Any, Any] | None:
 
 
 def _planner_state_from_tui_draft(draft: Any) -> Any:
-    from app.entrypoints.tui_intake import no_hic_contig_stage_scope
+    from app.entrypoints.tui_intake import (
+        _companion_read_hints,
+        no_hic_contig_stage_scope,
+    )
     from app.schemas.ask_plan import AskPlanState
-    from app.schemas.tui_intake import NoHiCFact
+    from app.schemas.tui_intake import HiCPairedReadsFact, NoHiCFact
     from app.storage.paths import SessionPaths
 
     has_hifi = draft.intake.hifi_reads is not None
     has_ont = draft.intake.ont_reads is not None
-    platform: str | None = "pacbio_hifi" if has_hifi and not has_ont else "ont"
+    has_short = draft.intake.short_reads is not None
+    platform: str | None = (
+        "pacbio_hifi" if has_hifi and not has_ont else ("ont" if has_ont else None)
+    )
     if has_hifi and has_ont:
+        platform = None
+    elif has_short and not has_hifi and not has_ont:
+        platform = "illumina"
+    elif has_short:
+        platform = None
+    if draft.intent.entry_mode == "clean_long_reads":
+        platform = (
+            draft.intake.clean_long_reads.platform
+            if draft.intake.clean_long_reads
+            else None
+        )
+    elif draft.intent.entry_mode == "existing_assembly":
         platform = None
 
     degraded = (
@@ -404,15 +431,10 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         if draft.method_parameters is not None
         else {}
     )
-    # Assembly method selection is runtime-derived.  Keep explicit legacy
-    # selected_methods if a durable draft already contains them, but do not
-    # synthesize a new method choice from intake intent.
     selected_methods = draft.selected_methods
 
     requested_stages = list(draft.intent.requested_stages)
     if degraded:
-        # New confirmations persist this projection in WorkflowIntent. Keep it
-        # here as a compatibility boundary for older durable drafts.
         requested_stages = no_hic_contig_stage_scope(requested_stages)
 
     entry_request: dict[str, Any] = {
@@ -424,6 +446,11 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         "requested_stages": requested_stages,
         "source_paths": [],
         "intent_parse_source": "llm_plan_draft",
+        "entry_mode": draft.intent.entry_mode,
+        "read_qc_inputs": {
+            "short_reads": has_short,
+            "hic_reads": isinstance(draft.intake.hic_reads, HiCPairedReadsFact),
+        },
         "intake_goal": {
             "target_assembly_level": (
                 "contig" if degraded else draft.intent.target_assembly_level
@@ -431,6 +458,25 @@ def _planner_state_from_tui_draft(draft: Any) -> Any:
         },
         "recommendation_policy": draft.recommendation_policy.model_dump(),
     }
+    hifiasm_inputs: dict[str, list[str]] = {}
+    if draft.intake.trio_maternal_reads and draft.intake.trio_paternal_reads:
+        hifiasm_inputs.update(
+            {
+                "trio_maternal_reads_ref": list(draft.intake.trio_maternal_reads.paths),
+                "trio_paternal_reads_ref": list(draft.intake.trio_paternal_reads.paths),
+            }
+        )
+    companion_hints = _companion_read_hints(draft.intent.goal_text)
+    if companion_hints["use_ultralong_ont"] and draft.intake.ont_reads:
+        hifiasm_inputs["ultralong_ont_reads_ref"] = list(draft.intake.ont_reads.paths)
+    if companion_hints["use_hic_phasing"] and isinstance(
+        draft.intake.hic_reads, HiCPairedReadsFact
+    ):
+        hifiasm_inputs["hic_reads_ref"] = [
+            path for pair in draft.intake.hic_reads.pairs for path in (pair.r1, pair.r2)
+        ]
+    if hifiasm_inputs:
+        entry_request["hifiasm_inputs"] = hifiasm_inputs
     return AskPlanState(
         session_id=draft.session_id,
         data_dir=draft.data_dir,
@@ -819,7 +865,7 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
 
 
 def _lifecycle_after_execution(draft: Any, result_code: int) -> str:
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
     from app.storage.paths import SessionPaths
 
     paths = SessionPaths(draft.data_dir, draft.session_id)
@@ -944,7 +990,10 @@ def _review_resumed_draft(draft: Any) -> Any | None:
         print("  3          替换 ONT reads")
         print("  4          替换 Hi-C reads / 声明没有 Hi-C")
         print("  5          替换 HiFi reads")
-        print("  6          修改推荐策略")
+        print("  6          替换 Illumina short paired reads")
+        print("  7          修改推荐策略")
+        if draft.intent.entry_mode != "raw_reads":
+            print("  8          替换当前入口的材料")
         print("  0          返回")
         action = input("> ").strip().lower()
         if action in {"", "1", "continue", "继续"}:
@@ -960,7 +1009,11 @@ def _review_resumed_draft(draft: Any) -> Any | None:
         elif action == "5":
             draft = _replace_draft_asset(draft, role="hifi_reads")
         elif action == "6":
+            draft = _replace_draft_asset(draft, role="short_reads")
+        elif action == "7":
             draft = _edit_recommendation_policy(draft)
+        elif action == "8" and draft.intent.entry_mode != "raw_reads":
+            draft = _replace_draft_asset(draft, role=draft.intent.entry_mode)
         else:
             print("无法识别该选择。\n")
             continue
@@ -1056,14 +1109,25 @@ def _replace_draft_goal(draft: Any) -> Any:
 def _replace_draft_asset(
     draft: Any,
     *,
-    role: Literal["hifi_reads", "ont_reads", "hic_reads"],
+    role: Literal[
+        "hifi_reads",
+        "ont_reads",
+        "hic_reads",
+        "short_reads",
+        "clean_long_reads",
+        "existing_assembly",
+    ],
 ) -> Any:
     from app.entrypoints.tui_intake import apply_asset_answer
 
-    if role == "hifi_reads":
+    if role in {"clean_long_reads", "existing_assembly"}:
+        print("请提供替换文件路径；clean 长读段请同时明确 ONT 或 PacBio HiFi 平台：")
+    elif role == "hifi_reads":
         print("请提供新的 PacBio HiFi 文件路径；可一次提供多个文件：")
     elif role == "ont_reads":
         print("请提供新的 ONT 文件路径；可一次提供多个文件：")
+    elif role == "short_reads":
+        print("请显式提供新的 Illumina 短读段 R1/R2；不会根据文件名推断配对：")
     else:
         print("请明确提供新的 Hi-C R1/R2；也可以回答\u201c没有 Hi-C\u201d：")
     answer = input("> ").strip()
@@ -1101,7 +1165,7 @@ def _reset_draft_planning(draft: Any) -> Any:
 
 
 def _durable_supervision_state(draft: Any) -> str:
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
     from app.storage.paths import SessionPaths
 
     paths = SessionPaths(draft.data_dir, draft.session_id)
@@ -1148,6 +1212,7 @@ def _create_child_rerun(parent: Any) -> int:
                 "hifi_reads": None,
                 "ont_reads": None,
                 "hic_reads": None,
+                "short_reads": None,
                 "unresolved_candidates": [],
             }
         )
@@ -1165,6 +1230,7 @@ def _render_batch_t2t_result(result: Any) -> None:
         "hifi_reads": "PacBio HiFi reads",
         "ont_reads": "ONT reads",
         "hic_reads": "Hi-C paired reads",
+        "short_reads": "Illumina short paired reads",
         "no_hic": "无 Hi-C",
         "species": "物种",
         "telomere_motif": "telomere motif",
@@ -1202,6 +1268,12 @@ def _would_replace_confirmed_asset(result: Any) -> bool:
 
 
 def _render_reused_assets(draft: Any) -> None:
+    for role in ("clean_long_reads", "existing_assembly"):
+        fact = getattr(draft.intake, role)
+        if fact is not None and draft.intent.entry_mode == role:
+            print(f"可复用 {role}：")
+            for path in fact.paths:
+                print(f"  - {path}")
     if draft.intake.hifi_reads is not None:
         print("\n可复用 PacBio HiFi reads：")
         for path in draft.intake.hifi_reads.paths:
@@ -1210,6 +1282,12 @@ def _render_reused_assets(draft: Any) -> None:
         print("\n可复用 ONT reads：")
         for path in draft.intake.ont_reads.paths:
             print(f"  - {path}")
+    short = draft.intake.short_reads
+    if getattr(short, "kind", None) == "short_reads_paired":
+        print("可复用 Illumina short-read pairs：")
+        for pair in short.pairs:
+            print(f"  - R1: {pair.r1}")
+            print(f"    R2: {pair.r2}")
     hic = draft.intake.hic_reads
     if getattr(hic, "kind", None) == "hic_paired_reads":
         print("可复用 Hi-C pairs：")
@@ -1228,6 +1306,9 @@ def _has_reused_assets(draft: Any) -> bool:
         draft.intake.hifi_reads is not None
         or draft.intake.ont_reads is not None
         or draft.intake.hic_reads is not None
+        or draft.intake.clean_long_reads is not None
+        or draft.intake.existing_assembly is not None
+        or draft.intake.short_reads is not None
     )
 
 
@@ -1247,7 +1328,10 @@ def _parse_goal_with_configured_llm(request_text: str) -> Mapping[str, Any]:
     system = (
         "Extract only explicit workflow-goal facts. Return one JSON object with "
         "goal_text, optional sample_id/target_species, target_assembly_level "
-        "(contig/scaffold/chromosome), requested_stages, and "
+        "(contig/scaffold/chromosome), requested_stages, entry_mode "
+        "(raw_reads/clean_long_reads/existing_assembly), optional clean_reads_platform "
+        "(ont/pacbio_hifi). Only explicit cleaned reads or an existing assembly select "
+        "a midstage mode; an ordinary assembly goal uses raw_reads. "
         "Do not invent paths, "
         "parameters, methods, or machine capabilities."
     )
@@ -1259,7 +1343,8 @@ def _parse_assets_with_configured_llm(
 ) -> Mapping[str, Any]:
     system = (
         "Extract explicitly stated sequencing asset roles from the answer. Return "
-        'JSON as {"candidates": [{"role": hifi_reads|ont_reads|hic_r1|hic_r2|no_hic, '
+        'JSON as {"candidates": [{"role": '
+        "hifi_reads|ont_reads|short_r1|short_r2|hic_r1|hic_r2|no_hic, "
         '"paths": [...], "explicit_role": true|false}]}. Preserve every path '
         "verbatim. Never invent a path, infer a mate from a filename, or mark a "
         "file as existing. The current focused role is "

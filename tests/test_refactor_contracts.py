@@ -119,9 +119,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                     {
                         "requested_stages": [],
                         "assembly": {"hifi_reads_ref": "reads/hifi.fofn"},
-                        "assembly_review": {
-                            "busco": {"lineage": "metazoa", "threads": 4}
-                        },
+                        "assembly_review": {"busco": {"threads": 4}},
                         "t2t": {
                             "assembly_fasta_ref": "assembly/final.fasta",
                             "read_inputs": [
@@ -155,9 +153,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 canonical["assembly"]["hifi_reads_ref"],
                 str((source_dir / "reads/hifi.fofn").resolve()),
             )
-            self.assertEqual(
-                canonical["assembly_review"]["busco"]["lineage"], "metazoa"
-            )
+            self.assertEqual(canonical["assembly_review"]["busco"]["threads"], 4)
             self.assertEqual(
                 canonical["t2t"]["assembly_fasta_ref"],
                 str((source_dir / "assembly/final.fasta").resolve()),

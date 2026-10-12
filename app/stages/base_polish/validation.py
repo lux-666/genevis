@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+import sqlite3
+from collections.abc import Mapping
+from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from app.schemas.artifacts import ArtifactRef
-from app.stages.sequences import fasta_records, read_sequences, sequence_summary
+from app.stages.sequence_index import SequenceIndex
+from app.stages.sequences import sequence_summary
 from app.storage.artifacts import resolve_artifact_ref
 from app.storage.assembly_candidates import load_executed_candidate_bundle
 
@@ -55,19 +59,42 @@ def load_comparison(
     return dict(report)
 
 
-def _covered(intervals: list[tuple[int, int]]) -> int:
-    total = end = 0
-    for start, stop in sorted(intervals):
+def _indexed_coverage(db: sqlite3.Connection, kind: str) -> tuple[int, int]:
+    count = total = end = 0
+    previous = None
+    for name, start, stop in db.execute(
+        "SELECT name, start, stop FROM spans WHERE kind=? ORDER BY name, start, stop",
+        (kind,),
+    ):
+        if name != previous:
+            count += 1
+            end = 0
+            previous = name
         total += max(0, stop - max(start, end))
         end = max(end, stop)
-    return total
+    return count, total
 
 
 def alignment_summary(
-    path: Path, targets: dict[str, str], reads: dict[str, int]
+    path: Path, targets: Mapping[str, str], reads: Mapping[str, int]
 ) -> dict[str, Any]:
-    query_intervals: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    target_intervals: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    with TemporaryDirectory(prefix="gene-paf-") as scratch:
+        with closing(
+            sqlite3.connect(str(Path(scratch) / "intervals.sqlite"))
+        ) as intervals:
+            intervals.execute("PRAGMA cache_size=-2048")
+            intervals.execute(
+                "CREATE TABLE spans (kind TEXT, name TEXT, start INTEGER, stop INTEGER)"
+            )
+            return _alignment_summary(path, targets, reads, intervals)
+
+
+def _alignment_summary(
+    path: Path,
+    targets: Mapping[str, str],
+    reads: Mapping[str, int],
+    intervals: sqlite3.Connection,
+) -> dict[str, Any]:
     count = matches = blocks = 0
     with path.open(encoding="ascii") as handle:
         for line in handle:
@@ -118,18 +145,20 @@ def alignment_summary(
                 or not 0 <= equal_bases - matching <= ambiguous
             ):
                 raise ValueError("PAF match/block counts differ from CIGAR")
-            query_intervals[query].append((qs, qe))
-            target_intervals[target].append((ts, te))
+            intervals.executemany(
+                "INSERT INTO spans VALUES (?, ?, ?, ?)",
+                [("query", query, qs, qe), ("target", target, ts, te)],
+            )
             count += 1
             matches += matching
             blocks += block
     if not count:
         raise ValueError("empty read-alignment evidence; polishing cannot be evaluated")
-    mapped = sum(_covered(intervals) for intervals in query_intervals.values())
-    covered = sum(_covered(intervals) for intervals in target_intervals.values())
+    mapped_count, mapped = _indexed_coverage(intervals, "query")
+    _, covered = _indexed_coverage(intervals, "target")
     return {
         "alignment_records": count,
-        "mapped_reads": len(query_intervals),
+        "mapped_reads": mapped_count,
         "total_reads": len(reads),
         "mapped_read_bases": mapped,
         "total_read_bases": sum(reads.values()),
@@ -144,32 +173,40 @@ def alignment_summary(
 def compare_outputs(
     source: Path, candidate: Path, reads: Path, before_paf: Path, after_paf: Path
 ) -> dict[str, Any]:
-    before, after = fasta_records(source), fasta_records(candidate)
-    if set(before) != set(after):
-        raise ValueError("polishing must preserve every scaffold identity")
-    lengths = {name: len(seq) for name, seq in read_sequences(reads, "fasta")}
-    before_metrics = alignment_summary(before_paf, before, lengths)
-    after_metrics = alignment_summary(after_paf, after, lengths)
-    return {
-        "schema_version": 1,
-        "before": {"sequence": sequence_summary(before), "alignments": before_metrics},
-        "after": {"sequence": sequence_summary(after), "alignments": after_metrics},
-        "delta": {
-            key: after_metrics[key] - before_metrics[key]
-            for key in (
-                "mapped_reads",
-                "mapped_read_bases",
-                "base_identity",
-                "target_coverage_fraction",
-            )
-        },
-        "changed_scaffolds": sum(before[name] != after[name] for name in before),
-        "independent_qv": None,
-        "limitations": [
-            "Same reads used for correction and comparison; "
-            "not independent accuracy/QV.",
-            "Alignment identity is weighted over records; "
-            "covered bases use interval unions.",
-            "No automatic improvement verdict. Compare QUAST/BUSCO in final Review.",
-        ],
-    }
+    with (
+        SequenceIndex(source) as before,
+        SequenceIndex(candidate) as after,
+        SequenceIndex(reads) as read_index,
+    ):
+        if set(before) != set(after):
+            raise ValueError("polishing must preserve every scaffold identity")
+        lengths = read_index.lengths()
+        before_metrics = alignment_summary(before_paf, before, lengths)
+        after_metrics = alignment_summary(after_paf, after, lengths)
+        return {
+            "schema_version": 1,
+            "before": {
+                "sequence": sequence_summary(before),
+                "alignments": before_metrics,
+            },
+            "after": {"sequence": sequence_summary(after), "alignments": after_metrics},
+            "delta": {
+                key: after_metrics[key] - before_metrics[key]
+                for key in (
+                    "mapped_reads",
+                    "mapped_read_bases",
+                    "base_identity",
+                    "target_coverage_fraction",
+                )
+            },
+            "changed_scaffolds": sum(before[name] != after[name] for name in before),
+            "independent_qv": None,
+            "limitations": [
+                "Same reads used for correction and comparison; "
+                "not independent accuracy/QV.",
+                "Alignment identity is weighted over records; "
+                "covered bases use interval unions.",
+                "No automatic improvement verdict. "
+                "Compare QUAST/BUSCO in final Review.",
+            ],
+        }

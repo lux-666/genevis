@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.entrypoints.run import _stage_seeds_from_run_config
+from app.control.stage_seeds import stage_seeds_from_run_config
 from app.schemas.run_config import RunConfig, load_run_config
 from app.stages.assembly.state import ASSEMBLY_STAGE_CURSOR_ADAPTER
 from app.stages.hic_scaffolding.state import HIC_SCAFFOLDING_CURSOR_ADAPTER
@@ -18,7 +18,7 @@ from app.stages.hic_scaffolding.state import HIC_SCAFFOLDING_CURSOR_ADAPTER
 def _busco_config(lineage: str = "embryophyta_odb10") -> dict[str, object]:
     """Return the only BUSCO fields a user RunConfig may provide."""
 
-    return {"lineage": lineage, "threads": 4}
+    return {"threads": 4}
 
 
 def _stage_requests(
@@ -165,7 +165,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": [],
                 "assembly": {
                     "hifi_reads_ref": "hifi.fofn",
-                    "hic_reads_ref": "hic.fofn",
+                    "hifiasm_inputs": {"hic_reads_ref": ["hic.fofn"]},
                     "target_level": "near_t2t",
                     "assembly_route": "hifi",
                 },
@@ -174,11 +174,21 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         assert config.assembly is not None
         self.assertEqual(config.assembly.hifi_reads_ref, "hifi.fofn")
-        self.assertEqual(config.assembly.hic_reads_ref, "hic.fofn")
+        self.assertEqual(config.assembly.hifiasm_inputs.hic_reads_ref, ["hic.fofn"])
         self.assertEqual(config.assembly.target_level, "near_t2t")
         self.assertEqual(config.assembly.assembly_route, "hifi")
 
-    def test_assembly_recommendation_policy_defaults_and_ablation_modes(self):
+    def test_top_level_hic_reads_ref_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "requested_stages": [],
+                    "assembly": {"hic_reads_ref": "hic.fofn"},
+                }
+            )
+        self.assertIn("hic_reads_ref", str(ctx.exception))
+
+    def test_assembly_recommendation_policy_defaults_and_strategy_modes(self):
         config = RunConfig.model_validate(
             {
                 "requested_stages": _local_stage_requests("assembly"),
@@ -193,7 +203,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.method_route_advisor, "deterministic_baseline")
         self.assertEqual(config.assembly.parameter_advisor, "advisor")
         ASSEMBLY_STAGE_CURSOR_ADAPTER.validate_python(
-            _stage_seeds_from_run_config(config, shared_parameters=None)["assembly"]
+            stage_seeds_from_run_config(config, shared_parameters=None)["assembly"]
         )
 
         with self.assertRaises(ValidationError) as ctx:
@@ -288,7 +298,7 @@ class RunConfigSchemaTests(unittest.TestCase):
             }
         )
 
-        seeds = _stage_seeds_from_run_config(config, shared_parameters=None)
+        seeds = stage_seeds_from_run_config(config, shared_parameters=None)
 
         self.assertEqual(seeds["genome_survey"]["survey_parameters"]["ploidy"], 4)
 
@@ -303,7 +313,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly is not None
         self.assertEqual(config.assembly.threads, 12)
         self.assertEqual(
-            _stage_seeds_from_run_config(config, shared_parameters=None)["assembly"][
+            stage_seeds_from_run_config(config, shared_parameters=None)["assembly"][
                 "threads"
             ],
             12,
@@ -407,7 +417,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert default.assembly_dedup is not None
         self.assertFalse(default.assembly_dedup.automatic_purge_approved)
         self.assertEqual(
-            _stage_seeds_from_run_config(approved, shared_parameters=None)[
+            stage_seeds_from_run_config(approved, shared_parameters=None)[
                 "assembly_dedup"
             ],
             {
@@ -552,7 +562,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": _local_stage_requests("assembly_review"),
                 "assembly_review": {
                     "busco": {
-                        "lineage": "embryophyta_odb10",
                         "threads": 16,
                     }
                 },
@@ -561,7 +570,7 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         assert cfg.assembly_review is not None
         assert cfg.assembly_review.busco is not None
-        self.assertEqual(cfg.assembly_review.busco.lineage, "embryophyta_odb10")
+        self.assertNotIn("lineage", cfg.assembly_review.busco.model_dump())
         self.assertEqual(cfg.assembly_review.busco.threads, 16)
 
     def test_requested_assembly_review_uses_host_default_without_busco_config(self):
@@ -573,6 +582,7 @@ class RunConfigSchemaTests(unittest.TestCase):
 
     def test_busco_rejects_host_database_identity_fields(self):
         for forbidden in (
+            "lineage",
             "lineage_path",
             "lineage_name",
             "lineage_version",
@@ -702,7 +712,7 @@ class RunConfigSchemaTests(unittest.TestCase):
             config.hic_scaffolding.parameter_advisor,
             "deterministic_baseline",
         )
-        seed = _stage_seeds_from_run_config(config, shared_parameters=None)[
+        seed = stage_seeds_from_run_config(config, shared_parameters=None)[
             "hic_scaffolding"
         ]
         self.assertEqual(seed["parameter_advisor"], "deterministic_baseline")
@@ -736,6 +746,41 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIsNotNone(config.t2t)
         self.assertIsNone(config.t2t.mode)
+
+    def test_t2t_rejects_incompatible_advisor_patch_modes(self):
+        for mode in ("manual_review", "propose_only"):
+            for policy in ({}, {"recommendation_mode": "advisor"}):
+                with self.subTest(mode=mode, policy=policy):
+                    with self.assertRaisesRegex(
+                        ValidationError, "t2t advisor requires mode=auto_patch"
+                    ):
+                        RunConfig.model_validate(
+                            {
+                                "requested_stages": _local_stage_requests("t2t"),
+                                "t2t": {"mode": mode, **policy},
+                            }
+                        )
+
+    def test_t2t_accepts_supported_policy_and_patch_mode_combinations(self):
+        for policy, modes in (
+            ("advisor", (None, "auto_patch")),
+            (
+                "deterministic_baseline",
+                (None, "auto_patch", "manual_review", "propose_only"),
+            ),
+        ):
+            for mode in modes:
+                with self.subTest(policy=policy, mode=mode):
+                    config = RunConfig.model_validate(
+                        {
+                            "requested_stages": _local_stage_requests("t2t"),
+                            "t2t": {"recommendation_mode": policy, "mode": mode},
+                            "shared_parameters": {
+                                "species_facts": {"telomere_motif": "TTAGGG"}
+                            },
+                        }
+                    )
+                    self.assertEqual(config.t2t.mode, mode)
 
     def test_autohic_run_config_rejects_catalog_owned_parameters(self):
         for name, value in (

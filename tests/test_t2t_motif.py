@@ -12,30 +12,20 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from app.control.lifecycle import ResumeValidationError
 from app.llm.parameters.t2t.motif import T2TMotifRequest
-from app.llm.parameters.t2t.request import T2TParameterRequest
-from app.review.application import (
-    ReviewApplicationIdentity,
-    ReviewApplicationIntegrityError,
-    load_verified_review_application,
-    persist_review_application,
-    persist_review_intent,
-)
-from app.review.base import ResumeReviewRequest
-from app.review.persistence import load_review_request, persist_review_request
 from app.schemas.artifacts import (
     T2T_MOTIF_INPUT_SNAPSHOT,
     T2T_MOTIF_RESOLUTION,
     T2T_MOTIF_RESOLUTION_MANIFEST,
+    T2T_PARAMETER_POLICY_RESPONSE,
     ArtifactMeta,
 )
+from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     CanonicalSpeciesFacts,
     T2TMotifInputSnapshotV3,
 )
-from app.schemas.state import initial_state
-from app.stages.base import stage_output
+from app.schemas.state import initial_state, stage_output
 from app.stages.t2t.nodes import enter_t2t, scan_assembly_telomeres
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.execution import load_t2t_frozen_execution_inputs
@@ -46,14 +36,14 @@ from app.stages.t2t.parameters.storage import (
     write_artifact as write_t2t_parameter_artifact,
 )
 from app.stages.t2t.parameters.workflow import (
-    apply_t2t_parameter_approval_application,
     freeze_t2t_parameters,
-    prepare_t2t_parameter_approval_application,
     recommend_t2t_parameters,
     resolve_t2t_telomere_motif,
 )
 from app.storage.artifacts import publish_artifact_record
-from app.storage.parameter_evidence import load_parameter_recommendation_chain_v3
+from app.storage.parameter_evidence import (
+    load_approved_parameter_chain_v3,
+)
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -72,16 +62,19 @@ class T2TMotifResolutionTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
             workflow_steps=[
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-001-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,
@@ -145,6 +138,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "status": "resolved",
                 "execution_mode": "local",
                 "mode": "auto_patch",
+                "recommendation_mode": "advisor",
                 "chromosome_list_ref": None,
                 "long_read_refs": [str(item["path"]) for item in read_inputs],
                 "long_read_inputs": read_inputs,
@@ -177,26 +171,106 @@ class T2TMotifResolutionTests(unittest.TestCase):
             merged["stage_outputs"] = update["stage_outputs"]
         return merged
 
+    def test_recommendation_requires_deterministic_baseline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                species_facts={
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                },
+            )
+            resolved = self._resolve_provided(state)
+            failed = self._merge(resolved, recommend_t2t_parameters(resolved))
+            output = stage_output(failed, "t2t")
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("deterministic_baseline", output["reason"])
+
+    def test_baseline_rejects_recovered_saved_advisor_response(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                species_facts={
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                },
+            )
+            resolved = self._resolve_provided(state)
+            resolved["stage_outputs"]["t2t"]["recommendation_mode"] = (
+                "deterministic_baseline"
+            )
+            write_t2t_parameter_artifact(
+                resolved,
+                0,
+                "policy_response.json",
+                {
+                    "schema_version": 2,
+                    "raw_response": json.dumps(
+                        {"parameters": {"min_mapq": 35}, "summary": "advisor"}
+                    ),
+                    "validity": "parsed",
+                    "error": None,
+                    "model_id": "t2t.parameter_recommender",
+                },
+                artifact_type=T2T_PARAMETER_POLICY_RESPONSE,
+                method_name="t2t.parameter_recommender",
+            )
+
+            failed = self._merge(resolved, recommend_t2t_parameters(resolved))
+
+            output = stage_output(failed, "t2t")
+            self.assertEqual(output["status"], "failed")
+            self.assertIn(
+                "baseline response does not match its policy", output["reason"]
+            )
+
     def test_model_requests_require_typed_canonical_inputs(self):
         with self.assertRaises(ValueError):
             T2TMotifRequest.model_validate(
                 {"facts": {"scientific_name": "Homo sapiens"}}
             )
-        with self.assertRaises(ValueError):
-            T2TParameterRequest.model_validate(
+
+    def test_baseline_persists_and_recovers_without_prompt_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                species_facts={
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                },
+            )
+            resolved = self._resolve_provided(state)
+            with patch("app.llm.prompts.PROMPT_ROOT", Path(tmpdir) / "no-prompts"):
+                approved = self._recommend(resolved)
+                replayed = self._recommend(resolved)
+                ready = self._merge(replayed, freeze_t2t_parameters(replayed))
+            output = stage_output(approved, "t2t")
+            self.assertEqual(stage_output(ready, "t2t")["status"], "parameters_ready")
+            self.assertEqual(
+                output["parameter_attempts"],
+                stage_output(replayed, "t2t")["parameter_attempts"],
+            )
+            bundle = load_approved_parameter_chain_v3(
+                approved,
+                attempt=output["parameter_attempts"][0],
+                expected_stage="t2t",
+                expected_method_id="t2t.alignment.minimap2",
+            )
+            refs = bundle.chain.manifest.refs
+            self.assertEqual(
+                bundle.chain.model_request,
                 {
                     "schema_version": 3,
+                    "policy": "deterministic_baseline",
+                    "method_id": "t2t.alignment.minimap2",
                     "task": "recommend_initial",
-                    "facts": CanonicalSpeciesFacts(scientific_name="Homo sapiens"),
-                    "t2t_context": {
-                        "stage": "t2t",
-                        "resolved_telomere_motif": "TTAGGG",
-                        "motif_source": "provided_species_fact",
-                        "long_read_asset_count": "1",
-                    },
-                    "adjustable_parameters": {},
-                }
+                    "input_snapshot_sha256": refs.input_snapshot_ref.sha256,
+                    "basis_sha256": refs.basis_snapshot_ref.sha256,
+                },
             )
+            self.assertFalse(bundle.chain.model_response["model_invoked"])
+            self.assertEqual(bundle.chain.model_response["parameters"], {})
+            self.assertNotIn("raw_response", bundle.chain.model_response)
 
     def _resolve_provided(self, state: dict) -> dict:
         with patch(
@@ -206,116 +280,14 @@ class T2TMotifResolutionTests(unittest.TestCase):
             update = resolve_t2t_telomere_motif(state)
         return self._merge(state, update)
 
-    def _recommend(self, state: dict, parameters: dict | None = None) -> dict:
-        with patch("app.llm.parameters.base.build_chat_model") as build_model:
-            build_model.return_value.invoke.return_value = self._response(
-                {
-                    "parameters": parameters or {},
-                    "summary": "Focused test recommendation.",
-                }
-            )
+    def _recommend(self, state: dict) -> dict:
+        state["stage_outputs"]["t2t"]["recommendation_mode"] = "deterministic_baseline"
+        with patch(
+            "app.llm.parameters.base.build_chat_model",
+            side_effect=AssertionError("deterministic baseline must not invoke model"),
+        ):
             update = recommend_t2t_parameters(state)
         return self._merge(state, update)
-
-    def _blocked_parameter_approval(self, tmpdir: str) -> dict:
-        state = self._state(
-            tmpdir,
-            species_facts={
-                "scientific_name": "Homo sapiens",
-                "telomere_motif": "TTAGGG",
-            },
-        )
-        return self._as_blocked_parameter_approval(
-            self._recommend(self._resolve_provided(state), {"min_mapq": 35})
-        )
-
-    @staticmethod
-    def _as_blocked_parameter_approval(blocked: dict) -> dict:
-        blocked["active_interrupt"] = blocked["stage_outputs"]["t2t"][
-            "active_interrupt"
-        ]
-        blocked["supervision_state"] = "blocked_human"
-        return blocked
-
-    @staticmethod
-    def _apply_parameter_approval(state: dict, request: ResumeReviewRequest) -> dict:
-        persisted_intent = persist_review_intent(state, request, source="test")
-        prepared = prepare_t2t_parameter_approval_application(
-            state, persisted_intent.intent
-        )
-        application_ref = persist_review_application(
-            state,
-            intent=persisted_intent,
-            prepared=prepared,
-        )
-        verified = load_verified_review_application(
-            state["data_dir"],
-            application_ref,
-            expected_identity=ReviewApplicationIdentity.from_intent(
-                persisted_intent.intent
-            ),
-        )
-        return apply_t2t_parameter_approval_application(state, verified)
-
-    @staticmethod
-    def _parameter_approval_request(
-        blocked: dict,
-        *,
-        decision: str = "approve_parameters",
-    ) -> ResumeReviewRequest:
-        interrupt = blocked["stage_outputs"]["t2t"]["active_interrupt"]
-        metadata_keys = (
-            "attempt_id",
-            "task",
-            "previous_attempt_id",
-            "recommendation_hash",
-        )
-        return ResumeReviewRequest(
-            session_id=blocked["session_id"],
-            stage="t2t",
-            gate_id="parameter_approval",
-            decision=decision,
-            review_request_id=interrupt["review_request_id"],
-            review_request_hash=interrupt["request_hash"],
-            metadata={key: interrupt[key] for key in metadata_keys},
-        )
-
-    @staticmethod
-    def _replace_parameter_approval_request(
-        blocked: dict,
-        *,
-        payload_updates: dict,
-    ) -> None:
-        output = blocked["stage_outputs"]["t2t"]
-        interrupt = output["active_interrupt"]
-        record = load_review_request(
-            blocked["data_dir"],
-            interrupt["request_ref"],
-            session_id=blocked["session_id"],
-        )
-        payload = {**record["payload"], **payload_updates}
-        persisted = persist_review_request(
-            blocked,
-            stage="t2t",
-            gate_id="parameter_approval",
-            reason="t2t_parameter_approval_required",
-            payload=payload,
-            method_name="t2t.parameter_approval",
-            artifact_type="t2t.parameter_approval.request",
-            bindings=record["bindings"],
-        )
-        replacement = persisted.compact_interrupt(
-            stage="t2t",
-            gate_id="parameter_approval",
-            reason="t2t_parameter_approval_required",
-            bindings=record["bindings"],
-        )
-        output["active_interrupt"] = replacement
-        blocked["active_interrupt"] = replacement
-        cursor = dict(output["current_parameter_recommendation"])
-        cursor["review_request_id"] = persisted.review_request_id
-        cursor["review_request_ref"] = persisted.request_ref.model_dump(mode="json")
-        output["current_parameter_recommendation"] = cursor
 
     def test_provided_species_fact_persists_chain_without_model_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -435,6 +407,33 @@ class T2TMotifResolutionTests(unittest.TestCase):
             replayed = self._merge(first, update)
             self.assertEqual(
                 stage_output(replayed, "t2t")["resolved_telomere_motif"], "TTAGG"
+            )
+
+    def test_saved_motif_response_without_recommendation_mode_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir, species_facts={"scientific_name": "Homo sapiens"}
+            )
+            with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+                model.return_value.invoke.return_value = self._response(
+                    {
+                        "status": "resolved",
+                        "telomere_motif": "TTAGGG",
+                        "summary": "Saved legacy response.",
+                    }
+                )
+                first = self._merge(state, resolve_t2t_telomere_motif(state))
+            cursor = first["stage_outputs"]["t2t"]
+            cursor.pop("recommendation_mode")
+            cursor.pop("telomere_motif_resolution_manifest_ref")
+            cursor["status"] = "resolved"
+            with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+                replay = self._merge(first, resolve_t2t_telomere_motif(first))
+            model.assert_not_called()
+            output = stage_output(replay, "t2t")
+            self.assertEqual(output["status"], "failed")
+            self.assertIn(
+                "explicit advisor or deterministic_baseline", output["reason"]
             )
 
     def test_provided_resolution_rejects_motif_that_disagrees_with_snapshot(self):
@@ -602,7 +601,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 read_count=2,
             )
             resolved = self._resolve_provided(state)
-            blocked = self._recommend(resolved, {"min_mapq": 35})
+            blocked = self._recommend(resolved)
             output = stage_output(blocked, "t2t")
             manifest = read_t2t_parameter_artifact(
                 blocked, output["current_parameter_recommendation"]["manifest_ref"]
@@ -740,6 +739,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 read_count=0,
             )
             resolved = self._resolve_provided(state)
+            resolved["stage_outputs"]["t2t"]["recommendation_mode"] = (
+                "deterministic_baseline"
+            )
             with patch(
                 "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError("zero assets must bypass recommendation"),
@@ -756,289 +758,128 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 },
             )
             resolved = self._resolve_provided(state)
+            resolved["stage_outputs"]["t2t"]["recommendation_mode"] = (
+                "deterministic_baseline"
+            )
             resolved["stage_outputs"]["t2t"]["resolved_telomere_motif"] = "CCCC"
             with patch(
                 "app.llm.parameters.base.build_chat_model",
                 side_effect=AssertionError("changed motif checkpoint must fail first"),
             ):
-                failed = self._merge(resolved, recommend_t2t_parameters(resolved))
+                failed = self._merge(
+                    resolved,
+                    recommend_t2t_parameters(resolved),
+                )
             output = stage_output(failed, "t2t")
             self.assertEqual(output["status"], "failed")
             self.assertIn("does not match its evidence chain", output["reason"])
 
-    def test_parameter_approval_validates_request_and_offered_decision_before_write(
-        self,
-    ):
-        cases = (
-            "request_id",
-            "request_hash",
-            "metadata",
-            "unsupported_decision",
-            "unoffered_rejection",
-        )
-        for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
-                blocked = self._blocked_parameter_approval(tmpdir)
-                request = self._parameter_approval_request(blocked)
-                if case == "request_id":
-                    request = request.model_copy(
-                        update={"review_request_id": "review_stale"}
-                    )
-                elif case == "request_hash":
-                    request = request.model_copy(
-                        update={"review_request_hash": "0" * 64}
-                    )
-                elif case == "metadata":
-                    request = request.model_copy(
-                        update={
-                            "metadata": {
-                                **request.metadata,
-                                "recommendation_hash": "0" * 64,
-                            }
-                        }
-                    )
-                elif case == "unsupported_decision":
-                    request = request.model_copy(update={"decision": "defer"})
-                else:
-                    self._replace_parameter_approval_request(
-                        blocked,
-                        payload_updates={"decisions_allowed": ["approve_parameters"]},
-                    )
-                    request = self._parameter_approval_request(
-                        blocked, decision="reject_parameters"
-                    )
-
-                with (
-                    patch(
-                        "app.review.approval.persist_review_decision"
-                    ) as persist_decision,
-                    self.assertRaises(
-                        (ResumeValidationError, ReviewApplicationIntegrityError)
-                    ),
-                ):
-                    self._apply_parameter_approval(blocked, request)
-                persist_decision.assert_not_called()
-
-    def test_parameter_approval_validates_cursor_and_payload_before_write(self):
-        cases = (
-            "cursor_status",
-            "cursor_review_request",
-            "cursor_review_ref",
-            "cursor_recommendation_id",
-            "cursor_task",
-            "cursor_method",
-            "payload_manifest_hash",
-            "payload_manifest_ref",
-        )
-        for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
-                blocked = self._blocked_parameter_approval(tmpdir)
-                output = blocked["stage_outputs"]["t2t"]
-                cursor = dict(output["current_parameter_recommendation"])
-                if case == "cursor_status":
-                    cursor["status"] = "approved"
-                elif case == "cursor_review_request":
-                    cursor["review_request_id"] = "review_stale"
-                elif case == "cursor_review_ref":
-                    cursor["review_request_ref"] = cursor["manifest_ref"]
-                elif case == "cursor_recommendation_id":
-                    cursor["recommendation_id"] = 1
-                elif case == "cursor_task":
-                    cursor["task"] = "retry_after_execution_failure"
-                elif case == "cursor_method":
-                    cursor["method_id"] = "t2t.changed_method"
-                elif case == "payload_manifest_hash":
-                    self._replace_parameter_approval_request(
-                        blocked,
-                        payload_updates={"recommendation_manifest_hash": "0" * 64},
-                    )
-                else:
-                    record = load_review_request(
-                        blocked["data_dir"],
-                        output["active_interrupt"]["request_ref"],
-                        session_id=blocked["session_id"],
-                    )
-                    other_ref = record["payload"]["recommendation_ref"]
-                    self._replace_parameter_approval_request(
-                        blocked,
-                        payload_updates={
-                            "recommendation_manifest_ref": other_ref,
-                            "recommendation_manifest_hash": other_ref["sha256"],
-                        },
-                    )
-                if case.startswith("cursor_"):
-                    output["current_parameter_recommendation"] = cursor
-                request = self._parameter_approval_request(blocked)
-
-                with (
-                    patch(
-                        "app.review.approval.persist_review_decision"
-                    ) as persist_decision,
-                    self.assertRaises(
-                        (ResumeValidationError, ReviewApplicationIntegrityError)
-                    ),
-                ):
-                    self._apply_parameter_approval(blocked, request)
-                persist_decision.assert_not_called()
-
-    def test_parameter_approval_validates_manifest_identity_before_write(self):
-        cases = {
-            "status": {"status": "response_invalid"},
-            "recommendation_id": {"recommendation_id": 1},
-            "task": {"task": "retry_after_execution_failure"},
-            "method": {"method_id": "t2t.changed_method"},
-            "predecessor_id": {"previous_attempt_id": 0},
-            "predecessor_seal": {"previous_attempt_seal_hash": "0" * 64},
-            "predecessor_ref": None,
-        }
-        for case, manifest_updates in cases.items():
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
-                blocked = self._blocked_parameter_approval(tmpdir)
-                cursor = blocked["stage_outputs"]["t2t"][
-                    "current_parameter_recommendation"
-                ]
-                chain = load_parameter_recommendation_chain_v3(
-                    blocked,
-                    manifest_ref=cursor["manifest_ref"],
-                    expected_stage="t2t",
-                    expected_method_id=cursor["method_id"],
-                )
-                if manifest_updates is None:
-                    manifest_updates = {
-                        "previous_attempt_manifest_ref": (
-                            chain.manifest.refs.recommendation_ref
-                        )
-                    }
-                changed_chain = replace(
-                    chain,
-                    manifest=chain.manifest.model_copy(update=manifest_updates),
-                )
-                request = self._parameter_approval_request(blocked)
-
-                with (
-                    patch(
-                        "app.stages.t2t.parameters.workflow."
-                        "load_parameter_recommendation_chain_v3",
-                        return_value=changed_chain,
-                    ),
-                    patch(
-                        "app.review.approval.persist_review_decision"
-                    ) as persist_decision,
-                    self.assertRaises(
-                        (ResumeValidationError, ReviewApplicationIntegrityError)
-                    ),
-                ):
-                    self._apply_parameter_approval(blocked, request)
-                persist_decision.assert_not_called()
-
-    def test_parameter_approval_requires_initial_empty_attempt_head_before_write(self):
-        cases = ("existing_attempt", "current_head", "proposed_head")
-        for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
-                blocked = self._blocked_parameter_approval(tmpdir)
-                output = blocked["stage_outputs"]["t2t"]
-                if case == "existing_attempt":
-                    output["parameter_attempts"] = [{"attempt_id": 0}]
-                elif case == "current_head":
-                    output["current_parameter_attempt_id"] = 1
-                else:
-                    output["proposed_parameter_attempt_id"] = 1
-                request = self._parameter_approval_request(blocked)
-
-                with (
-                    patch(
-                        "app.review.approval.persist_review_decision"
-                    ) as persist_decision,
-                    self.assertRaises(
-                        (ResumeValidationError, ReviewApplicationIntegrityError)
-                    ),
-                ):
-                    self._apply_parameter_approval(blocked, request)
-                persist_decision.assert_not_called()
-
-    def test_parameter_approval_derives_attempt_identity_from_validated_manifest(self):
+    def test_freeze_rejects_non_baseline_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            blocked = self._blocked_parameter_approval(tmpdir)
-            cursor = blocked["stage_outputs"]["t2t"]["current_parameter_recommendation"]
-            chain = load_parameter_recommendation_chain_v3(
-                blocked,
-                manifest_ref=cursor["manifest_ref"],
+            state = self._state(
+                tmpdir,
+                species_facts={
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                },
+            )
+            approved = self._recommend(self._resolve_provided(state))
+            output = stage_output(approved, "t2t")
+            attempt = output["parameter_attempts"][0]
+            bundle = load_approved_parameter_chain_v3(
+                approved,
+                attempt=attempt,
                 expected_stage="t2t",
-                expected_method_id=cursor["method_id"],
+                expected_method_id="t2t.alignment.minimap2",
             )
-
-            approved = self._apply_parameter_approval(
-                blocked,
-                self._parameter_approval_request(blocked),
+            nonempty_l2_chain = replace(
+                bundle.chain,
+                recommendation={
+                    **bundle.chain.recommendation,
+                    "recommendation": {"parameters": {"min_mapq": 35}},
+                },
             )
-
-            attempt = approved["stage_outputs"]["t2t"]["parameter_attempts"][0]
-            manifest = chain.manifest
-            self.assertEqual(attempt["attempt_id"], manifest.recommendation_id)
-            self.assertEqual(attempt["method_id"], manifest.method_id)
-            self.assertEqual(attempt["task"], manifest.task)
-            self.assertEqual(
-                attempt["previous_attempt_id"], manifest.previous_attempt_id
-            )
-            self.assertEqual(
-                attempt["previous_attempt_seal_hash"],
-                manifest.previous_attempt_seal_hash,
-            )
-            self.assertEqual(
-                attempt["recommendation_contract"],
-                manifest.recommendation_contract,
-            )
-            self.assertEqual(
-                attempt["recommendation_manifest_ref"],
-                chain.manifest_ref.model_dump(mode="json"),
-            )
-
-            approved_state = self._merge(blocked, approved)
-            with self.assertRaises(
-                (ResumeValidationError, ReviewApplicationIntegrityError)
-            ):
-                self._apply_parameter_approval(
-                    approved_state,
-                    self._parameter_approval_request(blocked),
-                )
-
-    def test_parameter_rejection_is_fully_bound_and_does_not_create_attempt(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            blocked = self._blocked_parameter_approval(tmpdir)
-
-            rejected = self._apply_parameter_approval(
-                blocked,
-                self._parameter_approval_request(blocked, decision="reject_parameters"),
-            )
-
-            output = rejected["stage_outputs"]["t2t"]
-            self.assertEqual(rejected["supervision_state"], "failed_terminal")
-            self.assertEqual(
-                output["current_parameter_recommendation"]["status"],
-                "rejected",
-            )
-            self.assertEqual(output["parameter_attempts"], [])
-            self.assertIsNone(output["proposed_parameter_attempt_id"])
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            blocked = self._blocked_parameter_approval(tmpdir)
-            self._replace_parameter_approval_request(
-                blocked,
-                payload_updates={"recommendation_manifest_hash": "0" * 64},
-            )
-            request = self._parameter_approval_request(
-                blocked, decision="reject_parameters"
-            )
-            with (
-                patch(
-                    "app.review.approval.persist_review_decision"
-                ) as persist_decision,
-                self.assertRaises(
-                    (ResumeValidationError, ReviewApplicationIntegrityError)
+            missing_policy_chain = replace(
+                bundle.chain,
+                manifest=bundle.chain.manifest.model_copy(
+                    update={"summary": {"response_parsed": True}}
                 ),
-            ):
-                self._apply_parameter_approval(blocked, request)
-            persist_decision.assert_not_called()
+            )
+            human_decision = {
+                **bundle.approval_decision,
+                "decision": {
+                    **bundle.approval_decision["decision"],
+                    "decided_by": "human",
+                },
+            }
+            non_policy_decision = {
+                **bundle.approval_decision,
+                "decision": {
+                    **bundle.approval_decision["decision"],
+                    "automatic_resolution": {
+                        **bundle.approval_decision["decision"]["automatic_resolution"],
+                        "source": "foreground_countdown",
+                    },
+                },
+            }
+            cases = {
+                "nonempty_l2": replace(bundle, chain=nonempty_l2_chain),
+                "missing_policy": replace(bundle, chain=missing_policy_chain),
+                "human_decided_by": replace(bundle, approval_decision=human_decision),
+                "non_policy_automatic_resolution": replace(
+                    bundle, approval_decision=non_policy_decision
+                ),
+                "different_input_binding": replace(
+                    bundle,
+                    chain=replace(
+                        bundle.chain,
+                        model_request={
+                            **bundle.chain.model_request,
+                            "input_snapshot_sha256": "0" * 64,
+                        },
+                    ),
+                ),
+                "different_basis_binding": replace(
+                    bundle,
+                    chain=replace(
+                        bundle.chain,
+                        model_request={
+                            **bundle.chain.model_request,
+                            "basis_sha256": "0" * 64,
+                        },
+                    ),
+                ),
+                "model_response": replace(
+                    bundle,
+                    chain=replace(
+                        bundle.chain,
+                        model_response={
+                            **bundle.chain.model_response,
+                            "model_invoked": True,
+                        },
+                    ),
+                ),
+            }
+            for case, bad_bundle in cases.items():
+                with (
+                    self.subTest(case=case),
+                    patch(
+                        "app.stages.t2t.parameters.execution.load_approved_parameter_chain_v3",
+                        return_value=bad_bundle,
+                    ),
+                ):
+                    failed = self._merge(approved, freeze_t2t_parameters(approved))
+
+                failed_output = stage_output(failed, "t2t")
+                self.assertEqual(failed_output["status"], "failed")
+                if case == "nonempty_l2":
+                    self.assertIn(
+                        "must not contain L2 mappings", failed_output["reason"]
+                    )
+                else:
+                    self.assertIn(
+                        "empty-L2 baseline policy approval", failed_output["reason"]
+                    )
 
     def test_freeze_uses_persisted_catalog_and_persists_all_source_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1049,29 +890,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                     "telomere_motif": "TTAGGG",
                 },
             )
-            blocked = self._as_blocked_parameter_approval(
-                self._recommend(self._resolve_provided(state), {"min_mapq": 35})
-            )
-            interrupt = stage_output(blocked, "t2t")["active_interrupt"]
-            metadata_keys = (
-                "attempt_id",
-                "task",
-                "previous_attempt_id",
-                "recommendation_hash",
-            )
-            approval = self._apply_parameter_approval(
-                blocked,
-                ResumeReviewRequest(
-                    session_id="s1",
-                    stage="t2t",
-                    gate_id="parameter_approval",
-                    decision="approve_parameters",
-                    review_request_id=interrupt["review_request_id"],
-                    review_request_hash=interrupt["request_hash"],
-                    metadata={key: interrupt[key] for key in metadata_keys},
-                ),
-            )
-            approved = self._merge(blocked, approval)
+            approved = self._recommend(self._resolve_provided(state))
             approved["stage_outputs"]["t2t"]["thresholds"] = {
                 "min_motif_copies": 999,
                 "terminal_window_bp": 999,
@@ -1095,7 +914,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 {
                     "min_motif_copies": 4,
                     "terminal_window_bp": 10_000,
-                    "min_mapq": 35,
+                    "min_mapq": 20,
                     "max_target_terminal_distance_bp": 1_000,
                     "min_overlap_bp": 500,
                     "min_supporting_reads": 1,
@@ -1112,9 +931,9 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "applications",
             ):
                 self.assertIn(key, frozen)
-            self.assertEqual(frozen["l2_approved"], {"min_mapq": 35})
+            self.assertEqual(frozen["l2_approved"], {})
             self.assertEqual(frozen["effective_thresholds"], output["thresholds"])
-            self.assertEqual(frozen["effective_source_by_parameter"]["min_mapq"], "l2")
+            self.assertEqual(frozen["effective_source_by_parameter"]["min_mapq"], "l0")
             self.assertEqual(
                 frozen["effective_source_by_parameter"]["terminal_window_bp"], "l0"
             )
@@ -1174,8 +993,31 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 scan.call_args.args[0], Path(original["input_assembly_ref"])
             )
             self.assertEqual(scan.call_args.args[1], "TTAGGG")
-            self.assertEqual(scan.call_args.args[2]["min_mapq"], 35)
+            self.assertEqual(scan.call_args.args[2]["min_mapq"], 20)
             self.assertEqual(scan.call_args.args[2]["min_motif_copies"], 4)
+
+    def test_freeze_rejects_catalog_default_outside_threshold_range(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                species_facts={
+                    "scientific_name": "Homo sapiens",
+                    "telomere_motif": "TTAGGG",
+                },
+            )
+            record = load_t2t_parameter_catalog().model_dump(mode="json")
+            record["parameters"]["min_mapq"]["layers"]["l0"]["value"] = 256
+            catalog = MethodParameterCatalog.model_validate(record)
+            with patch(
+                "app.stages.t2t.parameters.workflow.load_t2t_parameter_catalog",
+                return_value=catalog,
+            ):
+                approved = self._recommend(self._resolve_provided(state))
+            failed = self._merge(approved, freeze_t2t_parameters(approved))
+            output = stage_output(failed, "t2t")
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("min_mapq", output["reason"])
+            self.assertIn("255", output["reason"])
 
     def test_freeze_rejects_catalog_missing_required_stage_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1200,29 +1042,7 @@ class T2TMotifResolutionTests(unittest.TestCase):
                 "app.stages.t2t.parameters.workflow.load_t2t_parameter_catalog",
                 return_value=incomplete_catalog,
             ):
-                blocked = self._as_blocked_parameter_approval(
-                    self._recommend(self._resolve_provided(state))
-                )
-            interrupt = stage_output(blocked, "t2t")["active_interrupt"]
-            metadata_keys = (
-                "attempt_id",
-                "task",
-                "previous_attempt_id",
-                "recommendation_hash",
-            )
-            approval = self._apply_parameter_approval(
-                blocked,
-                ResumeReviewRequest(
-                    session_id="s1",
-                    stage="t2t",
-                    gate_id="parameter_approval",
-                    decision="approve_parameters",
-                    review_request_id=interrupt["review_request_id"],
-                    review_request_hash=interrupt["request_hash"],
-                    metadata={key: interrupt[key] for key in metadata_keys},
-                ),
-            )
-            approved = self._merge(blocked, approval)
+                approved = self._recommend(self._resolve_provided(state))
 
             failed = self._merge(approved, freeze_t2t_parameters(approved))
 

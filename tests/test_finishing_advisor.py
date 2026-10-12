@@ -59,7 +59,7 @@ def proposal(stage, index=0, action="run", selected=None):
 
 
 def test_default_finishing_seeds_use_advisor_and_t2t_patch_proposals():
-    from app.entrypoints.run import _stage_seeds_from_run_config
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.schemas.run_config import RunConfig
 
     config = RunConfig.model_validate(
@@ -70,7 +70,7 @@ def test_default_finishing_seeds_use_advisor_and_t2t_patch_proposals():
             ]
         }
     )
-    seeds = _stage_seeds_from_run_config(config, shared_parameters={})
+    seeds = stage_seeds_from_run_config(config, shared_parameters={})
     for stage in ("gapcloser", "t2t", "base_polish"):
         assert seeds[stage]["recommendation_mode"] == "advisor"
         assert seeds[stage]["max_attempts"] == 3
@@ -438,10 +438,6 @@ def test_t2t_explicit_baseline_never_calls_model_and_freezes_catalog(tmp_path, m
             "app.llm.recommender.build_chat_model",
             side_effect=AssertionError("model disabled"),
         ),
-        patch(
-            "app.stages.t2t.parameters.workflow.invoke_t2t_parameter_model",
-            side_effect=AssertionError("threshold model disabled"),
-        ),
     ):
         final = build_t2t().invoke(state)
     cursor = final["stage_outputs"]["t2t"]
@@ -471,7 +467,6 @@ def test_t2t_explicit_baseline_never_calls_model_and_freezes_catalog(tmp_path, m
 
 
 def test_t2t_baseline_without_motif_fails_without_model(tmp_path):
-    from app.execution.run_readiness import run_requires_llm
     from app.schemas.run_config import RunConfig
     from app.stages.t2t.builder import build_stage as build_t2t
 
@@ -486,13 +481,13 @@ def test_t2t_baseline_without_motif_fails_without_model(tmp_path):
     assert (
         "requires a supplied telomere motif" in final["stage_outputs"]["t2t"]["reason"]
     )
-    config = RunConfig.model_validate(
-        {
-            "requested_stages": [{"stage": "t2t", "allow_local_execution": True}],
-            "t2t": {"recommendation_mode": "deterministic_baseline"},
-        }
-    )
-    assert not run_requires_llm(config)
+    with pytest.raises(ValueError, match="deterministic_baseline requires"):
+        RunConfig.model_validate(
+            {
+                "requested_stages": [{"stage": "t2t", "allow_local_execution": True}],
+                "t2t": {"recommendation_mode": "deterministic_baseline"},
+            }
+        )
 
 
 @pytest.mark.parametrize("stage", ["gapcloser", "base_polish", "t2t"])
@@ -740,8 +735,9 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
     fixture = AssemblyReviewStageTests()
     fixture._fake_quast_bin(str(tmp_path))
     fixture._fake_busco_bin(str(tmp_path))
-    lineage = tmp_path / "embryophyta_odb10"
-    lineage.mkdir()
+    from tests.busco_fixture import ensure_busco_lineage, isolated_frozen_busco_resolver
+
+    lineage = ensure_busco_lineage(tmp_path)
     state["current_stage"] = "assembly_review"
     state["entered_workflow_step_index"] = state["workflow_step_index"]
     state["stage_outputs"]["assembly_review"] = {
@@ -751,10 +747,11 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
         "quast_parameters": {"threads": 1},
         "busco_parameters": {
             "threads": 1,
-            "lineage_path": str(lineage),
+            "lineage_path": str(lineage.resolve()),
             "lineage_name": lineage.name,
             "lineage_version": "odb10",
             "lineage_source": "test_fixture",
+            "mode": "genome",
         },
     }
     if not execute_polish:
@@ -770,7 +767,20 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
         ]
         rejected = resolve_candidates(invalid)["stage_outputs"]["assembly_review"]
         assert rejected["status"] == "failed"
-    evaluated = build_review().invoke(state)
+    with (
+        patch(
+            "app.stages.assembly_review.method_application.busco."
+            "load_frozen_dependency_resolver",
+            return_value=isolated_frozen_busco_resolver(
+                state["stage_outputs"]["assembly_review"]["busco_parameters"]
+            ),
+        ),
+        patch(
+            "app.stages.assembly_review.statistics._related_species_reference_dir",
+            return_value=fixture._test_reference_dir(state),
+        ),
+    ):
+        evaluated = build_review().invoke(state)
     assert evaluated["active_interrupt"], evaluated["stage_outputs"]["assembly_review"]
     paths = SessionPaths.from_run_dir(state["data_dir"])
     comparison = final_comparison(
@@ -791,13 +801,17 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
 
 
 @pytest.mark.parametrize("stage", ["gapcloser", "base_polish", "t2t"])
-def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
+@pytest.mark.parametrize("malformed_report", [False, True])
+def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(
+    tmp_path, stage, malformed_report
+):
     import argparse
     import shlex
 
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _run_resume, _stage_seeds_from_run_config
+    from app.entrypoints.run import _run_resume
     from app.graph.builder import build_graph
     from app.schemas.state import initial_state
     from app.storage.frozen_inputs import freeze_session_inputs
@@ -889,7 +903,7 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
         input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(paths.run_dir),
         workflow_steps=workflow_steps_from_run_config(frozen.run_config),
-        stage_seeds=_stage_seeds_from_run_config(
+        stage_seeds=stage_seeds_from_run_config(
             frozen.run_config, shared_parameters=shared
         ),
     )
@@ -936,7 +950,15 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
                 )
             )
 
-        assert resume(blocked) == 0
+        if malformed_report:
+            tool = tmp_path / "bin" / "quast.py"
+            tool.write_text(
+                tool.read_text().replace(
+                    "labels=args[args.index('--labels')+1].split(',')",
+                    "labels=['source']",
+                )
+            )
+        assert resume(blocked) == (1 if malformed_report else 0)
         graph = build_graph(
             backend="sqlite", data_dir=str(paths.run_dir), verified_inputs=frozen
         )
@@ -947,6 +969,20 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
         finally:
             graph.checkpointer.conn.close()
         assert len(history(blocked, stage)) == 1
+        if malformed_report:
+            assert blocked["supervision_state"] == "failed_terminal"
+            assert "collect failed" in blocked["stage_outputs"][stage]["reason"]
+            outcomes = {
+                event["method_name"]: event["disposition"]
+                for event in Ledger(paths.run_dir).read_events(paths.session_id)
+                if event["event_type"] == "method_disposition_recorded"
+            }
+            assert outcomes == {
+                biological: "completed",
+                f"{stage}.eval.quast": "failed",
+            }
+            assert len(model.messages) == 1
+            return
         before = [
             r["subject_id"]
             for r in Ledger(paths.run_dir).read_event_rows(paths.session_id)
@@ -965,3 +1001,44 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(tmp_path, stage):
     )
     assert len(model.messages) == 2
     assert fixture["current_stage"] == stage
+
+
+def test_t2t_baseline_graph_rejects_advisor_before_motif_resolution(tmp_path):
+    from app.stages.t2t.builder import build_baseline_stage
+
+    state = state_for("t2t", tmp_path)
+    state["shared_parameters"]["species_facts"].pop("telomere_motif", None)
+    with patch("app.llm.parameters.t2t.motif.build_chat_model") as model:
+        failed = build_baseline_stage().invoke(state)
+    model.assert_not_called()
+    assert failed["supervision_state"] == "failed_terminal"
+    assert (
+        "single-pass execution requires deterministic_baseline" in failed["last_error"]
+    )
+
+
+def test_reentry_restores_exact_request_before_rendering(tmp_path):
+    from app.stages.finishing.advisor import recommend
+
+    state = state_for("gapcloser", tmp_path)
+    model = Model([AIMessage(content=json.dumps(proposal("gapcloser")))])
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        blocked = build_stage("gapcloser").invoke(state)
+    expected = loop(blocked, "gapcloser")["recommendation_ref"]
+    with (
+        patch.object(
+            FinishingRecommender,
+            "messages",
+            side_effect=AssertionError("must restore exact request"),
+        ),
+        patch.object(
+            FinishingRecommender,
+            "invoke",
+            side_effect=AssertionError("must restore response"),
+        ),
+    ):
+        replay = recommend(blocked, "gapcloser")
+    assert (
+        replay["stage_outputs"]["gapcloser"]["finishing"]["recommendation_ref"]
+        == expected
+    )

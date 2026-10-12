@@ -5,7 +5,8 @@ import unittest
 
 from langgraph.graph import StateGraph
 
-from app.control.lifecycle import inspect_session, normalize_resume_review_request
+from app.control.inspection import inspect_session
+from app.control.resume import normalize_resume_review_request
 from app.graph.checkpoint_compaction import (
     TerminalCheckpointCompactionError,
     compact_terminal_checkpoint,
@@ -21,6 +22,7 @@ from app.review.application import (
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import get_review_gate
+from app.review.ledger import record_review_decision
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
@@ -71,7 +73,8 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             {
                 "step_id": f"step-{index:03d}-{stage}",
                 "stage": stage,
-                "allow_local_execution": False,
+                "allow_local_execution": stage == "assembly",
+                **({"selected_method_names": []} if stage != "assembly" else {}),
             }
             for index, stage in enumerate(stages)
         ]
@@ -303,6 +306,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             paths.manifest_path.write_text(
                 "session_id: s1\n"
+                "genome_size_estimate: 1000\n"
                 "user_metadata:\n"
                 "  target_species: Fixture species\n"
                 "assets:\n"
@@ -323,7 +327,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                             "stage": "genome_survey",
                             "allow_local_execution": False,
                         },
-                        {"stage": "assembly", "allow_local_execution": False},
+                        {"stage": "assembly", "allow_local_execution": True},
                         {
                             "stage": "assembly_review",
                             "allow_local_execution": False,
@@ -467,7 +471,8 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 paths.run_dir, application_ref
             )
             identity = ReviewApplicationIdentity.from_intent(intent.intent)
-            ledger.record_review_decision(
+            record_review_decision(
+                ledger,
                 paths.session_id,
                 application_ref=application.ref,
                 expected_identity=identity,

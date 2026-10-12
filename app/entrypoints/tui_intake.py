@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import yaml
@@ -42,18 +42,34 @@ from app.schemas.tui_intake import (
     IntakeRole,
     NoHiCFact,
     OntReadsFact,
+    ShortReadsFact,
+    TrioMaternalReadsFact,
+    TrioPaternalReadsFact,
     TuiSessionDraft,
     UnresolvedAssetCandidate,
     WorkflowIntent,
 )
 from app.storage.paths import SessionPaths, ensure_run_layout
 
-PathAssetRole = Literal["hifi_reads", "ont_reads", "hic_r1", "hic_r2"]
+PathAssetRole = Literal[
+    "hifi_reads",
+    "ont_reads",
+    "trio_maternal_reads",
+    "trio_paternal_reads",
+    "hic_r1",
+    "hic_r2",
+    "short_r1",
+    "short_r2",
+]
 _PATH_ASSET_ROLES: tuple[PathAssetRole, ...] = (
     "hifi_reads",
     "ont_reads",
+    "trio_maternal_reads",
+    "trio_paternal_reads",
     "hic_r1",
     "hic_r2",
+    "short_r1",
+    "short_r2",
 )
 
 _FASTQ_SUFFIXES = (".fastq.gz", ".fq.gz", ".fastq", ".fq")
@@ -73,6 +89,17 @@ _ONT_LABEL_RE = re.compile(r"(?:\bont\b|\bnanopore\b|纳米孔)", re.IGNORECASE)
 _HIFI_LABEL_RE = re.compile(
     r"(?:\bhifi\b|\bpacbio\b|\bccs\b|高保真(?:长)?读段)",
     re.IGNORECASE,
+)
+_SHORT_READ_LABEL_RE = re.compile(
+    r"(?:\billumina\b|\bshort[ -]?reads?\b|\bpaired[ -]?end\b|"
+    r"\bpe reads?\b|短读(?:段|reads?)?|二代测序)",
+    re.IGNORECASE,
+)
+_TRIO_MATERNAL_LABEL_RE = re.compile(
+    r"(?:\bmaternal\b|\bmother\b|\bmat\b|母本|母系)", re.IGNORECASE
+)
+_TRIO_PATERNAL_LABEL_RE = re.compile(
+    r"(?:\bpaternal\b|\bfather\b|\bpat\b|父本|父系)", re.IGNORECASE
 )
 _HIC_LABEL_RE = re.compile(
     r"(?:\bhi[\s-]?c\b|高通量染色体构象捕获)",
@@ -154,9 +181,14 @@ class IntakeClarification:
 
     kind: Literal["asset_collection", "degradation_confirmation", "t2t_batch"]
     role: Literal[
+        "clean_long_reads",
+        "existing_assembly",
         "hifi_reads",
         "ont_reads",
+        "trio_maternal_reads",
+        "trio_paternal_reads",
         "hic_reads",
+        "short_reads",
         "no_hic_degradation",
         "t2t_facts",
     ]
@@ -213,7 +245,20 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
     lower = text.lower()
     requested_stages: list[str]
     target_assembly_level: Literal["contig", "scaffold", "chromosome"]
-    if any(token in lower for token in ("t2t", "telomere-to-telomere", "端粒到端粒")):
+    has_short_reads = bool(_SHORT_READ_LABEL_RE.search(text))
+    has_long_reads = bool(_HIFI_LABEL_RE.search(text) or _ONT_LABEL_RE.search(text))
+    has_survey = bool(
+        re.search(r"(?:genome[ -]?survey|survey|基因组调查|基因组测序调查)", text, re.I)
+    )
+    # Illumina-only requests are read-QC/survey intake, not an implicit ONT
+    # assembly request.  Mixed HiFi+Illumina assembly remains assembly scope.
+    illumina_only_qc = has_short_reads and not has_long_reads
+    if illumina_only_qc:
+        requested_stages = ["read_qc"]
+        if has_survey:
+            requested_stages.append("genome_survey")
+        target_assembly_level = "contig"
+    elif any(token in lower for token in ("t2t", "telomere-to-telomere", "端粒到端粒")):
         requested_stages = list(recommended_workflow_template("t2t"))
         target_assembly_level = "chromosome"
     elif any(token in lower for token in ("hi-c", "hic", "染色体级", "chromosome")):
@@ -229,8 +274,21 @@ def deterministic_workflow_intent(request_text: str) -> WorkflowIntent:
         requested_stages = []
         target_assembly_level = "contig"
 
+    from app.entrypoints.tui_midstage import (
+        explicit_entry_mode,
+        explicit_long_read_platform,
+    )
+
+    material_text = _mask_path_spans(text, extract_path_spans(text))
+    entry_mode = explicit_entry_mode(material_text)
+    if entry_mode == "existing_assembly":
+        requested_stages = ["assembly_review"]
+    elif entry_mode == "clean_long_reads":
+        requested_stages = ["assembly", "assembly_dedup", "assembly_review"]
     target_species = _extract_target_species(text)
     return WorkflowIntent(
+        entry_mode=entry_mode,
+        clean_reads_platform=explicit_long_read_platform(material_text),
         goal_text=text,
         target_species=target_species,
         target_assembly_level=target_assembly_level,
@@ -291,6 +349,8 @@ def parse_workflow_intent(
         requested_stages = parsed_sequence
     deterministic_scope_recognized = bool(fallback.requested_stages)
     return WorkflowIntent(
+        entry_mode=fallback.entry_mode,
+        clean_reads_platform=fallback.clean_reads_platform,
         goal_text=fallback.goal_text,
         sample_id=parsed.sample_id if parsed.sample_id else fallback.sample_id,
         target_species=fallback.target_species,
@@ -306,24 +366,64 @@ def parse_workflow_intent(
 def required_roles_for_intent(intent: WorkflowIntent) -> list[IntakeRole]:
     """Compute sample facts required by this scope's assembly-oriented goals."""
 
+    if intent.entry_mode == "clean_long_reads":
+        return ["clean_long_reads"]
+    if intent.entry_mode == "existing_assembly":
+        return ["existing_assembly"]
     stages = set(intent.requested_stages)
     requires_hic = "hic_scaffolding" in stages or (
         intent.target_assembly_level == "chromosome"
     )
     method_hint = _recognized_assembly_method_hint(intent.goal_text)
     companion_hints = _companion_read_hints(intent.goal_text)
+    trio_requested = _trio_read_hints(intent.goal_text)
+    short_reads_requested = bool(_SHORT_READ_LABEL_RE.search(intent.goal_text))
+    has_long_read_hint = bool(
+        _HIFI_LABEL_RE.search(intent.goal_text)
+        or _ONT_LABEL_RE.search(intent.goal_text)
+    )
+    if (
+        short_reads_requested
+        and not has_long_read_hint
+        and not stages.intersection(
+            {"assembly", "assembly_dedup", "assembly_review", "hic_scaffolding", "t2t"}
+        )
+    ):
+        return ["short_reads"]
+    if short_reads_requested and not has_long_read_hint:
+        # Short reads are not an assembly substitute. Keep the executable
+        # intake on QC/survey rather than inventing a long-read role.
+        return ["short_reads"]
     roles: list[IntakeRole] = (
         ["hifi_reads"]
-        if method_hint == "hifiasm" or companion_hints["use_ultralong_ont"]
+        if trio_requested
+        or method_hint == "hifiasm"
+        or companion_hints["use_ultralong_ont"]
         else ["ont_reads"]
     )
-    if method_hint == "hifiasm" and companion_hints["use_ultralong_ont"]:
+    if companion_hints["use_ultralong_ont"] and method_hint != "hifiasm_ont":
         roles.append("ont_reads")
     if method_hint == "hifiasm_ont":
         roles = ["ont_reads"]
     if requires_hic or companion_hints["use_hic_phasing"]:
         roles.append("hic_reads")
+    if trio_requested:
+        roles.extend(["trio_maternal_reads", "trio_paternal_reads"])
+    if short_reads_requested:
+        roles.append("short_reads")
     return list(dict.fromkeys(roles))
+
+
+def _trio_read_hints(goal_text: str) -> bool:
+    lower = goal_text.lower()
+    return bool(
+        re.search(
+            r"(?:\btrio\b|trio-binning|trio binning|母本|父本|maternal|paternal|"
+            r"\bmother\b|\bfather\b)",
+            lower,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _companion_read_hints(goal_text: str) -> dict[str, bool]:
@@ -393,6 +493,20 @@ def create_tui_session_draft(
 def next_intake_clarification(draft: TuiSessionDraft) -> IntakeClarification | None:
     """Return the one next missing intake item, derived solely from draft facts."""
 
+    mode = draft.intent.entry_mode
+    if (
+        mode in {"clean_long_reads", "existing_assembly"}
+        and getattr(draft.intake, mode) is None
+    ):
+        return IntakeClarification(
+            kind="asset_collection",
+            role=mode,
+            question=(
+                "请提供已清洗长读段文件路径，并明确平台为 ONT 或 PacBio HiFi。"
+                if mode == "clean_long_reads"
+                else "请提供恰好一个已有组装 FASTA 文件路径。"
+            ),
+        )
     requirements = set(draft.intake.requirements)
     stages = set(draft.intent.requested_stages)
 
@@ -414,6 +528,38 @@ def next_intake_clarification(draft: TuiSessionDraft) -> IntakeClarification | N
                 "需要本次样本的 ONT reads。请直接提供文件路径；可一次提供多个文件。"
             ),
         )
+
+    if "short_reads" in requirements and draft.intake.short_reads is None:
+        return IntakeClarification(
+            kind="asset_collection",
+            role="short_reads",
+            question=(
+                "需要 Illumina/短读段 paired reads。请显式提供 R1 和 R2 来源；"
+                "不会根据文件名推断配对，可一次提供多个 lane。"
+            ),
+        )
+
+    for role, label, fact in (
+        (
+            "trio_maternal_reads",
+            "母本",
+            draft.intake.trio_maternal_reads,
+        ),
+        (
+            "trio_paternal_reads",
+            "父本",
+            draft.intake.trio_paternal_reads,
+        ),
+    ):
+        if role in requirements and fact is None:
+            return IntakeClarification(
+                kind="asset_collection",
+                role=role,
+                question=(
+                    f"需要 Trio {label}测序读段，用于构建 yak k-mer 数据库。"
+                    "请提供文件路径；可一次提供多个文件。"
+                ),
+            )
 
     # New confirmations persist this scope. Keep the projection for older drafts.
     degraded = (
@@ -789,8 +935,9 @@ def parse_asset_answer_deterministically(
     """Parse all explicit roles in an answer, not only the current question.
 
     An unlabelled path is assigned only to the focused long-read question.
-    Hi-C always requires explicit R1/R2 attribution in the text (or a later
-    structured confirmation); file names are masked before role analysis.
+    Hi-C and short reads always require explicit R1/R2 attribution in the text
+    (or a later structured confirmation); file names are masked before role
+    analysis.
     """
 
     spans = extract_path_spans(answer)
@@ -798,14 +945,22 @@ def parse_asset_answer_deterministically(
     grouped: dict[PathAssetRole, list[AssetPathSpan]] = {
         "hifi_reads": [],
         "ont_reads": [],
+        "trio_maternal_reads": [],
+        "trio_paternal_reads": [],
         "hic_r1": [],
         "hic_r2": [],
+        "short_r1": [],
+        "short_r2": [],
     }
     explicit_roles: dict[PathAssetRole, bool] = {
         "hifi_reads": False,
         "ont_reads": False,
+        "trio_maternal_reads": False,
+        "trio_paternal_reads": False,
         "hic_r1": False,
         "hic_r2": False,
+        "short_r1": False,
+        "short_r2": False,
     }
     unresolved: list[str] = []
 
@@ -903,11 +1058,26 @@ def validate_candidate_paths(candidate: AssetAnswerCandidate) -> PathValidationR
 
     if candidate.role == "no_hic":
         return PathValidationResult(paths=[], issues=[])
-    supported_suffixes = (
-        _ONT_SUFFIXES
-        if candidate.role in {"hifi_reads", "ont_reads"}
-        else _FASTQ_SUFFIXES
-    )
+    supported_suffixes: tuple[str, ...]
+    if candidate.role == "existing_assembly":
+        if len(candidate.paths) != 1:
+            return PathValidationResult(
+                paths=[], issues=["已有组装必须恰好一个 FASTA 文件。"]
+            )
+        supported_suffixes = _FASTA_SUFFIXES
+    else:
+        supported_suffixes = (
+            _ONT_SUFFIXES
+            if candidate.role
+            in {
+                "hifi_reads",
+                "ont_reads",
+                "clean_long_reads",
+                "trio_maternal_reads",
+                "trio_paternal_reads",
+            }
+            else _FASTQ_SUFFIXES
+        )
     resolved: list[str] = []
     issues: list[str] = []
     for raw_path in candidate.paths:
@@ -935,6 +1105,18 @@ def validate_candidate_paths(candidate: AssetAnswerCandidate) -> PathValidationR
                 f"expected one of {', '.join(supported_suffixes)}"
             )
             continue
+        if candidate.role in {"clean_long_reads", "existing_assembly"}:
+            from app.stages.sequences import detect_sequence_format
+
+            try:
+                detected = detect_sequence_format(path)
+                if candidate.role == "existing_assembly" and detected != "fasta":
+                    raise ValueError("assembly input must be FASTA")
+            except (OSError, EOFError, ValueError) as exc:
+                issues.append(
+                    f"{candidate.role}: unreadable sequence input {raw_path}: {exc}"
+                )
+                continue
         resolved.append(str(path))
     return PathValidationResult(paths=resolved, issues=issues)
 
@@ -953,6 +1135,16 @@ def apply_asset_answer(
 ) -> AssetAnswerApplyResult:
     """Validate and merge one answer into a draft without silently replacing facts."""
 
+    if draft.intent.entry_mode != "raw_reads" and focused_role in {
+        None,
+        "clean_long_reads",
+        "existing_assembly",
+    }:
+        from app.entrypoints.tui_midstage import apply_midstage_answer
+
+        return apply_midstage_answer(
+            draft, answer=answer, replace_confirmed=replace_confirmed
+        )
     parsed = parse_asset_answer_with_fallback(
         answer,
         focused_role=focused_role,
@@ -981,8 +1173,12 @@ def apply_asset_answer(
     validated_by_role: dict[str, list[tuple[AssetAnswerCandidate, list[str]]]] = {
         "hifi_reads": [],
         "ont_reads": [],
+        "trio_maternal_reads": [],
+        "trio_paternal_reads": [],
         "hic_r1": [],
         "hic_r2": [],
+        "short_r1": [],
+        "short_r2": [],
     }
     for candidate in path_candidates:
         validation = validate_candidate_paths(candidate)
@@ -1059,6 +1255,45 @@ def apply_asset_answer(
             intake.ont_reads = new_ont
             accepted_roles.append("ont_reads")
 
+    for role, fact_type, attr, label in (
+        (
+            "trio_maternal_reads",
+            TrioMaternalReadsFact,
+            "trio_maternal_reads",
+            "Trio maternal",
+        ),
+        (
+            "trio_paternal_reads",
+            TrioPaternalReadsFact,
+            "trio_paternal_reads",
+            "Trio paternal",
+        ),
+    ):
+        paths = _flatten_candidate_paths(validated_by_role[role])
+        if not paths:
+            continue
+        new_fact = fact_type(paths=paths)
+        existing_fact = getattr(intake, attr)
+        if existing_fact is not None and existing_fact.paths != new_fact.paths:
+            if replace_confirmed:
+                setattr(intake, attr, new_fact)
+                accepted_roles.append(role)
+            else:
+                issues.append(
+                    f"{label} reads are already confirmed; explicitly confirm "
+                    "replacement before changing them"
+                )
+                unresolved.extend(
+                    UnresolvedAssetCandidate(
+                        candidate=candidate,
+                        reason=f"would replace confirmed {label} reads",
+                    )
+                    for candidate, _paths in validated_by_role[role]
+                )
+        else:
+            setattr(intake, attr, new_fact)
+            accepted_roles.append(role)
+
     if no_hic_candidates:
         if isinstance(intake.hic_reads, HiCPairedReadsFact) and not replace_confirmed:
             issues.append(
@@ -1093,6 +1328,16 @@ def apply_asset_answer(
             draft=working,
         )
 
+    _merge_short_candidates(
+        intake=intake,
+        unresolved=unresolved,
+        validated_r1=validated_by_role["short_r1"],
+        validated_r2=validated_by_role["short_r2"],
+        replace_confirmed=replace_confirmed,
+        accepted_roles=accepted_roles,
+        issues=issues,
+    )
+
     record = IntakeAnswerRecord(
         raw_answer=answer,
         focused_role=focused_role,
@@ -1116,6 +1361,40 @@ def apply_asset_answer(
 def materialize_manifest_draft(draft: TuiSessionDraft) -> InputManifest:
     """Build the mutable manifest projection from confirmed intake facts only."""
 
+    if draft.intent.entry_mode != "raw_reads":
+        mode = draft.intent.entry_mode
+        fact = getattr(draft.intake, mode)
+        if fact is None:
+            return InputManifest(
+                session_id=draft.session_id, sample_id=draft.intent.sample_id
+            )
+        midstage_metadata = (
+            {"target_species": draft.intent.target_species}
+            if draft.intent.target_species
+            else {}
+        )
+        return InputManifest(
+            session_id=draft.session_id,
+            sample_id=draft.intent.sample_id,
+            assets=[
+                InputAssetSpec(
+                    asset_type="clean_long_reads"
+                    if mode == "clean_long_reads"
+                    else "assembly_fasta_registered",
+                    paths=fact.paths,
+                    sample_id=draft.intent.sample_id,
+                    platform=fact.platform if mode == "clean_long_reads" else "unknown",
+                    format=_shared_ont_format(fact.paths)
+                    if mode == "clean_long_reads"
+                    else "fasta",
+                    metadata={"intake_role": mode},
+                )
+            ],
+            user_metadata=midstage_metadata,
+            genome_size_estimate=draft.shared_parameters.estimated_genome_size
+            if draft.shared_parameters
+            else None,
+        )
     assets: list[InputAssetSpec] = []
     if draft.intake.hifi_reads is not None:
         hifi_paths = draft.intake.hifi_reads.paths
@@ -1139,6 +1418,39 @@ def materialize_manifest_draft(draft: TuiSessionDraft) -> InputManifest:
                 platform="ont",
                 format=_shared_ont_format(ont_paths),
                 metadata={"intake_role": "ont_reads"},
+            )
+        )
+    if isinstance(draft.intake.short_reads, ShortReadsFact):
+        pairs = [
+            PairedReadSpec(r1=pair.r1, r2=pair.r2)
+            for pair in draft.intake.short_reads.pairs
+        ]
+        assets.append(
+            InputAssetSpec(
+                asset_type="raw_short_dna_reads",
+                sample_id=draft.intent.sample_id,
+                platform="illumina",
+                layout="paired",
+                format="fastq",
+                paired_reads=pairs,
+                metadata={"intake_role": "short_reads"},
+            )
+        )
+    for fact, role in (
+        (draft.intake.trio_maternal_reads, "trio_maternal_reads"),
+        (draft.intake.trio_paternal_reads, "trio_paternal_reads"),
+    ):
+        if fact is None:
+            continue
+        paths = fact.paths
+        assets.append(
+            InputAssetSpec(
+                asset_type="raw_short_dna_reads",
+                paths=paths,
+                sample_id=draft.intent.sample_id,
+                platform="unknown",
+                format=_shared_ont_format(paths),
+                metadata={"intake_role": role},
             )
         )
     if isinstance(draft.intake.hic_reads, HiCPairedReadsFact):
@@ -1203,6 +1515,11 @@ def create_rerun_tui_session_draft(
         intent=child_intent,
         parent_session_id=parent.session_id,
     )
+    if child.intent.entry_mode != "raw_reads":
+        from app.entrypoints.tui_midstage import reuse_midstage_fact
+
+        reuse_midstage_fact(parent, child)
+        return child
     intake = child.intake.model_copy(deep=True)
     unresolved: list[UnresolvedAssetCandidate] = []
 
@@ -1238,6 +1555,97 @@ def create_rerun_tui_session_draft(
                     candidate=candidate,
                     reason="reused ONT paths no longer pass local validation",
                 )
+            )
+
+    parent_short = parent.intake.short_reads
+    if isinstance(parent_short, ShortReadsFact):
+        short_valid_pairs: list[HiCReadPair] = []
+        pair_candidates: list[tuple[AssetAnswerCandidate, AssetAnswerCandidate]] = []
+        short_valid = True
+        for pair in parent_short.pairs:
+            r1_candidate = AssetAnswerCandidate(
+                role="short_r1", paths=[pair.r1], explicit_role=True
+            )
+            r2_candidate = AssetAnswerCandidate(
+                role="short_r2", paths=[pair.r2], explicit_role=True
+            )
+            r1_validation = validate_candidate_paths(r1_candidate)
+            r2_validation = validate_candidate_paths(r2_candidate)
+            if not r1_validation.valid or not r2_validation.valid:
+                short_valid = False
+                unresolved.extend(
+                    [
+                        UnresolvedAssetCandidate(
+                            candidate=r1_candidate,
+                            reason=(
+                                "reused short-read R1 path no longer passes "
+                                "local validation"
+                            ),
+                        ),
+                        UnresolvedAssetCandidate(
+                            candidate=r2_candidate,
+                            reason=(
+                                "reused short-read R2 path no longer passes "
+                                "local validation"
+                            ),
+                        ),
+                    ]
+                )
+                continue
+            short_valid_pairs.append(
+                HiCReadPair(r1=r1_validation.paths[0], r2=r2_validation.paths[0])
+            )
+            pair_candidates.append((r1_candidate, r2_candidate))
+        if short_valid and short_valid_pairs:
+            intake.short_reads = ShortReadsFact(pairs=short_valid_pairs)
+        elif not short_valid:
+            for r1_candidate, r2_candidate in pair_candidates:
+                unresolved.extend(
+                    [
+                        UnresolvedAssetCandidate(
+                            candidate=r1_candidate,
+                            reason=(
+                                "reused short-read R1 path no longer passes "
+                                "local validation"
+                            ),
+                        ),
+                        UnresolvedAssetCandidate(
+                            candidate=r2_candidate,
+                            reason=(
+                                "reused short-read R2 path no longer passes "
+                                "local validation"
+                            ),
+                        ),
+                    ]
+                )
+
+    for fact, role, candidate_type, message in (
+        (
+            parent.intake.trio_maternal_reads,
+            "trio_maternal_reads",
+            TrioMaternalReadsFact,
+            "reused Trio maternal paths no longer pass local validation",
+        ),
+        (
+            parent.intake.trio_paternal_reads,
+            "trio_paternal_reads",
+            TrioPaternalReadsFact,
+            "reused Trio paternal paths no longer pass local validation",
+        ),
+    ):
+        if fact is None:
+            continue
+        candidate = AssetAnswerCandidate(
+            role=cast(AssetCandidateRole, role),
+            paths=list(fact.paths),
+            explicit_role=True,
+        )
+        validation = validate_candidate_paths(candidate)
+        if validation.valid:
+            setattr(intake, role, candidate_type(paths=validation.paths))
+        else:
+            unresolved.append(
+                UnresolvedAssetCandidate(candidate=candidate, reason=message)
             )
 
     parent_hic = parent.intake.hic_reads
@@ -1432,8 +1840,12 @@ def _safe_llm_candidates(
     admitted_by_role: dict[str, set[str]] = {
         "hifi_reads": set(),
         "ont_reads": set(),
+        "trio_maternal_reads": set(),
+        "trio_paternal_reads": set(),
         "hic_r1": set(),
         "hic_r2": set(),
+        "short_r1": set(),
+        "short_r2": set(),
     }
     for candidate in deterministic.candidates:
         if candidate.role in admitted_by_role:
@@ -1517,12 +1929,23 @@ def _role_for_path_span(
     masked_answer: str,
     focused_role: IntakeRole | None,
 ) -> tuple[
-    Literal["hifi_reads", "ont_reads", "hic_r1", "hic_r2"] | None,
+    Literal[
+        "hifi_reads",
+        "ont_reads",
+        "trio_maternal_reads",
+        "trio_paternal_reads",
+        "hic_r1",
+        "hic_r2",
+        "short_r1",
+        "short_r2",
+    ]
+    | None,
     bool,
 ]:
     clause_start, clause_end = _clause_bounds(masked_answer, span.start)
     clause = masked_answer[clause_start:clause_end]
     clause_has_hic = bool(_HIC_LABEL_RE.search(clause))
+    clause_has_short = bool(_SHORT_READ_LABEL_RE.search(clause))
     has_hic = clause_has_hic or bool(_HIC_LABEL_RE.search(masked_answer))
     explicit_role = _nearest_explicit_role_before(
         clause,
@@ -1535,17 +1958,50 @@ def _role_for_path_span(
         return "hifi_reads", True
     if explicit_role == "ont_reads":
         return "ont_reads", True
+    if explicit_role in {"trio_maternal_reads", "trio_paternal_reads"}:
+        return explicit_role, True
     if explicit_role in {"hic_r1", "hic_r2"} and (
-        has_hic or focused_role == "hic_reads"
+        has_hic or focused_role in {"hic_reads", "short_reads"}
+    ):
+        if focused_role == "short_reads" and not has_hic:
+            return (
+                "short_r1" if explicit_role == "hic_r1" else "short_r2",
+                True,
+            )
+        return explicit_role, True
+    if explicit_role in {"short_r1", "short_r2"} and (
+        clause_has_short or focused_role == "short_reads"
     ):
         return explicit_role, True
+    if explicit_role in {"hic_r1", "hic_r2"} and _short_context_before(
+        masked_answer, span.start
+    ):
+        return (
+            "short_r1" if explicit_role == "hic_r1" else "short_r2",
+            True,
+        )
     if clause_has_hic:
         return None, False
     if focused_role == "hifi_reads":
         return "hifi_reads", False
     if focused_role == "ont_reads":
         return "ont_reads", False
+    if focused_role in {"trio_maternal_reads", "trio_paternal_reads"}:
+        return focused_role, False
+    # Focused short-read collection still requires explicit R1/R2 labels.
+    # Never classify an unlabelled path from answer order or its filename.
     return None, False
+
+
+def _short_context_before(text: str, position: int) -> bool:
+    """Return whether the nearest explicit pairing context is short reads."""
+
+    prefix = text[:position]
+    short_matches = list(_SHORT_READ_LABEL_RE.finditer(prefix))
+    hic_matches = list(_HIC_LABEL_RE.finditer(prefix))
+    if not short_matches:
+        return False
+    return short_matches[-1].start() > (hic_matches[-1].start() if hic_matches else -1)
 
 
 def _clause_bounds(text: str, position: int) -> tuple[int, int]:
@@ -1569,8 +2025,12 @@ def _nearest_explicit_role_before(
     Literal[
         "hifi_reads",
         "ont_reads",
+        "trio_maternal_reads",
+        "trio_paternal_reads",
         "hic_r1",
         "hic_r2",
+        "short_r1",
+        "short_r2",
         "hic_unpaired",
     ]
     | None
@@ -1590,8 +2050,12 @@ def _nearest_explicit_role_before(
             Literal[
                 "hifi_reads",
                 "ont_reads",
+                "trio_maternal_reads",
+                "trio_paternal_reads",
                 "hic_r1",
                 "hic_r2",
+                "short_r1",
+                "short_r2",
                 "hic_unpaired",
             ],
         ]
@@ -1605,13 +2069,39 @@ def _nearest_explicit_role_before(
         for match in _ONT_LABEL_RE.finditer(clause)
     )
     markers.extend(
-        (offset + match.start(), offset + match.end(), "hic_r1")
+        (offset + match.start(), offset + match.end(), "trio_maternal_reads")
+        for match in _TRIO_MATERNAL_LABEL_RE.finditer(clause)
+    )
+    markers.extend(
+        (offset + match.start(), offset + match.end(), "trio_paternal_reads")
+        for match in _TRIO_PATERNAL_LABEL_RE.finditer(clause)
+    )
+    short_context = bool(_SHORT_READ_LABEL_RE.search(clause))
+    markers.extend(
+        (
+            offset + match.start(),
+            offset + match.end(),
+            "short_r1" if short_context else "hic_r1",
+        )
         for match in _R1_LABEL_RE.finditer(clause)
     )
     markers.extend(
-        (offset + match.start(), offset + match.end(), "hic_r2")
+        (
+            offset + match.start(),
+            offset + match.end(),
+            "short_r2" if short_context else "hic_r2",
+        )
         for match in _R2_LABEL_RE.finditer(clause)
     )
+    if _SHORT_READ_LABEL_RE.search(clause):
+        markers.extend(
+            (offset + match.start(), offset + match.end(), "short_r1")
+            for match in _R1_LABEL_RE.finditer(clause)
+        )
+        markers.extend(
+            (offset + match.start(), offset + match.end(), "short_r2")
+            for match in _R2_LABEL_RE.finditer(clause)
+        )
     markers.extend(
         (offset + match.start(), offset + match.end(), "hic_unpaired")
         for match in _HIC_LABEL_RE.finditer(clause)
@@ -1748,6 +2238,136 @@ def _merge_hic_candidates(
         "Hi-C R1/R2 lane counts do not match; provide the same number of "
         "explicitly labelled R1 and R2 files in corresponding order"
     )
+
+
+_PENDING_SHORT_MATE_REASON = "awaiting one explicit complementary short-read mate"
+
+
+def _merge_short_candidates(
+    *,
+    intake: AssetCollectionState,
+    unresolved: list[UnresolvedAssetCandidate],
+    validated_r1: Sequence[tuple[AssetAnswerCandidate, list[str]]],
+    validated_r2: Sequence[tuple[AssetAnswerCandidate, list[str]]],
+    replace_confirmed: bool,
+    accepted_roles: list[str],
+    issues: list[str],
+) -> None:
+    new_r1 = _flatten_candidate_paths(validated_r1)
+    new_r2 = _flatten_candidate_paths(validated_r2)
+    if not new_r1 and not new_r2:
+        return
+    if isinstance(intake.short_reads, ShortReadsFact) and not replace_confirmed:
+        issues.append(
+            "short-read pairs are already confirmed; explicitly confirm replacement "
+            "before changing them"
+        )
+        unresolved.extend(
+            UnresolvedAssetCandidate(
+                candidate=candidate,
+                reason="would replace confirmed short-read pairs",
+            )
+            for candidate, _paths in [*validated_r1, *validated_r2]
+        )
+        return
+    if replace_confirmed:
+        unresolved[:] = [
+            item
+            for item in unresolved
+            if item.reason != "would replace confirmed short-read pairs"
+        ]
+
+    pending_r1, pending_r2, retained, pending_items = _pending_short_mates(unresolved)
+    combined_r1 = [*pending_r1, *new_r1]
+    combined_r2 = [*pending_r2, *new_r2]
+    if combined_r1 and len(combined_r1) == len(combined_r2):
+        try:
+            pairs = [
+                HiCReadPair(r1=r1, r2=r2)
+                for r1, r2 in zip(combined_r1, combined_r2, strict=True)
+            ]
+            intake.short_reads = ShortReadsFact(pairs=pairs)
+        except (ValueError, ValidationError) as exc:
+            issues.append(f"could not accept short-read pair: {exc}")
+            unresolved[:] = retained
+            unresolved.extend(pending_items)
+            unresolved.extend(
+                UnresolvedAssetCandidate(
+                    candidate=candidate, reason="invalid short-read pair"
+                )
+                for candidate, _paths in [*validated_r1, *validated_r2]
+            )
+            return
+        unresolved[:] = retained
+        accepted_roles.append("short_reads")
+        return
+
+    unresolved[:] = retained
+    if combined_r1 and not combined_r2:
+        unresolved.extend(pending_items)
+        unresolved.extend(
+            UnresolvedAssetCandidate(
+                candidate=candidate, reason=_PENDING_SHORT_MATE_REASON
+            )
+            for candidate, _paths in validated_r1
+        )
+        issues.append(
+            "short-read R1 was validated; provide one explicitly labelled R2 "
+            "to confirm the pair"
+        )
+        return
+    if combined_r2 and not combined_r1:
+        unresolved.extend(pending_items)
+        unresolved.extend(
+            UnresolvedAssetCandidate(
+                candidate=candidate, reason=_PENDING_SHORT_MATE_REASON
+            )
+            for candidate, _paths in validated_r2
+        )
+        issues.append(
+            "short-read R2 was validated; provide one explicitly labelled R1 "
+            "to confirm the pair"
+        )
+        return
+    unresolved.extend(pending_items)
+    unresolved.extend(
+        UnresolvedAssetCandidate(
+            candidate=candidate,
+            reason="short-read R1/R2 lane counts do not match",
+        )
+        for candidate, _paths in [*validated_r1, *validated_r2]
+    )
+    issues.append(
+        "short-read R1/R2 lane counts do not match; provide the same number of "
+        "explicitly labelled R1 and R2 files in corresponding order"
+    )
+
+
+def _pending_short_mates(
+    unresolved: Sequence[UnresolvedAssetCandidate],
+) -> tuple[
+    list[str],
+    list[str],
+    list[UnresolvedAssetCandidate],
+    list[UnresolvedAssetCandidate],
+]:
+    r1: list[str] = []
+    r2: list[str] = []
+    retained: list[UnresolvedAssetCandidate] = []
+    pending_items: list[UnresolvedAssetCandidate] = []
+    for item in unresolved:
+        if item.reason != _PENDING_SHORT_MATE_REASON:
+            retained.append(item)
+            continue
+        if item.candidate.role == "short_r1":
+            r1.extend(item.candidate.paths)
+            pending_items.append(item)
+        elif item.candidate.role == "short_r2":
+            r2.extend(item.candidate.paths)
+            pending_items.append(item)
+        else:
+            retained.append(item)
+    return r1, r2, retained, pending_items
 
 
 def _pending_hic_mates(

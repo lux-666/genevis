@@ -85,9 +85,10 @@ parameters:
     application:
       kind: config_key
       key: nextgraph_a
-    min: 1
-    max: 10
+    required_for_execution: true
+    allowed_values: [1]
     layers:
-      l2:
-        adjustable: true
-    description: "NextGraph -a assembly graph option written to run.cfg."
+      l0:
+        kind: fixed
+        value: 1
+    description: "NextGraph -a output format: 0=None, 1=FASTA, 2=GraphML, 3=GFA2, 4=path. The executor fixes 1 to deliver FASTA; this is not a graph-pruning parameter. Source: https://nextdenovo.readthedocs.io/en/latest/UTILITY.html#nextgraph"

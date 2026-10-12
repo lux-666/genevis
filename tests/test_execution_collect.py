@@ -33,11 +33,13 @@ def _state(run_dir: Path, session_id: str, *, status: str) -> dict:
         data_dir=str(run_dir),
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-001-genome_survey",
                 "stage": "genome_survey",
                 "allow_local_execution": False,

@@ -12,7 +12,7 @@
 >
 > **依赖契约：** [运行数据](../reference/data-contract.md)、[执行生命周期](../reference/execution-lifecycle.md)、[阶段契约](../reference/stage-contracts.md)。
 >
-> **代码依据：** `app/review/gates.py`、`app/review/persistence.py`、`app/review/approval.py`、`app/review/recommender.py`、`app/llm/recommender.py`、`app/llm/json_response.py`、`app/control/resume_transaction.py`、`app/control/lifecycle.py`。
+> **代码依据：** `app/review/gates.py`、`app/review/persistence.py`、`app/review/approval.py`、`app/review/recommender.py`、`app/llm/recommender.py`、`app/llm/json_response.py`、`app/control/resume_transaction.py`、`app/control/inspection.py`、`app/control/terminal.py`、`app/control/resume.py`。
 
 <a id="durable-gate-model"></a>
 

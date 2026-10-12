@@ -7,11 +7,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.control.lifecycle import (
-    ResumeValidationError,
+from app.control.errors import ResumeValidationError
+from app.control.inspection import (
     _blocked_timeout_status,
-    build_foreground_auto_resume_request,
     inspect_state,
+)
+from app.control.resume import (
+    build_foreground_auto_resume_request,
     normalize_resume_review_request,
     review_max_blocked_seconds,
 )
@@ -54,6 +56,7 @@ def _blocked_route_state(
     recommended_selection: dict | None = None,
     wait_seconds: int = 300,
     elapsed_seconds: float = 400,
+    include_ont: bool = False,
 ) -> dict:
     run_dir = v2_run_dir(tmpdir, session_id)
     Ledger(run_dir).create_session(session_id, "control/manifest.yaml")
@@ -63,6 +66,7 @@ def _blocked_route_state(
         input_manifest_ref="control/manifest.yaml",
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
@@ -73,6 +77,7 @@ def _blocked_route_state(
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-002-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,
@@ -105,7 +110,7 @@ def _blocked_route_state(
             "has_hifi": recommended_route == "hifi",
             "ont_reads_ref": (
                 "artifacts/inputs/ont.fastq"
-                if recommended_route in {"ont", "cyclone"}
+                if recommended_route in {"ont", "cyclone"} or include_ont
                 else None
             ),
         }
@@ -236,7 +241,7 @@ def test_route_countdown_accepts_registered_recommendation(
 
 def test_manual_resume_after_deadline_uses_human_decision_without_timeout():
     with tempfile.TemporaryDirectory() as tmpdir:
-        state = _blocked_route_state(tmpdir, "manual_after_deadline")
+        state = _blocked_route_state(tmpdir, "manual_after_deadline", include_ont=True)
         result = _apply_route_review(state, _human_request(state, "select_ont"))
 
     assembly = result["stage_outputs"]["assembly"]

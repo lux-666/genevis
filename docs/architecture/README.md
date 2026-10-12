@@ -54,7 +54,7 @@ flowchart LR
 | 方法参数如何提出并获批？ | [`topics/parameter-recommendation.md`](topics/parameter-recommendation.md) | 参数与执行契约 |
 | bootstrap 负责什么？ | [`topics/bootstrap.md`](topics/bootstrap.md) | 描述符与治理契约 |
 | AutoHiC 路径有什么不同？ | [`topics/autohic.md`](topics/autohic.md) | 参数、执行与资源契约 |
-| TUI 能从 clean reads 或组装开始吗？ | [`topics/tui-midstage-entry.md`](topics/tui-midstage-entry.md) | 这是规划中的能力，当前限制已明确标注 |
+| TUI 能从 clean reads 或组装开始吗？ | [`topics/tui-midstage-entry.md`](topics/tui-midstage-entry.md) | 显式入口模式、材料验证及统一冻结 |
 
 <a id="reference-registry"></a>
 

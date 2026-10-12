@@ -11,7 +11,7 @@ from unittest.mock import patch
 import nbformat
 
 from app.schemas.state import initial_state
-from app.stages.assembly_review.nodes import (
+from app.stages.assembly_review.statistics import (
     _extract_target_metrics_from_signals,
     build_related_species_statistics_and_notebook,
 )
@@ -50,7 +50,7 @@ def _candidate(candidate_id: str, method_name: str = "flye") -> dict:
 
 def _empty_reference(root: str | Path) -> Path:
     reference = Path(root) / "empty_reference"
-    reference.mkdir()
+    reference.mkdir(exist_ok=True)
     files = {
         "Metazoa.ncbi.json": "{}\n",
         "Metazoa.ncbi.lineage": "Organism Taxonomic ID\n",
@@ -60,6 +60,14 @@ def _empty_reference(root: str | Path) -> Path:
     for name, contents in files.items():
         (reference / name).write_text(contents, encoding="utf-8")
     return reference
+
+
+def _run_statistics(state, reference):
+    with patch(
+        "app.stages.assembly_review.statistics._related_species_reference_dir",
+        return_value=reference,
+    ):
+        return build_related_species_statistics_and_notebook(state)
 
 
 class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
@@ -75,6 +83,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             data_dir=str(run_dir),
             workflow_steps=[
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
@@ -112,7 +121,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
         """Node handles a valid snapshot with no assembly rows."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a valid reference snapshot with no assembly rows.
-            empty_ref_dir = _empty_reference(tmpdir)
+            _empty_reference(tmpdir)
 
             state = self._state(
                 tmpdir,
@@ -126,11 +135,10 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
                     "candidates": [_candidate("c1")],
                     "signals": [],
                     # Point to an empty but structurally valid snapshot.
-                    "related_species_reference_dir": str(empty_ref_dir),
                 }
             }
 
-            update = build_related_species_statistics_and_notebook(state)
+            update = _run_statistics(state, _empty_reference(tmpdir))
 
             ar_out = update["stage_outputs"]["assembly_review"]
             self.assertNotIn("related_species_statistics_pack", ar_out)
@@ -169,7 +177,6 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
                 "assembly_review": {
                     "status": "evaluated",
                     "candidates": [_candidate("c1")],
-                    "related_species_reference_dir": str(_empty_reference(tmpdir)),
                     "signals": [
                         {
                             "candidate_id": "c1",
@@ -198,7 +205,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
                 }
             }
 
-            update = build_related_species_statistics_and_notebook(state)
+            update = _run_statistics(state, _empty_reference(tmpdir))
 
             ar_out = update["stage_outputs"]["assembly_review"]
             statistics_pack = json.loads(
@@ -233,7 +240,6 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
                     "status": "evaluated",
                     "candidates": [_candidate("c1")],
                     "signals": [],
-                    "related_species_reference_dir": str(_empty_reference(tmpdir)),
                 }
             }
             large_pack = {
@@ -245,19 +251,19 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "app.stages.assembly_review.nodes._build_related_species_statistics_pack",
+                    "app.stages.assembly_review.statistics._build_related_species_statistics_pack",
                     return_value=large_pack,
                 ),
                 patch(
-                    "app.stages.assembly_review.nodes.render_statistics_figures",
+                    "app.stages.assembly_review.statistics.render_statistics_figures",
                     return_value={},
                 ),
                 patch(
-                    "app.stages.assembly_review.nodes.build_assembly_review_notebook",
+                    "app.stages.assembly_review.statistics.build_assembly_review_notebook",
                     return_value=nbformat.v4.new_notebook(),
                 ),
             ):
-                update = build_related_species_statistics_and_notebook(state)
+                update = _run_statistics(state, _empty_reference(tmpdir))
 
             review = update["stage_outputs"]["assembly_review"]
             self.assertNotIn("related_species_statistics_pack", review)
@@ -276,7 +282,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             state = self._state(tmpdir, "s3", "session_id: s3\nassets: []\n")
             state["stage_outputs"] = {"assembly_review": {"status": "failed"}}
 
-            update = build_related_species_statistics_and_notebook(state)
+            update = _run_statistics(state, _empty_reference(tmpdir))
 
             self.assertEqual(update, {})
 

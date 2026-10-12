@@ -40,6 +40,7 @@ class _FakeChat:
 
 _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
     {
+        "selected_method_names": [],
         "step_id": "step-000-inventory",
         "stage": "inventory",
         "allow_local_execution": False,
@@ -50,6 +51,7 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         "allow_local_execution": True,
     },
     {
+        "selected_method_names": [],
         "step_id": "step-002-assembly_review",
         "stage": "assembly_review",
         "allow_local_execution": True,
@@ -59,6 +61,7 @@ _ASSEMBLY_REVIEW_WORKFLOW_STEPS = [
         },
     },
     {
+        "selected_method_names": [],
         "step_id": "step-003-hic_scaffolding",
         "stage": "hic_scaffolding",
         "allow_local_execution": True,

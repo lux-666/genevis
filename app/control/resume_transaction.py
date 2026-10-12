@@ -8,16 +8,16 @@ from typing import Any, Mapping
 
 from langchain_core.runnables import RunnableConfig
 
-from app.control.lifecycle import (
-    TerminalFinalizationError,
-    finalize_authoritative_terminal,
-    normalize_resume_review_request,
-    reconcile_canonical_terminal_checkpoint,
-)
 from app.control.projections import (
     ProjectionBoundary,
     ProjectionWarning,
     project_workflow_state,
+)
+from app.control.resume import normalize_resume_review_request
+from app.control.terminal import (
+    TerminalFinalizationError,
+    finalize_authoritative_terminal,
+    reconcile_canonical_terminal_checkpoint,
 )
 from app.review.application import (
     PersistedReviewIntent,
@@ -33,6 +33,7 @@ from app.review.application import (
 )
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
+from app.review.ledger import record_review_applied, record_review_decision
 from app.review.status import (
     ReviewLifecycleStatus,
     ReviewStatusProjection,
@@ -274,7 +275,8 @@ def execute_resume_transaction(
         )
 
         phase = "application_persist"
-        ledger.record_review_decision(
+        record_review_decision(
+            ledger,
             session_id,
             application_ref=verified_application.ref,
             expected_identity=identity,
@@ -323,7 +325,8 @@ def execute_resume_transaction(
                 )
 
         phase = "checkpoint_verify"
-        ledger.record_review_applied(
+        record_review_applied(
+            ledger,
             session_id,
             application_ref=verified_application.ref,
             expected_identity=identity,
@@ -530,7 +533,7 @@ def _terminal_preflight(
                 state=state,
                 operational_warnings=(
                     _bounded_error(
-                        "legacy terminal ledger integrity diagnostic: "
+                        "terminal ledger integrity diagnostic: "
                         f"{integrity.get('kind')} "
                         f"({integrity.get('terminal_count')} rows)"
                     ),

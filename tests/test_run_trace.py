@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.lifecycle import inspect_session, normalize_resume_review_request
+from app.control.inspection import inspect_session
+from app.control.resume import normalize_resume_review_request
 from app.reports.trace_writer import (
     SESSION_SUMMARY_JSON_FILENAME,
     SESSION_SUMMARY_MARKDOWN_FILENAME,
@@ -30,6 +31,7 @@ from app.review.application import (
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import get_review_gate
+from app.review.ledger import record_review_applied, record_review_decision
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import ROUTE_TRACE_LIMIT
@@ -69,9 +71,11 @@ def _run(
     if create:
         reads = paths.run_dir / "fixture_reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        assembly = paths.run_dir / "fixture_assembly.fa"
+        assembly.write_text(">ctg\nACGT\n", encoding="utf-8")
         run_config: dict[str, object] = {
             "requested_stages": [
-                {"stage": stage, "allow_local_execution": False}
+                {"stage": stage, "allow_local_execution": stage == "assembly"}
                 for stage in requested_stages
             ]
         }
@@ -85,6 +89,7 @@ def _run(
             paths,
             manifest_draft={
                 "session_id": session_id,
+                "genome_size_estimate": 1000,
                 **(
                     {"user_metadata": {"target_species": "Fixture species"}}
                     if "assembly_review" in requested_stages
@@ -96,7 +101,12 @@ def _run(
                         "paths": [str(reads.resolve())],
                         "platform": "ont",
                         "format": "fastq",
-                    }
+                    },
+                    {
+                        "asset_type": "assembly_fasta_registered",
+                        "paths": [str(assembly)],
+                        "format": "fasta",
+                    },
                 ],
             },
             run_config_draft=run_config,
@@ -291,9 +301,10 @@ def _stage(trace: dict, name: str) -> dict:
 def _workflow_state(paths: SessionPaths, *, workflow_step_index: int) -> dict:
     steps = [
         {
+            **({"selected_method_names": []} if stage != "assembly" else {}),
             "step_id": f"step-{index:03d}-{stage}",
             "stage": stage,
-            "allow_local_execution": False,
+            "allow_local_execution": stage == "assembly",
         }
         for index, stage in enumerate(("inventory", *_DEFAULT_REQUESTED_STAGES))
     ]
@@ -390,7 +401,8 @@ def _review_occurrence(
     application = load_verified_review_application(paths.run_dir, application_ref)
     identity = ReviewApplicationIdentity.from_intent(intent.intent)
     if record_decision:
-        ledger.record_review_decision(
+        record_review_decision(
+            ledger,
             paths.session_id,
             application_ref=application.ref,
             expected_identity=identity,
@@ -401,7 +413,8 @@ def _review_occurrence(
             **dict(gate.load_apply_application()(state, application)),
             "review_application_ref": application.ref.model_dump(mode="json"),
         }
-        ledger.record_review_applied(
+        record_review_applied(
+            ledger,
             paths.session_id,
             application_ref=application.ref,
             expected_identity=identity,

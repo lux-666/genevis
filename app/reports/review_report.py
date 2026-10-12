@@ -26,7 +26,7 @@ def write_operator_report(
     if supervision not in {"blocked_human", "failed_terminal"}:
         return None
 
-    from app.control.lifecycle import build_result_next_action
+    from app.control.next_action import build_result_next_action
 
     paths = SessionPaths.from_run_dir(data_dir)
     paths.require_session_id(session_id)

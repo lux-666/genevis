@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from app.control.lifecycle import inspect_session
+from app.control.inspection import inspect_session
 from app.graph.checkpointer import StateBudgetCheckpointer
 from app.schemas.state import TopLevelState, validate_top_level_state
 from app.storage.audit import verify_checkpoint_free_artifact_retention

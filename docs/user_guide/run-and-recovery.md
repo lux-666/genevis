@@ -32,6 +32,17 @@
 
 **真实工具检查必须显式选择。** 普通 `pytest -q`、`server_test.sh` 排除 `real_tool`。收集测试不探测 Conda 或生物工具；被选择测试在执行时检查前置条件，缺工具则失败。`Phase4ReadQCRealSmokeTests` 使用活动注册表中 `read_qc.long_read_stats.seqkit_stats` 的映射，经正式 CLI 预检、冻结后执行 SeqKit；标记的 hifiasm help/version 分别使用 `assembly.candidate.hifiasm` 和 `assembly.candidate.hifiasm_ont` 的映射，不使用 `HIFIASM_BIN` 或外层 PATH 选择二进制。这是 CLI 兼容检查，不是组装冒烟。开发主机缺二进制不是代码缺陷；取消选择不证明真实执行成功。
 
+Read QC 也支持独立的 paired short-DNA 输入：在 `read_qc.short_reads` 中冻结
+fastp 参数即可按每个 lane 的 R1/R2 执行，不要求 long reads。Hi-C 使用
+`read_qc.hic_reads`；默认 `preserve_hic_junction: true`，避免 adapter trimming
+破坏连接位点。完成后通过 `resource_refs` 交付 clean reads、paired-member
+身份、read-set manifest 和 fastp 报告；恢复时可以删除 work 目录，collect 会从
+已发布 artifact 恢复而不重跑 fastp。下游 AutoHiC/Hifiasm 消费 clean artifact，
+即使选择锚点来自原始资产也不会回退到 raw 路径。可直接复制
+`docs/examples/hifi_complete_run_config.template.json` 中仅用于 Hi-C 的
+`read_qc.hic_reads` 段；`contig_run_config.template.json` 没有 `read_qc`
+段。材料身份、配对读段和清洗边界见[材料与组装路线](materials-and-assembly.md)。
+
 <a id="2-run-small-real-tool-smoke-tests-for-each-key-stage"></a>
 
 ### 2. 对关键阶段运行小型真实工具冒烟
@@ -90,13 +101,17 @@ GapCloser 与 Racon 切片读取活动环境注册表（默认 `config/envs.yaml
 - Base Polish：真实校正、必需前后证据、采纳/源保留、成对最终评估。同读段一致性不是独立 QV，不预设改善。
 - T2T：支持延长证据与无延长路径，人工采纳/保留，以及恢复不重跑完成比对。
 
-全部切片用下方[独立命令](#independent-slice-server-runbook)：普通 run、明确模板、同一具名范围只读 route_acceptance，不需另一个阶段 Runner。模板已可供服务器运行，不等于真实冒烟或端到端已执行。
+全部切片用下方[独立命令](#independent-slice-server-runbook)：普通 run、明确
+RunConfig、同一冻结会话只读运行 `route_acceptance`，不需另一个阶段 Runner。
+模板已可供服务器运行，不等于真实冒烟或端到端已执行。
 
 <a id="6-only-then-run-the-complete-real-e2e"></a>
 
 ### 6. 最后才运行完整真实端到端
 
-前层通过后才用全规模或代表性真实数据。[完整路线](#complete-hifihic-server-acceptance)是最终集成/生物学验收，不是发现普通输入、路由、收集、恢复 bug 的首选。只读 route_acceptance 默认完整路线；匹配范围选 contig、hic、gapcloser、base-polish、t2t、finishing、review。不要为满足检查器加入无用阶段。
+前层通过后才用全规模或代表性真实数据。[完整工作流](#complete-hifihic-server-acceptance)
+是最终集成验收，不是发现普通输入、收集或恢复 bug 的首选。`route_acceptance`
+只读取冻结 RunConfig 投影出的全部 occurrence。不要为满足检查器加入无用阶段。
 
 **当前优先级：** 复用完成 contig，补已证明的代码测试/隔离和未覆盖方法/分支，再跑独立 Hi-C/finishing。不要仅因已验收执行没用专属冒烟 wrapper 就重跑，不先开十阶段。本文规定验收顺序，不声称待办测试或服务器运行已经执行。
 
@@ -127,19 +142,32 @@ cp docs/examples/contig_manifest.template.yaml /server/path/manifest.yaml
 cp docs/examples/contig_run_config.template.json /server/path/run_config.json
 ```
 
-这是根 README 指定的权威五阶段示例，精确 occurrence 列表保留在 JSON，不在其他指南重复。Inventory 冻结时作为隐式首步加入。替换所有服务器本地路径占位。模板有意不设 Assembly 方法/参数，QC/Survey 后由阶段推荐确认兼容方法，再推荐参数。活动映射须声明运行可选择的每个候选工具需求。
+这是根 README 指定的权威五阶段示例，精确 occurrence 列表保留在 JSON，不在其他指南重复。
+冻结时 `workflow_steps_from_run_config` 将 RunConfig 的字面阶段顺序投影为线性计划，并隐式加入
+Inventory 首步；单个 QC/Survey、Assembly 和重复阶段均保留为独立 occurrence，不去重。RunConfig
+配置的阶段和执行授权是执行与验收的唯一来源，不由注册表顺序或验收器补阶段。
+替换所有服务器本地路径占位。模板有意不设 Assembly 方法/参数，QC/Survey 后由阶段推荐确认兼容方法，
+再推荐参数。活动映射须声明运行可选择的每个候选工具需求。
 
-完整 schema 有效载荷由示例文件拥有；RunConfig 仍是字面 occurrence/授权权威。延迟 Assembly 方法/参数是阶段证据，不是启动配置。
+完整 schema 有效载荷由示例文件拥有；RunConfig 仍是字面 occurrence/授权权威。延迟 Assembly 方法/参数是阶段证据，不是启动配置。当前计划是线性 occurrence 序列，不是通用并行 DAG；LangGraph 在 occurrence 内承载审批、恢复和参数重试回环，但不能改写冻结顺序。
+
+<a id="public-data-comparison"></a>
+
+论文公开数据只作为可追溯材料和结果参照：系统先依据 manifest、QC/Survey 事实和阶段证据推荐方法，
+再执行并与论文公开结果对比；这不是复刻论文参数。验收退出 0 仅证明执行证据完整，生物学质量另行比较。
 
 审计**已有**五阶段运行，不执行工具：
 
 ```bash
-python -m app.diagnostics.route_acceptance --route contig \
+python -m app.diagnostics.route_acceptance \
   --run-dir /server/path/data/runs/EXISTING_CONTIG_SESSION \
   > /server/path/contig-acceptance.json
 ```
 
-检查验证进程/收集、组装交接、最终 QUAST/BUSCO。还应检查 QC/Survey 产品及冻结输入依赖；审计器前驱组装检查从组装交接开始，不是所有上游读段转换的全面证明。旧运行 schema 不受支持时保留匹配检出检查，不改冻结控制/checkpoint 来凑通过；新版读取器拒绝不等于旧运行失效。
+检查冻结计划中每个 occurrence 的进程/收集、产物交接和适用的最终 Review。还应检查 QC/Survey 产品及冻结输入依赖；前驱组装检查从组装交接开始，不是所有上游读段转换的全面证明。仅 QC/Survey 的
+RunConfig 不要求 `final_assembly`；从已有组装开始的消费者要求 Inventory 提供已验证源，后续组装生产
+occurrence 仍检查前一交付的输入和自身交接。最终 Review 按冻结的 `review_target.producer_step_id`
+决定是否检查 Base Polish source/polished pair；不论是否有 pair，验收都只是执行证据检查，生物学质量另行比较。
 
 <a id="hifi-gap-closing-from-an-existing-assembly"></a>
 
@@ -238,7 +266,7 @@ gene-agent run --manifest "$acceptance_work/manifest.yaml" \
 ```bash
 gene-agent inspect --session-id "$acceptance_session" --data-dir "$acceptance_data" --json \
   > "$acceptance_work/inspect.json"
-if python -m app.diagnostics.route_acceptance --route "$slice" \
+if python -m app.diagnostics.route_acceptance \
   --run-dir "$acceptance_data/runs/$acceptance_session" > "$acceptance_work/acceptance.json"; then
   acceptance_status=0
 else
@@ -247,7 +275,7 @@ fi
 printf 'Acceptance exit: %s\n' "$acceptance_status"
 ```
 
-阅读 acceptance.json：退出 **0** 仅代表该范围执行覆盖；**2** 表示未完成/失败/skip 缺口，检查 coverage_gaps/日志；**1** 表示必需证据不一致/缺失，须调查。无 Review 范围显式 `quality_evaluation_status: not_evaluated`，退出 0 不是质量比较或改善结论。报告检查 Inventory 源、产物哈希、阶段组装依赖。保留完整运行目录，不仅 JSON。不要修改输入或冻结控制来恢复失败。
+阅读 acceptance.json：退出 **0** 仅证明该冻结 RunConfig 的 occurrence 执行证据完整，生物学质量另行比较；**2** 表示未完成/失败/skip 缺口，检查 coverage_gaps/日志；**1** 表示必需证据不一致/缺失，须调查。RunConfig 不含 Review 时显式 `quality_evaluation_status: not_evaluated`。报告检查 Inventory 源、产物哈希、阶段组装依赖。保留完整运行目录，不仅 JSON。不要修改输入或冻结控制来恢复失败。
 
 <a id="hi-c-prove-detached-resume-does-not-launch-autohic-again"></a>
 
@@ -258,7 +286,7 @@ printf 'Acceptance exit: %s\n' "$acceptance_status"
 进程退出后保存只读执行后基线：
 
 ```bash
-if python -m app.diagnostics.route_acceptance --route hic \
+if python -m app.diagnostics.route_acceptance \
   --run-dir "$acceptance_data/runs/$acceptance_session" > "$acceptance_work/hic-before-resume.json"; then
   hic_before_status=0
 else
@@ -274,7 +302,7 @@ gene-agent inspect --session-id "$acceptance_session" --data-dir "$acceptance_da
 ```bash
 gene-agent resume --session-id "$acceptance_session" --data-dir "$acceptance_data" \
   --decision-file "$acceptance_work/hic-decision.json" --checkpointer sqlite
-python -m app.diagnostics.route_acceptance --route hic \
+python -m app.diagnostics.route_acceptance \
   --run-dir "$acceptance_data/runs/$acceptance_session" \
   --compare-hic-execution-from "$acceptance_work/hic-before-resume.json" \
   > "$acceptance_work/hic-after-resume.json"
@@ -286,16 +314,16 @@ python -m app.diagnostics.route_acceptance --route hic \
 
 ### Base Polish 与 T2T 验收要点
 
-新模板对 GapCloser、T2T、Base Polish 显式使用 `recommendation_mode: advisor`、`max_attempts: 3`。每阶段先对源做 QUAST；每次执行后，源与全部历次候选在相同设置下重新比较，再进入 `finishing_recommendation` 门。执行前与执行后都是这个门，通过请求绑定区分轮次。需要原单轮路径时显式设置 `deterministic_baseline`。
+模板对 GapCloser、T2T、Base Polish 显式使用 `recommendation_mode: advisor`、`max_attempts: 3`。每阶段先对源做 QUAST；每次执行后，源与全部历次候选在相同设置下重新比较，再进入 `finishing_recommendation` 门。执行前与执行后都是这个门，通过请求绑定区分轮次。需要单轮基线时显式设置 `deterministic_baseline`。
 
-三个独立顾问切片都需要 QUAST 和可用的 LLM 端点；按新版 [envs.yaml.example](../examples/envs.yaml.example) 增加 `gapcloser.eval.quast`、`t2t.eval.quast`、`base_polish.eval.quast` 环境映射，可共用已有 QUAST 环境。Finishing/看校正质量的 Base Polish 还需最终 Review 的 BUSCO 数据库。当前 Hi-C 活动会话保留原检出与环境；本次升级通过新会话验收。
+三个独立顾问切片都需要 QUAST 和可用的 LLM 端点；按 [envs.yaml.example](../examples/envs.yaml.example) 增加 `gapcloser.eval.quast`、`t2t.eval.quast`、`base_polish.eval.quast` 环境映射，可共用已有 QUAST 环境。Finishing/看校正质量的 Base Polish 还需最终 Review 的 BUSCO 数据库。
 
-- `follow_recommendation`：查看 response.json 的 action。`run` 批准新参数；`accept` 采纳 selected_attempt；`keep_source` 保留本阶段原组装。`human_review`、非法响应、重复参数、预算耗尽后建议 run，都不会开放 follow。
+- `follow_recommendation`：查看 response.json 的 action。操作者确认后执行提案中的 `run`（执行新参数）、`accept`（采纳 selected_attempt）或 `keep_source`（保留本阶段原组装）；此 finishing 门不自动 follow。`human_review`、非法响应、重复参数、预算耗尽后建议 run，都不会开放 follow。
 - `accept_candidate`：覆盖顾问建议，指定候选 `candidate_id: attempt_0` 等；可选回早先的完整候选。T2T 只有实际形成补丁的轮次可采纳。
 - `keep_prior_assembly`：成功保留本阶段原组装；`stop_human_review`：终态失败。
-- 每个动作均需人工批准；保持 `max_blocked_seconds: -1`。未批准的建议不会执行。T2T 顾问模式目前要求 `mode: auto_patch`；原逐条补丁选择走 `deterministic_baseline`。
+- Finishing 的每个动作仍需人工确认；Dedup 的合格前台 resolver 可按冻结策略自动 follow 已保存提案。保持 `max_blocked_seconds: -1` 时不自动触发倒计时。T2T advisor 要求 `mode: auto_patch`，baseline 使用独立策略证据。
 
-T2T 的 `deterministic_baseline` 不调用阈值模型或基序模型，要求显式提供 `species_facts.telomere_motif`，否则明确失败。基线使用冻结目录的 L0 阈值、空 L2 与策略审批，经原 schema-3 已批准尝试链执行单轮；不打开人工 `parameter_approval`，补丁采纳仍保留 `t2t_review` 人工门。`manual_review`/`propose_only`/`auto_patch` 控制补丁方式，与推荐策略独立。
+T2T 的 `deterministic_baseline` 不调用阈值模型或基序模型，要求显式提供 `species_facts.telomere_motif`，否则明确失败。基线使用冻结目录的 L0 阈值、空 L2 与 schema-3 策略请求与批准记录，经 `source=policy` 的已批准链执行单轮；不建立交互式 `parameter_approval` 门，补丁采纳仍保留 `t2t_review` 人工门。T2T advisor 只接受 `auto_patch`；`manual_review` 和 `propose_only` 要求显式选择 `deterministic_baseline`，不兼容组合在配置校验时拒绝。
 
 全部新尝试从相同源组装开始，不把上轮 polishing 结果继续校正。`work/steps/<step>/<stage>/attempts/NNN/` 隔离工具运行，`artifacts/steps/<step>/<stage>/advisor/` 保存设置、QUAST、请求/响应、assessment；approval 决定在 review 目录。顾问依据真实测量作方案选择，仍只能选择已实现的 TGS-GapCloser、端部补丁和 Racon 方法，不能提议未安装的新工具。没有参考的 QUAST 与同批读段一致性不构成独立准确率证明。
 
@@ -338,11 +366,10 @@ gene-agent run --manifest /server/path/manifest.yaml \
 
 ```bash
 python -m app.diagnostics.route_acceptance \
-  --route complete \
   --run-dir /server/path/data/runs/SESSION_ID > /server/path/acceptance.json
 ```
 
-退出 0 表示完整验证进程覆盖与成对评估，不表示自动生物学改善；2 表示未完成或明确缺口，含合法 skip（如无内部缺口），不能报告工具已运行；1 表示证据不一致/缺失。JSON 含各 occurrence 方法结果、验证执行/收集引用、候选/输出交接、最终组装、成对质量指标。失败/阻塞进程需检查日志；开发主机缺二进制不是代码失败。
+退出 0 仅证明冻结计划中适用的执行证据完整，生物学质量另行比较；2 表示未完成或明确缺口，含合法 skip（如无内部缺口），不能报告工具已运行；1 表示证据不一致/缺失。JSON 含各 occurrence 方法结果、验证执行/收集引用、候选/输出交接、最终组装（若适用）和成对质量指标（若最终 Review 绑定 Base Polish）。失败/阻塞进程需检查日志；开发主机缺二进制不是代码失败。
 
 保留运行目录、冻结输入、索引产物、日志、请求绑定决策。新配置重试不要编辑冻结运行，应创建新会话。人工门中断使用下方普通 inspect/review/resume。
 

@@ -9,31 +9,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.domains.parameter_recommendation.resolution import render_stage_values
 from app.execution.parameter_attempts import current_parameter_attempt
-from app.llm.parameters.t2t.request import T2T_METHOD
 from app.schemas.artifacts import T2T_PARAMETER_FROZEN_PARAMETERS, ArtifactRef
 from app.schemas.parameter_recommendation import (
     ResolvedParameterSources,
     T2TRecommendationContext,
 )
 from app.schemas.state import TopLevelState
+from app.schemas.t2t import T2TThresholds
+from app.stages.t2t.parameters.catalog import T2T_METHOD
+from app.stages.t2t.parameters.policy import baseline_request, baseline_response
 from app.stages.t2t.parameters.storage import (
     read_artifact as read_t2t_parameter_artifact,
 )
 from app.stages.t2t.state import T2TStageCursor, read_t2t_stage_output
-from app.storage.parameter_evidence import load_approved_parameter_chain_v3
-
-
-class T2TExecutionThresholds(BaseModel):
-    """Complete threshold shape consumed by T2T scan and patch nodes."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    min_motif_copies: int
-    terminal_window_bp: int
-    min_mapq: int
-    max_target_terminal_distance_bp: int
-    min_overlap_bp: int
-    min_supporting_reads: int
+from app.storage.parameter_evidence import (
+    ApprovedParameterBundleV3,
+    load_approved_parameter_chain_v3,
+)
 
 
 class T2TLongReadInput(BaseModel):
@@ -53,7 +45,7 @@ class T2TFrozenExecutionInputs(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    thresholds: T2TExecutionThresholds
+    thresholds: T2TThresholds
     resolved_telomere_motif: str
     motif_source: Literal["provided_species_fact", "llm_species_resolution"]
     mode: Literal["propose_only", "manual_review", "auto_patch"]
@@ -114,6 +106,52 @@ def load_chromosome_names_snapshot(path_value: str | None) -> tuple[str, ...]:
             f"configured chromosome_list_ref contains no chromosome names: {path}"
         )
     return tuple(sorted(names))
+
+
+def load_t2t_baseline_bundle(
+    state: TopLevelState, *, output: T2TStageCursor
+) -> ApprovedParameterBundleV3:
+    """Validate the policy-only schema-3 execution contract."""
+
+    if output.get("recommendation_mode") != "deterministic_baseline":
+        raise ValueError("T2T schema-3 parameters require deterministic_baseline")
+    bundle = load_approved_parameter_chain_v3(
+        state,
+        attempt=current_parameter_attempt(output, method_id=T2T_METHOD, label="T2T"),
+        expected_stage="t2t",
+        expected_method_id=T2T_METHOD,
+    )
+    chain = bundle.chain
+    decision = bundle.approval_decision["decision"]
+    automatic_resolution = decision.get("automatic_resolution")
+    if (
+        chain.manifest.summary.get("policy") != "deterministic_baseline"
+        or chain.manifest.summary.get("model_invoked") is not False
+        or chain.model_request
+        != baseline_request(
+            chain.manifest.refs.input_snapshot_ref,
+            chain.manifest.refs.basis_snapshot_ref,
+        )
+        or chain.model_response != baseline_response()
+        or bundle.approved_l2
+        or decision.get("decided_by") != "auto_rule"
+        or not isinstance(automatic_resolution, dict)
+        or automatic_resolution.get("source") != "policy"
+    ):
+        raise ValueError(
+            "T2T schema-3 evidence requires empty-L2 baseline policy approval"
+        )
+    context = chain.input_snapshot.stage_context
+    if (
+        not isinstance(context, T2TRecommendationContext)
+        or context.motif_source != "provided_species_fact"
+        or context.resolved_telomere_motif
+        != chain.input_snapshot.facts.species.supplied_telomere_motif
+    ):
+        raise ValueError(
+            "T2T deterministic_baseline requires a supplied telomere motif"
+        )
+    return bundle
 
 
 def load_t2t_frozen_execution_inputs(
@@ -181,12 +219,7 @@ def load_t2t_frozen_execution_inputs(
     if attempt.frozen_parameters_ref is None:
         raise ValueError("T2T parameter attempt has no frozen parameter evidence")
 
-    bundle = load_approved_parameter_chain_v3(
-        state,
-        attempt=attempt,
-        expected_stage="t2t",
-        expected_method_id=T2T_METHOD,
-    )
+    bundle = load_t2t_baseline_bundle(state, output=output)
     frozen = read_t2t_parameter_artifact(
         state,
         attempt.frozen_parameters_ref,
@@ -225,9 +258,7 @@ def load_t2t_frozen_execution_inputs(
         )
     rendered_stage_values = render_stage_values(resolved, bundle.chain.catalog)
     rendered_mode = rendered_stage_values.pop("mode", None)
-    thresholds = T2TExecutionThresholds.model_validate(
-        frozen.get("effective_thresholds")
-    )
+    thresholds = T2TThresholds.model_validate(frozen.get("effective_thresholds"))
 
     context = bundle.chain.input_snapshot.stage_context
     if not isinstance(context, T2TRecommendationContext):

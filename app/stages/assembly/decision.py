@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field, model_validator
 from app.llm.factory import build_chat_model
 from app.llm.json_response import (
     parse_json_object,
-    response_text,
     validate_model_response_record,
 )
+from app.llm.provenance import ModelCallProvenance
+from app.llm.recommender import StructuredRecommender
 
 AssemblyDecisionKind = Literal["route_selection"]
 
@@ -43,6 +44,7 @@ class AssemblyDecisionResult(BaseModel):
     valid: bool = False
     error: str | None = None
     model_id: str | None = None
+    model_call: ModelCallProvenance = Field(default_factory=ModelCallProvenance)
 
 
 def render_assembly_decision_messages(
@@ -74,36 +76,24 @@ def make_assembly_decision(
         messages if messages is not None else render_assembly_decision_messages(request)
     )
 
-    try:
-        model = build_chat_model()
-        response = model.invoke(invocation_messages)
-    except Exception as exc:
-        return AssemblyDecisionResult(
-            kind=request.kind,
-            raw_response="",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
-    raw_content = ""
-    try:
-        raw_content = response_text(response)
-        parsed = parse_json_object(raw_content)
+    def parse(parsed: dict[str, Any]) -> dict[str, Any]:
         _validate_route_selection(
             parsed, request.allowed_actions, request.allowed_methods
         )
-        return AssemblyDecisionResult(
-            kind=request.kind,
-            raw_response=raw_content,
-            parsed=parsed,
-            valid=True,
-            model_id=type(model).__name__,
-        )
-    except Exception as exc:
-        return AssemblyDecisionResult(
-            kind=request.kind,
-            raw_response=raw_content,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        return parsed
+
+    result = StructuredRecommender(parse).invoke(
+        invocation_messages, model_factory=build_chat_model
+    )
+    return AssemblyDecisionResult(
+        kind=request.kind,
+        raw_response=result.raw_response,
+        parsed=result.parsed,
+        valid=result.valid,
+        error=result.error,
+        model_id=result.model_id,
+        model_call=result.model_call,
+    )
 
 
 def _validate_route_selection(
@@ -112,9 +102,7 @@ def _validate_route_selection(
     recommended = parsed.get("recommended_route")
     if recommended not in set(allowed_actions):
         raise ValueError(f"recommended_route {recommended!r} not in allowed actions")
-    # ``recommended_method`` was added after the original route-only contract.
-    # Keep accepting old persisted/model responses during migration, but when
-    # present it is an explicit, fail-closed candidate selection.
+    # An actionable route binds one of the offered executable methods.
     method = parsed.get("recommended_method")
     if recommended != "insufficient_data" and allowed_methods and method is None:
         raise ValueError("recommended_method is required for a selected route")
@@ -127,11 +115,8 @@ def restore_assembly_decision(
 ) -> AssemblyDecisionResult:
     """Rehydrate one immutable Assembly decision without invoking the model."""
 
-    normalized_record = dict(record)
-    if not isinstance(normalized_record.get("model_id"), str):
-        normalized_record["model_id"] = None
     envelope = validate_model_response_record(
-        normalized_record,
+        record,
         expected_schema_version=1,
         label="persisted Assembly model response",
     )
@@ -142,6 +127,7 @@ def restore_assembly_decision(
             valid=False,
             error=envelope["error"],
             model_id=envelope["model_id"],
+            model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
         )
     parsed = parse_json_object(envelope["raw_response"])
     _validate_route_selection(parsed, request.allowed_actions, request.allowed_methods)
@@ -152,4 +138,5 @@ def restore_assembly_decision(
         valid=True,
         error=envelope["error"],
         model_id=envelope["model_id"],
+        model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
     )

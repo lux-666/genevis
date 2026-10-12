@@ -12,7 +12,9 @@
 >
 > **依赖契约：** [阶段契约](../reference/stage-contracts.md)、[运行数据](../reference/data-contract.md)、[资源交接](../reference/resource-handoff.md)。
 >
-> **代码依据：** `app/entrypoints/run.py`、`app/workflow.py`、`app/graph/builder.py`、`app/graph/routing.py`、`app/control/occurrence_settlement.py`、`app/control/lifecycle.py`、`app/graph/checkpoint_compaction.py`。
+> **代码依据：** `app/entrypoints/run.py`、`app/workflow.py`、`app/graph/builder.py`、`app/graph/routing.py`、`app/control/occurrence_settlement.py`、`app/control/inspection.py`、`app/control/terminal.py`、`app/control/resume.py`、`app/graph/checkpoint_compaction.py`。
+
+冻结依赖快照的 `runtime` 记录源码版本、已安装包版本、可用时的 Git 提交及工作区是否有修改。版本来自 `app/version.py`，构建元数据复用同一来源；安装包没有 checkout 时 Git 字段为空，不借用父目录仓库。恢复读取原快照，不重算运行来源。该来源记录用于审计，不承诺代码升级后的 checkpoint 迁移。
 
 <a id="public-entry-boundary"></a>
 
@@ -54,7 +56,9 @@ TUI 输入 -> 计划草稿 -> 确认 -> freeze-+
 
 多个 contig 或项目仍是多个独立运行。外部调用者为每个单元创建一份 manifest 和 RunConfig，分配无冲突 `session_id`，为每个进程分配一个终端，并重复调用同一命令。产品不增加批处理调度器、跨会话 checkpoint 或持久聚合进度所有者；调用者可在运行目录外合并只读检查结果。
 
-冻结后两个生产者都调用既有 `execute_frozen_session` 边界。该边界拥有阶段进度、评审摘要、回车确认倒计时、人工决策、自动超时决策和终态摘要的一套终端体验。入口点不得实现并行门禁或进度循环。
+冻结后两个生产者都调用 `execute_frozen_session` 边界。该边界拥有阶段进度、评审摘要、回车确认倒计时、人工决策、自动超时决策和终态摘要的一套终端体验。入口点不得实现并行门禁或进度循环。
+
+阶段配置投影由 `app/control/stage_seeds.py` 负责。`app/control/session.py` 负责图调用、阻塞 checkpoint 识别及调用异常后的终态裁决，返回结构化结果，不打印终端输出。`control/terminal.py` 证明和持久化终态；CLI 只把调用结果映射为提示和退出码。异常发生后以持久 checkpoint 和 Ledger 为准，不能用入口层内存状态覆盖已完成事实。
 
 附着和分离进度调用[运行数据契约](../reference/data-contract.md#410-one-workflow-progress-reducer)定义的同一 reducer。Checkpoint、标记和锁仍是执行诊断，不是第二进度权威。
 

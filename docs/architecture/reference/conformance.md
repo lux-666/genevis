@@ -20,6 +20,8 @@
 
 ## 未关闭缺口
 
+截至 2026-10-09，操作者确认本轮 finishing smoke 已完成；GapCloser、T2T、Base Polish 的独立阶段验收和串联验收均尚未执行，暂缓推进。本记录未附运行目录、工具版本或 smoke 日志，不将 smoke 扩大解释为这三个阶段的完整覆盖。Assembly 各方法及 Dedup 的代码覆盖与待验边界见[实现地图](../langgraph-implementation-map.md#assembly-dedup-validation-map)。新菌种实测与测试机操作仍未启动；操作者已有 PacBio、Illumina、Hi-C 数据，PacBio 的具体类型须在执行时确认。
+
 <a id="gapcloser-representative-sample-acceptance-and-noisy-read-routes"></a>
 
 ### GapCloser 代表性样本验收与含噪读段路线
@@ -38,17 +40,17 @@
 
 - 当前证据：`app/stages/base_polish/`、`tests/test_base_polish.py`、`app/diagnostics/route_acceptance.py`。
 - 契约所有者：[Base Polish](stage-contracts.md#10-base-polish)。
-- 关闭条件：先运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整路线。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
+- 关闭条件：先运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整工作流。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
 
 <a id="assembly-software-explanation-coverage"></a>
 
 ### Assembly 软件解释覆盖
 
-单一 Assembly 消费者、跨方法检索和冻结的方法/参数基础已实现。来源设置独立保留，不受目标 L2 键影响。解释目前来自可执行目录与既有 hifiasm 机制指导，尚未覆盖全部外部/历史设置或版本交互；无法解释的设置保留为未知。
+单一 Assembly 消费者、跨方法检索和冻结的方法/参数基础已实现。来源设置独立保留，不受目标 L2 键影响。解释来自可执行目录及 hifiasm、Flye、NextDenovo 的机制指导；新增指导引用官方说明且在目标方法参数请求中冻结。尚未覆盖全部外部/历史设置或版本交互；无法解释的设置保留为未知。
 
 - 当前证据：`app/domains/assembly/software_knowledge.py`、`method_guidance.py`、`app/knowledge/assembly_retrieval.py`。
 - 契约所有者：[Assembly 案例消费](casepack.md)。
-- 关闭条件：为真实案例库中遇到的设置补充经引用的机制/版本指导，超出当前目录的覆盖范围。这是内容覆盖，不是第二消费者，也不要求将外部设置翻译成可执行参数。Hi-C/T2T 仍在规划中。
+- 关闭条件：为真实案例库中遇到的设置补充经引用的机制/版本指导，超出当前目录的覆盖范围。这是内容覆盖，不是第二消费者，也不要求将外部设置翻译成可执行参数。Hi-C/T2T 工作流及推荐器已实现；待补的是对应案例与文献方法知识覆盖。
 
 <a id="assembly-corpus-handoff-and-measured-recommendation-coverage"></a>
 
@@ -64,21 +66,11 @@
 
 ### Dedup 顾问真实工具验收
 
-结构化推荐和有界 purge_dups/QUAST 评审循环已实现。聚焦图测试覆盖三次 purge 尝试、四次累积 QUAST 评估/模型请求、响应恢复与评审期间早先文件不变、冻结原始草稿输入，以及采纳首个候选。fixture 可执行检查不能证明真实工具的生物学质量，也不能证明服务器进程重启验收。
+结构化推荐和有界 purge_dups/QUAST 评审循环已实现。聚焦图测试覆盖三次 purge 尝试、四次累积 QUAST 评估/模型请求、响应恢复与评审期间早先文件不变、冻结原始草稿输入，以及采纳首个候选。父图 fixture 测试另覆盖 read_depth/self_alignment 两条路径的 SQLite 关闭重开、CLI 恢复、两轮 purge 后采纳早先候选或保留源；最终选择不重复执行工具。外部注册组装可绑定本次长读段为深度比对证据，不能将这些读段推断为原始组装来源。fixture 检查不能证明真实工具的生物学质量，也不能证明服务器分离进程验收。
 
-- 当前证据：`app/stages/assembly_dedup/`、`tests/test_dedup_recommendation_loop.py`。
+- 当前证据：`app/stages/assembly_dedup/`、`tests/test_dedup_recommendation_loop.py`、`tests/test_assembly_dedup_parent_recovery.py`。
 - 契约所有者：[Assembly Dedup](stage-contracts.md#5-assembly-dedup)。
 - 关闭条件：使用真实工具验证隔离阶段，包括分离进程恢复，并在声称代表性样本验收前保留验收证据。
-
-<a id="run-level-replay-capability-is-not-declared"></a>
-
-### 运行级回放能力尚未声明
-
-数据契约将 `fully_materialized`、`verified_external_dependencies`、`audit_only` 定义为运行级执行回放词汇，并预留 `control/run.json` 作为未来所有者；但生产路径 API、写入器和加载器尚未实现该记录。冻结控制输入与每次尝试的依赖记录提供底层证据，却没有可查询的单一持久声明。
-
-- 当前证据：`app/storage/frozen_inputs.py`、`app/execution/dependency_snapshot.py`；仓库搜索找不到 `control/run.json` 路径 API、写入器或读取器。
-- 契约所有者：[运行数据](data-contract.md)。
-- 关闭条件：发布并校验一个由冻结依赖/物化事实导出的回放枚举运行元数据记录，或从已接受契约和路径 API 中移除该枚举及 `run.json` 目标。
 
 <a id="five-stage-real-tool-contig-acceptance-is-not-automated"></a>
 
@@ -86,13 +78,15 @@
 
 五阶段原始读段 contig 路径已有聚焦单元和集成覆盖，包括整图生命周期测试，但尚无一次自动验收运行在代表性输入上通过规范完成流程调用真实 SeqKit、Jellyfish、GenomeScope2、所选组装器、purge_dups、QUAST、BUSCO 和配置的 LLM 端点。多数方法测试使用 fixture、stub 或修补外部边界隔离阶段。现有真实工具 Read QC 冒烟不能关闭整条路径缺口。
 
-操作者报告完成了一次真实五阶段运行。请用 `route_acceptance --route contig` 复用并审计其保留证据；本检出中没有捆绑自动数据集/测试框架，不等于服务器执行未发生。同一诊断现在也支持独立的 Review、Hi-C、GapCloser、T2T、Base Polish + Review 和 finishing 范围，并提供已发布 RunConfig/输入模板。这些条目不能证明对应服务器真实工具运行已通过。
+操作者报告完成了一次真实五阶段运行。请用 `route_acceptance --run-dir PATH` 复用并审计其保留证据；本检出中没有捆绑自动数据集/测试框架，不等于服务器执行未发生。验收器读取冻结 RunConfig，并通过 `workflow_steps_from_run_config` 投影精确的线性 occurrence 顺序：Inventory 隐式首步，单个 QC/Survey、Assembly 和重复 stage 均保留，不去重。`--compare-hic-execution-from PATH` 只对 `Inventory → hic_scaffolding` 的独立 Hi-C 切片有效。这些条目不能证明对应服务器真实工具运行已通过。
 
 `server_check.sh` 证明固定主机工具/包/数据库闭包，`server_test.sh` 是回归入口，不是全流程生物学执行证据。普通回归排除显式标记的真实工具检查（包括 SeqKit 和 hifiasm CLI 验证），且测试收集期间不探测工具。这两个脚本通过都不能证明 contig 运行成功。
 
+论文公开数据评估流程及 RunConfig 的唯一来源约束见[运行与恢复](../../user_guide/run-and-recovery.md#public-data-comparison)。
+
 - 当前证据：`tests/test_read_qc.py`、`tests/test_genome_survey.py`、`tests/test_assembly.py`、`tests/test_assembly_dedup.py`、`tests/test_assembly_review.py`、`scripts/server_check.sh`、`scripts/server_test.sh`、`app/diagnostics/route_acceptance.py`、`tests/test_route_acceptance.py`。
 - 契约所有者：[阶段契约](stage-contracts.md)与[部署边界](../../deployment/README.md)。
-- 关闭条件：审计保留的真实运行证据，补齐已证明的代码测试缺口并隔离真实工具测试。仅为尚未证明的方法/分支增加小数据真实工具覆盖；使用规范模板和 `gene-agent run`，不要建立第二执行框架。可复现服务器验收应保留可追溯输入/工具身份，并通过分离检查得到规范完成终态、五个已结算分析 occurrence 和哈希验证的 `final_assembly`。聚焦 stub 测试不满足条件。Hi-C 与 finishing 阶段在全流程验收前先作为独立切片；单一操作者顺序由[运行与恢复](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)拥有。
+- 关闭条件：审计保留的真实运行证据，补齐已证明的代码测试缺口并隔离真实工具测试。仅为尚未证明的方法/分支增加小数据真实工具覆盖；使用规范模板和 `gene-agent run`，不要建立第二执行框架。QC/Survey 计划不要求 `final_assembly`；已有组装消费者仍检查 Inventory 的已验证源，组装阶段仍检查前一交付的输入和自身交接。最终 Review 按绑定 producer 决定是否检查 Base Polish pair。可复现服务器验收应保留可追溯输入/工具身份，并通过分离检查得到冻结计划的规范完成终态和 occurrence 证据；验收退出 0 仅证明执行证据完整，生物学质量另行比较。聚焦 stub 测试不满足条件。Hi-C 与 finishing 阶段在全流程验收前先作为独立切片；单一操作者顺序由[运行与恢复](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)拥有。
 
 <a id="update-rule"></a>
 

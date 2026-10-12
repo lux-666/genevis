@@ -54,12 +54,7 @@ def test_unapproved_polishing_fails_closed_with_durable_evidence(
         )
         state["current_stage"] = stage  # type: ignore[typeddict-item]
         state["workflow_step_index"] = 1
-        state["entered_workflow_step_index"] = 0
-        state["workflow_step_outcome"] = {
-            "workflow_step_id": "step-000-inventory",
-            "stage": "inventory",
-            "outcome": "completed",
-        }
+        state["entered_workflow_step_index"] = 1
 
         result = build_graph(backend="memory", data_dir=str(run_dir)).invoke(
             state,
@@ -306,7 +301,8 @@ def test_documentation_and_simplification_policy_is_final_state_only() -> None:
     ):
         assert symbol not in governance
     assert "内容寻址 JSON 发布" not in governance
-    assert "schema-v1 路线恢复器" in recommendation_policy
+    assert "`model_call`" in recommendation_policy
+    assert "不把客户端类名当作模型身份" in recommendation_policy
     assert "_parameter_evidence_location" in parameter_contract
     assert "_load_reference_snapshot" not in stage_contract
     assert "不把任意对象转成" in review_topic

@@ -24,6 +24,12 @@ READ_QC_FILTERED_LONG_READS = "read_qc.filtered_long_reads"
 READ_QC_READ_SET_MANIFEST = "read_qc.read_set_manifest"
 READ_QC_LONG_READS_FOFN = "read_qc.long_reads.fofn"
 READ_QC_FILTERED_LONG_READS_FOFN = "read_qc.filtered_long_reads.fofn"
+READ_QC_CLEAN_SHORT_READ_R1 = "read_qc.cleaned_short_reads.r1"
+READ_QC_CLEAN_SHORT_READ_R2 = "read_qc.cleaned_short_reads.r2"
+READ_QC_CLEAN_HIC_READ_R1 = "read_qc.cleaned_hic_reads.r1"
+READ_QC_CLEAN_HIC_READ_R2 = "read_qc.cleaned_hic_reads.r2"
+READ_QC_FASTP_JSON = "read_qc.fastp.json"
+READ_QC_FASTP_HTML = "read_qc.fastp.html"
 GENOME_SURVEY_KMER_DB = "genome_survey.kmer_db"
 GENOME_SURVEY_KMER_HIST = "genome_survey.kmer_hist"
 GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
@@ -89,8 +95,8 @@ AUTOHIC_PARAMETER_SCRIPT = "hic_scaffolding.parameter.script"
 AUTOHIC_PARAMETER_COMMAND = "hic_scaffolding.parameter.command"
 T2T_PARAMETER_INPUT_SNAPSHOT = "t2t.parameter_recommendation.input_snapshot"
 T2T_PARAMETER_BASIS = "t2t.parameter.basis_snapshot"
-T2T_PARAMETER_MODEL_REQUEST = "t2t.parameter.model_request"
-T2T_PARAMETER_MODEL_RESPONSE = "t2t.parameter.model_response"
+T2T_PARAMETER_POLICY_REQUEST = "t2t.parameter.policy_request"
+T2T_PARAMETER_POLICY_RESPONSE = "t2t.parameter.policy_response"
 T2T_PARAMETER_RECOMMENDATION = "t2t.parameter.recommendation"
 T2T_PARAMETER_RESPONSE_PARSE = "t2t.parameter.response_parse"
 T2T_PARAMETER_RECOMMENDATION_MANIFEST = "t2t.parameter.recommendation_manifest"
@@ -653,68 +659,4 @@ class AssemblyRouteDecision(BaseModel):
     selected_route: Literal["cyclone", "ont", "hifi"]
     decided_by: Literal["auto_rule", "human_override", "run_config_explicit"]
     rationale: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class AssemblyQCSummary(BaseModel):
-    """QC summary for one assembly candidate."""
-
-    session_id: str
-    candidate_id: str
-    method_name: str
-    n50_mb: float | None = None
-    contig_count: int | None = None
-    total_length_mb: float | None = None
-    busco_completeness: float | None = None
-    busco_lineage: str | None = None
-    qv_score: float | None = None
-    gap_count: int | None = None
-    telomere_detected: bool | None = None
-    qc_passed: bool
-    qc_notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class AssemblyT2TReadiness(BaseModel):
-    """T2TFinishingAgent readiness assessment."""
-
-    session_id: str
-    candidate_id: str
-    t2t_verdict: Literal[
-        "adopt_draft",
-        "near_t2t",
-        "strict_t2t_candidate",
-        "insufficient",
-        "request_data",
-    ]
-    llm_confidence: float
-    llm_reasoning: str
-    uncertainty_notes: list[str] = Field(default_factory=list)
-    blocking_reasons: list[str] = Field(default_factory=list)
-    telomere_coverage_pct: float | None = None
-    gap_count: int | None = None
-    total_gap_bases: int | None = None
-    hic_misassembly_count: int | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class AssemblyReviewTaskItem(BaseModel):
-    """One human-review task generated during T2T readiness assessment."""
-
-    priority: Literal["high", "medium", "low"]
-    category: str
-    finding: str
-    action: str
-    can_auto_resolve: bool = False
-
-
-class AssemblyReviewTasks(BaseModel):
-    """T2TFinishingAgent human-review task list."""
-
-    session_id: str
-    candidate_id: str
-    t2t_status_estimate: Literal["near_t2t", "strict_t2t_candidate", "insufficient"]
-    confidence: float
-    tasks: list[AssemblyReviewTaskItem] = Field(default_factory=list)
-    blocking_for_strict_t2t: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

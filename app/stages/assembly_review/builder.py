@@ -26,8 +26,6 @@ from app.stages.assembly_review.method_application.quast import (
     quast_planner_outcome,
 )
 from app.stages.assembly_review.nodes import (
-    build_related_species_evidence_pack,
-    build_related_species_statistics_and_notebook,
     enter_assembly_review,
     evaluate_review_rules,
     fail_assembly_review,
@@ -45,6 +43,10 @@ from app.stages.assembly_review.routing import (
     route_after_plan_metrics,
     route_after_quast,
     route_from_evaluation,
+)
+from app.stages.assembly_review.statistics import (
+    build_related_species_evidence_pack,
+    build_related_species_statistics_and_notebook,
 )
 
 

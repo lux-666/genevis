@@ -75,6 +75,12 @@
 
 Inventory 同一逻辑资源同时含 clean/raw 资产时，由 `ResourceSpec.asset_type_priority_groups` 决定首选类型。后续阶段一旦发布中央资源引用，就不得静默回退到旧 Inventory 资产。
 
+Trio 母本和父本文件是例外的注册范围而非中央资源：Inventory 保留它们在
+asset registry 中，供已冻结且带有 `metadata.intake_role` 的显式 Trio 输入引用
+使用，但不会发布到中央 `long_reads` 或 `short_reads`。因此中央资源缺失时的
+registry fallback 也必须过滤 `trio_maternal_reads` / `trio_paternal_reads`；
+Genome Survey 和 Read QC 不得把父母读段当作子代读段。
+
 阶段使用 `update_resource_ref(...)` 发布；它返回新验证表，不修改传入状态。
 
 <a id="logical-resources"></a>
@@ -84,7 +90,7 @@ Inventory 同一逻辑资源同时含 clean/raw 资产时，由 `ResourceSpec.as
 | 阶段 | 必需 | 产生或更新 |
 |---|---|---|
 | `inventory` | — | 按 manifest 注册 `long_reads`、`short_reads`、`hic_reads`、`assembly` |
-| `read_qc` | `long_reads` | `long_reads` |
+| `read_qc` | `long_reads`（可选）、`short_reads`（可选）、`hic_reads`（可选）；至少一族可用 | `long_reads`、`short_reads`、`hic_reads`（按选中方法） |
 | `genome_survey` | 完整 Survey 至少需要 `short_reads` 或 `long_reads`，优先短读段族；族内 clean/raw 优先级在阶段前解析；明确基因组大小允许无读段 skip | 仅标量测量证据 |
 | `assembly` | `long_reads` | `assembly` |
 | `assembly_dedup` | `assembly`；`read_depth` 策略还需 `long_reads` | `assembly` |
@@ -95,6 +101,10 @@ Inventory 同一逻辑资源同时含 clean/raw 资产时，由 `ResourceSpec.as
 | `base_polish` | 当前 `assembly`、完整 HiFi-only `long_reads` | 人工采纳或复用的 `assembly`，以及供最终 Review 的成对替代候选 |
 
 运行时适配器强制这些直接依赖。Genome Survey 已允许只有短读段的运行，两族均存在时优先短 DNA 读段。`resource_specs.py` 仅拥有规范资源解析；阶段不共享第二份声明式规划表。
+
+冻结前与读取冻结输入时，`frozen_inputs.py` 使用同一检查验证 manifest 与字面阶段顺序：组装消费阶段必须有已登记组装或前置本地 Assembly；后置 Assembly 不能满足前面的输入。未授权本地执行的 Assembly 也不能被当作交付者。QC 至少有一个可用读段族，选中的 fastp 和 Hi-C scaffolding 要有显式配对输入；Trio 父母读段不计入子代输入。Assembly 所需基因组大小来自 manifest 或此前配置完整的本地 Survey。没有读段但有显式大小的 Survey 仍可按原契约跳过。
+
+进入 Dedup、Review、Hi-C 或 finishing occurrence 前，控制器从冻结顺序推导最近组装交接步骤，核对中央 `ResourceRef` 的生产阶段与 `workflow_step_id`。它与 Review 的 `review_target` 使用同一顺序分析，不新增计划字段或路线列表。来源缺失或不匹配即停止，不能静默使用更早的组装；Review 继续执行下述 Ledger 交付证明校验。QC 清洗结果仍按实际交付更新资源，不把每个计划中的 QC 当作必定产出清洗读段。文件内容、方法适用性、条件执行和人工采纳仍由阶段内检查决定。
 
 Hi-C 读段止于 `hic_scaffolding`。人工采纳后，该 occurrence 替换中央 `assembly`。GapCloser 消费该组装和完整当前 HiFi 集合；采纳则替换，保留旧组装或没有内部缺口则声明复用交付。后续 T2T 解析当时的组装和长读段，不直接消费 `hic_reads` 或 contact map。Base Polish 同样使用当前组装和 HiFi 集合。交接 metadata 携带 `comparison_candidate_bundle_ref`、`comparison_primary_output_ref`、`polish_comparison_ref`。最终 Review 依据不可变来源绑定比较验证两个候选，再用相同 QUAST/BUSCO 设置评估。这些引用描述替代项，不构成第二个当前组装。
 
@@ -158,6 +168,26 @@ Read QC 谱系不创建第二读段资源协议。未过滤完成时，重新发
 Read QC 发布中央 `long_reads` 后，下游不得回退到旧 raw 资产集。过滤后零读段仍发布方法证据与零值汇总统计，但不以空文件替换中央资源；Read QC occurrence 以 `no_reads_retained` 交付失败。
 
 FOFN、逐文件统计和摘要报告属于产物或适配器局部文件，不是并列交接机制。精确测量来源由[阶段契约](stage-contracts.md)的 Read QC 节拥有。
+
+### paired short-DNA 与 Hi-C fastp
+
+`read_qc.short_reads.fastp` 和 `read_qc.hic_reads.fastp` 使用同一个严格的
+paired-member 契约。Inventory 的 raw `short_reads`/`hic_reads` 交接只需提供有序
+`asset_ids`、注册表引用以及注册表内的 pair/mate provenance；它不要求复制
+`paired_members`。只有 fastp 派生资源必须同时提供 `read_set_manifest_ref` 和有序
+`paired_members`；每个 pair 具有非负
+`manifest_entry_ordinal`、`pair_index`，并且恰好有 `mate=R1` 与 `mate=R2`。
+R1/R2 不能共享 `source_asset_id`，不得通过文件名推断配对。非对象 lane、缺失
+mate、重复 lane 或 pair-index gap 都是输入错误，不是可静默丢弃的记录。
+
+fastp 的资源 `paths` 和 paired members 指向发布后的 clean artifact；原始资产
+只作为 `source_asset_id` 谱系锚点。Hi-C/Assembly 消费者通过
+`resolve_hic_pairs` 读取 paired members，因此即使 `selection_anchor` 指向原始
+资产路径，也只选择对应 pair group，返回的 R1/R2 仍是 clean 后代及其
+`ArtifactRef`。这保证 AutoHiC/Hifiasm 不会因 registry 回查而重新使用 raw reads。
+
+一个只含 short-DNA paired reads 的运行是合法的：不需要 long-read 资源，也不
+会凭空创建 `long_reads` 交接。无选中 fastp 方法的族不产生对应 resource ref。
 
 <a id="sequencing-member-identity"></a>
 

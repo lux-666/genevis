@@ -522,6 +522,7 @@ def prepare_session_inputs(
             run_config,
             declarations.read_declarations,
         )
+        _validate_workflow_input_contract(manifest, run_config)
     except FrozenInputValidationError:
         raise
     except (ValidationError, ValueError) as exc:
@@ -650,6 +651,7 @@ def freeze_session_inputs(
                 capture_dependency_snapshot,
                 dependency_snapshot_bytes,
             )
+            from app.execution.method_capabilities import required_tools_by_method
 
             dependency_snapshot = capture_dependency_snapshot(
                 config_path=config_path,
@@ -658,6 +660,7 @@ def freeze_session_inputs(
                 preflight_runner=preflight_runner,
                 probe_environments=probe_environments,
                 resolver=resolver,
+                required_tools_by_method=required_tools_by_method(run_config),
             )
             dependency_bytes = dependency_snapshot_bytes(dependency_snapshot)
             marker = _build_marker(
@@ -714,11 +717,13 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
             "frozen manifest does not contain the canonical shared platform"
         )
     try:
+        _validate_review_input_contract(manifest, run_config)
         _validate_assembly_input_contract(
             manifest,
             run_config,
             declarations.read_declarations,
         )
+        _validate_workflow_input_contract(manifest, run_config)
     except (FrozenInputValidationError, ValueError) as exc:
         raise FrozenInputIntegrityError(
             f"frozen manifest/run-config biological validation is invalid: {exc}"
@@ -1058,6 +1063,109 @@ def _validate_review_input_contract(
         )
 
 
+def _validate_workflow_input_contract(
+    manifest: InputManifest, run_config: RunConfig
+) -> None:
+    """Reject impossible input chains, without predicting conditional outputs.
+
+    Read processing preserves input families; only an executed Assembly can
+    introduce an assembly. Other assembly handoffs consume an existing one.
+    Content-dependent requirements (e.g. reads for closing actual N gaps) stay
+    with the stage that inspects the materialized input.
+    """
+    from app.stages.resource_specs import (
+        ASSEMBLY_SPEC,
+        HIC_READS_SPEC,
+        LONG_READS_SPEC,
+        SHORT_READS_SPEC,
+    )
+    from app.workflow import analyze_assembly_sequence
+
+    assets = [
+        asset
+        for asset in manifest.assets
+        if asset.metadata.get("intake_role")
+        not in {"trio_maternal_reads", "trio_paternal_reads"}
+    ]
+    available = {
+        spec.resource_type: [a for a in assets if a.asset_type in spec.asset_types]
+        for spec in (ASSEMBLY_SPEC, LONG_READS_SPEC, SHORT_READS_SPEC, HIC_READS_SPEC)
+    }
+    # Pair requirements apply to the family selected by the runtime resolver.
+    for group in SHORT_READS_SPEC.asset_type_priority_groups:
+        preferred = [a for a in available["short_reads"] if a.asset_type in group]
+        if preferred:
+            available["short_reads"] = preferred
+            break
+    has_assembly = bool(available["assembly"])
+    explicit_size = manifest.genome_size_estimate
+    has_size = explicit_size is not None
+    bindings = analyze_assembly_sequence(run_config.requested_stage_names())
+    for index, request in enumerate(run_config.requested_stages, start=1):
+        stage = request.stage
+
+        def require(present: bool, description: str) -> None:
+            if not present:
+                raise FrozenInputValidationError(
+                    f"step-{index:03d}-{stage} requires {description}"
+                )
+
+        if index in bindings:
+            require(
+                has_assembly, "an input assembly or a prior locally executed Assembly"
+            )
+        if stage == "assembly":
+            if request.allow_local_execution:
+                require(bool(available["long_reads"]), "offspring long reads")
+                require(
+                    has_size,
+                    "input_manifest.genome_size_estimate "
+                    "or a prior locally executed Genome Survey occurrence",
+                )
+            # A non-executed Assembly cannot provide the occurrence-specific
+            # handoff, even if Inventory registered a different assembly.
+            has_assembly = request.allow_local_execution
+        elif stage == "read_qc":
+            require(
+                bool(available["long_reads"])
+                or any(
+                    available[family] and all(a.paired_reads for a in available[family])
+                    for family in ("short_reads", "hic_reads")
+                ),
+                "offspring long reads or paired short/Hi-C reads",
+            )
+            config = run_config.read_qc
+            if config and request.allow_local_execution:
+                for family in ("short_reads", "hic_reads"):
+                    if getattr(config, family) is not None:
+                        require(
+                            bool(available[family])
+                            and all(a.paired_reads for a in available[family]),
+                            f"explicit paired {family} for fastp",
+                        )
+        elif stage == "genome_survey":
+            can_measure = (
+                request.allow_local_execution
+                and bool(available["short_reads"] or available["long_reads"])
+                and run_config.genome_survey is not None
+                and run_config.genome_survey.survey_parameters is not None
+            )
+            require(
+                explicit_size is not None or can_measure,
+                "offspring genomic reads and configured local Survey execution, "
+                "or an explicit genome size",
+            )
+            has_size = explicit_size is not None or can_measure
+        elif stage == "hic_scaffolding":
+            require(
+                bool(available["hic_reads"])
+                and all(a.paired_reads for a in available["hic_reads"]),
+                "explicit paired Hi-C reads",
+            )
+        elif stage == "base_polish" and request.allow_local_execution:
+            require(bool(available["long_reads"]), "offspring long reads for polishing")
+
+
 def _validate_assembly_input_contract(
     manifest: InputManifest,
     run_config: RunConfig,
@@ -1068,6 +1176,7 @@ def _validate_assembly_input_contract(
     assembly = run_config.assembly
     if assembly is None:
         return
+    _validate_trio_parent_roles(manifest, assembly)
     local_assembly = any(
         request.stage == "assembly" and request.allow_local_execution
         for request in run_config.requested_stages
@@ -1104,53 +1213,69 @@ def _validate_assembly_input_contract(
             raise FrozenInputValidationError(
                 "assembly.hifi_reads_ref must select a registered HiFi member"
             )
-    if assembly.hic_reads_ref:
-        selected = str(Path(assembly.hic_reads_ref).resolve(strict=False))
-        matching_entries = [
-            asset
-            for asset in paired_entries
-            if selected
-            in {str(Path(path).resolve(strict=False)) for path in asset.paths}
-        ]
-        if len(matching_entries) != 1:
-            raise FrozenInputValidationError(
-                "assembly.hic_reads_ref must select exactly one registered "
-                "paired-read group"
-            )
-    if manifest.genome_size_estimate is not None:
+    hifiasm_inputs = assembly.hifiasm_inputs
+    if hifiasm_inputs and hifiasm_inputs.hic_reads_ref:
+        for ref in hifiasm_inputs.hic_reads_ref:
+            selected = str(Path(ref).resolve(strict=False))
+            matching_entries = [
+                asset
+                for asset in paired_entries
+                if selected
+                in {str(Path(path).resolve(strict=False)) for path in asset.paths}
+            ]
+            if len(matching_entries) != 1:
+                raise FrozenInputValidationError(
+                    "assembly.hifiasm_inputs.hic_reads_ref must select exactly "
+                    "one registered paired-read group"
+                )
+
+
+def _validate_trio_parent_roles(
+    manifest: InputManifest,
+    assembly: Any,
+) -> None:
+    """Require Trio selectors to resolve to explicitly role-tagged assets.
+
+    Parent reads stay registered for the Trio execution path, but they are not
+    ordinary offspring short-read resources.  Keeping this check at the freeze
+    boundary prevents an untyped or cross-wired path from entering the graph.
+    """
+
+    hifiasm_inputs = assembly.hifiasm_inputs
+    if hifiasm_inputs is None or not hifiasm_inputs.trio_enabled:
         return
-    has_usable_survey_reads = any(
-        asset.asset_type
-        in {
-            "raw_short_dna_reads",
-            "clean_short_dna_reads",
-            "raw_long_reads",
-            "clean_long_reads",
-        }
-        for asset in manifest.assets
-    )
-    local_assembly_indexes = [
-        index
-        for index, request in enumerate(run_config.requested_stages)
-        if request.stage == "assembly" and request.allow_local_execution
-    ]
-    survey_is_configured = (
-        run_config.genome_survey is not None
-        and run_config.genome_survey.survey_parameters is not None
-    )
-    every_assembly_has_prior_survey = all(
-        survey_is_configured
-        and any(
-            earlier.stage == "genome_survey" and earlier.allow_local_execution
-            for earlier in run_config.requested_stages[:assembly_index]
+
+    role_paths: dict[str, set[str]] = {
+        "trio_maternal_reads": set(),
+        "trio_paternal_reads": set(),
+    }
+    for asset in manifest.assets:
+        role = asset.metadata.get("intake_role")
+        if role not in role_paths:
+            continue
+        role_paths[role].update(
+            str(Path(path).expanduser().resolve(strict=False)) for path in asset.paths
         )
-        for assembly_index in local_assembly_indexes
-    )
-    if not has_usable_survey_reads or not every_assembly_has_prior_survey:
-        raise FrozenInputValidationError(
-            "deferred Assembly requires input_manifest.genome_size_estimate or "
-            "a prior locally executed Genome Survey occurrence"
-        )
+
+    for field_name, role in (
+        ("trio_maternal_reads_ref", "trio_maternal_reads"),
+        ("trio_paternal_reads_ref", "trio_paternal_reads"),
+    ):
+        refs = getattr(hifiasm_inputs, field_name)
+        # Keep both parent identities explicit at the immutable input boundary.
+        if not refs:
+            raise FrozenInputValidationError(
+                "Trio hifiasm inputs require explicit maternal and paternal "
+                "role references"
+            )
+        for ref in refs:
+            selected = str(Path(ref).expanduser().resolve(strict=False))
+            if selected not in role_paths[role]:
+                raise FrozenInputValidationError(
+                    f"assembly.hifiasm_inputs.{field_name} must select a "
+                    f"registered asset tagged metadata.intake_role="
+                    f"{role!r}: {selected}"
+                )
 
 
 def _load_yaml_draft(

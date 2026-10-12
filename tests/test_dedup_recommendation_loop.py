@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -9,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.control.lifecycle import normalize_resume_review_request
+from app.control.resume import normalize_resume_review_request
 from app.llm.dedup import PurgeRecommendation, PurgeRecommender
 from app.review.application import (
     load_verified_review_application,
@@ -106,16 +107,23 @@ def test_structured_modes_validate_and_keep_raw(method):
 def test_budget_and_duplicate_config_stop_new_attempts():
     parsed = PurgeRecommendation.model_validate(proposal())
     with pytest.raises(ValueError, match="budget"):
-        validate_proposal(parsed, [], 0)
+        validate_proposal(parsed, [], 0, available_coverage_modes=["self_alignment"])
     with pytest.raises(ValueError, match="repeats"):
         validate_proposal(
-            parsed, [{"attempt": 0, "parameters": parsed.parameters.model_dump()}], 2
+            parsed,
+            [{"attempt": 0, "parameters": parsed.parameters.model_dump()}],
+            2,
+            available_coverage_modes=["self_alignment"],
         )
 
 
 def _state(tmp_path):
     helper = fixtures.AssemblyDedupStageTests()
     state = helper._state(str(tmp_path))
+    state["workflow_steps"][2]["selected_method_names"] = [
+        "assembly_dedup.purge_dups",
+        "assembly_dedup.eval.quast",
+    ]
     source = tmp_path / "source.fasta"
     source.write_text(">c1\n" + "ACGT" * 300 + "\n")
     bundle, primary = helper._publish_candidate(
@@ -159,8 +167,11 @@ cat "$last" > "${prefix}.purged.fa"
   shift
 done
 mkdir -p "$out"
-report="$out/report.tsv"
-printf 'Assembly\\t%s\\nN50\\t1200\\nTotal length\\t1200\\n' "$labels" > "$report"
+printf '%s\\n' "$labels" | awk -F, 'BEGIN {OFS="\\t"} {
+  printf "Assembly"; for(i=1;i<=NF;i++) printf "\\t%s", $i; printf "\\n";
+  printf "N50"; for(i=1;i<=NF;i++) printf "\\t1200"; printf "\\n";
+  printf "Total length"; for(i=1;i<=NF;i++) printf "\\t1200"; printf "\\n";
+}' > "$out/report.tsv"
 """,
     }
     for name, script in scripts.items():
@@ -353,6 +364,66 @@ def test_countdown_cannot_change_approved_settings_or_bypass_budget(tmp_path):
         validate_approved_attempt(exhausted)
 
 
+@pytest.mark.parametrize("method", ["quast", "purge_dups"])
+@pytest.mark.parametrize("prior_purge", [False, True])
+@pytest.mark.parametrize("failure", ["execution", "collect"])
+def test_method_failures_settle_their_own_evidence(
+    tmp_path, method, prior_purge, failure
+):
+    state, _ = _state(tmp_path)
+    model = Model(
+        [
+            AIMessage(content=json.dumps(proposal())),
+            AIMessage(content=json.dumps(proposal(preset="asm10"))),
+        ]
+    )
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        graph = build_stage()
+        if prior_purge or method == "purge_dups":
+            state = graph.invoke(state)
+        if prior_purge and method == "purge_dups":
+            state = graph.invoke(_approve(state))
+            assert len(history(state)) == 1
+        old_report = state["stage_outputs"]["assembly_dedup"].get("quast_report_ref")
+        if method == "purge_dups" or prior_purge:
+            state = _approve(state)
+        if failure == "execution":
+            tool = "quast.py" if method == "quast" else "purge_dups"
+            (tmp_path / "bin" / tool).write_text("#!/bin/sh\nexit 9\n")
+            final = graph.invoke(state)
+        else:
+            target = (
+                "app.stages.assembly_dedup.advisor.collect_quast"
+                if method == "quast"
+                else "app.stages.assembly_dedup.nodes._collect_purge_dups_result"
+            )
+            with patch(target, side_effect=OSError("injected collect failure")):
+                final = build_stage().invoke(state)
+    cursor = final["stage_outputs"]["assembly_dedup"]
+    assert cursor["status"] == "failed"
+    dispositions = {
+        event["method_name"]: event["disposition"]
+        for event in Ledger(state["data_dir"]).read_events("s1")
+        if event["event_type"] == "method_disposition_recorded"
+    }
+    assert dispositions == {
+        "assembly_dedup.eval.quast": "failed" if method == "quast" else "completed",
+        "assembly_dedup.purge_dups": (
+            "failed"
+            if method == "purge_dups"
+            else "completed"
+            if prior_purge
+            else "not_started"
+        ),
+    }
+    if method == "quast" and old_report:
+        assert cursor["quast_report_ref"] == old_report
+    [attempt] = cursor["execution_attempts"]
+    execution = load_json(final, attempt["execution_ref"])
+    assert execution["result"]["return_code"] == (9 if failure == "execution" else 0)
+    assert len(history(final)) == int(prior_purge)
+
+
 def test_disabled_execution_does_not_invoke_quast_or_model(tmp_path):
     state, _ = _state(tmp_path)
     state["stage_outputs"]["assembly_dedup"]["automatic_purge_approved"] = False
@@ -363,8 +434,55 @@ def test_disabled_execution_does_not_invoke_quast_or_model(tmp_path):
     assert result["workflow_step_outcome"]["deliveries"][0]["delivery_mode"] == "reused"
 
 
+@pytest.mark.parametrize(
+    "report",
+    [
+        "Assembly\tsource\nN50\t1200\n",
+        "Assembly\tattempt_0\tsource\nN50\t1200\t1200\n",
+        "Assembly\tsource\tattempt_0\nN50\t1200\n",
+        "Assembly\tsource\tattempt_0\n",
+        "Assembly\tsource\tattempt_0\nN50\t1200\t\n",
+    ],
+)
+def test_incomplete_quast_report_stops_before_candidate_advice(tmp_path, report):
+    state, _ = _state(tmp_path)
+    model = Model(
+        [
+            AIMessage(content=json.dumps(proposal())),
+            AIMessage(content=json.dumps(proposal("accept", selected=0))),
+        ]
+    )
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        graph = build_stage()
+        blocked = graph.invoke(state)
+        tool = tmp_path / "bin" / "quast.py"
+        # Preserve the fixture argv parser, replace only report generation.
+        original = tool.read_text().split("mkdir -p")[0]
+        tool.write_text(
+            original
+            + 'mkdir -p "$out"\n'
+            + f'printf %s {shlex.quote(report)} > "$out/report.tsv"\n'
+        )
+        final = graph.invoke(_approve(blocked))
+    cursor = final["stage_outputs"]["assembly_dedup"]
+    assert cursor["status"] == "failed"
+    assert "QUAST roster/table mismatch" in cursor["reason"]
+    assert cursor["failure_kind"] == "collect"
+    assert len(history(final)) == 1
+    assert len(model.messages) == 1
+    dispositions = {
+        event["method_name"]: event["disposition"]
+        for event in Ledger(state["data_dir"]).read_events("s1")
+        if event["event_type"] == "method_disposition_recorded"
+    }
+    assert dispositions == {
+        "assembly_dedup.purge_dups": "completed",
+        "assembly_dedup.eval.quast": "failed",
+    }
+
+
 def test_invalid_model_response_requires_human_result_selection(tmp_path):
-    from app.control.lifecycle import ResumeValidationError
+    from app.control.errors import ResumeValidationError
     from app.stages.assembly_dedup.review import normalize_timeout_request
 
     state, _ = _state(tmp_path)
@@ -395,8 +513,8 @@ def test_invalid_model_response_requires_human_result_selection(tmp_path):
 
 
 def test_advisor_configuration_freezes_quast_roster_and_existing_wait_policy():
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _stage_seeds_from_run_config
     from app.execution.run_readiness import effective_method_closure, run_requires_llm
     from app.schemas.run_config import RunConfig
 
@@ -424,7 +542,7 @@ def test_advisor_configuration_freezes_quast_roster_and_existing_wait_policy():
         "assembly_dedup.purge_dups",
         "assembly_dedup.eval.quast",
     ]
-    seeds = _stage_seeds_from_run_config(config, shared_parameters=None)
+    seeds = stage_seeds_from_run_config(config, shared_parameters=None)
     assert seeds["assembly_dedup"]["review_policy"]["max_blocked_seconds"] == -1
     assert seeds["assembly_dedup"]["max_attempts"] == 4
     assert run_requires_llm(config)

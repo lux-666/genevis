@@ -11,7 +11,6 @@ from app.schemas.state import TopLevelState
 from app.stages.t2t.nodes import (
     T2T_ALIGNMENT_METHOD,
     apply_t2t_patches,
-    block_t2t,
     build_t2t_alignment_graph,
     commit_t2t,
     enter_t2t,
@@ -53,12 +52,7 @@ def build_baseline_stage() -> CompiledStateGraph[
     TopLevelState,
     TopLevelState,
 ]:
-    """Single-pass schema-3 executor for explicit deterministic baselines.
-
-    Already-approved schema-3 cursors retain their execution consumer. Unseeded
-    internal callers retain the legacy initial recommendation boundary; public
-    RunConfig always seeds advisor or deterministic_baseline explicitly.
-    """
+    """Single-pass schema-3 executor for deterministic baselines."""
     graph = StateGraph(TopLevelState)
     graph.add_node("enter", enter_t2t)
     graph.add_node("resolve_inputs", resolve_t2t_inputs)
@@ -73,7 +67,6 @@ def build_baseline_stage() -> CompiledStateGraph[
     graph.add_node("validate_patched", validate_patched_assembly)
     graph.add_node("report", write_t2t_report)
     graph.add_node("gate_review", gate_t2t_review)
-    graph.add_node("block", block_t2t)
     graph.add_node("commit", commit_t2t)
     graph.add_node("fail", fail_t2t)
     graph.add_node(
@@ -139,7 +132,6 @@ def build_baseline_stage() -> CompiledStateGraph[
         "recommend_parameters",
         route_after_parameter_recommendation,
         {
-            "block": "block",
             "prepare_parameters": "prepare_parameters",
             "fail": "settle_alignment_before_failure",
         },
@@ -211,7 +203,6 @@ def build_baseline_stage() -> CompiledStateGraph[
     )
     graph.add_edge("commit", END)
     graph.add_edge("fail", END)
-    graph.add_edge("block", END)
     graph.add_edge("settle_alignment_before_patches", "apply_patches")
     graph.add_edge("settle_alignment_before_report", "report")
     graph.add_edge("settle_alignment_before_failure", "fail")

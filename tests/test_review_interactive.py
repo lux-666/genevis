@@ -517,7 +517,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
 
             with (
                 patch(
-                    "app.control.lifecycle.inspect_session",
+                    "app.control.inspection.inspect_session",
                     return_value={
                         "latest_review_status": {
                             "status": "awaiting_decision",
@@ -576,7 +576,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
 
             with (
                 patch(
-                    "app.control.lifecycle.inspect_session",
+                    "app.control.inspection.inspect_session",
                     return_value={
                         "latest_review_status": {
                             "status": "decision_committed",
@@ -662,7 +662,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
             raw_decision = request.model_dump(mode="json")
             with (
                 patch(
-                    "app.control.lifecycle.inspect_session",
+                    "app.control.inspection.inspect_session",
                     return_value={
                         "latest_review_status": {
                             "status": "awaiting_decision",
@@ -739,7 +739,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
             decision_path.write_text("{}\n", encoding="utf-8")
             with (
                 patch(
-                    "app.control.lifecycle.inspect_session",
+                    "app.control.inspection.inspect_session",
                     return_value={
                         "latest_review_status": {
                             "status": "awaiting_decision",
@@ -974,11 +974,13 @@ class RenderBlockedSummaryTests(unittest.TestCase):
                     },
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-003-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-004-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": True,

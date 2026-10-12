@@ -127,6 +127,49 @@ def test_registry_fallback_honors_asset_type_priority_and_multiple(tmp_path) -> 
     assert resolved.metadata["asset_types"] == ["clean_long_reads"]
 
 
+@pytest.mark.parametrize(
+    ("resource_type", "asset_type"),
+    [("short_reads", "raw_short_dna_reads"), ("long_reads", "raw_long_reads")],
+)
+def test_registry_fallback_excludes_trio_parent_reads(
+    tmp_path, resource_type, asset_type
+):
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": "s1",
+                "assets": [
+                    {
+                        "asset_id": "parent",
+                        "asset_type": asset_type,
+                        "path": f"/registry/{resource_type}-parent.fq",
+                        "metadata": {"intake_role": "trio_maternal_reads"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    state["data_dir"] = str(v2_run_dir(tmp_path, "s1"))
+    state["asset_registry_ref"] = _publish_registry_ref(
+        state["data_dir"], "s1", registry_path
+    )
+
+    resolved = resolve_stage_resource(
+        state,
+        resource_spec=ResourceSpec(
+            resource_type=resource_type,
+            asset_types=[asset_type],
+            allow_multiple=True,
+        ),
+    )
+
+    assert not resolved.found
+
+
 def test_inventory_resource_ref_honors_asset_type_priority(tmp_path) -> None:
     state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
     raw_path = tmp_path / "raw" / "one.fastq.gz"
@@ -190,6 +233,7 @@ def test_update_resource_ref_returns_validated_replacement_without_mutation() ->
         input_manifest_ref="manifest.yaml",
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
@@ -200,6 +244,7 @@ def test_update_resource_ref_returns_validated_replacement_without_mutation() ->
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-002-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,

@@ -36,7 +36,7 @@ Gene Agent 运行带参数推荐、人工评审、重试、大型工具输出和
 
 T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行。补丁候选表继续只包含进入支持分组的行；其中 supporting_reads 去重后的支持数汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。
 
-T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不打开人工参数门，补丁采纳仍走 t2t_review。旧 schema-3 初始 LLM 代码保留既有记录读取与受控兼容调用，不是新版 advisor 入口。旧活动会话保留匹配检出；本运行时不迁移 checkpoint。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
+T2T 的 deterministic_baseline 使用单轮 schema-3 策略请求与批准记录，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不建立交互式 `parameter_approval` 门，补丁采纳仍走 `t2t_review`。默认 T2T advisor 使用 finishing 共同任务记录，设置、请求/响应、assessment/history 和每轮 `frozen.json` 按 finishing 证据链保存。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
 
 <a id="2-product-decisions"></a>
 
@@ -46,7 +46,7 @@ T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已
 2. 持久恢复面向最新安全前沿，尤其是阻塞人工门禁。
 3. 报告文件名和产物类型是内部实现细节。
 4. 当前参数代码中的“Planner”指阶段参数推荐器，不是父图规划或独立 Assembly 方法顾问。
-5. 公共确定性运行使用 `gene-agent run --manifest PATH --run-config PATH --data-dir PATH`。manifest 单独拥有会话身份，`data-dir` 决定 `runs/<session_id>/` 布局。RunConfig 必须明确包含 `requested_stages` JSON 列表，各项为 `{stage, allow_local_execution}`。固定方法名单由描述符默认值推导，只存于冻结 `workflow_steps`。Assembly 是阶段拥有的例外，可省略 `selected_method_names`，在上游 QC/Survey 后推荐确认；省略表示延迟绑定，显式空名单可读取但不活动。工作流投影始终写固定名单；状态读取器为恢复接受缺失固定名单，但计划生成不会产生它。列表保留字面顺序和重复 occurrence；stage 是路由选择，allow_local_execution 是进程授权，没有独立本地执行数组。`requested_stages` 不得为 null，`[]` 是合法空生物学计划；`None` 只表示未完成规划/TUI 草稿，公共入口在冻结/执行前拒绝。冻结生成唯一运行时权威 `workflow_steps`，从隐式 `step-000-inventory` 开始，后续位置 ID 如 `step-001-t2t`。运行时不得追加、重排或替换。
+5. 公共确定性运行使用 `gene-agent run --manifest PATH --run-config PATH --data-dir PATH`。manifest 单独拥有会话身份，`data-dir` 决定 `runs/<session_id>/` 布局。RunConfig 必须明确包含 `requested_stages` JSON 列表，各项为 `{stage, allow_local_execution}`。固定方法名单由描述符默认值推导，只存于冻结 `workflow_steps`。Assembly 是阶段拥有的例外，可省略 `selected_method_names`，在上游 QC/Survey 后推荐确认；省略表示延迟绑定，显式名单必须恰好包含一个组装方法。固定阶段始终要求显式名单，读取和恢复拒绝缺失名单。列表保留字面顺序和重复 occurrence；stage 是路由选择，allow_local_execution 是进程授权，没有独立本地执行数组。`requested_stages` 不得为 null，`[]` 是合法空生物学计划；`None` 只表示未完成规划/TUI 草稿，公共入口在冻结/执行前拒绝。冻结生成唯一运行时权威 `workflow_steps`，从隐式 `step-000-inventory` 开始，后续位置 ID 如 `step-001-t2t`。运行时不得追加、重排或替换。
 6. Review 位置保留字面 RunConfig 数据；Assembly/T2T 不建立强制 Review，冻结不合成。明确请求的 Review 带 `review_target = {resource_type: "assembly", producer_step_id: "..."}`，绑定最近前置组装交接 occurrence。
 7. Gene Agent 是单操作者本地 pip 工具，信任控制运行目录的操作系统账户。完整性校验针对部分写入、崩溃、不兼容版本、意外损坏；不提供针对同一操作者的对抗隔离。
 
@@ -59,15 +59,9 @@ T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已
 - **审计回放：** 重建精确输入、模型请求、保存响应、解析结果、人工决策、冻结命令、执行结果、因果顺序。记录外部依赖，但不保证仅复制运行目录就能获得其字节。
 - **执行回放：** 重新运行命令，还需要工具环境、参考数据库、生物学输入字节。每项依赖须记录不可变来源和哈希，但不强制复制共享环境/数据库。
 
-已接受的未来运行元数据回放能力词汇：
+回放能力由冻结输入、机器依赖、每次尝试依赖及文件完整性共同证明。消费者直接核验这些证据；单一状态标签不能替代依赖检查。
 
-- `fully_materialized`：所需输入字节全部由运行拥有。
-- `verified_external_dependencies`：需要外部输入/数据库，并已记录不可变 manifest 和哈希。
-- `audit_only`：原命令可检查，但不能承诺再次执行。
-
-当前运行时**不发布** `control/run.json` 或其他携带该枚举的单一运行字段。已持久化评估回放所需冻结输入、机器依赖、每次尝试依赖，但消费者必须检查这些记录，不能相信不存在的声明。缺少运行级声明是明确[一致性欠账](conformance.md)，不是已实现字段。
-
-“自包含运行”只在原记录布局完整时保证审计回放。执行回放还须冻结证据证明全部字节和环境仍可用；未来运行级声明可摘要，不能替代证据。迁移外部依赖或绝对阶段游标路径不在保证内。
+“自包含运行”只在原记录布局完整时保证审计回放。执行回放还须冻结证据证明全部字节和环境仍可用。迁移外部依赖或绝对阶段游标路径不在保证内。
 
 <a id="4-fundamental-invariants"></a>
 
@@ -84,6 +78,8 @@ T2T 的 deterministic_baseline 保留单轮 schema-3 执行消费者，要求已
 <a id="42-immutable-evidence"></a>
 
 ### 4.2 不可变证据
+
+Ledger 公开读取在文件共享锁内完成解码与校验，等待持有独占追加锁的写者提交完整行；锁释放后仍残缺的 JSON 明确报损坏。读取不存在的 Ledger 不创建运行目录。锁内追加使用已持锁的读取器，不递归获取锁。该约定保证协作进程的完整前缀读取，不承诺断电后的文件系统耐久性。
 
 证据发布后不可变。向既有路径发布不同字节是错误；逻辑文档改变时使用新 ID 和路径。
 
@@ -176,7 +172,7 @@ RunConfig 和持久规划记录不携带 Assembly 方法或方法参数块。规
 
 展示 `finished` 始终等于 `completed + skipped`；不得将当前索引、缺当前或终态游标解释为计数。
 
-新写入不能产生重复/冲突 occurrence 终态。若旧 Ledger 已存在，按保守 `failed > skipped > completed` 投影，输出完整性诊断并标降级；无法证明计划前缀完整时不提供权威当前 occurrence。
+新写入不能产生重复/冲突 occurrence 终态。若 Ledger 存在重复或冲突终态，按保守 `failed > skipped > completed` 投影，输出完整性诊断并标降级；无法证明计划前缀完整时不提供权威当前 occurrence。
 
 <a id="5-fact-ownership"></a>
 
@@ -194,8 +190,8 @@ RunConfig 和持久规划记录不携带 Assembly 方法或方法参数块。规
 | 组装主产品与方法原生产物 | 不可变 executed candidate 包 + 索引 | 包引用、选定方法/候选 ID |
 | 推荐使用的精确 profile | 输入/profile 快照产物 | 引用、哈希 |
 | 描述符、目录、案例、策略依据 | 不可变运行证据快照；案例只保存每次推荐选中内容 | 引用、哈希、选定 ID |
-| 精确模型调用 | `model_request.json` | 请求引用、模型 ID |
-| 原始模型结果 | `model_response.json` | 响应引用、有效性枚举 |
+| 模型或策略请求 | Assembly/AutoHiC 的 `model_request.json`；T2T baseline 的 `policy_request.json` | 请求引用、模型 ID（调用时） |
+| 模型或策略响应 | Assembly/AutoHiC 的 `model_response.json`；T2T baseline 的 `policy_response.json` | 响应引用、解析状态 |
 | 解析的方法/参数推荐 | `recommendation.json` | 引用/哈希、紧凑接受投影 |
 | 响应结构解析结果 | `response_parse.json` | 引用、parsed/invalid、解析错误 |
 | 人工请求 | 不可变请求产物 | 请求 ID/引用/哈希、门 ID、步骤 ID |
@@ -263,7 +259,6 @@ data/
 - `layout.json` 声明 `schema_version: 2`，防止静默混合不兼容布局。
 - 结构化 run 和 TUI 仅从冻结 `input_manifest.yaml`、`run_config.json` 执行。TUI 专属草稿/state 是可变采集记录，不是执行器权威；无可变 `manifest.yaml` 执行权威。
 - 最后发布 `frozen_inputs.json`，绑定 manifest、run config、dependency manifest 哈希。
-- `control/run.json` 是接受的未来元数据所有者，当前不创建；见回放缺口。
 - 阶段目录不重复 session ID。
 - 数值推荐/尝试目录使用 occurrence 局部补零 ID，如 `000`、`001`、`002`。
 - 准备尝试时 `work/` 可变，之后作为恢复工作区保留，恢复原地校验脚本。

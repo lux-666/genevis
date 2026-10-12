@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -165,8 +166,9 @@ def test_polish_compare_adopt_and_finish_review(tmp_path: Path, decision: str) -
     fixture = AssemblyReviewStageTests()
     fixture._fake_quast_bin(str(tmp_path))
     fixture._fake_busco_bin(str(tmp_path))
-    lineage = tmp_path / "embryophyta_odb10"
-    lineage.mkdir()
+    from tests.busco_fixture import ensure_busco_lineage, isolated_frozen_busco_resolver
+
+    lineage = ensure_busco_lineage(tmp_path)
     result["workflow_steps"][3]["allow_local_execution"] = True
     result["stage_outputs"]["assembly_review"] = {
         "execution_mode": "local",
@@ -175,13 +177,27 @@ def test_polish_compare_adopt_and_finish_review(tmp_path: Path, decision: str) -
         "quast_parameters": {"threads": 1},
         "busco_parameters": {
             "threads": 1,
-            "lineage_path": str(lineage),
+            "lineage_path": str(lineage.resolve()),
             "lineage_name": lineage.name,
             "lineage_version": "odb10",
             "lineage_source": "test_fixture",
+            "mode": "genome",
         },
     }
-    evaluated = build_review().invoke(result)
+    with (
+        patch(
+            "app.stages.assembly_review.method_application.busco."
+            "load_frozen_dependency_resolver",
+            return_value=isolated_frozen_busco_resolver(
+                result["stage_outputs"]["assembly_review"]["busco_parameters"]
+            ),
+        ),
+        patch(
+            "app.stages.assembly_review.statistics._related_species_reference_dir",
+            return_value=fixture._test_reference_dir(result),
+        ),
+    ):
+        evaluated = build_review().invoke(result)
     assert evaluated["supervision_state"] == "blocked_human", evaluated
     signals = evaluated["stage_outputs"]["assembly_review"]["signals"]
     assert len(signals) == 4
@@ -399,9 +415,10 @@ def test_sqlite_close_and_cli_resume(tmp_path: Path, decision: str) -> None:
     import argparse
     import shlex
 
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _run_resume, _stage_seeds_from_run_config
+    from app.entrypoints.run import _run_resume
     from app.graph.builder import build_graph
     from app.schemas.state import initial_state
     from app.storage.frozen_inputs import freeze_session_inputs
@@ -478,7 +495,7 @@ def test_sqlite_close_and_cli_resume(tmp_path: Path, decision: str) -> None:
         input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(paths.run_dir),
         workflow_steps=workflow_steps_from_run_config(frozen.run_config),
-        stage_seeds=_stage_seeds_from_run_config(
+        stage_seeds=stage_seeds_from_run_config(
             frozen.run_config, shared_parameters={}
         ),
     )
