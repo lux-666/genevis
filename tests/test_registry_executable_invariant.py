@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from types import ModuleType
 from unittest.mock import patch
 
+from app.control.stage_seeds import stage_seeds_from_run_config
 from app.control.workflow_plan import workflow_step_id
 from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SEQKIT,
@@ -18,7 +19,6 @@ from app.entrypoints.ask_planner import (
     build_planner_method_catalog,
     build_run_config_payload,
 )
-from app.entrypoints.run import _stage_seeds_from_run_config
 from app.execution.lifecycle import MethodExecutionLifecycle
 from app.schemas.ask_plan import AskPlanState, PlanStageOccurrence
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
@@ -48,7 +48,12 @@ from app.stages.hic_scaffolding import builder as hic_scaffolding_builder
 from app.stages.hic_scaffolding.method_application import autohic
 from app.stages.read_qc import builder as read_qc_builder
 from app.stages.read_qc.constants import LENGTH_FILTER_SKIP
-from app.stages.read_qc.method_application import seqkit_length_filter, seqkit_stats
+from app.stages.read_qc.method_application import (
+    fastp_hic_reads,
+    fastp_short_reads,
+    seqkit_length_filter,
+    seqkit_stats,
+)
 from app.stages.read_qc.nodes import commit_read_qc, plan_length_filter
 from app.stages.t2t import builder as t2t_builder
 from app.stages.t2t import nodes as t2t_nodes
@@ -179,6 +184,20 @@ LOCAL_BINDINGS = (
         read_qc_builder.build_stage,
         "seqkit_length_filter",
     ),
+    LocalBinding(
+        fastp_short_reads,
+        fastp_short_reads.LIFECYCLE,
+        fastp_short_reads.build_short_reads_fastp_graph,
+        read_qc_builder.build_stage,
+        "short_reads_fastp",
+    ),
+    LocalBinding(
+        fastp_hic_reads,
+        fastp_hic_reads.LIFECYCLE,
+        fastp_hic_reads.build_hic_reads_fastp_graph,
+        read_qc_builder.build_stage,
+        "hic_reads_fastp",
+    ),
 )
 
 
@@ -259,7 +278,6 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
                             "step_id": workflow_step_id(1, "assembly"),
                             "stage": "assembly",
                             "allow_local_execution": False,
-                            "selected_method_names": [],
                         }
                     )
                 target_step_index = len(workflow_steps)
@@ -348,7 +366,7 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
                 "read_qc": {"length_filter": filter_config},
             }
         )
-        stage_seeds = _stage_seeds_from_run_config(
+        stage_seeds = stage_seeds_from_run_config(
             run_config,
             shared_parameters=None,
         )
@@ -456,7 +474,7 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
                 self.assertEqual(set(public_filter_config), {"approved", "thresholds"})
                 self.assertNotIn("method", public_filter_config)
                 run_config = RunConfig.model_validate(payload)
-                stage_seeds = _stage_seeds_from_run_config(
+                stage_seeds = stage_seeds_from_run_config(
                     run_config,
                     shared_parameters=None,
                 )

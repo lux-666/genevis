@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 from pathlib import Path
+from typing import cast
 
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
@@ -48,7 +49,7 @@ from app.stages.read_qc.method_application.support import (
     seqkit_aggregate_length_commands,
     update_read_qc_output,
 )
-from app.stages.read_qc.state import ReadQCSubstepJson
+from app.stages.read_qc.state import LengthThresholdsJson, ReadQCSubstepJson
 from app.storage.artifacts import (
     publish_or_recover_work_artifact,
     record_registered_artifacts,
@@ -118,7 +119,19 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
     )
     if blocked is not None:
         return update_read_qc_output(state, blocked)
-    min_len = int(output["substeps"]["length_filter"]["thresholds"]["min_len"])
+    raw_thresholds = output["substeps"]["length_filter"].get("thresholds") or {}
+    thresholds = dict(raw_thresholds)
+    raw_resolved = thresholds.get("resolved_min_len")
+    resolved_min_len = (
+        [int(value) for value in raw_resolved] if isinstance(raw_resolved, list) else []
+    )
+    if not resolved_min_len:
+        min_len = thresholds.get("min_len")
+        if not isinstance(min_len, int):
+            return fail_update(
+                state, "length filter thresholds have no resolved minimum"
+            )
+        resolved_min_len = [min_len] * len(output.get("raw_long_reads_paths") or [])
     working_dir = stage_work_dir(state, "read_qc", "length_filter")
     working_dir.mkdir(parents=True, exist_ok=True)
     input_paths = read_paths_from_output(output)
@@ -138,9 +151,11 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
     )
     script_path = working_dir / "run_length_filter.sh"
     commands = [
-        f"seqkit seq -m {min_len} {shlex.quote(str(input_path))} "
+        f"seqkit seq -m {minimum} {shlex.quote(str(input_path))} "
         f"> {shlex.quote(str(filtered_path))}"
-        for input_path, filtered_path in zip(input_paths, filtered_paths)
+        for input_path, filtered_path, minimum in zip(
+            input_paths, filtered_paths, resolved_min_len, strict=True
+        )
     ]
     filtered_args = " ".join(shlex.quote(str(path)) for path in filtered_paths)
     aggregate_command = seqkit_aggregate_length_commands(
@@ -187,7 +202,7 @@ def freeze_length_filter_attempt(state: TopLevelState) -> StateUpdate:
             "filtered_long_reads_paths": [str(path) for path in filtered_paths],
             "post_filter_stats_path": str(post_filter_stats_path),
             "post_filter_aggregate_stats_path": str(post_filter_aggregate_stats_path),
-            "thresholds": {"min_len": min_len},
+            "thresholds": {**thresholds, "resolved_min_len": resolved_min_len},
         },
     )
     return freeze_method_attempts(state, LIFECYCLE, [attempt])
@@ -205,12 +220,19 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
     attempt = executions[0].attempt
     paths = [Path(path) for path in attempt.metadata["filtered_long_reads_paths"]]
     stats_path = Path(attempt.metadata["post_filter_stats_path"])
-    min_len = attempt.metadata["thresholds"]["min_len"]
+    thresholds = dict(attempt.metadata["thresholds"])
+    # ``resolved_min_len`` is an execution cursor detail (one value per input
+    # lane), not part of the public summary contract.  Keep it on the attempt
+    # and stage substep, but do not leak it into published stats/summary
+    # metadata.
+    summary_thresholds = {
+        key: value for key, value in thresholds.items() if key != "resolved_min_len"
+    }
     filtered_metadata = {
         "attempt_id": attempt.attempt_id,
         "input_asset_ref": output.get("input_asset_ref"),
         "input_asset_refs": output.get("input_asset_refs") or [],
-        "thresholds": {"min_len": min_len},
+        "thresholds": summary_thresholds,
         "tool": "seqkit",
     }
     published_reads = [
@@ -296,7 +318,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         "input_asset_refs": output.get("input_asset_refs") or [],
         "read_set": "post_filter",
         "format": "tsv",
-        "thresholds": {"min_len": min_len},
+        "thresholds": summary_thresholds,
         "tool": "seqkit",
     }
     published_stats = publish_or_recover_work_artifact(
@@ -353,7 +375,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
                 "raw_long_reads_paths": output.get("raw_long_reads_paths") or [],
                 "filtered_long_reads_path": str(paths[0]),
                 "filtered_long_reads_paths": [str(path) for path in paths],
-                "thresholds": {"min_len": min_len},
+                "thresholds": summary_thresholds,
                 "read_set": "post_filter",
                 "aggregate_stats_artifact_ref": published_aggregate.ref.model_dump(
                     mode="json"
@@ -370,7 +392,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
         "input_asset_refs": output.get("input_asset_refs") or [],
         "read_set": "post_filter",
         "format": "json",
-        "thresholds": {"min_len": min_len},
+        "thresholds": summary_thresholds,
         "tool": "seqkit",
         "aggregate_stats_ref": published_aggregate.ref.model_dump(mode="json"),
         "dependency_refs": [published_aggregate.ref.model_dump(mode="json")],
@@ -444,7 +466,7 @@ def collect_length_filter_artifacts(state: TopLevelState) -> StateUpdate:
             "name": "length_filter",
             "status": "executed",
             "method_name": LENGTH_FILTER_METHOD_NAME,
-            "thresholds": {"min_len": min_len},
+            "thresholds": cast(LengthThresholdsJson, thresholds),
             "artifact_ref": str(paths[0]),
             "artifact_refs": [str(path) for path in paths],
             "post_filter_stats_ref": str(stats_path),

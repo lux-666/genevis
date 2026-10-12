@@ -15,17 +15,28 @@ from unittest.mock import patch
 
 import pytest
 
+from app.control.stage_seeds import stage_seeds_from_run_config
+from app.execution.lifecycle import load_method_executions, run_method_attempts
 from app.graph.builder import build_graph
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.resource_ref import ResourceRef
+from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.read_qc.builder import build_stage
 from app.stages.read_qc.method_application import seqkit_length_filter, seqkit_stats
+from app.stages.read_qc.method_application.fastp import (
+    collect_fastp_artifacts,
+    fastp_lifecycle,
+    freeze_fastp_attempt,
+)
 from app.stages.read_qc.method_application.seqkit_length_filter import (
     build_seqkit_length_filter_graph,
 )
 from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
+from app.stages.read_qc.pairs import resolve_qc_pairs
+from app.stages.read_resolution import resolve_hic_pairs
 from app.storage.artifacts import publish_artifact_record, read_artifact_records
 from app.storage.audit import audit_run_storage
 from app.storage.frozen_inputs import freeze_session_inputs
@@ -265,6 +276,340 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         seqkit.chmod(0o755)
         return bin_dir
 
+    def _fake_fastp_bin(self, tmpdir: str) -> Path:
+        """Create a deterministic fastp stand-in for lifecycle tests."""
+        bin_dir = Path(tmpdir) / "fastp-bin"
+        bin_dir.mkdir()
+        fastp = bin_dir / "fastp"
+        fastp.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, shutil, sys\n"
+            "args = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n"
+            "shutil.copyfile(args['--in1'], args['--out1'])\n"
+            "shutil.copyfile(args['--in2'], args['--out2'])\n"
+            "after_reads = 0 if os.environ.get('FASTP_TEST_EMPTY') else 3\n"
+            "after_bases = 0 if os.environ.get('FASTP_TEST_EMPTY') else 12\n"
+            "with open(args['--json'], 'w', encoding='utf-8') as handle:\n"
+            "    json.dump({'summary': {'before_filtering': {\n"
+            "        'total_reads': 4, 'total_bases': 16},\n"
+            "        'after_filtering': {'total_reads': after_reads,\n"
+            "        'total_bases': after_bases}}}, handle)\n"
+            "with open(args['--html'], 'w', encoding='utf-8') as handle:\n"
+            "    handle.write('<html>fastp test report</html>')\n",
+            encoding="utf-8",
+        )
+        fastp.chmod(0o755)
+        return bin_dir
+
+    def _short_pair_state(
+        self,
+        tmpdir: str,
+        *,
+        selected: bool = True,
+        asset_type: str = "raw_short_dna_reads",
+    ) -> dict:
+        root = Path(tmpdir)
+        assets = []
+        for lane in (1, 2):
+            for mate in ("R1", "R2"):
+                path = root / f"lane{lane}_{mate}.fastq"
+                path.write_text(
+                    f"@lane{lane}_{mate}\nACGT\n+\n!!!!\n", encoding="utf-8"
+                )
+                assets.append(
+                    {
+                        "asset_id": f"s1:{asset_type}:lane{lane}:{mate}",
+                        "asset_type": asset_type,
+                        "path": str(path),
+                        "platform": "illumina",
+                        "format": "fastq",
+                        "metadata": {
+                            "manifest_entry_ordinal": 0,
+                            "pair_index": lane - 1,
+                            "mate": mate,
+                        },
+                    }
+                )
+        registry = self._write_registry(tmpdir, assets=assets)
+        steps = _read_qc_workflow_steps(include_genome_survey=False)
+        if selected:
+            steps[1]["selected_method_names"] = [
+                "read_qc.long_read_stats.seqkit_stats",
+                "read_qc.length_filter.skip",
+                "read_qc.short_reads.fastp",
+            ]
+        state = self._state(tmpdir, str(registry))
+        state["workflow_steps"] = steps
+        fake_bin = self._fake_fastp_bin(tmpdir)
+        state["stage_outputs"] = {
+            "read_qc": {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "short_reads_request": {
+                    "threads": 2,
+                    "length_required": 30,
+                    "preserve_hic_junction": True,
+                },
+            }
+        }
+        return state
+
+    def test_run_config_fastp_seed_is_frozen_into_read_qc_only(self):
+        config = RunConfig.model_validate(
+            {
+                "requested_stages": [
+                    {"stage": "read_qc", "allow_local_execution": True}
+                ],
+                "read_qc": {
+                    "short_reads": {"threads": 8},
+                    "hic_reads": {"preserve_hic_junction": True},
+                },
+            }
+        )
+        seed = stage_seeds_from_run_config(config, shared_parameters=None)
+        self.assertEqual(seed["read_qc"]["short_reads_request"]["threads"], 8)
+        self.assertTrue(seed["read_qc"]["hic_reads_request"]["preserve_hic_junction"])
+
+    def test_short_only_multilane_fastp_delivers_clean_resource(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = build_stage().invoke(self._short_pair_state(tmpdir))
+
+            self.assertEqual(result["supervision_state"], "completed")
+            output = result["stage_outputs"]["read_qc"]
+            self.assertEqual(output["short_reads_summary"]["lanes"], 2)
+            self.assertEqual(output["short_reads_summary"]["total_reads_after"], 6)
+            clean_pairs = output["short_reads_clean_pairs"]
+            self.assertEqual(len(clean_pairs), 2)
+            self.assertEqual([pair["pair_index"] for pair in clean_pairs], [0, 1])
+            resource = result["resource_refs"]["short_reads"]
+            self.assertEqual(len(resource["paths"]), 4)
+            self.assertEqual(
+                [pair["r1"]["mate"] for pair in resource["metadata"]["paired_members"]],
+                ["R1", "R1"],
+            )
+            self.assertNotIn("long_reads", result["resource_refs"])
+
+    def test_fastp_collect_recovers_after_work_cleanup_without_rerun(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._short_pair_state(tmpdir)
+            state["stage_outputs"]["read_qc"]["status"] = "short_reads_fastp_planned"
+            lifecycle = fastp_lifecycle("short_reads")
+            frozen = freeze_fastp_attempt(state, "short_reads", lifecycle)
+            frozen_state = {**state, "stage_outputs": frozen["stage_outputs"]}
+            ran = run_method_attempts(frozen_state, lifecycle)
+            ran_state = {**frozen_state, "stage_outputs": ran["stage_outputs"]}
+
+            # First collection publishes immutable outputs. The replay below
+            # must recover those outputs after the mutable attempt directory is
+            # removed, and must not invoke fastp again.
+            first = collect_fastp_artifacts(ran_state, "short_reads", lifecycle)
+            self.assertEqual(
+                first["stage_outputs"]["read_qc"]["short_reads_summary"][
+                    "total_reads_after"
+                ],
+                6,
+            )
+            attempt = load_method_executions(ran_state, lifecycle)[0].attempt
+            import shutil
+
+            shutil.rmtree(attempt.working_dir)
+            replay = collect_fastp_artifacts(ran_state, "short_reads", lifecycle)
+            self.assertEqual(
+                replay["stage_outputs"]["read_qc"]["short_reads_summary"][
+                    "total_bases_after"
+                ],
+                24,
+            )
+
+    def test_derived_pair_payload_rejects_non_object_lane(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._short_pair_state(tmpdir)
+            state["resource_refs"] = {
+                "short_reads": {
+                    "resource_type": "short_reads",
+                    "paths": ["/tmp/short_reads.fastq"],
+                    "source_stage": "read_qc",
+                    "workflow_step_id": "step-001-read_qc",
+                    "metadata": {"paired_members": [None]},
+                }
+            }
+            with self.assertRaisesRegex(
+                ValueError, "paired_members require read_set_manifest_ref"
+            ):
+                resolve_qc_pairs(state, "short_reads")
+
+    def test_hic_fastp_freeze_preserves_junction_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._short_pair_state(tmpdir)
+            pairs = resolve_qc_pairs(state, "short_reads")
+            state["resource_refs"] = {
+                "hic_reads": {
+                    "resource_type": "hic_reads",
+                    "paths": [
+                        member["path"]
+                        for pair in pairs
+                        for member in (pair["r1"], pair["r2"])
+                    ],
+                    "source_stage": "inventory",
+                    "workflow_step_id": "step-000-inventory",
+                    "metadata": {
+                        "asset_registry_ref": state["asset_registry_ref"],
+                        "asset_ids": [
+                            member["source_asset_id"]
+                            for pair in pairs
+                            for member in (pair["r1"], pair["r2"])
+                        ],
+                    },
+                }
+            }
+            state["stage_outputs"]["read_qc"] = {
+                "execution_mode": "local",
+                "env": state["stage_outputs"]["read_qc"]["env"],
+                "status": "hic_reads_fastp_planned",
+                "hic_reads_request": {},
+            }
+            frozen = freeze_fastp_attempt(
+                state, "hic_reads", fastp_lifecycle("hic_reads")
+            )
+            work = next(
+                path
+                for path in Path(state["data_dir"]).rglob("run_fastp.sh")
+                if "hic_reads" in str(path)
+            )
+            self.assertIn("--disable_adapter_trimming", work.read_text())
+            self.assertEqual(
+                frozen["stage_outputs"]["read_qc"]["status"],
+                "hic_reads_fastp_frozen",
+            )
+
+    def test_hic_fastp_clean_pairs_are_consumed_by_read_resolution(self):
+        """The downstream Hi-C consumer must receive QC artifacts, not raw paths."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._short_pair_state(tmpdir, asset_type="hic_reads_registered")
+            raw_pairs = resolve_qc_pairs(state, "hic_reads")
+            raw_resource = ResourceRef(
+                resource_type="hic_reads",
+                paths=[
+                    member["path"]
+                    for pair in raw_pairs
+                    for member in (pair["r1"], pair["r2"])
+                ],
+                source_stage="inventory",
+                workflow_step_id="step-000-inventory",
+                metadata={
+                    "asset_registry_ref": state["asset_registry_ref"],
+                    "paired_members": raw_pairs,
+                    "asset_ids": [
+                        member["source_asset_id"]
+                        for pair in raw_pairs
+                        for member in (pair["r1"], pair["r2"])
+                    ],
+                },
+            )
+            state["resource_refs"] = {"hic_reads": raw_resource.to_dict()}
+            state["workflow_steps"][1]["selected_method_names"] = [
+                "read_qc.hic_reads.fastp"
+            ]
+            state["stage_outputs"]["read_qc"] = {
+                **state["stage_outputs"]["read_qc"],
+                "hic_reads_request": {"preserve_hic_junction": True},
+            }
+
+            result = build_stage().invoke(state)
+            self.assertEqual(result["supervision_state"], "completed")
+            clean_resource = result["resource_refs"]["hic_reads"]
+            clean_members = clean_resource["metadata"]["paired_members"]
+            self.assertEqual(len(clean_members), 2)
+            raw_path = str(Path(tmpdir) / "lane1_R1.fastq")
+            repeated_pairs = resolve_qc_pairs(result, "hic_reads")
+            self.assertTrue(repeated_pairs[0]["r1"]["artifact_ref"])
+            self.assertEqual(
+                repeated_pairs[0]["r1"]["compression"],
+                "gzip",
+            )
+            resolved = resolve_hic_pairs(result, selection_anchor=raw_path)
+            self.assertEqual(len(resolved), 2)
+            self.assertTrue(resolved[0].r1.read_artifact_ref)
+            self.assertNotEqual(resolved[0].r1.path, raw_path)
+            self.assertEqual(
+                resolved[0].r1.source_asset_id,
+                clean_members[0]["r1"]["source_asset_id"],
+            )
+
+    def test_fastp_zero_retention_fails_without_delivering_clean_resource(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._short_pair_state(tmpdir)
+            state["stage_outputs"]["read_qc"]["env"]["FASTP_TEST_EMPTY"] = "1"
+            result = build_stage().invoke(state)
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(
+                result["stage_outputs"]["read_qc"]["reason"], "no_reads_retained"
+            )
+            self.assertNotIn("short_reads", result.get("resource_refs") or {})
+            self.assertTrue(
+                result["stage_outputs"]["read_qc"]["short_reads_report_artifact_refs"]
+            )
+
+    def test_fastp_execution_failure_fails_occurrence_without_replacing_raw_resource(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._short_pair_state(tmpdir)
+            raw_pairs = resolve_qc_pairs(state, "short_reads")
+            raw_resource = ResourceRef(
+                resource_type="short_reads",
+                paths=[
+                    member["path"]
+                    for pair in raw_pairs
+                    for member in (pair["r1"], pair["r2"])
+                ],
+                source_stage="inventory",
+                workflow_step_id="step-000-inventory",
+                metadata={
+                    "asset_registry_ref": state["asset_registry_ref"],
+                    "asset_ids": [
+                        member["source_asset_id"]
+                        for pair in raw_pairs
+                        for member in (pair["r1"], pair["r2"])
+                    ],
+                    "paired_members": raw_pairs,
+                },
+            )
+            state["resource_refs"] = {"short_reads": raw_resource.to_dict()}
+            fastp = Path(tmpdir) / "fastp-bin" / "fastp"
+            fastp.write_text("#!/bin/sh\nexit 17\n", encoding="utf-8")
+            fastp.chmod(0o755)
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["stage_outputs"]["read_qc"]["status"], "failed")
+            self.assertEqual(
+                result["resource_refs"]["short_reads"], raw_resource.to_dict()
+            )
+
+    def test_hic_derived_member_tampering_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._short_pair_state(tmpdir, asset_type="hic_reads_registered")
+            raw_pairs = resolve_qc_pairs(state, "hic_reads")
+            state["resource_refs"] = {
+                "hic_reads": ResourceRef(
+                    resource_type="hic_reads",
+                    paths=[
+                        member["path"]
+                        for pair in raw_pairs
+                        for member in (pair["r1"], pair["r2"])
+                    ],
+                    source_stage="inventory",
+                    workflow_step_id="step-000-inventory",
+                    metadata={"paired_members": raw_pairs},
+                ).to_dict()
+            }
+            with self.assertRaisesRegex(
+                ValueError, "paired_members require read_set_manifest_ref"
+            ):
+                resolve_hic_pairs(state)
+
     def test_missing_asset_registry_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             graph = build_stage()
@@ -272,7 +617,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("raw_long_reads", result["last_error"])
+            self.assertIn("long_reads resolution failed", result["last_error"])
+            self.assertIn("asset_registry_ref is missing", result["last_error"])
 
     def test_registry_without_raw_long_reads_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1127,7 +1473,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "read_qc.length_filter.seqkit_seq",
             )
             self.assertEqual(
-                read_qc["substeps"]["length_filter"]["thresholds"], {"min_len": 1000}
+                read_qc["substeps"]["length_filter"]["thresholds"],
+                {"min_len": 1000, "resolved_min_len": [1000]},
             )
             self.assertEqual(
                 read_qc["length_filter_method"], "read_qc.length_filter.seqkit_seq"

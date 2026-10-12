@@ -77,9 +77,7 @@ def test_descriptor_registry_loading_is_cwd_independent(tmp_path, monkeypatch) -
     }
     assert "--offline" in busco.entry_patterns[0]
     assert "--auto-lineage" not in busco.entry_patterns[0]
-    assert registry.packages["hifiasm"].conditional_required_tools == {
-        "trio": ["yak"]
-    }
+    assert registry.packages["hifiasm"].conditional_required_tools == {"trio": ["yak"]}
     assert registry.root_dir.name == "descriptors"
 
 

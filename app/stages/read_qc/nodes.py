@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from app.configuration import load_descriptor_registry
 from app.control.workflow_plan import (
@@ -23,6 +23,7 @@ from app.stages.read_qc.constants import (
     LENGTH_FILTER_SKIP_METHOD_NAME,
     METHOD_NAME,
 )
+from app.stages.read_qc.pairs import resolve_qc_pairs
 from app.stages.read_qc.state import (
     ReadQCStageCursor,
     ReadQCSubstepJson,
@@ -32,7 +33,7 @@ from app.stages.read_qc.state import (
     update_read_qc_stage_output,
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
-from app.stages.resource_specs import LONG_READS_SPEC
+from app.stages.resource_specs import HIC_READS_SPEC, LONG_READS_SPEC, SHORT_READS_SPEC
 
 
 def _read_qc_output(state: TopLevelState) -> ReadQCStageCursor:
@@ -44,6 +45,11 @@ def _update_read_qc_output(
     payload: dict[str, Any],
 ) -> StateUpdate:
     return update_read_qc_stage_output(state, payload)
+
+
+def _pair_list(output: ReadQCStageCursor, key: str) -> list[dict[str, Any]]:
+    value = output.get(key)
+    return cast(list[dict[str, Any]], value) if isinstance(value, list) else []
 
 
 def _length_filter_status_update(
@@ -120,14 +126,17 @@ def enter_read_qc(state: TopLevelState) -> StateUpdate:
 
 
 def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
-    """Resolve the current logical long-read set."""
+    """Resolve every read family that this QC occurrence can consume."""
     try:
         resolution = resolve_stage_resource(state, resource_spec=LONG_READS_SPEC)
     except ValueError as exc:
-        return _fail_update(state, f"raw_long_reads resolution failed: {exc}")
+        return _fail_update(state, f"long_reads resolution failed: {exc}")
     if not resolution.found:
-        return _fail_update(state, "raw_long_reads/long_reads resource not found")
-    paths = [Path(path) for path in resolution.paths]
+        paths: list[Path] = []
+        metadata: dict[str, Any] = {}
+    else:
+        paths = [Path(path) for path in resolution.paths]
+        metadata = resolution.metadata
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
         return _blocked_update(
@@ -136,18 +145,22 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
             f"raw_long_reads path not found: {missing[0]}",
             {"blocked_input_ref": missing[0], "blocked_input_refs": missing},
         )
-    metadata = resolution.metadata
-    registry_backed = bool(metadata.get("asset_ids")) and (
-        metadata.get("asset_registry_ref") is not None
-        or (
-            resolution.source_type == "asset"
-            and state.get("asset_registry_ref") is not None
+    registry_backed = (
+        bool(paths)
+        and bool(metadata.get("asset_ids"))
+        and (
+            metadata.get("asset_registry_ref") is not None
+            or (
+                resolution is not None
+                and resolution.source_type == "asset"
+                and state.get("asset_registry_ref") is not None
+            )
         )
     )
     artifact_backed = metadata.get("read_set_manifest_ref") is not None and bool(
         metadata.get("artifact_refs")
     )
-    if not registry_backed and not artifact_backed:
+    if paths and not registry_backed and not artifact_backed:
         return _fail_update(
             state,
             "long_reads resource has no immutable registry or read-set provenance",
@@ -173,6 +186,50 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
     ]
     unique_platforms = list(dict.fromkeys(platforms))
     unique_formats = list(dict.fromkeys(formats))
+    families: list[str] = []
+    if paths:
+        families.append("long_reads")
+    family_errors: list[str] = []
+    for family, spec in (
+        ("short_reads", SHORT_READS_SPEC),
+        ("hic_reads", HIC_READS_SPEC),
+    ):
+        try:
+            family_resolution = resolve_stage_resource(state, resource_spec=spec)
+            if family_resolution.found:
+                pairs = resolve_qc_pairs(state, family)
+                if not pairs:
+                    return _fail_update(
+                        state, f"{family} resource has no complete R1/R2 pairs"
+                    )
+                families.append(family)
+        except ValueError as exc:
+            detail = str(exc)
+            if family == "short_reads" and "asset_registry_ref is missing" in detail:
+                detail += " (paired members require pair_index/mate provenance)"
+            selected_method = {
+                "short_reads": "read_qc.short_reads.fastp",
+                "hic_reads": "read_qc.hic_reads.fastp",
+            }[family]
+            current_step = current_workflow_step(state)
+            if (
+                current_step is not None
+                and selected_method in current_step["selected_method_names"]
+            ):
+                return _fail_update(
+                    state,
+                    f"{family} resolution failed for selected fastp method: {detail}",
+                )
+            family_errors.append(f"{family} resolution failed: {detail}")
+    if not families:
+        errors: list[str] = []
+        if not resolution.found:
+            errors.append("raw_long_reads resource was not found")
+        errors.extend(family_errors)
+        return _fail_update(
+            state,
+            "; ".join(errors) if errors else "read_qc found no supported read family",
+        )
     return _update_read_qc_output(
         state,
         {
@@ -182,11 +239,12 @@ def resolve_raw_long_reads(state: TopLevelState) -> StateUpdate:
             "input_artifact_refs": artifact_refs,
             "input_member_platforms": platforms,
             "input_member_formats": formats,
-            "raw_long_reads_path": str(paths[0]),
+            "raw_long_reads_path": str(paths[0]) if paths else "",
             "raw_long_reads_paths": [str(path) for path in paths],
             "platform": (unique_platforms[0] if len(unique_platforms) == 1 else None),
             "format": unique_formats[0] if len(unique_formats) == 1 else None,
-            "input_source": resolution.source,
+            "input_source": resolution.source if resolution is not None else "missing",
+            "input_families": families,
         },
     )
 
@@ -204,7 +262,10 @@ def plan_seqkit_stats(state: TopLevelState) -> StateUpdate:
         "method_name": METHOD_NAME,
         "package_name": registry.methods[METHOD_NAME].package_ref,
     }
-    if output.get("execution_mode") != "local":
+    if "long_reads" not in (output.get("input_families") or []):
+        update["skip_reason"] = "no_long_reads_resource"
+        status = "skipped"
+    elif output.get("execution_mode") != "local":
         update["skip_reason"] = "local_execution_not_enabled"
         status = "skipped"
     else:
@@ -216,13 +277,70 @@ def plan_seqkit_stats(state: TopLevelState) -> StateUpdate:
             "status": status,
             "method_name": METHOD_NAME,
             **(
-                {"skip_reason": "local_execution_not_enabled"}
+                {"skip_reason": str(update["skip_reason"])}
                 if status == "skipped"
                 else {}
             ),
         },
     }
     return _update_read_qc_output(state, update)
+
+
+def plan_fastp_family(state: TopLevelState, family: str) -> StateUpdate:
+    """Plan the configured paired-read QC method for one data family."""
+    output = _read_qc_output(state)
+    method_name = {
+        "short_reads": "read_qc.short_reads.fastp",
+        "hic_reads": "read_qc.hic_reads.fastp",
+    }[family]
+    step = current_workflow_step(state)
+    selected = step["selected_method_names"] if step is not None else []
+    if method_name not in selected:
+        return {}
+    if output.get("status") in {"failed", "blocked_input"}:
+        return {}
+    request = output.get(f"{family}_request") or {}
+    if family not in (output.get("input_families") or []):
+        return _update_read_qc_output(
+            state,
+            {
+                "status": f"{family}_fastp_executed",
+                "substeps": {
+                    **dict(output.get("substeps") or {}),
+                    family: {
+                        "name": family,
+                        "status": "skipped",
+                        "method_name": method_name,
+                        "skip_reason": f"no_{family}_resource",
+                    },
+                },
+            },
+        )
+    if output.get("execution_mode") != "local":
+        return _update_read_qc_output(
+            state,
+            {
+                "status": f"{family}_fastp_executed",
+                "skip_reason": "local_execution_not_enabled",
+                "substeps": {
+                    **dict(output.get("substeps") or {}),
+                    family: {
+                        "name": family,
+                        "status": "skipped",
+                        "method_name": method_name,
+                        "skip_reason": "local_execution_not_enabled",
+                    },
+                },
+            },
+        )
+    if not request:
+        return _fail_update(
+            state, f"{family} fastp input exists but configuration is missing"
+        )
+    return _update_read_qc_output(
+        state,
+        {"status": f"{family}_fastp_planned", "method_name": method_name},
+    )
 
 
 def plan_length_filter(state: TopLevelState) -> StateUpdate:
@@ -274,8 +392,35 @@ def plan_length_filter(state: TopLevelState) -> StateUpdate:
         )
     if LENGTH_FILTER_METHOD_NAME not in load_descriptor_registry().methods:
         return _fail_update(state, f"descriptor missing: {LENGTH_FILTER_METHOD_NAME}")
+    if "long_reads" not in (output.get("input_families") or []):
+        return _fail_update(
+            state,
+            "length filtering was approved but no long-read resource is available",
+        )
     min_len = thresholds.get("min_len")
-    if not approved or not isinstance(min_len, int) or min_len <= 0:
+    platform_min_len = thresholds.get("platform_min_len") or {}
+    platforms = list(output.get("input_member_platforms") or [])
+    paths = list(output.get("raw_long_reads_paths") or [])
+    resolved_min_len: list[int] = []
+    if platform_min_len:
+        for platform in platforms:
+            value = platform_min_len.get(platform, min_len)
+            if not isinstance(value, int) or value <= 0:
+                return _fail_update(
+                    state,
+                    "length filter threshold missing for long-read platform "
+                    f"{platform!r}",
+                )
+            resolved_min_len.append(value)
+        if len(resolved_min_len) != len(paths):
+            return _fail_update(
+                state,
+                "length filter platform threshold cardinality does not match "
+                "input reads",
+            )
+    elif isinstance(min_len, int) and min_len > 0:
+        resolved_min_len = [min_len] * len(paths)
+    if not approved or not resolved_min_len:
         return _length_filter_status_update(
             state,
             {
@@ -292,7 +437,7 @@ def plan_length_filter(state: TopLevelState) -> StateUpdate:
         {
             "status": "planned",
             "method_name": LENGTH_FILTER_METHOD_NAME,
-            "thresholds": {"min_len": min_len},
+            "thresholds": {**thresholds, "resolved_min_len": resolved_min_len},
         },
         "length_filter_planned",
         method_name=LENGTH_FILTER_METHOD_NAME,
@@ -306,6 +451,27 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
     if (
         output.get("filtered_long_reads_ref") or output.get("filtered_long_reads_refs")
     ) and post_filter_summary.get("num_seqs") == 0:
+        reason = "no_reads_retained"
+        failed_cursor = replace_read_qc_stage_output(
+            state,
+            {
+                **serialize_read_qc_stage_output(output),
+                "status": "failed",
+                "reason": reason,
+            },
+        )
+        return {
+            **fail_workflow_step(state, "read_qc", reason),
+            "route_trace": append_route_trace(state, "read_qc_stage"),
+            "stage_outputs": failed_cursor["stage_outputs"],
+        }
+    zero_fastp_family: str | None = None
+    for family in ("short_reads", "hic_reads"):
+        summary = output.get(f"{family}_summary")
+        if isinstance(summary, dict) and summary.get("total_reads_after") == 0:
+            zero_fastp_family = family
+            break
+    if zero_fastp_family is not None:
         reason = "no_reads_retained"
         failed_cursor = replace_read_qc_stage_output(
             state,
@@ -356,22 +522,13 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
         "summary",
         "summary_artifact_ref",
     ]
-    serialized_output = serialize_read_qc_stage_output(output)
-    cursor_update = replace_read_qc_stage_output(
-        state,
-        {
-            **{
-                key: serialized_output[key]
-                for key in committed_keys
-                if key in serialized_output
-            },
-            "status": status,
-        },
-    )
+    # Fastp business outputs are committed alongside the long-read cursor
+    # fields. Build the projection only after adding those keys;
+    # otherwise clean pairs are delivered to resource_refs but disappear from
+    # the durable stage cursor on the same commit.
     update: StateUpdate = {
         **advance_workflow_step(state, "read_qc", outcome="completed"),
         "route_trace": append_route_trace(state, "read_qc_stage"),
-        "stage_outputs": cursor_update["stage_outputs"],
     }
     read_paths = _committed_long_read_paths(output)
     if read_paths:
@@ -408,6 +565,79 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
             read_paths,
             "read_qc",
             metadata,
+        )
+    committed_keys.extend(
+        [
+            "short_reads_clean_pairs",
+            "hic_reads_clean_pairs",
+            "short_reads_summary",
+            "hic_reads_summary",
+            "short_reads_report_artifact_refs",
+            "hic_reads_report_artifact_refs",
+            "short_reads_read_set_manifest_ref",
+            "hic_reads_read_set_manifest_ref",
+        ]
+    )
+    serialized_output = serialize_read_qc_stage_output(output)
+    cursor_update = replace_read_qc_stage_output(
+        state,
+        {
+            **{
+                key: serialized_output[key]
+                for key in committed_keys
+                if key in serialized_output
+            },
+            "status": status,
+        },
+    )
+    update["stage_outputs"] = cursor_update["stage_outputs"]
+    for family, resource_type in (
+        ("short_reads", "short_reads"),
+        ("hic_reads", "hic_reads"),
+    ):
+        pairs = _pair_list(output, f"{family}_clean_pairs")
+        manifest_ref = output.get(f"{family}_read_set_manifest_ref")
+        if not pairs or not manifest_ref:
+            continue
+        paths = [
+            member["path"] for pair in pairs for member in (pair["r1"], pair["r2"])
+        ]
+        update["resource_refs"] = update_resource_ref(
+            {
+                **state,
+                "resource_refs": update.get(
+                    "resource_refs", state.get("resource_refs") or {}
+                ),
+            },
+            resource_type,
+            paths,
+            "read_qc",
+            {
+                "read_set_manifest_ref": manifest_ref,
+                # Keep the manifest-owned lane/mate grouping on the logical
+                # resource so a later QC occurrence can resolve clean pairs
+                # without re-inferring pairing from filenames.
+                "paired_members": pairs,
+                "artifact_refs": [
+                    member["artifact_ref"]
+                    for pair in pairs
+                    for member in (pair["r1"], pair["r2"])
+                ],
+                "member_count": len(paths),
+                "source_asset_ids": [
+                    member["source_asset_id"]
+                    for pair in pairs
+                    for member in (pair["r1"], pair["r2"])
+                ],
+                "platforms": list(
+                    dict.fromkeys(
+                        member["platform"]
+                        for pair in pairs
+                        for member in (pair["r1"], pair["r2"])
+                    )
+                ),
+                "formats": ["fastq"],
+            },
         )
     return update
 

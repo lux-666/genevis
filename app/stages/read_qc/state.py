@@ -49,6 +49,41 @@ class SeqkitSummaryJson(TypedDict, total=False):
 @with_config(ConfigDict(extra="forbid"))
 class LengthThresholdsJson(TypedDict, total=False):
     min_len: int
+    platform_min_len: dict[str, int]
+    resolved_min_len: list[int]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class QCReadMemberJson(TypedDict, total=False):
+    member_id: str
+    path: str
+    platform: str
+    format: str
+    compression: str
+    source_asset_id: str
+    artifact_ref: ArtifactRefJson
+    manifest_entry_ordinal: int
+    pair_index: int
+    mate: Literal["R1", "R2"]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class QCReadPairJson(TypedDict, total=False):
+    pair_id: str
+    manifest_entry_ordinal: int
+    pair_index: int
+    r1: QCReadMemberJson
+    r2: QCReadMemberJson | None
+
+
+@with_config(ConfigDict(extra="forbid"))
+class FastpSummaryJson(TypedDict, total=False):
+    lanes: int
+    total_reads_before: int
+    total_reads_after: int
+    total_bases_before: int
+    total_bases_after: int
+    reports: int
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -62,6 +97,9 @@ class ReadQCSubstepJson(TypedDict, total=False):
     summary_ref: str
     post_filter_stats_ref: str
     post_filter_summary_ref: str
+    report_artifact_refs: list[ArtifactRefJson]
+    read_set_manifest_ref: ArtifactRefJson
+    summary: FastpSummaryJson
     thresholds: LengthThresholdsJson
 
 
@@ -96,6 +134,7 @@ class ReadQCStageCursor(TypedDict, total=False):
     platform: str | None
     format: str | None
     input_source: str | None
+    input_families: list[str]
     blocked_input_ref: str
     blocked_input_refs: list[str]
     env_target: str
@@ -121,6 +160,18 @@ class ReadQCStageCursor(TypedDict, total=False):
     filtered_long_reads_artifact_refs: list[ArtifactRefJson]
     read_set_manifest_ref: ArtifactRefJson
     substeps: dict[str, ReadQCSubstepJson]
+    short_reads_request: dict[str, object]
+    hic_reads_request: dict[str, object]
+    short_read_pairs: list[QCReadPairJson]
+    hic_read_pairs: list[QCReadPairJson]
+    short_reads_clean_pairs: list[QCReadPairJson]
+    hic_reads_clean_pairs: list[QCReadPairJson]
+    short_reads_summary: FastpSummaryJson
+    hic_reads_summary: FastpSummaryJson
+    short_reads_report_artifact_refs: list[ArtifactRefJson]
+    hic_reads_report_artifact_refs: list[ArtifactRefJson]
+    short_reads_read_set_manifest_ref: ArtifactRefJson
+    hic_reads_read_set_manifest_ref: ArtifactRefJson
 
 
 READ_QC_STAGE_CURSOR_ADAPTER = TypeAdapter(ReadQCStageCursor)

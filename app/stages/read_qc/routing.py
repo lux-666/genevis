@@ -31,7 +31,8 @@ def route_after_plan(state: TopLevelState) -> Literal["fail", "filter", "stats"]
         read_qc_out.get("status"), extra_statuses=EXTRA_FAIL_STATUSES
     ):
         return "fail"
-    if read_qc_out.get("skip_reason") == "local_execution_not_enabled":
+    stats = (read_qc_out.get("substeps") or {}).get("long_read_stats") or {}
+    if stats.get("status") == "skipped":
         return "filter"
     return "stats"
 
@@ -45,10 +46,22 @@ def route_after_stats(state: TopLevelState) -> Literal["fail", "filter"]:
     )
 
 
-def route_after_length_filter(state: TopLevelState) -> Literal["fail", "commit"]:
+def route_after_length_filter(
+    state: TopLevelState,
+) -> Literal["fail", "short"]:
     """Route after optional length filtering."""
     return (
         "fail"
         if is_terminal_failure(_status(state), extra_statuses=EXTRA_FAIL_STATUSES)
-        else "commit"
+        else "short"
+    )
+
+
+def route_after_fastp(state: TopLevelState) -> Literal["fail", "continue"]:
+    """Never commit or continue after a paired-read method failure."""
+
+    return (
+        "fail"
+        if is_terminal_failure(_status(state), extra_statuses=EXTRA_FAIL_STATUSES)
+        else "continue"
     )
