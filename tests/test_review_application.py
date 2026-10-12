@@ -22,6 +22,7 @@ from app.review.application import (
     review_application_id,
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.ledger import record_review_applied, record_review_decision
 from app.review.persistence import (
     persist_review_decision,
     persist_review_request,
@@ -672,7 +673,8 @@ def test_review_applied_event_is_typed_verified_and_idempotent(
         ReviewApplicationIntegrityError,
         match="verified review_decision",
     ):
-        ledger.record_review_applied(
+        record_review_applied(
+            ledger,
             "s1",
             application_ref=application_ref,
             expected_identity=identity,
@@ -682,7 +684,8 @@ def test_review_applied_event_is_typed_verified_and_idempotent(
         event["event_type"] == "review_applied" for event in ledger.read_events("s1")
     )
 
-    ledger.record_review_decision(
+    record_review_decision(
+        ledger,
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
@@ -691,7 +694,8 @@ def test_review_applied_event_is_typed_verified_and_idempotent(
         ReviewApplicationIntegrityError,
         match="valid application ref",
     ):
-        ledger.record_review_applied(
+        record_review_applied(
+            ledger,
             "s1",
             application_ref=application_ref,
             expected_identity=identity,
@@ -705,20 +709,23 @@ def test_review_applied_event_is_typed_verified_and_idempotent(
         ReviewApplicationIntegrityError,
         match="has not progressed beyond the review gate",
     ):
-        ledger.record_review_applied(
+        record_review_applied(
+            ledger,
             "s1",
             application_ref=application_ref,
             expected_identity=identity,
             checkpoint_state=blocked_checkpoint,
         )
 
-    first = ledger.record_review_applied(
+    first = record_review_applied(
+        ledger,
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
         checkpoint_state=checkpoint_state,
     )
-    replay = ledger.record_review_applied(
+    replay = record_review_applied(
+        ledger,
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
@@ -784,7 +791,8 @@ def test_review_status_projects_all_four_durable_states(
     assert prepared.application_ref == application_ref
     assert prepared.decision_sequence is None
 
-    decision_event = Ledger(run_dir).record_review_decision(
+    decision_event = record_review_decision(
+        Ledger(run_dir),
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
@@ -798,7 +806,8 @@ def test_review_status_projects_all_four_durable_states(
     assert applied.status == "applied"
     assert applied.applied_sequence is None
 
-    applied_event = Ledger(run_dir).record_review_applied(
+    applied_event = record_review_applied(
+        Ledger(run_dir),
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
@@ -880,7 +889,7 @@ def test_review_applied_without_verified_decision_is_integrity_error(
     assert status.decision_sequence is None
     assert "without a verified review_decision" in str(status.integrity_error)
 
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
 
     summary = inspect_session("s1", run_dir)
     occurrence = summary["review_occurrences"][0]
@@ -1018,7 +1027,8 @@ def test_review_status_rejects_multiple_fully_bound_decision_events(
     )
     identity = ReviewApplicationIdentity.from_intent(persisted_intent.intent)
     ledger = Ledger(run_dir)
-    first = ledger.record_review_decision(
+    first = record_review_decision(
+        ledger,
         "s1",
         application_ref=application_ref,
         expected_identity=identity,
@@ -1041,8 +1051,8 @@ def test_review_status_rejects_multiple_fully_bound_decision_events(
     assert status.decision_sequence is None
 
 
-def test_legacy_decision_requires_verified_later_progression(tmp_path: Path) -> None:
-    from app.control.lifecycle import inspect_session
+def test_partial_review_evidence_never_implies_applied(tmp_path: Path) -> None:
+    from app.control.inspection import inspect_session
 
     run_dir, state, persisted_request, _request = _blocked_inventory(tmp_path)
     ledger = Ledger(run_dir)
@@ -1078,7 +1088,7 @@ def test_legacy_decision_requires_verified_later_progression(tmp_path: Path) -> 
     partial = project_review_status(state, identity=identity)
     assert partial.status == "awaiting_decision"
     assert partial.accepts_new_decision is False
-    assert "legacy partial" in str(partial.integrity_error)
+    assert "without a verified intent/application" in str(partial.integrity_error)
     partial_summary = inspect_session("s1", run_dir)
     assert partial_summary["next_action"]["kind"] == "review_integrity_error"
 
@@ -1087,10 +1097,10 @@ def test_legacy_decision_requires_verified_later_progression(tmp_path: Path) -> 
         "inventory",
         workflow_step_id="step-000-inventory",
     )
-    progressed = project_review_status(state, identity=identity)
-    assert progressed.status == "applied"
-    assert progressed.resolution_basis == "historical_progression"
-    assert progressed.decision_sequence is None
+    still_partial = project_review_status(state, identity=identity)
+    assert still_partial.status == "awaiting_decision"
+    assert still_partial.accepts_new_decision is False
+    assert "without a verified intent/application" in str(still_partial.integrity_error)
 
 
 def test_review_status_rejects_partial_identity_hash_mismatch(tmp_path: Path) -> None:
@@ -1171,7 +1181,7 @@ def test_post_terminal_progression_is_diagnostic_not_review_resolution(
 def test_committed_intent_projects_same_decision_recovery_action(
     tmp_path: Path,
 ) -> None:
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
 
     run_dir, state, persisted_request, request = _blocked_inventory(tmp_path)
     ledger = Ledger(run_dir)
@@ -1197,7 +1207,7 @@ def test_committed_intent_projects_same_decision_recovery_action(
 def test_post_terminal_review_request_is_diagnostic_and_cannot_reopen(
     tmp_path: Path,
 ) -> None:
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
 
     run_dir, _state, persisted_request, _request = _blocked_inventory(tmp_path)
     ledger = Ledger(run_dir)
@@ -1226,7 +1236,7 @@ def test_post_terminal_review_request_is_diagnostic_and_cannot_reopen(
     assert summary["next_action"]["kind"] == "completed"
 
 
-def test_historical_progression_uses_exact_frozen_occurrence(tmp_path: Path) -> None:
+def test_later_occurrence_does_not_close_an_unverified_review(tmp_path: Path) -> None:
     run_dir = v2_run_dir(tmp_path / "data", "s1")
     state = initial_state(
         session_id="s1",
@@ -1234,16 +1244,19 @@ def test_historical_progression_uses_exact_frozen_occurrence(tmp_path: Path) -> 
         data_dir=str(run_dir),
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-001-read_qc",
                 "stage": "read_qc",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-002-read_qc",
                 "stage": "read_qc",
                 "allow_local_execution": False,
@@ -1316,7 +1329,7 @@ def test_historical_progression_uses_exact_frozen_occurrence(tmp_path: Path) -> 
         "read_qc",
         workflow_step_id="step-002-read_qc",
     )
-    exact_later_occurrence = project_review_status(state, identity=identity)
-    assert exact_later_occurrence.status == "applied"
-    assert exact_later_occurrence.resolution_basis == "historical_progression"
-    assert exact_later_occurrence.decision_sequence is None
+    still_unverified = project_review_status(state, identity=identity)
+    assert still_unverified.status == "awaiting_decision"
+    assert still_unverified.accepts_new_decision is False
+    assert "request_hash does not match" in str(still_unverified.integrity_error)

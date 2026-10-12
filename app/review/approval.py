@@ -201,7 +201,7 @@ def load_verified_interrupt_request(
 
     Checks: sha256 == request_hash, review_request_id, stage, gate_id, bindings.
     Returns ``(request_ref, request_record)`` on success; raises
-    :exc:`~app.control.lifecycle.ResumeValidationError` on any mismatch.
+    :exc:`~app.control.errors.ResumeValidationError` on any mismatch.
     """
 
     data_dir = state.get("data_dir")
@@ -484,7 +484,7 @@ def persist_parameter_approval_decision(
     """Write or recover the immutable approval decision artifact.
 
     Returns the published :class:`~app.schemas.artifacts.ArtifactRef`.
-    Raises :exc:`~app.control.lifecycle.ResumeValidationError` on persistence
+    Raises :exc:`~app.control.errors.ResumeValidationError` on persistence
     failure.
     """
 

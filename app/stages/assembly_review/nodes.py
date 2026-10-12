@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import (
     advance_workflow_step,
     assembly_delivery,

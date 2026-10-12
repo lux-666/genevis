@@ -11,12 +11,12 @@ from unittest.mock import patch
 
 from pydantic import BaseModel, ConfigDict
 
-from app.control.lifecycle import (
-    ResumeValidationError,
+from app.control.errors import ResumeValidationError
+from app.control.inspection import inspect_session
+from app.control.resume import (
     build_foreground_auto_resume_request,
     build_resume_decision_template,
     foreground_automatic_decision_label,
-    inspect_session,
     normalize_resume_review_request,
 )
 from app.entrypoints.review_interactive import prompt_generic_gate_decision
@@ -702,6 +702,7 @@ def _review_state(run_dir: Path, *, stage: str) -> dict:
         "current_stage": stage,
         "workflow_steps": [
             {
+                **({"selected_method_names": []} if item != "assembly" else {}),
                 "step_id": f"step-{index:03d}-{item}",
                 "stage": item,
                 "allow_local_execution": False,

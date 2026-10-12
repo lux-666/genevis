@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.lifecycle import (
-    ResumeValidationError,
-    inspect_state,
+from app.control.errors import ResumeValidationError
+from app.control.inspection import inspect_state
+from app.control.resume import (
     normalize_resume_review_request,
 )
 from app.reports.review_report import write_final_review_report, write_operator_report
@@ -21,6 +21,7 @@ from app.review.application import (
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import get_review_gate
+from app.review.ledger import record_review_applied, record_review_decision
 from app.review.persistence import persist_review_request
 from app.schemas.state import initial_state
 from app.storage.ledger import Ledger
@@ -48,11 +49,13 @@ def _request(
         "current_stage": stage,
         "workflow_steps": [
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                **({"selected_method_names": []} if stage != "assembly" else {}),
                 "step_id": f"step-001-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
@@ -88,11 +91,13 @@ def _request(
 def _review_state(paths: SessionPaths, stage: str, **updates: object) -> dict:
     workflow_steps = [
         {
+            "selected_method_names": [],
             "step_id": "step-000-inventory",
             "stage": "inventory",
             "allow_local_execution": False,
         },
         {
+            **({"selected_method_names": []} if stage != "assembly" else {}),
             "step_id": f"step-001-{stage}",
             "stage": stage,
             "allow_local_execution": False,
@@ -193,7 +198,8 @@ def _review_occurrence(
     )
     application = load_verified_review_application(paths.run_dir, application_ref)
     identity = ReviewApplicationIdentity.from_intent(intent.intent)
-    ledger.record_review_decision(
+    record_review_decision(
+        ledger,
         paths.session_id,
         application_ref=application.ref,
         expected_identity=identity,
@@ -204,7 +210,8 @@ def _review_occurrence(
             **dict(gate.load_apply_application()(state, application)),
             "review_application_ref": application.ref.model_dump(mode="json"),
         }
-        ledger.record_review_applied(
+        record_review_applied(
+            ledger,
             paths.session_id,
             application_ref=application.ref,
             expected_identity=identity,

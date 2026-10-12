@@ -12,13 +12,15 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from app.control.lifecycle import (
-    ResumeValidationError,
+from app.control.errors import ResumeValidationError
+from app.control.inspection import (
     _decision_requirements_from_artifact,
-    build_foreground_auto_resume_request,
-    build_resume_decision_template,
     inspect_session,
     inspect_state,
+)
+from app.control.resume import (
+    build_foreground_auto_resume_request,
+    build_resume_decision_template,
     normalize_resume_review_request,
     review_max_blocked_seconds,
 )
@@ -31,6 +33,7 @@ from app.review.application import (
 )
 from app.review.base import ResumeReviewRequest, load_resume_review_request
 from app.review.gates import get_review_gate
+from app.review.ledger import record_review_applied, record_review_decision
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -119,7 +122,8 @@ def _apply_review_application(
     application = load_verified_review_application(state["data_dir"], application_ref)
     identity = ReviewApplicationIdentity.from_intent(intent.intent)
     ledger = Ledger(state["data_dir"])
-    ledger.record_review_decision(
+    record_review_decision(
+        ledger,
         state["session_id"],
         application_ref=application.ref,
         expected_identity=identity,
@@ -145,7 +149,8 @@ def _apply_review_application(
         checkpoint_state["review_application_ref"] = application.ref.model_dump(
             mode="json"
         )
-        ledger.record_review_applied(
+        record_review_applied(
+            ledger,
             state["session_id"],
             application_ref=application.ref,
             expected_identity=identity,
@@ -2090,6 +2095,7 @@ def _frozen_workflow_steps(stages: list[str]) -> list[dict]:
     for index, item in enumerate(stages):
         step_id = f"step-{index:03d}-{item}"
         step = {
+            **({"selected_method_names": []} if item != "assembly" else {}),
             "step_id": step_id,
             "stage": item,
             "allow_local_execution": False,

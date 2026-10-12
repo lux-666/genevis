@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.configuration import load_descriptor_registry
-from app.control.lifecycle import inspect_session
+from app.control.inspection import inspect_session
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.execution.evidence import load_execution_evidence, load_frozen_attempt
 from app.review.persistence import load_review_request

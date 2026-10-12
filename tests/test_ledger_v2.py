@@ -15,6 +15,7 @@ from app.review.application import (
     persist_review_intent,
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.ledger import record_review_decision
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.limits import ROUTE_TRACE_LIMIT
@@ -762,7 +763,8 @@ class LedgerV2Tests(unittest.TestCase):
                 ),
             )
             identity = ReviewApplicationIdentity.from_intent(intent.intent)
-            ledger.record_review_decision(
+            record_review_decision(
+                ledger,
                 "s1",
                 application_ref=application_ref,
                 expected_identity=identity,

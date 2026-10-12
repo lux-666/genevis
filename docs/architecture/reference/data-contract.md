@@ -46,7 +46,7 @@ T2T 的 deterministic_baseline 使用单轮 schema-3 策略请求与批准记录
 2. 持久恢复面向最新安全前沿，尤其是阻塞人工门禁。
 3. 报告文件名和产物类型是内部实现细节。
 4. 当前参数代码中的“Planner”指阶段参数推荐器，不是父图规划或独立 Assembly 方法顾问。
-5. 公共确定性运行使用 `gene-agent run --manifest PATH --run-config PATH --data-dir PATH`。manifest 单独拥有会话身份，`data-dir` 决定 `runs/<session_id>/` 布局。RunConfig 必须明确包含 `requested_stages` JSON 列表，各项为 `{stage, allow_local_execution}`。固定方法名单由描述符默认值推导，只存于冻结 `workflow_steps`。Assembly 是阶段拥有的例外，可省略 `selected_method_names`，在上游 QC/Survey 后推荐确认；省略表示延迟绑定，显式空名单可读取但不活动。工作流投影始终写固定名单；状态读取器为恢复接受缺失固定名单，但计划生成不会产生它。列表保留字面顺序和重复 occurrence；stage 是路由选择，allow_local_execution 是进程授权，没有独立本地执行数组。`requested_stages` 不得为 null，`[]` 是合法空生物学计划；`None` 只表示未完成规划/TUI 草稿，公共入口在冻结/执行前拒绝。冻结生成唯一运行时权威 `workflow_steps`，从隐式 `step-000-inventory` 开始，后续位置 ID 如 `step-001-t2t`。运行时不得追加、重排或替换。
+5. 公共确定性运行使用 `gene-agent run --manifest PATH --run-config PATH --data-dir PATH`。manifest 单独拥有会话身份，`data-dir` 决定 `runs/<session_id>/` 布局。RunConfig 必须明确包含 `requested_stages` JSON 列表，各项为 `{stage, allow_local_execution}`。固定方法名单由描述符默认值推导，只存于冻结 `workflow_steps`。Assembly 是阶段拥有的例外，可省略 `selected_method_names`，在上游 QC/Survey 后推荐确认；省略表示延迟绑定，显式名单必须恰好包含一个组装方法。固定阶段始终要求显式名单，读取和恢复拒绝缺失名单。列表保留字面顺序和重复 occurrence；stage 是路由选择，allow_local_execution 是进程授权，没有独立本地执行数组。`requested_stages` 不得为 null，`[]` 是合法空生物学计划；`None` 只表示未完成规划/TUI 草稿，公共入口在冻结/执行前拒绝。冻结生成唯一运行时权威 `workflow_steps`，从隐式 `step-000-inventory` 开始，后续位置 ID 如 `step-001-t2t`。运行时不得追加、重排或替换。
 6. Review 位置保留字面 RunConfig 数据；Assembly/T2T 不建立强制 Review，冻结不合成。明确请求的 Review 带 `review_target = {resource_type: "assembly", producer_step_id: "..."}`，绑定最近前置组装交接 occurrence。
 7. Gene Agent 是单操作者本地 pip 工具，信任控制运行目录的操作系统账户。完整性校验针对部分写入、崩溃、不兼容版本、意外损坏；不提供针对同一操作者的对抗隔离。
 
@@ -172,7 +172,7 @@ RunConfig 和持久规划记录不携带 Assembly 方法或方法参数块。规
 
 展示 `finished` 始终等于 `completed + skipped`；不得将当前索引、缺当前或终态游标解释为计数。
 
-新写入不能产生重复/冲突 occurrence 终态。若旧 Ledger 已存在，按保守 `failed > skipped > completed` 投影，输出完整性诊断并标降级；无法证明计划前缀完整时不提供权威当前 occurrence。
+新写入不能产生重复/冲突 occurrence 终态。若 Ledger 存在重复或冲突终态，按保守 `failed > skipped > completed` 投影，输出完整性诊断并标降级；无法证明计划前缀完整时不提供权威当前 occurrence。
 
 <a id="5-fact-ownership"></a>
 

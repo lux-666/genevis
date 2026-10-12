@@ -819,7 +819,7 @@ def _freeze_and_execute(draft: Any, plan: Any) -> int:
 
 
 def _lifecycle_after_execution(draft: Any, result_code: int) -> str:
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
     from app.storage.paths import SessionPaths
 
     paths = SessionPaths(draft.data_dir, draft.session_id)
@@ -1101,7 +1101,7 @@ def _reset_draft_planning(draft: Any) -> Any:
 
 
 def _durable_supervision_state(draft: Any) -> str:
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
     from app.storage.paths import SessionPaths
 
     paths = SessionPaths(draft.data_dir, draft.session_id)

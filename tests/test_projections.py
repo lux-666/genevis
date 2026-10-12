@@ -4,7 +4,7 @@ import dataclasses
 
 import pytest
 
-from app.control.lifecycle import inspect_state
+from app.control.inspection import inspect_state
 from app.control.projections import (
     ProgressProjectionInput,
     ProjectionBoundary,
@@ -113,11 +113,13 @@ def test_inspect_state_does_not_treat_checkpoint_cursor_as_workflow_progress() -
         input_manifest_ref="manifest.yaml",
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-001-read_qc",
                 "stage": "read_qc",
                 "allow_local_execution": False,
@@ -147,11 +149,13 @@ def test_inspect_state_does_not_treat_checkpoint_cursor_as_workflow_progress() -
 def test_failed_progress_scope_controls_authority_requirements() -> None:
     steps = [
         {
+            "selected_method_names": [],
             "step_id": "step-000-inventory",
             "stage": "inventory",
             "allow_local_execution": False,
         },
         {
+            "selected_method_names": [],
             "step_id": "step-001-read_qc",
             "stage": "read_qc",
             "allow_local_execution": False,
@@ -185,7 +189,7 @@ def test_failed_progress_scope_controls_authority_requirements() -> None:
     )
     assert legacy["projection_authority"] == "degraded_stage_terminal_projection"
     assert legacy["integrity_diagnostics"][-1]["kind"] == (
-        "legacy_failed_session_missing_failure_scope"
+        "failed_session_missing_failure_scope"
     )
 
 
@@ -195,11 +199,13 @@ def test_attached_failed_occurrence_projects_scope_from_durable_terminal() -> No
         input_manifest_ref="manifest.yaml",
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-001-read_qc",
                 "stage": "read_qc",
                 "allow_local_execution": False,

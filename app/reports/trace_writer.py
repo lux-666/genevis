@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.control.lifecycle import inspect_session
+from app.control.inspection import inspect_session
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.reports._projection import atomic_write_text, source_watermark
 from app.reports.review_report import _pending_review_requests
@@ -454,7 +454,7 @@ def _methods_by_workflow_step(
     terminals therefore remain attempt facts, while
     ``method_disposition_recorded`` is attached as an orthogonal immutable
     method fact.  The Ledger rejects conflicting typed writes; this projector
-    additionally remains deterministic for legacy/corrupt duplicate rows by
+    additionally remains deterministic for corrupt duplicate rows by
     selecting the earliest sequenced disposition rather than letting the last
     row overwrite the result.
     """
@@ -486,7 +486,7 @@ def _methods_by_workflow_step(
             attempts[attempt_id] = record
             order.append(attempt_id)
         if event_type == "attempt_started":
-            # A duplicate legacy start must not overwrite the first immutable
+            # A duplicate start must not overwrite the first immutable
             # attempt observation merely because it was appended later.
             if record["started_at"] is None:
                 record["started_at"] = event.get("timestamp")
@@ -526,7 +526,7 @@ def _methods_by_workflow_step(
             continue
         key = (step_id, stage, method_name)
         # Ledger sequence is the immutable causal order.  Preserve the first
-        # observed row for legacy duplicate/conflict tolerance.
+        # observed row for duplicate/conflict tolerance.
         if key not in dispositions:
             dispositions[key] = event
 

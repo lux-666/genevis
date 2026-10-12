@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.control.lifecycle import (
+from app.control.terminal import (
     TerminalFinalizationError,
     finalize_authoritative_terminal,
 )

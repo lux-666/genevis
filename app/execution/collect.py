@@ -14,8 +14,14 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app.execution.attempt_owners import MethodExecution
-from app.schemas.state import JsonValue, StateUpdate, TopLevelState
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.schemas.state import (
+    JsonValue,
+    StateUpdate,
+    TopLevelState,
+    stage_output,
+    update_stage_output,
+)
+from app.stages.base import absolute_data_dir
 from app.storage.ledger import Ledger, LedgerConflictError, LedgerFormatError
 from app.storage.paths import DataLayoutError
 

@@ -5,7 +5,8 @@ import unittest
 
 from langgraph.graph import StateGraph
 
-from app.control.lifecycle import inspect_session, normalize_resume_review_request
+from app.control.inspection import inspect_session
+from app.control.resume import normalize_resume_review_request
 from app.graph.checkpoint_compaction import (
     TerminalCheckpointCompactionError,
     compact_terminal_checkpoint,
@@ -21,6 +22,7 @@ from app.review.application import (
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import get_review_gate
+from app.review.ledger import record_review_decision
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
@@ -72,6 +74,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 "step_id": f"step-{index:03d}-{stage}",
                 "stage": stage,
                 "allow_local_execution": False,
+                **({"selected_method_names": []} if stage != "assembly" else {}),
             }
             for index, stage in enumerate(stages)
         ]
@@ -467,7 +470,8 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
                 paths.run_dir, application_ref
             )
             identity = ReviewApplicationIdentity.from_intent(intent.intent)
-            ledger.record_review_decision(
+            record_review_decision(
+                ledger,
                 paths.session_id,
                 application_ref=application.ref,
                 expected_identity=identity,

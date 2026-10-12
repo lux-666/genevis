@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import JsonValue as PydanticJsonValue
 
 from app.configuration import load_descriptor_registry
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import (
     advance_workflow_step,
     assembly_delivery,

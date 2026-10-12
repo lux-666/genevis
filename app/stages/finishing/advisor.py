@@ -28,8 +28,8 @@ from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.execution import InputDependency
-from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
-from app.stages.base import stage_artifacts_dir, stage_output, stage_work_dir
+from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState, stage_output
+from app.stages.base import stage_artifacts_dir, stage_work_dir
 from app.stages.quast import validate_quast_comparison
 from app.stages.read_resolution import resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource

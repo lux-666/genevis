@@ -169,6 +169,10 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
                 f"workflow_steps[{index}].allow_local_execution must be a bool"
             )
         has_roster = "selected_method_names" in raw_step
+        if not has_roster and stage != "assembly":
+            raise ValueError(
+                f"workflow_steps[{index}].selected_method_names is required for {stage}"
+            )
         roster: tuple[str, ...] = ()
         if has_roster:
             raw_roster = raw_step.get("selected_method_names")
@@ -192,10 +196,10 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
                     f"workflow_steps[{index}].selected_method_names must use the "
                     f"{stage!r} method prefix"
                 )
-            if stage == "assembly" and len(roster) > 1:
+            if stage == "assembly" and len(roster) != 1:
                 raise ValueError(
                     f"workflow_steps[{index}].selected_method_names must contain "
-                    "at most one Assembly method"
+                    "exactly one Assembly method, or omit it for deferred binding"
                 )
         expected_id = f"step-{index:03d}-{stage}"
         if raw_step.get("step_id") != expected_id:
@@ -287,6 +291,26 @@ def validate_workflow_steps(value: object) -> list["WorkflowStep"]:
                 f"must be {expected_producer_step_id!r}"
             )
     return steps
+
+
+def active_workflow_step_id(
+    state: Mapping[str, Any], *, expected_stage: str | None = None
+) -> str:
+    """Return the validated current occurrence without importing control code."""
+
+    steps = validate_workflow_steps(state.get("workflow_steps"))
+    index = state.get("workflow_step_index")
+    if type(index) is not int or not 0 <= index < len(steps):
+        raise ValueError("workflow_step_index does not identify an active step")
+    step = steps[index]
+    if state.get("current_stage") != step["stage"]:
+        raise ValueError("current_stage does not match the frozen workflow step")
+    if expected_stage is not None and step["stage"] != expected_stage:
+        raise ValueError(
+            f"workflow step {step['step_id']} is {step['stage']!r}, "
+            f"not {expected_stage!r}"
+        )
+    return step["step_id"]
 
 
 def freeze_workflow_steps(
@@ -860,3 +884,23 @@ def initial_state(
         resource_refs=validate_resource_refs({}),
         skip_reasons={},
     )
+
+
+def stage_output(state: TopLevelState, stage_name: str) -> StageCursor:
+    """Return a mutable copy of a stage's slot in stage_outputs."""
+    if stage_name not in DOMAIN_STAGES:
+        raise ValueError(f"unknown stage output slot: {stage_name}")
+    stage = cast(DomainStage, stage_name)
+    return dict((state.get("stage_outputs") or {}).get(stage, {}))
+
+
+def update_stage_output(
+    state: TopLevelState, stage_name: str, payload: dict[str, JsonValue]
+) -> StateUpdate:
+    """Merge payload into a stage's output slot and return the state delta."""
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs[cast(DomainStage, stage_name)] = {
+        **stage_output(state, stage_name),
+        **payload,
+    }
+    return {"stage_outputs": validate_stage_outputs(outputs)}

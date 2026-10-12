@@ -24,15 +24,15 @@ import yaml
 from langchain_core.runnables import RunnableConfig
 
 from app.config import default_data_root
-from app.control.lifecycle import (
-    TerminalFinalizationError,
-    finalize_authoritative_terminal,
-    reconcile_canonical_terminal_checkpoint,
-)
 from app.control.projections import (
     ProgressProjectionInput,
     ProjectionBoundary,
     project_workflow_state,
+)
+from app.control.terminal import (
+    TerminalFinalizationError,
+    finalize_authoritative_terminal,
+    reconcile_canonical_terminal_checkpoint,
 )
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.entrypoints.environment import (
@@ -1050,8 +1050,8 @@ def _interactive_gate_loop(
 ) -> TopLevelState:
     """Loop on foreground human gates until completion, cancellation, or failure."""
     from app.control.errors import ResumeValidationError
-    from app.control.lifecycle import (
-        _blocked_timeout_status,
+    from app.control.inspection import _blocked_timeout_status
+    from app.control.resume import (
         build_foreground_auto_resume_request,
         foreground_automatic_decision_label,
         review_max_blocked_seconds,
@@ -1390,10 +1390,8 @@ def _run_storage_audit(args: argparse.Namespace) -> int:
 
 def _run_inspect(args: argparse.Namespace) -> int:
     from app.control.errors import ResumeValidationError
-    from app.control.lifecycle import (
-        build_resume_decision_template,
-        inspect_session,
-    )
+    from app.control.inspection import inspect_session
+    from app.control.resume import build_resume_decision_template
 
     filters = _parse_inspect_filters(getattr(args, "filter", []) or [])
     if filters is None:

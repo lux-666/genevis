@@ -11,13 +11,11 @@ from pydantic import TypeAdapter
 from app.control.workflow_plan import current_workflow_step_id
 from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.schemas.state import (
-    DOMAIN_STAGES,
-    DomainStage,
     JsonValue,
-    StageCursor,
     StateUpdate,
     TopLevelState,
-    validate_stage_outputs,
+    stage_output,
+    update_stage_output,
 )
 from app.storage.asset_registry import load_asset_records
 from app.storage.paths import SessionPaths
@@ -82,26 +80,6 @@ def resolve_run_ref(state: TopLevelState, path_ref: str | Path) -> Path:
 # ============================================================================
 # Stage output read/write helpers
 # ============================================================================
-
-
-def stage_output(state: TopLevelState, stage_name: str) -> StageCursor:
-    """Return a mutable copy of a stage's slot in stage_outputs."""
-    if stage_name not in DOMAIN_STAGES:
-        raise ValueError(f"unknown stage output slot: {stage_name}")
-    stage = cast(DomainStage, stage_name)
-    return dict((state.get("stage_outputs") or {}).get(stage, {}))
-
-
-def update_stage_output(
-    state: TopLevelState, stage_name: str, payload: dict[str, JsonValue]
-) -> StateUpdate:
-    """Merge payload into a stage's output slot and return the state delta."""
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs[cast(DomainStage, stage_name)] = {
-        **stage_output(state, stage_name),
-        **payload,
-    }
-    return {"stage_outputs": validate_stage_outputs(outputs)}
 
 
 _ValidatedCursorT = TypeVar("_ValidatedCursorT")

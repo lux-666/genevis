@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 
 from typing_extensions import TypedDict
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import fail_workflow_step
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (

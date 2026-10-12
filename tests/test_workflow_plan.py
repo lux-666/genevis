@@ -247,44 +247,29 @@ def test_workflow_step_roster_requires_unique_stage_prefixed_names() -> None:
         )
 
 
-def test_workflow_step_reader_accepts_legacy_missing_fixed_roster() -> None:
-    legacy = validate_workflow_steps(
-        [
-            {
-                "step_id": "step-000-inventory",
-                "stage": "inventory",
-                "allow_local_execution": False,
-                "selected_method_names": [],
-            },
-            {
-                "step_id": "step-001-t2t",
-                "stage": "t2t",
-                "allow_local_execution": True,
-            },
-        ]
-    )
-    assert "selected_method_names" not in legacy[1]
-
-
-def test_workflow_step_reader_keeps_legacy_empty_assembly_roster() -> None:
-    legacy = validate_workflow_steps(
-        [
-            {
-                "step_id": "step-000-inventory",
-                "stage": "inventory",
-                "allow_local_execution": False,
-                "selected_method_names": [],
-            },
-            {
-                "step_id": "step-001-assembly",
-                "stage": "assembly",
-                "allow_local_execution": True,
-                "selected_method_names": [],
-            },
-        ]
-    )
-
-    assert legacy[1]["selected_method_names"] == []
+@pytest.mark.parametrize("stage,roster", [("t2t", None), ("assembly", [])])
+def test_workflow_step_reader_rejects_missing_fixed_or_empty_dynamic_roster(
+    stage, roster
+):
+    step = {
+        "step_id": f"step-001-{stage}",
+        "stage": stage,
+        "allow_local_execution": True,
+    }
+    if roster is not None:
+        step["selected_method_names"] = roster
+    with pytest.raises(ValueError, match="selected_method_names"):
+        validate_workflow_steps(
+            [
+                {
+                    "step_id": "step-000-inventory",
+                    "stage": "inventory",
+                    "allow_local_execution": False,
+                    "selected_method_names": [],
+                },
+                step,
+            ]
+        )
 
 
 def test_frozen_workflow_plan_rejects_runtime_append_or_reorder() -> None:

@@ -26,7 +26,10 @@ from app.execution.method_outcomes import (
     settle_method_outcomes,
 )
 from app.execution.method_runner import build_frozen_attempt
-from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.llm.parameters.assembly.request import (
+    build_parameter_request_dto,
+    validate_recorded_parameter_request,
+)
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
@@ -53,8 +56,7 @@ from app.schemas.parameter_recommendation import (
     RecommendationInputSnapshotV3,
     RecommendationRetryContext,
 )
-from app.schemas.state import initial_state
-from app.stages.base import stage_output, update_stage_output
+from app.schemas.state import initial_state, stage_output, update_stage_output
 from app.storage.artifacts import read_artifact_records
 from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
@@ -537,6 +539,7 @@ def _persist_v3_recommendation_fixture(
         manifest_ref=manifest_ref,
         expected_stage="assembly",
         expected_method_id="assembly.contract",
+        request_validator=validate_recorded_parameter_request,
     )
 
     attempt_manifest_ref = None
@@ -612,6 +615,7 @@ def _v3_parameter_attempt(
         attempt=attempt,
         expected_stage="assembly",
         expected_method_id="assembly.contract",
+        request_validator=validate_recorded_parameter_request,
     )
     return attempt
 

@@ -180,7 +180,7 @@ def reduce_workflow_progress(
                     {"kind": "controller_boundary_failure_has_no_settled_prefix"}
                 )
         elif failure_scope is None:
-            diagnostics.append({"kind": "legacy_failed_session_missing_failure_scope"})
+            diagnostics.append({"kind": "failed_session_missing_failure_scope"})
         else:
             diagnostics.append({"kind": "failed_session_has_invalid_failure_scope"})
     elif failure_scope is not None:

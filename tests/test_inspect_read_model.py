@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from app.control.lifecycle import inspect_session
+from app.control.inspection import inspect_session
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths

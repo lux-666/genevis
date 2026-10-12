@@ -7,7 +7,7 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.control.workflow_plan import current_workflow_step_id
 from app.llm.dedup import PurgeParameters, PurgeRecommendation
 from app.review.application import (

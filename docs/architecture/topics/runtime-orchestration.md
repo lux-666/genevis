@@ -12,7 +12,9 @@
 >
 > **依赖契约：** [阶段契约](../reference/stage-contracts.md)、[运行数据](../reference/data-contract.md)、[资源交接](../reference/resource-handoff.md)。
 >
-> **代码依据：** `app/entrypoints/run.py`、`app/workflow.py`、`app/graph/builder.py`、`app/graph/routing.py`、`app/control/occurrence_settlement.py`、`app/control/lifecycle.py`、`app/graph/checkpoint_compaction.py`。
+> **代码依据：** `app/entrypoints/run.py`、`app/workflow.py`、`app/graph/builder.py`、`app/graph/routing.py`、`app/control/occurrence_settlement.py`、`app/control/inspection.py`、`app/control/terminal.py`、`app/control/resume.py`、`app/graph/checkpoint_compaction.py`。
+
+冻结依赖快照的 `runtime` 记录源码版本、已安装包版本、可用时的 Git 提交及工作区是否有修改。版本来自 `app/version.py`，构建元数据复用同一来源；安装包没有 checkout 时 Git 字段为空，不借用父目录仓库。恢复读取原快照，不重算运行来源。该来源记录用于审计，不承诺代码升级后的 checkpoint 迁移。
 
 <a id="public-entry-boundary"></a>
 

@@ -50,3 +50,13 @@ def test_removed_sequence_grammar_and_dead_views_do_not_return():
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         assert not names & forbidden
+
+
+def test_ledger_and_parameter_storage_do_not_import_business_owners():
+    for relative in ("app/storage/ledger.py", "app/storage/parameter_evidence.py"):
+        tree = ast.parse(Path(relative).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                assert not (node.module or "").startswith(
+                    ("app.review", "app.llm", "app.stages", "app.entrypoints")
+                ), (relative, node.module)

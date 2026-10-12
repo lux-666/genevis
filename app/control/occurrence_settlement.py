@@ -156,7 +156,7 @@ def _settled_method_names(
             raise TypeError("workflow step selected_method_names must be a list")
         return [str(name) for name in frozen]
     if step.get("stage") != "assembly":
-        return None
+        raise ValueError("fixed workflow occurrence requires selected_method_names")
     if not isinstance(cursor, dict):
         raise TypeError("dynamic Assembly method binding requires a stage cursor")
     primary_method = cursor.get("primary_method")
