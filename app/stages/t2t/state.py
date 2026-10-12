@@ -18,6 +18,7 @@ from app.stages.base import (
     update_validated_stage_output,
     validated_stage_output,
 )
+from app.stages.finishing.state import FinishingCursor
 from app.stages.t2t.parameters.catalog import T2TMode
 
 
@@ -102,7 +103,7 @@ class T2TStageCursor(TypedDict, total=False):
     recommendation_mode: str
     recommendation_output_method: str
     max_attempts: int
-    finishing: dict[str, Any]
+    finishing: FinishingCursor
 
     """All JSON-serializable keys owned by the T2T stage."""
 

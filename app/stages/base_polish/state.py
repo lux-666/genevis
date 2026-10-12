@@ -9,6 +9,7 @@ from typing_extensions import TypedDict
 from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import update_validated_stage_output, validated_stage_output
+from app.stages.finishing.state import FinishingCursor
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -16,7 +17,7 @@ class BasePolishStageCursor(TypedDict, total=False):
     recommendation_mode: str
     recommendation_output_method: str
     max_attempts: int
-    finishing: dict[str, Any]
+    finishing: FinishingCursor
 
     status: str
     reason: str

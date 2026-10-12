@@ -318,3 +318,7 @@ Advisor 使用 finishing_recommendation，单轮基线使用 base_polish_adoptio
 同一只读诊断支持明确范围 `complete`（默认）、`contig`、`review`、`hic`、`dedup`、`gapcloser`、`t2t`、`base-polish`、`finishing`。各范围要求精确 occurrence 序列；切片不报告为完整路线覆盖。独立切片经 Inventory 注册源 FASTA，验证首个工具消费该候选主输出。终态 Review 要求每个候选均有 QUAST/BUSCO 执行与收集指标。Base Polish 执行后进入 Review 的范围要求同设置不可变源/所选抛光对；advisor 未执行便保留源时，仅评估源并标记 not_executed_source_retained，不算 Racon 执行覆盖。无 Review 范围明确无最终 QUAST/BUSCO 质量评估。合法 skip 仍使工具执行覆盖不完整。
 
 单阶段 Hi-C 范围可比较执行后采纳门的只读审计与分离恢复后完成审计，绑定同一会话、冻结输入和请求，要求 attempt-start 事件、执行证据、收集输出哈希不变。它是执行回放检查，不是生物学验收，也不防御操作者故意伪造基线。参数重试是新执行，不能通过不重跑断言。
+
+序列语法由 `app/stages/sequences.py` 统一：FASTA 与多行 FASTQ 均校验非空标识、非空 IUPAC DNA 和完整质量长度；gzip 按内容标识识别，非 IUPAC 字符拒绝。T2T 负链定向使用完整 IUPAC complement，端部支持与 PAF 算法独立于图节点。Finishing 观测逐 scaffold 扫描，完整统计不受 100 条示例上限影响。GapCloser/Polish 成对校验使用调用范围临时 SQLite 序列索引，保留重复身份、完整覆盖与坐标检查；索引不是运行持久证据。Polish PAF 区间排序在临时索引完成，来源与结果仍发布为原有不可变证据。
+
+Finishing 游标按 phase 校验必需引用：建议必须有评估，阻塞必须有推荐，执行必须有决策和参数，完成必须有采纳候选与决策。尝试终态、方法处置、阶段结算仍各自独立。

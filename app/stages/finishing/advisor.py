@@ -34,7 +34,6 @@ from app.stages.quast import validate_quast_comparison
 from app.stages.read_resolution import resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import QUAST_REFERENCE_SPEC, assembly_resource_spec
-from app.stages.sequences import fasta_records, reverse_complement, sequence_summary
 from app.storage.artifacts import (
     publish_artifact_record,
     publish_or_recover_work_artifact,
@@ -385,56 +384,14 @@ def collect_quast(state: TopLevelState, stage: str) -> StateUpdate:
 
 
 def observations(state: TopLevelState, stage: str) -> dict[str, Any]:
-    """Raw terminal/gap measurements are observations, not selection thresholds."""
-    records = fasta_records(source(state, stage).primary_output_path)
-    result: dict[str, Any] = {"sequence": sequence_summary(records)}
-    if stage == "gapcloser":
-        import re
+    """Measure one scaffold at a time; retain at most 100 diagnostic examples."""
+    from app.stages.finishing.observations import measure_assembly
 
-        gaps = [
-            {
-                "sequence": name,
-                "start": m.start(),
-                "end": m.end(),
-                "length": m.end() - m.start(),
-            }
-            for name, seq in records.items()
-            for m in re.finditer("N+", seq.upper())
-            if m.start() > 0 and m.end() < len(seq)
-        ]
-        result["gaps"] = {
-            "count": len(gaps),
-            "total_bases": sum(g["length"] for g in gaps),
-            "examples": gaps[:100],
-            "examples_truncated": len(gaps) > 100,
-        }
-    elif stage == "t2t":
-        from app.stages.t2t.nodes import _max_motif_copies
-
-        motif = output(state, stage)["resolved_telomere_motif"]
-        rows = [
-            {
-                "sequence": name,
-                "length": len(seq),
-                "left_max_motif_copies": max(
-                    _max_motif_copies(seq[:10000], motif),
-                    _max_motif_copies(seq[:10000], reverse_complement(motif)),
-                ),
-                "right_max_motif_copies": max(
-                    _max_motif_copies(seq[-10000:], motif),
-                    _max_motif_copies(seq[-10000:], reverse_complement(motif)),
-                ),
-            }
-            for name, seq in records.items()
-        ]
-        result["terminal_observations"] = {
-            "motif": motif,
-            "measurement_window_bp": 10000,
-            "count": len(rows),
-            "examples": rows[:100],
-            "examples_truncated": len(rows) > 100,
-        }
-    return result
+    return measure_assembly(
+        source(state, stage).primary_output_path,
+        stage=stage,
+        motif=output(state, stage).get("resolved_telomere_motif"),
+    )
 
 
 def table_summary(path: Path) -> dict[str, Any]:
@@ -687,17 +644,43 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
         quast.model_dump(mode="json"),
         *f["history_refs"],
     ]
-    request = {
-        "stage": stage,
-        "workflow_step_id": current_workflow_step_id(state),
-        "messages": recommender.messages(evidence),
-        "evidence": evidence,
-        "output_method": recommender.method,
-        "dependency_refs": deps,
-    }
-    request_ref = publish_json(
-        state, stage, f"recommendations/{len(records):03d}/request.json", request, deps
+    request_name = f"recommendations/{len(records):03d}/request.json"
+    recovered_request = recover_published_artifact(
+        state["data_dir"],
+        state["session_id"],
+        stage_artifacts_dir(state, stage, "advisor", request_name),
+        stage=stage,
+        method_name=f"{stage}.advisor",
+        artifact_type=f"{stage}.advisor.request",
+        metadata={"dependency_refs": deps},
     )
+    if recovered_request:
+        request_ref = recovered_request.ref
+        request = load_json(state, request_ref)
+        if (
+            request.get("stage") != stage
+            or request.get("workflow_step_id") != current_workflow_step_id(state)
+            or request.get("dependency_refs") != deps
+            or request.get("evidence") != evidence
+            or request.get("output_method") != recommender.method
+        ):
+            raise ValueError("finishing persisted request binding mismatch")
+    else:
+        request = {
+            "stage": stage,
+            "workflow_step_id": current_workflow_step_id(state),
+            "messages": recommender.messages(evidence),
+            "evidence": evidence,
+            "output_method": recommender.method,
+            "dependency_refs": deps,
+        }
+        request_ref = publish_json(
+            state,
+            stage,
+            f"recommendations/{len(records):03d}/request.json",
+            request,
+            deps,
+        )
     name = f"recommendations/{len(records):03d}/response.json"
     recovered = recover_published_artifact(
         state["data_dir"],
