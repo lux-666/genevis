@@ -41,7 +41,14 @@ gene-agent bootstrap
 
 ## 验证顺序
 
-安装并激活编排器环境后立即运行代码验证。主机配置完成后检查 contig 就绪：
+Python 运行版本由 [`app/version.py`](../../app/version.py) 单一拥有，
+`pyproject.toml` 的 Hatch 元数据从该文件读取；不要在 `app/__init__.py` 或
+部署脚本另写版本号。应用要求 Python 3.11+，CI 固定 Python 3.12。运行时和开发
+依赖的可复现解析边界是 [`constraints/ci.txt`](../../constraints/ci.txt)，它锁定
+CI/部署回归所验证的直接闭包版本；`pyproject.toml` 仍是依赖声明的权威来源。
+
+安装并激活编排器环境后立即运行代码验证。CI 使用同一约束文件安装 editable
+wheel 并调用现有 `scripts/server_test.sh`，不维护第二套测试或 scanner。主机配置完成后检查 contig 就绪：
 
 ```bash
 bash /path/to/gene_agent/scripts/server_test.sh

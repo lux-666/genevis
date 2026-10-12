@@ -37,7 +37,7 @@ Git 携带应用代码、`pyproject.toml`、描述符、测试、现行文档、
 ```bash
 conda create -n gene_agent python=3.11 -y
 conda activate gene_agent
-python -m pip install -e '.[dev]'
+python -m pip install -c constraints/ci.txt -e '.[dev]'
 ```
 
 `'.[dev]'` 的引号防止 shell 通配符展开。Python 运行与开发依赖仅声明于 [`pyproject.toml`](../../pyproject.toml)。`gene_agent` 是文档约定的编排器环境名，不从 `config/envs.yaml` 读取。以下命令假设它保持激活。

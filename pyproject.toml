@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gene-agent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "LangGraph-driven multiplatform long-read genome assembly agent for ONT, HiFi, CLR, and CycloneSEQ"
 requires-python = ">=3.11"
 classifiers = [
@@ -72,6 +72,9 @@ strict = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.hatch.version]
+path = "app/version.py"
 
 [tool.hatch.build.targets.wheel.force-include]
 "descriptors" = "app/_descriptors"
