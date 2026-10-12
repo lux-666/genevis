@@ -14,6 +14,7 @@ packages:
   juicer: juicer.yaml
   juicebox: juicebox.yaml
   seqkit: seqkit.yaml
+  fastp: fastp.yaml
   tgsgapcloser: tgsgapcloser.yaml
   racon: racon.yaml
 methods:
@@ -37,12 +38,16 @@ methods:
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
   read_qc.length_filter.skip: read_qc/length_filter_skip.yaml
   read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
+  read_qc.short_reads.fastp: read_qc/fastp_short_reads.yaml
+  read_qc.hic_reads.fastp: read_qc/fastp_hic_reads.yaml
 by_stage:
   inventory: []
   read_qc:
     - read_qc.long_read_stats.seqkit_stats
     - read_qc.length_filter.skip
     - read_qc.length_filter.seqkit_seq
+    - read_qc.short_reads.fastp
+    - read_qc.hic_reads.fastp
   genome_survey:
     - genome_survey.kmer_count.jellyfish
     - genome_survey.model.genomescope2

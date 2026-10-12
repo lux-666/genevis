@@ -63,6 +63,7 @@ class PackageDescriptor(StrictDescriptorModel):
     package_name: str
     version_constraint: str
     conditional_version_constraints: dict[str, str] = Field(default_factory=dict)
+    conditional_required_tools: dict[str, list[str]] = Field(default_factory=dict)
     language: Literal["python", "R", "cli", "container"]
     install_channel: str
     entry_patterns: list[str]

@@ -1,5 +1,8 @@
 package_name: hifiasm
 version_constraint: ">=0.21.0"
+conditional_required_tools:
+  trio:
+    - yak
 language: cli
 install_channel: conda
 entry_patterns:

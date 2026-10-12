@@ -95,9 +95,13 @@ class InputAssetSpec(BaseModel):
                 f"got {self.asset_type!r}"
             )
         if self.paired_reads:
-            if self.asset_type != "hic_reads_registered":
+            if self.asset_type not in {
+                "raw_short_dna_reads",
+                "clean_short_dna_reads",
+                "hic_reads_registered",
+            }:
                 raise ValueError(
-                    "paired_reads is currently supported only for hic_reads_registered"
+                    "paired_reads is supported only for short-DNA or Hi-C reads"
                 )
             flattened = [
                 path for pair in self.paired_reads for path in (pair.r1, pair.r2)

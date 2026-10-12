@@ -120,6 +120,8 @@ ExecutorBindingKey = Literal[
     "assembly_ultralong_reads",
     "assembly_hic_r1_reads",
     "assembly_hic_r2_reads",
+    "assembly_trio_paternal_yak",
+    "assembly_trio_maternal_yak",
     "assembly_method_read_type",
     "assembly_output_dir",
     "assembly_output_prefix",

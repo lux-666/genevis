@@ -1,0 +1,15 @@
+package_name: fastp
+version_constraint: ">=0.23"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "fastp --in1 {input_r1} --in2 {input_r2} --out1 {output_r1} --out2 {output_r2}"
+help_summary: "Paired-end adapter trimming and quality filtering for short and Hi-C reads."
+known_pitfalls:
+  - "R1/R2 lane pairing is frozen from manifest metadata; filenames are never paired heuristically."
+  - "Each lane is processed independently so output provenance preserves lane identity."
+resource_defaults:
+  cpu_cores: 4
+  memory_gb: 4.0
+  gpu_required: false
+  walltime_hours: 4.0

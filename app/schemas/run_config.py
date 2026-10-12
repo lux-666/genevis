@@ -31,6 +31,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.domains.assembly.inputs import HifiasmInputConfig
 from app.domains.assembly.selection import NormalizedReadType
 from app.review.gates import registered_review_stages
 from app.schemas.manifest import Platform
@@ -56,6 +57,33 @@ ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
 ]
+
+
+class FastpReadQCConfig(BaseModel):
+    """Explicit fastp controls for one paired-read family."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    threads: int = Field(default=4, ge=1, le=1024)
+    qualified_quality_phred: int = Field(default=15, ge=0, le=41)
+    unqualified_percent_limit: int = Field(default=40, ge=0, le=100)
+    n_base_limit: int = Field(default=5, ge=0)
+    length_required: int = Field(default=50, ge=1)
+    adapter_sequence: str | None = None
+    adapter_sequence_r2: str | None = None
+    preserve_hic_junction: bool = True
+
+    @field_validator("adapter_sequence", "adapter_sequence_r2")
+    @classmethod
+    def _adapter_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("adapter sequences must not be blank")
+        return value
+
+
 T2TReadPlatform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi"]
 
 DEFAULT_REVIEW_MAX_BLOCKED_SECONDS = 300
@@ -232,6 +260,7 @@ class AssemblyRunConfig(BaseModel):
     threads: int = Field(default=32, gt=0)
     hifi_reads_ref: str | None = None
     hic_reads_ref: str | None = None
+    hifiasm_inputs: HifiasmInputConfig | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
     assembly_route: AssemblyRoute = "auto"
     method_route_advisor: RecommendationMode = "advisor"
@@ -253,11 +282,26 @@ class ReadQCLengthFilterConfig(BaseModel):
 
     @model_validator(mode="after")
     def _require_thresholds_for_executable_filter(self) -> "ReadQCLengthFilterConfig":
+        if not self.approved:
+            return self
         min_len = self.thresholds.get("min_len")
-        if self.approved and (not isinstance(min_len, int) or min_len <= 0):
+        platform_min_len = self.thresholds.get("platform_min_len", {})
+        if min_len is not None and (not isinstance(min_len, int) or min_len <= 0):
             raise ValueError(
-                "read_qc.length_filter.thresholds.min_len must be a "
-                "positive integer when approved"
+                "read_qc.length_filter.thresholds.min_len must be positive"
+            )
+        if not isinstance(platform_min_len, dict):
+            raise ValueError(
+                "read_qc.length_filter.thresholds.platform_min_len must be an object"
+            )
+        for platform, value in platform_min_len.items():
+            if not isinstance(platform, str) or not platform.strip():
+                raise ValueError("platform_min_len keys must be non-empty strings")
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError("platform_min_len values must be positive integers")
+        if min_len is None and not platform_min_len:
+            raise ValueError(
+                "approved length filtering requires min_len or platform_min_len"
             )
         return self
 
@@ -268,6 +312,8 @@ class ReadQCRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     length_filter: ReadQCLengthFilterConfig | None = None
+    short_reads: FastpReadQCConfig | None = None
+    hic_reads: FastpReadQCConfig | None = None
 
 
 class GenomeSurveyRunParameters(BaseModel):
@@ -326,7 +372,6 @@ class BuscoRunParameters(BaseModel):
 
     mode: Literal["genome"] = "genome"
     threads: int = Field(default=8, gt=0)
-
 
 
 class QuastRunParameters(BaseModel):
@@ -476,6 +521,25 @@ class RunConfig(BaseModel):
                 "run_config: read_qc.length_filter.approved is true but "
                 "requested_stages[read_qc].allow_local_execution is not true"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_local_execution_for_fastp(self) -> "RunConfig":
+        read_qc = self.read_qc
+        if read_qc is None or not self.any_occurrence_allows_local_execution("read_qc"):
+            enabled = [
+                name
+                for name, config in (
+                    ("short_reads", read_qc.short_reads if read_qc else None),
+                    ("hic_reads", read_qc.hic_reads if read_qc else None),
+                )
+                if config is not None
+            ]
+            if enabled:
+                raise ValueError(
+                    "run_config: read_qc fastp configuration requires local "
+                    "execution: " + ", ".join(enabled)
+                )
         return self
 
     @model_validator(mode="after")
@@ -773,8 +837,45 @@ def canonicalize_run_config_paths(
     normalized = deepcopy(dict(payload))
     for field_path in _RUN_CONFIG_PATH_FIELDS:
         _canonicalize_payload_path(normalized, field_path, source_dir)
+    _canonicalize_hifiasm_input_paths(normalized, source_dir)
     _canonicalize_t2t_read_inputs(normalized, source_dir)
     return normalized
+
+
+def _canonicalize_hifiasm_input_paths(
+    payload: dict[str, Any],
+    source_dir: Path | None,
+) -> None:
+    """Canonicalize every explicit hifiasm companion/trio member path."""
+
+    assembly = payload.get("assembly")
+    if not isinstance(assembly, dict):
+        return
+    raw_inputs = assembly.get("hifiasm_inputs")
+    if raw_inputs is None:
+        return
+    if not isinstance(raw_inputs, dict):
+        return
+    for field in (
+        "ultralong_ont_reads_ref",
+        "hic_reads_ref",
+        "trio_maternal_reads_ref",
+        "trio_paternal_reads_ref",
+    ):
+        value = raw_inputs.get(field)
+        if value is None:
+            continue
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, list):
+            continue
+        raw_inputs[field] = [
+            _canonical_path(
+                item,
+                source_dir=source_dir,
+                field=f"assembly.hifiasm_inputs.{field}[{index}]",
+            )
+            for index, item in enumerate(values)
+        ]
 
 
 def _canonicalize_payload_path(

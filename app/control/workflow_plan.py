@@ -105,7 +105,13 @@ def _selected_method_names_for_request(
         selected_filter = (
             "read_qc.length_filter.skip" if filter_method == "skip" else filter_method
         )
-        return (*always, selected_filter)
+        configured = []
+        if run_config.read_qc is not None:
+            if run_config.read_qc.short_reads is not None:
+                configured.append("read_qc.short_reads.fastp")
+            if run_config.read_qc.hic_reads is not None:
+                configured.append("read_qc.hic_reads.fastp")
+        return (*always, selected_filter, *configured)
     if request.stage == "assembly":
         # Assembly is the first stage whose method roster is bound at stage
         # time, after upstream evidence and human confirmation.
