@@ -21,8 +21,10 @@ from app.execution.evidence import (
     read_execution_stderr_tail,
 )
 from app.execution.method_outcomes import settle_method_outcomes
+from app.llm.json_response import model_response_record
 from app.llm.parameters.hic.recommender import (
     PROMPT_BUNDLE,
+    AutoHiCParameterDecision,
     autohic_parameter_prompt_hash,
     render_autohic_parameter_messages,
     restore_autohic_parameter_decision,
@@ -35,6 +37,7 @@ from app.llm.parameters.hic.request import (
     PARAMETER_RECOMMENDATION_CONTRACT,
     build_autohic_parameter_request,
 )
+from app.llm.transaction import recover_or_invoke_response
 from app.review.application import (
     PreparedReviewApplication,
     ReviewIntentV1,
@@ -328,25 +331,48 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             artifact_type=HIC_PARAMETER_BASIS,
             method_name=_RECOMMENDER_METHOD,
         )
-        messages = render_autohic_parameter_messages(model_request)
-        model_request_ref = write_autohic_parameter_artifact(
+        recovered_request = recover_autohic_parameter_artifact(
             state,
             recommendation_id,
             "model_request.json",
-            {
-                "schema_version": 3,
-                "prompt_bundle_id": PROMPT_BUNDLE,
-                "prompt_template_sha256": autohic_parameter_prompt_hash(),
-                "messages": messages,
-                **(
-                    {"policy_skipped_model": True}
-                    if policy == "deterministic_baseline"
-                    else {}
-                ),
-            },
-            artifact_type=HIC_PARAMETER_MODEL_REQUEST,
+            expected_type=HIC_PARAMETER_MODEL_REQUEST,
             method_name=_RECOMMENDER_METHOD,
         )
+        if recovered_request is not None:
+            model_request_ref, request_record = recovered_request
+            messages = request_record["messages"]
+            if (
+                request_record.get("schema_version") != 3
+                or request_record.get("prompt_bundle_id") != PROMPT_BUNDLE
+                or bool(request_record.get("policy_skipped_model"))
+                != (policy == "deterministic_baseline")
+                or not isinstance(messages, list)
+                or len(messages) != 2
+                or messages[0].get("role") != "system"
+                or messages[1].get("role") != "user"
+                or json.loads(messages[1]["content"]) != model_request
+            ):
+                raise ValueError("AutoHiC persisted request binding mismatch")
+        else:
+            messages = render_autohic_parameter_messages(model_request)
+            model_request_ref = write_autohic_parameter_artifact(
+                state,
+                recommendation_id,
+                "model_request.json",
+                {
+                    "schema_version": 3,
+                    "prompt_bundle_id": PROMPT_BUNDLE,
+                    "prompt_template_sha256": autohic_parameter_prompt_hash(),
+                    "messages": messages,
+                    **(
+                        {"policy_skipped_model": True}
+                        if policy == "deterministic_baseline"
+                        else {}
+                    ),
+                },
+                artifact_type=HIC_PARAMETER_MODEL_REQUEST,
+                method_name=_RECOMMENDER_METHOD,
+            )
     except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail_update(
             state,
@@ -354,47 +380,60 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
             failure_kind="parameter_recommendation",
         )
 
-    model_response_ref: ArtifactRef | None = None
+    def invoke_decision() -> AutoHiCParameterDecision:
+        if policy == "deterministic_baseline":
+            return restore_autohic_parameter_decision(
+                {
+                    "schema_version": 2,
+                    "raw_response": json.dumps(
+                        {
+                            "parameters": {},
+                            "summary": (
+                                "Deterministic baseline: parameter advisor "
+                                "disabled; empty L2 mapping."
+                            ),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    "validity": "parsed",
+                    "error": None,
+                    "model_id": "deterministic_baseline_policy",
+                }
+            )
+        return invoke_autohic_parameter_model(model_request, messages=messages)
+
     try:
-        recovered_response = recover_autohic_parameter_artifact(
-            state,
-            recommendation_id,
-            "model_response.json",
-            expected_type=HIC_PARAMETER_MODEL_RESPONSE,
-            method_name=_RECOMMENDER_METHOD,
+        model_response_ref, decision = recover_or_invoke_response(
+            recover=lambda: recover_autohic_parameter_artifact(
+                state,
+                recommendation_id,
+                "model_response.json",
+                expected_type=HIC_PARAMETER_MODEL_RESPONSE,
+                method_name=_RECOMMENDER_METHOD,
+            ),
+            invoke=invoke_decision,
+            restore=restore_autohic_parameter_decision,
+            publish=lambda result: write_autohic_parameter_artifact(
+                state,
+                recommendation_id,
+                "model_response.json",
+                model_response_record(
+                    schema_version=2,
+                    raw_response=result.raw_response,
+                    valid=result.valid,
+                    error=result.error,
+                    model_id=result.model_id,
+                    model_call=result.model_call.model_dump(mode="json"),
+                ),
+                artifact_type=HIC_PARAMETER_MODEL_RESPONSE,
+                method_name=_RECOMMENDER_METHOD,
+            ),
         )
-        if recovered_response is None:
-            if policy == "deterministic_baseline":
-                decision = restore_autohic_parameter_decision(
-                    {
-                        "schema_version": 2,
-                        "raw_response": json.dumps(
-                            {
-                                "parameters": {},
-                                "summary": (
-                                    "Deterministic baseline: parameter advisor "
-                                    "disabled; empty L2 mapping."
-                                ),
-                            },
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        "validity": "parsed",
-                        "error": None,
-                        "model_id": "deterministic_baseline_policy",
-                    }
-                )
-            else:
-                decision = invoke_autohic_parameter_model(
-                    model_request, messages=messages
-                )
-        else:
-            model_response_ref, response_record = recovered_response
-            decision = restore_autohic_parameter_decision(response_record)
     except (OSError, ValueError, ParameterPersistenceError) as exc:
         return _fail_update(
             state,
-            f"AutoHiC parameter response recovery failed: {exc}",
+            f"AutoHiC parameter response persistence failed: {exc}",
             failure_kind="parameter_recommendation",
         )
     recommendation = decision.recommendation or {}
@@ -404,22 +443,6 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
         "error": decision.error,
     }
     try:
-        if model_response_ref is None:
-            model_response_ref = write_autohic_parameter_artifact(
-                state,
-                recommendation_id,
-                "model_response.json",
-                {
-                    "schema_version": 2,
-                    "raw_response": decision.raw_response,
-                    "validity": "parsed" if decision.valid else "invalid",
-                    "error": decision.error,
-                    "model_id": decision.model_id,
-                    "model_call": decision.model_call.model_dump(mode="json"),
-                },
-                artifact_type=HIC_PARAMETER_MODEL_RESPONSE,
-                method_name=_RECOMMENDER_METHOD,
-            )
         recommendation_ref = write_autohic_parameter_artifact(
             state,
             recommendation_id,

@@ -45,6 +45,7 @@ from app.llm.parameters.assembly.request import (
     validate_parameter_basis,
     validate_recorded_parameter_request,
 )
+from app.llm.transaction import recover_or_invoke_response
 from app.review.application import (
     PreparedReviewApplication,
     ReviewIntentV1,
@@ -382,51 +383,37 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
             state, f"Assembly parameter request persistence failed: {exc}"
         )
 
-    # A stale checkpoint may replay after the nondeterministic response was
-    # durably published.  Recover and re-parse that exact response instead of
-    # invoking the model again.
-    model_response_ref: ArtifactRef | None = None
     try:
-        recovered_response = recover_artifact(
-            state,
-            recommendation_id,
-            "model_response.json",
-            expected_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
-            method_name="assembly.parameter_recommender",
-        )
-        if recovered_response is None:
-            decision = invoke_assembly_parameter_model(
-                request_dto,
-                messages=messages,
-            )
-        else:
-            model_response_ref, response_record = recovered_response
-            decision = restore_assembly_parameter_decision(
-                response_record,
-                request_dto,
-            )
-    except (OSError, ValueError, ParameterPersistenceError) as exc:
-        return _fail_update(
-            state,
-            f"Assembly parameter response recovery failed: {exc}",
-        )
-    try:
-        if model_response_ref is None:
-            model_response_ref = write_artifact(
+        model_response_ref, decision = recover_or_invoke_response(
+            recover=lambda: recover_artifact(
+                state,
+                recommendation_id,
+                "model_response.json",
+                expected_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+                method_name="assembly.parameter_recommender",
+            ),
+            invoke=lambda: invoke_assembly_parameter_model(
+                request_dto, messages=messages
+            ),
+            restore=lambda record: restore_assembly_parameter_decision(
+                record, request_dto
+            ),
+            publish=lambda result: write_artifact(
                 state,
                 recommendation_id,
                 "model_response.json",
                 model_response_record(
                     schema_version=2,
-                    raw_response=decision.raw_response,
-                    valid=decision.valid,
-                    error=decision.error,
-                    model_id=decision.model_id,
-                    model_call=decision.model_call.model_dump(mode="json"),
+                    raw_response=result.raw_response,
+                    valid=result.valid,
+                    error=result.error,
+                    model_id=result.model_id,
+                    model_call=result.model_call.model_dump(mode="json"),
                 ),
                 artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
                 method_name="assembly.parameter_recommender",
-            )
+            ),
+        )
         parsed = decision.parsed or {}
         recommendation_ref = write_artifact(
             state,
@@ -1549,54 +1536,6 @@ def _validate_parameter_attempt_chain(
         ):
             raise ValueError("parameter retry recommendation contract drifted")
     return attempts
-
-
-def build_parameter_attempt_timeline(
-    state: TopLevelState,
-    assembly_out: AssemblyStageCursor,
-    *,
-    status: str,
-    reason: str,
-) -> dict[str, Any]:
-    """Derive a refs-only terminal timeline from compact sealed cursors."""
-
-    attempts = _validate_parameter_attempt_chain(
-        state,
-        assembly_out.get("parameter_attempts") or [],
-    )
-    entries = [
-        {
-            "sequence": sequence,
-            "attempt_id": attempt["attempt_id"],
-            "previous_attempt_id": attempt.get("previous_attempt_id"),
-            "recommendation_manifest_ref": attempt.get("recommendation_manifest_ref"),
-            "approval_decision_ref": attempt.get("approval_decision_ref"),
-            "frozen_parameters_ref": attempt.get("frozen_parameters_ref"),
-            "command_ref": attempt.get("command_ref"),
-            "frozen_attempt_ref": attempt.get("frozen_attempt_ref"),
-            "execution_ref": attempt.get("execution_ref"),
-            "review_ref": attempt.get("review_ref"),
-            "attempt_manifest_ref": attempt.get("attempt_manifest_ref"),
-            "seal_hash": attempt.get("seal_hash"),
-        }
-        for sequence, attempt in enumerate(attempts)
-    ]
-    retry_counts = dict(assembly_out.get("retry_counts") or {})
-    return {
-        "schema_version": 2,
-        "recommendation_contract": (
-            attempts[0].get("recommendation_contract") if attempts else None
-        ),
-        "entries": entries,
-        "terminal": {
-            "status": status,
-            "reason": reason,
-            "final_attempt_id": attempts[-1]["attempt_id"] if attempts else None,
-            "execution_retries_used": int(retry_counts.get("execution", 0)),
-            "result_ref": assembly_out.get("draft_assembly_ref"),
-            "parameter_rejection": assembly_out.get("parameter_rejection"),
-        },
-    }
 
 
 def _fail_update(state: TopLevelState, reason: str) -> StateUpdate:

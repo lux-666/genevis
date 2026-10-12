@@ -24,7 +24,6 @@ from app.stages.assembly.parameters.storage import read_artifact as read_json_ar
 from app.stages.assembly.parameters.workflow import (
     _seal_parameter_attempt,
     _validate_parameter_attempt_chain,
-    build_parameter_attempt_timeline,
     execution_retry_gate,
     recommend_assembly_parameters,
 )
@@ -139,7 +138,7 @@ class ParameterApprovalGateV3Tests(unittest.TestCase):
                 assembly["reason"],
             )
 
-    def test_compact_chain_seals_and_timeline_contains_only_refs(self):
+    def test_compact_chain_seals_and_contains_only_refs(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = _state(Path(tmp))
             initial = _seal_parameter_attempt(
@@ -156,21 +155,8 @@ class ParameterApprovalGateV3Tests(unittest.TestCase):
                 ),
             )
             chain = _validate_parameter_attempt_chain(state, [initial, retry])
-            timeline = build_parameter_attempt_timeline(
-                state,
-                {
-                    "parameter_attempts": chain,
-                    "retry_counts": {"execution": 1},
-                },
-                status="assembly_succeeded",
-                reason="completed",
-            )
-
-            self.assertEqual(
-                [entry["attempt_id"] for entry in timeline["entries"]], [0, 1]
-            )
-            self.assertEqual(timeline["terminal"]["execution_retries_used"], 1)
-            serialized = json.dumps(timeline, separators=(",", ":"))
+            self.assertEqual([entry["attempt_id"] for entry in chain], [0, 1])
+            serialized = json.dumps(chain, separators=(",", ":"))
             for forbidden in (
                 "catalog_snapshot",
                 "recommended_params",
@@ -237,17 +223,9 @@ class ParameterApprovalGateV3Tests(unittest.TestCase):
                 initial["frozen_attempt_ref"],
             )
             sealed_retry = _seal_parameter_attempt(state, attempts[1])
-            timeline = build_parameter_attempt_timeline(
-                state,
-                {
-                    "parameter_attempts": [initial, sealed_retry],
-                    "retry_counts": {"execution": 1, "review": 0},
-                },
-                status="failed",
-                reason="test",
-            )
+            chain = _validate_parameter_attempt_chain(state, [initial, sealed_retry])
             self.assertEqual(
-                [entry["frozen_attempt_ref"] for entry in timeline["entries"]],
+                [entry["frozen_attempt_ref"] for entry in chain],
                 [
                     initial["frozen_attempt_ref"],
                     sealed_retry["frozen_attempt_ref"],
