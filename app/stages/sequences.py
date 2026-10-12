@@ -6,6 +6,7 @@ import gzip
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TextIO
 
 _BASES = frozenset("ACGTRYSWKMBDHVN")
 
@@ -17,13 +18,43 @@ def _sequence(parts: list[str]) -> str:
     return sequence
 
 
-def read_sequences(path: Path, sequence_format: str) -> Iterator[tuple[str, str]]:
-    """Validate plain/gzip FASTA or multiline FASTQ without retaining all reads."""
+def open_sequence_text(path: Path) -> TextIO:
+    """Read ASCII sequences; gzip is identified by bytes, never by suffix."""
     with path.open("rb") as raw:
         compressed = raw.read(2) == b"\x1f\x8b"
-    opener = gzip.open if compressed else open
+    if compressed:
+        return gzip.open(path, "rt", encoding="ascii")
+    return path.open("r", encoding="ascii")
+
+
+def detect_sequence_format(path: Path) -> str:
+    with open_sequence_text(path) as handle:
+        first = handle.read(1)
+    if first == ">":
+        return "fasta"
+    if first == "@":
+        return "fastq"
+    raise ValueError("expected non-empty FASTA or FASTQ")
+
+
+def reverse_complement(sequence: str) -> str:
+    """Reverse complement DNA using the complete IUPAC alphabet."""
+    normalized = sequence.upper()
+    if not set(normalized) <= _BASES:
+        raise ValueError("non-IUPAC DNA sequence")
+    return normalized.translate(str.maketrans("ACGTRYSWKMBDHVN", "TGCAYRSWMKVHDBN"))[
+        ::-1
+    ]
+
+
+def read_sequences(
+    path: Path, sequence_format: str | None = None
+) -> Iterator[tuple[str, str]]:
+    """Validate plain/gzip FASTA or multiline FASTQ without retaining all reads."""
+    if sequence_format is None:
+        sequence_format = detect_sequence_format(path)
     count = 0
-    with opener(path, "rt", encoding="ascii") as handle:
+    with open_sequence_text(path) as handle:
         if sequence_format == "fasta":
             name = ""
             parts: list[str] = []

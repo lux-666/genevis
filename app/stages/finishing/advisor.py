@@ -34,7 +34,7 @@ from app.stages.quast import validate_quast_comparison
 from app.stages.read_resolution import resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import QUAST_REFERENCE_SPEC, assembly_resource_spec
-from app.stages.sequences import fasta_records, sequence_summary
+from app.stages.sequences import fasta_records, reverse_complement, sequence_summary
 from app.storage.artifacts import (
     publish_artifact_record,
     publish_or_recover_work_artifact,
@@ -409,7 +409,7 @@ def observations(state: TopLevelState, stage: str) -> dict[str, Any]:
             "examples_truncated": len(gaps) > 100,
         }
     elif stage == "t2t":
-        from app.stages.t2t.nodes import _max_motif_copies, _reverse_complement
+        from app.stages.t2t.nodes import _max_motif_copies
 
         motif = output(state, stage)["resolved_telomere_motif"]
         rows = [
@@ -418,11 +418,11 @@ def observations(state: TopLevelState, stage: str) -> dict[str, Any]:
                 "length": len(seq),
                 "left_max_motif_copies": max(
                     _max_motif_copies(seq[:10000], motif),
-                    _max_motif_copies(seq[:10000], _reverse_complement(motif)),
+                    _max_motif_copies(seq[:10000], reverse_complement(motif)),
                 ),
                 "right_max_motif_copies": max(
                     _max_motif_copies(seq[-10000:], motif),
-                    _max_motif_copies(seq[-10000:], _reverse_complement(motif)),
+                    _max_motif_copies(seq[-10000:], reverse_complement(motif)),
                 ),
             }
             for name, seq in records.items()

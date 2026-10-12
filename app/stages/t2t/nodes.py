@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import bz2
 import csv
-import gzip
 import json
-import lzma
 import re
 import shlex
 from collections import defaultdict
@@ -92,6 +89,7 @@ from app.stages.base import (
 from app.stages.read_resolution import resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
+from app.stages.sequences import open_sequence_text, read_sequences, reverse_complement
 from app.stages.t2t.parameters.catalog import T2TMode, resolve_t2t_mode
 from app.stages.t2t.parameters.execution import (
     T2TFrozenExecutionInputs,
@@ -534,7 +532,7 @@ def scan_read_telomeres(state: TopLevelState) -> StateUpdate:
             for read_input in execution_inputs.long_read_inputs:
                 member_id = read_input.member_id
                 preset = _minimap2_preset(read_input.platform)
-                for source_read_id, sequence in _iter_sequences(Path(read_input.path)):
+                for source_read_id, sequence in read_sequences(Path(read_input.path)):
                     read_id = f"{member_id}::{source_read_id}"
                     if read_id in seen_read_ids:
                         raise ValueError(
@@ -2383,7 +2381,7 @@ def _validate_long_read_inputs(
         if not reads_path.exists() or not reads_path.is_file():
             raise ValueError(f"long-read input is not a file: {reads_path}")
         try:
-            next(_iter_sequences(reads_path))
+            next(read_sequences(reads_path))
         except StopIteration as exc:
             raise ValueError(f"long-read input is empty: {reads_path}") from exc
         except (OSError, ValueError) as exc:
@@ -2513,58 +2511,10 @@ def _skip_no_reads(
 
 def _looks_like_fasta(path: Path) -> bool:
     try:
-        with _open_text(path) as handle:
+        with open_sequence_text(path) as handle:
             return handle.read(1) == ">"
-    except OSError:
+    except (OSError, UnicodeError):
         return False
-
-
-def _open_text(path: Path) -> TextIO:
-    suffix = path.suffix.lower()
-    if suffix in {".gz", ".gzip"}:
-        return gzip.open(path, "rt", encoding="utf-8")
-    if suffix in {".bz2", ".bzip2"}:
-        return bz2.open(path, "rt", encoding="utf-8")
-    if suffix == ".xz":
-        return lzma.open(path, "rt", encoding="utf-8")
-    return path.open("r", encoding="utf-8")
-
-
-def _iter_sequences(path: Path) -> Iterator[tuple[str, str]]:
-    with _open_text(path) as handle:
-        first = handle.readline()
-        if not first:
-            raise ValueError("empty sequence file")
-        if first.startswith(">"):
-            name = first[1:].strip().split()[0]
-            sequence_lines: list[str] = []
-            for line in handle:
-                if line.startswith(">"):
-                    if not name:
-                        raise ValueError("FASTA record has no identifier")
-                    yield name, "".join(sequence_lines).upper()
-                    name = line[1:].strip().split()[0]
-                    sequence_lines = []
-                else:
-                    sequence_lines.append(line.strip())
-            if not name:
-                raise ValueError("FASTA record has no identifier")
-            yield name, "".join(sequence_lines).upper()
-            return
-        if not first.startswith("@"):
-            raise ValueError("expected FASTA or FASTQ")
-        header = first
-        while header:
-            name = header[1:].strip().split()[0]
-            sequence_text = handle.readline().strip()
-            plus = handle.readline()
-            quality = handle.readline()
-            if not name or not sequence_text or not plus.startswith("+") or not quality:
-                raise ValueError("invalid FASTQ record")
-            yield name, sequence_text.upper()
-            header = handle.readline()
-            if header and not header.startswith("@"):
-                raise ValueError("invalid FASTQ header")
 
 
 def _load_telomeric_read_sequences(
@@ -2572,7 +2522,7 @@ def _load_telomeric_read_sequences(
 ) -> dict[str, str]:
     sequences: dict[str, str] = {}
     for _preset, path_value in sorted(fasta_refs.items()):
-        for read_id, sequence in _iter_sequences(Path(path_value)):
+        for read_id, sequence in read_sequences(Path(path_value)):
             if read_id in sequences:
                 raise ValueError(
                     f"duplicate telomeric read across preset groups: {read_id}"
@@ -2584,7 +2534,7 @@ def _load_telomeric_read_sequences(
 def _scan_fasta_ends(
     path: Path, motif: str, thresholds: dict[str, int]
 ) -> Iterable[dict[str, str]]:
-    for name, sequence in _iter_sequences(path):
+    for name, sequence in read_sequences(path):
         left, right = _terminal_signal(sequence, motif, thresholds)
         yield {
             "sequence": name,
@@ -2606,16 +2556,12 @@ def _terminal_signal(
 
 
 def _max_motif_copies(sequence: str, motif: str) -> int:
-    alternatives = [re.escape(motif), re.escape(_reverse_complement(motif))]
+    alternatives = [re.escape(motif), re.escape(reverse_complement(motif))]
     match_lengths = [
         len(match.group(0)) // len(motif)
         for match in re.finditer(f"(?:{'|'.join(alternatives)})+", sequence)
     ]
     return max(match_lengths, default=0)
-
-
-def _reverse_complement(sequence: str) -> str:
-    return sequence.upper().translate(str.maketrans("ACGTN", "TGCAN"))[::-1]
 
 
 def _candidate_rows(
@@ -2654,7 +2600,7 @@ def _candidate_rows(
             oriented_sequence = (
                 (sequence or "")
                 if paf.strand == "+"
-                else _reverse_complement(sequence or "")
+                else reverse_complement(sequence or "")
             )
             oriented_query_start = (
                 paf.query_start
@@ -2859,7 +2805,7 @@ def _write_patched_fasta(
     patches: dict[str, dict[str, Any]],
 ) -> None:
     records = []
-    for name, sequence in _iter_sequences(source):
+    for name, sequence in read_sequences(source):
         plan = patches.get(name) or {}
         left = plan.get("left")
         right = plan.get("right")
@@ -2950,21 +2896,19 @@ def _materialize_t2t_patches(
     ]
     if not selected:
         return None
-    read_sequences = _load_telomeric_read_sequences(
+    telomeric_sequences = _load_telomeric_read_sequences(
         out.get("telomeric_reads_fasta_refs") or {}
     )
-    assembly_sequences = dict(
-        _iter_sequences(Path(execution_inputs.input_assembly_ref))
-    )
+    assembly_sequences = dict(read_sequences(Path(execution_inputs.input_assembly_ref)))
     patches: dict[str, dict[str, Any]] = {}
     records: list[dict[str, str]] = []
     error: str | None = None
     for row in selected:
-        sequence = read_sequences.get(row["read_id"])
+        sequence = telomeric_sequences.get(row["read_id"])
         if not sequence:
             error = f"selected_read_sequence_unavailable:{row['read_id']}"
             break
-        oriented = sequence if row["strand"] == "+" else _reverse_complement(sequence)
+        oriented = sequence if row["strand"] == "+" else reverse_complement(sequence)
         oriented_start = int(row["oriented_query_start"])
         oriented_end = int(row["oriented_query_end"])
         tail = (
