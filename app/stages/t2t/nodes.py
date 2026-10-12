@@ -1633,7 +1633,11 @@ def _load_telomeric_read_sequences(
 def _scan_fasta_ends(
     path: Path, motif: str, thresholds: dict[str, int]
 ) -> Iterable[dict[str, str]]:
+    seen: set[str] = set()
     for name, sequence in read_sequences(path):
+        if name in seen:
+            raise ValueError(f"duplicate scaffold identifier: {name}")
+        seen.add(name)
         left, right = terminal_signal(sequence, motif, thresholds)
         yield {
             "sequence": name,

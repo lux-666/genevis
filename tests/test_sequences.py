@@ -45,6 +45,15 @@ def test_duplicate_scaffold_rejected(tmp_path):
     with pytest.raises(ValueError, match="duplicate"):
         fasta_records(path)
 
+    from app.stages.t2t.nodes import _scan_fasta_ends
+
+    with pytest.raises(ValueError, match="duplicate"):
+        list(
+            _scan_fasta_ends(
+                path, "ACGT", {"terminal_window_bp": 4, "min_motif_copies": 1}
+            )
+        )
+
 
 def test_iupac_reverse_complement():
     assert reverse_complement("AARY") == "RYTT"
