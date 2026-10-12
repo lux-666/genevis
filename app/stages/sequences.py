@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import gzip
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TextIO
 
@@ -118,7 +118,7 @@ def fasta_records(path: Path) -> dict[str, str]:
     return records
 
 
-def sequence_summary(records: dict[str, str]) -> dict[str, int]:
+def sequence_summary(records: Mapping[str, str]) -> dict[str, int]:
     return {
         "scaffolds": len(records),
         "total_bases": sum(map(len, records.values())),

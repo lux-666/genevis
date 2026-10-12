@@ -40,6 +40,7 @@ from app.stages.base_polish.state import read_base_polish_stage_output as output
 from app.stages.base_polish.state import update_base_polish_stage_output as update
 from app.stages.base_polish.validation import compare_outputs, load_comparison
 from app.stages.finishing.advisor import loop, work_parts
+from app.stages.finishing.read_inputs import write_normalized_fasta
 from app.stages.finishing.review import approved_proposal
 from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
@@ -230,12 +231,7 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
         )
         work.mkdir(parents=True, exist_ok=True)
         normalized = work / "hifi.fasta"
-        with normalized.open("w", encoding="ascii") as handle:
-            for index, member in enumerate(members):
-                for ordinal, (_, sequence) in enumerate(
-                    read_sequences(Path(member.path), member.format)
-                ):
-                    handle.write(f">member_{index}_read_{ordinal}\n{sequence}\n")
+        write_normalized_fasta(normalized, members)
         verify_input_dependencies(state, dependencies)
         normalized_artifact = _publish(
             state,
