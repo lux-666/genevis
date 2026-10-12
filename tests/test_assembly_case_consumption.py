@@ -684,12 +684,12 @@ def test_freeze_does_not_copy_or_require_case_directory_and_live_reads_refresh(
     }
     assert not (paths.control_dir / "assembly_knowledge.json").exists()
     assert validate_frozen_inputs(paths).run_config.assembly.case_source == str(source)
-    from app.entrypoints.run import _stage_seeds_from_run_config
+    from app.control.stage_seeds import stage_seeds_from_run_config
 
     state = {
         "data_dir": str(paths.run_dir),
         "session_id": paths.session_id,
-        "stage_seeds": _stage_seeds_from_run_config(
+        "stage_seeds": stage_seeds_from_run_config(
             bundle.run_config, shared_parameters=None
         ),
     }

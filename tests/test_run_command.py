@@ -119,9 +119,7 @@ def _prepared_inputs(
         ],
     }
     if "assembly_review" in stages:
-        payload["assembly_review"] = {
-            "busco": _busco_config()
-        }
+        payload["assembly_review"] = {"busco": _busco_config()}
     return SimpleNamespace(
         manifest=SimpleNamespace(session_id=session_id),
         run_config=RunConfig.model_validate(payload),
@@ -318,11 +316,13 @@ class AttachedProgressTests(unittest.TestCase):
         state = {
             "workflow_steps": [
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-001-read_qc",
                     "stage": "read_qc",
                     "allow_local_execution": False,
@@ -364,6 +364,7 @@ class AttachedProgressTests(unittest.TestCase):
             "session_id": "s1",
             "workflow_steps": [
                 {
+                    **({"selected_method_names": []} if stage != "assembly" else {}),
                     "step_id": f"step-{index:03d}-{stage}",
                     "stage": stage,
                     "allow_local_execution": False,
@@ -414,11 +415,13 @@ class AttachedProgressTests(unittest.TestCase):
             "session_id": "s1",
             "workflow_steps": [
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-001-read_qc",
                     "stage": "read_qc",
                     "allow_local_execution": False,
@@ -1161,7 +1164,7 @@ class FrozenHelperTests(unittest.TestCase):
                 patch("app.entrypoints.run.Ledger"),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ),
                 patch("app.entrypoints.run.project_workflow_state"),
@@ -1345,7 +1348,7 @@ class FrozenHelperTests(unittest.TestCase):
                 ) as initial,
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ),
                 patch("app.entrypoints.run.project_workflow_state"),
@@ -1493,7 +1496,9 @@ class FrozenHelperTests(unittest.TestCase):
             }
             graph = Mock()
             graph.get_state.return_value = SimpleNamespace(values=terminal_state)
-            reconcile_target = run_entry.reconcile_canonical_terminal_checkpoint
+            reconcile_target = (
+                run_entry.terminal.reconcile_canonical_terminal_checkpoint
+            )
             with (
                 patch("app.entrypoints.run.Ledger") as ledger,
                 patch(
@@ -1502,11 +1507,11 @@ class FrozenHelperTests(unittest.TestCase):
                 ),
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.reconcile_canonical_terminal_checkpoint",
+                    "app.control.terminal.reconcile_canonical_terminal_checkpoint",
                     wraps=reconcile_target,
                 ) as reconcile,
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=run_entry.TerminalFinalizationError(
                         "canonical Ledger terminal stage conflicts with the checkpoint"
                     ),
@@ -1557,7 +1562,7 @@ class FrozenHelperTests(unittest.TestCase):
                 patch("app.entrypoints.run.Ledger") as ledger,
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ) as finalize,
             ):

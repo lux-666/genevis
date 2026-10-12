@@ -85,22 +85,24 @@ def test_completed_terminal_is_recorded_only_after_checkpoint_proof(tmp_path) ->
     assert terminals == [result.terminal_event]
 
 
-def test_legacy_workflow_step_without_roster_remains_terminal_compatible(
-    tmp_path,
-) -> None:
+def test_terminal_checkpoint_requires_frozen_inventory_roster(tmp_path) -> None:
     run_dir = v2_run_dir(tmp_path / "data", "s1")
-    Ledger(run_dir).create_session("s1", "control/manifest.yaml")
+    ledger = Ledger(run_dir)
+    ledger.create_session("s1", "control/manifest.yaml")
     state = _completed_state(run_dir)
     state["workflow_steps"][0].pop("selected_method_names")
-    result = finalize_authoritative_terminal(
-        _TerminalGraph(state),
-        {"configurable": {"thread_id": "s1"}},
-        state,
-        "s1",
-        run_dir,
-        "memory",
-    )
-    assert result.terminal_event["summary"]["outcome"] == "completed"
+    with pytest.raises(
+        TerminalFinalizationError, match="checkpoint could not be verified"
+    ):
+        finalize_authoritative_terminal(
+            _TerminalGraph(state),
+            {"configurable": {"thread_id": "s1"}},
+            state,
+            "s1",
+            run_dir,
+            "memory",
+        )
+    assert ledger.read_canonical_terminal("s1") is None
 
 
 def test_failure_update_that_raises_after_commit_is_reconciled(tmp_path) -> None:

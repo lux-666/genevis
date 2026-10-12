@@ -1,4 +1,4 @@
-"""Lifecycle helpers for inspecting and resuming human review gates."""
+"""Prove, settle, and persist authoritative workflow terminal outcomes."""
 
 from __future__ import annotations
 

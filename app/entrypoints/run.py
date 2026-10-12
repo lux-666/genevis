@@ -24,16 +24,15 @@ import yaml
 from langchain_core.runnables import RunnableConfig
 
 from app.config import default_data_root
+from app.control import terminal
 from app.control.projections import (
     ProgressProjectionInput,
     ProjectionBoundary,
     project_workflow_state,
 )
-from app.control.terminal import (
-    TerminalFinalizationError,
-    finalize_authoritative_terminal,
-    reconcile_canonical_terminal_checkpoint,
-)
+from app.control.session import SessionExecutionError, invoke_session_graph
+from app.control.stage_seeds import stage_seeds_from_run_config
+from app.control.terminal import TerminalFinalizationError
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.entrypoints.environment import (
     load_dotenv_without_override,
@@ -43,18 +42,9 @@ from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
     CheckpointerBackend,
 )
-from app.review.gates import registered_review_stages
-from app.schemas.run_config import (
-    AssemblyRunConfig,
-    RunConfig,
-)
-from app.schemas.shared_parameters import SharedParameters
 from app.schemas.state import (
-    StageOutputs,
     TopLevelState,
     initial_state,
-    validate_stage_outputs,
-    validate_top_level_state,
 )
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
@@ -62,170 +52,6 @@ from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
     from app.storage.frozen_inputs import FrozenExecutionLease, FrozenInputBundle
-
-
-def _build_assembly_selection(
-    *,
-    assembly: AssemblyRunConfig,
-    shared_parameters: SharedParameters | dict[str, Any] | None,
-    shared_platform: Any = None,
-) -> None:
-    """Keep the compatibility seam explicitly non-authoritative.
-
-    RunConfig cannot carry an Assembly method, so entrypoint projection must
-    never manufacture an ``AssemblySelection``.  The unused arguments keep old
-    internal callers source-compatible while durable drafts migrate.
-    """
-
-    del assembly, shared_parameters, shared_platform
-    return None
-
-
-def _stage_seeds_from_run_config(
-    run_config: RunConfig,
-    *,
-    shared_parameters: SharedParameters | dict[str, Any] | None,
-    dependency_resolver: Any | None = None,
-    species_name: str | None = None,
-) -> StageOutputs:
-    """Project shared stage configuration without occurrence-local consent.
-
-    ``allow_local_execution`` belongs to one workflow occurrence and is applied
-    only when that occurrence is entered.  Keeping it out of these immutable
-    per-stage seeds prevents one locally authorized occurrence from granting
-    process execution to another occurrence of the same stage.
-    """
-
-    requested = set(run_config.requested_stage_names())
-    seeds: StageOutputs = {}
-
-    if (
-        "read_qc" in requested
-        and run_config.read_qc
-        and run_config.read_qc.length_filter
-    ):
-        filter_config = run_config.read_qc.length_filter
-        filter_request = filter_config.model_dump(mode="json")
-        filter_request["method"] = filter_config.selected_method()
-        seeds["read_qc"] = {
-            # Method identity is an internal fixed-stage projection. RunConfig
-            # carries only approval plus thresholds.
-            "length_filter_request": filter_request
-        }
-
-    if (
-        "genome_survey" in requested
-        and run_config.genome_survey
-        and run_config.genome_survey.survey_parameters
-    ):
-        survey_parameters = run_config.genome_survey.survey_parameters.model_dump(
-            exclude_none=True
-        )
-        species_facts = (
-            run_config.shared_parameters.species_facts
-            if run_config.shared_parameters is not None
-            else None
-        )
-        survey_parameters["ploidy"] = (
-            species_facts.ploidy
-            if species_facts is not None and species_facts.ploidy is not None
-            else 2
-        )
-        seeds["genome_survey"] = {"survey_parameters": survey_parameters}
-
-    if "assembly" in requested and run_config.assembly:
-        assembly_seed: dict[str, Any] = {}
-        for key in (
-            "case_source",
-            "threads",
-            "hifi_reads_ref",
-            "hic_reads_ref",
-            "target_level",
-            "assembly_route",
-            "method_route_advisor",
-            "parameter_advisor",
-        ):
-            value = getattr(run_config.assembly, key)
-            if value is not None:
-                assembly_seed[key] = value
-        if assembly_seed:
-            seeds["assembly"] = assembly_seed
-
-    if "assembly_dedup" in requested and run_config.assembly_dedup:
-        seeds["assembly_dedup"] = run_config.assembly_dedup.model_dump(mode="json")
-
-    if "assembly_review" in requested:
-        review_seed: dict[str, Any] = {}
-        if run_config.assembly_review and run_config.assembly_review.quast:
-            review_seed["quast_parameters"] = (
-                run_config.assembly_review.quast.model_dump()
-            )
-        if dependency_resolver is None:
-            raise ValueError(
-                "assembly_review seed requires the frozen database contract"
-            )
-        from app.execution.database_resolution import validate_review_databases
-
-        review_seed.update(
-            validate_review_databases(
-                run_config,
-                dependency_resolver,
-                species_name=species_name,
-            )
-        )
-        seeds["assembly_review"] = review_seed
-
-    if "hic_scaffolding" in requested and run_config.hic_scaffolding:
-        hic_seed: dict[str, Any] = {}
-        hic_seed["parameter_advisor"] = run_config.hic_scaffolding.parameter_advisor
-        if run_config.hic_scaffolding.autohic_parameters:
-            hic_seed["autohic_parameters"] = (
-                run_config.hic_scaffolding.autohic_parameters.model_dump(
-                    exclude_none=True
-                )
-            )
-        hic_seed["parameter_retry_policy"] = {
-            "retry_on_execution_failure": (
-                run_config.hic_scaffolding.retry_on_execution_failure
-            ),
-            "max_execution_retries": run_config.hic_scaffolding.max_execution_retries,
-            "max_review_retries": run_config.hic_scaffolding.max_review_retries,
-        }
-        seeds["hic_scaffolding"] = hic_seed
-
-    from app.schemas.run_config import (
-        BasePolishRunConfig,
-        GapCloserRunConfig,
-        T2TRunConfig,
-    )
-
-    for stage, config_type in (
-        ("t2t", T2TRunConfig),
-        ("gapcloser", GapCloserRunConfig),
-        ("base_polish", BasePolishRunConfig),
-    ):
-        if stage in requested:
-            config = getattr(run_config, stage) or config_type()
-            seeds[stage] = config.model_dump(mode="json", exclude_none=True)
-            if (
-                stage == "t2t"
-                and config.recommendation_mode == "advisor"
-                and "mode" not in seeds[stage]
-            ):
-                seeds[stage]["mode"] = "auto_patch"
-
-    for review_stage in registered_review_stages():
-        if review_stage not in requested:
-            continue
-        stage_seed = dict(seeds.get(review_stage) or {})
-        stage_seed["review_policy"] = {
-            "max_blocked_seconds": (
-                run_config.review_policy.effective_max_blocked_seconds(review_stage)
-            )
-        }
-        seeds[review_stage] = stage_seed
-
-    return validate_stage_outputs(seeds)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -621,7 +447,8 @@ def _execute_verified_frozen_session(
     run_config = bundle.run_config
     run_dir = str(paths.run_dir)
     manifest_ref = paths.to_ref(paths.input_manifest_path)
-    Ledger(run_dir).create_session(session_id, manifest_ref)
+    ledger = Ledger(run_dir)
+    ledger.create_session(session_id, manifest_ref)
 
     workflow_steps = workflow_steps_from_run_config(run_config)
     shared_parameters = (
@@ -637,7 +464,7 @@ def _execute_verified_frozen_session(
 
         declarations = getattr(bundle, "declarations", None)
         manifest = getattr(declarations, "manifest", None)
-        stage_seeds = _stage_seeds_from_run_config(
+        stage_seeds = stage_seeds_from_run_config(
             run_config,
             shared_parameters=shared_parameters,
             dependency_resolver=dependency_resolver,
@@ -670,142 +497,43 @@ def _execute_verified_frozen_session(
         projection_boundary=projection_boundary,
     )
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
-    resumed_from_blocked_checkpoint = False
     try:
-        result: TopLevelState | None = None
-        if resume_checkpoint:
-            get_state = getattr(graph, "get_state", None)
-            if callable(get_state):
-                checkpoint = get_state(config)
-                checkpoint_values = getattr(checkpoint, "values", None)
-                terminal_read = Ledger(run_dir).read_canonical_terminal(session_id)
-                if terminal_read is not None:
-                    if not isinstance(checkpoint_values, dict):
-                        raise TerminalFinalizationError(
-                            "canonical Ledger terminal has no resumable checkpoint"
-                        )
-                    checkpoint_state = validate_top_level_state(checkpoint_values)
-                    reconcile_canonical_terminal_checkpoint(
-                        checkpoint_state,
-                        terminal_read["canonical"],
-                        session_id=session_id,
-                    )
-                    result = checkpoint_state
-                elif isinstance(checkpoint_values, dict) and (
-                    checkpoint_values.get("session_id") == session_id
-                ):
-                    checkpoint_supervision = checkpoint_values.get("supervision_state")
-                    if checkpoint_supervision in {
-                        "blocked_human",
-                        "completed",
-                        "failed_terminal",
-                    }:
-                        result = validate_top_level_state(checkpoint_values)
-                        resumed_from_blocked_checkpoint = (
-                            checkpoint_supervision == "blocked_human"
-                        )
-        if result is None:
-            result = validate_top_level_state(
-                graph.invoke(None if resume_checkpoint else state, config=config)
-            )
-    except Exception as exc:
-        # Prefer the latest checkpoint because the in-memory seed may be several
-        # stages behind the node that raised. A proven terminal checkpoint wins
-        # over the observer/invoke exception and must never be rewritten failed.
-        latest_state = dict(state)
-        try:
-            snapshot = graph.get_state(config)
-            snapshot_values = getattr(snapshot, "values", None)
-            if isinstance(snapshot_values, dict):
-                latest_state.update(snapshot_values)
-        except Exception:
-            pass
-        error = f"{type(exc).__name__}: {exc}"
-        canonical_terminal = Ledger(run_dir).read_canonical_terminal(session_id)
-        latest_supervision = latest_state.get("supervision_state")
-        if latest_supervision in {"completed", "failed_terminal"}:
-            try:
-                finalized = finalize_authoritative_terminal(
-                    graph,
-                    config,
-                    latest_state,
-                    session_id,
-                    run_dir,
-                    backend,
-                )
-            except TerminalFinalizationError as terminal_exc:
-                print(
-                    "error: terminal checkpoint could not be reconciled after "
-                    f"invoke raised: {terminal_exc}",
-                    file=sys.stderr,
-                )
-                return _return_with_projection_warnings(projection_boundary)
-            result = finalized.state
-            project_workflow_state(
-                projection_boundary,
-                result,
-                data_dir=run_dir,
-                session_id=session_id,
-            )
-            _print_projection_warnings(projection_boundary)
-            if finalized.compaction_warning:
-                print(
-                    "warning: terminal checkpoint compaction skipped: "
-                    f"{finalized.compaction_warning}",
-                    file=sys.stderr,
-                )
-            print(
-                "warning: workflow invoke raised after a terminal checkpoint; "
-                f"preserving {latest_supervision}: {error}",
-                file=sys.stderr,
-            )
-            return 0 if latest_supervision == "completed" else 1
-        if canonical_terminal is not None:
-            print(
-                "error: canonical Ledger terminal conflicts with a nonterminal "
-                f"checkpoint after invoke raised: {error}",
-                file=sys.stderr,
-            )
-            return _return_with_projection_warnings(projection_boundary)
-        failure_result = {
-            **latest_state,
-            "session_id": session_id,
-            "data_dir": run_dir,
-            "input_manifest_ref": manifest_ref,
-            "supervision_state": "failed_terminal",
-            "last_error": error,
-        }
-        try:
-            finalized = finalize_authoritative_terminal(
-                graph,
-                config,
-                failure_result,
-                session_id,
-                run_dir,
-                backend,
-                normalize_failure=True,
-            )
-        except TerminalFinalizationError as terminal_exc:
-            print(
-                f"error: failed to persist terminal failure checkpoint: {terminal_exc}",
-                file=sys.stderr,
-            )
-            return _return_with_projection_warnings(projection_boundary)
+        invocation = invoke_session_graph(
+            graph,
+            config,
+            state,
+            ledger=ledger,
+            resume_checkpoint=resume_checkpoint,
+            checkpointer=backend,
+        )
+    except SessionExecutionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _return_with_projection_warnings(projection_boundary)
+    result = invocation.state
+    resumed_from_blocked_checkpoint = invocation.resumed_from_blocked_checkpoint
+    if invocation.invoke_error is not None:
         project_workflow_state(
-            projection_boundary,
-            finalized.state,
-            data_dir=run_dir,
-            session_id=session_id,
+            projection_boundary, result, data_dir=run_dir, session_id=session_id
         )
         _print_projection_warnings(projection_boundary)
-        if finalized.compaction_warning:
+        if invocation.compaction_warning:
             print(
                 "warning: terminal checkpoint compaction skipped: "
-                f"{finalized.compaction_warning}",
+                f"{invocation.compaction_warning}",
                 file=sys.stderr,
             )
-        print(f"error: workflow invoke failed: {error}", file=sys.stderr)
-        return 1
+        if invocation.preserved_terminal:
+            print(
+                "warning: workflow invoke raised after a terminal checkpoint; "
+                f"preserving {result['supervision_state']}: {invocation.invoke_error}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"error: workflow invoke failed: {invocation.invoke_error}",
+                file=sys.stderr,
+            )
+        return 0 if result["supervision_state"] == "completed" else 1
 
     supervision = result.get("supervision_state", "unknown")
 
@@ -882,7 +610,7 @@ def _execute_verified_frozen_session(
         "failed_terminal",
     }:
         try:
-            finalized = finalize_authoritative_terminal(
+            finalized = terminal.finalize_authoritative_terminal(
                 graph,
                 config,
                 dict(result),

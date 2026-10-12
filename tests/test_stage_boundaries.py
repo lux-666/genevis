@@ -60,3 +60,13 @@ def test_ledger_and_parameter_storage_do_not_import_business_owners():
                 assert not (node.module or "").startswith(
                     ("app.review", "app.llm", "app.stages", "app.entrypoints")
                 ), (relative, node.module)
+
+
+def test_session_control_has_no_terminal_presentation_dependency():
+    for relative in ("app/control/session.py", "app/control/stage_seeds.py"):
+        tree = ast.parse(Path(relative).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                assert not (node.module or "").startswith("app.entrypoints")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id != "print"

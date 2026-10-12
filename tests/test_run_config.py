@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.entrypoints.run import _stage_seeds_from_run_config
+from app.control.stage_seeds import stage_seeds_from_run_config
 from app.schemas.run_config import RunConfig, load_run_config
 from app.stages.assembly.state import ASSEMBLY_STAGE_CURSOR_ADAPTER
 from app.stages.hic_scaffolding.state import HIC_SCAFFOLDING_CURSOR_ADAPTER
@@ -193,7 +193,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.method_route_advisor, "deterministic_baseline")
         self.assertEqual(config.assembly.parameter_advisor, "advisor")
         ASSEMBLY_STAGE_CURSOR_ADAPTER.validate_python(
-            _stage_seeds_from_run_config(config, shared_parameters=None)["assembly"]
+            stage_seeds_from_run_config(config, shared_parameters=None)["assembly"]
         )
 
         with self.assertRaises(ValidationError) as ctx:
@@ -288,7 +288,7 @@ class RunConfigSchemaTests(unittest.TestCase):
             }
         )
 
-        seeds = _stage_seeds_from_run_config(config, shared_parameters=None)
+        seeds = stage_seeds_from_run_config(config, shared_parameters=None)
 
         self.assertEqual(seeds["genome_survey"]["survey_parameters"]["ploidy"], 4)
 
@@ -303,7 +303,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly is not None
         self.assertEqual(config.assembly.threads, 12)
         self.assertEqual(
-            _stage_seeds_from_run_config(config, shared_parameters=None)["assembly"][
+            stage_seeds_from_run_config(config, shared_parameters=None)["assembly"][
                 "threads"
             ],
             12,
@@ -407,7 +407,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert default.assembly_dedup is not None
         self.assertFalse(default.assembly_dedup.automatic_purge_approved)
         self.assertEqual(
-            _stage_seeds_from_run_config(approved, shared_parameters=None)[
+            stage_seeds_from_run_config(approved, shared_parameters=None)[
                 "assembly_dedup"
             ],
             {
@@ -702,7 +702,7 @@ class RunConfigSchemaTests(unittest.TestCase):
             config.hic_scaffolding.parameter_advisor,
             "deterministic_baseline",
         )
-        seed = _stage_seeds_from_run_config(config, shared_parameters=None)[
+        seed = stage_seeds_from_run_config(config, shared_parameters=None)[
             "hic_scaffolding"
         ]
         self.assertEqual(seed["parameter_advisor"], "deterministic_baseline")

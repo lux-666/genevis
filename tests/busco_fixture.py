@@ -167,6 +167,7 @@ def isolated_frozen_busco_resolver(parameters: dict[str, Any]):
         DependencySnapshot.model_validate(
             {
                 "captured_at": "2026-01-01T00:00:00+00:00",
+                "runtime": {"source_version": "fixture"},
                 "config": {"source_path": "/fixture/envs.yaml", "sha256": "0" * 64},
                 "default_environment": {"conda_env": "fixture"},
                 "databases": {

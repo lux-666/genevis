@@ -281,7 +281,7 @@ def test_complete_read_set_normalization_or_rejection(
 def test_review_corruption_rejected_before_decision(
     tmp_path: Path, corruption: str
 ) -> None:
-    from app.control.lifecycle import ResumeValidationError
+    from app.control.errors import ResumeValidationError
     from app.review.application import persist_review_intent
     from app.review.base import ResumeReviewRequest
     from app.stages.gapcloser.builder import build_stage
@@ -335,8 +335,8 @@ def _run_frozen_example(
 ) -> tuple[dict, Path]:
     import yaml
 
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _stage_seeds_from_run_config
     from app.graph.builder import build_graph
     from app.schemas.state import initial_state
     from app.storage.frozen_inputs import freeze_session_inputs
@@ -383,7 +383,7 @@ def _run_frozen_example(
         input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(paths.run_dir),
         workflow_steps=workflow_steps_from_run_config(frozen.run_config),
-        stage_seeds=_stage_seeds_from_run_config(
+        stage_seeds=stage_seeds_from_run_config(
             frozen.run_config, shared_parameters={}
         ),
     )
@@ -498,7 +498,7 @@ def test_real_tgs_gapcloser_hifi_smoke(tmp_path: Path) -> None:
     """Opt-in real binaries on a deterministic synthetic gap, not a real sample."""
     import argparse
 
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
     from app.entrypoints.run import _run_resume
 
     rng = random.Random(1847)
@@ -546,8 +546,8 @@ def test_real_tgs_gapcloser_hifi_smoke(tmp_path: Path) -> None:
 
 
 def test_frozen_closure_and_review_bind_to_gapcloser() -> None:
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _stage_seeds_from_run_config
     from app.execution.run_readiness import effective_method_closure, run_requires_llm
     from app.schemas.run_config import RunConfig
 
@@ -565,7 +565,7 @@ def test_frozen_closure_and_review_bind_to_gapcloser() -> None:
     }
     assert not run_requires_llm(config)
     assert (
-        _stage_seeds_from_run_config(config, shared_parameters={})["gapcloser"][
+        stage_seeds_from_run_config(config, shared_parameters={})["gapcloser"][
             "threads"
         ]
         == 3

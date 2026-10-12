@@ -59,7 +59,7 @@ def proposal(stage, index=0, action="run", selected=None):
 
 
 def test_default_finishing_seeds_use_advisor_and_t2t_patch_proposals():
-    from app.entrypoints.run import _stage_seeds_from_run_config
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.schemas.run_config import RunConfig
 
     config = RunConfig.model_validate(
@@ -70,7 +70,7 @@ def test_default_finishing_seeds_use_advisor_and_t2t_patch_proposals():
             ]
         }
     )
-    seeds = _stage_seeds_from_run_config(config, shared_parameters={})
+    seeds = stage_seeds_from_run_config(config, shared_parameters={})
     for stage in ("gapcloser", "t2t", "base_polish"):
         assert seeds[stage]["recommendation_mode"] == "advisor"
         assert seeds[stage]["max_attempts"] == 3
@@ -808,9 +808,10 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(
     import argparse
     import shlex
 
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _run_resume, _stage_seeds_from_run_config
+    from app.entrypoints.run import _run_resume
     from app.graph.builder import build_graph
     from app.schemas.state import initial_state
     from app.storage.frozen_inputs import freeze_session_inputs
@@ -902,7 +903,7 @@ def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(
         input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(paths.run_dir),
         workflow_steps=workflow_steps_from_run_config(frozen.run_config),
-        stage_seeds=_stage_seeds_from_run_config(
+        stage_seeds=stage_seeds_from_run_config(
             frozen.run_config, shared_parameters=shared
         ),
     )

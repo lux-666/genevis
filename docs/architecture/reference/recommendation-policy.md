@@ -35,9 +35,7 @@ Assembly `RecommendationPolicy` 拥有两个独立且冻结的顾问模式：
 
 ## 持久化顾问响应封装
 
-Assembly 路线和参数顾问写入共用 `schema_version`、`raw_response`、`validity`、`error`、`model_id`。`app/llm/json_response.py` 拥有公共传输结构的构造与校验，包括 `validity` 的 `parsed` 和 `invalid` 值，但不拥有特定版本的回放兼容性。
-
-schema-v1 路线恢复器将缺失或非字符串 `model_id` 规范化为 `null`；schema-v2 Assembly 参数恢复器拒绝非字符串 `model_id`。两者的 schema 专属恢复策略必须保持区别；两种 schema 的新写入均为字符串或 `null`。
+Assembly 路线和参数顾问写入共用 `schema_version`、`raw_response`、`validity`、`error`、`model_id` 与 `model_call`。`app/llm/json_response.py` 拥有公共传输结构的构造与严格校验，包括 `validity` 的 `parsed` 和 `invalid` 值。`model_id` 只接受字符串或 `null`，不把客户端类名当作模型身份；`model_call` 分别记录配置模型、服务返回模型和调用标识。恢复器校验所属契约的版本，恢复已保存的调用身份，不重新调用模型或改写来源。
 
 <a id="draft-and-freeze-boundary"></a>
 

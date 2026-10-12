@@ -415,9 +415,10 @@ def test_sqlite_close_and_cli_resume(tmp_path: Path, decision: str) -> None:
     import argparse
     import shlex
 
-    from app.control.lifecycle import inspect_session
+    from app.control.inspection import inspect_session
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _run_resume, _stage_seeds_from_run_config
+    from app.entrypoints.run import _run_resume
     from app.graph.builder import build_graph
     from app.schemas.state import initial_state
     from app.storage.frozen_inputs import freeze_session_inputs
@@ -494,7 +495,7 @@ def test_sqlite_close_and_cli_resume(tmp_path: Path, decision: str) -> None:
         input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(paths.run_dir),
         workflow_steps=workflow_steps_from_run_config(frozen.run_config),
-        stage_seeds=_stage_seeds_from_run_config(
+        stage_seeds=stage_seeds_from_run_config(
             frozen.run_config, shared_parameters={}
         ),
     )

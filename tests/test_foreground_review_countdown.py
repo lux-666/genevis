@@ -274,7 +274,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
 
     def test_zero_falls_back_to_manual_when_existing_resolver_fails(self):
         with patch(
-            "app.control.lifecycle.build_foreground_auto_resume_request",
+            "app.control.resume.build_foreground_auto_resume_request",
             side_effect=ResumeValidationError("missing binding"),
         ):
             final, execute, collect, waiter = self._run_loop(
@@ -294,7 +294,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
             "review_request_verification_error": "request hash mismatch",
         }
         with patch(
-            "app.control.lifecycle.build_foreground_auto_resume_request",
+            "app.control.resume.build_foreground_auto_resume_request",
             side_effect=ResumeValidationError("missing binding"),
         ):
             final, execute, collect, waiter = self._run_loop(
