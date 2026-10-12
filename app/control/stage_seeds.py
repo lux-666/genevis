@@ -74,7 +74,6 @@ def stage_seeds_from_run_config(
             "case_source",
             "threads",
             "hifi_reads_ref",
-            "hic_reads_ref",
             "hifiasm_inputs",
             "target_level",
             "assembly_route",

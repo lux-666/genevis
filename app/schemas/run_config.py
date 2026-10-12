@@ -107,7 +107,6 @@ _BUSCO_VERSION_RE = re.compile(r"_(odb\d+(?:\.\d+)?)$")
 _RUN_CONFIG_PATH_FIELDS = (
     ("assembly", "case_source"),
     ("assembly", "hifi_reads_ref"),
-    ("assembly", "hic_reads_ref"),
     ("t2t", "chromosome_list_ref"),
     ("t2t", "assembly_fasta_ref"),
 )
@@ -259,7 +258,6 @@ class AssemblyRunConfig(BaseModel):
 
     threads: int = Field(default=32, gt=0)
     hifi_reads_ref: str | None = None
-    hic_reads_ref: str | None = None
     hifiasm_inputs: HifiasmInputConfig | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
     assembly_route: AssemblyRoute = "auto"

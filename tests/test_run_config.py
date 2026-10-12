@@ -165,7 +165,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": [],
                 "assembly": {
                     "hifi_reads_ref": "hifi.fofn",
-                    "hic_reads_ref": "hic.fofn",
+                    "hifiasm_inputs": {"hic_reads_ref": ["hic.fofn"]},
                     "target_level": "near_t2t",
                     "assembly_route": "hifi",
                 },
@@ -174,9 +174,19 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         assert config.assembly is not None
         self.assertEqual(config.assembly.hifi_reads_ref, "hifi.fofn")
-        self.assertEqual(config.assembly.hic_reads_ref, "hic.fofn")
+        self.assertEqual(config.assembly.hifiasm_inputs.hic_reads_ref, ["hic.fofn"])
         self.assertEqual(config.assembly.target_level, "near_t2t")
         self.assertEqual(config.assembly.assembly_route, "hifi")
+
+    def test_top_level_hic_reads_ref_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "requested_stages": [],
+                    "assembly": {"hic_reads_ref": "hic.fofn"},
+                }
+            )
+        self.assertIn("hic_reads_ref", str(ctx.exception))
 
     def test_assembly_recommendation_policy_defaults_and_strategy_modes(self):
         config = RunConfig.model_validate(

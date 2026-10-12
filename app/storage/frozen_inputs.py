@@ -1107,19 +1107,21 @@ def _validate_assembly_input_contract(
             raise FrozenInputValidationError(
                 "assembly.hifi_reads_ref must select a registered HiFi member"
             )
-    if assembly.hic_reads_ref:
-        selected = str(Path(assembly.hic_reads_ref).resolve(strict=False))
-        matching_entries = [
-            asset
-            for asset in paired_entries
-            if selected
-            in {str(Path(path).resolve(strict=False)) for path in asset.paths}
-        ]
-        if len(matching_entries) != 1:
-            raise FrozenInputValidationError(
-                "assembly.hic_reads_ref must select exactly one registered "
-                "paired-read group"
-            )
+    hifiasm_inputs = assembly.hifiasm_inputs
+    if hifiasm_inputs and hifiasm_inputs.hic_reads_ref:
+        for ref in hifiasm_inputs.hic_reads_ref:
+            selected = str(Path(ref).resolve(strict=False))
+            matching_entries = [
+                asset
+                for asset in paired_entries
+                if selected
+                in {str(Path(path).resolve(strict=False)) for path in asset.paths}
+            ]
+            if len(matching_entries) != 1:
+                raise FrozenInputValidationError(
+                    "assembly.hifiasm_inputs.hic_reads_ref must select exactly "
+                    "one registered paired-read group"
+                )
     if manifest.genome_size_estimate is not None:
         return
     has_usable_survey_reads = any(
