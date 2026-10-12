@@ -11,7 +11,7 @@ from app.review.application import (
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import ArtifactRef, canonical_artifact_refs
 from app.stages.assembly_review import nodes as assembly_review_nodes
-from app.stages.t2t.nodes import T2TReviewEffectV1
+from app.stages.t2t.review import T2TReviewEffectV1
 
 
 def _ref(artifact_id: str, path_ref: str, sha256: str) -> ArtifactRef:

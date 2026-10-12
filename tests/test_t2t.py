@@ -29,22 +29,24 @@ from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.schemas.t2t import T2TThresholds
+from app.stages.t2t.algorithms import candidate_rows
 from app.stages.t2t.builder import build_baseline_stage, build_stage
 from app.stages.t2t.nodes import (
     _CANDIDATE_FIELDS,
-    T2TReviewEffectV1,
-    _candidate_rows,
     _materialize_t2t_patches,
     _t2t_adoption_decision_ref,
-    apply_t2t_review_application,
     build_t2t_candidates,
     commit_t2t,
-    prepare_t2t_review_application,
     scan_read_telomeres,
 )
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.execution import (
     T2TFrozenExecutionInputs,
+)
+from app.stages.t2t.review import (
+    T2TReviewEffectV1,
+    apply_t2t_review_application,
+    prepare_t2t_review_application,
 )
 from app.stages.t2t.state import update_t2t_stage_output
 from app.storage.artifacts import publish_artifact_record, read_artifact_records
@@ -142,7 +144,7 @@ class T2TStageTests(unittest.TestCase):
             )
 
     def test_nonselection_review_clears_candidate_ids_without_reordering_notes(self):
-        from app.stages.t2t.nodes import validate_t2t_intent_request
+        from app.stages.t2t.review import validate_t2t_intent_request
 
         request = ResumeReviewRequest(
             session_id="s1",
@@ -159,7 +161,7 @@ class T2TStageTests(unittest.TestCase):
         self.assertEqual(canonical.notes, ["first note", "second note"])
 
     def test_accept_review_canonicalizes_and_validates_candidate_ids(self):
-        from app.stages.t2t.nodes import validate_t2t_intent_request
+        from app.stages.t2t.review import validate_t2t_intent_request
 
         request = ResumeReviewRequest(
             session_id="s1",
@@ -179,7 +181,7 @@ class T2TStageTests(unittest.TestCase):
         }
 
         with patch(
-            "app.stages.t2t.nodes._selectable_t2t_candidate_ids",
+            "app.stages.t2t.review._selectable_t2t_candidate_ids",
             return_value={"chr1:left", "chr2:right"},
         ):
             canonical = validate_t2t_intent_request({}, request, request_record)
@@ -200,7 +202,7 @@ class T2TStageTests(unittest.TestCase):
                 )
 
         with patch(
-            "app.stages.t2t.nodes._selectable_t2t_candidate_ids",
+            "app.stages.t2t.review._selectable_t2t_candidate_ids",
             return_value={"chr1:left"},
         ):
             with self.assertRaisesRegex(ResumeValidationError, "current selectable"):
@@ -716,7 +718,7 @@ class T2TStageTests(unittest.TestCase):
                 "r1\t600\t0\t500\t+\tchr1\t10000\t0\t9500\t9500\t9500\t60\n",
                 encoding="utf-8",
             )
-            rows = _candidate_rows(
+            rows = candidate_rows(
                 paf,
                 {"chr1": {"left_has_signal": "false", "right_has_signal": "false"}},
                 {
@@ -1846,7 +1848,7 @@ class T2TStageTests(unittest.TestCase):
                 f"{read_id}\t104\t24\t104\t-\tchr1\t100\t0\t90\t80\t80\t60\n",
                 encoding="utf-8",
             )
-            rows = _candidate_rows(
+            rows = candidate_rows(
                 paf,
                 {
                     "chr1": {

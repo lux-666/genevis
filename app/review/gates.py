@@ -132,15 +132,6 @@ class ReviewGateDeclaration:
     def required_resume_fields_for(self, decision: str) -> tuple[str, ...]:
         return tuple(self.required_resume_fields_by_decision.get(decision, ()))
 
-    def declared_resume_fields(self) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(
-                field_name
-                for fields in self.required_resume_fields_by_decision.values()
-                for field_name in fields
-            )
-        )
-
     @staticmethod
     def _load_callable(path: str) -> Callable[..., Any]:
         module_name, function_name = path.rsplit(":", 1)
@@ -497,11 +488,11 @@ register_review_gate(
             "stop_pipeline",
         ),
         intent_metadata_model=("app.review.application:ForegroundReviewMetadataV1"),
-        validate_intent_request=("app.stages.t2t.nodes:validate_t2t_intent_request"),
+        validate_intent_request=("app.stages.t2t.review:validate_t2t_intent_request"),
         effect_kind="t2t.review_application.v1",
-        effect_model="app.stages.t2t.nodes:T2TReviewEffectV1",
-        prepare_application="app.stages.t2t.nodes:prepare_t2t_review_application",
-        apply_application="app.stages.t2t.nodes:apply_t2t_review_application",
+        effect_model="app.stages.t2t.review:T2TReviewEffectV1",
+        prepare_application="app.stages.t2t.review:prepare_t2t_review_application",
+        apply_application="app.stages.t2t.review:apply_t2t_review_application",
         prompt_adapter="t2t",
         template_preferred_decision="accept_selected_candidates",
         required_resume_fields_by_decision={
