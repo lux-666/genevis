@@ -990,20 +990,12 @@ class Ledger:
         self.paths.require_session_id(session_id)
         if not self.events_path.exists():
             return []
-        rows: list[dict[str, Any]] = []
         with self.events_path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise LedgerFormatError(
-                        f"invalid JSON in {self.events_path}:{line_number}"
-                    ) from exc
-                self._validate_row(row, line_number)
-                rows.append(row)
-        return rows
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            try:
+                return self._rows_from_locked_handle(handle)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def read_events(self, session_id: str) -> list[dict[str, Any]]:
         """Return bounded query projections while preserving the v2 envelope."""
