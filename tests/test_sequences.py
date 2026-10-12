@@ -54,3 +54,18 @@ def test_iupac_reverse_complement():
     )
     with pytest.raises(ValueError):
         reverse_complement("AX")
+
+
+def test_t2t_selected_reads_still_validate_unselected_duplicates(tmp_path):
+    from app.stages.t2t.nodes import _load_telomeric_read_sequences
+
+    reads = tmp_path / "telomeric.fa"
+    reads.write_text(">selected\nACGT\n>unselected\nTTTT\n")
+    assert _load_telomeric_read_sequences(
+        {"map-hifi": str(reads)}, selected_ids={"selected"}
+    ) == {"selected": "ACGT"}
+    reads.write_text(reads.read_text() + ">unselected\nAAAA\n")
+    with pytest.raises(ValueError, match="duplicate"):
+        _load_telomeric_read_sequences(
+            {"map-hifi": str(reads)}, selected_ids={"selected"}
+        )

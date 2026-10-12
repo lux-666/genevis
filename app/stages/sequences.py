@@ -119,11 +119,12 @@ def fasta_records(path: Path) -> dict[str, str]:
 
 
 def sequence_summary(records: Mapping[str, str]) -> dict[str, int]:
-    return {
-        "scaffolds": len(records),
-        "total_bases": sum(map(len, records.values())),
-        "n_bases": sum(seq.count("N") for seq in records.values()),
-        "internal_gaps": sum(
-            len(re.findall(r"N+", seq.strip("N"))) for seq in records.values()
-        ),
-    }
+    summary = {"scaffolds": 0, "total_bases": 0, "n_bases": 0, "internal_gaps": 0}
+    for sequence in records.values():
+        summary["scaffolds"] += 1
+        summary["total_bases"] += len(sequence)
+        summary["n_bases"] += sequence.count("N")
+        summary["internal_gaps"] += sum(
+            1 for _ in re.finditer(r"N+", sequence.strip("N"))
+        )
+    return summary

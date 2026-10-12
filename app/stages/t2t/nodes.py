@@ -1613,15 +1613,20 @@ def _looks_like_fasta(path: Path) -> bool:
 
 def _load_telomeric_read_sequences(
     fasta_refs: Mapping[str, str],
+    *,
+    selected_ids: set[str] | None = None,
 ) -> dict[str, str]:
     sequences: dict[str, str] = {}
+    seen: set[str] = set()
     for _preset, path_value in sorted(fasta_refs.items()):
         for read_id, sequence in read_sequences(Path(path_value)):
-            if read_id in sequences:
+            if read_id in seen:
                 raise ValueError(
                     f"duplicate telomeric read across preset groups: {read_id}"
                 )
-            sequences[read_id] = sequence
+            seen.add(read_id)
+            if selected_ids is None or read_id in selected_ids:
+                sequences[read_id] = sequence
     return sequences
 
 
@@ -1731,9 +1736,16 @@ def _materialize_t2t_patches(
     if not selected:
         return None
     telomeric_sequences = _load_telomeric_read_sequences(
-        out.get("telomeric_reads_fasta_refs") or {}
+        out.get("telomeric_reads_fasta_refs") or {},
+        selected_ids={row["read_id"] for row in selected},
     )
-    assembly_sequences = dict(read_sequences(Path(execution_inputs.input_assembly_ref)))
+    assembly_lengths: dict[str, int] = {}
+    for name, scaffold_sequence in read_sequences(
+        Path(execution_inputs.input_assembly_ref)
+    ):
+        if name in assembly_lengths:
+            raise ValueError(f"duplicate scaffold identifier: {name}")
+        assembly_lengths[name] = len(scaffold_sequence)
     patches: dict[str, dict[str, Any]] = {}
     records: list[dict[str, str]] = []
     error: str | None = None
@@ -1753,12 +1765,12 @@ def _materialize_t2t_patches(
         if not tail:
             error = f"empty_replacement_tail:{row['candidate_id']}"
             break
-        target_sequence = assembly_sequences.get(row["target"])
-        if target_sequence is None:
+        target_length = assembly_lengths.get(row["target"])
+        if target_length is None:
             error = f"patch_target_missing:{row['target']}"
             break
         cut = int(row["junction_coordinate"])
-        if cut < 0 or cut > len(target_sequence):
+        if cut < 0 or cut > target_length:
             error = f"invalid_junction_coordinate:{row['candidate_id']}:{cut}"
             break
         target_plan = patches.setdefault(row["target"], {})
@@ -1777,7 +1789,7 @@ def _materialize_t2t_patches(
                 "extension_length": str(len(tail)),
                 "target_cut_coordinate": str(cut),
                 "target_bases_removed": str(
-                    cut if row["target_end"] == "left" else len(target_sequence) - cut
+                    cut if row["target_end"] == "left" else target_length - cut
                 ),
                 "bases_added": str(len(tail)),
                 "supporting_reads": row["supporting_reads"],
