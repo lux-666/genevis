@@ -121,7 +121,7 @@ gene-agent bootstrap
 
 手动编辑同样有效。手工复制通用种子时，替换全部保留占位符，删除尚未配置的可选组，不保留半填数据库或包组。跳过 AutoHiC 时一并删除四个包项和 `methods.hic_scaffolding.candidate.autohic`。
 
-数据库安装完成后填写唯一 `databases:` 块，注册已安装 BUSCO lineage 别名和 NCBI 快照根。每运行 RunConfig 不重复数据库路径、版本、来源或 lineage 选择。Assembly Review 的 NCBI 拉丁学名由 manifest `user_metadata.target_species` 提供；系统从根下选择的冻结 NCBI 快照和主机安装注册表推导 lineage。RunConfig `assembly_review.busco.lineage` 若存在，仅作一致性断言。
+数据库安装完成后填写唯一 `databases:` 块，注册已安装 BUSCO lineage 别名和 NCBI 快照根。每运行 RunConfig 不重复数据库路径、版本、来源或 lineage 选择。Assembly Review 的 NCBI 拉丁学名由 manifest `user_metadata.target_species` 提供；系统从根下选择的冻结 NCBI 快照和主机安装注册表推导 lineage。RunConfig 的 BUSCO 设置只接受执行模式和线程数。
 
 NCBI 安装器从活动映射解析根目标，写入一个有名子目录。根尚不存在时，先人工添加预定根路径，再运行安装器，最后用 bootstrap 或 `--verify-only` 验证安装。
 

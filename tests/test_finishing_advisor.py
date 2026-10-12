@@ -735,8 +735,9 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
     fixture = AssemblyReviewStageTests()
     fixture._fake_quast_bin(str(tmp_path))
     fixture._fake_busco_bin(str(tmp_path))
-    lineage = tmp_path / "embryophyta_odb10"
-    lineage.mkdir()
+    from tests.busco_fixture import ensure_busco_lineage, isolated_frozen_busco_resolver
+
+    lineage = ensure_busco_lineage(tmp_path)
     state["current_stage"] = "assembly_review"
     state["entered_workflow_step_index"] = state["workflow_step_index"]
     state["stage_outputs"]["assembly_review"] = {
@@ -746,10 +747,11 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
         "quast_parameters": {"threads": 1},
         "busco_parameters": {
             "threads": 1,
-            "lineage_path": str(lineage),
+            "lineage_path": str(lineage.resolve()),
             "lineage_name": lineage.name,
             "lineage_version": "odb10",
             "lineage_source": "test_fixture",
+            "mode": "genome",
         },
     }
     if not execute_polish:
@@ -765,7 +767,20 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
         ]
         rejected = resolve_candidates(invalid)["stage_outputs"]["assembly_review"]
         assert rejected["status"] == "failed"
-    evaluated = build_review().invoke(state)
+    with (
+        patch(
+            "app.stages.assembly_review.method_application.busco."
+            "load_frozen_dependency_resolver",
+            return_value=isolated_frozen_busco_resolver(
+                state["stage_outputs"]["assembly_review"]["busco_parameters"]
+            ),
+        ),
+        patch(
+            "app.stages.assembly_review.statistics._related_species_reference_dir",
+            return_value=fixture._test_reference_dir(state),
+        ),
+    ):
+        evaluated = build_review().invoke(state)
     assert evaluated["active_interrupt"], evaluated["stage_outputs"]["assembly_review"]
     paths = SessionPaths.from_run_dir(state["data_dir"])
     comparison = final_comparison(
@@ -998,4 +1013,31 @@ def test_t2t_baseline_graph_rejects_advisor_before_motif_resolution(tmp_path):
     assert failed["supervision_state"] == "failed_terminal"
     assert (
         "single-pass execution requires deterministic_baseline" in failed["last_error"]
+    )
+
+
+def test_reentry_restores_exact_request_before_rendering(tmp_path):
+    from app.stages.finishing.advisor import recommend
+
+    state = state_for("gapcloser", tmp_path)
+    model = Model([AIMessage(content=json.dumps(proposal("gapcloser")))])
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        blocked = build_stage("gapcloser").invoke(state)
+    expected = loop(blocked, "gapcloser")["recommendation_ref"]
+    with (
+        patch.object(
+            FinishingRecommender,
+            "messages",
+            side_effect=AssertionError("must restore exact request"),
+        ),
+        patch.object(
+            FinishingRecommender,
+            "invoke",
+            side_effect=AssertionError("must restore response"),
+        ),
+    ):
+        replay = recommend(blocked, "gapcloser")
+    assert (
+        replay["stage_outputs"]["gapcloser"]["finishing"]["recommendation_ref"]
+        == expected
     )

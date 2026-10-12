@@ -315,7 +315,7 @@ class AssemblyDedupRunConfig(BaseModel):
 
 
 class BuscoRunParameters(BaseModel):
-    """BUSCO execution knobs plus a legacy lineage consistency assertion.
+    """BUSCO execution knobs; database identity is host-owned.
 
     Database paths, versions, and provenance are host-owned and therefore are
     rejected by this RunConfig model. The freeze boundary derives ``lineage``
@@ -324,16 +324,9 @@ class BuscoRunParameters(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    lineage: str | None = None
     mode: Literal["genome"] = "genome"
     threads: int = Field(default=8, gt=0)
 
-    @field_validator("lineage")
-    @classmethod
-    def _lineage_selector_must_be_non_empty(cls, value: str | None) -> str | None:
-        if value is not None and not value.strip():
-            raise ValueError("assembly_review.busco.lineage must be non-empty")
-        return value
 
 
 class QuastRunParameters(BaseModel):

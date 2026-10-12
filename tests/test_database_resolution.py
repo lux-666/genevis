@@ -185,9 +185,7 @@ def test_logical_lineage_resolves_to_complete_projection(tmp_path: Path) -> None
     _write_reference_files(ncbi)
     resolver = EnvResolver(config_data=_config(lineage, ncbi))
 
-    projection = resolve_busco_parameters(
-        _run_config(lineage=lineage.name, threads=6), resolver
-    )
+    projection = resolve_busco_parameters(_run_config(threads=6), resolver)
 
     assert projection["lineage_path"] == str(lineage.resolve())
     assert projection["lineage_name"] == lineage.name
@@ -320,31 +318,9 @@ def test_plant_taxonomy_requires_fixed_lineage_to_be_installed(
         )
 
 
-def test_explicit_run_config_lineage_conflicts_with_fixed_plant_lineage(
-    tmp_path: Path,
-) -> None:
-    lineage = ensure_busco_lineage(tmp_path / "busco")
-    ncbi = tmp_path / "ncbi"
-    ncbi.mkdir()
-    species_name = "Brassica rapa subsp. pekinensis"
-    _write_species_reference(
-        ncbi,
-        species_name=species_name,
-        lineage_name=None,
-        prefix="Viridiplantae",
-        taxonomy_lineage=f"Viridiplantae;Embryophyta;Brassica;{species_name}",
-    )
-    resolver = EnvResolver(config_data=_config(lineage, ncbi))
-
-    with pytest.raises(
-        DatabaseResolutionError,
-        match="assembly_review.busco.lineage conflicts with the species-derived",
-    ):
-        resolve_busco_parameters(
-            _run_config(lineage="metazoa_odb10"),
-            resolver,
-            species_name=species_name,
-        )
+def test_run_config_rejects_a_database_lineage_selector() -> None:
+    with pytest.raises(ValueError, match="Extra inputs"):
+        _run_config(lineage="metazoa_odb10")
 
 
 def test_species_name_selects_one_of_multiple_ncbi_references(tmp_path: Path) -> None:
@@ -442,9 +418,8 @@ def test_run_config_rejects_host_database_identity_fields(
     forbidden_field: str,
     tmp_path: Path,
 ) -> None:
-    lineage = ensure_busco_lineage(tmp_path / "busco")
     with pytest.raises(ValidationError):
-        _run_config(lineage=lineage.name, threads=4, **{forbidden_field: "host"})
+        _run_config(threads=4, **{forbidden_field: "host"})
 
 
 def test_database_paths_are_relative_to_env_config(tmp_path: Path) -> None:
@@ -514,3 +489,23 @@ def test_ncbi_snapshot_requires_one_same_prefix_four_file_set(tmp_path: Path) ->
 
     with pytest.raises(DatabaseResolutionError, match="four_file_set_invalid"):
         resolve_ncbi_reference_dir(resolver)
+
+
+def test_busco_stage_requires_frozen_database_even_with_complete_cursor(tmp_path):
+    from app.stages.assembly_review.method_application.busco import busco_parameters
+
+    lineage = ensure_busco_lineage(tmp_path)
+    parameters = {
+        "lineage_path": str(lineage.resolve()),
+        "lineage_name": lineage.name,
+        "lineage_version": "odb10",
+        "lineage_source": "test_fixture",
+        "threads": 1,
+        "mode": "genome",
+    }
+    values, error = busco_parameters(
+        {"data_dir": str(tmp_path / "runs" / "uncommitted")},
+        {"busco_parameters": parameters},
+    )
+    assert values == {}
+    assert error

@@ -217,7 +217,7 @@ BUSCO/NCBI 仅从冻结依赖 manifest 的主机数据库注册表解析。Revie
 
 BUSCO 先对选定验证快照应用确定性分类规则：精确目标 taxid 的完整 `*.ncbi.lineage`，或无精确目标时全部同属行的共同完整分类，包含 `Viridiplantae`/`Embryophyta` 时，必须选择已安装 `embryophyta_odb10`。lineage2 仅提供等级提示。不得从快照目录名、近缘物种 `Annotation BUSCO Lineage` 或主机默认推断分类；植物目标缺固定 lineage 时在冻结前阻塞。
 
-固定植物规则不适用时，从所选快照的近缘物种 `Annotation BUSCO Lineage` 映射，与主机注册表取交集，冻结前要求恰好一个兼容已安装 lineage。固定植物规则优先于更窄植物注释。快照创建/安装负责参考数据生成验证；用户无需检查行或选择 lineage。`assembly_review.busco.lineage` 不是公共选择入口；若 RunConfig 包含它，只作一致性断言，与物种推导不符则带字段路径失败。模板/TUI 不生成它。RunConfig 不拥有数据库路径、版本、来源；主机 `default_lineage` 不作为无法解析物种的后备。Review 可接受候选、采纳另行完成的 polish/purge 动作或停止；决策绑定当前请求和类型化候选引用。
+固定植物规则不适用时，从所选快照的近缘物种 `Annotation BUSCO Lineage` 映射，与主机注册表取交集，冻结前要求恰好一个兼容已安装 lineage。固定植物规则优先于更窄植物注释。快照创建/安装负责参考数据生成验证；用户无需检查行或选择 lineage。RunConfig 的 BUSCO 设置只包含执行模式和线程数，不接受 lineage 选择、数据库路径、版本或来源；主机 `default_lineage` 不作为无法解析物种的后备。Review 可接受候选、采纳另行完成的 polish/purge 动作或停止；决策绑定当前请求和类型化候选引用。
 
 NCBI 比较证据和统计验证解析精确相同的快照字节。依赖冻结记录每个已装子快照四文件联合身份。目标解析和稳定来源失败分类共享；首个有用层级证据选择与全层统计队列构建保持各自阶段契约。
 

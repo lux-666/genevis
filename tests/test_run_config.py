@@ -18,7 +18,7 @@ from app.stages.hic_scaffolding.state import HIC_SCAFFOLDING_CURSOR_ADAPTER
 def _busco_config(lineage: str = "embryophyta_odb10") -> dict[str, object]:
     """Return the only BUSCO fields a user RunConfig may provide."""
 
-    return {"lineage": lineage, "threads": 4}
+    return {"threads": 4}
 
 
 def _stage_requests(
@@ -552,7 +552,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                 "requested_stages": _local_stage_requests("assembly_review"),
                 "assembly_review": {
                     "busco": {
-                        "lineage": "embryophyta_odb10",
                         "threads": 16,
                     }
                 },
@@ -561,7 +560,7 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         assert cfg.assembly_review is not None
         assert cfg.assembly_review.busco is not None
-        self.assertEqual(cfg.assembly_review.busco.lineage, "embryophyta_odb10")
+        self.assertNotIn("lineage", cfg.assembly_review.busco.model_dump())
         self.assertEqual(cfg.assembly_review.busco.threads, 16)
 
     def test_requested_assembly_review_uses_host_default_without_busco_config(self):
@@ -573,6 +572,7 @@ class RunConfigSchemaTests(unittest.TestCase):
 
     def test_busco_rejects_host_database_identity_fields(self):
         for forbidden in (
+            "lineage",
             "lineage_path",
             "lineage_name",
             "lineage_version",

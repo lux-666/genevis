@@ -60,12 +60,11 @@ def _with_busco(root: Path, payload: dict[str, object]) -> dict[str, object]:
         for request in requests
     ):
         return payload
-    lineage = ensure_busco_lineage(root)
+    ensure_busco_lineage(root)
     return {
         **payload,
         "assembly_review": {
             "busco": {
-                "lineage": lineage.name,
                 "threads": 4,
             }
         },
@@ -74,18 +73,13 @@ def _with_busco(root: Path, payload: dict[str, object]) -> dict[str, object]:
 
 def _review_run_config(
     lineage: Path,
-    *,
-    lineage_selector: str | None = None,
     **busco_overrides: object,
 ) -> dict[str, object]:
-    selected_lineage = lineage_selector or lineage.name
     return {
         "requested_stages": [
             {"stage": "assembly_review", "allow_local_execution": False}
         ],
-        "assembly_review": {
-            "busco": {"lineage": selected_lineage, "threads": 4, **busco_overrides}
-        },
+        "assembly_review": {"busco": {"threads": 4, **busco_overrides}},
     }
 
 
@@ -668,7 +662,7 @@ class FrozenInputTests(unittest.TestCase):
             "missing_lengths": "odb10 lengths_cutoff must be a non-empty",
             "missing_ancestral": "eukaryota ancestral must be a non-empty",
             "missing_refseq": "eukaryota refseq_db.faa.gz must be a non-empty",
-            "declared_identity_mismatch": "conflicts with the species-derived lineage",
+            "declared_identity_mismatch": "lineage identity mismatch",
             "declared_version_mismatch": "lineage_version must match",
         }
         for kind, expected in cases.items():
@@ -676,7 +670,6 @@ class FrozenInputTests(unittest.TestCase):
                 root = Path(tmp)
                 paths, manifest, run_config, envs = self._fixture(root)
                 lineage = ensure_busco_lineage(root)
-                lineage_selector: str | None = None
                 overrides: dict[str, object] = {}
                 if kind == "empty_lineage":
                     for child in lineage.iterdir():
@@ -719,7 +712,12 @@ class FrozenInputTests(unittest.TestCase):
                 elif kind == "missing_refseq":
                     (lineage / "refseq_db.faa.gz").unlink()
                 elif kind == "declared_identity_mismatch":
-                    lineage_selector = "insecta_odb10"
+                    config_file = lineage / "dataset.cfg"
+                    config_file.write_text(
+                        config_file.read_text().replace(
+                            "embryophyta_odb10", "insecta_odb10"
+                        )
+                    )
                 elif kind == "declared_version_mismatch":
                     envs.write_text(
                         envs.read_text(encoding="utf-8").replace(
@@ -731,7 +729,6 @@ class FrozenInputTests(unittest.TestCase):
                     json.dumps(
                         _review_run_config(
                             lineage,
-                            lineage_selector=lineage_selector,
                             **overrides,
                         )
                     ),
@@ -773,9 +770,16 @@ class FrozenInputTests(unittest.TestCase):
                     run_config_draft=run_config,
                 )
 
-                self.assertEqual(
-                    prepared.run_config.assembly_review.busco.lineage,
-                    lineage_name,
+                self.assertNotIn(
+                    "lineage", prepared.run_config.assembly_review.busco.model_dump()
+                )
+                from app.schemas.run_config import validate_busco_lineage
+
+                validate_busco_lineage(
+                    lineage,
+                    lineage_name=lineage_name,
+                    lineage_version=lineage_name.split("_", 1)[1],
+                    lineage_source="test_fixture",
                 )
 
     def test_prepared_freeze_revalidates_mutation_before_identity(self) -> None:

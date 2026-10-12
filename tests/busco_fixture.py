@@ -11,18 +11,8 @@ _BUSCO_PROFILE_ID = "1001at9999"
 
 
 def busco_parameters(lineage_path: str | Path) -> dict[str, object]:
-    """Return the host-independent BUSCO RunConfig projection.
-
-    The database registry owns paths, versions, and provenance.  Tests pass a
-    path here only because they create the fixture on disk; the resulting
-    payload must contain the logical lineage selector and execution threads.
-    """
-
-    lineage_name = Path(lineage_path).name
-    return {
-        "lineage": lineage_name,
-        "threads": 4,
-    }
+    """Return BUSCO execution controls; lineage belongs to the host fixture."""
+    return {"threads": 4}
 
 
 def assembly_review_config(lineage_path: str | Path) -> dict[str, object]:
@@ -39,7 +29,7 @@ def assembly_review_selector_config(
     local database directory.
     """
 
-    return {"busco": {"lineage": lineage}}
+    return {"busco": {}}
 
 
 def ensure_busco_lineage(
@@ -164,3 +154,34 @@ def add_busco_config(
         **payload,
         "assembly_review": assembly_review_config(lineage_path),
     }
+
+
+def isolated_frozen_busco_resolver(parameters: dict[str, Any]):
+    """An explicit frozen registry double for tests of the stage process seam."""
+    from app.execution.dependency_snapshot import (
+        DependencySnapshot,
+        FrozenDependencyResolver,
+    )
+
+    return FrozenDependencyResolver(
+        DependencySnapshot.model_validate(
+            {
+                "captured_at": "2026-01-01T00:00:00+00:00",
+                "config": {"source_path": "/fixture/envs.yaml", "sha256": "0" * 64},
+                "default_environment": {"conda_env": "fixture"},
+                "databases": {
+                    "busco": {
+                        "default_lineage": parameters["lineage_name"],
+                        "lineages": {
+                            parameters["lineage_name"]: {
+                                "path": parameters["lineage_path"],
+                                "version": parameters["lineage_version"],
+                                "source": parameters["lineage_source"],
+                            }
+                        },
+                    },
+                    "ncbi": {"reference_dir": "/fixture/ncbi"},
+                },
+            }
+        )
+    )

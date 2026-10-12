@@ -1,7 +1,6 @@
 """Resolve and validate host-owned databases at the freeze/execution boundary.
 
-``RunConfig`` may retain a legacy logical BUSCO lineage assertion, but the
-manifest scientific name selects the lineage for new runs. This module is the
+The manifest scientific name selects the BUSCO lineage for runs. This module is the
 narrow adapter shared by readiness, freeze, and stage consumers. It accepts
 both the active and frozen dependency resolver interfaces and returns only the
 compact execution projection needed by BUSCO/NCBI.
@@ -67,8 +66,7 @@ def resolve_busco_parameters(
 ) -> dict[str, Any]:
     """Return a complete, validated BUSCO execution projection.
 
-    The manifest species selects one compatible host lineage. A legacy RunConfig
-    ``lineage`` may assert that identity but cannot override it. Filesystem paths,
+    The manifest species selects one compatible host lineage. Filesystem paths,
     version, and provenance come exclusively from the host registry.
     """
 
@@ -77,7 +75,7 @@ def resolve_busco_parameters(
     busco_registry = getattr(registry, "busco", None)
     if busco_registry is None:
         raise DatabaseResolutionError("databases.busco is not configured")
-    logical_name = request.lineage
+    logical_name: str | None = None
     if species_name is not None:
         from app.reference.ncbi import resolve_busco_lineage_for_species
 
@@ -95,11 +93,6 @@ def resolve_busco_parameters(
                 "input_manifest.user_metadata.target_species cannot resolve a "
                 f"unique installed BUSCO lineage: {exc}"
             ) from exc
-        if logical_name is not None and logical_name != derived_lineage:
-            raise DatabaseResolutionError(
-                "assembly_review.busco.lineage conflicts with the species-derived "
-                f"lineage: {logical_name!r} versus {derived_lineage!r}"
-            )
         logical_name = derived_lineage
     if logical_name is None:
         logical_name = str(getattr(busco_registry, "default_lineage", "")).strip()
