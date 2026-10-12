@@ -72,12 +72,6 @@
 - 契约所有者：[Assembly Dedup](stage-contracts.md#5-assembly-dedup)。
 - 关闭条件：使用真实工具验证隔离阶段，包括分离进程恢复，并在声称代表性样本验收前保留验收证据。
 
-<a id="run-level-replay-capability-is-not-declared"></a>
-
-### 运行级回放能力尚未声明
-
-运行级回放摘要留作[运行数据契约](data-contract.md#3-replay-terminology)中的规划项，尚未实现，不属于当前收口门禁。当前执行恢复继续核验冻结控制输入、机器依赖与每次尝试依赖；不存在可替代这些证据的单一 `control/run.json` 声明。
-
 <a id="five-stage-real-tool-contig-acceptance-is-not-automated"></a>
 
 ### 五阶段真实工具 contig 验收尚未自动化
