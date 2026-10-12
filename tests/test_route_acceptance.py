@@ -10,9 +10,9 @@ import yaml
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.diagnostics import route_acceptance as audit
 from app.schemas.manifest import InputManifest
-from app.schemas.run_config import load_run_config
+from app.schemas.run_config import RunConfig, load_run_config
 from app.storage.ledger import Ledger
-from app.workflow import recommended_workflow_template
+from app.workflow import ASSEMBLY_HANDOFF_PRODUCER_STAGES, recommended_workflow_template
 from tests.data_v2 import v2_run_dir
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +43,6 @@ def test_slice_profiles_use_exact_frozen_plan(
         ROOT / f"docs/examples/{template}_run_config.template.json"
     )
     assert config.requested_stage_names() == stages
-    assert audit.ROUTE_STAGES[route] == stages
     monkeypatch.setattr(
         audit,
         "validate_frozen_inputs",
@@ -52,12 +51,10 @@ def test_slice_profiles_use_exact_frozen_plan(
     monkeypatch.setattr(
         audit, "inspect_session", lambda *args: {"supervision_state": "blocked_human"}
     )
-    report = audit.audit_route(run, route=route)
-    assert report["route"] == route
+    report = audit.audit_route(run)
+    assert report["workflow_steps"] == workflow_steps_from_run_config(config)
     assert report["status"] == "incomplete_execution_coverage"
     assert [r["stage"] for r in report["occurrences"]] == ["inventory", *stages]
-    with pytest.raises(ValueError, match="route"):
-        audit.audit_route(run, route="hic" if route != "hic" else "t2t")
 
 
 def test_slice_manifests_register_existing_source():
@@ -82,8 +79,8 @@ def test_hic_resume_comparison_fails_closed():
     from copy import deepcopy
 
     before = {
-        "schema_version": 2,
-        "route": "hic",
+        "schema_version": 3,
+        "workflow_steps": [{"stage": "inventory"}, {"stage": "hic_scaffolding"}],
         "session_id": "hic-a",
         "frozen_input_hashes": {
             key: "0" * 64
@@ -188,8 +185,11 @@ def test_hic_comparison_uses_actual_collected_execution_across_adoption(
             methods, gaps = audit.execution_coverage(occurrence_state, rows, records)
             assert not gaps
             return {
-                "schema_version": 2,
-                "route": "hic",
+                "schema_version": 3,
+                "workflow_steps": [
+                    {"stage": "inventory"},
+                    {"stage": "hic_scaffolding"},
+                ],
                 "session_id": "s1",
                 "frozen_input_hashes": {"fixture": "0" * 64},
                 "session_state": session_state,
@@ -377,18 +377,77 @@ def test_unfinished_route_reports_every_occurrence_without_writing(
     assert after == before
 
 
-def test_non_complete_plan_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [],
+        ["read_qc"],
+        ["genome_survey"],
+        ["assembly"],
+        ["read_qc", "genome_survey"],
+        ["read_qc", "read_qc", "assembly"],
+    ],
+)
+@pytest.mark.parametrize("completed", [False, True])
+def test_audit_uses_literal_config_without_requiring_assembly_for_read_stages(
+    tmp_path, monkeypatch, stages, completed
+):
     run = v2_run_dir(tmp_path, "audit")
-    config = load_run_config(ROOT / "docs/examples/contig_run_config.template.json")
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": stage, "allow_local_execution": True} for stage in stages
+            ]
+        }
+    )
+    steps = workflow_steps_from_run_config(config)
+    rows = []
+    for step in steps:
+        if completed:
+            rows.append(
+                {
+                    "event_type": "stage_completed",
+                    "stage": step["stage"],
+                    "workflow_step_id": step["step_id"],
+                }
+            )
+            if step["stage"] == "assembly":
+                rows.append(
+                    {
+                        "event_type": "resource_delivered",
+                        "stage": "assembly",
+                        "workflow_step_id": step["step_id"],
+                    }
+                )
     monkeypatch.setattr(
         audit,
         "validate_frozen_inputs",
         lambda _: SimpleNamespace(run_config=config, file_sha256=lambda key: "0" * 64),
     )
-    with pytest.raises(ValueError, match="not the complete"):
-        audit.audit_route(run)
+    monkeypatch.setattr(
+        audit,
+        "inspect_session",
+        lambda *args: {
+            "supervision_state": "completed" if completed else "blocked_human",
+            "final_assembly": {"path": "final.fa"} if "assembly" in stages else None,
+        },
+    )
+    monkeypatch.setattr(Ledger, "read_event_rows", lambda *args: rows)
+    monkeypatch.setattr(audit, "read_artifact_records", lambda *args: [])
+    monkeypatch.setattr(audit, "execution_coverage", lambda *args: ([], []))
+    monkeypatch.setattr(
+        audit,
+        "verify_delivery",
+        lambda *args: {"primary_output_ref": {"sha256": "0" * 64}},
+    )
+    report = audit.audit_route(run)
+    assert report["workflow_steps"] == steps
+    assert [row["stage"] for row in report["occurrences"]] == ["inventory", *stages]
+    assert len({row["step_id"] for row in report["occurrences"]}) == len(steps)
+    assert report["status"] == (
+        "complete_execution_coverage" if completed else "incomplete_execution_coverage"
+    )
+    assert report["quality_evaluation_status"] == "not_evaluated"
 
 
 def test_cli_invalid_evidence_is_json_and_nonzero(
@@ -418,7 +477,7 @@ def test_frozen_gapcloser_slice_checks_registered_source_and_skip(tmp_path):
         }
 
     before = evidence_bytes()
-    report = audit.audit_route(run, route="gapcloser")
+    report = audit.audit_route(run)
     assert report["status"] == "incomplete_execution_coverage"
     assert report["quality_evaluation_status"] == "not_evaluated"
     assert report["final_assembly"]
@@ -432,7 +491,70 @@ def test_frozen_gapcloser_slice_checks_registered_source_and_skip(tmp_path):
     assert evidence_bytes() == before
     Path(source["path"]).write_text(">changed\nACGT\n")
     with pytest.raises(ValueError):
-        audit.audit_route(run, route="gapcloser")
+        audit.audit_route(run)
+
+
+def test_frozen_qc_graph_audits_without_an_assembly(tmp_path, monkeypatch, capsys):
+    from app.graph.builder import build_graph
+    from app.schemas.state import initial_state
+    from tests.test_graph_routing import _freeze_verified_inputs
+
+    run = v2_run_dir(tmp_path, "qc-audit")
+    reads = tmp_path / "reads.fa"
+    reads.write_text(">r1\nACGT\n")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "qc-audit",
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(reads)],
+                        "platform": "ont",
+                        "format": "fasta",
+                    }
+                ],
+            }
+        )
+    )
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "read_qc", "allow_local_execution": False},
+                {"stage": "read_qc", "allow_local_execution": False},
+            ]
+        }
+    )
+    paths, frozen = _freeze_verified_inputs(run, manifest, config)
+    Ledger(run).create_session(
+        paths.session_id, paths.to_ref(paths.input_manifest_path)
+    )
+    state = initial_state(
+        session_id=paths.session_id,
+        input_manifest_ref=paths.to_ref(paths.input_manifest_path),
+        data_dir=str(run),
+        workflow_steps=workflow_steps_from_run_config(config),
+    )
+    graph = build_graph(backend="sqlite", data_dir=str(run), verified_inputs=frozen)
+    try:
+        result = graph.invoke(state, {"configurable": {"thread_id": paths.session_id}})
+    finally:
+        graph.checkpointer.conn.close()
+    assert result["supervision_state"] == "completed"
+    Ledger(run).record_session_terminal(paths.session_id, outcome="completed")
+    report = audit.audit_route(run)
+    assert report["session_state"] == "completed"
+    assert report["final_assembly"] is None
+    # Tools were not authorized: successful workflow settlement is not coverage.
+    assert report["status"] == "incomplete_execution_coverage"
+    assert [row["outcome"] for row in report["occurrences"]] == ["stage_completed"] * 3
+    assert any("step-001-read_qc" in gap for gap in report["coverage_gaps"])
+    assert any("step-002-read_qc" in gap for gap in report["coverage_gaps"])
+    monkeypatch.setattr("sys.argv", ["route_acceptance", "--run-dir", str(run)])
+    capsys.readouterr()
+    assert audit.main() == 2
+    assert json.loads(capsys.readouterr().out) == report
 
 
 @pytest.fixture
@@ -440,7 +562,7 @@ def completed_slice(tmp_path, monkeypatch):
     """Stub only evidence readers to test scoped orchestration and fault policy."""
     from app.schemas.artifacts import ArtifactRef
 
-    def setup(route):
+    def setup(route, *, stages=None):
         run = v2_run_dir(tmp_path, "audit")
         stem = {"review": "assembly_review", "base-polish": "base_polish"}.get(
             route, route
@@ -448,28 +570,40 @@ def completed_slice(tmp_path, monkeypatch):
         config = load_run_config(
             ROOT / f"docs/examples/{stem}_run_config.template.json"
         )
+        if stages is not None:
+            config = RunConfig.model_validate(
+                {
+                    **config.model_dump(mode="json"),
+                    "requested_stages": [
+                        {"stage": stage, "allow_local_execution": True}
+                        for stage in stages
+                    ],
+                }
+            )
         steps = workflow_steps_from_run_config(config)
         rows, deliveries, methods = [], {}, {}
+        previous_primary = None
         for index, step in enumerate(steps):
-            rows.extend(
-                [
-                    {
-                        "event_type": "stage_completed",
-                        "stage": step["stage"],
-                        "workflow_step_id": step["step_id"],
-                    },
+            if step["stage"] in ASSEMBLY_HANDOFF_PRODUCER_STAGES:
+                rows.append(
                     {
                         "event_type": "resource_delivered",
                         "stage": step["stage"],
                         "workflow_step_id": step["step_id"],
-                    },
-                ]
+                    }
+                )
+                deliveries[step["step_id"]] = {
+                    "delivery_mode": "materialized",
+                    "candidate_id": "candidate",
+                    "primary_output_ref": {"producer": index},
+                }
+            rows.append(
+                {
+                    "event_type": "stage_completed",
+                    "stage": step["stage"],
+                    "workflow_step_id": step["step_id"],
+                }
             )
-            deliveries[step["step_id"]] = {
-                "delivery_mode": "materialized",
-                "candidate_id": "candidate",
-                "primary_output_ref": {"producer": index},
-            }
             names = step["selected_method_names"] if index else []
             methods[step["step_id"]] = [
                 {
@@ -479,13 +613,17 @@ def completed_slice(tmp_path, monkeypatch):
                             "success": True,
                             "collected": True,
                             "candidate_id": "candidate",
-                            "input_artifacts": [{"producer": index - 1}],
+                            "input_artifacts": [previous_primary]
+                            if previous_primary
+                            else [],
                             "evaluation_settings": {"threads": 1},
                         }
                     ],
                 }
                 for name in names
             ]
+            if step["step_id"] in deliveries:
+                previous_primary = deliveries[step["step_id"]]["primary_output_ref"]
         request_ref = ArtifactRef(
             artifact_id="fixture",
             path_ref="artifacts/request.json",
@@ -532,10 +670,101 @@ def completed_slice(tmp_path, monkeypatch):
 )
 def test_completed_scoped_audit_does_not_require_other_stages(completed_slice, route):
     run, *_ = completed_slice(route)
-    report = audit.audit_route(run, route=route)
+    report = audit.audit_route(run)
     assert report["status"] == "complete_execution_coverage"
     assert (report["quality_evaluation_status"] == "verified") == (
         route in {"review", "base-polish", "finishing"}
+    )
+
+
+@pytest.mark.parametrize(
+    "stages,paired",
+    [
+        (["read_qc", "base_polish", "assembly_review"], True),
+        (["base_polish", "read_qc", "assembly_review"], True),
+        (["base_polish", "assembly_review", "base_polish", "assembly_review"], True),
+        (["base_polish", "assembly_review", "assembly_review"], False),
+        (["base_polish", "assembly_dedup", "assembly_review"], False),
+    ],
+)
+def test_final_evaluation_follows_review_producer_binding(
+    completed_slice, monkeypatch, stages, paired
+):
+    run, steps, _, _, _, _, quality = completed_slice("base-polish", stages=stages)
+    calls = []
+    records = [
+        {"workflow_step_id": step["step_id"], "artifact_type": "base_polish.comparison"}
+        for step in steps
+        if step["stage"] == "base_polish"
+    ]
+    monkeypatch.setattr(audit, "read_artifact_records", lambda *args: records)
+
+    def evaluate(*args):
+        calls.append("evaluation")
+        return quality
+
+    def compare(*args):
+        assert args[1] == [
+            r
+            for r in records
+            if r["workflow_step_id"] == steps[-1]["review_target"]["producer_step_id"]
+        ]
+        calls.append("comparison")
+        return quality
+
+    monkeypatch.setattr(audit, "final_evaluation", evaluate)
+    monkeypatch.setattr(audit, "final_comparison", compare)
+    report = audit.audit_route(run)
+    assert report["workflow_steps"] == steps
+    assert calls == ["comparison" if paired else "evaluation"]
+
+
+def test_review_after_qc_rejects_input_from_the_adjacent_nonproducer(completed_slice):
+    run, steps, _, _, methods, _, _ = completed_slice(
+        "base-polish", stages=["base_polish", "read_qc", "assembly_review"]
+    )
+    for method in methods[steps[-1]["step_id"]]:
+        method["processes"][0]["input_artifacts"] = [{"producer": 2}]
+    with pytest.raises(ValueError, match="no execution consumes preceding assembly"):
+        audit.audit_route(run)
+
+
+def test_repeated_qc_cannot_borrow_another_occurrences_completion(
+    tmp_path, monkeypatch
+):
+    run = v2_run_dir(tmp_path, "audit")
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "read_qc", "allow_local_execution": True},
+                {"stage": "read_qc", "allow_local_execution": True},
+            ]
+        }
+    )
+    steps = workflow_steps_from_run_config(config)
+    ledger = Ledger(run)
+    ledger.create_session("audit", "control/manifest.yaml")
+    for step in steps[:-1]:
+        ledger.record_stage_completed(
+            "audit", step["stage"], workflow_step_id=step["step_id"]
+        )
+    monkeypatch.setattr(
+        audit,
+        "validate_frozen_inputs",
+        lambda _: SimpleNamespace(run_config=config, file_sha256=lambda key: "0" * 64),
+    )
+    monkeypatch.setattr(
+        audit, "inspect_session", lambda *args: {"supervision_state": "blocked_human"}
+    )
+    report = audit.audit_route(run)
+    assert report["occurrences"][1]["outcome"] == "stage_completed"
+    assert report["occurrences"][2]["outcome"] == "not_terminal"
+    assert any(
+        "step-002-read_qc: not_terminal" == gap for gap in report["coverage_gaps"]
+    )
+    assert any(
+        "step-002-read_qc: missing method disposition:" in gap
+        for gap in report["coverage_gaps"]
     )
 
 
@@ -567,7 +796,14 @@ def test_completed_slice_rejects_broken_evidence(completed_slice, fault):
         for method in methods[last]:
             method["processes"][0]["input_artifacts"] = []
     elif fault == "duplicate_delivery":
-        rows.append(rows[-1])
+        rows.append(
+            next(
+                r
+                for r in rows
+                if r["event_type"] == "resource_delivered"
+                and r["workflow_step_id"] == last
+            )
+        )
     elif fault == "reused_changed_source":
         # Review may select an alternative; the reuse identity restriction is
         # checked against a non-Review producer instead.
@@ -592,9 +828,7 @@ def test_completed_slice_rejects_broken_evidence(completed_slice, fault):
                 }
             )
     with pytest.raises(ValueError):
-        audit.audit_route(
-            run, route="hic" if fault == "reused_changed_source" else "review"
-        )
+        audit.audit_route(run)
 
 
 @pytest.mark.parametrize(

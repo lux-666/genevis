@@ -13,7 +13,7 @@
 | Bootstrap | 可选 `gene-agent bootstrap` / `bootstrap --update` 助手 | 生成、扩展、验证活动环境映射、声明的包探针及映射内每个方法项 | 映射独占写入、包安装、生物学输入或运行会话 |
 | 主机就绪 | [`scripts/server_check.sh`](../../scripts/server_check.sh) | 只读检查编排器前置条件、显式 RunConfig 的固定阶段方法/包闭包和主机数据库；默认五阶段 contig 模板 | 延迟 Assembly 候选就绪、LLM 可达性、私有输入或生物学执行 |
 | 代码验证 | [`scripts/server_test.sh`](../../scripts/server_test.sh) | 格式、lint、类型检查、普通 pytest、compileall、diff 检查 | 主机就绪或真实数据端到端验收证明 |
-| 路线/切片证据 | `python -m app.diagnostics.route_acceptance --route SCOPE --run-dir PATH` | 只读范围内进程/收集证据、交接、请求时的最终 Review、抛光范围的成对评估，以及可选 Hi-C 不重跑比较 | 运行工具、改变决策、独立 QV 或保证生物学改善 |
+| 冻结计划验收 | `python -m app.diagnostics.route_acceptance --run-dir PATH` | 只读审计冻结 RunConfig 投影的全部 occurrence、进程/收集、交接和适用的最终 Review；`--compare-hic-execution-from PATH` 仅用于独立 Hi-C 切片的恢复前后比较 | 运行工具或改变决策；退出 0 仅证明执行证据完整，生物学质量另行比较 |
 
 <a id="host-configuration-lifecycle"></a>
 
@@ -55,10 +55,12 @@ bash /path/to/gene_agent/scripts/server_test.sh
 bash /path/to/gene_agent/scripts/server_check.sh
 ```
 
-`server_check.sh` 使用 `gene-agent run` 共用 Python 就绪代码导出固定阶段方法闭包，刻意不维护 shell 工具列表。Assembly 方法选择延迟到上游证据具备后，候选在 Assembly 入口从冻结依赖快照解析并检查。规范 contig 模板含 Assembly Review，因此也校验活动映射中 BUSCO lineage 与 NCBI 根下快照。真实运行还校验 manifest 和所选 LLM 端点。独立切片或完整 HiFi 路线应将编辑后的 RunConfig 作为脚本首参。模板、执行、分离 Hi-C 恢复及范围化运行后检查由[运行与恢复](../user_guide/run-and-recovery.md#independent-slice-server-runbook)拥有。
+`server_check.sh` 使用 `gene-agent run` 共用 Python 就绪代码导出固定阶段方法闭包，刻意不维护 shell 工具列表。Assembly 方法选择延迟到上游证据具备后，候选在 Assembly 入口从冻结依赖快照解析并检查。规范 contig 模板含 Assembly Review，因此也校验活动映射中 BUSCO lineage 与 NCBI 根下快照。真实运行还校验 manifest 和所选 LLM 端点。独立切片或完整 HiFi 工作流应将编辑后的 RunConfig 作为脚本首参；RunConfig 的阶段配置和授权也是验收唯一来源，Inventory 由冻结计划隐式加入。模板、执行、分离 Hi-C 恢复及运行后检查由[运行与恢复](../user_guide/run-and-recovery.md#independent-slice-server-runbook)拥有。
+
+当前冻结计划是 RunConfig 投影出的线性 occurrence 序列，不是通用并行 DAG；重复 stage 不去重。LangGraph 负责 occurrence 内的审批、恢复和参数重试回环，不能改变已冻结的顺序。论文公开数据评估流程见[运行与恢复](../user_guide/run-and-recovery.md#public-data-comparison)。
 
 Bootstrap 成功不证明 `server_check.sh` 一定成功；`server_check.sh` 成功也不证明活动映射的全部声明健康。两者范围不同，应在实际执行的检出目录检查。若 bootstrap 使用 `--config PATH`，则为 `server_check.sh` 和真实运行导出同一绝对 `GENE_AGENT_ENVS_CONFIG`。
 
-`server_test.sh` 是代码级回归门禁，运行格式、lint、mypy、普通 pytest、compileall 和 `git diff --check`，明确排除 `real_tool`。它不是实际数据或生物工具冒烟框架。完整路线前按[分层验收顺序](../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行：代码测试、小工具冒烟、contig 端到端、独立 Hi-C/finishing 切片、完整真实端到端。复用操作者已有五阶段运行证据，不强迫重跑已覆盖方法。未关闭的全路径验收边界只在[架构一致性](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated)记录。
+`server_test.sh` 是代码级回归门禁，运行格式、lint、mypy、普通 pytest、compileall 和 `git diff --check`，明确排除 `real_tool`。它不是实际数据或生物工具冒烟框架。完整工作流前按[分层验收顺序](../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行：代码测试、小工具冒烟、contig 端到端、独立 Hi-C/finishing 切片、完整真实端到端。复用操作者已有五阶段运行证据，不强迫重跑已覆盖方法。未关闭的全路径验收边界只在[架构一致性](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated)记录。
 
 新主机安装见[新主机配置](migration.md)；Mac/Git 交接见[Mac 开发与服务器执行](mac_dev_server_pull.md)；启动和恢复会话见[运行与恢复](../user_guide/run-and-recovery.md)。

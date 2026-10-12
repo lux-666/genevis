@@ -40,7 +40,7 @@
 
 - 当前证据：`app/stages/base_polish/`、`tests/test_base_polish.py`、`app/diagnostics/route_acceptance.py`。
 - 契约所有者：[Base Polish](stage-contracts.md#10-base-polish)。
-- 关闭条件：先运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整路线。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
+- 关闭条件：先运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整工作流。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
 
 <a id="assembly-software-explanation-coverage"></a>
 
@@ -78,13 +78,15 @@
 
 五阶段原始读段 contig 路径已有聚焦单元和集成覆盖，包括整图生命周期测试，但尚无一次自动验收运行在代表性输入上通过规范完成流程调用真实 SeqKit、Jellyfish、GenomeScope2、所选组装器、purge_dups、QUAST、BUSCO 和配置的 LLM 端点。多数方法测试使用 fixture、stub 或修补外部边界隔离阶段。现有真实工具 Read QC 冒烟不能关闭整条路径缺口。
 
-操作者报告完成了一次真实五阶段运行。请用 `route_acceptance --route contig` 复用并审计其保留证据；本检出中没有捆绑自动数据集/测试框架，不等于服务器执行未发生。同一诊断现在也支持独立的 Review、Hi-C、GapCloser、T2T、Base Polish + Review 和 finishing 范围，并提供已发布 RunConfig/输入模板。这些条目不能证明对应服务器真实工具运行已通过。
+操作者报告完成了一次真实五阶段运行。请用 `route_acceptance --run-dir PATH` 复用并审计其保留证据；本检出中没有捆绑自动数据集/测试框架，不等于服务器执行未发生。验收器读取冻结 RunConfig，并通过 `workflow_steps_from_run_config` 投影精确的线性 occurrence 顺序：Inventory 隐式首步，单个 QC/Survey、Assembly 和重复 stage 均保留，不去重。`--compare-hic-execution-from PATH` 只对 `Inventory → hic_scaffolding` 的独立 Hi-C 切片有效。这些条目不能证明对应服务器真实工具运行已通过。
 
 `server_check.sh` 证明固定主机工具/包/数据库闭包，`server_test.sh` 是回归入口，不是全流程生物学执行证据。普通回归排除显式标记的真实工具检查（包括 SeqKit 和 hifiasm CLI 验证），且测试收集期间不探测工具。这两个脚本通过都不能证明 contig 运行成功。
 
+论文公开数据评估流程及 RunConfig 的唯一来源约束见[运行与恢复](../../user_guide/run-and-recovery.md#public-data-comparison)。
+
 - 当前证据：`tests/test_read_qc.py`、`tests/test_genome_survey.py`、`tests/test_assembly.py`、`tests/test_assembly_dedup.py`、`tests/test_assembly_review.py`、`scripts/server_check.sh`、`scripts/server_test.sh`、`app/diagnostics/route_acceptance.py`、`tests/test_route_acceptance.py`。
 - 契约所有者：[阶段契约](stage-contracts.md)与[部署边界](../../deployment/README.md)。
-- 关闭条件：审计保留的真实运行证据，补齐已证明的代码测试缺口并隔离真实工具测试。仅为尚未证明的方法/分支增加小数据真实工具覆盖；使用规范模板和 `gene-agent run`，不要建立第二执行框架。可复现服务器验收应保留可追溯输入/工具身份，并通过分离检查得到规范完成终态、五个已结算分析 occurrence 和哈希验证的 `final_assembly`。聚焦 stub 测试不满足条件。Hi-C 与 finishing 阶段在全流程验收前先作为独立切片；单一操作者顺序由[运行与恢复](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)拥有。
+- 关闭条件：审计保留的真实运行证据，补齐已证明的代码测试缺口并隔离真实工具测试。仅为尚未证明的方法/分支增加小数据真实工具覆盖；使用规范模板和 `gene-agent run`，不要建立第二执行框架。QC/Survey 计划不要求 `final_assembly`；已有组装消费者仍检查 Inventory 的已验证源，组装阶段仍检查前一交付的输入和自身交接。最终 Review 按绑定 producer 决定是否检查 Base Polish pair。可复现服务器验收应保留可追溯输入/工具身份，并通过分离检查得到冻结计划的规范完成终态和 occurrence 证据；验收退出 0 仅证明执行证据完整，生物学质量另行比较。聚焦 stub 测试不满足条件。Hi-C 与 finishing 阶段在全流程验收前先作为独立切片；单一操作者顺序由[运行与恢复](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)拥有。
 
 <a id="update-rule"></a>
 

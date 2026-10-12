@@ -73,13 +73,14 @@ class DocumentationContractTests(unittest.TestCase):
             "Phase4ReadQCRealSmokeTests",
             "已完成 AutoHiC 尝试不会再次启动",
             "assembly_fasta_registered",
-            "--route contig",
+            "workflow_steps_from_run_config",
             "## 独立切片服务器操作手册",
             "--compare-hic-execution-from",
             "复用该运行证据",
             "不声称待办测试或服务器运行已经执行",
         ):
             self.assertIn(requirement, guide)
+        self.assertNotIn("--route", guide)
 
     def test_implementation_map_method_inventory_matches_the_registry(self) -> None:
         from app.schemas.descriptors import DescriptorRegistry

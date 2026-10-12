@@ -1,4 +1,4 @@
-"""Read-only evidence audit for an explicitly scoped route or independent slice.
+"""Read-only evidence audit of the exact frozen RunConfig workflow.
 
 Exit 0: full execution coverage; 2: incomplete/legitimately skipped coverage;
 1: inconsistent evidence. None of these is a biological improvement verdict.
@@ -27,19 +27,7 @@ from app.storage.assembly_candidates import load_executed_candidate_bundle
 from app.storage.frozen_inputs import validate_frozen_inputs
 from app.storage.ledger import Ledger, project_stage_terminal_events
 from app.storage.paths import SessionPaths
-from app.workflow import ASSEMBLY_HANDOFF_PRODUCER_STAGES, recommended_workflow_template
-
-ROUTE_STAGES = {
-    "complete": recommended_workflow_template("t2t"),
-    "contig": recommended_workflow_template("assembly_review"),
-    "review": ["assembly_review"],
-    "hic": ["hic_scaffolding"],
-    "gapcloser": ["gapcloser"],
-    "dedup": ["assembly_dedup"],
-    "t2t": ["t2t"],
-    "base-polish": ["base_polish", "assembly_review"],
-    "finishing": ["gapcloser", "t2t", "base_polish", "assembly_review"],
-}
+from app.workflow import ASSEMBLY_HANDOFF_PRODUCER_STAGES
 
 
 def _ref(record: dict[str, Any]) -> ArtifactRef:
@@ -265,14 +253,14 @@ def final_comparison(
     }
 
 
-def audit_route(run_dir: Path, *, route: str = "complete") -> dict[str, Any]:
+def audit_route(run_dir: Path) -> dict[str, Any]:
     paths = SessionPaths.from_run_dir(run_dir)
     frozen = validate_frozen_inputs(paths)
     steps = workflow_steps_from_run_config(frozen.run_config)
-    if route not in ROUTE_STAGES:
-        raise ValueError(f"unknown route: {route}")
-    if frozen.run_config.requested_stage_names() != ROUTE_STAGES[route]:
-        raise ValueError(f"not the {route} route; expected {ROUTE_STAGES[route]}")
+    assembly_steps = [
+        step for step in steps[1:] if step["stage"] in ASSEMBLY_HANDOFF_PRODUCER_STAGES
+    ]
+    needs_source = bool(assembly_steps and assembly_steps[0]["stage"] != "assembly")
     snapshot = inspect_session(paths.session_id, paths.run_dir)
     errors = {
         key: snapshot[key]
@@ -324,7 +312,7 @@ def audit_route(run_dir: Path, *, route: str = "complete") -> dict[str, Any]:
             raise ValueError(f"{step['step_id']}: ambiguous assembly handoff")
         if (
             step["stage"] == "inventory"
-            and route not in {"complete", "contig"}
+            and needs_source
             and outcome == "stage_completed"
             and len(deliveries) != 1
         ):
@@ -371,14 +359,19 @@ def audit_route(run_dir: Path, *, route: str = "complete") -> dict[str, Any]:
         if deliveries:
             previous_primary = deliveries[0]["primary_output_ref"]
     complete = snapshot["supervision_state"] == "completed"
-    if complete and not snapshot.get("final_assembly"):
+    if complete and assembly_steps and not snapshot.get("final_assembly"):
         raise ValueError("completed session has no verified final assembly")
     quality = None
     if complete and steps[-1]["stage"] == "assembly_review":
         request_ref = _ref(snapshot["latest_review_request_artifact"])
-        if route in {"complete", "base-polish", "finishing"}:
+        target_id = steps[-1]["review_target"]["producer_step_id"]
+        target = next(step for step in steps if step["step_id"] == target_id)
+        if target["stage"] == "base_polish":
             quality = final_comparison(
-                paths, records, steps[-1]["step_id"], request_ref
+                paths,
+                [r for r in records if r.get("workflow_step_id") == target_id],
+                steps[-1]["step_id"],
+                request_ref,
             )
         else:
             quality = final_evaluation(paths, steps[-1]["step_id"], request_ref)
@@ -408,8 +401,8 @@ def audit_route(run_dir: Path, *, route: str = "complete") -> dict[str, Any]:
     if not complete:
         gaps.append(f"session: {snapshot['supervision_state']}")
     return {
-        "schema_version": 2,
-        "route": route,
+        "schema_version": 3,
+        "workflow_steps": steps,
         "session_id": paths.session_id,
         "frozen_input_hashes": {
             key: frozen.file_sha256(key)
@@ -439,14 +432,17 @@ def compare_hic_execution(
     """Compare operator snapshots across a detached Hi-C adoption decision."""
     for key in (
         "schema_version",
-        "route",
+        "workflow_steps",
         "session_id",
         "frozen_input_hashes",
         "review_request_ref",
     ):
         if not before.get(key) or before[key] != current.get(key):
             raise ValueError(f"Hi-C replay comparison: different or missing {key}")
-    if current["route"] != "hic" or current["schema_version"] != 2:
+    if [step["stage"] for step in current["workflow_steps"]] != [
+        "inventory",
+        "hic_scaffolding",
+    ] or current["schema_version"] != 3:
         raise ValueError("no-rerun comparison requires the single-stage hic route")
     gate = before.get("active_gate") or {}
     if (
@@ -481,11 +477,10 @@ def compare_hic_execution(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--route", choices=tuple(ROUTE_STAGES), default="complete")
     parser.add_argument("--compare-hic-execution-from", type=Path)
     args = parser.parse_args()
     try:
-        report = audit_route(args.run_dir, route=args.route)
+        report = audit_route(args.run_dir)
         if args.compare_hic_execution_from:
             before = json.loads(args.compare_hic_execution_from.read_text())
             if not isinstance(before, dict):
