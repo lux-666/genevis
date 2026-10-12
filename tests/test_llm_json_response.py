@@ -39,6 +39,14 @@ def test_model_response_record_round_trips_through_one_envelope() -> None:
         "validity": "parsed",
         "error": None,
         "model_id": "model-v1",
+        "model_call": {
+            "schema_version": 1,
+            "configured_model": None,
+            "returned_model": None,
+            "client_implementation": None,
+            "output_method": None,
+            "sampling": {},
+        },
     }
     assert (
         validate_model_response_record(
@@ -50,7 +58,7 @@ def test_model_response_record_round_trips_through_one_envelope() -> None:
     )
 
 
-def test_assembly_restorers_preserve_versioned_model_id_compatibility() -> None:
+def test_assembly_restorers_preserve_model_identity() -> None:
     parameter_record = model_response_record(
         schema_version=2,
         raw_response="",

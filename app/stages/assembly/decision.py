@@ -12,6 +12,7 @@ from app.llm.json_response import (
     parse_json_object,
     validate_model_response_record,
 )
+from app.llm.provenance import ModelCallProvenance
 from app.llm.recommender import StructuredRecommender
 
 AssemblyDecisionKind = Literal["route_selection"]
@@ -43,6 +44,7 @@ class AssemblyDecisionResult(BaseModel):
     valid: bool = False
     error: str | None = None
     model_id: str | None = None
+    model_call: ModelCallProvenance = Field(default_factory=ModelCallProvenance)
 
 
 def render_assembly_decision_messages(
@@ -90,6 +92,7 @@ def make_assembly_decision(
         valid=result.valid,
         error=result.error,
         model_id=result.model_id,
+        model_call=result.model_call,
     )
 
 
@@ -129,6 +132,7 @@ def restore_assembly_decision(
             valid=False,
             error=envelope["error"],
             model_id=envelope["model_id"],
+            model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
         )
     parsed = parse_json_object(envelope["raw_response"])
     _validate_route_selection(parsed, request.allowed_actions, request.allowed_methods)
@@ -139,4 +143,5 @@ def restore_assembly_decision(
         valid=True,
         error=envelope["error"],
         model_id=envelope["model_id"],
+        model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
     )

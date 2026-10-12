@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Literal, Mapping
 
@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from app.llm.factory import build_chat_model
 from app.llm.json_response import parse_json_object
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
+from app.llm.provenance import ModelCallProvenance
 from app.llm.recommender import StructuredRecommender
 from app.schemas.parameter_recommendation import (
     T2T_MOTIF_RESOLVER_ID,
@@ -58,6 +59,7 @@ class T2TMotifDecision:
     valid: bool
     error: str | None = None
     model_id: str | None = None
+    model_call: ModelCallProvenance = field(default_factory=ModelCallProvenance)
 
 
 def build_t2t_motif_request(
@@ -122,6 +124,7 @@ def resolve_t2t_motif(
         valid=result.valid,
         error=result.error,
         model_id=result.model_id,
+        model_call=result.model_call,
     )
 
 
@@ -149,6 +152,7 @@ def restore_t2t_motif_decision(record: Mapping[str, Any]) -> T2TMotifDecision:
             valid=False,
             error=error,
             model_id=model_id,
+            model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
         )
     parsed = normalize_t2t_motif_resolution(parse_json_object(raw))
     return T2TMotifDecision(
@@ -159,6 +163,7 @@ def restore_t2t_motif_decision(record: Mapping[str, Any]) -> T2TMotifDecision:
         valid=True,
         error=error,
         model_id=model_id,
+        model_call=ModelCallProvenance.model_validate(record.get("model_call", {})),
     )
 
 

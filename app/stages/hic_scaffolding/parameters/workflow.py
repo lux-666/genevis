@@ -415,6 +415,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
                     "validity": "parsed" if decision.valid else "invalid",
                     "error": decision.error,
                     "model_id": decision.model_id,
+                    "model_call": decision.model_call.model_dump(mode="json"),
                 },
                 artifact_type=HIC_PARAMETER_MODEL_RESPONSE,
                 method_name=_RECOMMENDER_METHOD,

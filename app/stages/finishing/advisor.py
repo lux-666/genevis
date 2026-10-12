@@ -721,6 +721,7 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
             "raw_response": result.raw_response,
             "raw_message": result.raw_message,
             "model_id": result.model_id,
+            "model_call": result.model_call.model_dump(mode="json"),
         }
         response_ref = publish_json(
             state, stage, name, response, [request_ref.model_dump(mode="json")]

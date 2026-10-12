@@ -422,6 +422,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                     valid=decision.valid,
                     error=decision.error,
                     model_id=decision.model_id,
+                    model_call=decision.model_call.model_dump(mode="json"),
                 ),
                 artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
                 method_name="assembly.parameter_recommender",

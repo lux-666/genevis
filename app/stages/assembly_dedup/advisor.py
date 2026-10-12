@@ -435,6 +435,7 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
             "raw_response": result.raw_response,
             "raw_message": result.raw_message,
             "model_id": result.model_id,
+            "model_call": result.model_call.model_dump(mode="json"),
             "error": result.error,
             "proposal": result.parsed.model_dump(mode="json")
             if result.parsed

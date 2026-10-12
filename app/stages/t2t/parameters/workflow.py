@@ -247,6 +247,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
                     "validity": "parsed" if decision.valid else "invalid",
                     "error": decision.error,
                     "model_id": decision.model_id,
+                    "model_call": decision.model_call.model_dump(mode="json"),
                 },
                 artifact_type=T2T_MOTIF_MODEL_RESPONSE,
                 method_name=_MOTIF_RESOLVER_METHOD,

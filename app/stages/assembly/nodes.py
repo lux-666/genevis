@@ -2064,6 +2064,7 @@ def _recommend_route_with_decision_boundary(
                                 valid=decision.valid,
                                 error=decision.error,
                                 model_id=decision.model_id,
+                                model_call=decision.model_call.model_dump(mode="json"),
                             ),
                         },
                         artifact_type=ASSEMBLY_METHOD_MODEL_RESPONSE,
