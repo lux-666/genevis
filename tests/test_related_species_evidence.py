@@ -13,10 +13,10 @@ from unittest.mock import patch
 from app.reference.ncbi import build_related_species_evidence_pack
 from app.review.persistence import load_review_request
 from app.schemas.state import initial_state
-from app.stages.assembly_review.nodes import (
+from app.stages.assembly_review.nodes import human_review_gate
+from app.stages.assembly_review.statistics import (
     build_related_species_evidence_pack as build_review_evidence_pack,
 )
-from app.stages.assembly_review.nodes import human_review_gate
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -474,11 +474,14 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
-                    "related_species_reference_dir": str(reference_dir),
                 }
             }
 
-            update = build_review_evidence_pack(state)
+            with patch(
+                "app.stages.assembly_review.statistics._related_species_reference_dir",
+                return_value=reference_dir,
+            ):
+                update = build_review_evidence_pack(state)
 
             evidence = update["stage_outputs"]["assembly_review"][
                 "related_species_evidence_pack"
@@ -525,7 +528,6 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
-                    "related_species_reference_dir": str(reference_dir),
                     "candidates": [_candidate("candidate-1")],
                     "signals": [],
                     "review_plan": {
@@ -534,7 +536,11 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
                     },
                 },
             }
-            pack_update = build_review_evidence_pack(state)
+            with patch(
+                "app.stages.assembly_review.statistics._related_species_reference_dir",
+                return_value=reference_dir,
+            ):
+                pack_update = build_review_evidence_pack(state)
             state["stage_outputs"] = pack_update["stage_outputs"]
 
             with patch(

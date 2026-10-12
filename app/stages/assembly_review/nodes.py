@@ -16,11 +16,9 @@ import os
 import shutil
 from collections.abc import Mapping
 from hashlib import sha256
-from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.control.lifecycle import ResumeValidationError
@@ -32,18 +30,7 @@ from app.control.workflow_plan import (
     fail_workflow_step,
     workflow_step_by_id,
 )
-from app.execution.database_resolution import (
-    DatabaseResolutionError,
-    resolve_ncbi_reference_dir,
-)
 from app.integrity import SHA256_PATTERN
-from app.reference.ncbi import (
-    build_related_species_evidence_pack as _build_related_species_evidence_pack,
-)
-from app.reference.ncbi import (
-    build_related_species_statistics_pack as _build_related_species_statistics_pack,
-)
-from app.reference.ncbi import species_name_from_metadata
 from app.review.application import (
     ForegroundReviewMetadataV1,
     PreparedReviewApplication,
@@ -64,11 +51,8 @@ from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_DRAFT_ASSEMBLY,
     ASSEMBLY_REVIEW_ACTION,
-    ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ASSEMBLY_REVIEW_PACKET,
-    ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
-    ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
     ArtifactMeta,
     ArtifactRef,
     AssemblyEvalBundle,
@@ -98,10 +82,8 @@ from app.stages.assembly_review.method_application.support import (
 from app.stages.assembly_review.method_application.support import (
     write_json_artifact as _write_json_artifact,
 )
-from app.stages.assembly_review.notebook import (
-    build_assembly_review_notebook,
-    render_statistics_figures,
-    write_notebook,
+from app.stages.assembly_review.rendering import (
+    _render_assembly_review_markdown,
 )
 from app.stages.assembly_review.state import (
     ASSEMBLY_CANDIDATE_CURSOR_ADAPTER,
@@ -113,6 +95,10 @@ from app.stages.assembly_review.state import (
     AssemblyReviewCursor,
     assembly_review_output,
     update_assembly_review_output,
+)
+from app.stages.assembly_review.statistics import (
+    _candidate_metrics,
+    _json_artifact_payload_matches,
 )
 from app.stages.base import (
     absolute_data_dir,
@@ -129,9 +115,7 @@ from app.storage.artifacts import (
     PublishedArtifact,
     artifact_ref_for_path,
     publish_artifact_record,
-    record_registered_artifacts,
     recover_published_artifact,
-    register_artifact_records,
     resolve_artifact_ref,
 )
 from app.storage.assembly_candidates import (
@@ -140,7 +124,6 @@ from app.storage.assembly_candidates import (
     publish_derived_assembly_candidate,
 )
 from app.storage.ledger import Ledger, project_stage_terminal_events
-from app.workflow import is_terminal_failure
 
 logger = logging.getLogger(__name__)
 
@@ -579,313 +562,6 @@ def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
     if metrics and not ar_out.get("metrics"):
         update["metrics"] = metrics
     return update_assembly_review_output(state, update)
-
-
-def build_related_species_evidence_pack(state: TopLevelState) -> StateUpdate:
-    """Build non-blocking local NCBI evidence for the review report and LLM."""
-    ar_out = assembly_review_output(state)
-    if is_terminal_failure(ar_out.get("status")):
-        return {}
-
-    species_name = _target_species_name(state)
-    reference_dir = _related_species_reference_dir(ar_out, state=state)
-    if reference_dir is None:
-        return update_assembly_review_output(
-            state,
-            {
-                "status": "failed",
-                "reason": "frozen NCBI reference database is unavailable",
-            },
-        )
-    evidence_pack = _build_related_species_evidence_pack(
-        species_name, reference_dir=reference_dir
-    )
-    existing_ref = ar_out.get("related_species_evidence_pack_ref")
-    if existing_ref and _json_artifact_payload_matches(existing_ref, evidence_pack):
-        return {}
-
-    evidence_ref = _write_json_artifact(
-        state,
-        "related_species_evidence_pack.json",
-        evidence_pack,
-        artifact_type=ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
-    )
-    return update_assembly_review_output(
-        state,
-        {
-            "related_species_evidence_pack": evidence_pack,
-            "related_species_evidence_pack_ref": evidence_ref,
-        },
-    )
-
-
-def _related_species_reference_dir(
-    ar_out: AssemblyReviewCursor,
-    *,
-    state: TopLevelState | None = None,
-) -> str | Path | None:
-    """Return the NCBI reference path from the frozen database contract.
-
-    The explicit stage-output value remains only for isolated node tests and
-    old checkpoints. A committed run always has a frozen resolver, so runtime
-    code never consults an environment variable or a module default path.
-    """
-    if state is not None:
-        try:
-            from app.execution.dependency_snapshot import (
-                load_frozen_dependency_resolver,
-            )
-
-            resolver = load_frozen_dependency_resolver(state.get("data_dir", "data"))
-            return resolve_ncbi_reference_dir(
-                resolver,
-                species_name=_target_species_name(state),
-            )
-        except (DatabaseResolutionError, OSError, TypeError, ValueError) as exc:
-            try:
-                from app.storage.frozen_inputs import has_frozen_input_contract
-                from app.storage.paths import SessionPaths
-
-                committed = has_frozen_input_contract(
-                    SessionPaths.from_run_dir(state.get("data_dir", ""))
-                )
-            except (OSError, TypeError, ValueError):
-                committed = False
-            if committed:
-                logger.error("frozen NCBI database unavailable: %s", exc)
-                return None
-            # Explicit path is retained only for isolated pre-freeze tests and
-            # migration tooling; it is never consulted by a committed run.
-    value = ar_out.get("related_species_reference_dir")
-    if not value:
-        return None
-    ref_path = Path(value)
-    try:
-        from app.reference.ncbi import validate_reference_snapshot
-
-        validate_reference_snapshot(ref_path)
-    except (OSError, TypeError, ValueError):
-        return None
-    else:
-        return ref_path
-
-
-def build_related_species_statistics_and_notebook(
-    state: TopLevelState,
-) -> StateUpdate:
-    """Build statistics pack and comparative notebook for assembly review."""
-    ar_out = assembly_review_output(state)
-    if is_terminal_failure(ar_out.get("status")):
-        return {}
-
-    species_name = _target_species_name(state)
-    reference_dir = _related_species_reference_dir(ar_out, state=state)
-    if reference_dir is None:
-        return update_assembly_review_output(
-            state,
-            {
-                "status": "failed",
-                "reason": "frozen NCBI reference database is unavailable",
-            },
-        )
-
-    target_metrics = _extract_target_metrics_from_signals(ar_out)
-
-    statistics_pack = _build_related_species_statistics_pack(
-        species_name, reference_dir=reference_dir, target_metrics=target_metrics
-    )
-
-    existing_stats_ref = ar_out.get("related_species_statistics_pack_ref")
-    statistics_pack_unchanged = existing_stats_ref and _json_artifact_payload_matches(
-        existing_stats_ref, statistics_pack
-    )
-
-    if statistics_pack_unchanged:
-        existing_notebook_ref = ar_out.get("assembly_review_comparative_notebook_ref")
-        if existing_notebook_ref and Path(existing_notebook_ref).exists():
-            comparative_figures = ar_out.get("comparative_figures", {})
-            all_figures_exist = all(
-                Path(p).exists() for p in comparative_figures.values()
-            )
-            if all_figures_exist:
-                # Full skip: re-register artifacts for ledger consistency, then return
-                assert isinstance(existing_stats_ref, str)
-                data_dir = absolute_data_dir(state)
-                session_id = state["session_id"]
-
-                notebook_artifact = ArtifactMeta.from_file(
-                    Path(existing_notebook_ref),
-                    stage="assembly_review",
-                    method_name="assembly_review.contract",
-                    artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
-                    metadata={"session_id": session_id},
-                )
-                register_artifact_records(data_dir, session_id, [notebook_artifact])
-
-                figure_artifacts = [
-                    ArtifactMeta.from_file(
-                        Path(abs_path),
-                        stage="assembly_review",
-                        method_name="assembly_review.contract",
-                        artifact_type=f"assembly_review.figure.{logical_name}",
-                        metadata={"figure_type": logical_name},
-                    )
-                    for logical_name, abs_path in comparative_figures.items()
-                ]
-                if figure_artifacts:
-                    register_artifact_records(data_dir, session_id, figure_artifacts)
-                statistics_artifact_ref = artifact_ref_for_path(
-                    data_dir,
-                    session_id,
-                    existing_stats_ref,
-                    expected_type=ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
-                )
-                record_registered_artifacts(
-                    data_dir,
-                    session_id,
-                    [statistics_artifact_ref, notebook_artifact, *figure_artifacts],
-                )
-
-                return {}
-
-    if statistics_pack_unchanged:
-        statistics_ref = existing_stats_ref
-    else:
-        statistics_ref = _write_json_artifact(
-            state,
-            "related_species_statistics_pack.json",
-            statistics_pack,
-            artifact_type=ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
-        )
-
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-    figures_dir = stage_artifacts_dir(state, "assembly_review", "figures")
-    work_figures_dir = stage_work_dir(state, "assembly_review", "figures")
-    figure_sources = render_statistics_figures(
-        statistics_pack,
-        work_figures_dir,
-        target_metrics=target_metrics,
-    )
-
-    figure_paths: dict[str, str] = {}
-    figure_refs: list[ArtifactRef] = []
-    for logical_name, abs_path in figure_sources.items():
-        source = Path(abs_path)
-        artifact = ArtifactMeta.from_file(
-            source,
-            stage="assembly_review",
-            method_name="assembly_review.contract",
-            artifact_type=f"assembly_review.figure.{logical_name}",
-            metadata={"figure_type": logical_name},
-        )
-        published = publish_artifact_record(
-            data_dir,
-            session_id,
-            artifact,
-            destination=figures_dir / source.name,
-        )
-        figure_paths[logical_name] = str(published.path)
-        figure_refs.append(published.ref)
-
-    out_dir = stage_artifacts_dir(state, "assembly_review")
-    statistics_pack_relpath = "related_species_statistics_pack.json"
-    figures_relpaths = {
-        name: f"figures/{Path(path).name}" for name, path in figure_paths.items()
-    }
-    evidence_pack = ar_out.get("related_species_evidence_pack", {})
-
-    notebook = build_assembly_review_notebook(
-        statistics_pack=statistics_pack,
-        evidence_pack=evidence_pack,
-        target_metrics=target_metrics,
-        session_id=session_id,
-        statistics_pack_relpath=statistics_pack_relpath,
-        figures_relpaths=figures_relpaths,
-    )
-
-    notebook_path = out_dir / "assembly_review_report.ipynb"
-    notebook_source = stage_work_dir(
-        state, "assembly_review", "assembly_review_report.ipynb"
-    )
-    write_notebook(notebook, notebook_source)
-
-    notebook_artifact = ArtifactMeta.from_file(
-        notebook_source,
-        stage="assembly_review",
-        method_name="assembly_review.contract",
-        artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
-        metadata={"session_id": session_id, "figure_count": len(figure_paths)},
-    )
-    published_notebook = publish_artifact_record(
-        data_dir,
-        session_id,
-        notebook_artifact,
-        destination=notebook_path,
-    )
-    notebook_path = published_notebook.path
-    if not isinstance(statistics_ref, str):
-        raise ValueError("assembly review statistics pack has no artifact path")
-    statistics_artifact_ref = artifact_ref_for_path(
-        data_dir,
-        session_id,
-        statistics_ref,
-        expected_type=ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
-    )
-    record_registered_artifacts(
-        data_dir,
-        session_id,
-        [statistics_artifact_ref, *figure_refs, published_notebook.ref],
-    )
-
-    return update_assembly_review_output(
-        state,
-        {
-            "related_species_statistics_pack_ref": statistics_ref,
-            "assembly_review_comparative_notebook_ref": str(notebook_path),
-            "comparative_figures": figure_paths,
-        },
-    )
-
-
-def _extract_target_metrics_from_signals(
-    ar_out: AssemblyReviewCursor,
-) -> dict[str, float] | None:
-    """Extract target assembly metrics from available signals for percentile"""
-    """computation.
-
-    Returns None when multiple candidates exist (no single target to position).
-    """
-    candidates = ar_out.get("candidates", [])
-    if len(candidates) != 1:
-        return None
-
-    candidate_id = candidates[0].get("candidate_id")
-    if not candidate_id:
-        return None
-
-    signals = ar_out.get("signals", [])
-    candidate_metrics = _candidate_metrics(candidate_id, signals)
-
-    target_metrics: dict[str, float] = {}
-
-    # Map QUAST metrics
-    quast = candidate_metrics.get("quast", {})
-    if quast.get("n50") is not None:
-        target_metrics["n50_bp"] = float(quast["n50"])
-    if quast.get("total_length") is not None:
-        target_metrics["assembly_size_bp"] = float(quast["total_length"])
-    if quast.get("gc_percent") is not None:
-        target_metrics["gc_percent"] = float(quast["gc_percent"])
-
-    # Map BUSCO metrics
-    busco = candidate_metrics.get("busco", {})
-    if busco.get("complete_percent") is not None:
-        target_metrics["busco_complete_percent"] = float(busco["complete_percent"])
-    if busco.get("duplicated_percent") is not None:
-        target_metrics["busco_duplicated_percent"] = float(busco["duplicated_percent"])
-
-    return target_metrics if target_metrics else None
 
 
 def _phase10_review_metrics(
@@ -1955,38 +1631,6 @@ def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
     )
 
 
-def _json_artifact_payload_matches(artifact_ref: Any, payload: dict[str, Any]) -> bool:
-    path = Path(str(artifact_ref))
-    if not path.exists():
-        return False
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    return bool(existing == payload)
-
-
-def _target_species_name(state: TopLevelState) -> str | None:
-    """Read optional species metadata without making manifest parsing a gate."""
-    manifest_ref = state.get("input_manifest_ref")
-    if not manifest_ref:
-        return None
-    path = resolve_run_ref(state, str(manifest_ref))
-    if not path.exists():
-        return None
-    try:
-        text = path.read_text(encoding="utf-8")
-        raw = (
-            json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
-        )
-    except (OSError, json.JSONDecodeError, yaml.YAMLError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    metadata = dict(raw.get("user_metadata") or {})
-    return species_name_from_metadata(metadata)
-
-
 def _ensure_assembly_review_reports(
     state: TopLevelState,
     ar_out: AssemblyReviewCursor,
@@ -2189,243 +1833,6 @@ def _candidate_comparison_context(
     return context
 
 
-def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> str:
-    lines = [
-        f"# {title}",
-        "",
-        (
-            "No automatic biological thresholds are applied. This report informs "
-            "the human decision only."
-        ),
-        "",
-        "## Candidate Metrics",
-        "",
-        (
-            "| Candidate | Method | Source | Assembly ref | QUAST contigs | "
-            "Total length | N50 | Largest contig | BUSCO C% | BUSCO S% | "
-            "BUSCO D% | BUSCO F% | BUSCO M% | Available signals | "
-            "Missing/failed/pending signals |"
-        ),
-        (
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
-            "--- | --- | --- | --- | --- |"
-        ),
-    ]
-    for candidate in payload.get("candidates", []):
-        metrics = candidate.get("metrics") or {}
-        quast = metrics.get("quast") or {}
-        busco = metrics.get("busco") or {}
-        signal_buckets = candidate.get("signals") or {}
-        unavailable = []
-        for status in ("missing", "failed", "pending"):
-            for signal_name in signal_buckets.get(status, []):
-                unavailable.append(f"{signal_name} ({status})")
-        lines.append(
-            "| "
-            + " | ".join(
-                _markdown_cell(value)
-                for value in [
-                    candidate.get("candidate_id"),
-                    candidate.get("method_name"),
-                    candidate.get("source"),
-                    candidate.get("final_assembly_ref"),
-                    quast.get("contig_count"),
-                    quast.get("total_length"),
-                    quast.get("n50"),
-                    quast.get("largest_contig"),
-                    busco.get("complete_percent"),
-                    busco.get("single_copy_percent"),
-                    busco.get("duplicated_percent"),
-                    busco.get("fragmented_percent"),
-                    busco.get("missing_percent"),
-                    ", ".join(signal_buckets.get("available", [])),
-                    ", ".join(unavailable),
-                ]
-            )
-            + " |"
-        )
-
-    lines.extend(
-        [
-            "",
-            "## Parameter Provenance",
-            "",
-            (
-                "| Candidate | Read profile | Estimated genome size | Threads | "
-                "Rerun index |"
-            ),
-            "| --- | --- | --- | --- | --- |",
-        ]
-    )
-    for candidate in payload.get("candidates", []):
-        params = candidate.get("parameters") or {}
-        lines.append(
-            "| "
-            + " | ".join(
-                _markdown_cell(value)
-                for value in [
-                    candidate.get("candidate_id"),
-                    params.get("read_profile"),
-                    params.get("estimated_genome_size"),
-                    params.get("threads"),
-                    params.get("rerun_index"),
-                ]
-            )
-            + " |"
-        )
-
-    lines.extend(["", "## Reference-dependent QUAST metrics", ""])
-    lines.append("Missing values mean unavailable, not zero errors or QV.")
-    for candidate in payload.get("candidates", []):
-        quast = (candidate.get("metrics") or {}).get("quast") or {}
-        lines.append(
-            f"- {candidate.get('candidate_id')}: "
-            + json.dumps(
-                {
-                    key: value
-                    for key, value in quast.items()
-                    if key
-                    not in {"contig_count", "total_length", "n50", "largest_contig"}
-                },
-                sort_keys=True,
-            )
-        )
-    polish = payload.get("polishing_comparison")
-    if polish:
-        lines.extend(
-            [
-                "",
-                "## Paired polishing evidence",
-                "",
-                "Before = source; after = Racon. Same reads were used for correction "
-                "and comparison; these values are not independent QV.",
-                "",
-                "```json",
-                json.dumps(polish, indent=2, sort_keys=True),
-                "```",
-                "Retaining the source is a valid final decision; "
-                "no benefit is assumed.",
-            ]
-        )
-
-    _append_related_species_sanity_check(
-        lines, payload.get("related_species_sanity_check") or {}
-    )
-
-    lines.extend(["", "## Evidence Refs", ""])
-    raw_refs = payload.get("raw_refs") or {}
-    for key, value in raw_refs.items():
-        if value:
-            lines.append(f"- {key}: `{value}`")
-    for candidate in payload.get("candidates", []):
-        metric_refs = candidate.get("metric_refs_by_signal") or {}
-        for signal_name, refs in metric_refs.items():
-            for ref in refs:
-                lines.append(
-                    f"- {candidate.get('candidate_id')} {signal_name}: `{ref}`"
-                )
-
-    lines.extend(["", "## Missing Evidence", ""])
-    for candidate in payload.get("candidates", []):
-        signal_buckets = candidate.get("signals") or {}
-        notes_by_signal = candidate.get("signal_notes_by_signal") or {}
-        for status in ("missing", "failed", "pending"):
-            for signal_name in signal_buckets.get(status, []):
-                notes = ", ".join(notes_by_signal.get(signal_name, []))
-                suffix = f" — {notes}" if notes else ""
-                lines.append(
-                    f"- {candidate.get('candidate_id')} {signal_name}: {status}{suffix}"
-                )
-
-    lines.extend(["", "## Report Notes", ""])
-    for note in payload.get("notes", []):
-        lines.append(f"- {note}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _append_related_species_sanity_check(
-    lines: list[str], pack: dict[str, Any]
-) -> None:
-    lines.extend(["", "## Related-species sanity check", ""])
-    if not pack:
-        lines.append("- Reference evidence was not generated.")
-        return
-    target = pack.get("target") or {}
-    target_name = target.get("canonical_scientific_name") or target.get("input_name")
-    lines.extend(
-        [
-            f"- Target: {_markdown_cell(target_name)}",
-            f"- Matching mode: {_markdown_cell(pack.get('matching_mode'))}",
-            (
-                "- This evidence is comparative only; it is not an assembly prior "
-                "or automatic-failure threshold."
-            ),
-            "",
-        ]
-    )
-    records = pack.get("selected_records") or []
-    if records:
-        lines.extend(
-            [
-                (
-                    "| Organism | Accession | Assembly | Total length | "
-                    "Chromosomes | Contig N50 | Scaffold N50 | GC | "
-                    "BUSCO lineage |"
-                ),
-                "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-            ]
-        )
-        for record in records:
-            busco = record.get("busco") or {}
-            lines.append(
-                "| "
-                + " | ".join(
-                    _markdown_cell(value)
-                    for value in [
-                        record.get("organism_name"),
-                        record.get("accession"),
-                        record.get("assembly_name"),
-                        record.get("total_sequence_length_bp"),
-                        record.get("chromosome_count"),
-                        record.get("contig_n50_bp"),
-                        record.get("scaffold_n50_bp"),
-                        record.get("gc_percent"),
-                        busco.get("lineage"),
-                    ]
-                )
-                + " |"
-            )
-    else:
-        lines.append("- No useful related-species primary assemblies were found.")
-    excluded = pack.get("excluded_alternate_haplotype_records") or []
-    if excluded:
-        excluded_accessions = ", ".join(
-            str(record.get("accession")) for record in excluded
-        )
-        lines.append(f"- Excluded alternate-haplotype records: {excluded_accessions}")
-    summary = pack.get("computed_summary") or {}
-    if summary:
-        lines.extend(
-            [
-                "",
-                "Computed summary:",
-                "",
-                "```json",
-                json.dumps(summary, ensure_ascii=False, sort_keys=True),
-                "```",
-            ]
-        )
-    for note in pack.get("notes") or []:
-        lines.append(f"- Reference note: {note}")
-
-
-def _markdown_cell(value: Any) -> str:
-    if value is None or value == "":
-        return "-"
-    return str(value).replace("|", "\\|").replace("\n", " ")
-
-
 def _write_report_json_artifact_if_changed(
     state: TopLevelState,
     filename: str,
@@ -2484,22 +1891,6 @@ def _candidate_parameters(
         "estimated_genome_size": assembly_out.get("genome_size_prior"),
         "threads": threads,
     }
-
-
-def _candidate_metrics(
-    candidate_id: str, signals: list[AssemblyEvalSignalCursor]
-) -> dict[str, Any]:
-    metrics: dict[str, Any] = {}
-    for signal in signals:
-        if signal.get("candidate_id") != candidate_id:
-            continue
-        if signal.get("status") != "available":
-            continue
-        signal_name = signal.get("signal_name")
-        signal_metrics = (signal.get("metadata") or {}).get("metrics")
-        if signal_name and signal_metrics:
-            metrics[signal_name] = signal_metrics
-    return metrics
 
 
 def fail_assembly_review(state: TopLevelState) -> StateUpdate:

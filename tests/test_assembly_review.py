@@ -725,6 +725,12 @@ class AssemblyReviewStageTests(unittest.TestCase):
             "related_species_reference_dir": str(self._test_reference_dir(state))
         }
         state["stage_outputs"] = stage_outputs
+        reference_patch = patch(
+            "app.stages.assembly_review.statistics._related_species_reference_dir",
+            side_effect=lambda _out, *, state: self._test_reference_dir(state),
+        )
+        reference_patch.start()
+        self.addCleanup(reference_patch.stop)
         if candidate_bundles:
             candidate_refs = [
                 self._write_candidate_bundle(
