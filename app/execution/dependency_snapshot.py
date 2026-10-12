@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_version
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -163,6 +163,7 @@ def capture_dependency_snapshot(
     preflight_runner: Callable[..., Any] | None = None,
     probe_environments: bool | None = None,
     resolver: EnvResolver | None = None,
+    required_tools_by_method: Mapping[str, Sequence[str]] | None = None,
 ) -> DependencySnapshot:
     """Capture resolved environments and packages from active machine config.
 
@@ -234,6 +235,17 @@ def capture_dependency_snapshot(
             )
             for method in method_names
         }
+        for method, additions in (required_tools_by_method or {}).items():
+            if method not in method_environments:
+                continue
+            spec = method_environments[method]
+            method_environments[method] = spec.model_copy(
+                update={
+                    "required_tools": list(
+                        dict.fromkeys([*spec.required_tools, *map(str, additions)])
+                    )
+                }
+            )
         databases = resolver.databases
     except (FileNotFoundError, OSError, ValueError, TypeError) as exc:
         raise DependencySnapshotError(

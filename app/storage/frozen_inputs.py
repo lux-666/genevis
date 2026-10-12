@@ -650,6 +650,7 @@ def freeze_session_inputs(
                 capture_dependency_snapshot,
                 dependency_snapshot_bytes,
             )
+            from app.execution.method_capabilities import required_tools_by_method
 
             dependency_snapshot = capture_dependency_snapshot(
                 config_path=config_path,
@@ -658,6 +659,7 @@ def freeze_session_inputs(
                 preflight_runner=preflight_runner,
                 probe_environments=probe_environments,
                 resolver=resolver,
+                required_tools_by_method=required_tools_by_method(run_config),
             )
             dependency_bytes = dependency_snapshot_bytes(dependency_snapshot)
             marker = _build_marker(
@@ -1068,6 +1070,7 @@ def _validate_assembly_input_contract(
     assembly = run_config.assembly
     if assembly is None:
         return
+    _validate_trio_parent_roles(manifest, assembly)
     local_assembly = any(
         request.stage == "assembly" and request.allow_local_execution
         for request in run_config.requested_stages
@@ -1151,6 +1154,54 @@ def _validate_assembly_input_contract(
             "deferred Assembly requires input_manifest.genome_size_estimate or "
             "a prior locally executed Genome Survey occurrence"
         )
+
+
+def _validate_trio_parent_roles(
+    manifest: InputManifest,
+    assembly: Any,
+) -> None:
+    """Require Trio selectors to resolve to explicitly role-tagged assets.
+
+    Parent reads stay registered for the Trio execution path, but they are not
+    ordinary offspring short-read resources.  Keeping this check at the freeze
+    boundary prevents an untyped or cross-wired path from entering the graph.
+    """
+
+    hifiasm_inputs = assembly.hifiasm_inputs
+    if hifiasm_inputs is None or not hifiasm_inputs.trio_enabled:
+        return
+
+    role_paths: dict[str, set[str]] = {
+        "trio_maternal_reads": set(),
+        "trio_paternal_reads": set(),
+    }
+    for asset in manifest.assets:
+        role = asset.metadata.get("intake_role")
+        if role not in role_paths:
+            continue
+        role_paths[role].update(
+            str(Path(path).expanduser().resolve(strict=False)) for path in asset.paths
+        )
+
+    for field_name, role in (
+        ("trio_maternal_reads_ref", "trio_maternal_reads"),
+        ("trio_paternal_reads_ref", "trio_paternal_reads"),
+    ):
+        refs = getattr(hifiasm_inputs, field_name)
+        # Keep both parent identities explicit at the immutable input boundary.
+        if not refs:
+            raise FrozenInputValidationError(
+                "Trio hifiasm inputs require explicit maternal and paternal "
+                "role references"
+            )
+        for ref in refs:
+            selected = str(Path(ref).expanduser().resolve(strict=False))
+            if selected not in role_paths[role]:
+                raise FrozenInputValidationError(
+                    f"assembly.hifiasm_inputs.{field_name} must select a "
+                    f"registered asset tagged metadata.intake_role="
+                    f"{role!r}: {selected}"
+                )
 
 
 def _load_yaml_draft(

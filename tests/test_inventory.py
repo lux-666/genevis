@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from app.control.lifecycle import normalize_resume_review_request
+from app.control.resume import normalize_resume_review_request
 from app.control.workflow_plan import workflow_steps_from_run_config
 from app.review.application import (
     ReviewApplicationIdentity,
@@ -364,6 +364,52 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(len(registry["assets"]), 3)
             asset_types = {a["asset_type"] for a in registry["assets"]}
             self.assertEqual(asset_types, {"raw_long_reads", "raw_short_dna_reads"})
+
+    def test_inventory_keeps_trio_parents_in_registry_but_excludes_central_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            child = Path(tmpdir) / "child.fq"
+            maternal = Path(tmpdir) / "maternal.fq"
+            paternal = Path(tmpdir) / "paternal.fq"
+            for path in (child, maternal, paternal):
+                path.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = {
+                "session_id": "trio-isolation",
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(child)],
+                        "platform": "pacbio_hifi",
+                    },
+                    {
+                        "asset_type": "raw_short_dna_reads",
+                        "paths": [str(maternal)],
+                        "metadata": {"intake_role": "trio_maternal_reads"},
+                    },
+                    {
+                        "asset_type": "raw_short_dna_reads",
+                        "paths": [str(paternal)],
+                        "metadata": {"intake_role": "trio_paternal_reads"},
+                    },
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            _, result = self._invoke_inventory("trio-isolation", path)
+            registry = json.loads(_registry_path(result).read_text(encoding="utf-8"))
+
+            registered_paths = {asset["path"] for asset in registry["assets"]}
+            self.assertEqual(
+                registered_paths,
+                {
+                    str(child.resolve()),
+                    str(maternal.resolve()),
+                    str(paternal.resolve()),
+                },
+            )
+            self.assertEqual(
+                result["resource_refs"]["long_reads"]["paths"],
+                [str(child.resolve())],
+            )
+            self.assertNotIn("short_reads", result["resource_refs"])
 
     def test_inventory_triggers_review_for_ambiguous_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:

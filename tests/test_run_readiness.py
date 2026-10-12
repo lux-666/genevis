@@ -417,6 +417,59 @@ def test_preflight_probes_selected_methods_then_mandatory_llm(tmp_path: Path) ->
     assert llm_calls == ["called"]
 
 
+def test_trio_hifiasm_preflight_requires_yak_only_when_trio_enabled(
+    tmp_path: Path,
+) -> None:
+    probed_commands: list[list[str]] = []
+
+    def runner(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        probed_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    trio_config = RunConfig.model_validate(
+        {
+            "requested_stages": [{"stage": "assembly", "allow_local_execution": True}],
+            "assembly": {
+                "hifiasm_inputs": {
+                    "trio_maternal_reads_ref": ["/tmp/maternal.fasta"],
+                    "trio_paternal_reads_ref": ["/tmp/paternal.fasta"],
+                }
+            },
+        }
+    )
+    preflight_run_readiness(
+        trio_config,
+        effective_methods={"assembly": ("assembly.candidate.hifiasm",)},
+        config_path=_env_config(tmp_path / "trio-envs.yaml"),
+        runner=runner,
+        llm_probe=lambda: None,
+    )
+    hifiasm_commands = [
+        command for command in probed_commands if command[-1] == "hifiasm"
+    ]
+    assert hifiasm_commands
+    assert any(command[-1] == "yak" for command in probed_commands)
+
+    probed_commands.clear()
+    non_trio_config = RunConfig.model_validate(
+        {"requested_stages": [{"stage": "assembly", "allow_local_execution": True}]}
+    )
+    preflight_run_readiness(
+        non_trio_config,
+        effective_methods={"assembly": ("assembly.candidate.hifiasm",)},
+        config_path=_env_config(tmp_path / "non-trio-envs.yaml"),
+        runner=runner,
+        llm_probe=lambda: None,
+    )
+    hifiasm_commands = [
+        command for command in probed_commands if command[-1] == "hifiasm"
+    ]
+    assert hifiasm_commands
+    assert all("yak" not in command for command in hifiasm_commands)
+
+
 def test_odb12_2_rejects_busco_before_6_1(tmp_path: Path) -> None:
     llm_calls: list[str] = []
 

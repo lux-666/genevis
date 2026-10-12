@@ -1089,6 +1089,14 @@ def _populate_resource_refs_from_assets(
 
     # Group assets by logical resource type
     for record in records:
+        # Trio parental reads remain inventory assets for yak resolution, but
+        # are not offspring genomic material for Survey, QC, or other central
+        # long/short-read consumers.
+        if record.metadata.get("intake_role") in {
+            "trio_maternal_reads",
+            "trio_paternal_reads",
+        }:
+            continue
         resource_type = None
 
         # Map asset_type to logical resource name

@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import TerminalFinalizationResult
+from app.control.terminal import TerminalFinalizationResult
 from app.entrypoints.run import execute_frozen_session
 from app.execution.dependency_snapshot import (
     DependencySnapshotError,
@@ -132,6 +132,128 @@ class _FrozenExecutionGraph:
 
 
 class FrozenInputTests(unittest.TestCase):
+    def test_trio_parent_refs_require_matching_manifest_intake_roles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child = root / "child.fq"
+            maternal = root / "maternal.fq"
+            paternal = root / "paternal.fq"
+            for path in (child, maternal, paternal):
+                path.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+            def payload(maternal_metadata=None, paternal_metadata=None):
+                return {
+                    "session_id": "trio-contract",
+                    "genome_size_estimate": 1000,
+                    "assets": [
+                        {
+                            "asset_type": "raw_long_reads",
+                            "paths": [str(child)],
+                            "platform": "pacbio_hifi",
+                        },
+                        {
+                            "asset_type": "raw_short_dna_reads",
+                            "paths": [str(maternal)],
+                            "metadata": maternal_metadata or {},
+                        },
+                        {
+                            "asset_type": "raw_short_dna_reads",
+                            "paths": [str(paternal)],
+                            "metadata": paternal_metadata or {},
+                        },
+                    ],
+                }
+
+            config = {
+                "requested_stages": [
+                    {"stage": "assembly", "allow_local_execution": True}
+                ],
+                "assembly": {
+                    "hifiasm_inputs": {
+                        "trio_maternal_reads_ref": [str(maternal)],
+                        "trio_paternal_reads_ref": [str(paternal)],
+                    }
+                },
+            }
+            with self.assertRaisesRegex(
+                FrozenInputValidationError, "metadata.intake_role='trio_maternal_reads'"
+            ):
+                prepare_session_inputs(
+                    manifest_draft=payload(), run_config_draft=config
+                )
+
+            with self.assertRaisesRegex(
+                FrozenInputValidationError, "metadata.intake_role='trio_paternal_reads'"
+            ):
+                prepare_session_inputs(
+                    manifest_draft=payload(
+                        {"intake_role": "trio_maternal_reads"},
+                        {"intake_role": "trio_maternal_reads"},
+                    ),
+                    run_config_draft=config,
+                )
+
+            prepared = prepare_session_inputs(
+                manifest_draft=payload(
+                    {"intake_role": "trio_maternal_reads"},
+                    {"intake_role": "trio_paternal_reads"},
+                ),
+                run_config_draft=config,
+            )
+            self.assertTrue(prepared.run_config.assembly.hifiasm_inputs.trio_enabled)
+
+    def test_trio_freeze_snapshot_contains_conditional_yak_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, manifest, _run_config, envs = self._fixture(root)
+            maternal = root / "maternal.fq"
+            paternal = root / "paternal.fq"
+            for path in (maternal, paternal):
+                path.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest.write_text(
+                "session_id: s1\n"
+                "genome_size_estimate: 1000\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths: [{root / 'reads.fastq'}]\n"
+                "    platform: pacbio_hifi\n"
+                "  - asset_type: raw_short_dna_reads\n"
+                f"    paths: [{maternal}]\n"
+                "    metadata: {intake_role: trio_maternal_reads}\n"
+                "  - asset_type: raw_short_dna_reads\n"
+                f"    paths: [{paternal}]\n"
+                "    metadata: {intake_role: trio_paternal_reads}\n",
+                encoding="utf-8",
+            )
+            run_config = {
+                "requested_stages": [
+                    {"stage": "assembly", "allow_local_execution": True}
+                ],
+                "assembly": {
+                    "hifiasm_inputs": {
+                        "trio_maternal_reads_ref": [str(maternal)],
+                        "trio_paternal_reads_ref": [str(paternal)],
+                    }
+                },
+            }
+            bundle = freeze_session_inputs(
+                paths,
+                manifest_draft=manifest,
+                run_config_draft=run_config,
+                config_path=envs,
+                probe_environments=False,
+            )
+            snapshot = load_dependency_snapshot(
+                paths.dependency_manifest_path,
+                expected_sha256=bundle.marker.files["dependency_manifest"].sha256,
+            )
+            self.assertIn(
+                "yak",
+                snapshot.method_environments[
+                    "assembly.candidate.hifiasm"
+                ].required_tools,
+            )
+
     def test_zero_byte_sequence_input_is_rejected_before_run_layout_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1412,7 +1534,7 @@ class FrozenInputTests(unittest.TestCase):
                     "app.entrypoints.run.initial_state", side_effect=fake_initial_state
                 ),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ),
                 patch("app.entrypoints.run.project_workflow_state"),
@@ -1556,7 +1678,7 @@ class FrozenInputTests(unittest.TestCase):
             with (
                 patch("app.entrypoints.run.build_graph", return_value=graph),
                 patch(
-                    "app.entrypoints.run.finalize_authoritative_terminal",
+                    "app.control.terminal.finalize_authoritative_terminal",
                     side_effect=_finalized_terminal,
                 ),
             ):

@@ -19,6 +19,7 @@ from app.execution.env_resolver import (
     package_preflight,
     preflight,
 )
+from app.execution.method_capabilities import augment_method_env_spec
 from app.llm.recommender import OutputMethod, StructuredRecommender
 from app.schemas.run_config import RunConfig
 
@@ -206,6 +207,11 @@ def preflight_run_readiness(
         stage = method_name.split(".", 1)[0]
         try:
             spec = resolver.resolve(stage=stage, method_name=method_name)
+            spec = augment_method_env_spec(
+                spec,
+                run_config=run_config,
+                method_name=method_name,
+            )
             packages = resolver.packages_for_spec(spec)
         except (TypeError, ValueError) as exc:
             failures.append(f"{method_name}: invalid dependency configuration: {exc}")

@@ -56,6 +56,11 @@ resource_defaults:
 
 包描述符可描述安装渠道、入口模式、资源默认值和已知陷阱。机器专属环境与包根路径属于 `config/envs.yaml`，不属于能力记录。
 
+包还可以声明 `conditional_required_tools`。这类工具只有在冻结的运行配置
+启用对应能力时才加入 readiness 和 dependency snapshot；例如 Trio
+`assembly.candidate.hifiasm` 才要求 `yak`，普通 Hifiasm 或其他非 Trio 路线不
+会被强制要求。条件能力和环境快照因此保持同一份工具契约。
+
 <a id="method-descriptor"></a>
 
 ## 方法描述符
