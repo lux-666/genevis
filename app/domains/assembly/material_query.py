@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.knowledge.assembly_cases import Observation
+from app.schemas.parameter_recommendation import AssemblyMaterialContext
 
 PLATFORMS = {
     "pacbio_hifi": "hifi",
@@ -14,6 +15,30 @@ PLATFORMS = {
     "cycloneseq": "cyclone",
     "hic": "hic",
 }
+
+
+def resolved_material_context(assembly: Mapping[str, Any]) -> AssemblyMaterialContext:
+    """Expose roles actually bound by Assembly; ordinary ONT never implies UL."""
+
+    member_platforms = assembly.get("assembly_input_member_platforms") or {}
+    primary_platforms = member_platforms.get("primary") or []
+    return AssemblyMaterialContext(
+        hifi_files=primary_platforms.count("pacbio_hifi"),
+        ont_files=primary_platforms.count("ont"),
+        ultralong_ont_files=len(assembly.get("ultralong_read_refs") or [])
+        if assembly.get("use_ultralong_ont")
+        else 0,
+        hic_pairs=len(assembly.get("hic_r1_reads") or [])
+        if assembly.get("use_hic_phasing")
+        else 0,
+        trio_maternal_files=len(assembly.get("trio_maternal_read_refs") or []),
+        trio_paternal_files=len(assembly.get("trio_paternal_read_refs") or []),
+        phasing_mode="trio"
+        if assembly.get("trio_enabled")
+        else "hic"
+        if assembly.get("use_hic_phasing")
+        else "none",
+    )
 
 
 def build_material_query(
@@ -126,6 +151,7 @@ def build_material_query(
         "task": "contig_assembly",
         "text": text,
         "platforms": sorted(platforms),
+        "material_inputs": resolved_material_context(assembly).model_dump(mode="json"),
         "target_level": assembly.get("target_level"),
         "observations": [o.model_dump(mode="json") for o in observations],
         "read_summary_scope": {
@@ -145,7 +171,11 @@ def build_material_query(
 
 def visible_query(query: Mapping[str, Any]) -> dict[str, Any]:
     """Material scope only; canonical facts are sent once, separately."""
-    result = {k: query[k] for k in ("platforms", "read_summary_scope") if k in query}
+    result = {
+        k: query[k]
+        for k in ("platforms", "read_summary_scope", "material_inputs")
+        if k in query
+    }
     for observation in query.get("observations", []):
         if observation["name"] == "coverage" and observation["state"] == "filtered":
             result["filtered_coverage"] = {

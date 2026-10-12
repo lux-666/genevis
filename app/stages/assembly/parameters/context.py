@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
+from app.domains.assembly.material_query import resolved_material_context
 from app.domains.assembly.selection import (
     AssemblySelection,
     validate_assembly_selection,
@@ -44,6 +45,7 @@ def build_assembly_recommendation_context(
         assembly_route=assembly_route,
         read_type=selection.read_type,
         target_level=target_level,
+        material_inputs=resolved_material_context(assembly_out),
         retry=retry_context,
     )
 

@@ -305,6 +305,20 @@ class RecommendationRetryContext(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class AssemblyMaterialContext(BaseModel):
+    """Resolved input roles shared by method and parameter recommendations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hifi_files: int = Field(default=0, ge=0)
+    ont_files: int = Field(default=0, ge=0)
+    ultralong_ont_files: int = Field(default=0, ge=0)
+    hic_pairs: int = Field(default=0, ge=0)
+    trio_maternal_files: int = Field(default=0, ge=0)
+    trio_paternal_files: int = Field(default=0, ge=0)
+    phasing_mode: Literal["none", "hic", "trio"] = "none"
+
+
 class AssemblyRecommendationContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -312,6 +326,9 @@ class AssemblyRecommendationContext(BaseModel):
     assembly_route: Literal["hifi", "ont", "cyclone"]
     read_type: NormalizedReadType
     target_level: Literal["draft", "near_t2t", "strict_t2t"]
+    material_inputs: AssemblyMaterialContext = Field(
+        default_factory=AssemblyMaterialContext
+    )
     retry: RecommendationRetryContext | None = None
 
 

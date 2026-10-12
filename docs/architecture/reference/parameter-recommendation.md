@@ -126,7 +126,7 @@ Assembly `AssemblyParameterRequestDTO` 包含：
 - `recommendation_contract: parameter_recommendation_v1`。
 - `method_id` 和 `task`。
 - 严格 `CanonicalRecommendationFacts` 类型的 `facts`。
-- 类型化 `assembly_context`：路线、规范读段类型、目标层级、重试时有界时间顺序尝试历史。
+- 类型化 `assembly_context`：路线、规范读段类型、目标层级、已绑定 HiFi/ONT/超长 ONT/Hi-C/Trio 材料数量及分相模式、重试时有界时间顺序尝试历史。方法顾问和参数顾问共享该材料投影；普通 ONT 不自动视为超长读段，仅供 scaffolding 的 Hi-C 不自动视为组装分相输入。
 - `adjustable_parameters`：描述/类型元数据，不带默认值。
 - `knowledge_evidence`：任务专属紧凑案例、原生设置、`source_method.setting_explanations`；完整选定证据留在 basis。
 - `material_context`、`method_decision`、`method_guidance`；空证据集合显式表达，不加载其他案例来源。
