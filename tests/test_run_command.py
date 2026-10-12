@@ -15,12 +15,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app.entrypoints.run as run_entry
-from app.control.lifecycle import TerminalFinalizationResult
 from app.control.projections import (
     ProjectionBoundary,
     progress_projection_input,
 )
 from app.control.resume_transaction import ResumeTransactionError
+from app.control.terminal import TerminalFinalizationResult
 from app.execution.dependency_snapshot import (
     FrozenDependencyResolver,
     capture_dependency_snapshot,
@@ -46,9 +46,8 @@ def _capture_call(function, *args, **kwargs):
     return result, stdout.getvalue(), stderr.getvalue()
 
 
-def _busco_config(lineage_path: str) -> dict[str, object]:
+def _busco_config() -> dict[str, object]:
     return {
-        "lineage": Path(lineage_path).name,
         "threads": 4,
     }
 
@@ -121,7 +120,7 @@ def _prepared_inputs(
     }
     if "assembly_review" in stages:
         payload["assembly_review"] = {
-            "busco": _busco_config("/data/busco/embryophyta_odb10")
+            "busco": _busco_config()
         }
     return SimpleNamespace(
         manifest=SimpleNamespace(session_id=session_id),
@@ -872,7 +871,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
-                        "assembly_review": {"busco": _busco_config(str(lineage))},
+                        "assembly_review": {"busco": _busco_config()},
                     }
                 ),
                 encoding="utf-8",
@@ -949,7 +948,7 @@ class PublicRunSQLiteIntegrationTests(unittest.TestCase):
                         "requested_stages": [
                             {"stage": "assembly_review", "allow_local_execution": False}
                         ],
-                        "assembly_review": {"busco": _busco_config(str(lineage))},
+                        "assembly_review": {"busco": _busco_config()},
                     }
                 ),
                 encoding="utf-8",
@@ -1146,7 +1145,7 @@ class FrozenHelperTests(unittest.TestCase):
                             "mode": "manual_review",
                             "recommendation_mode": "deterministic_baseline",
                         },
-                        "assembly_review": {"busco": _busco_config(str(self._lineage))},
+                        "assembly_review": {"busco": _busco_config()},
                         "review_policy": {
                             "max_blocked_seconds": 300,
                             "stages": {
@@ -1546,7 +1545,7 @@ class FrozenHelperTests(unittest.TestCase):
                         {"stage": "assembly", "allow_local_execution": False},
                         {"stage": "assembly_review", "allow_local_execution": False},
                     ],
-                    assembly_review={"busco": _busco_config(str(self._lineage))},
+                    assembly_review={"busco": _busco_config()},
                 ),
             )
             graph = Mock()

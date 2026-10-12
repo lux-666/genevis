@@ -618,7 +618,7 @@ class TuiWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "data"
-            lineage = ensure_busco_lineage(root)
+            ensure_busco_lineage(root)
             draft = create_tui_session_draft(
                 session_id="s1",
                 data_dir=str(data_dir),
@@ -627,7 +627,6 @@ class TuiWorkflowTests(unittest.TestCase):
             ).model_copy(update={"lifecycle": "ready_to_confirm"})
             save_tui_session_draft(draft)
             busco = {
-                "lineage": lineage.name,
                 "threads": 4,
             }
             plan = AskPlanState(
@@ -752,7 +751,6 @@ class TuiWorkflowTests(unittest.TestCase):
         return ensure_test_host_envs(root)
 
     def _frozen_parent(self, data_dir: Path, reads: Path, envs: Path):
-        lineage = envs.parent / "busco" / "embryophyta_odb10"
         parent = create_tui_session_draft(
             session_id="parent",
             data_dir=str(data_dir),
@@ -778,7 +776,6 @@ class TuiWorkflowTests(unittest.TestCase):
                     ],
                     "assembly_review": {
                         "busco": {
-                            "lineage": lineage.name,
                             "threads": 4,
                         }
                     },
