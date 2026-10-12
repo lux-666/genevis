@@ -178,8 +178,6 @@ def resolve_ncbi_reference(
                 if isinstance(expected_hashes, Mapping)
                 else None
             )
-            if expected_hash is None and name == "metazoa":
-                expected_hash = getattr(resolver, "ncbi_manifest_sha256", None)
             if (
                 expected_hash is not None
                 and reference_snapshot_sha256(path) != expected_hash

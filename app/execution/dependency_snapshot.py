@@ -68,7 +68,6 @@ class DependencySnapshot(BaseModel):
     databases: DatabaseRegistry | None = None
     # NCBI snapshots are external directories, so their content identities are
     # frozen separately from the registry path.
-    ncbi_manifest_sha256: str | None = None
     ncbi_manifest_sha256s: dict[str, str] = Field(default_factory=dict)
     environment_preflight: dict[str, PreflightResult] = Field(default_factory=dict)
     package_preflight: dict[str, PackagePreflightResult] = Field(default_factory=dict)
@@ -97,7 +96,6 @@ class FrozenDependencyResolver:
         self.config_path = Path(snapshot.config.source_path)
         self.packages = dict(snapshot.packages)
         self.databases = snapshot.databases
-        self.ncbi_manifest_sha256 = snapshot.ncbi_manifest_sha256
         self.ncbi_manifest_sha256s = dict(snapshot.ncbi_manifest_sha256s)
 
     def resolve(self, *, stage: str, method_name: str | None = None) -> EnvSpec:
