@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping, TextIO
 from uuid import NAMESPACE_URL, uuid5
 
@@ -55,6 +56,78 @@ class PublishedArtifact:
     path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactIndexView:
+    """One validated, read-only view of an artifact index.
+
+    The view is intentionally scoped to one caller invocation.  It is safe to
+    use for several by-id/by-path lookups without reparsing the append-only
+    index, but it must be rebuilt after a publication.  Resolving a reference
+    still checks the durable file size and SHA-256; the view only removes
+    duplicate index parsing, never the integrity boundary.
+    """
+
+    paths: SessionPaths
+    records: tuple[Mapping[str, Any], ...]
+    by_id: Mapping[str, Mapping[str, Any]]
+    by_path: Mapping[str, Mapping[str, Any]]
+
+    def record_for_ref(self, value: ArtifactRef | Mapping[str, Any]) -> dict[str, Any]:
+        ref = (
+            value
+            if isinstance(value, ArtifactRef)
+            else ArtifactRef.model_validate(value)
+        )
+        record = self.by_id.get(ref.artifact_id)
+        if record is None:
+            raise DataLayoutError(
+                f"artifact ref is not present in the index: {ref.artifact_id}"
+            )
+        indexed_ref = _artifact_ref_from_record(record)
+        if indexed_ref != ref:
+            raise DataLayoutError(
+                f"artifact ref does not match its index record: {ref.artifact_id}"
+            )
+        # Do not leak the index's validated record object.  Callers may enrich
+        # the returned snapshot for a report, but cannot mutate this view's
+        # facts or bypass a later integrity check.
+        return _thaw_mapping(record)
+
+    def ref_for_path(
+        self,
+        path: Path | str,
+        *,
+        expected_type: str | None = None,
+    ) -> ArtifactRef:
+        path_ref = self.paths.to_ref(path)
+        record = self.by_path.get(path_ref)
+        if record is None:
+            raise DataLayoutError(
+                f"artifact path is not present in the index: {path_ref}"
+            )
+        ref = _artifact_ref_from_record(record)
+        if expected_type is not None and ref.artifact_type != expected_type:
+            raise DataLayoutError(
+                f"artifact path has type {ref.artifact_type!r}, "
+                f"expected {expected_type!r}: {path_ref}"
+            )
+        return ref
+
+    def resolve(self, value: ArtifactRef | Mapping[str, Any]) -> Path:
+        ref = (
+            value
+            if isinstance(value, ArtifactRef)
+            else ArtifactRef.model_validate(value)
+        )
+        self.record_for_ref(ref)
+        path = self.paths.resolve_ref(ref.path_ref)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        if path.stat().st_size != ref.size_bytes or sha256_file(path) != ref.sha256:
+            raise DataLayoutError(f"artifact ref integrity mismatch: {ref.path_ref}")
+        return path
+
+
 def canonical_artifact_id(session_id: str, path_ref: str, sha256: str) -> str:
     """Return the stable opaque ID for one immutable run-local artifact."""
     identity = json.dumps(
@@ -69,17 +142,37 @@ def read_artifact_records(
     data_dir: Path | str, session_id: str
 ) -> list[dict[str, Any]]:
     """Read and validate the run's v2 artifact index."""
+    return [
+        _thaw_mapping(record)
+        for record in read_artifact_index_view(data_dir, session_id).records
+    ]
+
+
+def read_artifact_index_view(
+    data_dir: Path | str, session_id: str
+) -> ArtifactIndexView:
+    """Read and validate the artifact index once for one caller scope."""
+
     paths = _session_paths(data_dir, session_id, require_layout=True)
     index_path = paths.artifact_index_path
     if not index_path.exists():
-        return []
+        empty: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
+        return ArtifactIndexView(paths, (), empty, empty)
     with index_path.open("r", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
         try:
-            records = _load_records(handle, paths)
+            loaded = _load_records(handle, paths)
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    return records
+    records = tuple(_freeze_mapping(record) for record in loaded)
+    by_id = MappingProxyType({record["artifact_id"]: record for record in records})
+    by_path = MappingProxyType({record["path_ref"]: record for record in records})
+    return ArtifactIndexView(
+        paths=paths,
+        records=records,
+        by_id=by_id,
+        by_path=by_path,
+    )
 
 
 def publish_artifact_records(
@@ -174,7 +267,8 @@ def recover_published_artifact(
         destination_path,
     )
     if indexed_ref is not None:
-        resolved = resolve_artifact_ref(paths.run_dir, session_id, indexed_ref)
+        index_view = read_artifact_index_view(paths.run_dir, session_id)
+        resolved = index_view.resolve(indexed_ref)
         if indexed_ref.artifact_type != artifact_type:
             raise DataLayoutError(
                 f"artifact path has type {indexed_ref.artifact_type!r}, "
@@ -335,35 +429,13 @@ def resolve_artifact_ref(
     data_dir: Path | str,
     session_id: str,
     value: ArtifactRef | dict[str, Any],
+    *,
+    index_view: ArtifactIndexView | None = None,
 ) -> Path:
     """Verify an indexed artifact ref and return its durable absolute path."""
 
     ref = value if isinstance(value, ArtifactRef) else ArtifactRef.model_validate(value)
-    paths = _session_paths(data_dir, session_id, require_layout=True)
-    records = read_artifact_records(paths.run_dir, session_id)
-    record = next(
-        (
-            candidate
-            for candidate in records
-            if candidate.get("artifact_id") == ref.artifact_id
-        ),
-        None,
-    )
-    if record is None:
-        raise DataLayoutError(
-            f"artifact ref is not present in the index: {ref.artifact_id}"
-        )
-    indexed_ref = _artifact_ref_from_record(record)
-    if indexed_ref != ref:
-        raise DataLayoutError(
-            f"artifact ref does not match its index record: {ref.artifact_id}"
-        )
-    path = paths.resolve_ref(ref.path_ref)
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    if path.stat().st_size != ref.size_bytes or sha256_file(path) != ref.sha256:
-        raise DataLayoutError(f"artifact ref integrity mismatch: {ref.path_ref}")
-    return path
+    return (index_view or read_artifact_index_view(data_dir, session_id)).resolve(ref)
 
 
 def artifact_ref_for_path(
@@ -372,21 +444,13 @@ def artifact_ref_for_path(
     path: Path | str,
     *,
     expected_type: str | None = None,
+    index_view: ArtifactIndexView | None = None,
 ) -> ArtifactRef:
     """Return and verify the canonical indexed ref for one durable path."""
 
-    paths = _session_paths(data_dir, session_id, require_layout=True)
-    path_ref = paths.to_ref(path)
-    ref = _indexed_artifact_ref_for_path(paths, session_id, path)
-    if ref is None:
-        raise DataLayoutError(f"artifact path is not present in the index: {path_ref}")
-    if expected_type is not None and ref.artifact_type != expected_type:
-        raise DataLayoutError(
-            f"artifact path has type {ref.artifact_type!r}, "
-            f"expected {expected_type!r}: "
-            f"{path_ref}"
-        )
-    resolve_artifact_ref(paths.run_dir, session_id, ref)
+    view = index_view or read_artifact_index_view(data_dir, session_id)
+    ref = view.ref_for_path(path, expected_type=expected_type)
+    view.resolve(ref)
     return ref
 
 
@@ -574,16 +638,12 @@ def _indexed_artifact_ref_for_path(
     paths: SessionPaths,
     session_id: str,
     path: Path | str,
+    *,
+    index_view: ArtifactIndexView | None = None,
 ) -> ArtifactRef | None:
     path_ref = paths.to_ref(path)
-    record = next(
-        (
-            candidate
-            for candidate in read_artifact_records(paths.run_dir, session_id)
-            if candidate.get("path_ref") == path_ref
-        ),
-        None,
-    )
+    view = index_view or read_artifact_index_view(paths.run_dir, session_id)
+    record = view.by_path.get(path_ref)
     return None if record is None else _artifact_ref_from_record(record)
 
 
@@ -729,8 +789,40 @@ def _require_same_registration(
         )
 
 
-def _artifact_ref_from_record(record: dict[str, Any]) -> ArtifactRef:
+def _artifact_ref_from_record(record: Mapping[str, Any]) -> ArtifactRef:
     return ArtifactRef.model_validate({field: record[field] for field in _REF_FIELDS})
+
+
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    frozen = _freeze_value(value)
+    if not isinstance(frozen, Mapping):
+        raise TypeError("artifact index record must be a mapping")
+    return frozen
+
+
+def _thaw_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_value(item) for item in value]
+    return value
+
+
+def _thaw_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    thawed = _thaw_value(value)
+    if not isinstance(thawed, dict):
+        raise TypeError("artifact index record must be a mapping")
+    return thawed
 
 
 def _update_transient_meta(

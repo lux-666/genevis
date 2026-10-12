@@ -240,6 +240,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
                 manifest_ref=initial_attempt.recommendation_manifest_ref,
                 expected_stage="assembly",
                 expected_method_id=method_name,
+                request_validator=validate_recorded_parameter_request,
             )
             catalog = initial_chain.catalog
             facts = initial_chain.input_snapshot.facts
@@ -955,6 +956,7 @@ def _validate_assembly_parameter_approval(
             manifest_ref=manifest_ref,
             expected_stage="assembly",
             expected_method_id=cursor.method_id,
+            request_validator=validate_recorded_parameter_request,
         )
     except (ValueError, ParameterEvidenceError) as exc:
         raise ResumeValidationError(
@@ -1341,6 +1343,7 @@ def hydrate_parameter_attempt(
         attempt=attempt,
         expected_stage="assembly",
         expected_method_id=attempt.method_id,
+        request_validator=validate_recorded_parameter_request,
     )
     recommended_parameters = approved_bundle.approved_l2
 

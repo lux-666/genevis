@@ -614,6 +614,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
             attempt=attempt,
             expected_stage="assembly",
             expected_method_id=FLYE_METHOD,
+            request_validator=assembly_support.validate_recorded_parameter_request,
         )
 
     def test_support_turns_v3_evidence_errors_into_stage_friendly_errors(self):

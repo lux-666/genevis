@@ -40,6 +40,7 @@ from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
+from app.llm.parameters.assembly.request import validate_recorded_parameter_request
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
@@ -532,6 +533,7 @@ def load_current_approved_recommendation(
             attempt=attempt,
             expected_stage="assembly",
             expected_method_id=method_id,
+            request_validator=validate_recorded_parameter_request,
         )
     except (ParameterAttemptStateError, ParameterEvidenceError) as exc:
         return None, f"{label} recommendation evidence is invalid: {exc}"
