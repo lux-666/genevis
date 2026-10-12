@@ -172,9 +172,7 @@ def _write_ncbi_reference(root: Path) -> Path:
 def _assembly_config(
     *,
     review_local: bool = True,
-    lineage_version: str = "odb10",
 ) -> RunConfig:
-    lineage_name = f"embryophyta_{lineage_version}"
     return RunConfig.model_validate(
         {
             "requested_stages": [
@@ -187,7 +185,6 @@ def _assembly_config(
             ],
             "assembly_review": {
                 "busco": {
-                    "lineage": lineage_name,
                     "threads": 4,
                 }
             },
@@ -195,7 +192,7 @@ def _assembly_config(
     )
 
 
-def _env_config(path: Path) -> Path:
+def _env_config(path: Path, *, lineage_version: str = "odb10") -> Path:
     busco_root = path.parent / "busco"
     lineage_names = (
         "embryophyta_odb10",
@@ -220,7 +217,7 @@ def _env_config(path: Path) -> Path:
         "packages: {}\n"
         "databases:\n"
         "  busco:\n"
-        "    default_lineage: embryophyta_odb10\n"
+        f"    default_lineage: embryophyta_{lineage_version}\n"
         "    lineages:\n" + lineage_yaml + "  ncbi:\n"
         f"    reference_dir: {reference}\n"
         "methods:\n"
@@ -429,7 +426,8 @@ def test_odb12_2_rejects_busco_before_6_1(tmp_path: Path) -> None:
         stdout = "BUSCO 6.0.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12.2")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12.2")
     with pytest.raises(
         RunReadinessError,
         match=r"BUSCO 6\.0\.0 does not satisfy >=6\.1 required for "
@@ -438,7 +436,7 @@ def test_odb12_2_rejects_busco_before_6_1(tmp_path: Path) -> None:
         preflight_run_readiness(
             run_config,
             effective_methods=_assembly_selected_closure(run_config),
-            config_path=_env_config(tmp_path / "envs.yaml"),
+            config_path=env_config,
             runner=runner,
             llm_probe=lambda: llm_calls.append("called"),
         )
@@ -453,11 +451,12 @@ def test_odb12_2_accepts_busco_6_1(tmp_path: Path) -> None:
         stdout = "BUSCO 6.1.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12.2")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12.2")
     methods = preflight_run_readiness(
         run_config,
         effective_methods=_assembly_selected_closure(run_config),
-        config_path=_env_config(tmp_path / "envs.yaml"),
+        config_path=env_config,
         runner=runner,
         llm_probe=lambda: None,
     )
@@ -474,7 +473,8 @@ def test_odb12_rejects_busco_before_5_8(tmp_path: Path) -> None:
         stdout = "BUSCO 5.7.1\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12")
     with pytest.raises(
         RunReadinessError,
         match=r"BUSCO 5\.7\.1 does not satisfy >=5\.8 required for "
@@ -483,7 +483,7 @@ def test_odb12_rejects_busco_before_5_8(tmp_path: Path) -> None:
         preflight_run_readiness(
             run_config,
             effective_methods=_assembly_selected_closure(run_config),
-            config_path=_env_config(tmp_path / "envs.yaml"),
+            config_path=env_config,
             runner=runner,
             llm_probe=lambda: llm_calls.append("called"),
         )
@@ -498,11 +498,12 @@ def test_odb12_accepts_busco_5_8(tmp_path: Path) -> None:
         stdout = "BUSCO 5.8.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb12")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb12")
     methods = preflight_run_readiness(
         run_config,
         effective_methods=_assembly_selected_closure(run_config),
-        config_path=_env_config(tmp_path / "envs.yaml"),
+        config_path=env_config,
         runner=runner,
         llm_probe=lambda: None,
     )
@@ -517,11 +518,12 @@ def test_odb10_accepts_descriptor_minimum_busco_5_4(tmp_path: Path) -> None:
         stdout = "BUSCO 5.4.0\n" if command[-2:] == ["busco", "--version"] else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    run_config = _assembly_config(lineage_version="odb10")
+    run_config = _assembly_config()
+    env_config = _env_config(tmp_path / "envs.yaml", lineage_version="odb10")
     methods = preflight_run_readiness(
         run_config,
         effective_methods=_assembly_selected_closure(run_config),
-        config_path=_env_config(tmp_path / "envs.yaml"),
+        config_path=env_config,
         runner=runner,
         llm_probe=lambda: None,
     )
@@ -667,9 +669,7 @@ def test_review_only_path_does_not_require_llm(tmp_path: Path) -> None:
             "requested_stages": [
                 {"stage": "assembly_review", "allow_local_execution": False}
             ],
-            "assembly_review": {
-                "busco": {"lineage": "embryophyta_odb10", "threads": 4}
-            },
+            "assembly_review": {"busco": {"threads": 4}},
         }
     )
     assert not run_requires_llm(review_only)
