@@ -7,6 +7,7 @@ import pytest
 from app.llm.json_response import (
     model_response_record,
     parse_json_object,
+    response_text,
     validate_model_response_record,
 )
 from app.llm.parameters.assembly.recommender import (
@@ -84,5 +85,17 @@ def test_assembly_restorers_preserve_model_identity() -> None:
 
     with pytest.raises(ValueError, match="invalid model_id"):
         restore_assembly_parameter_decision(parameter_record, {})
-    restored_route = restore_assembly_decision(route_record, route_request)
-    assert restored_route.model_id is None
+    with pytest.raises(ValueError, match="invalid model_id"):
+        restore_assembly_decision(route_record, route_request)
+
+
+@pytest.mark.parametrize("content", [[42], [{"other": "value"}], [{"text": 42}]])
+def test_response_blocks_cannot_stringify_arbitrary_payloads(content):
+    with pytest.raises(ValueError, match="must contain text"):
+        response_text(content)
+
+
+def test_response_blocks_preserve_text_order():
+    assert response_text([{"type": "text", "text": '{"ok":'}, "true}"]) == (
+        '{"ok":true}'
+    )

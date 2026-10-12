@@ -102,9 +102,7 @@ def _validate_route_selection(
     recommended = parsed.get("recommended_route")
     if recommended not in set(allowed_actions):
         raise ValueError(f"recommended_route {recommended!r} not in allowed actions")
-    # ``recommended_method`` was added after the original route-only contract.
-    # Keep accepting old persisted/model responses during migration, but when
-    # present it is an explicit, fail-closed candidate selection.
+    # An actionable route binds one of the offered executable methods.
     method = parsed.get("recommended_method")
     if recommended != "insufficient_data" and allowed_methods and method is None:
         raise ValueError("recommended_method is required for a selected route")
@@ -117,11 +115,8 @@ def restore_assembly_decision(
 ) -> AssemblyDecisionResult:
     """Rehydrate one immutable Assembly decision without invoking the model."""
 
-    normalized_record = dict(record)
-    if not isinstance(normalized_record.get("model_id"), str):
-        normalized_record["model_id"] = None
     envelope = validate_model_response_record(
-        normalized_record,
+        record,
         expected_schema_version=1,
         label="persisted Assembly model response",
     )
