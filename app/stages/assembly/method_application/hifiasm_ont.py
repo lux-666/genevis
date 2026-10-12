@@ -161,7 +161,6 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
     temp_draft = working_dir / "draft_assembly.fasta"
     prefix = output_dir / "hifiasm_ont"
     gfa = output_dir / "hifiasm_ont.bp.p_ctg.gfa"
-    fallback_gfa = output_dir / "hifiasm_ont.p_ctg.gfa"
     script = working_dir / "run_hifiasm_ont.sh"
     try:
         catalog = approved_bundle.chain.catalog
@@ -183,11 +182,8 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> StateUpdate:
     script.write_text(
         "set -e\n"
         f"{command}\n"
-        f"if [ -f {shlex.quote(str(gfa))} ]; then gfa={shlex.quote(str(gfa))};"
-        f" elif [ -f {shlex.quote(str(fallback_gfa))} ];"
-        f" then gfa={shlex.quote(str(fallback_gfa))};"
-        " else echo 'expected hifiasm primary contig GFA missing' >&2; exit 1; fi\n"
-        f'awk \'/^S/{{print ">"$2"\\n"$3}}\' "$gfa" > '
+        f"test -s {shlex.quote(str(gfa))}\n"
+        f'awk \'/^S/{{print ">"$2"\\n"$3}}\' {shlex.quote(str(gfa))} > '
         f"{shlex.quote(str(temp_draft))}\n"
         f"{shell_publish_file(temp_draft, draft)}\n",
         encoding="utf-8",

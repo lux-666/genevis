@@ -6,6 +6,7 @@ from copy import deepcopy
 import pytest
 
 from app.control.errors import ResumeValidationError
+from app.llm.parameters.assembly.request import validate_recorded_parameter_request
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
     load_approved_parameter_chain_v3,
@@ -79,10 +80,16 @@ def test_shared_chain_and_execution_reject_unbound_evidence(
         load_parameter_recommendation_chain_v3(
             state,
             manifest_ref=attempt["recommendation_manifest_ref"],
+            request_validator=validate_recorded_parameter_request,
             **common,
         )
     with pytest.raises(ParameterEvidenceError):
-        load_approved_parameter_chain_v3(state, attempt=attempt, **common)
+        load_approved_parameter_chain_v3(
+            state,
+            attempt=attempt,
+            request_validator=validate_recorded_parameter_request,
+            **common,
+        )
 
 
 @pytest.mark.parametrize("fault", FAULTS[:-1])

@@ -144,6 +144,12 @@ class AssemblyStageCursor(TypedDict, total=False):
     hic_reads_ref: str | None
     hic_r1_reads: list[str]
     hic_r2_reads: list[str]
+    trio_maternal_read_refs: list[str]
+    trio_paternal_read_refs: list[str]
+    trio_maternal_member_ids: list[str]
+    trio_paternal_member_ids: list[str]
+    trio_enabled: bool
+    phased_output_refs: dict[str, list[ArtifactRefJson]]
     assembly_input_member_ids: dict[str, list[str]]
     assembly_input_member_platforms: dict[str, list[str]]
     assembly_input_artifact_refs: dict[str, list[ArtifactRefJson | None]]
@@ -193,7 +199,6 @@ class AssemblyStageCursor(TypedDict, total=False):
     assembly_execution_contract: JsonObject
     flye_parameters: JsonObject
     nextdenovo_parameters: JsonObject
-    hifiasm_parameters: JsonObject
     hifiasm_ont_parameters: JsonObject
     flye_output_dir: str
     hifiasm_output_dir: str

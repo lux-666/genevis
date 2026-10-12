@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from app.control.lifecycle import normalize_resume_review_request
+from app.control.resume import normalize_resume_review_request
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.env_resolver import EnvResolver, preflight
 from app.execution.evidence import (
@@ -29,7 +29,10 @@ from app.execution.local_runner import LocalRunner
 from app.execution.method_runner import build_frozen_attempt
 from app.integrity import sha256_file
 from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
-from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.llm.parameters.assembly.request import (
+    build_parameter_request_dto,
+    validate_recorded_parameter_request,
+)
 from app.review.application import (
     load_verified_review_application,
     persist_review_application,
@@ -173,16 +176,19 @@ def _v2_state(tmpdir: str, *, session_id: str = "s1") -> dict:
         data_dir=str(run_dir),
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-001-read_qc",
                 "stage": "read_qc",
                 "allow_local_execution": True,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-002-genome_survey",
                 "stage": "genome_survey",
                 "allow_local_execution": True,
@@ -1439,6 +1445,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 manifest_ref=cursor.manifest_ref,
                 expected_stage="assembly",
                 expected_method_id="assembly.candidate.hifiasm_ont",
+                request_validator=validate_recorded_parameter_request,
             )
 
         self.assertEqual(assembly["status"], "blocked_human")
@@ -1500,6 +1507,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 manifest_ref=cursor.manifest_ref,
                 expected_stage="assembly",
                 expected_method_id="assembly.candidate.hifiasm_ont",
+                request_validator=validate_recorded_parameter_request,
             )
 
         self.assertEqual(assembly["status"], "parameter_response_invalid")
@@ -1530,6 +1538,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 manifest_ref=cursor.manifest_ref,
                 expected_stage="assembly",
                 expected_method_id="assembly.candidate.hifiasm_ont",
+                request_validator=validate_recorded_parameter_request,
             )
 
         self.assertEqual(assembly["status"], "blocked_human")
@@ -1891,11 +1900,9 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         reads_ref, reads_artifact_ref = self._publish_reads(state, reads)
         if method == "hifiasm":
             status = "hifiasm_execution_planned"
-            param_key = "hifiasm_parameters"
             method_name = "assembly.candidate.hifiasm"
         else:
             status = "hifiasm_ont_execution_planned"
-            param_key = "hifiasm_ont_parameters"
             method_name = "assembly.candidate.hifiasm_ont"
         assembly = {
             "status": status,
@@ -1908,7 +1915,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 "source": "run_config",
                 "rationale": "test fixture explicitly selects the assembly method",
             },
-            param_key: {"threads": 1},
+            "threads": 1,
             "current_parameter_attempt_id": 0,
             "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
             "assembly_input_member_platforms": {
@@ -1963,17 +1970,14 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 "source": "run_config",
                 "rationale": "test fixture explicitly selects the assembly method",
             },
-            "nextdenovo_parameters": {
-                "genome_size": 2_000_000,
-                "threads": 1,
-            },
+            "threads": 1,
             "assembly_input_member_ids": {"primary": ["fixture_member_0"]},
             "assembly_input_member_platforms": {"primary": ["ont"]},
             "assembly_input_artifact_refs": {"primary": [reads_artifact_ref]},
             "resolved_genome_size": {
                 "value_bp": 2_000_000,
                 "source": "provided",
-                "source_path": "assembly.nextdenovo_parameters.genome_size",
+                "source_path": "assembly.genome_size_prior",
             },
             "current_parameter_attempt_id": 0,
         }

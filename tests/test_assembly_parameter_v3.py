@@ -94,6 +94,7 @@ def _assembly_state(run_dir: Path, output: dict) -> dict:
         data_dir=str(run_dir),
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
@@ -104,6 +105,7 @@ def _assembly_state(run_dir: Path, output: dict) -> dict:
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-002-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,
@@ -542,7 +544,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
     def test_execution_contract_has_no_legacy_field_fallback(self):
         output = {
             "env": {"PATH": "/legacy"},
-            "flye_parameters": {"threads": 8},
+            "threads": 8,
         }
 
         with self.assertRaisesRegex(
@@ -557,7 +559,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
     def test_execution_contract_freezes_l0_value_and_provenance(self):
         output = {
             "env": {"PATH": "/frozen"},
-            "flye_parameters": {"threads": 8},
+            "threads": 8,
         }
 
         contract = assembly_support.build_assembly_execution_contract(
@@ -565,7 +567,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
             method_id=FLYE_METHOD,
         )
         output["env"]["PATH"] = "/mutated"
-        output["flye_parameters"]["threads"] = 64
+        output["threads"] = 64
 
         self.assertEqual(contract.schema_version, 3)
         self.assertEqual(contract.environment.values, {"PATH": "/frozen"})
@@ -576,7 +578,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
     def test_execution_contract_rejects_falsey_non_mapping_sources(self):
         for output, field in (
             ({"env": []}, "env must be a mapping"),
-            ({"flye_parameters": []}, "flye_parameters must be a mapping"),
+            ({"threads": []}, "invalid Assembly execution contract parameter"),
         ):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(ValueError, field):
@@ -650,7 +652,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_flye_attempt",
                 FLYE_METHOD,
                 "flye_execution_planned",
-                "flye_parameters",
                 "flye",
                 "pacbio-raw",
                 "nano-hq",
@@ -661,7 +662,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_nextdenovo_attempt",
                 NEXTDENOVO_METHOD,
                 "nextdenovo_execution_planned",
-                "nextdenovo_parameters",
                 "nextdenovo",
                 "clr",
                 "ont",
@@ -672,7 +672,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_hifiasm_attempt",
                 HIFIASM_METHOD,
                 "hifiasm_execution_planned",
-                "hifiasm_parameters",
                 "hifiasm",
                 "ont",
                 None,
@@ -683,7 +682,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_hifiasm_ont_attempt",
                 HIFIASM_ONT_METHOD,
                 "hifiasm_ont_execution_planned",
-                "hifiasm_ont_parameters",
                 "hifiasm_ont",
                 "hifi",
                 None,
@@ -696,7 +694,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
             freeze_name,
             method_id,
             status,
-            parameter_key,
             prior_key,
             mutable_read_type,
             expected_method_read_type,
@@ -712,10 +709,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                     "status": status,
                     "input_ref": "/reads/long.fastq.gz",
                     "input_type": "ont_raw",
-                    parameter_key: {
-                        "read_type": mutable_read_type,
-                        "threads": 6,
-                    },
+                    "threads": 6,
                     "read_type_prior": {prior_key: mutable_read_type},
                     "assembly_input_member_ids": {"primary": ["fixture-member-0"]},
                 }
@@ -726,7 +720,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 output[assembly_support.ASSEMBLY_EXECUTION_CONTRACT_KEY] = (
                     contract.model_dump(mode="json")
                 )
-                output[parameter_key]["threads"] = 99
+                output["threads"] = 99
                 output["env"] = {"PATH": "/mutable/not-frozen"}
                 state = _assembly_state(run_dir, output)
                 bundle = SimpleNamespace(
@@ -839,32 +833,28 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 "freeze_flye_attempt",
                 FLYE_METHOD,
                 "flye_execution_planned",
-                "flye_parameters",
             ),
             (
                 nextdenovo_adapter,
                 "freeze_nextdenovo_attempt",
                 NEXTDENOVO_METHOD,
                 "nextdenovo_execution_planned",
-                "nextdenovo_parameters",
             ),
             (
                 hifiasm_adapter,
                 "freeze_hifiasm_attempt",
                 HIFIASM_METHOD,
                 "hifiasm_execution_planned",
-                "hifiasm_parameters",
             ),
             (
                 hifiasm_ont_adapter,
                 "freeze_hifiasm_ont_attempt",
                 HIFIASM_ONT_METHOD,
                 "hifiasm_ont_execution_planned",
-                "hifiasm_ont_parameters",
             ),
         )
 
-        for adapter, freeze_name, method_id, status, parameter_key in cases:
+        for adapter, freeze_name, method_id, status in cases:
             with (
                 self.subTest(method_id=method_id),
                 tempfile.TemporaryDirectory() as tmp,
@@ -875,7 +865,6 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                     "status": status,
                     "input_ref": "/reads/long.fastq.gz",
                     "input_type": "ont_raw",
-                    parameter_key: {"read_type": "mutable-value"},
                     "read_type_prior": {"mutable": "mutable-value"},
                     "assembly_input_member_ids": {"primary": ["fixture-member-0"]},
                 }
@@ -886,7 +875,7 @@ class AssemblyAdapterV3Tests(unittest.TestCase):
                 output[assembly_support.ASSEMBLY_EXECUTION_CONTRACT_KEY] = (
                     contract.model_dump(mode="json")
                 )
-                output[parameter_key]["threads"] = 99
+                output["threads"] = 99
                 state = _assembly_state(run_dir, output)
                 bundle = SimpleNamespace(
                     attempt=SimpleNamespace(attempt_id=0),

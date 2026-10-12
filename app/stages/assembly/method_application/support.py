@@ -236,12 +236,6 @@ class AssemblyNativeOutputDeclaration:
     media_type: str
 
 
-_PARAMETER_KEY_BY_METHOD = {
-    FLYE_METHOD: "flye_parameters",
-    NEXTDENOVO_METHOD: "nextdenovo_parameters",
-    HIFIASM_METHOD: "hifiasm_parameters",
-    HIFIASM_ONT_METHOD: "hifiasm_ont_parameters",
-}
 ASSEMBLY_EXECUTION_CONTRACT_KEY = "assembly_execution_contract"
 
 
@@ -321,31 +315,20 @@ def build_assembly_execution_contract(
 ) -> AssemblyExecutionContract:
     """Freeze run-config execution inputs at the Assembly planning boundary."""
 
-    parameter_key = _PARAMETER_KEY_BY_METHOD.get(method_id)
-    if parameter_key is None:
+    if method_id not in _ASSEMBLY_METHODS:
         raise ValueError(f"unsupported Assembly method: {method_id}")
     raw_env = output.get("env")
     if raw_env is None:
         raw_env = {}
     if not isinstance(raw_env, dict):
         raise ValueError("Assembly run-config env must be a mapping")
-    raw_parameters = output.get(parameter_key)
-    if raw_parameters is None:
-        raw_parameters = {}
-    if not isinstance(raw_parameters, dict):
-        raise ValueError(f"{parameter_key} must be a mapping")
     public_thread_value = output.get("threads")
-    thread_value = (
-        public_thread_value
-        if public_thread_value is not None
-        else raw_parameters.get("threads")
-    )
+    thread_value = public_thread_value
     threads = None
     if thread_value is not None:
         invalid: list[dict[str, Any]] = []
-        thread_field = (
-            "threads" if public_thread_value is not None else f"{parameter_key}.threads"
-        )
+        parameter_key = "assembly_execution_contract"
+        thread_field = "threads"
         threads = positive_int(
             thread_value,
             thread_field,
@@ -372,7 +355,7 @@ def load_assembly_execution_contract(
     *,
     method_id: str,
 ) -> AssemblyExecutionContract:
-    """Validate the frozen execution contract without legacy-field fallback."""
+    """Validate the frozen execution contract at the execution boundary."""
 
     payload = output.get(ASSEMBLY_EXECUTION_CONTRACT_KEY)
     if payload is None:

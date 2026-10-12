@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import normalize_resume_review_request
+from app.control.resume import normalize_resume_review_request
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
@@ -39,7 +39,10 @@ from app.stages.assembly.method_application import flye as flye_graph
 from app.stages.assembly.method_application import hifiasm as hifiasm_graph
 from app.stages.assembly.method_application import nextdenovo as nextdenovo_graph
 from app.stages.assembly.method_application.flye import build_flye_graph
-from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
+from app.stages.assembly.method_application.hifiasm import (
+    build_hifiasm_graph,
+    collect_hifiasm_artifacts,
+)
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
 from app.stages.assembly.nodes import _route_selector_payload, infer_input_profile
 from app.stages.assembly.routing import route_after_commit
@@ -320,6 +323,67 @@ class AssemblyDescriptorTests(unittest.TestCase):
 
 
 class AssemblyStageTests(unittest.TestCase):
+    def test_hifiasm_collect_preserves_candidate_update_when_adding_phased_refs(self):
+        native_ref = {
+            "artifact_id": "hap1-id",
+            "path_ref": "artifacts/hap1.gfa",
+            "sha256": "a" * 64,
+        }
+        execution = type(
+            "Execution",
+            (),
+            {
+                "attempt": type(
+                    "Attempt", (), {"metadata": {"hifiasm_output_dir": "/tmp/hifiasm"}}
+                )()
+            },
+        )()
+        native = type(
+            "Native",
+            (),
+            {
+                "artifact_class": "haplotype_contigs",
+                "native_role": "trio.hap1_fasta",
+                "artifact_ref": type(
+                    "Ref", (), {"model_dump": lambda self, **_: native_ref}
+                )(),
+            },
+        )()
+        bundle = type(
+            "Bundle", (), {"bundle": type("Body", (), {"native_outputs": [native]})()}
+        )()
+        collected = {
+            "stage_outputs": {
+                "assembly": {
+                    "status": "draft_ready",
+                    "draft_assembly_ref": "/artifacts/draft.fasta",
+                    "executed_candidate_bundle_ref": {"artifact_id": "bundle-id"},
+                }
+            }
+        }
+        state = {"session_id": "s1", "data_dir": "/tmp/run"}
+        with (
+            patch.object(
+                hifiasm_graph, "load_method_executions", return_value=[execution]
+            ),
+            patch.object(
+                hifiasm_graph, "hifiasm_native_output_declarations", return_value=[]
+            ),
+            patch.object(
+                hifiasm_graph, "collect_method_artifacts", return_value=collected
+            ),
+            patch.object(
+                hifiasm_graph,
+                "load_executed_candidate_bundle",
+                return_value=bundle,
+            ),
+        ):
+            update = collect_hifiasm_artifacts(state)
+        output = update["stage_outputs"]["assembly"]
+        self.assertEqual(output["status"], "draft_ready")
+        self.assertIn("executed_candidate_bundle_ref", output)
+        self.assertEqual(output["phased_output_refs"]["trio.hap1_fasta"][0], native_ref)
+
     def _invoke(self, graph, state: dict) -> dict:
         with (
             patch(
@@ -1149,7 +1213,7 @@ class AssemblyStageTests(unittest.TestCase):
                         read_type="cyclone",
                         primary_method="assembly.candidate.flye",
                     ),
-                    "flye_parameters": {"threads": 0},
+                    "threads": 0,
                 }
             }
 
@@ -1162,8 +1226,8 @@ class AssemblyStageTests(unittest.TestCase):
             invalid_params = {
                 item["param"] for item in assembly.get("invalid_params") or []
             }
-            self.assertIn("flye_parameters.threads", invalid_params)
-            self.assertIn("flye_parameters.threads", result["last_error"])
+            self.assertIn("threads", invalid_params)
+            self.assertIn("threads", result["last_error"])
 
     def test_local_flye_execution_writes_draft_assembly_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1197,7 +1261,7 @@ class AssemblyStageTests(unittest.TestCase):
                         read_type="cyclone",
                         primary_method="assembly.candidate.flye",
                     ),
-                    "flye_parameters": {"threads": 1},
+                    "threads": 1,
                 }
             }
 
@@ -1309,7 +1373,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "env": {
                         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                     },
-                    "flye_parameters": {"threads": 1},
+                    "threads": 1,
                 },
             }
             _set_long_reads(state, reads)
@@ -1351,7 +1415,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "env": {
                         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                     },
-                    "flye_parameters": {"threads": 1},
+                    "threads": 1,
                 },
             }
             _set_long_reads(state, reads_1, reads_2)
@@ -1402,7 +1466,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "parameter_recommendation": {
                         "max_execution_retries": 0,
                     },
-                    "flye_parameters": {"threads": 1},
+                    "threads": 1,
                 },
             }
 
@@ -1647,7 +1711,7 @@ class AssemblyStageTests(unittest.TestCase):
                         read_type="pacbio_hifi",
                         primary_method="assembly.candidate.hifiasm",
                     ),
-                    "hifiasm_parameters": {"threads": 0},
+                    "threads": 0,
                 }
             }
 
@@ -1770,7 +1834,7 @@ class AssemblyStageTests(unittest.TestCase):
                         read_type="cyclone",
                         primary_method="assembly.candidate.nextdenovo",
                     ),
-                    "nextdenovo_parameters": {"threads": 1},
+                    "threads": 1,
                 },
             }
 
@@ -2035,7 +2099,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         self,
         tmpdir: str,
         *,
-        flye_parameters: dict | None,
+        threads: int | None,
         marker: Path | None = None,
         shared_read_type: str = "ont_hq",
         genome_size: int | None = 2_000_000,
@@ -2067,8 +2131,8 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                 primary_method="assembly.candidate.flye",
             ),
         }
-        if flye_parameters is not None:
-            assembly_out["flye_parameters"] = flye_parameters
+        if threads is not None:
+            assembly_out["threads"] = threads
         state["stage_outputs"] = {"assembly": assembly_out}
         state["shared_parameters"] = {"read_type": shared_read_type}
         if genome_size is not None:
@@ -2080,7 +2144,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             marker = Path(tmpdir) / "flye-called"
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters=None,
+                threads=None,
                 marker=marker,
                 genome_size=None,
             )
@@ -2105,7 +2169,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters={},
+                threads=None,
             )
 
             result = self._invoke_with_parameter_approvals(state)
@@ -2126,7 +2190,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters={"threads": 1},
+                threads=1,
                 shared_read_type="pacbio_hifi",
             )
 
@@ -2152,32 +2216,11 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             )
             self.assertEqual(candidate.bundle.genome_size_prior, 2_000_000)
 
-    def test_obsolete_method_read_type_cannot_override_approved_snapshot(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            marker = Path(tmpdir) / "flye-called"
-            state = self._local_state_with_flye(
-                tmpdir,
-                flye_parameters={
-                    "read_type": "foo",
-                    "threads": 1,
-                },
-                marker=marker,
-            )
-
-            result = self._invoke_with_parameter_approvals(state)
-
-            self.assertEqual(result["current_stage"], "assembly_dedup")
-            self.assertTrue(marker.exists())
-            assembly = result["stage_outputs"]["assembly"]
-            command = _attempt_command(result, assembly["parameter_attempts"][0])
-            self.assertIn("--nano-hq", command["argv"])
-            self.assertNotIn("foo", command["argv"])
-
     def test_validated_params_are_passed_to_flye_command_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters={"threads": 1},
+                threads=1,
             )
 
             result = self._invoke_with_parameter_approvals(state)
@@ -2210,7 +2253,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._local_state_with_flye(
                 tmpdir,
-                flye_parameters={"threads": 1},
+                threads=1,
             )
 
             result = self._invoke_with_parameter_approvals(state)

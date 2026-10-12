@@ -64,6 +64,7 @@ class AssemblyFofnResolutionTests(unittest.TestCase):
                     "current_stage": "assembly",
                     "workflow_steps": [
                         {
+                            "selected_method_names": [],
                             "step_id": "step-000-inventory",
                             "stage": "inventory",
                             "allow_local_execution": False,
@@ -74,6 +75,7 @@ class AssemblyFofnResolutionTests(unittest.TestCase):
                             "allow_local_execution": False,
                         },
                         {
+                            "selected_method_names": [],
                             "step_id": "step-002-assembly_review",
                             "stage": "assembly_review",
                             "allow_local_execution": False,
