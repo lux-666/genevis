@@ -359,7 +359,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             "stage_outputs": {"assembly_review": {}},
         }
         state["workflow_steps"][2].pop("selected_method_names")
-        with self.assertRaisesRegex(ValueError, "missing its frozen method roster"):
+        with self.assertRaisesRegex(ValueError, "selected_method_names is required"):
             quast_method_outcome(state)
 
     def test_repeated_review_uses_only_the_active_occurrence_roster(self):
@@ -2421,7 +2421,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
                 )
 
     def test_unsupported_review_decision_fails_closed(self):
-        from app.control.lifecycle import ResumeValidationError
+        from app.control.errors import ResumeValidationError
         from app.review.application import persist_review_intent
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (
@@ -2448,7 +2448,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
                 prepare_assembly_review_application(state, intent.intent)
 
     def test_validates_rejected_candidate_set_and_rejects_unknown_ids(self):
-        from app.control.lifecycle import ResumeValidationError
+        from app.control.errors import ResumeValidationError
         from app.review.approval import load_verified_interrupt_request
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (
@@ -2521,7 +2521,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
             self.assertEqual(stopped.metadata, {})
 
     def test_transform_intent_rejects_external_and_missing_file_refs(self):
-        from app.control.lifecycle import ResumeValidationError
+        from app.control.errors import ResumeValidationError
         from app.review.approval import load_verified_interrupt_request
         from app.review.base import ResumeReviewRequest
         from app.stages.assembly_review.nodes import (

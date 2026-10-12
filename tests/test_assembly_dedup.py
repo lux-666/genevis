@@ -38,6 +38,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             data_dir=str(run_dir),
             workflow_steps=[
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
@@ -49,6 +50,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 },
                 {
                     "step_id": "step-002-assembly_dedup",
+                    "selected_method_names": ["assembly_dedup.purge_dups"],
                     "stage": "assembly_dedup",
                     "allow_local_execution": True,
                 },

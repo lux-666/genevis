@@ -77,7 +77,6 @@ def _genome_survey_workflow_steps() -> list[dict]:
             "step_id": "step-002-assembly",
             "stage": "assembly",
             "allow_local_execution": False,
-            "selected_method_names": [],
         },
         {
             "step_id": "step-003-assembly_review",

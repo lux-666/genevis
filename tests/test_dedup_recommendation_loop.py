@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.control.lifecycle import normalize_resume_review_request
+from app.control.resume import normalize_resume_review_request
 from app.llm.dedup import PurgeRecommendation, PurgeRecommender
 from app.review.application import (
     load_verified_review_application,
@@ -120,6 +120,10 @@ def test_budget_and_duplicate_config_stop_new_attempts():
 def _state(tmp_path):
     helper = fixtures.AssemblyDedupStageTests()
     state = helper._state(str(tmp_path))
+    state["workflow_steps"][2]["selected_method_names"] = [
+        "assembly_dedup.purge_dups",
+        "assembly_dedup.eval.quast",
+    ]
     source = tmp_path / "source.fasta"
     source.write_text(">c1\n" + "ACGT" * 300 + "\n")
     bundle, primary = helper._publish_candidate(
@@ -478,7 +482,7 @@ def test_incomplete_quast_report_stops_before_candidate_advice(tmp_path, report)
 
 
 def test_invalid_model_response_requires_human_result_selection(tmp_path):
-    from app.control.lifecycle import ResumeValidationError
+    from app.control.errors import ResumeValidationError
     from app.stages.assembly_dedup.review import normalize_timeout_request
 
     state, _ = _state(tmp_path)
@@ -509,8 +513,8 @@ def test_invalid_model_response_requires_human_result_selection(tmp_path):
 
 
 def test_advisor_configuration_freezes_quast_roster_and_existing_wait_policy():
+    from app.control.stage_seeds import stage_seeds_from_run_config
     from app.control.workflow_plan import workflow_steps_from_run_config
-    from app.entrypoints.run import _stage_seeds_from_run_config
     from app.execution.run_readiness import effective_method_closure, run_requires_llm
     from app.schemas.run_config import RunConfig
 
@@ -538,7 +542,7 @@ def test_advisor_configuration_freezes_quast_roster_and_existing_wait_policy():
         "assembly_dedup.purge_dups",
         "assembly_dedup.eval.quast",
     ]
-    seeds = _stage_seeds_from_run_config(config, shared_parameters=None)
+    seeds = stage_seeds_from_run_config(config, shared_parameters=None)
     assert seeds["assembly_dedup"]["review_policy"]["max_blocked_seconds"] == -1
     assert seeds["assembly_dedup"]["max_attempts"] == 4
     assert run_requires_llm(config)

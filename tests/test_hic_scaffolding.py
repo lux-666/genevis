@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
 from app.execution.lifecycle import load_method_executions, run_method_attempts
 from app.review.application import (

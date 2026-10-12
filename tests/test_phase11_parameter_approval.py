@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,

@@ -12,13 +12,14 @@ from unittest.mock import patch
 import pytest
 
 from app.control.errors import ResumeValidationError
-from app.control.lifecycle import (
+from app.control.inspection import inspect_state
+from app.control.resume import (
     build_foreground_auto_resume_request,
-    inspect_state,
     normalize_resume_review_request,
 )
 from app.execution.parameter_attempts import current_parameter_attempt
 from app.integrity import sha256_file
+from app.llm.parameters.assembly.request import validate_recorded_parameter_request
 from app.review.application import (
     VerifiedReviewApplication,
     load_verified_review_application,
@@ -163,16 +164,19 @@ def _state(
         data_dir=str(paths.run_dir),
         workflow_steps=[
             {
+                "selected_method_names": [],
                 "step_id": "step-000-inventory",
                 "stage": "inventory",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-001-read_qc",
                 "stage": "read_qc",
                 "allow_local_execution": False,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-002-genome_survey",
                 "stage": "genome_survey",
                 "allow_local_execution": False,
@@ -183,6 +187,7 @@ def _state(
                 "allow_local_execution": True,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-004-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,
@@ -324,6 +329,7 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
         manifest_ref=cursor.manifest_ref,
         expected_stage="assembly",
         expected_method_id="assembly.candidate.hifiasm_ont",
+        request_validator=validate_recorded_parameter_request,
     )
     model_request = chain.model_request
     assert model_request["messages"] == model.messages
@@ -583,6 +589,7 @@ def test_parameter_chains_reject_an_earlier_same_stage_occurrence(
                 "allow_local_execution": True,
             },
             {
+                "selected_method_names": [],
                 "step_id": "step-006-assembly_review",
                 "stage": "assembly_review",
                 "allow_local_execution": False,
@@ -606,6 +613,7 @@ def test_parameter_chains_reject_an_earlier_same_stage_occurrence(
             manifest_ref=first_cursor.manifest_ref,
             expected_stage="assembly",
             expected_method_id="assembly.candidate.hifiasm_ont",
+            request_validator=validate_recorded_parameter_request,
         )
     with pytest.raises(
         ParameterEvidenceError,
@@ -616,6 +624,7 @@ def test_parameter_chains_reject_an_earlier_same_stage_occurrence(
             attempt=first_attempt,
             expected_stage="assembly",
             expected_method_id="assembly.candidate.hifiasm_ont",
+            request_validator=validate_recorded_parameter_request,
         )
 
 
@@ -748,6 +757,7 @@ def test_model_request_is_durable_before_invoke_failure(tmp_path: Path) -> None:
         manifest_ref=cursor.manifest_ref,
         expected_stage="assembly",
         expected_method_id="assembly.candidate.hifiasm_ont",
+        request_validator=validate_recorded_parameter_request,
     )
     assert chain.model_response["validity"] == "invalid"
     assert "model unavailable" in chain.model_response["error"]
@@ -788,6 +798,7 @@ def test_deterministic_baseline_persists_policy_decision_without_model_call(
         attempt=attempt,
         expected_stage="assembly",
         expected_method_id="assembly.candidate.hifiasm_ont",
+        request_validator=validate_recorded_parameter_request,
     )
     assert isinstance(approved_bundle, ApprovedParameterBundleV3)
     assert approved_bundle.chain.manifest.summary["policy"] == "deterministic_baseline"
@@ -895,6 +906,7 @@ def test_approved_baseline_rejects_nonempty_l2_evidence(tmp_path: Path) -> None:
         attempt=attempt,
         expected_stage="assembly",
         expected_method_id="assembly.candidate.hifiasm_ont",
+        request_validator=validate_recorded_parameter_request,
     )
 
     tampered_chain = replace(

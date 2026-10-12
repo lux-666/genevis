@@ -83,6 +83,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             data_dir=str(run_dir),
             workflow_steps=[
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,

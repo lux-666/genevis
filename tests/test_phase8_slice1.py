@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError, normalize_resume_review_request
+from app.control.errors import ResumeValidationError
+from app.control.resume import normalize_resume_review_request
 from app.knowledge.packs import load_knowledge_pack
 from app.review.application import (
     ReviewApplicationIdentity,
@@ -554,11 +555,13 @@ class InputProfilerTests(unittest.TestCase):
                     "selected_method_names": [],
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-001-read_qc",
                     "stage": "read_qc",
                     "allow_local_execution": True,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-002-genome_survey",
                     "stage": "genome_survey",
                     "allow_local_execution": True,

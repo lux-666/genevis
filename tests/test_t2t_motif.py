@@ -25,8 +25,7 @@ from app.schemas.parameter_recommendation import (
     CanonicalSpeciesFacts,
     T2TMotifInputSnapshotV3,
 )
-from app.schemas.state import initial_state
-from app.stages.base import stage_output
+from app.schemas.state import initial_state, stage_output
 from app.stages.t2t.nodes import enter_t2t, scan_assembly_telomeres
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.execution import load_t2t_frozen_execution_inputs
@@ -63,16 +62,19 @@ class T2TMotifResolutionTests(unittest.TestCase):
             data_dir=str(v2_run_dir(tmpdir, "s1")),
             workflow_steps=[
                 {
+                    "selected_method_names": [],
                     "step_id": "step-000-inventory",
                     "stage": "inventory",
                     "allow_local_execution": False,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-001-t2t",
                     "stage": "t2t",
                     "allow_local_execution": True,
                 },
                 {
+                    "selected_method_names": [],
                     "step_id": "step-002-assembly_review",
                     "stage": "assembly_review",
                     "allow_local_execution": False,

@@ -9,8 +9,9 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessage
 
+from app.control.stage_seeds import stage_seeds_from_run_config
 from app.control.workflow_plan import workflow_steps_from_run_config
-from app.entrypoints.run import _run_resume, _stage_seeds_from_run_config
+from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
 from app.integrity import sha256_file
 from app.schemas.state import initial_state
@@ -69,7 +70,7 @@ def freeze_parent(tmp_path, assets, run_config, methods):
         input_manifest_ref=paths.to_ref(paths.input_manifest_path),
         data_dir=str(paths.run_dir),
         workflow_steps=workflow_steps_from_run_config(frozen.run_config),
-        stage_seeds=_stage_seeds_from_run_config(
+        stage_seeds=stage_seeds_from_run_config(
             frozen.run_config, shared_parameters=shared
         ),
     )
@@ -141,7 +142,7 @@ ASSEMBLY_MODES = [
 def test_registered_assembly_advisor_constrains_depth_to_available_reads(
     tmp_path, platform
 ):
-    from app.control.lifecycle import ResumeValidationError
+    from app.control.errors import ResumeValidationError
     from app.stages.assembly_dedup.advisor import execution_capabilities
     from app.stages.assembly_dedup.nodes import freeze_purge_dups_attempt
 

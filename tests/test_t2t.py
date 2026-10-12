@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.errors import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
 from app.integrity import sha256_file
 from app.review.application import (
