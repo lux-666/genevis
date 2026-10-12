@@ -2,7 +2,7 @@
 
 # TUI 与规划
 
-> **状态：** 已实现原始 HiFi/ONT 和配对 Hi-C 输入；更广的中途阶段入口另行规划。
+> **状态：** 已实现原始 HiFi/ONT、子代 Illumina 短读段 paired reads、Trio 母本/父本读段、配对 Hi-C、clean 长读段及已有组装入口。
 >
 > **阅读场景：** 修改对话输入采集、计划草稿、整次运行冻结或草稿恢复。
 >
@@ -32,7 +32,7 @@ intake -> planning -> ready_to_confirm -> frozen
 
 已有准备好的文件时，真实运行使用确定性入口 `gene-agent run --manifest PATH --run-config PATH --data-dir PATH`。它将文件视为已定稿草稿，汇入同一整次运行冻结边界和执行器。公共 RunConfig、occurrence、授权和评审策略字段见[运行数据契约](../reference/data-contract.md)。未完成的计划草稿在阶段选择前仍可使用 `None`，这表示草稿未完成，不构成第二种可执行运行时含义。
 
-当前输入模型直接支持 PacBio HiFi、ONT、明确配对的 Hi-C lane、明确无 Hi-C 的事实、物种事实及提供时的端粒基序。尚不采集 clean 长读段、已有组装、CLR、CycloneSEQ 或短读段。后端 manifest 和 Inventory 支持不等于 TUI 已支持；见[中途阶段入口规划](tui-midstage-entry.md)。
+当前输入模型直接支持 PacBio HiFi、ONT、子代 Illumina 短读段 paired reads、Trio 母本/父本读段、明确配对的 Hi-C lane、明确无 Hi-C 的事实、物种事实及提供时的端粒基序。短读段必须由操作者分别显式声明 R1 与 R2；TUI 不根据文件名或目录顺序推断配对。短读段事实物化为 `raw_short_dna_reads` 的 `layout: paired` 输入，并可驱动独立 `read_qc`（fastp）及可选 `genome_survey`，但不会单独虚造 Assembly 路线。Trio 父母读段虽使用短 DNA 输入类型承载，仍以独立的母本/父本角色绑定，不作为子代短读段 QC 输入。HiFi 与子代短读段可以在同一 Assembly 采集流程中同时确认；Hi-C 清洗则依据当前意图和已确认的配对 Hi-C 输入绑定。显式中途入口采集带平台的 clean 长读段或一个已有组装 FASTA；见[中途阶段入口](tui-midstage-entry.md)。CLR 和 CycloneSEQ 仍通过文件 manifest 声明。
 
 <a id="intent-is-not-the-execution-plan"></a>
 

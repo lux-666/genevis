@@ -14,12 +14,30 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.schemas.ask_plan import PlanStageOccurrence
 from app.schemas.shared_parameters import SharedParameters
 
-IntakeRole = Literal["hifi_reads", "ont_reads", "hic_reads"]
-AssetCandidateRole = Literal[
+EntryMode = Literal["raw_reads", "clean_long_reads", "existing_assembly"]
+LongReadPlatform = Literal["ont", "pacbio_hifi"]
+
+IntakeRole = Literal[
+    "clean_long_reads",
+    "existing_assembly",
     "hifi_reads",
     "ont_reads",
+    "trio_maternal_reads",
+    "trio_paternal_reads",
+    "hic_reads",
+    "short_reads",
+]
+AssetCandidateRole = Literal[
+    "clean_long_reads",
+    "existing_assembly",
+    "hifi_reads",
+    "ont_reads",
+    "trio_maternal_reads",
+    "trio_paternal_reads",
     "hic_r1",
     "hic_r2",
+    "short_r1",
+    "short_r2",
     "no_hic",
 ]
 TuiLifecycle = Literal[
@@ -38,6 +56,8 @@ class WorkflowIntent(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    entry_mode: EntryMode = "raw_reads"
+    clean_reads_platform: LongReadPlatform | None = None
     goal_text: str = Field(min_length=1)
     sample_id: str | None = Field(default=None, min_length=1)
     target_species: str | None = Field(default=None, min_length=1)
@@ -111,6 +131,73 @@ class OntReadsFact(BaseModel):
         return normalized
 
 
+class CleanLongReadsFact(BaseModel):
+    """Explicitly cleaned long reads with a user-declared sequencing platform."""
+
+    model_config = ConfigDict(extra="forbid")
+    paths: list[str] = Field(min_length=1)
+    platform: LongReadPlatform
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_paths(cls, value: list[str]) -> list[str]:
+        if any(not path.strip() for path in value) or len(set(value)) != len(value):
+            raise ValueError("clean read paths must be nonblank and unique")
+        return value
+
+
+class ExistingAssemblyFact(BaseModel):
+    """Exactly one explicitly supplied assembly FASTA."""
+
+    model_config = ConfigDict(extra="forbid")
+    paths: list[str] = Field(min_length=1, max_length=1)
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_path(cls, value: list[str]) -> list[str]:
+        if not value[0].strip():
+            raise ValueError("assembly path must not be blank")
+        return value
+
+
+class TrioMaternalReadsFact(BaseModel):
+    """Confirmed maternal reads supplied to yak for Trio binning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["trio_maternal_reads"] = "trio_maternal_reads"
+    paths: list[str] = Field(min_length=1)
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_paths(cls, value: list[str]) -> list[str]:
+        normalized = [str(path).strip() for path in value]
+        if any(not path for path in normalized):
+            raise ValueError("Trio maternal paths must not be blank")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Trio maternal paths must be unique")
+        return normalized
+
+
+class TrioPaternalReadsFact(BaseModel):
+    """Confirmed paternal reads supplied to yak for Trio binning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["trio_paternal_reads"] = "trio_paternal_reads"
+    paths: list[str] = Field(min_length=1)
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_paths(cls, value: list[str]) -> list[str]:
+        normalized = [str(path).strip() for path in value]
+        if any(not path for path in normalized):
+            raise ValueError("Trio paternal paths must not be blank")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Trio paternal paths must be unique")
+        return normalized
+
+
 class HiCReadPair(BaseModel):
     """A user-declared Hi-C R1/R2 pair; file names are not interpreted."""
 
@@ -144,10 +231,32 @@ class HiCPairedReadsFact(BaseModel):
 
     @model_validator(mode="after")
     def _validate_unique_paths(self) -> "HiCPairedReadsFact":
-        paths = [path for pair in self.pairs for path in (pair.r1, pair.r2)]
-        if len(set(paths)) != len(paths):
-            raise ValueError("Hi-C mate paths must be unique across all pairs")
+        _validate_unique_pair_paths(self.pairs, label="Hi-C")
         return self
+
+
+class ShortReadsFact(BaseModel):
+    """Confirmed explicit Illumina/short-read R1/R2 pairs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["short_reads_paired"] = "short_reads_paired"
+    pairs: list[HiCReadPair] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_unique_paths(self) -> "ShortReadsFact":
+        _validate_unique_pair_paths(self.pairs, label="Short-read")
+        return self
+
+
+def _validate_unique_pair_paths(
+    pairs: list[HiCReadPair],
+    *,
+    label: str,
+) -> None:
+    paths = [path for pair in pairs for path in (pair.r1, pair.r2)]
+    if len(set(paths)) != len(paths):
+        raise ValueError(f"{label} mate paths must be unique across all pairs")
 
 
 class NoHiCFact(BaseModel):
@@ -227,10 +336,15 @@ class AssetCollectionState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    clean_long_reads: CleanLongReadsFact | None = None
+    existing_assembly: ExistingAssemblyFact | None = None
     requirements: list[IntakeRole] = Field(default_factory=list)
     hifi_reads: HifiReadsFact | None = None
     ont_reads: OntReadsFact | None = None
+    trio_maternal_reads: TrioMaternalReadsFact | None = None
+    trio_paternal_reads: TrioPaternalReadsFact | None = None
     hic_reads: HiCPairedReadsFact | NoHiCFact | None = None
+    short_reads: ShortReadsFact | None = None
     unresolved_candidates: list[UnresolvedAssetCandidate] = Field(default_factory=list)
     answer_history: list[IntakeAnswerRecord] = Field(default_factory=list)
 
@@ -314,9 +428,3 @@ class TuiSessionDraft(BaseModel):
                     "a no_hic degradation decision requires an explicit no_hic fact"
                 )
         return self
-
-
-# The design document uses ``TuiSessionState`` while the implementation calls
-# this mutable pre-freeze object a draft.  Keep one canonical model and a
-# semantic alias for callers that prefer the former name.
-TuiSessionState = TuiSessionDraft
