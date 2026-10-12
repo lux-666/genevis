@@ -58,6 +58,7 @@ from app.stages.hic_scaffolding.parameters.storage import (
     write_artifact as write_autohic_parameter_artifact,
 )
 from app.stages.hic_scaffolding.state import HiCScaffoldingCursor
+from app.stages.read_resolution import resolve_hic_pairs
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import assembly_resource_spec
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
@@ -434,11 +435,27 @@ def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
                     assembly,
                 )
             ]
-        read_dependencies = asset_input_dependencies(
-            state,
-            list(output.get("hic_read_refs") or []),
-            list(parameters["hic_read_paths"]),
-        )
+        read_members = [
+            member for pair in resolve_hic_pairs(state) for member in (pair.r1, pair.r2)
+        ]
+        if [str(Path(member.path).resolve()) for member in read_members] != list(
+            parameters["hic_read_paths"]
+        ) or [member.member_id for member in read_members] != list(
+            output.get("hic_read_refs") or []
+        ):
+            raise ValueError("current Hi-C reads no longer match approved inputs")
+        read_dependencies: list[InputDependency] = []
+        for member in read_members:
+            if member.read_artifact_ref is not None:
+                read_dependencies.append(
+                    artifact_input_dependency(
+                        state, member.read_artifact_ref, member.path
+                    )
+                )
+            else:
+                read_dependencies.extend(
+                    asset_input_dependencies(state, [member.member_id], [member.path])
+                )
         config_dependency = artifact_input_dependency(
             state,
             config_ref,

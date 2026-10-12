@@ -40,7 +40,11 @@ from app.stages.genome_survey.state import (
     genome_survey_output,
     update_genome_survey_output,
 )
-from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
+from app.stages.read_resolution import (
+    RuntimeReadMember,
+    resolve_long_read_members,
+    resolve_short_read_members,
+)
 from app.stages.resource_resolution import ResourceResolution, resolve_stage_resource
 from app.stages.resource_specs import LONG_READS_SPEC, SHORT_READS_SPEC
 from app.storage.artifacts import publish_artifact_record, record_registered_artifacts
@@ -166,6 +170,12 @@ def resolve_survey_inputs(state: TopLevelState) -> StateUpdate:
         return _fail_update(state, short_error or long_error or "survey input error")
     try:
         long_members = resolve_long_read_members(state) if long_resolution.found else []
+        if short_resolution.metadata.get("read_set_manifest_ref") is not None:
+            short_assets = _runtime_read_assets(
+                resolve_short_read_members(state),
+                short_resolution.source,
+                resource_type="short_reads",
+            )
     except (OSError, ValueError) as exc:
         return _fail_update(state, f"genome survey input resolution failed: {exc}")
     long_assets = _runtime_read_assets(long_members, long_resolution.source)
@@ -227,13 +237,16 @@ def _resolution_assets(
 
 
 def _runtime_read_assets(
-    members: list[RuntimeReadMember], source: str
+    members: list[RuntimeReadMember],
+    source: str,
+    *,
+    resource_type: SurveyInputFamily = "long_reads",
 ) -> list[SurveyAssetCursor]:
     assets: list[SurveyAssetCursor] = []
     for member in members:
         asset: SurveyAssetCursor = {
             "asset_id": member.source_asset_id,
-            "asset_type": "long_reads",
+            "asset_type": resource_type,
             "path": member.path,
             "platform": member.platform,
             "format": member.format,
