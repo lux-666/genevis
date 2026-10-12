@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
-from app.execution.env_resolver import EnvResolver, normalize_database_registry
+from app.execution.env_resolver import DatabaseRegistry, EnvResolver
 
 _SHARED_TARGET_KEY = "shared_conda_target"
 _AUTOHIC_TARGET_KEY = "autohic_conda_target"
@@ -198,19 +198,7 @@ def build_project_bootstrap_plan(
     changes: list[ProjectConfigChange] = []
     unresolved: list[str] = []
 
-    if "databases" in draft:
-        database_source = draft["databases"]
-        normalized = normalize_database_registry(database_source)
-        # Explicit --update edits only operator-selected fields. Plain bootstrap
-        # includes the host-key migration in its visible, confirmed write plan.
-        if not explicit_update and normalized != database_source:
-            draft["databases"] = normalized
-            _record(
-                changes,
-                config_path,
-                "databases.ncbi",
-                "rename from databases.ncbi_metazoa",
-            )
+    _validate_database_keys(draft.get("databases"))
 
     default = _ensure_mapping(draft, "default")
     conda_bin = values.get(_CONDA_BIN_KEY)
@@ -352,8 +340,7 @@ def collect_project_bootstrap_plan(
     )
     source = _read_yaml(source_path) if source_path is not None else _minimal_config()
     inspect = deepcopy(source)
-    if "databases" in inspect:
-        inspect["databases"] = normalize_database_registry(inspect["databases"])
+    _validate_database_keys(inspect.get("databases"))
     if update and source_exists:
         return _collect_project_bootstrap_update_plan(
             config_path,
@@ -1432,3 +1419,11 @@ def _ask_yes_no(prompt: Callable[[str], str], label: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return answer in {"y", "yes"}
+
+
+def _validate_database_keys(value: object) -> None:
+    """Reject unowned host database groups before asking for edits."""
+    if isinstance(value, dict):
+        unknown = set(value).difference(DatabaseRegistry.model_fields)
+        if unknown:
+            raise ValueError(f"unknown database groups: {sorted(unknown)}")

@@ -63,23 +63,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             self.assertEqual(resolver.config_path, config)
             self.assertEqual(resolver.resolve(stage="unknown").conda_env, "shared_env")
 
-    def test_old_database_key_normalizes_without_an_alias_or_source_mutation(self):
-        from copy import deepcopy
-
-        import yaml
-
-        from app.execution.env_resolver import DatabaseRegistry
-
-        template = Path("docs/examples/envs.yaml.example")
-        raw = yaml.safe_load(template.read_text())["databases"]
-        raw["ncbi_metazoa"] = raw.pop("ncbi")
-        original = deepcopy(raw)
-        registry = DatabaseRegistry.model_validate(raw)
-        self.assertEqual(raw, original)
-        self.assertEqual(set(registry.model_dump()), {"busco", "ncbi"})
-        self.assertFalse(hasattr(registry, "ncbi_metazoa"))
-
-    def test_dual_database_keys_are_rejected_even_for_equal_or_null_values(self):
+    def test_database_registry_accepts_only_current_keys(self):
         import yaml
 
         from app.execution.env_resolver import DatabaseRegistry
@@ -87,10 +71,16 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         raw = yaml.safe_load(Path("docs/examples/envs.yaml.example").read_text())[
             "databases"
         ]
-        for legacy in (raw["ncbi"], None, {}):
-            with self.subTest(legacy=legacy):
-                with self.assertRaisesRegex(ValueError, "cannot declare both"):
-                    DatabaseRegistry.model_validate({**raw, "ncbi_metazoa": legacy})
+        self.assertEqual(
+            set(DatabaseRegistry.model_validate(raw).model_dump()), {"busco", "ncbi"}
+        )
+        for unknown in (raw["ncbi"], None, {}):
+            with self.subTest(unknown=unknown):
+                with self.assertRaisesRegex(ValueError, "Extra inputs"):
+                    DatabaseRegistry.model_validate({**raw, "ncbi_metazoa": unknown})
+        raw["ncbi_metazoa"] = raw.pop("ncbi")
+        with self.assertRaises(ValueError):
+            DatabaseRegistry.model_validate(raw)
 
     def test_env_template_loads_and_covers_core_mainline(self):
         template_path = (
