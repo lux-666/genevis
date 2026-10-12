@@ -92,3 +92,5 @@ pytest -q
 审查发现编号只是在当前审查中定位问题的坐标，不是架构分类。不得创建 `F1`/`F2` 式契约、表格或导航。已接受的语义规则应进入现有权威文档；只有实际的实现与契约差异才记入 `conformance.md`，并以缺失能力或冲突表示命名，不以发现它的审查命名。操作指南和示例可概述用法，但默认值、优先级和生命周期语义应链接回权威来源。
 
 简化工作应根据代码与调用点证据，将候选分类为精确克隆（`exact clone`）、语义重复（`semantic duplication`）、重复表示（`duplicate representation`）、死接口（`dead surface`）或有意对称（`intentional symmetry`）。优先删除多余权威来源，避免增加抽象。除非权威契约被明确修改，否则保留公共兼容接口。
+
+当前已收敛的契约包括：`app/stages/sequences.py` 的序列语法与 IUPAC 定向、`write_normalized_fasta` 的执行输入归一化、`recover_or_invoke_response` 的不可变响应恢复顺序。阶段的生物学参数、审批和证据类型仍分别拥有，不能因结构相似而混同。`tests/test_simplification_contract.py` 在普通 pytest/CI 中检测去除位置与文档字符串后的大型精确函数体重复（阈值 70 个 AST 节点，允许数 0）；它不声称发现语义重复。新重复必须先做语义分类，不能盲目抽象或通过改名绕过。`tests/test_stage_boundaries.py` 约束算法/渲染层不反向依赖流程层。
