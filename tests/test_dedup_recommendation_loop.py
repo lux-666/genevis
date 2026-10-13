@@ -10,7 +10,11 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.control.resume import normalize_resume_review_request
+from app.control.inspection import inspect_state
+from app.control.resume import (
+    foreground_automatic_decision_label,
+    normalize_resume_review_request,
+)
 from app.llm.dedup import PurgeRecommendation, PurgeRecommender
 from app.review.application import (
     load_verified_review_application,
@@ -493,6 +497,7 @@ def test_invalid_model_response_requires_human_result_selection(tmp_path):
     record = load_json(result, active["request_ref"])
     assert "follow_recommendation" not in record["payload"]["decisions_allowed"]
     assert "keep_prior_assembly" in record["payload"]["decisions_allowed"]
+    assert foreground_automatic_decision_label(inspect_state(result)) is None
     request = ResumeReviewRequest(
         session_id="s1",
         stage="assembly_dedup",

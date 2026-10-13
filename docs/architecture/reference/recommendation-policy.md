@@ -72,3 +72,7 @@ Assembly、AutoHiC 与 T2T 的 `deterministic_baseline` 从同样已验证的事
 就绪检查遵循冻结策略。Assembly 两个顾问均为基线时不要求 LLM 端点；AutoHiC 参数顾问也为基线时，Hi-C 也不要求。T2T 显式基线也不要求端点，但必须提供基序；其 advisor 和其他仍使用顾问的阶段要求端点。精确结构化端点探测和失败不创建会话的语义由[执行生命周期](execution-lifecycle.md#whole-run-readiness-boundary)拥有。Assembly 游标持久化两个策略模式，参数基线显式标记每条跳过模型的记录，不能靠产物缺失来表达。 Assembly Review 的 LLM 建议是可选自动化能力，不是所有运行的冻结前硬依赖；证据完整时倒计时可以触发建议，端点不可用或建议无效时回退人工恢复。
 
 顾问模式中，方法请求携带显式 `evidence_status` 映射。标为 `"unavailable"` 的上游字段为 null，不得推断或当作观测；除非现有证据支持一条路线，否则提示词要求返回 `insufficient_data`。模型不能猜测恢复屏蔽字段；缺乏充分路线/读段兼容性却指定方法的响应必须校验失败。持久位置见[运行数据](data-contract.md#101-assembly-method-recommendation)。
+
+Assembly 路线与读段类型共用 `app/domains/assembly/selection.py` 的映射：`clr` 对应 `pacbio_clr`，`ont` 同时支持 `ont_raw` 和 `ont_hq`，推荐与恢复必须保留具体类型。请求菜单只列当前声明输入支持的路线；参数推荐上下文、产物与 checkpoint 使用同一组路线类型。旧冻结请求不能追加选项：仅在当前输入明确只有 CLR、原请求没有 `select_clr` 时，旧 `select_cyclone` 可作为 CLR 的人工恢复动作，交付仍记录 `clr`/`pacbio_clr`，不改写请求。
+
+注册超时 normalizer 不等于每份请求都能自动执行。Assembly 必须有有效、类型与路线一致且被当前请求允许的推荐；Dedup 和参数审批必须允许各自的推荐执行或批准动作。空推荐、无效推荐或仅允许人工结果选择的请求直接进入人工路径，不用默认选项触发失败的自动事务。有效推荐仍遵循配置的倒计时；其他人工采纳门的既有审批策略不变。

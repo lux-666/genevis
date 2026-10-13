@@ -469,7 +469,10 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 "max_blocked_seconds": 0,
                 "recommended_route": "hifi",
                 "recommended_assembly_selection": {
-                    "primary_method": "assembly.candidate.hifiasm"
+                    "primary_method": "assembly.candidate.hifiasm",
+                    "read_type": "pacbio_hifi",
+                    "source": "recommendation",
+                    "rationale": "fixture recommendation",
                 },
             },
         }

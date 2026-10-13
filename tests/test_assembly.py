@@ -495,6 +495,7 @@ class AssemblyStageTests(unittest.TestCase):
                 self.assertIsInstance(method, str)
                 route = {
                     "pacbio_hifi": "hifi",
+                    "pacbio_clr": "clr",
                     "ont_raw": "ont",
                     "ont_hq": "ont",
                     "cyclone": "cyclone",

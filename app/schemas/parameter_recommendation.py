@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.domains.assembly.selection import NormalizedReadType
+from app.domains.assembly.selection import NormalizedReadType, SelectedAssemblyRoute
 from app.integrity import SHA256_PATTERN
 from app.schemas.artifacts import (
     ArtifactRef,
@@ -323,7 +323,7 @@ class AssemblyRecommendationContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     stage: Literal["assembly"]
-    assembly_route: Literal["hifi", "ont", "cyclone"]
+    assembly_route: SelectedAssemblyRoute
     read_type: NormalizedReadType
     target_level: Literal["draft", "near_t2t", "strict_t2t"]
     material_inputs: AssemblyMaterialContext = Field(

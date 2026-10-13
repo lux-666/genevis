@@ -6,7 +6,9 @@ from typing import Literal, cast
 
 from app.domains.assembly.material_query import resolved_material_context
 from app.domains.assembly.selection import (
+    ROUTE_TO_READ_TYPE,
     AssemblySelection,
+    SelectedAssemblyRoute,
     validate_assembly_selection,
 )
 from app.schemas.parameter_recommendation import (
@@ -16,10 +18,10 @@ from app.schemas.parameter_recommendation import (
 from app.schemas.state import TopLevelState
 from app.stages.assembly.state import AssemblyStageCursor, assembly_stage_output
 
-AssemblyContextRoute = Literal["hifi", "ont", "cyclone"]
+AssemblyContextRoute = SelectedAssemblyRoute
 AssemblyTargetLevel = Literal["draft", "near_t2t", "strict_t2t"]
 
-_ASSEMBLY_ROUTES = frozenset({"hifi", "ont", "cyclone"})
+_ASSEMBLY_ROUTES = frozenset(ROUTE_TO_READ_TYPE)
 _TARGET_LEVELS = frozenset({"draft", "near_t2t", "strict_t2t"})
 
 
@@ -71,7 +73,7 @@ def _require_route(raw: object) -> AssemblyContextRoute:
         raise ValueError(
             f"assembly recommendation context has unknown assembly_route {raw!r}"
         )
-    return cast(AssemblyContextRoute, route)
+    return route
 
 
 def _require_target_level(raw: object) -> AssemblyTargetLevel:

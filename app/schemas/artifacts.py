@@ -15,6 +15,10 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
+from app.domains.assembly.selection import (
+    RecommendedAssemblyRoute,
+    SelectedAssemblyRoute,
+)
 from app.integrity import SHA256_PATTERN, sha256_file
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
@@ -637,7 +641,7 @@ class AssemblyInputProfile(BaseModel):
     has_hifi: bool = False
     has_hic: bool = False
     has_rnaseq: bool = False
-    recommended_route: Literal["cyclone", "ont", "hifi", "insufficient_data"]
+    recommended_route: RecommendedAssemblyRoute
     recommendation_reasoning: str
     uncertainty_notes: list[str] = Field(default_factory=list)
     profile_source: Literal[
@@ -656,7 +660,7 @@ class AssemblyRouteDecision(BaseModel):
     """Final route decision confirmed by run config, policy, or human review."""
 
     session_id: str
-    selected_route: Literal["cyclone", "ont", "hifi"]
+    selected_route: SelectedAssemblyRoute
     decided_by: Literal["auto_rule", "human_override", "run_config_explicit"]
     rationale: str
     metadata: dict[str, Any] = Field(default_factory=dict)

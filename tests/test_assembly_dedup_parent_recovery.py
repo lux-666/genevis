@@ -357,9 +357,13 @@ def test_assembly_modes_parent_cli_recovery(
         },
         {method_id: [tool]},
     )
-    route = {"pacbio_hifi": "hifi", "ont_raw": "ont", "ont_hq": "ont"}.get(
-        read_type, "cyclone"
-    )
+    route = {
+        "pacbio_hifi": "hifi",
+        "pacbio_clr": "clr",
+        "ont_raw": "ont",
+        "ont_hq": "ont",
+        "cyclone": "cyclone",
+    }[read_type]
 
     class MethodModel:
         calls = 0

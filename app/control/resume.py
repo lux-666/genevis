@@ -12,6 +12,10 @@ from app.control.inspection import (
     _blocked_timeout_status,
     _validate_active_interrupt_workflow_step,
 )
+from app.domains.assembly.selection import (
+    route_from_read_type,
+    validate_assembly_selection,
+)
 from app.review.application import (
     ReviewApplicationError,
     canonicalize_review_intent_request,
@@ -318,10 +322,31 @@ def foreground_automatic_decision_label(
     if gate is None:
         return None
     if gate.normalize_timeout_request:
-        return str(build_resume_decision_template(summary).get("decision") or "rule")
+        return _foreground_rule_decision(gate, requirements)
     if gate.prompt_bundle and requirements.get("auto_decidable") is True:
         return "LLM review recommendation"
     return None
+
+
+def _foreground_rule_decision(
+    gate: ReviewGateDeclaration, requirements: Mapping[str, Any]
+) -> str | None:
+    """A normalizer alone does not prove this request has an automatic action."""
+    decision = gate.template_preferred_decision
+    if gate.key == ("assembly", "route_selection"):
+        try:
+            selection = validate_assembly_selection(
+                requirements.get("recommended_assembly_selection")
+            )
+        except (TypeError, ValueError):
+            return None
+        route = route_from_read_type(selection.read_type)
+        if requirements.get("recommended_route") != route:
+            return None
+        decision = f"select_{route}"
+    return (
+        decision if decision in (requirements.get("decisions_allowed") or []) else None
+    )
 
 
 def build_foreground_auto_resume_request(
@@ -404,7 +429,10 @@ def build_foreground_auto_resume_request(
             }
         )
 
-    if not gate.normalize_timeout_request:
+    if (
+        not gate.normalize_timeout_request
+        or _foreground_rule_decision(gate, requirements) is None
+    ):
         raise ResumeValidationError(
             f"review gate {stage}/{gate.gate_id} has no eligible automatic resolver"
         )

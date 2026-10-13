@@ -75,7 +75,10 @@ def _route_summary(wait_seconds: int) -> dict:
         "max_blocked_seconds": wait_seconds,
         "recommended_route": "hifi",
         "recommended_assembly_selection": {
-            "primary_method": "assembly.candidate.hifiasm"
+            "primary_method": "assembly.candidate.hifiasm",
+            "read_type": "pacbio_hifi",
+            "source": "recommendation",
+            "rationale": "fixture recommendation",
         },
     }
     return summary
@@ -253,6 +256,15 @@ class ForegroundGateLoopTests(unittest.TestCase):
         self.assertEqual(final["supervision_state"], "blocked_human")
         waiter.assert_not_called()
         collect.assert_called_once()
+        execute.assert_not_called()
+
+    def test_empty_route_recommendation_prompts_without_starting_countdown(self):
+        summary = _route_summary(300)
+        summary["decision_requirements"]["recommended_assembly_selection"] = {}
+        final, execute, collect, waiter = self._run_loop(300, summary=summary)
+        self.assertEqual(final["supervision_state"], "blocked_human")
+        collect.assert_called_once()
+        waiter.assert_not_called()
         execute.assert_not_called()
 
     def test_zero_immediately_runs_existing_route_resolver(self):

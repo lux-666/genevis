@@ -12,6 +12,8 @@ from typing_extensions import Required, TypedDict
 from app.domains.assembly.selection import (
     AssemblySelectionSource,
     NormalizedReadType,
+    RecommendedAssemblyRoute,
+    SelectedAssemblyRoute,
 )
 from app.schemas.artifacts import ArtifactRefJson
 from app.schemas.state import StateUpdate, TopLevelState
@@ -21,7 +23,7 @@ from app.stages.base import (
 )
 
 JsonObject: TypeAlias = dict[str, PydanticJsonValue]
-AssemblyRoute: TypeAlias = Literal["auto", "cyclone", "ont", "hifi"]
+AssemblyRoute: TypeAlias = Literal["auto", SelectedAssemblyRoute]
 AssemblyTargetLevel: TypeAlias = Literal["draft", "near_t2t", "strict_t2t"]
 
 
@@ -62,7 +64,7 @@ class AssemblyInputProfileCursor(TypedDict, total=False):
     has_ont: bool
     has_hic: bool
     has_rnaseq: bool
-    recommended_route: Literal["cyclone", "ont", "hifi", "insufficient_data"]
+    recommended_route: RecommendedAssemblyRoute
     read_type: str
     recommendation_reasoning: str
     uncertainty_notes: list[str]
@@ -127,8 +129,8 @@ class AssemblyStageCursor(TypedDict, total=False):
     method_route_advisor: Literal["advisor", "deterministic_baseline"]
     case_source: str
     parameter_advisor: Literal["advisor", "deterministic_baseline"]
-    explicit_route: Literal["cyclone", "ont", "hifi"] | None
-    selected_route: Literal["cyclone", "ont", "hifi"]
+    explicit_route: SelectedAssemblyRoute | None
+    selected_route: SelectedAssemblyRoute
     normalized_read_type: NormalizedReadType | None
     primary_method: str
     execution_mode: str

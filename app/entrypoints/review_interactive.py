@@ -70,6 +70,7 @@ DECISION_LABELS = {
     "select_cyclone": "use CycloneSEQ route",
     "select_ont": "use ONT route",
     "select_hifi": "use HiFi route",
+    "select_clr": "use PacBio CLR route",
     "accept_candidate": "accept scaffold result",
     "keep_prior_assembly": "keep prior contig assembly",
     "request_parameter_retry": "request a new parameter recommendation",
@@ -89,6 +90,7 @@ DECISION_HELP = {
     "select_cyclone": "use the CycloneSEQ assembly route.",
     "select_ont": "use the ONT assembly route.",
     "select_hifi": "use the HiFi assembly route.",
+    "select_clr": "use the PacBio CLR assembly route.",
     "accept_candidate": (
         "use the reviewed scaffold result and continue through the remaining "
         "frozen workflow steps."

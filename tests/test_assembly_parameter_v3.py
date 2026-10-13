@@ -260,7 +260,7 @@ class AssemblyContextV3Tests(unittest.TestCase):
     def test_context_preserves_registered_selection_read_types(self):
         cases = (
             (FLYE_METHOD, "cyclone", "cyclone"),
-            (FLYE_METHOD, "pacbio_clr", "cyclone"),
+            (FLYE_METHOD, "pacbio_clr", "clr"),
             (NEXTDENOVO_METHOD, "ont_raw", "ont"),
             (HIFIASM_METHOD, "pacbio_hifi", "hifi"),
             (HIFIASM_ONT_METHOD, "ont_hq", "ont"),
