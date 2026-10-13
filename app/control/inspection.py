@@ -653,6 +653,8 @@ def _with_review_requirements(
                 enriched[key] = active_interrupt.get(key)
     for key in (
         "workflow_step_id",
+        "reason",
+        "notes",
         "auto_decidable",
         "max_blocked_seconds",
         "review_request_artifact_ref",

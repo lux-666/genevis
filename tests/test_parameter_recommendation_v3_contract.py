@@ -126,6 +126,31 @@ def test_canonical_facts_preserve_absent_values_and_production_numeric_shapes() 
     assert facts.asset_presence.has_ont is False
 
 
+@pytest.mark.parametrize("quality", [None, 0, 0.0, 18.5])
+def test_canonical_facts_preserve_zero_quality_and_missing_quality(quality) -> None:
+    facts = build_canonical_facts(
+        shared_parameters={},
+        read_qc_output={"summary": {"avg_qual": quality}},
+        genome_survey_result=None,
+    )
+    if quality is None:
+        assert facts.reads.mean_quality is None
+    else:
+        assert facts.reads.mean_quality.value == quality
+        assert facts.reads.mean_quality.unit == "phred"
+        assert facts.reads.mean_quality.origin.producer == "read_qc"
+
+
+@pytest.mark.parametrize("quality", [-0.1, float("nan"), float("inf"), True, "0"])
+def test_canonical_facts_reject_invalid_quality(quality) -> None:
+    with pytest.raises(ValueError, match="read_qc.summary.avg_qual"):
+        build_canonical_facts(
+            shared_parameters={},
+            read_qc_output={"summary": {"avg_qual": quality}},
+            genome_survey_result=None,
+        )
+
+
 @pytest.mark.parametrize(
     ("overrides", "field"),
     [

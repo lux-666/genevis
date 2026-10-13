@@ -1120,7 +1120,7 @@ def _brief_generic_evidence(
     report_refs = requirements.get("report_refs") or {}
     if report_refs:
         evidence["report_refs"] = report_refs
-    notes = (request_payload or {}).get("notes") or []
+    notes = requirements.get("notes") or (request_payload or {}).get("notes") or []
     if notes:
         evidence["notes"] = notes
     return evidence
