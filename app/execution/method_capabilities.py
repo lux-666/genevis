@@ -9,6 +9,7 @@ from app.execution.env_resolver import EnvSpec
 from app.schemas.run_config import RunConfig
 
 _TRIO_HIFIASM_METHOD = "assembly.candidate.hifiasm"
+_AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 
 
 def trio_enabled(run_config: RunConfig) -> bool:
@@ -24,8 +25,12 @@ def conditional_required_tools(
     run_config: RunConfig,
     method_name: str,
 ) -> tuple[str, ...]:
-    """Return descriptor-declared tools activated by this run's capabilities."""
+    """Return executable tools activated by this run's configuration."""
 
+    if method_name == _AUTOHIC_METHOD:
+        hic = run_config.hic_scaffolding
+        parameters = hic.autohic_parameters if hic else None
+        return (parameters.python_command,) if parameters else ()
     if method_name != _TRIO_HIFIASM_METHOD or not trio_enabled(run_config):
         return ()
     registry = load_descriptor_registry()
@@ -52,5 +57,8 @@ def augment_method_env_spec(
 def required_tools_by_method(run_config: RunConfig) -> Mapping[str, Sequence[str]]:
     """Return conditional tool additions needed in a dependency snapshot."""
 
-    additions = conditional_required_tools(run_config, _TRIO_HIFIASM_METHOD)
-    return {_TRIO_HIFIASM_METHOD: additions} if additions else {}
+    return {
+        method: additions
+        for method in load_descriptor_registry().methods
+        if (additions := conditional_required_tools(run_config, method))
+    }
