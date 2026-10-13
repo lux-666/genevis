@@ -304,6 +304,40 @@ def test_deferred_assembly_closure_waits_for_stage_recommendation() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "families", [[], ["short_reads"], ["hic_reads"], ["short_reads", "hic_reads"]]
+)
+@pytest.mark.parametrize("filter_approved", [False, True])
+def test_qc_dependency_closure_includes_configured_methods_once(
+    families, filter_approved
+):
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [
+                {"stage": "read_qc", "allow_local_execution": local}
+                for local in (False, True, True)
+            ],
+            "read_qc": {
+                **{family: {} for family in families},
+                "length_filter": {
+                    "approved": filter_approved,
+                    "thresholds": {"min_len": 1000} if filter_approved else {},
+                },
+            },
+        }
+    )
+    closure = effective_method_closure(
+        config, selected_methods={"read_qc": ["read_qc.long_read_stats.seqkit_stats"]}
+    )
+    assert closure == {
+        "read_qc": (
+            "read_qc.long_read_stats.seqkit_stats",
+            *(("read_qc.length_filter.seqkit_seq",) if filter_approved else ()),
+            *(f"read_qc.{family}.fastp" for family in families),
+        )
+    }
+
+
 def test_full_deterministic_assembly_does_not_require_llm() -> None:
     run_config = RunConfig.model_validate(
         {
