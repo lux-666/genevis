@@ -28,27 +28,6 @@ class RunReadinessError(ValueError):
     """Raised when the confirmed run cannot start on the current machine."""
 
 
-def _fixed_local_methods() -> dict[str, tuple[str, ...]]:
-    """Return registry-derived rosters for stages with fixed local methods."""
-
-    registry = load_descriptor_registry()
-    read_qc = tuple(
-        method_name
-        for method_name in registry.by_stage.get("read_qc", ())
-        if registry.methods[method_name].planner.selection_role == "always"
-    )
-    return {
-        "read_qc": read_qc,
-        "genome_survey": tuple(registry.by_stage.get("genome_survey", ())),
-        "assembly_dedup": tuple(registry.by_stage.get("assembly_dedup", ())),
-        "assembly_review": tuple(registry.by_stage.get("assembly_review", ())),
-        "hic_scaffolding": tuple(registry.by_stage.get("hic_scaffolding", ())),
-        "gapcloser": tuple(registry.by_stage.get("gapcloser", ())),
-        "base_polish": tuple(registry.by_stage.get("base_polish", ())),
-        "t2t": tuple(registry.by_stage.get("t2t", ())),
-    }
-
-
 def assembly_candidate_method_scope() -> tuple[str, ...]:
     """Return every registry Assembly candidate available for deferred runs.
 
@@ -72,60 +51,20 @@ def effective_method_closure(
 ) -> dict[str, tuple[str, ...]]:
     """Return the canonical local-method closure for readiness and freeze."""
 
-    fixed_local_methods = _fixed_local_methods()
-    local_stages = list(
-        dict.fromkeys(
-            request.stage
-            for request in run_config.requested_stages
-            if request.allow_local_execution
-        )
-    )
-    explicitly_selected = _normalize_selected_methods(selected_methods)
+    from app.control.workflow_plan import workflow_steps_from_run_config
+
+    # Explicit mappings remain validation inputs; rosters belong to the plan.
+    _normalize_selected_methods(selected_methods)
     closure: dict[str, list[str]] = {}
-
-    def add(stage: str, method_name: str) -> None:
-        if method_name in _NON_EXECUTABLE_METHODS:
-            return
-        methods = closure.setdefault(stage, [])
-        if method_name not in methods:
-            methods.append(method_name)
-
-    for stage in local_stages:
-        for method_name in fixed_local_methods.get(stage, ()):
-            if method_name == "assembly_dedup.eval.quast" and not (
-                run_config.assembly_dedup
-                and run_config.assembly_dedup.recommendation_mode == "advisor"
-                and run_config.assembly_dedup.automatic_purge_approved
-            ):
+    for step in workflow_steps_from_run_config(run_config):
+        if not step["allow_local_execution"]:
+            continue
+        for method_name in step.get("selected_method_names", []):
+            if method_name in _NON_EXECUTABLE_METHODS:
                 continue
-            if method_name in {
-                "gapcloser.eval.quast",
-                "base_polish.eval.quast",
-                "t2t.eval.quast",
-            }:
-                config = getattr(run_config, stage)
-                if (
-                    config is not None
-                    and config.recommendation_mode == "deterministic_baseline"
-                ):
-                    continue
-            add(stage, method_name)
-        if stage == "read_qc":
-            length_filter = (
-                run_config.read_qc.length_filter
-                if run_config.read_qc is not None
-                else None
-            )
-            if length_filter is not None and length_filter.approved:
-                add(stage, length_filter.selected_method())
-        elif stage == "assembly":
-            # Assembly candidates are captured at freeze time, but none is
-            # startup-preflighted as the selected method before recommendation.
-            pass
-
-        if stage not in fixed_local_methods and stage not in {"read_qc", "assembly"}:
-            for method_name in explicitly_selected.get(stage, ()):
-                add(stage, method_name)
+            methods = closure.setdefault(step["stage"], [])
+            if method_name not in methods:
+                methods.append(method_name)
     return {stage: tuple(methods) for stage, methods in closure.items()}
 
 
