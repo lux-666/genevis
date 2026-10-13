@@ -760,7 +760,7 @@ def test_method_request_persists_shared_query_and_cross_method_basis(
     payload = json.loads(captured[1]["content"])
     for route in payload["rules"]["routes"].values():
         assert set(route) == {"description"}
-    assert set(payload["rules"]["routes"]) == {"cyclone", "ont", "hifi"}
+    assert set(payload["rules"]["routes"]) == {"cyclone", "ont", "clr", "hifi"}
     assert payload["knowledge_evidence"]["cases"][0]["method"]["tool"] == "NextDenovo"
     assert "read_cutoff = 10000" not in captured[1]["content"]
     assert "setting_explanations" not in captured[1]["content"]

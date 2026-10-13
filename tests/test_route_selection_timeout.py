@@ -14,9 +14,11 @@ from app.control.inspection import (
 )
 from app.control.resume import (
     build_foreground_auto_resume_request,
+    foreground_automatic_decision_label,
     normalize_resume_review_request,
     review_max_blocked_seconds,
 )
+from app.domains.assembly.selection import normalize_read_type
 from app.review.application import (
     ReviewApplicationIdentity,
     load_verified_review_application,
@@ -43,6 +45,10 @@ _RECOMMENDED_SELECTIONS = {
     },
     "cyclone": {
         "read_type": "cyclone",
+        "primary_method": "assembly.candidate.flye",
+    },
+    "clr": {
+        "read_type": "pacbio_clr",
         "primary_method": "assembly.candidate.flye",
     },
 }
@@ -107,6 +113,7 @@ def _blocked_route_state(
                 "uncertainty_notes": [],
             },
             "recommended_assembly_selection": recommended_selection,
+            "normalized_read_type": normalize_read_type(recommended_route),
             "has_hifi": recommended_route == "hifi",
             "ont_reads_ref": (
                 "artifacts/inputs/ont.fastq"
@@ -208,6 +215,7 @@ def test_route_request_persists_effective_wait_without_policy_mode():
         ("hifi", "select_hifi", "assembly.candidate.hifiasm"),
         ("ont", "select_ont", "assembly.candidate.hifiasm_ont"),
         ("cyclone", "select_cyclone", "assembly.candidate.flye"),
+        ("clr", "select_clr", "assembly.candidate.flye"),
     ],
 )
 def test_route_countdown_accepts_registered_recommendation(
@@ -383,18 +391,62 @@ def test_invalid_route_recommendation_leaves_gate_blocked():
                 "rationale": "bad recommendation payload",
             },
         )
-        request = _auto_request(state)
-
-        with pytest.raises(ResumeValidationError, match="invalid read type"):
-            _apply_route_review(
-                state,
-                request,
-                blocked_timeout_seconds=300,
-                decision_source="foreground_countdown",
-            )
+        assert foreground_automatic_decision_label(inspect_state(state)) is None
+        with pytest.raises(
+            ResumeValidationError, match="no eligible automatic resolver"
+        ):
+            _auto_request(state)
 
     assert state["supervision_state"] == "blocked_human"
     assert state["active_interrupt"] is not None
+
+
+def test_clr_gate_offers_only_available_route_and_keeps_read_type():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = _blocked_route_state(tmpdir, "clr_manual", recommended_route="clr")
+        assert _request_payload(state)["decisions_allowed"] == [
+            "select_clr",
+            "stop_human_review",
+        ]
+        result = _apply_route_review(state, _human_request(state, "select_clr"))
+        selection = result["stage_outputs"]["assembly"]["assembly_selection"]
+        assert selection["read_type"] == "pacbio_clr"
+        assert selection["primary_method"] == "assembly.candidate.flye"
+
+
+def test_missing_recommendation_does_not_advertise_or_attempt_automatic_resolution():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state = _blocked_route_state(
+            tmpdir, "no_recommendation", recommended_route="insufficient_data"
+        )
+        assert foreground_automatic_decision_label(inspect_state(state)) is None
+        with pytest.raises(
+            ResumeValidationError, match="no eligible automatic resolver"
+        ):
+            _auto_request(state)
+
+
+@pytest.mark.parametrize(
+    "stage,gate_id",
+    [
+        ("assembly_dedup", "dedup_recommendation"),
+        ("assembly", "parameter_approval"),
+        ("hic_scaffolding", "parameter_approval"),
+    ],
+)
+def test_timeout_hook_cannot_automatically_choose_a_fallback_action(stage, gate_id):
+    summary = {
+        "decision_requirements": {
+            "stage": stage,
+            "gate_id": gate_id,
+            "decisions_allowed": ["keep_prior_assembly", "stop_human_review"],
+        }
+    }
+    assert foreground_automatic_decision_label(summary) is None
+    with pytest.raises(ResumeValidationError, match="no eligible automatic resolver"):
+        build_foreground_auto_resume_request(
+            summary, configured_seconds=300, elapsed_seconds=300
+        )
 
 
 def test_indefinite_wait_never_expires():

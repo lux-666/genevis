@@ -5,19 +5,22 @@ allowed_actions:
   - cyclone
   - ont
   - hifi
+  - clr
   - insufficient_data
 
 routes:
   cyclone:
-    description: "CycloneSeq or ONT R9-like long reads."
+    description: "CycloneSEQ long reads."
   ont:
-    description: "ONT R10/high-quality nanopore reads."
+    description: "Raw or high-quality ONT reads."
+  clr:
+    description: "PacBio CLR/subreads."
   hifi:
     description: "PacBio HiFi reads."
 
 selection_priority_notes:
   - "Routes describe input compatibility. Choose among compatible registered methods using current material and case evidence; a route does not prescribe a default tool."
   - "HiFi reads with adequate coverage usually select hifi."
-  - "ONT R10/high-quality ONT reads usually select ont."
-  - "CycloneSeq or ONT R9-like reads usually select cyclone."
+  - "Raw and high-quality ONT reads select ont; preserve ont_raw versus ont_hq."
+  - "CycloneSEQ reads select cyclone; PacBio CLR/subreads select clr."
   - "Missing platform/read refs or very low coverage selects insufficient_data."

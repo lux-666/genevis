@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 from pydantic import BaseModel
 
+from app.domains.assembly.selection import ROUTE_TO_READ_TYPE
 from app.schemas.state import (
     DOMAIN_STAGES,
     DomainStage,
@@ -375,9 +376,7 @@ register_review_gate(
         stage="assembly",
         gate_id="route_selection",
         decisions_allowed=(
-            "select_cyclone",
-            "select_ont",
-            "select_hifi",
+            *(f"select_{route}" for route in ROUTE_TO_READ_TYPE),
             "stop_human_review",
         ),
         intent_metadata_model=(

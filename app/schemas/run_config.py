@@ -32,7 +32,7 @@ from pydantic import (
 )
 
 from app.domains.assembly.inputs import HifiasmInputConfig
-from app.domains.assembly.selection import NormalizedReadType
+from app.domains.assembly.selection import NormalizedReadType, SelectedAssemblyRoute
 from app.review.gates import registered_review_stages
 from app.schemas.manifest import Platform
 from app.schemas.shared_parameters import SpeciesFacts
@@ -51,7 +51,7 @@ RequestableStage = Literal[
     "base_polish",
 ]
 
-AssemblyRoute = Literal["cyclone", "ont", "hifi", "auto"]
+AssemblyRoute = Literal[SelectedAssemblyRoute, "auto"]
 RecommendationMode = Literal["advisor", "deterministic_baseline"]
 ReadQCLengthFilterMethod = Literal[
     "skip",

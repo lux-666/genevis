@@ -22,6 +22,9 @@ NormalizedReadType = Literal[
     "pacbio_hifi",
 ]
 
+SelectedAssemblyRoute = Literal["cyclone", "ont", "clr", "hifi"]
+RecommendedAssemblyRoute = Literal[SelectedAssemblyRoute, "insufficient_data"]
+
 PLATFORM_TO_SHARED_READ_TYPE: dict[str, NormalizedReadType] = {
     "cyclone": "cyclone",
     "cycloneseq": "cyclone",
@@ -86,10 +89,11 @@ METHOD_ALIASES = {
     HIFIASM_ONT_METHOD: HIFIASM_ONT_METHOD,
 }
 
-ROUTE_TO_READ_TYPE: dict[str, NormalizedReadType] = {
+ROUTE_TO_READ_TYPE: dict[SelectedAssemblyRoute, NormalizedReadType] = {
     "cyclone": "cyclone",
     "ont": "ont_raw",
     "hifi": "pacbio_hifi",
+    "clr": "pacbio_clr",
 }
 
 DEFAULT_PRIMARY_BY_READ_TYPE: dict[NormalizedReadType, str] = {
@@ -145,7 +149,7 @@ def normalize_read_type(
     if value in SHARED_TO_METHOD_READ_TYPE:
         return cast(NormalizedReadType, value)
     if value in ROUTE_TO_READ_TYPE:
-        return ROUTE_TO_READ_TYPE[str(value)]
+        return ROUTE_TO_READ_TYPE[cast(SelectedAssemblyRoute, value)]
     if value in FLYE_TO_SHARED_READ_TYPE:
         return FLYE_TO_SHARED_READ_TYPE[str(value)]
     if value in {"clr", "pacbio_clr"}:
@@ -201,12 +205,14 @@ def resolve_read_type_with_source(
     return None, None
 
 
-def route_from_read_type(read_type: str) -> str:
+def route_from_read_type(read_type: str) -> SelectedAssemblyRoute:
     if read_type == "pacbio_hifi":
         return "hifi"
     if read_type in {"ont_raw", "ont_hq"}:
         return "ont"
-    if read_type in {"cyclone", "pacbio_clr"}:
+    if read_type == "pacbio_clr":
+        return "clr"
+    if read_type == "cyclone":
         return "cyclone"
     raise ValueError(f"unknown assembly read_type: {read_type}")
 

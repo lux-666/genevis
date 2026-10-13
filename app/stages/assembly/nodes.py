@@ -32,10 +32,13 @@ from app.domains.assembly.inputs import HifiasmInputConfig
 from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     PLATFORMS_BY_SHARED_READ_TYPE,
+    ROUTE_TO_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
     AssemblySelection,
     AssemblySelectionSource,
     NormalizedReadType,
+    RecommendedAssemblyRoute,
+    SelectedAssemblyRoute,
     compatible_methods,
     default_primary_method,
     is_method_read_type_compatible,
@@ -117,7 +120,6 @@ from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
     load_assets_from_registry,
-    ordered_unique,
     stage_artifacts_dir,
     stage_work_dir,
 )
@@ -137,14 +139,9 @@ from app.storage.assembly_candidates import load_executed_candidate_bundle
 from app.storage.ledger import Ledger
 
 ROUTE_DECISION_MAP: dict[str, SelectedAssemblyRoute] = {
-    "select_cyclone": "cyclone",
-    "select_ont": "ont",
-    "select_hifi": "hifi",
+    f"select_{route}": route for route in ROUTE_TO_READ_TYPE
 }
-ROUTE_VALUES: frozenset[str] = frozenset({"cyclone", "ont", "hifi"})
-
-SelectedAssemblyRoute = Literal["cyclone", "ont", "hifi"]
-RecommendedAssemblyRoute = Literal["cyclone", "ont", "hifi", "insufficient_data"]
+ROUTE_VALUES: frozenset[str] = frozenset(ROUTE_TO_READ_TYPE)
 InputProfileSource = Literal[
     "manifest",
     "run_config",
@@ -210,7 +207,7 @@ class AssemblyRouteSelectionApplicationEffectV1(BaseModel):
 
     schema_version: Literal[1] = 1
     decision: Literal[
-        "select_cyclone", "select_ont", "select_hifi", "stop_human_review"
+        "select_cyclone", "select_ont", "select_hifi", "select_clr", "stop_human_review"
     ]
     selected_route: SelectedAssemblyRoute | None = None
     assembly_selection: AssemblySelection | None = None
@@ -678,9 +675,7 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
         profile = _build_input_profile(
             state,
             assembly_out,
-            recommended_route=cast(
-                SelectedAssemblyRoute, _route_from_read_type(selection.read_type)
-            ),
+            recommended_route=_route_from_read_type(selection.read_type),
             reasoning=selection.rationale,
             uncertainty_notes=[],
             profile_source=profile_source,
@@ -692,9 +687,7 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
             artifact_type=ASSEMBLY_INPUT_PROFILE,
             method_name="assembly.input_profiler",
         )
-        selected_route = cast(
-            SelectedAssemblyRoute, _route_from_read_type(selection.read_type)
-        )
+        selected_route = _route_from_read_type(selection.read_type)
         decision = AssemblyRouteDecision(
             session_id=state["session_id"],
             selected_route=selected_route,
@@ -752,6 +745,7 @@ def infer_input_profile(state: TopLevelState) -> StateUpdate:
             source="recommendation",
             rationale=str(recommendation.get("reasoning") or "selector recommendation"),
             method=recommendation.get("recommended_method"),
+            read_type=recommendation.get("recommended_read_type"),
         )
         if recommended_route != "insufficient_data"
         else None
@@ -951,13 +945,8 @@ def prepare_route_selection_application(
             decision_ref=decision_ref,
         )
 
-    selected_route = ROUTE_DECISION_MAP.get(request.decision)
-    if selected_route is None:
-        raise ResumeValidationError(
-            f"unsupported assembly selection decision: {request.decision}"
-        )
-
     assembly_out = assembly_stage_output(state)
+    selected_route = _requested_route(request, assembly_out, request_record)
     read_type, read_type_source = _requested_read_type(
         request, assembly_out, selected_route
     )
@@ -1015,7 +1004,7 @@ def prepare_route_selection_application(
         effect_kind="assembly.route_selection.v1",
         effect=AssemblyRouteSelectionApplicationEffectV1(
             decision=cast(
-                Literal["select_cyclone", "select_ont", "select_hifi"],
+                Literal["select_cyclone", "select_ont", "select_hifi", "select_clr"],
                 request.decision,
             ),
             selected_route=selected_route,
@@ -1139,6 +1128,7 @@ def validate_route_selection_intent_request(
         "select_cyclone",
         "select_ont",
         "select_hifi",
+        "select_clr",
         "stop_human_review",
     }:
         raise ResumeValidationError(
@@ -1159,8 +1149,8 @@ def validate_route_selection_intent_request(
             }
         )
 
-    selected_route = ROUTE_DECISION_MAP[request.decision]
     assembly_out = assembly_stage_output(state)
+    selected_route = _requested_route(request, assembly_out, request_record)
     read_type, _read_type_source = _requested_read_type(
         request, assembly_out, selected_route
     )
@@ -1261,6 +1251,7 @@ def normalize_selection_timeout_request(
         "hifi": "select_hifi",
         "ont": "select_ont",
         "cyclone": "select_cyclone",
+        "clr": "select_clr",
     }.get(route)
     if not decision:
         raise ResumeValidationError(
@@ -1793,9 +1784,7 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
         gate_id="route_selection",
         reason=reason,
         decisions_allowed=[
-            "select_cyclone",
-            "select_ont",
-            "select_hifi",
+            *(f"select_{route}" for route in _available_routes(assembly_out)),
             "stop_human_review",
         ],
         signals=[],
@@ -1815,18 +1804,7 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
         "recommendation_reasoning": profile.get("recommendation_reasoning"),
         "uncertainty_notes": profile.get("uncertainty_notes", []),
         "available_routes": _available_routes(assembly_out),
-        "available_read_types": sorted(
-            {
-                route
-                for route in [
-                    "cyclone",
-                    "ont_raw",
-                    "ont_hq",
-                    "pacbio_clr",
-                    "pacbio_hifi",
-                ]
-            }
-        ),
+        "available_read_types": sorted(_assembly_observed_read_types(assembly_out)),
         "compatible_methods": {
             read_type: compatible_methods(read_type)
             for read_type in cast(
@@ -1881,12 +1859,9 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
 
 
 def _available_routes(assembly_out: AssemblyStageCursor) -> list[str]:
-    routes = []
-    if assembly_out.get("ont_reads_ref"):
-        routes.extend(["cyclone", "ont"])
-    if assembly_out.get("hifi_reads_ref") or assembly_out.get("has_hifi"):
-        routes.append("hifi")
-    return ordered_unique(routes)
+    observed = _assembly_observed_read_types(assembly_out)
+    available = {_route_from_read_type(read_type) for read_type in observed}
+    return [route for route in ROUTE_TO_READ_TYPE if route in available]
 
 
 def _selection_from_output(
@@ -1909,8 +1884,9 @@ def _selection_from_route(
     source: AssemblySelectionSource,
     rationale: str,
     method: str | None = None,
+    read_type: NormalizedReadType | None = None,
 ) -> AssemblySelection | None:
-    read_type = normalize_read_type(route)
+    read_type = read_type or normalize_read_type(route)
     if not read_type:
         return None
     return AssemblySelection(
@@ -1931,6 +1907,8 @@ def _requested_read_type(
     if route_read_type is None:
         raise ResumeValidationError(f"unsupported assembly route: {selected_route}")
 
+    selected_read_type = route_read_type
+    selected_source = "selected_route"
     for source, raw_value in (
         ("metadata.read_type", request.metadata.get("read_type")),
         ("metadata.shared_read_type", request.metadata.get("shared_read_type")),
@@ -1946,18 +1924,40 @@ def _requested_read_type(
                 f"{selected_route!r}, "
                 f"but {source}={raw_value!r} normalizes to read_type {read_type!r}"
             )
-        return read_type, source
+        selected_read_type, selected_source = read_type, source
+        break
+    else:
+        prior_read_type = _normalized_read_type_from_prior(
+            assembly_out.get("read_type_prior")
+        )
+        if prior_read_type and _route_from_read_type(prior_read_type) == selected_route:
+            selected_read_type, selected_source = prior_read_type, "read_type_prior"
+    if selected_read_type not in _assembly_observed_read_types(assembly_out):
+        raise ResumeValidationError(
+            f"assembly read_type {selected_read_type!r} is not available for inputs"
+        )
+    return selected_read_type, selected_source
 
-    prior_read_type = resolve_read_type(
-        (
-            "read_type_prior",
-            _normalized_read_type_from_prior(assembly_out.get("read_type_prior")),
-        ),
-        context="assembly.requested_read_type",
-    )
-    if prior_read_type and _route_from_read_type(prior_read_type) == selected_route:
-        return prior_read_type, "read_type_prior"
-    return route_read_type, "selected_route"
+
+def _requested_route(
+    request: ResumeReviewRequest,
+    assembly_out: AssemblyStageCursor,
+    request_record: Mapping[str, Any],
+) -> SelectedAssemblyRoute:
+    route = ROUTE_DECISION_MAP.get(request.decision)
+    if route is None:
+        raise ResumeValidationError(
+            f"unsupported assembly selection decision: {request.decision}"
+        )
+    # Frozen pre-CLR menus cannot acquire a new action. Preserve their CLR
+    # recovery alias only when the active inputs unambiguously prove CLR.
+    if (
+        route == "cyclone"
+        and "select_clr" not in request_record["payload"]["decisions_allowed"]
+        and _assembly_observed_read_types(assembly_out) == {"pacbio_clr"}
+    ):
+        return "clr"
+    return route
 
 
 def _requested_method(
@@ -2214,6 +2214,7 @@ def _recommend_route_with_decision_boundary(
             else "insufficient_data"
         )
         try:
+            recommended_read_type = _recommended_read_type(payload, recommended_route)
             recommended_method = _validated_recommended_method(
                 payload,
                 assembly_out,
@@ -2241,7 +2242,7 @@ def _recommend_route_with_decision_boundary(
                         "response_sha256": response_ref.sha256,
                         "recommended_route": recommended_route,
                         "recommended_method": recommended_method,
-                        "recommended_read_type": payload.get("recommended_read_type"),
+                        "recommended_read_type": recommended_read_type,
                         "reasoning": payload.get(
                             "reasoning", payload.get("recommendation_reasoning", "")
                         ),
@@ -2265,7 +2266,7 @@ def _recommend_route_with_decision_boundary(
         return {
             "recommended_route": recommended_route,
             "recommended_method": recommended_method,
-            "recommended_read_type": _recommended_read_type(payload, recommended_route),
+            "recommended_read_type": recommended_read_type,
             "reasoning": str(
                 payload.get("reasoning", payload.get("recommendation_reasoning", ""))
             ),
@@ -2433,6 +2434,8 @@ def _recommended_read_type(
 ) -> NormalizedReadType | None:
     raw = payload.get("recommended_read_type")
     read_type = normalize_read_type(raw) if raw is not None else None
+    if raw is not None and read_type is None:
+        raise ValueError(f"unsupported recommended_read_type: {raw!r}")
     if read_type is None and recommended_route != "insufficient_data":
         read_type = normalize_read_type(recommended_route)
     return read_type
@@ -2455,13 +2458,16 @@ def _validated_recommended_method(
     if method not in allowed_methods:
         raise ValueError(f"recommended_method {method!r} is not an input candidate")
     read_type = _recommended_read_type(payload, recommended_route)
-    route_read_type = normalize_read_type(recommended_route)
-    if read_type != route_read_type:
+    if read_type is None or _route_from_read_type(read_type) != recommended_route:
         raise ValueError(
             f"recommended_read_type {read_type!r} conflicts with "
             f"recommended_route {recommended_route!r}"
         )
-    if read_type is None or not is_method_read_type_compatible(method, read_type):
+    if read_type not in _assembly_observed_read_types(assembly_out):
+        raise ValueError(
+            f"recommended_read_type {read_type!r} is not available for inputs"
+        )
+    if not is_method_read_type_compatible(method, read_type):
         raise ValueError(
             f"recommended_method {method!r} is incompatible with "
             f"recommended_read_type {read_type!r}"
@@ -2590,11 +2596,11 @@ def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:
     return None
 
 
-def _normalized_read_type_prior(state: TopLevelState) -> str | None:
+def _normalized_read_type_prior(state: TopLevelState) -> NormalizedReadType | None:
     return _normalized_read_type_from_prior(_read_type_prior(state))
 
 
-def _normalized_read_type_from_prior(prior: Any) -> str | None:
+def _normalized_read_type_from_prior(prior: Any) -> NormalizedReadType | None:
     if not isinstance(prior, dict):
         return None
     return resolve_read_type(
