@@ -52,7 +52,7 @@ docs/README.md
 | 公共 CLI | [`../app/entrypoints/run.py`](../app/entrypoints/run.py) |
 | 阶段注册 | [`../app/workflow.py`](../app/workflow.py) |
 | 软件包与方法能力 | [`../descriptors/registry.yaml`](../descriptors/registry.yaml) |
-| 当前主机映射 | `GENE_AGENT_ENVS_CONFIG`，否则使用被 Git 忽略的本机配置 [`../config/envs.yaml`](../config/envs.yaml) |
+| 当前主机映射 | `GENE_AGENT_ENVS_CONFIG`，否则使用被 Git 忽略的本机配置 `../config/envs.yaml` |
 | 缺少主机配置时的种子 | [`examples/envs.yaml.example`](examples/envs.yaml.example) |
 | NCBI 快照安装与文件布局 | [`../data/reference/ncbi/README.md`](../data/reference/ncbi/README.md) |
 | 通过 schema 校验的操作输入 | [`examples/`](examples/) |

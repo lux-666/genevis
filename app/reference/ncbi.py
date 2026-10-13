@@ -424,7 +424,8 @@ def resolve_busco_lineage_for_species(
         species_name,
         reference_dir=reference_dir,
     )
-    if _PLANT_TAXONOMY_MARKERS & {_normalise(term) for term in taxonomy_terms}:
+    taxonomy = {_normalise(term) for term in taxonomy_terms}
+    if _PLANT_TAXONOMY_MARKERS & taxonomy:
         if _PLANT_BUSCO_LINEAGE not in configured_lineages:
             raise ValueError(
                 f"plant taxonomy for species {species_name!r} requires installed "
@@ -448,10 +449,18 @@ def resolve_busco_lineage_for_species(
     }
     if len(compatible) == 1:
         return next(iter(compatible))
+    # Unannotated assemblies need not have BUSCO metrics; their verified
+    # taxonomy can still identify one installed evaluation dataset.
+    taxonomy_matches = {
+        name for name in configured_lineages if _busco_lineage_family(name) in taxonomy
+    }
+    if not observed and len(taxonomy_matches) == 1:
+        return next(iter(taxonomy_matches))
     raise ValueError(
         f"cannot resolve one configured BUSCO lineage for species {species_name!r}; "
         f"reference lineages={sorted(observed)}, "
-        f"configured matches={sorted(compatible)}"
+        f"configured matches={sorted(compatible)}, "
+        f"taxonomy matches={sorted(taxonomy_matches)}"
     )
 
 

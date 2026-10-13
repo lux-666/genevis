@@ -460,9 +460,14 @@ def test_cli_invalid_evidence_is_json_and_nonzero(
     assert json.loads(capsys.readouterr().out)["status"] == "invalid_evidence"
 
 
-def test_frozen_gapcloser_slice_checks_registered_source_and_skip(tmp_path):
+def test_frozen_gapcloser_slice_checks_registered_source_and_skip(
+    tmp_path, monkeypatch
+):
     from tests.test_gapcloser import _run_frozen_example
 
+    envs = tmp_path / "envs.yaml"
+    envs.write_text(json.dumps({"default": {"fallback_prefix": str(tmp_path)}}))
+    monkeypatch.setenv("GENE_AGENT_ENVS_CONFIG", str(envs))
     result, run = _run_frozen_example(tmp_path, "AAAACCCC", "AAAACCCC")
     assert result["supervision_state"] == "completed"
     # The graph-only fixture closes SQLite before the CLI terminal finalizer.

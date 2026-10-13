@@ -19,6 +19,7 @@ from app.execution.env_resolver import EnvResolver
 from app.reference.ncbi import (
     MATCHING_TIER_RANK,
     MATCHING_TIERS,
+    resolve_busco_lineage_for_species,
     validate_reference_snapshot,
 )
 from app.schemas.run_config import RunConfig
@@ -214,6 +215,94 @@ def test_species_name_selects_configured_busco_lineage(tmp_path: Path) -> None:
 
     assert projection["lineage_name"] == "actinopterygii_odb10"
     assert projection["threads"] == 6
+
+
+@pytest.mark.parametrize(
+    "target,reference_species,lineage_name,taxonomy",
+    [
+        (
+            "Pyricularia oryzae",
+            "Pyricularia oryzae",
+            "fungi_odb10",
+            "Eukaryota;Fungi;Ascomycota;Pyricularia;Pyricularia oryzae",
+        ),
+        (
+            "Pyricularia oryzae",
+            "Pyricularia grisea",
+            "fungi_odb10",
+            "Eukaryota;Fungi;Ascomycota;Pyricularia;Pyricularia grisea",
+        ),
+        (
+            "Solea ovata",
+            "Solea ovata",
+            "metazoa_odb10",
+            "Eukaryota;Metazoa;Chordata;Solea;Solea ovata",
+        ),
+    ],
+)
+def test_unannotated_species_uses_verified_taxonomy_and_installed_dataset(
+    tmp_path, target, reference_species, lineage_name, taxonomy
+):
+    lineage = ensure_busco_lineage(tmp_path / "busco", lineage_name=lineage_name)
+    ncbi = tmp_path / "ncbi"
+    ncbi.mkdir()
+    _write_species_reference(
+        ncbi,
+        species_name=reference_species,
+        lineage_name=None,
+        prefix="Snapshot",
+        full_lineage=taxonomy,
+    )
+    unrelated = ensure_busco_lineage(tmp_path / "busco")
+    config = _config(unrelated, ncbi)
+    config["databases"]["busco"]["lineages"].update(
+        _config(lineage, ncbi)["databases"]["busco"]["lineages"]
+    )
+    projection = resolve_busco_parameters(
+        _run_config(), EnvResolver(config_data=config), species_name=target
+    )
+    assert projection["lineage_name"] == lineage_name
+
+
+@pytest.mark.parametrize(
+    "observed,full_lineage,configured",
+    [
+        (
+            None,
+            "Eukaryota;Fungi;Ascomycota;Pyricularia;Pyricularia oryzae",
+            {"fungi_odb10", "ascomycota_odb10"},
+        ),
+        (
+            None,
+            "Eukaryota;Fungi;Pyricularia;Pyricularia oryzae",
+            {"fungi_odb10", "fungi_odb12"},
+        ),
+        (None, "Eukaryota;Pyricularia;Pyricularia oryzae", {"fungi_odb10"}),
+        (None, "Eukaryota;Fungi;Pyricularia;Pyricularia oryzae", {"metazoa_odb10"}),
+        (
+            "ascomycota_odb10",
+            "Eukaryota;Fungi;Pyricularia;Pyricularia oryzae",
+            {"fungi_odb10"},
+        ),
+    ],
+)
+def test_taxonomy_fallback_rejects_ambiguity_missing_or_conflicting_evidence(
+    tmp_path, observed, full_lineage, configured
+):
+    _write_species_reference(
+        tmp_path,
+        species_name="Pyricularia oryzae",
+        lineage_name=observed,
+        prefix="Fungi",
+        full_lineage=full_lineage,
+        taxonomy_lineage="Fungi;Pyricularia;Pyricularia oryzae",
+    )
+    with pytest.raises(ValueError, match="cannot resolve one configured BUSCO lineage"):
+        resolve_busco_lineage_for_species(
+            "Pyricularia oryzae",
+            reference_dir=tmp_path,
+            configured_lineages=configured,
+        )
 
 
 def test_plant_genus_taxonomy_selects_fixed_lineage_without_exact_target(
