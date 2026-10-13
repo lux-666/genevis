@@ -30,6 +30,8 @@
 
 Assembly 是延迟绑定例外：整次运行就绪捕获已配置候选依赖范围，但不假装某个候选已被选择。上游证据具备后，Assembly 从冻结范围选择，并在冻结方法尝试前预检所选方法。
 
+RunConfig 激活的工具依赖由同一能力投影补入预检和依赖快照：Trio Hifiasm 的 `yak`，以及 Hi-C 配置实际指定的 `autohic_parameters.python_command`。仅检查主机映射中的默认解释器不能代替检查配置实际启动的命令。
+
 是否必需 LLM 端点由选定工作流和[推荐策略](recommendation-policy.md#readiness-and-evidence)决定。需要时，就绪检查通过共享 `StructuredRecommender` 按冻结配置实际选择的 `prompt_json`、`json_schema` 或 `function_calling` 协议逐种探测配置端点，只接受精确解析 JSON 对象 `{"ready": true}`。模式专有的响应格式或强制函数调用绑定同样接受验证；一种协议通过不能代替另一种。空输出、自由文本、JSON 数组或其他结构对象都失败。这验证结构化输出能力，不只是认证或网络连通性。
 
 此边界只读。Bootstrap 对更广配置目录的验证，以及方法稍后的冻结依赖验证，仍是独立检查。

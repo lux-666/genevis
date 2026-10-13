@@ -398,6 +398,14 @@ class AutoHiCRunParameters(BaseModel):
     threads: int | None = Field(default=None, gt=0)
     python_command: str = "python3.9"
 
+    @field_validator("python_command")
+    @classmethod
+    def _python_command_must_be_non_empty(cls, value: str) -> str:
+        command = value.strip()
+        if not command:
+            raise ValueError("autohic_parameters.python_command must be non-empty")
+        return command
+
 
 class HiCScaffoldingRunConfig(BaseModel):
     """AutoHiC runtime configuration and frozen parameter-advisor policy."""
