@@ -70,6 +70,7 @@ class _ReadQCRecommendationSource:
         self.mean_quality: float | None = _pos_float_or_none(
             summary.get("avg_qual"),
             "read_qc.summary.avg_qual",
+            allow_zero=True,
         )
 
 
@@ -601,19 +602,22 @@ def _pos_int_or_none(value: Any, field: str) -> int | None:
     return int(value)
 
 
-def _pos_float_or_none(value: Any, field: str) -> float | None:
+def _pos_float_or_none(
+    value: Any, field: str, *, allow_zero: bool = False
+) -> float | None:
     if value is None:
         return None
+    bound = "non-negative" if allow_zero else "positive"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} must be a positive number")
+        raise ValueError(f"{field} must be a {bound} number")
     try:
         fv = float(value)
     except OverflowError:
         raise ValueError(f"{field} must be finite") from None
     if not math.isfinite(fv):
         raise ValueError(f"{field} must be finite")
-    if fv <= 0:
-        raise ValueError(f"{field} must be positive")
+    if fv < 0 or (fv == 0 and not allow_zero):
+        raise ValueError(f"{field} must be {bound}")
     return fv
 
 

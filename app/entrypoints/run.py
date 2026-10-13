@@ -1255,6 +1255,16 @@ def _print_inspect_text(
         print(f"decision_requirements.stage: {requirements.get('stage')}")
         decisions_allowed = requirements.get("decisions_allowed") or []
         print(f"decision_requirements.decisions_allowed: {decisions_allowed}")
+        for key in (
+            "reason",
+            "max_blocked_seconds",
+            "recommended_route",
+            "recommended_assembly_selection",
+            "recommendation_reasoning",
+            "uncertainty_notes",
+        ):
+            if key in requirements:
+                print(f"decision_requirements.{key}: {requirements[key]}")
         if requirements.get("candidate_ids"):
             print(
                 f"decision_requirements.candidate_ids: {requirements['candidate_ids']}"

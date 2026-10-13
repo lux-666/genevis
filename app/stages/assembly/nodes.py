@@ -2544,9 +2544,7 @@ def _unavailable_route_recommendation(
         "recommended_route": "insufficient_data",
         "recommended_method": None,
         "recommended_read_type": None,
-        "reasoning": (
-            "route selector LLM unavailable; route selection requires human/data review"
-        ),
+        "reasoning": reason,
         "source": "llm_unavailable",
         "uncertainty_notes": [reason],
         "model_request_ref": (

@@ -1,21 +1,27 @@
 """Exercise route contracts from recommendation through durable approval."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
+from app.control.inspection import inspect_state
+from app.control.resume import foreground_automatic_decision_label
 from app.domains.assembly.selection import (
     ROUTE_TO_READ_TYPE,
     default_primary_method,
     route_from_read_type,
 )
+from app.entrypoints.review_interactive import build_decision_brief
+from app.entrypoints.run import _print_inspect_text
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.run_config import RunConfig
 from app.stages.assembly.nodes import (
     _validated_recommended_method,
     block_assembly_for_human,
     infer_input_profile,
+    resolve_extended_inputs,
     select_route,
 )
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
@@ -34,6 +40,133 @@ READ_TYPES = [
     ("pacbio_clr", "clr"),
     ("pacbio_hifi", "pacbio_hifi"),
 ]
+
+
+@pytest.mark.parametrize("method", ["flye", "nextdenovo"])
+def test_zero_qc_quality_reaches_method_advisor_and_countdown(tmp_path, method):
+    reads = tmp_path / "clr.fastq"
+    reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+    state = InputProfilerTests()._state(
+        str(tmp_path),
+        assets=[
+            {
+                "asset_id": "clr",
+                "asset_type": "raw_long_reads",
+                "path": str(reads),
+                "platform": "clr",
+            }
+        ],
+    )
+    state["workflow_steps"] = [
+        state["workflow_steps"][0],
+        {
+            "step_id": "step-001-read_qc",
+            "stage": "read_qc",
+            "allow_local_execution": True,
+            "selected_method_names": ["read_qc.long_read_stats.seqkit_stats"],
+        },
+        {
+            "step_id": "step-002-assembly",
+            "stage": "assembly",
+            "allow_local_execution": True,
+        },
+    ]
+    state["workflow_step_index"] = state["entered_workflow_step_index"] = 2
+    state["shared_parameters"] = {"read_type": "pacbio_clr"}
+    state["stage_outputs"] = {
+        "read_qc": {
+            "summary": {"num_seqs": 1, "total_bases": 4, "avg_qual": 0.0},
+        }
+    }
+    state.update(resolve_extended_inputs(state))
+    state["stage_outputs"]["assembly"]["review_policy"] = {"max_blocked_seconds": 1}
+    primary_method = f"assembly.candidate.{method}"
+
+    class Model:
+        def invoke(self, messages):
+            facts = json.loads(messages[1]["content"])["facts"]
+            assert facts["reads"]["mean_quality"]["value"] == 0.0
+            return json.dumps(
+                {
+                    "recommended_route": "clr",
+                    "recommended_read_type": "pacbio_clr",
+                    "recommended_method": primary_method,
+                    "reasoning": "compatible CLR method",
+                    "uncertainty_notes": [],
+                }
+            )
+
+    with patch(
+        "app.stages.assembly.decision.build_chat_model", return_value=Model()
+    ) as factory:
+        state.update(infer_input_profile(state))
+    factory.assert_called_once()
+    state.update(select_route(state))
+    state.update(block_assembly_for_human(state))
+    summary = inspect_state(state)
+    assert foreground_automatic_decision_label(summary) == "select_clr"
+    assert summary["decision_requirements"]["max_blocked_seconds"] == 1
+    assert (
+        summary["decision_requirements"]["recommended_assembly_selection"][
+            "primary_method"
+        ]
+        == primary_method
+    )
+    state["active_interrupt"]["blocked_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=2)
+    ).isoformat()
+    state.update(
+        _apply_route_review(
+            state,
+            _auto_request(state),
+            blocked_timeout_seconds=1,
+            decision_source="foreground_countdown",
+        )
+    )
+    assert (
+        state["stage_outputs"]["assembly"]["assembly_selection"]["primary_method"]
+        == primary_method
+    )
+
+
+def test_request_failure_is_visible_without_loading_unverified_artifact(
+    tmp_path, capsys
+):
+    state = InputProfilerTests()._state(str(tmp_path))
+    error = (
+        "assembly method request recovery failed: "
+        "read_qc.summary.avg_qual must be positive"
+    )
+    state["stage_outputs"] = {
+        "assembly": {
+            "status": "profile_ready",
+            "normalized_read_type": "pacbio_clr",
+            "input_profile": {
+                "recommended_route": "insufficient_data",
+                "recommendation_reasoning": error,
+                "uncertainty_notes": [error],
+            },
+        }
+    }
+    state.update(select_route(state))
+    state.update(block_assembly_for_human(state))
+    summary = inspect_state(state)
+    assert not summary.get("latest_review_request_artifact", {}).get("file_path")
+    assert summary.get("decision_requirements"), summary
+    assert summary["decision_requirements"].get("notes"), summary[
+        "decision_requirements"
+    ]
+    brief = build_decision_brief(summary, state["data_dir"])
+    assert any(error in note for note in brief["evidence"]["notes"])
+    _print_inspect_text(
+        {
+            **summary,
+            "checkpoint_persistence": "sqlite",
+            "durable_resume_available": True,
+        },
+        {},
+    )
+    assert error in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("read_type,platform", READ_TYPES)
