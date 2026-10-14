@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import httpx
+from langchain_openai import ChatOpenAI
+
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
@@ -315,15 +318,68 @@ class ReviewRecommenderTests(unittest.TestCase):
                     chat_model=_FakeChat(json.dumps({"decision": "purge"})),
                 )
 
-    def test_binding_fallback_invokes_once_and_preserves_provider_model_identity(self):
-        class FallbackChat(_FakeChat):
-            def bind(self, **kwargs):
-                if kwargs["response_format"]["type"] == "json_schema":
-                    self.bound_formats.append(kwargs)
-                    raise ValueError("native schemas unsupported")
-                return super().bind(**kwargs)
+    def test_real_client_sends_closed_required_schema_and_preserves_metadata(self):
+        response = {
+            "session_id": "s1",
+            "stage": "assembly_review",
+            "decision": "stop_human_review",
+            "candidate_id": None,
+            "method_name": None,
+            "rejected_candidates": [],
+            "notes": ["fixture rationale"],
+            "metadata": {
+                "evidence_refs": [],
+                "available_signals": ["fixture_signal"],
+                "missing_or_pending_signals": [],
+            },
+        }
+        calls = []
 
-        with tempfile.TemporaryDirectory() as tmp:
+        def check_schema(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    self.assertIs(node.get("additionalProperties"), False)
+                    self.assertEqual(
+                        set(node.get("required", [])), set(node["properties"])
+                    )
+                self.assertNotIn("default", node)
+                for value in node.values():
+                    check_schema(value)
+            elif isinstance(node, list):
+                for value in node:
+                    check_schema(value)
+
+        def handle(request):
+            payload = json.loads(request.content)
+            calls.append(payload)
+            fmt = payload["response_format"]
+            self.assertEqual(fmt["type"], "json_schema")
+            self.assertIs(fmt["json_schema"]["strict"], True)
+            check_schema(fmt["json_schema"]["schema"])
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-fixture",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "returned-fixture-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps(response),
+                            },
+                        }
+                    ],
+                },
+            )
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            httpx.Client(transport=httpx.MockTransport(handle)) as client,
+        ):
             run_dir = v2_run_dir(tmp, "s1")
             persisted = _persist_request(
                 run_dir,
@@ -333,8 +389,14 @@ class ReviewRecommenderTests(unittest.TestCase):
                     decisions_allowed=["stop_human_review"],
                 ),
             )
-            chat = FallbackChat(json.dumps({"decision": "stop_human_review"}))
-            recommend_review_decision(
+            chat = ChatOpenAI(
+                model="fixture-model",
+                api_key="test-only",
+                http_client=client,
+                base_url="https://fixture.invalid/v1",
+                max_retries=0,
+            )
+            decision = recommend_review_decision(
                 session_id="s1",
                 stage="assembly_review",
                 review_request_id=persisted.review_request_id,
@@ -343,11 +405,14 @@ class ReviewRecommenderTests(unittest.TestCase):
                 data_dir=run_dir,
                 chat_model=chat,
             )
-            self.assertEqual(chat.invocation_count, 1)
-            self.assertEqual(
-                [b["response_format"]["type"] for b in chat.bound_formats],
-                ["json_schema", "json_object"],
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(decision.metadata, response["metadata"])
+            artifact = json.loads(
+                SessionPaths.from_run_dir(run_dir)
+                .resolve_ref(decision.rationale_artifact_ref.path_ref)
+                .read_text()
             )
+            self.assertEqual(artifact["model"], "returned-fixture-model")
 
     def test_recommender_rejects_invalid_json(self):
         with tempfile.TemporaryDirectory() as tmp:

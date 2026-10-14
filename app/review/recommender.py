@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.llm.factory import build_chat_model
 from app.llm.prompts import (
@@ -30,17 +30,25 @@ class RecommendationError(ValueError):
     """Raised when an LLM recommendation cannot be used."""
 
 
+class RecommendationMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_refs: list[str]
+    available_signals: list[str]
+    missing_or_pending_signals: list[str]
+
+
 class RecommendationDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: str
     stage: str
     decision: str
-    candidate_id: str | None = None
-    method_name: str | None = None
-    rejected_candidates: list[str] = Field(default_factory=list)
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    candidate_id: str | None
+    method_name: str | None
+    rejected_candidates: list[str]
+    notes: list[str]
+    metadata: RecommendationMetadata
 
 
 def recommend_review_decision(
@@ -83,10 +91,11 @@ def recommend_review_decision(
             ),
         },
     )
-    model = _bind_recommendation_response_format(chat_model or build_chat_model())
-    result = StructuredRecommender(lambda payload: payload).invoke(
-        messages, model_factory=lambda: model
-    )
+    result = StructuredRecommender(
+        lambda payload: payload,
+        schema=RecommendationDraft,
+        method="json_schema",
+    ).invoke(messages, model_factory=lambda: chat_model or build_chat_model())
     if not result.valid:
         error = result.error or "unknown model response failure"
         if error.startswith("JSONDecodeError:"):
@@ -125,7 +134,7 @@ def recommend_review_decision(
             request_ref=ref,
             request_hash=request_hash,
             payload={
-                "model": _model_identifier(model),
+                "model": result.model_id,
                 "prompt_bundle": bundle.name,
                 "prompt_paths": _prompt_paths(bundle.name),
                 "raw_recommendation": raw,
@@ -223,28 +232,6 @@ def _prompt_paths(bundle_name: str) -> dict[str, str]:
     }
 
 
-def _bind_recommendation_response_format(chat_model: Any) -> Any:
-    bind = getattr(chat_model, "bind", None)
-    if not callable(bind):
-        return chat_model
-
-    schema = RecommendationDraft.model_json_schema()
-    schema["additionalProperties"] = False
-    try:
-        return bind(
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "review_recommendation",
-                    "schema": schema,
-                    "strict": True,
-                },
-            }
-        )
-    except Exception:
-        return bind(response_format={"type": "json_object"})
-
-
 def _normalize_recommendation(
     raw: dict[str, Any], *, session_id: str, stage: str
 ) -> dict[str, Any]:
@@ -256,12 +243,16 @@ def _normalize_recommendation(
     if "rationale" in normalized and "notes" not in normalized:
         rationale = normalized.pop("rationale")
         normalized["notes"] = [rationale] if isinstance(rationale, str) else rationale
+    normalized.setdefault("candidate_id", None)
+    normalized.setdefault("method_name", None)
+    normalized.setdefault("rejected_candidates", [])
+    normalized.setdefault("notes", [])
+    metadata = normalized.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        normalized["metadata"] = {
+            "evidence_refs": [],
+            "available_signals": [],
+            "missing_or_pending_signals": [],
+            **metadata,
+        }
     return normalized
-
-
-def _model_identifier(model: Any) -> str | None:
-    for attr in ("model_name", "model", "model_id"):
-        value = getattr(model, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    return None
