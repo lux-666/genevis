@@ -356,7 +356,7 @@ def project_workflow_state(
             data_dir,
             session_id,
         )
-    if supervision in {"blocked_human", "failed_terminal"}:
+    if supervision in {"running_stage", "blocked_human", "failed_terminal"}:
         return boundary.run(
             "operator_report",
             write_operator_report,

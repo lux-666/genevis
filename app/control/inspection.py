@@ -622,7 +622,6 @@ def _runtime_proposal_requirements(gate: Any) -> dict[str, Any]:
         "kind": gate.proposal_kind,
         "label": gate.proposal_label or gate.gate_id.replace("_", " "),
         "parameter_recommendation_status": gate.parameter_recommendation_status,
-        "human_confirmation_required": True,
     }
     if gate.related_parameter_gate is not None:
         proposal["related_parameter_gate"] = {

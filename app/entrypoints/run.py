@@ -37,6 +37,7 @@ from app.control.workflow_plan import workflow_steps_from_run_config
 from app.entrypoints.environment import (
     load_dotenv_without_override,
 )
+from app.entrypoints.review_interactive import render_applied_review
 from app.graph.builder import build_graph
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
@@ -789,10 +790,8 @@ def _interactive_gate_loop(
         execute_resume_transaction,
     )
     from app.entrypoints.review_interactive import (
-        build_decision_brief,
         collect_gate_decision,
         load_blocked_gate_summary,
-        render_decision_brief,
         wait_for_gate_claim,
     )
 
@@ -854,9 +853,12 @@ def _interactive_gate_loop(
                     request, _raw_decision = gate_result
             else:
                 initial_elapsed = float(timeout.get("elapsed_seconds") or 0.0)
-                brief = build_decision_brief(summary, data_dir)
-                render_decision_brief(brief)
                 if timeout.get("expired") or wait_seconds == 0:
+                    print(
+                        f"review: stage={stage} gate={gate_id} "
+                        f"automatic={automatic_label}",
+                        flush=True,
+                    )
                     claim = "expired"
                 else:
                     remaining = max(0.0, wait_seconds - initial_elapsed)
@@ -871,7 +873,6 @@ def _interactive_gate_loop(
                         session_id,
                         data_dir,
                         summary=summary,
-                        render_brief=False,
                     )
                     if gate_result is not None:
                         request, _raw_decision = gate_result
@@ -933,7 +934,6 @@ def _interactive_gate_loop(
                             session_id,
                             data_dir,
                             summary=fallback_summary,
-                            render_brief=False,
                         )
                         if gate_result is not None:
                             request, _raw_decision = gate_result
@@ -964,6 +964,7 @@ def _interactive_gate_loop(
                 event_context=event_context,
                 lease=lease,
                 projection_boundary=projection_boundary,
+                on_review_applied=render_applied_review,
             )
         except ResumeTransactionError as exc:
             if source == "foreground_countdown":
@@ -1010,6 +1011,7 @@ def _interactive_gate_loop(
                             event_context={"recovery_after_phase": exc.phase},
                             lease=lease,
                             projection_boundary=projection_boundary,
+                            on_review_applied=render_applied_review,
                         )
                     except ResumeTransactionError as recovery_exc:
                         print(
@@ -1038,7 +1040,6 @@ def _interactive_gate_loop(
                     session_id,
                     data_dir,
                     summary=fallback_summary,
-                    render_brief=False,
                 )
                 if gate_result is None:
                     print("review skipped; session remains blocked")
@@ -1057,6 +1058,7 @@ def _interactive_gate_loop(
                         event_context=None,
                         lease=lease,
                         projection_boundary=projection_boundary,
+                        on_review_applied=render_applied_review,
                     )
                 except ResumeTransactionError as manual_exc:
                     print(
@@ -1073,12 +1075,6 @@ def _interactive_gate_loop(
 
         _print_resume_transaction_warnings(transaction)
         result = transaction.state
-        if transaction.decision_artifact_path is not None:
-            print(f"decision_artifact: {transaction.decision_artifact_path}")
-        print(
-            f"\nresumed → stage={result.get('current_stage')} "
-            f"state={result.get('supervision_state')}"
-        )
 
     return result
 
@@ -1455,6 +1451,7 @@ def _run_resume(args: argparse.Namespace) -> int:
                 event_context=event_context,
                 lease=lease,
                 projection_boundary=projection_boundary,
+                on_review_applied=render_applied_review,
             )
     except FrozenExecutionActiveError as exc:
         print(f"error: frozen session is already active: {exc}", file=sys.stderr)

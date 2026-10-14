@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from app.control.resume_transaction import (
     ResumeTransactionError,
@@ -234,6 +236,52 @@ class ResumeTransactionTests(unittest.TestCase):
             self.assertEqual(len(failed), 1)
             self.assertEqual(failed[0]["phase"], "validation")
 
+    def test_applied_notification_and_report_precede_interrupted_invoke(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir, state, request, lease = self._setup(tmpdir)
+            graph = _Graph(state)
+            notified = Mock()
+
+            def interrupt_invoke(_state, *, config):
+                notified.assert_called_once()
+                applied_request, supervision = notified.call_args.args
+                self.assertEqual(applied_request.decision, request.decision)
+                self.assertEqual(supervision, graph.state["supervision_state"])
+                self.assertEqual(len(self._events(run_dir, "review_applied")), 1)
+                report = json.loads(
+                    (run_dir / "reports/current_status.json").read_text()
+                )
+                self.assertEqual(report["supervision_state"], supervision)
+                self.assertIsNone(report["active_interrupt"])
+                raise KeyboardInterrupt
+
+            graph.invoke = interrupt_invoke
+            with self.assertRaises(KeyboardInterrupt):
+                self._execute(
+                    graph=graph,
+                    run_dir=run_dir,
+                    request=request,
+                    lease=lease,
+                    on_review_applied=notified,
+                )
+
+    def test_applied_notification_failure_does_not_prevent_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir, state, request, lease = self._setup(tmpdir)
+            graph = _Graph(state)
+            result = self._execute(
+                graph=graph,
+                run_dir=run_dir,
+                request=request,
+                lease=lease,
+                on_review_applied=Mock(side_effect=BrokenPipeError("closed")),
+            )
+            self.assertEqual(graph.invocations, 1)
+            self.assertEqual(result.review_status, "applied")
+            self.assertTrue(
+                any(w.name == "review_applied" for w in result.projection_warnings)
+            )
+
     def test_auto_rule_requires_foreground_countdown_transaction_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir, state, human_request, lease = self._setup(tmpdir)
@@ -267,6 +315,7 @@ class ResumeTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir, state, request, lease = self._setup(tmpdir)
             graph = _Graph(state, update_result=False, persist_update=False)
+            notified = Mock()
 
             with self.assertRaisesRegex(
                 ResumeTransactionError, "returned False"
@@ -276,8 +325,10 @@ class ResumeTransactionTests(unittest.TestCase):
                     run_dir=run_dir,
                     request=request,
                     lease=lease,
+                    on_review_applied=notified,
                 )
 
+            notified.assert_not_called()
             self.assertEqual(ctx.exception.phase, "checkpoint_apply")
             self.assertEqual(graph.invocations, 0)
             self.assertEqual(len(self._events(run_dir, "review_decision")), 1)

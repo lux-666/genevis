@@ -982,7 +982,6 @@ class ReviewResumeTests(unittest.TestCase):
                 "kind": "parameter_recommendation",
                 "label": "Assembly parameter proposal",
                 "parameter_recommendation_status": "implemented",
-                "human_confirmation_required": True,
             },
         )
         self.assertEqual(

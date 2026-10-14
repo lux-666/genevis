@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -100,6 +101,7 @@ def execute_resume_transaction(
     blocked_timeout_seconds: float | None = None,
     event_context: Mapping[str, Any] | None = None,
     projection_boundary: ProjectionBoundary | None = None,
+    on_review_applied: Callable[[ResumeReviewRequest, str], None] | None = None,
 ) -> ResumeTransactionResult:
     """Recover or apply one exact review decision while holding the session lease."""
 
@@ -341,6 +343,23 @@ def execute_resume_transaction(
                 review_status=status,
                 intent_ref=intent_ref,
                 application_ref=application_ref,
+            )
+
+        # Publish the verified transition before downstream work can block.
+        if on_review_applied is not None:
+            boundary.run(
+                "review_applied",
+                on_review_applied,
+                persisted_intent.intent.request,
+                checkpoint_state["supervision_state"],
+                disable_after_failure=True,
+            )
+        if checkpoint_state["supervision_state"] != "completed":
+            project_workflow_state(
+                boundary,
+                checkpoint_state,
+                data_dir=paths.run_dir,
+                session_id=session_id,
             )
 
         phase = "invoke"

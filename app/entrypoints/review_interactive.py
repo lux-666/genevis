@@ -37,6 +37,21 @@ InputWaiter = Callable[[TextIO, float], bool]
 # Rendering
 # ---------------------------------------------------------------------------
 
+
+def render_applied_review(request: "ResumeReviewRequest", state: str) -> None:
+    """Announce a verified decision before downstream execution starts."""
+    state = {
+        "running_stage": "running",
+        "failed_terminal": "failed",
+        "blocked_human": "blocked",
+    }.get(state, state)
+    print(
+        f"review applied: stage={request.stage} gate={request.gate_id} "
+        f"decision={request.decision} by={request.decided_by}; state={state}",
+        flush=True,
+    )
+
+
 ASSEMBLY_REVIEW_DECISION_HELP = {
     "accept": (
         "Approve the selected assembly; execution then follows the remaining "
@@ -117,167 +132,6 @@ DECISION_HELP = {
         "reject this parameter recommendation and stop the current workflow attempt."
     ),
 }
-
-
-def render_blocked_summary(summary: dict[str, Any]) -> None:
-    """Print a human-readable summary of a blocked session gate."""
-    requirements = summary.get("decision_requirements") or {}
-    stage = requirements.get("stage", "unknown")
-    print(f"\nsession_id:        {summary['session_id']}")
-    print(f"supervision_state: {summary['supervision_state']}")
-    print(f"blocked_stage:     {stage}")
-
-    if stage == "assembly_review":
-        _render_assembly_review(requirements, summary)
-    elif stage == "hic_scaffolding":
-        _render_hic_scaffolding(requirements, summary)
-    else:
-        _render_generic_gate(requirements)
-
-    report = summary.get("latest_review_request_artifact")
-    if isinstance(report, dict) and report.get("file_path"):
-        print(f"review_request:    {report['file_path']}")
-
-    next_action = summary.get("next_action") or {}
-    if next_action.get("relevant_refs"):
-        print(f"relevant_refs:     {next_action['relevant_refs']}")
-    print()
-
-
-def _render_assembly_review(
-    requirements: dict[str, Any],
-    summary: dict[str, Any],
-) -> None:
-    decisions = requirements.get("decisions_allowed", [])
-    _render_choices(decisions)
-    _render_assembly_review_downstream_context(summary, decisions)
-
-    candidate_ids = requirements.get("candidate_ids") or []
-    candidate_refs = requirements.get("candidate_primary_output_refs") or {}
-    if candidate_ids:
-        print("\ncandidates:")
-        for cid in candidate_ids:
-            ref = _artifact_ref_label(candidate_refs.get(cid))
-            print(f"  [{cid}] {ref}")
-            _print_candidate_core_reports(requirements, cid, indent="    ")
-
-    report_refs = requirements.get("report_refs") or {}
-    if report_refs:
-        print("\nreport_refs:")
-        for name, ref in report_refs.items():
-            print(f"  {name}: {ref}")
-
-    comparison = requirements.get("candidate_comparison_context") or {}
-    if comparison:
-        print("\ncandidate_comparison:")
-        for key, val in comparison.items():
-            print(f"  {key}: {val}")
-
-
-def _render_assembly_review_downstream_context(
-    summary: dict[str, Any], decisions: list[str]
-) -> None:
-    print("\nafter_accepting_assembly:")
-    following_steps = _following_frozen_workflow_steps(summary)
-    if following_steps:
-        print(f"  next: {' -> '.join(following_steps)}")
-    print("  note: execution follows the remaining frozen workflow steps as written;")
-    print("        runtime does not append or reorder them.")
-    if decisions:
-        _render_decision_meanings(decisions)
-
-
-def _following_frozen_workflow_steps(summary: dict[str, Any]) -> list[str]:
-    """Return display labels for occurrences after the active frozen step."""
-
-    steps = summary.get("workflow_steps")
-    index = summary.get("workflow_step_index")
-    if not isinstance(steps, list) or type(index) is not int:
-        return []
-    if not 0 <= index < len(steps):
-        return []
-
-    labels: list[str] = []
-    for step in steps[index + 1 :]:
-        if not isinstance(step, dict):
-            return []
-        step_id = step.get("step_id")
-        stage = step.get("stage")
-        if not isinstance(step_id, str) or not isinstance(stage, str):
-            return []
-        labels.append(f"{step_id} ({stage})")
-    return labels
-
-
-def _render_hic_scaffolding(
-    requirements: dict[str, Any],
-    summary: dict[str, Any],
-) -> None:
-    decisions = requirements.get("decisions_allowed", [])
-    _render_choices(decisions)
-    _render_decision_meanings(decisions)
-
-    methods = requirements.get("candidate_methods") or []
-    if methods:
-        print("\ncandidate_methods:")
-        for m in methods:
-            print(f"  - {m}")
-
-    candidates = requirements.get("method_candidates") or {}
-    if candidates:
-        print("\nexecuted_candidates:")
-        for method, candidate in candidates.items():
-            print(f"  [{method}] {candidate.get('status')}")
-            for key in ("scaffold_fasta", "review_bundle_ref", "qc_report_ref"):
-                if candidate.get(key):
-                    print(f"    {key}: {candidate[key]}")
-
-    interrupt = (summary.get("latest_review_request") or {}).get("payload", {})
-    for key in (
-        "pre_hic_assembly_ref",
-        "output_assembly_ref",
-        "hic_review_bundle_ref",
-        "chromosome_scaffolded_assembly_candidate_ref",
-        "hic_qc_report_ref",
-    ):
-        val = interrupt.get(key) or requirements.get(key)
-        if val:
-            print(f"{key}: {val}")
-
-
-def _render_choices(decisions: list[str]) -> None:
-    if not decisions:
-        print("choices: <none>")
-        return
-    print("choices:")
-    for decision in decisions:
-        print(f"  - {_choice_display(decision)}")
-
-
-def _render_decision_meanings(decisions: list[str]) -> None:
-    meanings = [(decision, DECISION_HELP.get(decision)) for decision in decisions]
-    meanings = [(decision, help_text) for decision, help_text in meanings if help_text]
-    if not meanings:
-        return
-    print("\nchoice_help:")
-    for decision, help_text in meanings:
-        print(f"  {_choice_display(decision)}: {help_text}")
-
-
-def _render_generic_gate(requirements: dict[str, Any]) -> None:
-    decisions = requirements.get("decisions_allowed", [])
-    _render_choices(decisions)
-    _render_decision_meanings(decisions)
-    candidate_ids = requirements.get("candidate_ids") or []
-    if candidate_ids:
-        print("\ncandidates:")
-        for cid in candidate_ids:
-            print(f"  - {cid}")
-    methods = requirements.get("candidate_methods") or []
-    if methods:
-        print("\ncandidate_methods:")
-        for method in methods:
-            print(f"  - {method}")
 
 
 # ---------------------------------------------------------------------------
@@ -741,9 +595,9 @@ def build_decision_brief(
     brief: dict[str, Any] = {
         "session_id": summary.get("session_id"),
         "stage": stage,
+        "gate_id": requirements.get("gate_id"),
         "supervision_state": summary.get("supervision_state"),
         "decisions_allowed": requirements.get("decisions_allowed", []),
-        "runtime_proposal": dict(requirements.get("runtime_proposal") or {}),
     }
 
     request_artifact = summary.get("latest_review_request_artifact")
@@ -788,6 +642,7 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
     print(f"{'=' * 50}")
     print(f"\nSession:  {brief.get('session_id')}")
     print(f"Stage:    {brief.get('stage')}")
+    print(f"Gate:     {brief.get('gate_id') or 'unknown'}")
     print(f"State:    {brief.get('supervision_state')}")
     choices = ", ".join(
         _choice_display(decision) for decision in brief.get("decisions_allowed", [])
@@ -796,26 +651,6 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
 
     if brief.get("review_request_ref"):
         print(f"Request:  {brief['review_request_ref']}")
-
-    runtime_proposal = brief.get("runtime_proposal") or {}
-    if runtime_proposal:
-        print("\nRuntime proposal:")
-        print(f"  scope:    {runtime_proposal.get('label')}")
-        print(f"  kind:     {runtime_proposal.get('kind')}")
-        print(
-            "  parameter recommendation: "
-            f"{runtime_proposal.get('parameter_recommendation_status')}"
-        )
-        related_gate = runtime_proposal.get("related_parameter_gate") or {}
-        if related_gate:
-            print(
-                f"  related parameter gate: {related_gate.get('stage')}/"
-                f"{related_gate.get('gate_id')}"
-            )
-        for note in runtime_proposal.get("parameter_recommendation_notes") or []:
-            print(f"  note: {note}")
-        if runtime_proposal.get("human_confirmation_required"):
-            print("  confirmation: human decision required before continuing")
 
     proposal = brief.get("parameter_proposal") or {}
     if proposal:
@@ -1136,7 +971,6 @@ def collect_gate_decision(
     data_dir: str,
     *,
     summary: dict[str, Any] | None = None,
-    render_brief: bool = True,
     verified_inputs: "FrozenInputBundle | None" = None,
 ) -> tuple["ResumeReviewRequest", dict[str, Any]] | None:
     """Inspect a blocked session, prompt operator, validate request schema.
@@ -1175,9 +1009,8 @@ def collect_gate_decision(
         )
         return None
 
-    if render_brief:
-        brief = build_decision_brief(summary, data_dir)
-        render_decision_brief(brief)
+    brief = build_decision_brief(summary, data_dir)
+    render_decision_brief(brief)
 
     if gate.prompt_adapter == "assembly_review":
         raw_decision = prompt_assembly_review_decision(requirements)
@@ -1445,6 +1278,7 @@ def run_interactive_review(
                 checkpointer="sqlite",
                 lease=active_lease,
                 projection_boundary=projection_boundary,
+                on_review_applied=render_applied_review,
             )
         except ResumeTransactionError as exc:
             if exc.phase == "validation":
@@ -1457,8 +1291,6 @@ def run_interactive_review(
             return 1
 
         final = transaction.state
-        if transaction.decision_artifact_path is not None:
-            print(f"decision_artifact: {transaction.decision_artifact_path}")
         for operational_warning in transaction.operational_warnings:
             print(f"warning: {operational_warning}", file=sys.stderr)
         if transaction.compaction_warning:

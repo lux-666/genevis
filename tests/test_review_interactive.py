@@ -23,7 +23,6 @@ from app.entrypoints.review_interactive import (
     prompt_assembly_review_decision,
     prompt_generic_gate_decision,
     prompt_hic_scaffolding_decision,
-    render_blocked_summary,
     render_decision_brief,
     run_interactive_review,
 )
@@ -919,108 +918,6 @@ class RunInteractiveReviewTests(unittest.TestCase):
             self.assertEqual(raw["notes"], ["continue inventory"])
 
 
-class RenderBlockedSummaryTests(unittest.TestCase):
-    def test_renders_assembly_review_without_error(self):
-        summary = {
-            "session_id": "s1",
-            "supervision_state": "blocked_human",
-            "decision_requirements": {
-                "stage": "assembly_review",
-                "decisions_allowed": ["accept", "stop_human_review"],
-                "candidate_ids": ["flye"],
-                "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
-                "report_refs": {"report": "/tmp/report.json"},
-                "candidate_comparison_context": {"flye_n50": 10000},
-            },
-            "latest_review_request_artifact": {"file_path": "/tmp/request.json"},
-            "next_action": {"relevant_refs": ["/tmp/ref"]},
-        }
-        render_blocked_summary(summary)
-
-    def test_renders_assembly_review_following_frozen_occurrences(self):
-        summary = {
-            "session_id": "s1",
-            "supervision_state": "blocked_human",
-            "decision_requirements": {
-                "stage": "assembly_review",
-                "decisions_allowed": ["accept", "stop_human_review"],
-                "candidate_ids": ["flye"],
-                "candidate_primary_output_refs": {"flye": _primary_output_ref("flye")},
-            },
-            "workflow_steps": [
-                {
-                    "step_id": "step-000-inventory",
-                    "stage": "inventory",
-                    "allow_local_execution": False,
-                    "selected_method_names": [],
-                },
-                {
-                    "step_id": "step-001-t2t",
-                    "stage": "t2t",
-                    "allow_local_execution": False,
-                    "selected_method_names": ["t2t.alignment.minimap2"],
-                },
-                {
-                    "step_id": "step-002-assembly_review",
-                    "stage": "assembly_review",
-                    "allow_local_execution": True,
-                    "selected_method_names": [
-                        "assembly_review.eval.quast",
-                        "assembly_review.eval.busco",
-                    ],
-                    "review_target": {
-                        "resource_type": "assembly",
-                        "producer_step_id": "step-001-t2t",
-                    },
-                },
-                {
-                    "selected_method_names": [],
-                    "step_id": "step-003-t2t",
-                    "stage": "t2t",
-                    "allow_local_execution": True,
-                },
-                {
-                    "selected_method_names": [],
-                    "step_id": "step-004-assembly_review",
-                    "stage": "assembly_review",
-                    "allow_local_execution": True,
-                    "review_target": {
-                        "resource_type": "assembly",
-                        "producer_step_id": "step-003-t2t",
-                    },
-                },
-            ],
-            "workflow_step_index": 2,
-            "latest_review_request_artifact": None,
-            "next_action": {},
-        }
-        out = io.StringIO()
-        with patch("sys.stdout", out):
-            render_blocked_summary(summary)
-
-        rendered = out.getvalue()
-        self.assertIn("after_accepting_assembly", rendered)
-        self.assertIn(
-            "next: step-003-t2t (t2t)",
-            rendered,
-        )
-        self.assertIn("runtime does not append or reorder them", rendered)
-
-    def test_renders_hic_scaffolding_without_error(self):
-        summary = {
-            "session_id": "s1",
-            "supervision_state": "blocked_human",
-            "decision_requirements": {
-                "stage": "hic_scaffolding",
-                "decisions_allowed": ["select_method", "skip"],
-                "candidate_methods": ["hic_scaffolding.candidate.autohic"],
-            },
-            "latest_review_request_artifact": None,
-            "next_action": {},
-        }
-        render_blocked_summary(summary)
-
-
 class ValidationTests(unittest.TestCase):
     def test_removed_final_assembly_ref_is_rejected(self):
         with self.assertRaises(ValidationError):
@@ -1301,20 +1198,6 @@ class DecisionBriefTests(unittest.TestCase):
             "supervision_state": "blocked_human",
             "decisions_allowed": ["accept", "pass"],
             "review_request_ref": "/tmp/request.json",
-            "runtime_proposal": {
-                "kind": "assembly_candidate_review",
-                "label": "Assembly result and evidence review",
-                "parameter_recommendation_status": "mixed",
-                "related_parameter_gate": {
-                    "stage": "assembly",
-                    "gate_id": "parameter_approval",
-                },
-                "parameter_recommendation_notes": [
-                    "Assembly parameter retries use the v3 recommendation "
-                    "and approval workflow."
-                ],
-                "human_confirmation_required": True,
-            },
             "candidates": [
                 {
                     "id": "flye",
@@ -1332,7 +1215,7 @@ class DecisionBriefTests(unittest.TestCase):
         }
         render_decision_brief(brief)
 
-    def test_t2t_runtime_proposal_reports_parameter_recommender(self):
+    def test_manual_brief_identifies_gate_without_internal_proposal_metadata(self):
         summary = {
             "session_id": "s1",
             "supervision_state": "blocked_human",
@@ -1344,7 +1227,6 @@ class DecisionBriefTests(unittest.TestCase):
                     "kind": "finishing_candidate_review",
                     "label": "T2T finishing candidate review",
                     "parameter_recommendation_status": "implemented",
-                    "human_confirmation_required": True,
                 },
             },
             "latest_review_request_artifact": None,
@@ -1356,10 +1238,10 @@ class DecisionBriefTests(unittest.TestCase):
         with patch("sys.stdout", out):
             render_decision_brief(brief)
 
-        self.assertEqual(
-            brief["runtime_proposal"]["parameter_recommendation_status"], "implemented"
-        )
-        self.assertIn("parameter recommendation: implemented", out.getvalue())
+        self.assertEqual(brief["gate_id"], "t2t_review")
+        self.assertIn("Gate:     t2t_review", out.getvalue())
+        self.assertNotIn("Runtime proposal:", out.getvalue())
+        self.assertNotIn("parameter recommendation:", out.getvalue())
 
     def test_empty_brief_renders_without_error(self):
         brief = {

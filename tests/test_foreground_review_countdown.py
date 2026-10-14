@@ -12,7 +12,10 @@ from unittest.mock import Mock, patch
 from app.control.errors import ResumeValidationError
 from app.control.projections import ProjectionBoundary
 from app.control.resume_transaction import ResumeTransactionError
-from app.entrypoints.review_interactive import wait_for_gate_claim
+from app.entrypoints.review_interactive import (
+    render_applied_review,
+    wait_for_gate_claim,
+)
 from app.entrypoints.run import _interactive_gate_loop
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
@@ -268,11 +271,21 @@ class ForegroundGateLoopTests(unittest.TestCase):
         execute.assert_not_called()
 
     def test_zero_immediately_runs_existing_route_resolver(self):
-        final, execute, collect, waiter = self._run_loop(
-            0,
-            summary=_route_summary(0),
-        )
+        output = io.StringIO()
+        with (
+            patch("sys.stdout", output),
+            patch("app.entrypoints.review_interactive.build_decision_brief") as brief,
+        ):
+            final, execute, collect, waiter = self._run_loop(
+                0,
+                summary=_route_summary(0),
+            )
 
+        brief.assert_not_called()
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            ["review: stage=assembly gate=route_selection automatic=select_hifi"],
+        )
         self.assertEqual(final["supervision_state"], "completed")
         waiter.assert_not_called()
         collect.assert_not_called()
@@ -283,6 +296,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
         self.assertEqual(call["request"].decided_by, "auto_rule")
         self.assertTrue(call["lease"].active)
         self.assertIsInstance(call["projection_boundary"], ProjectionBoundary)
+        self.assertIs(call["on_review_applied"], render_applied_review)
 
     def test_zero_falls_back_to_manual_when_existing_resolver_fails(self):
         with patch(
@@ -345,7 +359,6 @@ class ForegroundGateLoopTests(unittest.TestCase):
         self.assertEqual(final["supervision_state"], "completed")
         waiter.assert_not_called()
         collect.assert_called_once()
-        self.assertFalse(collect.call_args.kwargs["render_brief"])
         self.assertEqual(execute.call_count, 2)
         self.assertEqual(
             execute.call_args_list[0].kwargs["source"],
@@ -392,7 +405,6 @@ class ForegroundGateLoopTests(unittest.TestCase):
 
         self.assertEqual(final["supervision_state"], "completed")
         waiter.assert_called_once()
-        self.assertFalse(collect.call_args.kwargs["render_brief"])
         call = execute.call_args.kwargs
         self.assertEqual(call["source"], "interactive_gate")
         self.assertIsNone(call["blocked_timeout_seconds"])

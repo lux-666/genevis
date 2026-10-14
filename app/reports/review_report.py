@@ -23,7 +23,7 @@ def write_operator_report(
     model writer, not a lifecycle transition.
     """
     supervision = result.get("supervision_state")
-    if supervision not in {"blocked_human", "failed_terminal"}:
+    if supervision not in {"running_stage", "blocked_human", "failed_terminal"}:
         return None
 
     from app.control.next_action import build_result_next_action

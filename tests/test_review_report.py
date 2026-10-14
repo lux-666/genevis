@@ -9,6 +9,7 @@ from pathlib import Path
 
 from app.control.errors import ResumeValidationError
 from app.control.inspection import inspect_state
+from app.control.projections import ProjectionBoundary, project_workflow_state
 from app.control.resume import (
     normalize_resume_review_request,
 )
@@ -443,6 +444,31 @@ class ReviewReportTests(unittest.TestCase):
                 persisted.request_ref.path_ref,
             )
             self.assertEqual(report["next_action"]["kind"], "review_decision_required")
+
+            running = {
+                **_review_state(paths, "assembly_review"),
+                "supervision_state": "running_stage",
+                "active_interrupt": None,
+            }
+            before_events = len(Ledger(paths.run_dir).read_event_rows("s1"))
+            before_index = paths.artifact_index_path.read_bytes()
+            projected = project_workflow_state(
+                ProjectionBoundary(),
+                running,
+                data_dir=paths.run_dir,
+                session_id="s1",
+            )
+            self.assertTrue(projected.completed)
+            current = json.loads(Path(report_ref).read_text(encoding="utf-8"))
+            self.assertEqual(current["supervision_state"], "running_stage")
+            self.assertIsNone(current["active_interrupt"])
+            self.assertNotEqual(
+                current["next_action"]["kind"], "review_decision_required"
+            )
+            self.assertEqual(
+                len(Ledger(paths.run_dir).read_event_rows("s1")), before_events
+            )
+            self.assertEqual(paths.artifact_index_path.read_bytes(), before_index)
 
     def test_later_status_replaces_one_fixed_file_without_audit_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
