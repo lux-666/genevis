@@ -300,7 +300,13 @@ def execute_resume_transaction(
             update_error: Exception | None = None
             update_result: Any = None
             try:
-                update_result = graph.update_state(config, update)
+                # A blocked run last wrote through route_controller. Letting
+                # LangGraph infer that node would dispatch the advanced cursor
+                # directly into an unseeded stage. Apply as the gate's owning
+                # stage so its unconditional edge re-enters route_controller.
+                update_result = graph.update_state(
+                    config, update, as_node=f"{identity.stage}_stage"
+                )
             except Exception as exc:
                 update_error = exc
 

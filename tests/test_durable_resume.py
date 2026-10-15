@@ -22,12 +22,14 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from app.control.workflow_plan import workflow_steps_from_run_config
+from app.control.resume_transaction import execute_resume_transaction
+from app.control.workflow_plan import fail_workflow_step, workflow_steps_from_run_config
 from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
 from app.graph.checkpointer import checkpoint_db_path
-from app.review.base import ReviewPayload
+from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import PersistedReviewRequest, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -39,6 +41,7 @@ from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.storage.artifacts import publish_artifact_record
 from app.storage.frozen_inputs import (
+    FrozenExecutionLease,
     FrozenInputBundle,
     freeze_session_inputs,
     validate_frozen_inputs,
@@ -335,6 +338,78 @@ def _capture(func, *args):
 
 
 class DurableResumeTests(unittest.TestCase):
+    def test_accept_from_controller_checkpoint_enters_next_stage_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(Path(tmp) / "data", "s1")
+            state, persisted, _draft = _build_blocked_state(
+                run_dir, include_downstream_stage=True
+            )
+            config = {"configurable": {"thread_id": "s1"}}
+            seen = []
+
+            def downstream(stage_state):
+                seen.append(stage_state)
+                Ledger(run_dir).record_method_disposition(
+                    "s1",
+                    "base_polish",
+                    "step-003-base_polish",
+                    "base_polish.racon",
+                    "not_started",
+                    reason="fixture downstream failure",
+                )
+                return fail_workflow_step(
+                    stage_state, "base_polish", "fixture downstream failure"
+                )
+
+            with patch(
+                "app.graph.builder.build_base_polish_stage", return_value=downstream
+            ):
+                graph = _build_frozen_graph(run_dir)
+                try:
+                    # A real blocked run ends at route_controller, rather than
+                    # the review stage. Preserve that scheduling history.
+                    graph.invoke(state, config)
+                    self.assertEqual(graph.get_state(config).next, ())
+                finally:
+                    graph.checkpointer.conn.close()
+
+                graph = _build_frozen_graph(run_dir)
+                try:
+                    result = execute_resume_transaction(
+                        graph=graph,
+                        config=config,
+                        session_id="s1",
+                        data_dir=run_dir,
+                        request=ResumeReviewRequest(
+                            session_id="s1",
+                            stage="assembly_review",
+                            gate_id="assembly_review",
+                            review_request_id=persisted.review_request_id,
+                            review_request_hash=persisted.request_hash,
+                            decision="accept",
+                            candidate_id="flye",
+                        ),
+                        source="interactive_review",
+                        checkpointer="sqlite",
+                        lease=FrozenExecutionLease(
+                            session_id="s1", run_dir=run_dir, active=True
+                        ),
+                    )
+                finally:
+                    graph.checkpointer.conn.close()
+
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0]["workflow_step_index"], 3)
+            self.assertEqual(seen[0]["entered_workflow_step_index"], 3)
+            self.assertEqual(result.state["last_error"], "fixture downstream failure")
+            rows = Ledger(run_dir).read_event_rows("s1")
+            entered = [
+                row for row in rows
+                if row["event_type"] == "stage_entered"
+                and row["workflow_step_id"] == "step-003-base_polish"
+            ]
+            self.assertEqual(len(entered), 1)
+
     def test_durable_resume_assembly_review_accept_advances(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_root = Path(tmp) / "data"

@@ -45,13 +45,15 @@ class _Graph:
         self.update_result = update_result
         self.persist_update = persist_update
         self.updates: list[dict] = []
+        self.update_nodes: list[str | None] = []
         self.invocations = 0
 
     def get_state(self, _config):
         return SimpleNamespace(values=self.state)
 
-    def update_state(self, _config, update):
+    def update_state(self, _config, update, *, as_node=None):
         self.updates.append(update)
+        self.update_nodes.append(as_node)
         if self.persist_update:
             self.state = {**self.state, **update}
         return self.update_result
@@ -170,6 +172,7 @@ class ResumeTransactionTests(unittest.TestCase):
             self.assertEqual(result.state["current_stage"], "inventory")
             self.assertEqual(result.review_status, "applied")
             self.assertEqual(len(graph.updates), 1)
+            self.assertEqual(graph.update_nodes, ["inventory_stage"])
             self.assertEqual(graph.invocations, 1)
             self.assertIsNotNone(result.intent_artifact_path)
             self.assertIsNotNone(result.application_artifact_path)

@@ -113,7 +113,7 @@ class _FakeResumeGraph:
     def get_state(self, config):
         return SimpleNamespace(values=self.state)
 
-    def update_state(self, config, update):
+    def update_state(self, config, update, *, as_node=None):
         self.updated.append(update)
 
     def invoke(self, state, config):

@@ -75,7 +75,7 @@
   -> gate prepare 创建类型化决策/证据效果
   -> 持久化并验证不可变应用
   -> 验证后的 gate apply 返回纯紧凑状态更新
-  -> graph.update_state(...)
+  -> graph.update_state(..., as_node="<评审所属阶段>_stage")
   -> 重读 checkpoint 并证明应用已落入 checkpoint
   -> record_review_applied
   -> graph.invoke(None, ...)
@@ -84,6 +84,8 @@
 ```
 
 这是跨产物、Ledger 和 SQLite checkpoint 操作的幂等感知 saga，不是跨存储 ACID 事务。每个持久步骤都支持回放并验证前序证据。共享状态投影是恢复决策点：后续 `request=None` 调用恢复已提交或已准备应用的意图；只有 `awaiting_decision` 允许替换决策。
+
+恢复更新必须显式归属于评审所属阶段节点，使其后续边返回 `route_controller`，由控制器结算已完成步骤并初始化下一步骤。阻塞运行的最后写入节点是 `route_controller`；让 LangGraph 自动推断恢复更新的节点会绕过控制器，直接调度尚未进入的下一阶段。
 
 <a id="decision-effects"></a>
 
