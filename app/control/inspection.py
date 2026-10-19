@@ -644,6 +644,7 @@ def _with_review_requirements(
     )
     if gate is not None:
         enriched["runtime_proposal"] = _runtime_proposal_requirements(gate)
+        enriched["zero_wait_policy"] = gate.zero_wait_policy
     resume_metadata = _parameter_approval_resume_metadata(active_interrupt)
     if resume_metadata:
         enriched["resume_metadata"] = resume_metadata
@@ -655,6 +656,7 @@ def _with_review_requirements(
         "reason",
         "notes",
         "auto_decidable",
+        "recommendation_error",
         "max_blocked_seconds",
         "review_request_artifact_ref",
         "review_request_id",

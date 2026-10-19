@@ -1497,7 +1497,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ResumeValidationError,
-                "requires a human review decision",
+                "requires a bound zero-wait rule",
             ):
                 prepare_hic_scaffolding_review_application(
                     result,

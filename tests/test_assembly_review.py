@@ -1007,7 +1007,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 'mkdir -p "$outdir"\n'
                 "printf 'Assembly\tassembly\n# contigs\t1\n"
                 "Largest contig\t8\nTotal length\t8\nN50\t8\n"
-                'L50\t1\nGC (%)\t50.00\n\' > "$outdir/report.tsv"\n'
+                'L50\t1\nGC (%%)\t50.00\n\' > "$outdir/report.tsv"\n'
                 "printf 'fake quast report\n' > \"$outdir/report.txt\"\n"
                 "printf 'fake quast stdout\n'\n",
                 encoding="utf-8",
@@ -1041,11 +1041,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 'summary="$out/short_summary.specific.$lineage_name.$out.txt"\n'
                 "printf 'C:95.0%%[S:93.0%%,D:2.0%%],"
                 "F:3.0%%,M:2.0%%,n:100\n"
-                "10\tComplete BUSCOs (C)\n"
-                "8\tComplete and single-copy BUSCOs (S)\n"
+                "95\tComplete BUSCOs (C)\n"
+                "93\tComplete and single-copy BUSCOs (S)\n"
                 "2\tComplete and duplicated BUSCOs (D)\n"
-                "1\tFragmented BUSCOs (F)\n"
-                "1\tMissing BUSCOs (M)\n"
+                "3\tFragmented BUSCOs (F)\n"
+                "2\tMissing BUSCOs (M)\n"
                 '100\tTotal BUSCO groups searched\n\' > "$summary"\n'
                 "printf 'fake busco stdout\n'\n",
                 encoding="utf-8",
@@ -1353,7 +1353,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("Total length", report_text)
             self.assertIn("Largest contig", report_text)
             self.assertIn("busco", report_text)
-            self.assertIn("thresholds_not_applied_without_human_approval", report_text)
+            self.assertIn("quality_metrics_are_advisory", report_text)
             report_data = json.loads(
                 Path(ar_out["assembly_review_packet_ref"]).read_text(encoding="utf-8")
             )
@@ -1452,7 +1452,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(summary_payload["metrics"]["n50"], 8)
             self.assertEqual(summary_payload["metrics"]["total_length"], 8)
             self.assertIn(
-                "thresholds_not_applied_without_human_approval",
+                "quality_metrics_are_advisory",
                 summary_payload["notes"],
             )
             # The summary path must also appear on the signal's metric_refs
@@ -2313,7 +2313,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
         self.addCleanup(stage_tests.doCleanups)
         session_id = "test-rerun-session"
         assembly_fasta = Path(tmpdir) / "draft.fasta"
-        assembly_fasta.write_text(">ctg1\\nACGTACGT\\n", encoding="utf-8")
+        assembly_fasta.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
         candidate_refs = [
             stage_tests._write_candidate_bundle(
                 tmpdir,

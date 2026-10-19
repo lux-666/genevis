@@ -73,6 +73,15 @@ class PurgeRecommender(StructuredRecommender[PurgeRecommendation]):
                     "human/foreground-countdown review policy. "
                     "Return one JSON object matching this response schema: "
                     + json.dumps(PurgeRecommendation.model_json_schema())
+                    + (
+                        " Current execution policy is run_valid_outputs. "
+                        "Missing quality evidence is advisory. Before the first "
+                        "attempt, recommend valid run parameters when budget "
+                        "remains and execution is authorized. "
+                        "After a completed candidate, recommend accept. "
+                        if evidence.get("execution_policy") == "run_valid_outputs"
+                        else ""
+                    )
                 ),
             },
             {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)},

@@ -82,6 +82,24 @@ class FinishingRecommender(StructuredRecommender[FinishingRecommendation]):
             "missing, prefer keep_source or human_review unless a new configuration "
             "has a specific, evidence-grounded hypothesis.",
         }
+        zero_wait = evidence.get("execution_policy") == "run_valid_outputs"
+        if zero_wait and self.stage == "base_polish":
+            instructions["base_polish"] = (
+                "Only a single HiFi Racon round per candidate is implemented. "
+                "All configurations start from the original source. Before/after "
+                "alignment uses correction reads and is not independent QV. "
+                "Report that limitation without using it as an execution veto."
+            )
+        policy = (
+            " Current execution policy is run_valid_outputs. Missing quality "
+            "evidence is advisory and must not prevent execution. Before the "
+            "first attempt, recommend valid run parameters when budget remains. "
+            "After a materialized result, recommend accept; if no new result "
+            "was materialized, prefer keep_source. Do not request human review "
+            "solely for missing independent accuracy evidence. "
+            if zero_wait
+            else ""
+        )
         return [
             {
                 "role": "system",
@@ -100,7 +118,9 @@ class FinishingRecommender(StructuredRecommender[FinishingRecommendation]):
                 + self.stage
                 + ": "
                 + json.dumps(PARAMETERS[self.stage].model_json_schema())
-                + ". Human approval is required for every action. Response schema: "
+                + policy
+                + ". Actions use the configured review countdown policy. "
+                "Response schema: "
                 + json.dumps(FinishingRecommendation.model_json_schema()),
             },
             {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)},

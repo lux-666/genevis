@@ -12,6 +12,7 @@ from app.review.application import (
     ReviewIntentV1,
     VerifiedReviewApplication,
 )
+from app.review.automatic import validate_zero_wait_request
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request, persist_review_decision
 from app.schemas.artifacts import ArtifactRef
@@ -44,6 +45,8 @@ def validate_intent_request(
     request: ResumeReviewRequest,
     request_record: Mapping[str, Any],
 ) -> ResumeReviewRequest:
+    if request.decided_by != "human":
+        validate_zero_wait_request(request, request_record, data_dir=state["data_dir"])
     interrupt: Mapping[str, Any] = state.get("active_interrupt") or {}
     ref = ArtifactRef.model_validate(interrupt.get("request_ref"))
     step_id = current_workflow_step_id(state, expected_stage="gapcloser")
@@ -52,7 +55,6 @@ def validate_intent_request(
         or request.stage != "gapcloser"
         or request.gate_id != GATE
         or request.decision not in DECISIONS
-        or request.decided_by != "human"
         or request.review_request_id != interrupt.get("review_request_id")
         or request.review_request_hash != ref.sha256
         or interrupt.get("request_hash") != ref.sha256

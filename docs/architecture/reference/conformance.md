@@ -26,17 +26,17 @@
 
 ### GapCloser 代表性样本验收与含噪读段路线
 
-已实现的 TGS-GapCloser 切片只接受明确分类的 HiFi 读段，校验原生产物，并要求持久人工采纳。测试使用 fixture 可执行文件覆盖共享生命周期，并提供可选真实二进制合成缺口检查；两者都不是代表性生物样本，也不能证明共识准确性改善。没有声明 ONT/CLR/CycloneSEQ 校正路线。Base Polish 在下方有独立 HiFi-only 契约。
+已实现的 TGS-GapCloser 切片只接受明确分类的 HiFi 读段，校验原生产物，并要求持久门禁采纳（人工或零等待自动，遵循[等待模式矩阵](../topics/review-and-resume.md#foreground-review-policy)）。测试使用 fixture 可执行文件覆盖共享生命周期，并提供可选真实二进制合成缺口检查；两者都不是代表性生物样本，也不能证明共识准确性改善。没有声明 ONT/CLR/CycloneSEQ 校正路线。Base Polish 在下方有独立 HiFi-only 契约。
 
 - 当前证据：`app/stages/gapcloser/`、`tests/test_gapcloser.py`。
 - 契约所有者：[GapCloser](stage-contracts.md#8-gapcloser)。
-- 关闭条件：在已配置主机上运行代表性 scaffold/HiFi 数据集，检查 gap-detail 报告，独立评估质量，并记录人工采纳。其他平台须另行接受一条路线。
+- 关闭条件：在已配置主机上运行代表性 scaffold/HiFi 数据集，检查 gap-detail 报告，独立评估质量，并记录采用来源和决定。其他平台须另行接受一条路线。
 
 <a id="base-polish-representative-sample-acceptance-and-independent-accuracy"></a>
 
 ### Base Polish 代表性样本验收与独立准确性
 
-仅 HiFi 的 minimap2/Racon 路线、成对前后比对证据、持久人工采纳/源保留以及最终成对 QUAST/BUSCO 评估已实现。fixture 可执行测试证明进程契约，不证明生物学正确性。同一批用于校正的读段不能建立独立共识 QV。
+仅 HiFi 的 minimap2/Racon 路线、成对前后比对证据、持久门禁采纳/源保留以及最终成对 QUAST/BUSCO 评估已实现。fixture 可执行测试证明进程契约，不证明生物学正确性。同一批用于校正的读段不能建立独立共识 QV。
 
 - 当前证据：`app/stages/base_polish/`、`tests/test_base_polish.py`、`app/diagnostics/route_acceptance.py`。
 - 契约所有者：[Base Polish](stage-contracts.md#10-base-polish)。
@@ -93,3 +93,7 @@
 ## 更新规则
 
 每条记录都要标明接受的所有者、当前代码证据和客观关闭条件。关闭缺口的同一变更中删除对应条目。
+
+## 零等待推进验证边界
+
+零等待使用同一前台执行器和持久门禁事务，不需要额外编排系统。`tests/test_zero_wait_review.py` 覆盖阶段图的自动批准/采用/沿用、预算、非法参数、损坏 FASTA 和评估报告，以及成功后不再调用结果顾问。完整父图跨多个阶段的零等待连续推进、进程中断后的人工恢复与真实服务器代表样本仍须分别验收，阶段 fixture 不能代替这些证据。恢复不重建自动倒计时，属于当前明确限制。

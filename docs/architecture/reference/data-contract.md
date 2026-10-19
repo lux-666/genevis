@@ -432,7 +432,9 @@ Checkpoint `active_interrupt` 只含有界控制数据：
 
 `payload.max_blocked_seconds` 是有效冻结策略值。运行全局 `ReviewPolicyConfig.max_blocked_seconds` 默认 300；唯一覆盖为 `review_policy.stages[stage].max_blocked_seconds`，只允许注册的评审阶段。有效值冻结到每个请求的评审所属阶段。一次阶段覆盖作用于该阶段全部门，包括 Assembly 参数审批与路线选择，没有门专属超时配置。Assembly Review 除非通过 `review_policy.stages.assembly_review` 显式覆盖，否则沿用全局值。
 
-值表示前台行为，不是持久截止时间。新运行冻结前验证 stdin/stdout TTY 后进入同一附着执行器。`-1` 无限等，`0` 立即触发注册合格 resolver，正数是回车认领倒计时，到期触发同一 resolver。前台循环共享，决策保持门专属，由注册表声明。
+值表示前台行为，不是持久截止时间。新运行进入同一附着执行器；结构化运行全部阶段为零等待时不要求 TTY，其余情况冻结前验证 stdin/stdout TTY；TUI 交互入口仍要求 TTY。`-1` 无限等，`0` 按[零等待策略](../topics/review-and-resume.md)立即采用可用产物、执行有效参数或沿用输入，正数是回车认领倒计时，到期触发既有合格 resolver。前台循环共享，决策保持门专属，由注册表声明。
+
+`auto_decidable` 表示 LLM resolver 的资格；零等待是否有规则由注册表 `zero_wait_policy` 决定，inspect 将两者分别投影，不能将 false 解读为禁止所有自动动作。`recommendation_error` 保存解析及阶段语义校验错误，属于不可变请求内容；零等待拒绝该错误，不按合法保留建议处理。
 
 不可变请求存在后才计时。参数门超时只批准请求绑定的精确推荐，不生成、编辑、合并、替换值。Resolver 资格、请求/推荐绑定、理由产物、类型化意图/应用生命周期仍权威。自动决策还须内部恢复事务来源和绑定倒计时 metadata 指明当前 `foreground_countdown`；决策来源仍由 resolver 拥有（`llm_provisional` 或 `auto_rule`），请求 metadata 不能自授权。
 

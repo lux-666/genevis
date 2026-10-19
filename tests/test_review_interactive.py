@@ -447,7 +447,7 @@ class PromptHicScaffoldingTests(unittest.TestCase):
         rendered = out.getvalue()
         self.assertIn("action:", rendered)
         self.assertIn("select action [1-3]", rendered)
-        self.assertIn("accept scaffold result [accept_candidate]", rendered)
+        self.assertIn("accept stage result [accept_candidate]", rendered)
         self.assertIn("operator note (optional, audit only)", rendered)
 
     def test_keep_prior_assembly_needs_no_method_selection(self):

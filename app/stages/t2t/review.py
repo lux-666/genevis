@@ -203,10 +203,6 @@ def prepare_t2t_review_application(
         raise ResumeValidationError(
             "t2t accept_selected_candidates requires candidate_ids"
         )
-    if decision == "accept_selected_candidates" and request.decided_by != "human":
-        raise ResumeValidationError(
-            "t2t candidate adoption requires a human review decision"
-        )
 
     if decision == "stop_pipeline":
         return _prepare_stopped_t2t_review_application(
@@ -523,8 +519,10 @@ def validate_t2t_intent_request(
     if decision != "accept_selected_candidates":
         return request.model_copy(update={"candidate_ids": []})
     if request.decided_by != "human":
-        raise ResumeValidationError(
-            "t2t candidate adoption requires a human review decision"
+        from app.review.automatic import validate_zero_wait_request
+
+        validate_zero_wait_request(
+            request, request_record, data_dir=state.get("data_dir", "")
         )
     candidate_ids = sorted(set(request.candidate_ids))
     if not candidate_ids:

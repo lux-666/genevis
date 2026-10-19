@@ -182,7 +182,7 @@ cp docs/examples/gapcloser_run_config.template.json /server/path/run_config.json
 
 替换组装/读段路径、会话 ID，提供完整当前 HiFi 集。活动主机配置（默认 `config/envs.yaml`）须把 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser 1.2.1、minimap2、GNU getopt（不是 macOS BSD）的环境。默认 advisor 模板还需 `gapcloser.eval.quast` 环境和 LLM 端点，通过缺口/填补报告与 QUAST 反馈推荐参数；不需 BUSCO 数据库。显式 `deterministic_baseline` 才使用操作者设置执行单轮，不调用 LLM 或 QUAST，不称最优 HiFi 推荐。
 
-工具生成候选 FASTA、原生片段细节、索引校验报告，测量缺口/长度变化与复制片段一致性，不是 QV 或改善。用 review 或请求绑定文件执行 accept_candidate、keep_prior_assembly、stop_human_review。不自动采纳；完成后 inspect 报告最终采纳/复用组装。无内部 N 缺口则不调用工具，复用输入。
+工具生成候选 FASTA、原生片段细节、索引校验报告，测量缺口/长度变化与复制片段一致性，不是 QV 或改善。用 review 或请求绑定文件执行 accept_candidate、keep_prior_assembly、stop_human_review。本节人工验收配置不自动采纳；完成后 inspect 报告最终采纳/复用组装。无内部 N 缺口则不调用工具，复用输入。
 
 此处不支持 ONT/CLR/CycloneSEQ/未知/混合读段。完整工作流推荐不保证输入兼容，应明确省略不支持 occurrence；Base Polish 当前也要求 HiFi。独立质量评估需显式追加 Review 并配置工具、数据库、物种。精确范围见[GapCloser 契约](../architecture/reference/stage-contracts.md#8-gapcloser)。
 
@@ -318,14 +318,14 @@ python -m app.diagnostics.route_acceptance \
 
 三个独立顾问切片都需要 QUAST 和可用的 LLM 端点；按 [envs.yaml.example](../examples/envs.yaml.example) 增加 `gapcloser.eval.quast`、`t2t.eval.quast`、`base_polish.eval.quast` 环境映射，可共用已有 QUAST 环境。Finishing/看校正质量的 Base Polish 还需最终 Review 的 BUSCO 数据库。
 
-- `follow_recommendation`：查看 response.json 的 action。操作者确认后执行提案中的 `run`（执行新参数）、`accept`（采纳 selected_attempt）或 `keep_source`（保留本阶段原组装）；此 finishing 门不自动 follow。`human_review`、非法响应、重复参数、预算耗尽后建议 run，都不会开放 follow。
+- `follow_recommendation`：查看 response.json 的 action。操作者确认后执行提案中的 `run`（执行新参数）、`accept`（采纳 selected_attempt）或 `keep_source`（保留本阶段原组装）；非零等待的 finishing 门不自动 follow；零等待会在首次执行前自动执行有效参数推荐。`human_review`、非法响应、重复参数、预算耗尽后建议 run，都不会开放 follow。
 - `accept_candidate`：覆盖顾问建议，指定候选 `candidate_id: attempt_0` 等；可选回早先的完整候选。T2T 只有实际形成补丁的轮次可采纳。
 - `keep_prior_assembly`：成功保留本阶段原组装；`stop_human_review`：终态失败。
-- Finishing 的每个动作仍需人工确认；Dedup 的合格前台 resolver 可按冻结策略自动 follow 已保存提案。保持 `max_blocked_seconds: -1` 时不自动触发倒计时。T2T advisor 要求 `mode: auto_patch`，baseline 使用独立策略证据。
+- 零等待时 Finishing/Dedup 自动采用已有可用候选，否则执行有效推荐或沿用阶段输入；非零等待沿用既有评审策略。保持 `max_blocked_seconds: -1` 时不自动触发倒计时。T2T advisor 要求 `mode: auto_patch`，baseline 使用独立策略证据。
 
-T2T 的 `deterministic_baseline` 不调用阈值模型或基序模型，要求显式提供 `species_facts.telomere_motif`，否则明确失败。基线使用冻结目录的 L0 阈值、空 L2 与 schema-3 策略请求与批准记录，经 `source=policy` 的已批准链执行单轮；不建立交互式 `parameter_approval` 门，补丁采纳仍保留 `t2t_review` 人工门。T2T advisor 只接受 `auto_patch`；`manual_review` 和 `propose_only` 要求显式选择 `deterministic_baseline`，不兼容组合在配置校验时拒绝。
+T2T 的 `deterministic_baseline` 不调用阈值模型或基序模型，要求显式提供 `species_facts.telomere_motif`，否则明确失败。基线使用冻结目录的 L0 阈值、空 L2 与 schema-3 策略请求与批准记录，经 `source=policy` 的已批准链执行单轮；不建立交互式 `parameter_approval` 门，补丁采纳仍经 `t2t_review` 持久门，零等待采用可选择补丁或无补丁时沿用输入，非零等待由人工处理。T2T advisor 只接受 `auto_patch`；`manual_review` 和 `propose_only` 要求显式选择 `deterministic_baseline`，不兼容组合在配置校验时拒绝。
 
-全部新尝试从相同源组装开始，不把上轮 polishing 结果继续校正。`work/steps/<step>/<stage>/attempts/NNN/` 隔离工具运行，`artifacts/steps/<step>/<stage>/advisor/` 保存设置、QUAST、请求/响应、assessment；approval 决定在 review 目录。顾问依据真实测量作方案选择，仍只能选择已实现的 TGS-GapCloser、端部补丁和 Racon 方法，不能提议未安装的新工具。没有参考的 QUAST 与同批读段一致性不构成独立准确率证明。
+零等待在一次尝试完成并收集评估后直接采用有效候选或沿用输入，不再调用结果顾问；预算耗尽也不调用模型。全部新尝试从相同源组装开始，不把上轮 polishing 结果继续校正。`work/steps/<step>/<stage>/attempts/NNN/` 隔离工具运行，`artifacts/steps/<step>/<stage>/advisor/` 保存设置、QUAST、请求/响应、assessment；approval 决定在 review 目录。顾问依据真实测量作方案选择，仍只能选择已实现的 TGS-GapCloser、端部补丁和 Racon 方法，不能提议未安装的新工具。没有参考的 QUAST 与同批读段一致性不构成独立准确率证明。
 
 在测试机按以下矩阵收口，每个分支使用新会话：
 
@@ -392,7 +392,7 @@ manifest 拥有 session_id，输出存于：
 /server/path/data/runs/<session_id>/
 ```
 
-冻结前 stdin/stdout 必须 TTY；occurrence 只有冻结授权允许才启动本地进程。全局 `review_policy.max_blocked_seconds` 应用于全部注册门（包括 Assembly 两门和 Review），`review_policy.stages` 仅提供可选的阶段覆盖。默认和倒计时精确语义归[评审契约](../architecture/reference/data-contract.md#12-review-contract)。门按冻结策略与注册 resolver 人工等待或使用合格附着倒计时。持久门中断后人工恢复，新进程不重建旧倒计时。
+结构化运行全部阶段零等待时允许无 TTY；其他配置及 TUI 入口在冻结前要求 stdin/stdout TTY；occurrence 只有冻结授权允许才启动本地进程。全局 `review_policy.max_blocked_seconds` 应用于全部注册门（包括 Assembly 两门和 Review），`review_policy.stages` 仅提供可选的阶段覆盖。默认和倒计时精确语义归[评审契约](../architecture/reference/data-contract.md#12-review-contract)。门按冻结策略与注册 resolver 人工等待或使用合格附着倒计时。持久门中断后人工恢复，新进程不重建旧倒计时。
 
 可选对话入口：
 

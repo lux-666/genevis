@@ -884,9 +884,9 @@ def validate_hic_scaffolding_review_intent_request(
     if request.decision != "accept_candidate":
         return request
     if request.decided_by != "human":
-        raise ResumeValidationError(
-            "AutoHiC candidate adoption requires a human review decision"
-        )
+        from app.review.automatic import validate_zero_wait_request
+
+        validate_zero_wait_request(request, request_record, data_dir=state["data_dir"])
 
     candidate = dict((hic_out.get("method_candidates") or {}).get(AUTOHIC_METHOD) or {})
     if candidate.get("status") != "executed" or not candidate.get("scaffold_fasta"):
@@ -915,6 +915,9 @@ def validate_hic_scaffolding_review_intent_request(
         raise ResumeValidationError(
             f"AutoHiC adopted assembly provenance is invalid: {exc}"
         ) from exc
+    from app.stages.sequences import validate_assembly_fasta
+
+    validate_assembly_fasta(Path(str(candidate["scaffold_fasta"])))
     return request
 
 

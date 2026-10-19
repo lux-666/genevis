@@ -24,6 +24,7 @@ from app.execution.lifecycle import (
 from app.execution.method_outcomes import MethodOutcome, has_execution_result
 from app.execution.method_runner import build_frozen_attempt
 from app.llm.dedup import PurgeParameters, PurgeRecommendation, PurgeRecommender
+from app.review.automatic import completed_attempt_proposal
 from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef, ArtifactRefJson
@@ -405,10 +406,21 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
         report_ref.model_dump(mode="json"),
         *cursor.get("history_refs", []),
     ]
+    if (cursor.get("review_policy") or {}).get("max_blocked_seconds") == 0:
+        evidence["execution_policy"] = "run_valid_outputs"
+    policy_proposal = (
+        completed_attempt_proposal(
+            completed_attempts=len(records),
+            candidate_attempts=[r["attempt"] for r in records],
+            maximum=cursor.get("max_attempts", 3),
+        )
+        if evidence.get("execution_policy") == "run_valid_outputs"
+        else None
+    )
     request = {
-        "messages": recommender.messages(evidence),
+        "messages": [] if policy_proposal else recommender.messages(evidence),
         "evidence": evidence,
-        "output_method": recommender.method,
+        "output_method": "policy" if policy_proposal else recommender.method,
         "dependency_refs": dependencies,
     }
     request_ref = publish_json(
@@ -429,18 +441,26 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
         response_ref = recovered.ref
         response = load_json(state, response_ref)
     else:
-        result = recommender.invoke(request["messages"])
-        response = {
-            "request_ref": request_ref.model_dump(mode="json"),
-            "raw_response": result.raw_response,
-            "raw_message": result.raw_message,
-            "model_id": result.model_id,
-            "model_call": result.model_call.model_dump(mode="json"),
-            "error": result.error,
-            "proposal": result.parsed.model_dump(mode="json")
-            if result.parsed
-            else None,
-        }
+        if policy_proposal:
+            response = {
+                "request_ref": request_ref.model_dump(mode="json"),
+                "proposal": policy_proposal,
+                "error": None,
+                "source": "policy",
+            }
+        else:
+            result = recommender.invoke(request["messages"])
+            response = {
+                "request_ref": request_ref.model_dump(mode="json"),
+                "raw_response": result.raw_response,
+                "raw_message": result.raw_message,
+                "model_id": result.model_id,
+                "model_call": result.model_call.model_dump(mode="json"),
+                "error": result.error,
+                "proposal": result.parsed.model_dump(mode="json")
+                if result.parsed
+                else None,
+            }
         response_ref = publish_json(state, name, response, metadata["dependency_refs"])
     if response["request_ref"] != request_ref.model_dump(mode="json"):
         raise ValueError("dedup recommendation request binding mismatch")
@@ -460,7 +480,7 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
     decisions = ["keep_prior_assembly", "stop_human_review"]
     if records:
         decisions.insert(0, "accept_candidate")
-    if proposal and proposal.action != "human_review":
+    if proposal and proposal.action != "human_review" and not policy_proposal:
         decisions.insert(0, "follow_recommendation")
     payload = ReviewPayload(
         stage=STAGE,
@@ -468,6 +488,7 @@ def recommend_dedup(state: TopLevelState) -> StateUpdate:
         reason="dedup_recommendation_ready",
         decisions_allowed=decisions,
         auto_decidable=False,
+        recommendation_error=error,
         candidates=[
             {
                 "attempt": row["attempt"],

@@ -404,7 +404,8 @@ class DurableResumeTests(unittest.TestCase):
             self.assertEqual(result.state["last_error"], "fixture downstream failure")
             rows = Ledger(run_dir).read_event_rows("s1")
             entered = [
-                row for row in rows
+                row
+                for row in rows
                 if row["event_type"] == "stage_entered"
                 and row["workflow_step_id"] == "step-003-base_polish"
             ]

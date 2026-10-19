@@ -77,7 +77,7 @@ checkpoint 是恢复游标，不是工作流数据库。当前逻辑文件通过
 
 ## 当前产品边界
 
-阶段注册表包括 Inventory、Read QC、Genome Survey、Assembly、Assembly Dedup、Assembly Review、Hi-C Scaffolding、GapCloser、T2T Finishing 和 Base Polish。操作者计划编译为不可变 occurrence；注册表顺序只指导注册和展示，不决定运行时后继。GapCloser 支持仅 HiFi 的 TGS-GapCloser，并由人工决定采纳；Base Polish 执行一轮 HiFi Racon，产出成对证据并由人工采纳。精确的 occurrence、Review 绑定及输入支持规则见[运行时编排](runtime-orchestration.md)和[阶段契约](../reference/stage-contracts.md)。
+阶段注册表包括 Inventory、Read QC、Genome Survey、Assembly、Assembly Dedup、Assembly Review、Hi-C Scaffolding、GapCloser、T2T Finishing 和 Base Polish。操作者计划编译为不可变 occurrence；注册表顺序只指导注册和展示，不决定运行时后继。GapCloser 支持仅 HiFi 的 TGS-GapCloser；Base Polish 执行一轮 HiFi Racon 并产出成对证据。两者的采用/沿用动作共用持久门禁，遵循[等待模式矩阵](review-and-resume.md#foreground-review-policy)。精确的 occurrence、Review 绑定及输入支持规则见[运行时编排](runtime-orchestration.md)和[阶段契约](../reference/stage-contracts.md)。
 
 真实运行通过 `gene-agent run --manifest PATH --run-config PATH --data-dir PATH` 启动；`gene-agent tui` 是可选对话入口，两者使用同一冻结会话执行器。文件所有权、TTY、RunConfig 和冻结语义由运行数据与运行时文档定义。其他公共命令用于检查、审计、评审、恢复或 bootstrap。生产方法以 CLI 所在主机的本地子进程执行；服务器运行意味着在服务器检出目录启动同一 CLI，不存在代理内 SSH 或调度器 Runner。
 

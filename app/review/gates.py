@@ -56,6 +56,7 @@ class ReviewGateDeclaration:
     effect_model: str
     prepare_application: str
     apply_application: str
+    zero_wait_policy: str | None = None
     prompt_bundle: str | None = None
     prompt_adapter: str = "generic"
     template_preferred_decision: str | None = None
@@ -234,12 +235,13 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="base_polish",
         gate_id="base_polish_adoption",
+        zero_wait_policy="adopt_result",
         decisions_allowed=(
             "accept_candidate",
             "keep_prior_assembly",
             "stop_human_review",
         ),
-        intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+        intent_metadata_model="app.review.application:ForegroundReviewMetadataV1",
         validate_intent_request="app.stages.base_polish.review:validate_intent_request",
         effect_kind="base_polish.adoption.v1",
         effect_model="app.stages.base_polish.review:BasePolishAdoptionEffect",
@@ -254,12 +256,13 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="gapcloser",
         gate_id="gapcloser_adoption",
+        zero_wait_policy="adopt_result",
         decisions_allowed=(
             "accept_candidate",
             "keep_prior_assembly",
             "stop_human_review",
         ),
-        intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+        intent_metadata_model="app.review.application:ForegroundReviewMetadataV1",
         validate_intent_request="app.stages.gapcloser.review:validate_intent_request",
         effect_kind="gapcloser.adoption.v1",
         effect_model="app.stages.gapcloser.review:GapCloserAdoptionEffect",
@@ -306,8 +309,9 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="inventory",
         gate_id="inventory_review",
+        zero_wait_policy="continue",
         decisions_allowed=("continue", "stop_human_review"),
-        intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+        intent_metadata_model="app.review.application:ForegroundReviewMetadataV1",
         validate_intent_request=(
             "app.stages.inventory.nodes:validate_inventory_review_intent_request"
         ),
@@ -325,6 +329,7 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="assembly_review",
         gate_id="assembly_review",
+        zero_wait_policy="finish_review",
         decisions_allowed=(
             "accept",
             "pass",
@@ -444,6 +449,7 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="hic_scaffolding",
         gate_id="hic_scaffolding",
+        zero_wait_policy="adopt_result",
         decisions_allowed=(
             "accept_candidate",
             "keep_prior_assembly",
@@ -481,6 +487,7 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="t2t",
         gate_id="t2t_review",
+        zero_wait_policy="adopt_patches",
         decisions_allowed=(
             "accept_selected_candidates",
             "continue_without_patch",
@@ -508,6 +515,7 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="assembly_dedup",
         gate_id="dedup_recommendation",
+        zero_wait_policy="finishing",
         decisions_allowed=(
             "follow_recommendation",
             "accept_candidate",
@@ -533,13 +541,14 @@ for _finishing_stage in ("gapcloser", "t2t", "base_polish"):
         ReviewGateDeclaration(
             stage=_finishing_stage,
             gate_id="finishing_recommendation",
+            zero_wait_policy="finishing",
             decisions_allowed=(
                 "follow_recommendation",
                 "accept_candidate",
                 "keep_prior_assembly",
                 "stop_human_review",
             ),
-            intent_metadata_model="app.review.application:EmptyReviewMetadataV1",
+            intent_metadata_model="app.review.application:ForegroundReviewMetadataV1",
             validate_intent_request="app.stages.finishing.review:validate_intent_request",
             effect_kind="finishing.recommendation.v1",
             effect_model="app.stages.finishing.review:FinishingReviewEffect",

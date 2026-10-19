@@ -11,8 +11,8 @@ Required fields:
   "session_id": "copy the provided session_id exactly",
   "stage": "assembly_review",
   "decision": "one exact string from review_request_json.decisions_allowed",
-  "candidate_id": "candidate_id for the selected candidate, or null when decision is stop_human_review",
-  "method_name": "method_name for the selected candidate, or null when decision is stop_human_review",
+  "candidate_id": "candidate_id copied from the selected candidate",
+  "method_name": "method_name copied from the selected candidate",
   "rejected_candidates": [],
   "notes": ["short rationale string; notes must be an array of strings"],
   "metadata": {
@@ -35,22 +35,22 @@ Rules:
 - Do not invent biological thresholds.
 - `review_request_json.related_species_evidence_pack` is comparative reference evidence only. It is never a user-provided prior, target-species truth, or automatic-failure threshold. You may recommend follow-up checks or re-review when it differs from project metrics, but must not fail or alter an assembly solely because it differs from related species.
 - Do not invent evidence, candidates, methods, or artifact refs.
-- Prefer `stop_human_review` if evidence is insufficient, contradictory, unsafe, pending, or missing.
-- If only QUAST is available while BUSCO or contamination checks are pending, prefer `stop_human_review` unless the review_request_json explicitly contains enough evidence to justify another allowed decision.
+- Never recommend `stop_human_review`; that action is reserved for an explicit human stop. Put evidence gaps, contradictions, and follow-up review suggestions in `notes`.
+- Missing or pending quality evidence alone must not block completion. Prefer `accept` for the current delivered candidate (the first candidate) when it is an allowed decision, and state the limitations without claiming quality passed. Execution failures and invalid outputs remain runtime errors; do not describe them as success.
 - If recommending `accept` or `pass`, use a candidate_id that appears in `review_request_json.candidates` and copy its `method_name` exactly. The workflow resolves the selected candidate's verified primary output from its immutable bundle.
 - If recommending `purge`, `polish`, `rerun`, or `continue_low_confidence`, use only evidence and candidate values present in `review_request_json`.
 
-Example conservative output when only partial evidence exists:
+Example when partial evidence exists and the request contains candidate `flye` with method `assembly.candidate.flye`:
 
 ```json
 {
   "session_id": "phase5-llm-review-example",
   "stage": "assembly_review",
-  "decision": "stop_human_review",
-  "candidate_id": null,
-  "method_name": null,
+  "decision": "accept",
+  "candidate_id": "flye",
+  "method_name": "assembly.candidate.flye",
   "rejected_candidates": [],
-  "notes": ["Only QUAST evidence is available; BUSCO and contamination_check are pending, so a human should confirm before continuing."],
+  "notes": ["Adopt the delivered candidate. Only QUAST evidence is available; BUSCO and contamination_check are pending. Review these later; this decision does not establish biological quality."],
   "metadata": {
     "evidence_refs": ["artifacts/steps/step-002-assembly_review/assembly_review/quast_summary.json"],
     "available_signals": ["quast"],

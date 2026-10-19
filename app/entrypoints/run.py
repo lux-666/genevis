@@ -326,10 +326,20 @@ def _run(args: argparse.Namespace) -> int:
         )
         data_dir = _resolve_data_dir(args.data_dir)
         paths = SessionPaths(data_dir, prepared.manifest.session_id)
-        if not _foreground_review_available():
+        from app.review.gates import registered_review_stages
+
+        zero_wait_run = all(
+            prepared.run_config.review_policy.effective_max_blocked_seconds(stage) == 0
+            for stage in [
+                "inventory",
+                *[s.stage for s in prepared.run_config.requested_stages],
+            ]
+            if stage in registered_review_stages()
+        )
+        if not _foreground_review_available() and not zero_wait_run:
             print(
                 "error: run requires a real stdin/stdout TTY before inputs "
-                "can be frozen",
+                "can be frozen unless all review waits are zero",
                 file=sys.stderr,
             )
             return 1
@@ -637,7 +647,9 @@ def _execute_verified_frozen_session(
             file=sys.stderr,
         )
 
-    if supervision == "failed_terminal":
+    if supervision == "failed_terminal" or (
+        supervision == "blocked_human" and result.get("last_error")
+    ):
         print(f"error: {result.get('last_error', 'unknown failure')}", file=sys.stderr)
         return 1
 
@@ -807,6 +819,7 @@ def _interactive_gate_loop(
                 f"error: review request could not be verified: {error}",
                 file=sys.stderr,
             )
+            result = {**result, "last_error": str(error)}
             break
         requirements = summary.get("decision_requirements") or {}
         stage = str(requirements.get("stage") or "unknown")
@@ -815,6 +828,7 @@ def _interactive_gate_loop(
             wait_seconds = review_max_blocked_seconds(summary)
         except ResumeValidationError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            result = {**result, "last_error": str(exc)}
             break
 
         request = None
@@ -822,6 +836,11 @@ def _interactive_gate_loop(
         blocked_timeout_seconds: float | None = None
         event_context: dict[str, Any] | None = None
         automatic_label = foreground_automatic_decision_label(summary)
+        if wait_seconds == 0 and automatic_label is None:
+            reason = f"no automatic action for {stage}/{gate_id}"
+            print(f"error: {reason}", file=sys.stderr)
+            result = {**result, "last_error": reason}
+            break
         if wait_seconds == -1 or automatic_label is None:
             gate_result = collect_gate_decision(
                 session_id,
@@ -839,6 +858,11 @@ def _interactive_gate_loop(
                 "blocked_at_missing",
                 "blocked_at_invalid",
             }:
+                if wait_seconds == 0:
+                    reason = "zero-wait request has no valid blocked_at"
+                    print(f"error: {reason}", file=sys.stderr)
+                    result = {**result, "last_error": reason}
+                    break
                 print(
                     "error: foreground countdown requires a valid blocked_at; "
                     "continuing with manual review",
@@ -915,10 +939,17 @@ def _interactive_gate_loop(
                             elapsed_seconds=elapsed,
                         )
                         print(
-                            f"error: automatic review failed: {exc}; "
-                            "checking whether manual review can continue",
+                            f"error: automatic review failed: {exc}",
                             file=sys.stderr,
                         )
+                        if wait_seconds == 0:
+                            result = {**result, "last_error": str(exc)}
+                            print(
+                                "zero-wait run stopped on automatic review error; "
+                                "checkpoint preserved",
+                                file=sys.stderr,
+                            )
+                            break
                         fallback_summary = load_blocked_gate_summary(
                             session_id, data_dir
                         )
@@ -1019,10 +1050,19 @@ def _interactive_gate_loop(
                             f"{recovery_exc.phase}: {recovery_exc}",
                             file=sys.stderr,
                         )
+                        result = {**result, "last_error": str(recovery_exc)}
                         break
                     _print_resume_transaction_warnings(transaction)
                     result = transaction.state
                     continue
+                if wait_seconds == 0:
+                    result = {**result, "last_error": str(exc)}
+                    print(
+                        "zero-wait run stopped on automatic review error; "
+                        "checkpoint preserved",
+                        file=sys.stderr,
+                    )
+                    break
                 print(
                     "automatic failure occurred before intent commit; checking "
                     "whether manual review can continue",

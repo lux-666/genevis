@@ -86,8 +86,8 @@ DECISION_LABELS = {
     "select_ont": "use ONT route",
     "select_hifi": "use HiFi route",
     "select_clr": "use PacBio CLR route",
-    "accept_candidate": "accept scaffold result",
-    "keep_prior_assembly": "keep prior contig assembly",
+    "accept_candidate": "accept stage result",
+    "keep_prior_assembly": "keep stage input assembly",
     "request_parameter_retry": "request a new parameter recommendation",
     "select_method": "choose result/method",
     "skip": "skip this stage",
@@ -107,11 +107,11 @@ DECISION_HELP = {
     "select_hifi": "use the HiFi assembly route.",
     "select_clr": "use the PacBio CLR assembly route.",
     "accept_candidate": (
-        "use the reviewed scaffold result and continue through the remaining "
+        "use the reviewed stage result and continue through the remaining "
         "frozen workflow steps."
     ),
     "keep_prior_assembly": (
-        "reject the AutoHiC result, retain the prior contig assembly, and "
+        "retain the assembly that entered this stage, and "
         "continue through the remaining frozen workflow steps."
     ),
     "request_parameter_retry": (

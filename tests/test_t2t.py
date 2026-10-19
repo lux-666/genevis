@@ -188,7 +188,9 @@ class T2TStageTests(unittest.TestCase):
 
             self.assertEqual(canonical.candidate_ids, ["chr1:left", "chr2:right"])
             self.assertEqual(canonical.notes, ["first note", "second note"])
-            with self.assertRaisesRegex(ResumeValidationError, "requires a human"):
+            with self.assertRaisesRegex(
+                ResumeValidationError, "requires a bound zero-wait rule"
+            ):
                 validate_t2t_intent_request(
                     {},
                     request.model_copy(update={"decided_by": "auto_rule"}),
@@ -1387,7 +1389,7 @@ class T2TStageTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ResumeValidationError,
-                "requires a human review decision",
+                "requires a bound zero-wait rule",
             ):
                 self._apply_t2t_review(
                     blocked,

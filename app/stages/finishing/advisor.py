@@ -24,6 +24,7 @@ from app.execution.lifecycle import (
 from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.llm.finishing import PARAMETERS, FinishingRecommendation, FinishingRecommender
+from app.review.automatic import completed_attempt_proposal
 from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
@@ -635,9 +636,21 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
             "kmer_completeness": None,
         },
     }
+    if (cursor.get("review_policy") or {}).get("max_blocked_seconds") == 0:
+        evidence["execution_policy"] = "run_valid_outputs"
     recommender = FinishingRecommender(
         stage, cast(Any, cursor.get("recommendation_output_method", "json_schema"))
     )
+    policy_proposal = (
+        completed_attempt_proposal(
+            completed_attempts=len(records),
+            candidate_attempts=[r["attempt"] for r in records if r["materialized"]],
+            maximum=maximum,
+        )
+        if evidence.get("execution_policy") == "run_valid_outputs"
+        else None
+    )
+    output_method = "policy" if policy_proposal else recommender.method
     deps = [
         f["config_ref"],
         original.ref.model_dump(mode="json"),
@@ -662,16 +675,16 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
             or request.get("workflow_step_id") != current_workflow_step_id(state)
             or request.get("dependency_refs") != deps
             or request.get("evidence") != evidence
-            or request.get("output_method") != recommender.method
+            or request.get("output_method") != output_method
         ):
             raise ValueError("finishing persisted request binding mismatch")
     else:
         request = {
             "stage": stage,
             "workflow_step_id": current_workflow_step_id(state),
-            "messages": recommender.messages(evidence),
+            "messages": [] if policy_proposal else recommender.messages(evidence),
             "evidence": evidence,
-            "output_method": recommender.method,
+            "output_method": output_method,
             "dependency_refs": deps,
         }
         request_ref = publish_json(
@@ -694,18 +707,26 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
     if recovered:
         response_ref, response = recovered.ref, load_json(state, recovered.ref)
     else:
-        result = recommender.invoke(request["messages"])
-        response = {
-            "request_ref": request_ref.model_dump(mode="json"),
-            "proposal": result.parsed.model_dump(mode="json")
-            if result.parsed
-            else None,
-            "error": result.error,
-            "raw_response": result.raw_response,
-            "raw_message": result.raw_message,
-            "model_id": result.model_id,
-            "model_call": result.model_call.model_dump(mode="json"),
-        }
+        if policy_proposal:
+            response = {
+                "request_ref": request_ref.model_dump(mode="json"),
+                "proposal": policy_proposal,
+                "error": None,
+                "source": "policy",
+            }
+        else:
+            result = recommender.invoke(request["messages"])
+            response = {
+                "request_ref": request_ref.model_dump(mode="json"),
+                "proposal": result.parsed.model_dump(mode="json")
+                if result.parsed
+                else None,
+                "error": result.error,
+                "raw_response": result.raw_response,
+                "raw_message": result.raw_message,
+                "model_id": result.model_id,
+                "model_call": result.model_call.model_dump(mode="json"),
+            }
         response_ref = publish_json(
             state, stage, name, response, [request_ref.model_dump(mode="json")]
         )
@@ -722,7 +743,7 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
     decisions = ["keep_prior_assembly", "stop_human_review"]
     if any(row["materialized"] for row in records):
         decisions.insert(0, "accept_candidate")
-    if proposal and proposal.action != "human_review":
+    if proposal and proposal.action != "human_review" and not policy_proposal:
         decisions.insert(0, "follow_recommendation")
     context = {
         "config_ref": f["config_ref"],
@@ -737,6 +758,7 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
         reason="finishing_recommendation_ready",
         decisions_allowed=decisions,
         auto_decidable=False,
+        recommendation_error=error,
         candidates=[
             {
                 "candidate_id": f"attempt_{r['attempt']}",

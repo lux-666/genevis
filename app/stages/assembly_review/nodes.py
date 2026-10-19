@@ -313,7 +313,7 @@ def _validate_unexecuted_polish_retention(
         or request["workflow_step_id"] != producer["step_id"]
         or request["stage"] != "base_polish"
         or request["gate_id"] != "finishing_recommendation"
-        or decision["decision"]["decided_by"] != "human"
+        or decision["decision"]["decided_by"] not in {"human", "auto_rule"}
     ):
         raise ValueError("Base Polish source retention evidence mismatch")
     action = decision["decision"]["decision"]
@@ -507,7 +507,7 @@ def plan_review_metrics(state: TopLevelState) -> StateUpdate:
         signals=eval_signals,
         available_inputs=sorted(available_inputs),
         missing_inputs=sorted(missing_inputs),
-        notes=["thresholds_not_applied_without_human_approval"],
+        notes=["quality_metrics_are_advisory"],
     )
     eval_bundle_ref = _write_json_artifact(
         state,
@@ -719,7 +719,7 @@ def human_review_gate(state: TopLevelState) -> StateUpdate:
             "stop_human_review",
         ],
         notes=[
-            "Thresholds for BUSCO and QUAST require human approval before application.",
+            "Quality metrics are observations, not automatic failure thresholds.",
             _assembly_review_accept_note(state),
             (
                 "Assembly execution-failure retries use the v3 recommendation, "
@@ -1077,6 +1077,11 @@ def validate_assembly_review_intent_request(
             f"unsupported assembly_review decision: {request.decision}"
         )
     if request.decision == "stop_human_review":
+        if request.decided_by != "human":
+            raise ResumeValidationError(
+                "review advice cannot terminate the workflow; "
+                "explicit human stop required"
+            )
         metadata = dict(request.metadata)
         for field_name in (
             "action_output_ref",
@@ -1137,6 +1142,9 @@ def validate_assembly_review_intent_request(
         if candidate["candidate_id"] == request.candidate_id
     )
     selected = _verified_review_candidate(state, selected_candidate)
+    from app.stages.sequences import validate_assembly_fasta
+
+    validate_assembly_fasta(selected.primary_output_path)
     metadata = dict(request.metadata)
     if metadata.pop("approval", None) == "human":
         metadata["human_approved_action"] = True
@@ -1175,7 +1183,7 @@ def apply_assembly_review_application(
         raise ResumeValidationError("assembly_review application has the wrong gate")
 
     if effect.decision == "stop_human_review":
-        reason = "assembly_review stopped by human review decision"
+        reason = f"assembly_review stopped by {effect.decided_by} decision"
         review_update = update_assembly_review_output(
             state,
             {
@@ -1592,7 +1600,7 @@ def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
         "session_id": state["session_id"],
         "candidates": comparison_candidates,
         "polishing_comparison": _polish_review_evidence(state, candidates),
-        "notes": ["thresholds_not_applied_without_human_approval"],
+        "notes": ["quality_metrics_are_advisory"],
     }
     existing_ref = ar_out.get("candidate_comparison_ref")
     if existing_ref and _json_artifact_payload_matches(
@@ -1716,8 +1724,8 @@ def _assembly_review_report_payload(
             ar_out.get("related_species_evidence_pack") or {}
         ),
         "notes": [
-            "thresholds_not_applied_without_human_approval",
-            "report_informs_human_decision_only",
+            "quality_metrics_are_advisory",
+            "report_records_quality_observations",
         ],
     }
 

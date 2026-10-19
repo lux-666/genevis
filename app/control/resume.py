@@ -108,17 +108,26 @@ def normalize_resume_review_request(
                 raise ResumeValidationError(
                     f"Unsupported timeout stage: {canonical_request.stage}"
                 ) from exc
-            normalizer = gate.load_timeout_request_normalizer()
-            if normalizer is None:
-                raise ResumeValidationError(
-                    f"review gate {canonical_request.stage}/{gate.gate_id} has no "
-                    "automatic timeout resolver"
+            if configured_seconds == 0 and gate.zero_wait_policy:
+                from app.review.automatic import validate_zero_wait_request
+
+                validate_zero_wait_request(
+                    canonical_request, request_record, data_dir=state["data_dir"]
                 )
-            normalized = normalizer(state, canonical_request, timeout)
-            _active, normalized_record = _validated_resume_context(state, normalized)
-            ensure_decision_allowed(normalized_record, normalized)
-            final_request = normalized
-            final_record = normalized_record
+            else:
+                normalizer = gate.load_timeout_request_normalizer()
+                if normalizer is None:
+                    raise ResumeValidationError(
+                        f"review gate {canonical_request.stage}/{gate.gate_id} has no "
+                        "automatic timeout resolver"
+                    )
+                normalized = normalizer(state, canonical_request, timeout)
+                _active, normalized_record = _validated_resume_context(
+                    state, normalized
+                )
+                ensure_decision_allowed(normalized_record, normalized)
+                final_request = normalized
+                final_record = normalized_record
     try:
         return canonicalize_review_intent_request(
             state,
@@ -321,6 +330,8 @@ def foreground_automatic_decision_label(
     gate = find_review_gate(stage, gate_id if isinstance(gate_id, str) else None)
     if gate is None:
         return None
+    if requirements.get("max_blocked_seconds") == 0 and gate.zero_wait_policy:
+        return f"zero-wait {gate.zero_wait_policy}"
     if gate.normalize_timeout_request:
         return _foreground_rule_decision(gate, requirements)
     if gate.prompt_bundle and requirements.get("auto_decidable") is True:
@@ -380,6 +391,51 @@ def build_foreground_auto_resume_request(
         "configured_seconds": configured_seconds,
         "elapsed_seconds": elapsed_seconds,
     }
+    if configured_seconds == 0 and gate.zero_wait_policy:
+        if data_dir is None:
+            raise ResumeValidationError(
+                "zero-wait action requires the session directory"
+            )
+        from app.review.automatic import zero_wait_selection
+        from app.review.persistence import load_review_request
+
+        try:
+            ref = ArtifactRef.model_validate(requirements.get("request_ref"))
+            record = load_review_request(
+                data_dir, ref, session_id=str(summary.get("session_id") or "")
+            )
+            if (
+                record["review_request_id"] != requirements.get("review_request_id")
+                or ref.sha256 != requirements.get("request_hash")
+                or record["stage"] != stage
+                or record["gate_id"] != gate.gate_id
+                or record["payload"].get("max_blocked_seconds") != 0
+            ):
+                raise ValueError("zero-wait request identity or timeout mismatch")
+            selected = zero_wait_selection(
+                gate.zero_wait_policy,
+                record,
+                data_dir,
+                session_id=str(summary["session_id"]),
+            )
+            return ResumeReviewRequest(
+                session_id=str(summary["session_id"]),
+                stage=stage,
+                gate_id=gate.gate_id,
+                review_request_id=record["review_request_id"],
+                review_request_hash=ref.sha256,
+                **selected,
+                decided_by="auto_rule",
+                rationale_artifact_ref=ref,
+                metadata=countdown_metadata,
+                notes=[
+                    f"zero-wait policy: {gate.zero_wait_policy}; "
+                    "adoption is not a quality certification"
+                ],
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            raise ResumeValidationError(f"zero-wait action failed: {exc}") from exc
+
     if gate.prompt_bundle and requirements.get("auto_decidable") is True:
         if data_dir is None:
             raise ResumeValidationError(
@@ -416,6 +472,10 @@ def build_foreground_auto_resume_request(
             raise ResumeValidationError(
                 f"automatic review recommendation failed: {exc}"
             ) from exc
+        if recommendation.decision == "stop_human_review":
+            raise ResumeValidationError(
+                "LLM requested review; the workflow remains resumable, not failed"
+            )
         return recommendation.model_copy(
             update={
                 "notes": [
