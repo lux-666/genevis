@@ -1,5 +1,22 @@
 # Gene Agent
 
+Gene Agent is an alpha-stage workflow system for long-read genome assembly.
+It coordinates established bioinformatics tools with LangGraph and preserves
+run inputs, execution evidence, artifacts, human review decisions, and recovery
+state. It is designed for researchers running assembly workflows on Linux or
+HPC hosts. The repository is named `genevis`; the Python package and CLI are
+`gene-agent`.
+
+Start with the [offline verification walkthrough](docs/user_guide/offline-verification.md)
+to check input registration, durable review/resume, and artifact auditing without
+installing biological tools or configuring an LLM endpoint. These synthetic
+checks validate workflow behavior; they do not establish biological accuracy or
+real-tool compatibility. For real runs, follow the setup and operator guides below
+(currently primarily in Chinese). See [Contributing](CONTRIBUTING.md) for feedback
+and development instructions.
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 lux-666.
+
 Gene Agent 是面向长读长基因组组装的可恢复、可审计工作流系统。它用
 LangGraph 编排已批准的本地生信工具，把 manifest、参数推荐、人工决策、
 运行证据和阶段产物保存在同一个 session 边界内。

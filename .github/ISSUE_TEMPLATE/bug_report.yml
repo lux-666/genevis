@@ -1,0 +1,38 @@
+name: Bug report / 错误报告
+description: Report an installation, workflow, recovery, or documentation problem.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Expected and observed behavior
+      description: English or Chinese is welcome. Remove credentials and private sample information.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: Git commit, Python version, OS, affected stage or command, and relevant tool versions.
+    validations:
+      required: true
+  - type: dropdown
+    id: context
+    attributes:
+      label: Where did it happen?
+      options:
+        - Installation or configuration
+        - Offline code test
+        - Real biological-tool run
+        - Documentation
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Commands and synthetic input, or public input source and checksum. Do not attach .env or whole session directories.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted error excerpt and recovery attempts
+      description: Include the relevant error and what you tried; omit private identifiers and credentials.

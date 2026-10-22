@@ -7,6 +7,8 @@
 ## 先选择读者角色
 
 - [用户指南](user_guide/README.md)：安装、主机准备、contig 运行、评审关卡、检查与恢复。
+- [Offline verification](user_guide/offline-verification.md)：无需生信工具或 API 凭据的合成测试验证入口。
+- [Contributing](../CONTRIBUTING.md)：外部贡献、错误报告和试用反馈入口。
 - [开发者指南](developer_guide/README.md)：按改动类型查找代码、测试、描述符、架构契约和实现证据。
 - [架构地图](architecture/README.md)：贡献者的主要设计入口；读者索引的拆分不改变或削弱任何架构权威。
 
