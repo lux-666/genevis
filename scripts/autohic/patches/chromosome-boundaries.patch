@@ -3,8 +3,8 @@ index 4c78435..8ce93e0 100644
 --- a/src/utils/get_chr_data.py
 +++ b/src/utils/get_chr_data.py
 @@ -165,131 +165,82 @@ def split_list(lst, val):
- 
- 
+
+
  def divide_chr(chr_len_txt, hic_file, assembly_file, modified_assembly_file, hic_len):
 -    """
 -        divide chr
@@ -205,6 +205,6 @@ index 4c78435..8ce93e0 100644
 +        for group in groups:
 +            output.write(" ".join(group) + "\n")
 +    logger.info("Chromosome boundary cutting and regrouping done\n")
- 
- 
+
+
  def split_chr(img_file, asy_file, hic_file, cfg_file, device='cpu'):
