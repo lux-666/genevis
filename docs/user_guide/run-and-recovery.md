@@ -478,6 +478,45 @@ gene-agent resume \
 
 恢复在改状态前验证会话、occurrence/门绑定、不可变证据、决策结构和 checkpoint 可用性。
 
+<a id="autohic-external-recovery"></a>
+
+## AutoHiC 已有中间结果的独立恢复
+
+这是一条外部运维入口，不是 `gene-agent resume`。只在已核对同一轮次 `.hic/.assembly` 的来源、原始 FASTA 与去重复 contacts 后使用。输入要求每个 fragment 恰好放置一次的无 gap 布局；带重复 `hic_gap` 放置的 `FINAL.assembly` 不适用。正式会话失败或 Ledger 截断时保留原运行目录，不编辑冻结证据或伪造完成；本工具不把外部结果登记为原尝试成功。完整正式流程及尚未实现的部分见[AutoHiC](../architecture/topics/autohic.md#resource-failure-and-external-recovery)。
+
+先按[部署指南](../deployment/migration.md#autohic-gpu-environment)验证环境。从仓库根，以 AutoHiC 自身 Python 执行单轮检测/调整；示例参数和路径须按原冻结配置替换。`expected_span` 是核对上游 `get_hic_real_len` 后明确接受的 map 坐标范围，不直接等于 FASTA 总长。rawchrom 第一组可能很短，不能因此默认接受其余区域未被检测。
+
+```bash
+expected_span=447502881  # 示例：替换为已核验的官方推理范围
+conda run --no-capture-output -n autohic_gpu python -m scripts.autohic.recover \
+  --autohic-root /opt/AutoHiC \
+  --hic /data/hic/contigs.0.hic --assembly /data/hic/contigs.0.assembly \
+  --pair-provenance 'same producer round; cprops+asm and source sequence lengths verified' \
+  --expected-inference-span-bp "$expected_span" \
+  --output /data/recovery/pass-01 --device auto --threads 8 --min-free-gib 350 \
+  --post-review-script /opt/3d-dna/run-asm-pipeline-post-review.sh \
+  --reference /data/hic/contigs.fasta --contacts /data/hic/merged_nodups.txt
+```
+
+省略最后三项只生成检测证据和 `adjusted.assembly`；三项必须一起提供。可用 `--images /data/verified-images/png` 复用同一 map 的完整官方图片及 `info.txt`，索引必须使用仍有效的绝对图片路径。工具校验每个 resolution 的窗口数和文件存在，不能自动证明图片内容来自给定 map。`--device auto|cpu|cuda` 控制设备，`--score`、`--iou-score`、`--min-length`、`--max-length` 和调整开关应与预期设置核对；debris 默认为关闭。`--threads` 仅控制图片生成并行数，post-review 使用上游自己的资源设置。`--min-free-gib` 只是预留值，须结合 contacts 大小、3D-DNA 文本放大和其他任务另行评估峰值。
+
+查看输出的 `status.json`、`device_events.jsonl`、`inference_progress.json` 和 `post_review.log`；图片生成数量不等于已推理数量。completed 表示这次独立单轮操作通过校验，仍缺完整 AutoHiC 候选选择/迭代、染色体分配和 HTML。失败时保留部分输出，换新目录；已有目录拒绝覆盖，锁冲突拒绝第二个写入进程。不要重启完整 `autohic.py` 来续跑已完成的 Juicer/3D-DNA。
+
+### 空间清理的依赖顺序
+
+先用 `df -h` 看目标 Linux 文件系统空闲，用 `du` 定位运行目录，再检查 `lsof +L1` 中删除后仍被进程持有的文件。Linux 空闲增加而 Windows `ext4.vhdx` 文件不变是动态虚拟磁盘的正常行为；宿主压缩另安排维护窗口，活动任务期间不要关闭 WSL。
+
+只有确认没有活动进程读写、下游已成功且保留了重新生成依据，才可清理对应旧尝试的中间文件：
+
+| 中间文件 | 清理前必须确认 |
+|---|---|
+| `splits/*.sam`、`*_abnorm.sam`、`*_unmapped.sam`、对应 `*.sort.txt` | 比对、分类、排序、去重复成功；最终去重复 contacts 完整且可读取 |
+| `aligned/merged_sort.txt`、`abnormal.sam`、`unmapped.sam`、`dups.txt` | `merged_nodups.txt` 已验证并保留；后续不再依赖分类/重复读段 |
+| 旧轮次 `.mnd.txt`、排序临时文件、重复图片 | 对应 map/assembly 或本轮推理产物已成功验证，未来恢复不依赖这些文件 |
+| 整个过时运行工作区 | 原始输入、最终 FASTA、同一版本配对 map/assembly、报告/日志/参数和必要恢复输入另有验证过的保留副本 |
+
+`merged_nodups.txt`、原始 FASTQ/FASTA、仍需 post-review 的输入配对、冻结证据及 checkpoint/Ledger 都不是可无条件删除的缓存。本工具不自动删除任何文件。下次启动前做磁盘预算、并限制并行大型尝试；自动依赖清理和阶段恢复尚待正式执行器实现。
+
 <a id="upgrade-safety"></a>
 
 ## 升级安全

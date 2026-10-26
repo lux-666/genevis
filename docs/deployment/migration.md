@@ -85,6 +85,52 @@ conda create -n env_geno_exec \
 
 Assembly 在上游证据具备后选择方法。应声明并安装该主机上运行可能选择的每个候选；bootstrap 检查声明目录。所选候选在执行前从冻结依赖快照再做阶段预检。GapCloser 另需 `tgsgapcloser` 与 GNU `getopt`，Base Polish 另需 `racon`；以活动映射声明为准。AutoHiC、Juicer、3D-DNA、模型和生物数据库是外部资源，不包含在上述 Conda 安装命令中。
 
+<a id="autohic-gpu-environment"></a>
+
+## AutoHiC GPU 环境
+
+AutoHiC 的 Python/深度学习栈与编排器分开安装。保留已验证 CPU 环境，克隆专用 GPU 环境；仅切换方法主机映射。以下是已验证的 Linux x86-64/Python 3.9、GTX 1080 Ti 兼容组合，供迁移旧版 AutoHiC 使用；其他显卡/架构需重新选择配套版本并执行实际模型验证，不应直接升级整个环境到最新 PyTorch/MMDetection。
+
+```bash
+conda create -n autohic_gpu --clone autohic -y
+conda install -n autohic_gpu -c pytorch -c defaults \
+  pytorch=1.10.1 torchvision=0.11.2 cudatoolkit=11.3.1 \
+  pytorch-mutex=1.0=cuda -y
+conda run -n autohic_gpu python -m pip install --no-deps --force-reinstall \
+  https://download.openmmlab.com/mmcv/dist/cu113/torch1.10.0/mmcv_full-1.3.17-cp39-cp39-manylinux1_x86_64.whl
+```
+
+这组环境还包含 MMDetection 2.11.0、NumPy 1.24.3、timm 0.6.13，以及原 AutoHiC 自带的模型代码/权重。这里的安装命令是迁移配方，并非已在所有新主机验证的锁文件；先检查 solver 计划，避免混入 CPU PyTorch 或不匹配的 torchvision/MMCV。主机还需兼容 CUDA 11.3 的 NVIDIA 驱动，WSL 由 Windows 驱动提供；`nvidia-smi` 的 CUDA 上限不等于 Python 环境实际编译版本。
+
+从仓库根，用一张已有的 AutoHiC 接触图图片实际检查两个模型；输出目录必须不存在：
+
+```bash
+conda run --no-capture-output -n autohic_gpu python \
+  -m scripts.autohic.check_environment \
+  --autohic-root /opt/AutoHiC --image /data/hic/png/5000/example.jpg \
+  --output /data/checks/autohic-gpu --device cuda
+CUDA_VISIBLE_DEVICES='' conda run --no-capture-output -n autohic_gpu python \
+  -m scripts.autohic.check_environment \
+  --autohic-root /opt/AutoHiC --image /data/hic/png/5000/example.jpg \
+  --output /data/checks/autohic-cpu --device auto
+```
+
+检查 `environment.json` 中两个模型的实际 device 和版本，第二条必须为 CPU。`--device cuda` 失败退出，不会隐式退回；`auto` 的精确边界见[AutoHiC 设备策略](../architecture/topics/autohic.md#resource-failure-and-external-recovery)。这些工具必须从源码检出运行，当前应用 wheel 只包含 `app`。
+
+如果旧 PyTorch 在新系统上导入时报精确错误 `libtorch_cpu.so: cannot enable executable stack as shared object requires: Invalid argument`，先确认该共享库的 ELF GNU_STACK 标志。仅对此错误，可在保留备份后，用支持 `--clear-execstack` 的 patchelf 修复新 GPU 环境中的私有副本。Conda 文件可能与包缓存硬链接，不能原地修改共享 inode：
+
+```bash
+conda activate autohic_gpu
+# torch 尚无法导入，用 Python 的安装路径定位；确认路径属于新 GPU 环境。
+autohic_lib=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"] + "/torch/lib/libtorch_cpu.so")')
+cp --preserve=all -- "$autohic_lib" "$autohic_lib.before-execstack-fix"
+cp --preserve=all -- "$autohic_lib" "$autohic_lib.private"
+patchelf --clear-execstack "$autohic_lib.private"
+mv -- "$autohic_lib.private" "$autohic_lib"
+```
+
+仅在确认该兼容性问题时执行，不批量修改其他库，也不修改 CPU 环境或 Conda 包缓存。然后重跑上述 GPU 与 CPU 模型检查。活动 `config/envs.yaml` 中 `methods.hic_scaffolding.candidate.autohic.conda_env` 改为 `autohic_gpu`，其余包根和 Python 路径保持目标主机实际配置；若声明 `conda_prefix`，须同步指向同一个环境。不要修改已冻结会话的环境快照。`gpu_required: false` 保持不变，表示无 GPU 的机器仍可用 CPU。
+
 <a id="conditional-services-and-data"></a>
 
 ## 条件性服务与数据
