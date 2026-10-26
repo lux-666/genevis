@@ -84,6 +84,8 @@ AutoHiC 适配器只加载已验证的已批准 schema-3 参数链。它解析�
 
 `.hic` 可读取且 assembly 总长一致并不能单独证明二者配对。必须核对同一生产轮次的 cprops/asm、原始序列名/长度等来源，再用 `--pair-provenance` 记录依据。官方 `get_hic_real_len` 使用第一个 placement group，并按 map/assembly 比例换算坐标；多组 rawchrom 输入可能只覆盖很小一段。`--expected-inference-span-bp` 要求操作者明确确认官方推理坐标范围，不能仅凭文件名选输入。已有图片还必须确认来自该 contact map；数量校验不构成来源证明。
 
+AutoHiC 上游 `src/utils/get_chr_data.py::divide_chr` 将 inclusive 染色体末端加一作为切点，但对片段末端/已有连接处仍调用切割，会生成零长度 fragment；末尾还用跨两碱基查询选择下一组起点。`scripts/autohic/patches/chromosome-boundaries.patch` 是针对上游 `4dc5ad9eba62bba569d7934261df2b3ea630faa2` 的独立补丁：保留官方 cut/re-cut 操作，只在片段内部切割，再按累计末端分组；支持反向 placement、重复切割和 map/assembly 比例换算，保留推理范围外的未分配片段。它不改变模型、阈值或预测边界，也不靠删除零长度结果掩盖错误。补丁需要在目标 AutoHiC 检出显式应用；Gene Agent 不会自动修改外部软件。安装和显式回归见[部署指南](../../deployment/migration.md#autohic-chromosome-boundary-patch)。
+
 独立恢复不执行完整 AutoHiC 的候选轮次选择、迭代纠错、染色体分配或 HTML 报告生成；其默认关闭 debris 调整，正式 `onehic.py` 默认值不同，操作者必须核对参数。它不导入 Gene Agent attempt、不改 Ledger/checkpoint，也不能替代正式四项产物的成功/采纳。正式 wrapper 尚未接入这里的推理中 CPU 退回；清理、子阶段恢复和错误传播的待办见[一致性缺口](../reference/conformance.md#autohic-resource-recovery-gap)。操作命令见[运行与恢复](../../user_guide/run-and-recovery.md#autohic-external-recovery)，GPU 环境迁移见[新主机配置](../../deployment/migration.md#autohic-gpu-environment)。
 
 <a id="adoption-and-retries"></a>

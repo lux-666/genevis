@@ -131,6 +131,34 @@ mv -- "$autohic_lib.private" "$autohic_lib"
 
 仅在确认该兼容性问题时执行，不批量修改其他库，也不修改 CPU 环境或 Conda 包缓存。然后重跑上述 GPU 与 CPU 模型检查。活动 `config/envs.yaml` 中 `methods.hic_scaffolding.candidate.autohic.conda_env` 改为 `autohic_gpu`，其余包根和 Python 路径保持目标主机实际配置；若声明 `conda_prefix`，须同步指向同一个环境。不要修改已冻结会话的环境快照。`gpu_required: false` 保持不变，表示无 GPU 的机器仍可用 CPU。
 
+<a id="autohic-chromosome-boundary-patch"></a>
+
+### AutoHiC 染色体边界补丁
+
+上游 `4dc5ad9eba62bba569d7934261df2b3ea630faa2` 的 `divide_chr` 存在末端切割产生零长度 fragment 的缺陷，与 GPU/CPU 设备无关。仓库附带保持模型和预测边界不变的最小作用域补丁，原因见[AutoHiC 专题](../architecture/topics/autohic.md#resource-failure-and-external-recovery)。在目标 AutoHiC 源码根应用，先检查已有修改及补丁上下文：
+
+```bash
+genevis_checkout=/path/to/genevis
+autohic_checkout=/opt/AutoHiC
+boundary_patch="$genevis_checkout/scripts/autohic/patches/chromosome-boundaries.patch"
+git -C "$autohic_checkout" status --short
+git -C "$autohic_checkout" apply --check "$boundary_patch"
+git -C "$autohic_checkout" apply "$boundary_patch"
+```
+
+检查不通过时不要强制覆盖目标主机修改；已应用时可用 `git apply --reverse --check` 核对。该补丁只修改 `src/utils/get_chr_data.py::divide_chr`，正式 `autohic.py` 和外部恢复的 `split_chr` 调用都使用此函数。不要在仍运行该子阶段时变更源码。
+
+用编排器的 pytest 驱动 AutoHiC 自身 Python 验证 7 组真实函数案例，包含正向/反向末端、已有连接、内部切割、重复反向切割和比例坐标。普通回归不会探测或修改外部软件：
+
+```bash
+cd "$genevis_checkout"
+AUTOHIC_TEST_ROOT="$autohic_checkout" \
+AUTOHIC_TEST_PYTHON=/path/to/conda/envs/autohic_gpu/bin/python3.9 \
+  python -m pytest -q -m real_tool tests/test_autohic_boundary_patch.py
+```
+
+这条检查不运行模型或完整 Juicer/3D-DNA，但会导入 AutoHiC 的依赖；两项环境变量必须显式提供。真实样本恢复还需校验全部 fragment 为正长且恰好放置一次、总长不变、每组末端与模型边界一致，再执行 post-review。
+
 <a id="conditional-services-and-data"></a>
 
 ## 条件性服务与数据
