@@ -418,6 +418,62 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class PromptGenericCandidateBindingTests(unittest.TestCase):
+    def test_recommendation_actions_do_not_bind_existing_candidates(self):
+        for stage in ("gapcloser", "t2t", "base_polish", "assembly_dedup"):
+            gate_id = (
+                "dedup_recommendation"
+                if stage == "assembly_dedup"
+                else "finishing_recommendation"
+            )
+            for decision in (
+                "follow_recommendation",
+                "keep_prior_assembly",
+                "stop_human_review",
+            ):
+                for candidates in (["attempt_0"], ["attempt_0", "attempt_1"]):
+                    with self.subTest(
+                        stage=stage, decision=decision, candidates=candidates
+                    ):
+                        requirements = {
+                            "stage": stage,
+                            "gate_id": gate_id,
+                            "decisions_allowed": [decision],
+                            "candidate_ids": candidates,
+                        }
+                        with patch("builtins.input", side_effect=["1", "reviewed"]):
+                            result = prompt_generic_gate_decision(requirements)
+                        self.assertIsNotNone(result)
+                        self.assertEqual(result["decision"], decision)
+                        self.assertNotIn("candidate_id", result)
+                        self.assertNotIn("rejected_candidates", result)
+                        self.assertEqual(result["notes"], ["reviewed"])
+
+    def test_accept_candidate_selects_without_implicit_rejections(self):
+        for stage in ("gapcloser", "t2t", "base_polish", "assembly_dedup"):
+            gate_id = (
+                "dedup_recommendation"
+                if stage == "assembly_dedup"
+                else "finishing_recommendation"
+            )
+            for candidates in (["attempt_0"], ["attempt_0", "attempt_1"]):
+                with self.subTest(stage=stage, candidates=candidates):
+                    requirements = {
+                        "stage": stage,
+                        "gate_id": gate_id,
+                        "decisions_allowed": ["accept_candidate"],
+                        "candidate_ids": candidates,
+                    }
+                    inputs = ["1", "reviewed"]
+                    if len(candidates) > 1:
+                        inputs.insert(1, "2")
+                    with patch("builtins.input", side_effect=inputs):
+                        result = prompt_generic_gate_decision(requirements)
+                    self.assertIsNotNone(result)
+                    self.assertEqual(result["candidate_id"], candidates[-1])
+                    self.assertNotIn("rejected_candidates", result)
+
+
 class PromptHicScaffoldingTests(unittest.TestCase):
     def test_accept_candidate_prompt_uses_operator_labels(self):
         requirements = {
