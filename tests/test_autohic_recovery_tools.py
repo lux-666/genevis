@@ -190,12 +190,26 @@ def test_assembly_span_tracks_first_group(tmp_path):
     )
 
 
-def image_index(tmp_path, count=2):
+def image_index(tmp_path, count=2, windows=None):
     rows = []
-    for i in range(count):
+    if windows is None:
+        windows = [(500, 0, 300000)] * count
+    for i, (resolution, start, end) in enumerate(windows):
         path = tmp_path / (str(i) + ".jpg")
         path.write_bytes(b"test image")
-        rows.append({str(path): dict(resolution=500)})
+        rows.append(
+            {
+                str(path): dict(
+                    resolution=resolution,
+                    chr_A="assembly",
+                    chr_A_start=start,
+                    chr_A_end=end,
+                    chr_B="assembly",
+                    chr_B_start=start,
+                    chr_B_end=end,
+                )
+            }
+        )
     (tmp_path / "info.txt").write_text("".join(json.dumps(row) + "\n" for row in rows))
     return rows
 
@@ -203,6 +217,68 @@ def image_index(tmp_path, count=2):
 def test_complete_image_set_includes_overlapping_last_window(tmp_path):
     image_index(tmp_path)
     assert validate_images(tmp_path, 300000, [250, 500]) == 2
+
+
+@pytest.mark.parametrize(
+    "total_bp,resolutions,windows",
+    [
+        (10, [500], [(500, 0, 10)]),
+        (400000, [500], [(500, 0, 350000), (500, 50000, 400000)]),
+        (
+            1000000,
+            [250, 500, 1000],
+            [
+                (500, 0, 350000),
+                (500, 200000, 550000),
+                (500, 400000, 750000),
+                (500, 600000, 950000),
+                (500, 650000, 1000000),
+                (1000, 0, 700000),
+                (1000, 300000, 1000000),
+                (1000, 300000, 1000000),
+            ],
+        ),
+    ],
+)
+def test_complete_official_windows_are_accepted(
+    tmp_path, total_bp, resolutions, windows
+):
+    rows = image_index(tmp_path, windows=windows)
+    # Rendering callbacks can finish in any order.
+    (tmp_path / "info.txt").write_text(
+        "".join(json.dumps(row) + "\n" for row in reversed(rows))
+    )
+    assert validate_images(tmp_path, total_bp, resolutions) == len(windows)
+
+
+def test_same_count_cannot_hide_missing_windows(tmp_path):
+    image_index(tmp_path, windows=[(500, 0, 350000)] * 5)
+    with pytest.raises(ValueError, match="Incomplete image set"):
+        validate_images(tmp_path, 1000000, [500])
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("chr_A", "chr1"),
+        ("chr_B", "chr1"),
+        ("chr_A_start", 1),
+        ("chr_A_end", 299999),
+        ("chr_B_start", 1),
+        ("chr_B_end", 299999),
+        ("chr_A_start", None),
+    ],
+)
+def test_incorrect_window_metadata_is_rejected(tmp_path, field, value):
+    rows = image_index(tmp_path)
+    meta = next(iter(rows[0].values()))
+    if value is None:
+        del meta[field]
+    else:
+        meta[field] = value
+    (tmp_path / "info.txt").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(ValueError, match="Incomplete image set"):
+        validate_images(tmp_path, 300000, [500])
 
 
 def test_missing_rendered_job_is_rejected(tmp_path):
@@ -282,7 +358,7 @@ def fake_upstream(tmp_path, monkeypatch, child_code=0):
     (tmp_path / "map.hic").write_bytes(b"contact map")
     images = tmp_path / "images"
     images.mkdir()
-    image_index(images, count=1)
+    image_index(images, windows=[(500, 0, 10)])
     calls = []
 
     class HiC:

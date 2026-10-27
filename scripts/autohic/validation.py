@@ -55,16 +55,34 @@ def validate_images(directory, total_bp, resolutions):
         for line in (directory / "info.txt").read_text().splitlines()
         if line.strip()
     ]
-    expected = Counter(
-        {r: (total_bp + r * 400 - 1) // (r * 400) for r in resolutions if r >= 500}
-    )
+    expected = Counter()
+    for resolution in resolutions:
+        if resolution < 500:
+            continue
+        width = min(total_bp, resolution * 700)
+        for start in range(0, total_bp, resolution * 400):
+            end = min(start + width, total_bp)
+            start = end - width
+            # Upstream may render the same end window more than once.
+            expected[(resolution, "assembly", start, end, "assembly", start, end)] += 1
     if any(len(row) != 1 for row in rows):
         raise ValueError("Official inference requires exactly one image per index row")
-    observed = Counter(meta["resolution"] for row in rows for meta in row.values())
+    fields = (
+        "resolution",
+        "chr_A",
+        "chr_A_start",
+        "chr_A_end",
+        "chr_B",
+        "chr_B_start",
+        "chr_B_end",
+    )
+    observed = Counter(
+        tuple(meta.get(field) for field in fields)
+        for row in rows
+        for meta in row.values()
+    )
     if observed != expected:
-        raise ValueError(
-            f"Incomplete image set: expected {dict(expected)}, got {dict(observed)}"
-        )
+        raise ValueError("Incomplete image set: missing or unexpected diagonal windows")
     names = [Path(name) for row in rows for name in row]
     if not names or len(names) != len(set(names)):
         raise ValueError("Empty image set or duplicate image paths")
