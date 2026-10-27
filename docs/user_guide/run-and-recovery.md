@@ -498,7 +498,7 @@ conda run --no-capture-output -n autohic_gpu python -m scripts.autohic.recover \
   --reference /data/hic/contigs.fasta --contacts /data/hic/merged_nodups.txt
 ```
 
-省略最后三项只生成检测证据和 `adjusted.assembly`；三项必须一起提供。可用 `--images /data/verified-images/png` 复用同一 map 的完整官方图片及 `info.txt`，索引必须使用仍有效的绝对图片路径。工具校验每个 resolution 的窗口数和文件存在，不能自动证明图片内容来自给定 map。`--device auto|cpu|cuda` 控制设备，`--score`、`--iou-score`、`--min-length`、`--max-length` 和调整开关应与预期设置核对；debris 默认为关闭。`--threads` 仅控制图片生成并行数，post-review 使用上游自己的资源设置。`--min-free-gib` 只是预留值，须结合 contacts 大小、3D-DNA 文本放大和其他任务另行评估峰值。
+省略最后三项只生成检测证据和 `adjusted.assembly`；三项必须一起提供。可用 `--images /data/verified-images/png` 复用同一 map 的图片及 `info.txt`，索引必须使用仍有效的绝对图片路径。工具检查图片文件；各 resolution 的数量或坐标覆盖与官方窗口不匹配时仅提示，继续处理索引中的图片。覆盖检查不能自动证明图片内容来自给定 map，completed 也不证明图片覆盖完整。`--device auto|cpu|cuda` 控制设备，`--score`、`--iou-score`、`--min-length`、`--max-length` 和调整开关应与预期设置核对；debris 默认为关闭。`--threads` 仅控制图片生成并行数，post-review 使用上游自己的资源设置。`--min-free-gib` 只是预留值，须结合 contacts 大小、3D-DNA 文本放大和其他任务另行评估峰值。
 
 查看输出的 `status.json`、`device_events.jsonl`、`inference_progress.json` 和 `post_review.log`；图片生成数量不等于已推理数量。completed 表示这次独立单轮操作通过校验，仍缺完整 AutoHiC 候选选择/迭代、染色体分配和 HTML。失败时保留部分输出，换新目录；已有目录拒绝覆盖，锁冲突拒绝第二个写入进程。不要重启完整 `autohic.py` 来续跑已完成的 Juicer/3D-DNA。
 

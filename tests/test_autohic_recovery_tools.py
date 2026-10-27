@@ -251,10 +251,10 @@ def test_complete_official_windows_are_accepted(
     assert validate_images(tmp_path, total_bp, resolutions) == len(windows)
 
 
-def test_same_count_cannot_hide_missing_windows(tmp_path):
+def test_same_count_with_missing_windows_warns_and_continues(tmp_path):
     image_index(tmp_path, windows=[(500, 0, 350000)] * 5)
-    with pytest.raises(ValueError, match="Incomplete image set"):
-        validate_images(tmp_path, 1000000, [500])
+    with pytest.warns(RuntimeWarning, match="continuing with 5 indexed images"):
+        assert validate_images(tmp_path, 1000000, [500]) == 5
 
 
 @pytest.mark.parametrize(
@@ -269,7 +269,7 @@ def test_same_count_cannot_hide_missing_windows(tmp_path):
         ("chr_A_start", None),
     ],
 )
-def test_incorrect_window_metadata_is_rejected(tmp_path, field, value):
+def test_incorrect_window_metadata_warns_and_continues(tmp_path, field, value):
     rows = image_index(tmp_path)
     meta = next(iter(rows[0].values()))
     if value is None:
@@ -277,14 +277,14 @@ def test_incorrect_window_metadata_is_rejected(tmp_path, field, value):
     else:
         meta[field] = value
     (tmp_path / "info.txt").write_text("".join(json.dumps(row) + "\n" for row in rows))
-    with pytest.raises(ValueError, match="Incomplete image set"):
-        validate_images(tmp_path, 300000, [500])
+    with pytest.warns(RuntimeWarning, match="Image coverage differs"):
+        assert validate_images(tmp_path, 300000, [500]) == 2
 
 
-def test_missing_rendered_job_is_rejected(tmp_path):
+def test_missing_rendered_job_warns_and_continues(tmp_path):
     image_index(tmp_path, count=1)
-    with pytest.raises(ValueError, match="Incomplete image set"):
-        validate_images(tmp_path, 300000, [500])
+    with pytest.warns(RuntimeWarning, match="continuing with 1 indexed images"):
+        assert validate_images(tmp_path, 300000, [500]) == 1
 
 
 def test_missing_image_file_is_rejected(tmp_path):
@@ -449,6 +449,15 @@ def test_recovery_single_pass_reuses_images_and_records_provenance(
     assert manifest["pair_provenance"] == "verified producer round"
     assert calls[0] == ("inference", 10)
     assert (output / "png").resolve() == tmp_path / "images"
+
+
+def test_recovery_completes_after_image_coverage_warning(tmp_path, monkeypatch):
+    args, output, calls = fake_upstream(tmp_path, monkeypatch)
+    image_index(tmp_path / "images", windows=[(500, 0, 9)])
+    with pytest.warns(RuntimeWarning, match="Image coverage differs"):
+        main(args)
+    assert json.loads((output / "status.json").read_text())["state"] == "completed"
+    assert [call[0] for call in calls] == ["inference", "adjust"]
 
 
 def test_recovery_rejects_unexpected_official_span(tmp_path, monkeypatch):

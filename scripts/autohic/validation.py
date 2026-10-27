@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from collections import Counter
 from pathlib import Path
 
@@ -48,7 +49,7 @@ def assembly_info(path):
 
 
 def validate_images(directory, total_bp, resolutions):
-    """Match official diagonal window jobs, including overlapping end windows."""
+    """Validate image files and warn about unexpected diagonal window coverage."""
     directory = Path(directory)
     rows = [
         json.loads(line)
@@ -81,8 +82,6 @@ def validate_images(directory, total_bp, resolutions):
         for row in rows
         for meta in row.values()
     )
-    if observed != expected:
-        raise ValueError("Incomplete image set: missing or unexpected diagonal windows")
     names = [Path(name) for row in rows for name in row]
     if not names or len(names) != len(set(names)):
         raise ValueError("Empty image set or duplicate image paths")
@@ -90,6 +89,13 @@ def validate_images(directory, total_bp, resolutions):
         name.is_absolute() and name.is_file() and name.stat().st_size for name in names
     ):
         raise ValueError("Image index must refer to nonempty files by absolute path")
+    if observed != expected:
+        warnings.warn(
+            "Image coverage differs from official diagonal windows; "
+            f"continuing with {len(names)} indexed images",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return len(names)
 
 

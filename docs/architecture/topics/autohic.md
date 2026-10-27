@@ -80,7 +80,7 @@ AutoHiC 适配器只加载已验证的已批准 schema-3 参数链。它解析�
 
 - `device.py`：`auto` 探测实际 CUDA/MMCV NMS 后优先 GPU；启动不可用或识别到的 CUDA 初始化/推理错误时退回 CPU。推理失败只重试当前图片，之后保持 CPU。`cpu` 强制 CPU；`cuda` 要求 GPU，失败直接退出。只在退出异常处理块后释放初始化残留，记录设备事件和已处理图片数。设备上下文严重损坏导致模型无法移回 CPU 时仍会失败，不保证恢复所有 CUDA 错误。
 - `check_environment.py`：实际运行 CPU NMS、所选设备的探针及错误/染色体两个模型各一张图片，输出版本和实际设备。必须在无 GPU 可见的条件下单独验证 CPU 路径。
-- `recover.py`：复用操作者确认来源的 `.hic/.assembly` 配对或完整图片集，执行与官方 `onehic.py` 对应的单轮错误检测/调整，可选调用官方 3D-DNA post-review。检查磁盘预留、配对来源记录、推理范围、assembly 长度/placement、完整图片数、子进程退出码和输出；使用目录锁、全新输出目录和持久状态防止重复写入。磁盘预留是操作者设置的运行余量，不是完整峰值空间预测，也不约束 RAM。
+- `recover.py`：复用操作者确认来源的 `.hic/.assembly` 配对或图片集，执行与官方 `onehic.py` 对应的单轮错误检测/调整，可选调用官方 3D-DNA post-review。检查磁盘预留、配对来源记录、推理范围、assembly 长度/placement、图片文件、子进程退出码和输出；图片数量或坐标覆盖与官方窗口不匹配时仅提示，继续处理索引中的图片。使用目录锁、全新输出目录和持久状态防止重复写入。磁盘预留是操作者设置的运行余量，不是完整峰值空间预测，也不约束 RAM。
 
 `.hic` 可读取且 assembly 总长一致并不能单独证明二者配对。必须核对同一生产轮次的 cprops/asm、原始序列名/长度等来源，再用 `--pair-provenance` 记录依据。官方 `get_hic_real_len` 使用第一个 placement group，并按 map/assembly 比例换算坐标；多组 rawchrom 输入可能只覆盖很小一段。`--expected-inference-span-bp` 要求操作者明确确认官方推理坐标范围，不能仅凭文件名选输入。已有图片还必须确认来自该 contact map；数量校验不构成来源证明。
 
