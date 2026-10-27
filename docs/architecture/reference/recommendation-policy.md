@@ -78,3 +78,7 @@ Assembly 路线与读段类型共用 `app/domains/assembly/selection.py` 的映�
 在非零等待模式下，注册超时 normalizer 不等于每份请求都能自动执行。Assembly 必须有有效、类型与路线一致且被当前请求允许的推荐；Dedup 和参数审批必须允许各自的推荐执行或批准动作。空推荐、无效推荐或仅允许人工结果选择的请求直接进入人工路径，不用默认选项触发失败的自动事务。有效推荐仍遵循配置的倒计时；其他人工采纳门的既有审批策略不变。
 
 零等待在 finishing/Dedup 已完成尝试后直接生成 `source=policy` 的响应与采用/保留决策，不再调用结果顾问；原始输入、候选和评估仍保留。初始必要参数推荐的解析或阶段语义错误仍报错。零等待（`max_blocked_seconds: 0`）采用[明确推进策略](../topics/review-and-resume.md)：已有可用候选优先采用；无候选时执行有效推荐或沿用输入；最终 Review 评估并生成报告，质量建议不作终止授权。上文有关证据资格和人工回退的描述适用于非零等待。
+
+<a id="finishing-diagnostics-and-method-boundary"></a>
+
+Finishing 顾问的完整提案还可保存三类策略信息：`diagnostics` 按目标绑定已有产物和不确定性，`methods` 引用注册表中的方法适用性，`expected_new_evidence` 说明重试预期新增的证据。它们进入不可变 recommendation response 和 attempt assessment，供恢复与后续顾问读取；原始模型输出不被重新解释为执行计划。当前 T2T 执行器仍固定为 `t2t.alignment.minimap2`，因此 `switch_method` 与 `next_cluster` 只作为未实现动作被拒绝。新增方法必须先进入 descriptor registry、执行生命周期和采纳契约，再允许顾问选择；不能仅增加一个模型枚举值。

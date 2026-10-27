@@ -34,7 +34,7 @@ Gene Agent 运行带参数推荐、人工评审、重试、大型工具输出和
 
 `finishing_recommendation` 复用持久评审请求和 intent/application，但其效应为 `finishing.recommendation.v1`，不创建 schema-3 ParameterAttempt。审批精确绑定设置、源、历次 assessment、推荐与 QUAST；执行前重验 occurrence、参数、预算和来源。同源的新参数尝试目录隔离；恢复复用已发布响应与执行证据；早先候选的交付与最终 T2T 报告使用所选轮次证据。
 
-T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行。补丁候选表继续只包含进入支持分组的行；其中 supporting_reads 去重后的支持数汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。
+T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行；完整输出字符串及 CIGAR 留在不可变产物，不复制到模型示例上下文。执行命令摘要仅记录冻结脚本的解释器调用，源码快照通过 frozen_attempt_ref 追溯，不复制进模型上下文。补丁候选表继续只包含进入支持分组的行；其中 JSON supporting_read_ids 是无歧义身份列表，supporting_reads 仅作兼容展示；独立来源数单独记录，数值汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。 `reconstruction.json` 保存候选、构建计划、实现 profile 和版本；回贴验证表绑定完整候选 SHA-256。Collector 在发布成功事件前校验三者的一致性，并把 JSON 产物投影为有限的顾问摘要，避免把完整序列或 CIGAR 复制到模型上下文。代表输入与构建输出分别保留，不把同源一致性统计标成独立准确性证据。空候选仍提供结构完整的元数据和有表头的验证表。
 
 T2T 的 deterministic_baseline 使用单轮 schema-3 策略请求与批准记录，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不建立交互式 `parameter_approval` 门，补丁采纳仍走 `t2t_review`。默认 T2T advisor 使用 finishing 共同任务记录，设置、请求/响应、assessment/history 和每轮 `frozen.json` 按 finishing 证据链保存。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
 

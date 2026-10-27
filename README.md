@@ -112,13 +112,16 @@ Mac 开发机负责编辑和代码测试；真实生信工具在 Linux 服务器
 ```bash
 conda create -n gene_agent python=3.11 -y
 conda activate gene_agent
-python -m pip install -e '.[dev]'
+python -m pip install -c constraints/ci.txt -e '.[dev]'
 bash scripts/server_test.sh
 ```
 
 Python 依赖的唯一权威是 [pyproject.toml](pyproject.toml)。`gene_agent` 是本文档
 约定的编排器环境名，不从 `config/envs.yaml` 读取；激活后所有操作命令都直接使用
 当前环境。生信工具的 Conda 环境才由 `config/envs.yaml` 解析。
+T2T 执行脚本使用编排器解释器内的 `pyspoa`；安装由上述项目依赖统一管理。
+没有对应平台 wheel 时需要本机 C++ 编译环境。更新代码后需重新安装依赖；
+仅更新工具 Conda 环境不能补齐该 Python 依赖。
 
 ### 2. Prepare and check the host
 

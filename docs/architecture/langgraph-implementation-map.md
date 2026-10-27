@@ -119,8 +119,8 @@
 | GapCloser HiFi 执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser 无校正路线、原生坐标校验、持久门禁采纳（零等待自动）、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
 | T2T 输入/基序：`resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process`，条件模型调用 | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`；`tests/test_t2t_motif.py` |
 | T2T 单轮 schema-3 策略请求与批准、`prepare_parameters` | `wired` | `implemented-no-process` 策略/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |
-| T2T 扫描与 minimap2 比对 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py` |
-| T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
+| T2T 扫描、映射、POA 构建与回贴统计 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/{nodes,algorithms,reconstruction,script}.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py` |
+| T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物；顾问诊断、方法适用性和预期新证据进入 recommendation/assessment，但未接入方法切换。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`、`app/stages/finishing/advisor.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
 | Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、持久门禁交接；`tests/test_base_polish.py` |
 
 <a id="registered-method-inventory"></a>
@@ -151,7 +151,7 @@
 | `hic_scaffolding.candidate.autohic` | 已注册且有目录 | `executable` | 已实现 | `tests/test_hic_scaffolding.py` | 收集必须有全部四项评审产品 |
 | `gapcloser.tgs_gapcloser` | 已注册 | `executable` | 已实现 | `tests/test_gapcloser.py` | 仅 HiFi，采用遵循等待模式矩阵；坐标一致性不是 QV |
 | `base_polish.racon` | 已注册 | `executable` | 已实现 | `tests/test_base_polish.py` | 仅 HiFi；成对读段一致性不是独立 QV；采纳或保留源 |
-| `t2t.alignment.minimap2` | 已注册且有目录 | `executable` | 已实现 | `tests/test_t2t.py` | 无额外记录限制 |
+| `t2t.alignment.minimap2` | 已注册且有目录 | `executable` | 已实现 | `tests/test_t2t.py`、`tests/test_t2t_output_contract.py` | 单次冻结脚本覆盖构建与回贴，完整候选绑定；未做真实工具或样本验收 |
 
 `tests/test_registry_executable_invariant.py` 从导入 `MethodExecutionLifecycle` 绑定导出本地 ID，证明覆盖每个本地方法，并验证共享 freeze/run/collect 与外层路线。从生产规划目录导出 planner-only 集合，沿 `read_qc.length_filter.skip` 到 raw 提交，证明不创建过滤冻结尝试、Runner 调用或方法尝试事件。两集合互斥，并集等于完整注册表。
 
@@ -173,7 +173,7 @@
 | Assembly：Hifiasm-ONT | 已实现 | 已实现，共享案例消费者 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 必须保持 ONT 模式、读段状态与案例绑定差异 |
 | Assembly：NextDenovo | 已实现 | 已实现，共享案例消费者 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 有原生来源设置；不能机械翻译外部工具参数 |
 | AutoHiC | 已实现 | 已实现 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 缺声明产品时收集拒绝；终态收集失败无自动重试 |
-| T2T/minimap2 阈值 | 已实现 | 基序、源端部测量、过滤前分布/拒绝原因及全部候选支持数 | 持久门禁批准，遵循等待模式矩阵 | 独立尝试与冻结输入 | 有界顾问循环；另有初始 schema-3 基线 | 实际补丁/保留源；无独立 QV |
+| T2T/minimap2 阈值 | 已实现 | 输入测量、过滤前分布/拒绝原因、来源去重支持数与回贴指标 | 持久门禁批准，遵循等待模式矩阵 | 独立尝试与冻结输入 | 有界顾问循环；另有初始 schema-3 基线 | 实际补丁/保留源；无独立 QV |
 | GapCloser | 已实现 | 缺口与 QUAST/填补证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮独立冻结 | max_attempts 有界参数尝试 | HiFi-only TGS-GapCloser；另有单轮基线 |
 | Base Polish | 已实现 | QUAST、成对 PAF/FASTA/版本证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮从原组装独立冻结 | max_attempts 有界配置尝试 | 每候选一轮 HiFi Racon；无独立 QV |
 | Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`；正数倒计时可自动 follow 有效建议，零等待执行明确推进策略；人工也可显式选择 | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |

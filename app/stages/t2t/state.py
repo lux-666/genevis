@@ -136,6 +136,12 @@ class T2TStageCursor(TypedDict, total=False):
     notes: list[str]
     thresholds: T2TThresholdsJson
     alignment_observations_ref: str
+    readback_validation_ref: str
+    readback_paf_ref: str
+    reconstruction_ref: str
+    reconstructed_assembly_ref: str
+    representative_baseline_ref: str
+    consensus_extensions_ref: str
 
     # Motif-resolution evidence chain.
     resolved_telomere_motif: str
@@ -171,7 +177,7 @@ class T2TStageCursor(TypedDict, total=False):
     assembly_missing_end_count: int
     reads_telomere_scan_ref: str
     telomeric_reads_ref: str
-    telomeric_reads_fasta_refs: dict[str, str]
+    alignment_reads_fasta_refs: dict[str, str]
     read_count: int
     telomeric_read_count: int
     candidate_skip_reason: str

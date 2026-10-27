@@ -17,3 +17,4 @@ pytest-cov==7.0.0
 ruff==0.16.8
 mypy==2.3.1
 types-PyYAML==6.0.12.20250915
+pyspoa==0.3.2

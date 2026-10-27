@@ -42,6 +42,13 @@
 - 契约所有者：[Base Polish](stage-contracts.md#10-base-polish)。
 - 关闭条件：先运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整工作流。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
 
+### T2T 构建与验证的工程边界
+
+当前代码已把 POA 构建和完整候选回贴纳入同一个冻结方法生命周期，保存来源、计算预算、版本和哈希绑定。工程回归覆盖产物结构、错误传播、恢复与采纳；本次仅做软件检查，没有执行真实工具或样本验收。诊断记录、方法适用性和重试必须说明新增证据已经落地。方法切换在只有一种适用注册方法时拒绝。代表输入对照不是独立方法；部分候选重新验证和旧 checkpoint 迁移仍未实现。具体行为由[阶段契约](stage-contracts.md#9-t2t-finishing)拥有，不另建控制路径。
+
+- 当前证据：`app/stages/t2t/{algorithms,reconstruction,script,nodes,review}.py`、`tests/test_t2t.py`、`tests/test_t2t_output_contract.py`。
+- 后续范围：另行明确方法切换及验证契约后再实现；不得把工程回归通过等同于结果质量已验证。
+
 <a id="assembly-software-explanation-coverage"></a>
 
 ### Assembly 软件解释覆盖
