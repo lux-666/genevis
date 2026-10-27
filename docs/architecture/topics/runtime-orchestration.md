@@ -34,7 +34,7 @@ RunConfig 拥有字面 occurrence 序列。规划推荐永远不会变成校验�
 
 `gene-agent tui` 是使用同一冻结发布和执行器的可选对话输入/规划入口。其他公共子命令为 `inspect`、`storage-audit`、`resume`、`review` 和 `bootstrap`。
 
-`execute_frozen_session` 校验冻结控制文档，取得每会话执行锁和活动 `FrozenExecutionLease`，创建 Ledger 会话，构建小型 `TopLevelState`，把运行配置值投影到所属阶段游标，使用所得执行器拥有的 `FrozenInputBundle` 构建父图，并以 session ID 作为 LangGraph thread ID 调用。Inventory 校验和资产注册消费已经验证的内存 manifest、RunConfig、规范声明和运行所属路径，不重新打开未经校验的控制文件。该 bundle 是闭包上下文，不是图通道或 checkpoint 载荷。新进程在建图前再次校验冻结事务；这是数据契约定义的可信本地操作者模型下的运行一致性检查。公共 run 始终使用 SQLite。每个新结构化运行和已确认 TUI 草稿都必须在冻结前检查 stdin/stdout 为真实 TTY；能力缺失时失败且不发布冻结输入。已冻结的阻塞 checkpoint 仍可通过 `inspect`、`review`、`resume` 恢复，但不构成第二个非交互新运行入口。
+`execute_frozen_session` 校验冻结控制文档，取得每会话执行锁和活动 `FrozenExecutionLease`，创建 Ledger 会话，构建小型 `TopLevelState`，把运行配置值投影到所属阶段游标，使用所得执行器拥有的 `FrozenInputBundle` 构建父图，并以 session ID 作为 LangGraph thread ID 调用。Inventory 校验和资产注册消费已经验证的内存 manifest、RunConfig、规范声明和运行所属路径，不重新打开未经校验的控制文件。该 bundle 是闭包上下文，不是图通道或 checkpoint 载荷。新进程在建图前再次校验冻结事务；这是数据契约定义的可信本地操作者模型下的运行一致性检查。公共 run 始终使用 SQLite。结构化新运行全部阶段等待为 0 时允许无 TTY；存在非零等待时必须连接真实 stdin/stdout TTY，否则失败且不发布冻结输入。TUI 是交互入口，确认草稿后仍要求 TTY；冻结后共用同一执行器。已冻结的阻塞 checkpoint 通过 `inspect`、`review`、`resume` 人工恢复，不重启自动循环。
 
 前台门禁使用冻结的评审策略和注册 resolver，而原执行器保持附着。进程中断留下持久人工阻塞，不使用守护进程截止时间；后续 `review` 和 `resume` 不重建已经过去的倒计时。精确值、resolver 资格、不可变绑定和恢复状态由[评审契约](../reference/data-contract.md#12-review-contract)拥有，并在[评审与恢复](review-and-resume.md)中说明。
 
@@ -52,9 +52,9 @@ TUI 输入 -> 计划草稿 -> 确认 -> freeze-+
 
 `gene-agent run` 将 manifest 与 RunConfig 视为已经定稿的草稿，不进入 TUI 计划草稿编辑器，也不要求二次确认。无效文件在冻结前失败；有效文件冻结后直接执行。TUI 仍是反复收集、检查、描述、编辑和确认可变草稿的入口，最终创建同一冻结契约。
 
-每个新运行都要求 stdin 和 stdout 在冻结前连接真实 TTY。公共新运行契约没有非交互执行分支。`review` 和 `resume` 是持久会话中断后的恢复工具，不是第二种正常生命周期。
+全零等待的结构化新运行允许无 TTY，其余新运行要求 stdin 和 stdout 在冻结前连接真实 TTY。两者使用同一执行器和持久门禁协议，具体动作由[等待模式矩阵](review-and-resume.md#foreground-review-policy)拥有。`review` 和 `resume` 是持久会话中断后的恢复工具，不是第二种正常生命周期。
 
-多个 contig 或项目仍是多个独立运行。外部调用者为每个单元创建一份 manifest 和 RunConfig，分配无冲突 `session_id`，为每个进程分配一个终端，并重复调用同一命令。产品不增加批处理调度器、跨会话 checkpoint 或持久聚合进度所有者；调用者可在运行目录外合并只读检查结果。
+多个 contig 或项目仍是多个独立运行。外部调用者为每个单元创建一份 manifest 和 RunConfig，分配无冲突 `session_id`，按等待配置为需要交互的进程分配终端，并重复调用同一命令。产品不增加批处理调度器、跨会话 checkpoint 或持久聚合进度所有者；调用者可在运行目录外合并只读检查结果。
 
 冻结后两个生产者都调用 `execute_frozen_session` 边界。该边界拥有阶段进度、评审摘要、回车确认倒计时、人工决策、自动超时决策和终态摘要的一套终端体验。入口点不得实现并行门禁或进度循环。
 
@@ -87,7 +87,7 @@ START -> route_controller -> selected stage subgraph
 
 父图中的每个域节点都是编译阶段子图。阶段可以解析逻辑资源、规划已注册方法、进入共享方法生命周期、发布生物学产物、打开评审门并提交新资源。这些是可用边界，不是十个阶段必须完全相同的序列。
 
-`app/graph/builder.py` 显式注册十个域阶段；子图可组合，但不存在动态插件注册表。`gapcloser` 执行仅 HiFi 的 TGS-GapCloser 路线并人工采纳；`base_polish` 执行仅 HiFi 的 Racon 轮次，带成对前后证据并人工采纳或保留来源。恢复只应用于绑定到被中断不可变 occurrence 的决策，不重写剩余计划、固定方法名单或已绑定 Assembly 选择。
+`app/graph/builder.py` 显式注册十个域阶段；子图可组合，但不存在动态插件注册表。`gapcloser` 执行仅 HiFi 的 TGS-GapCloser 路线；`base_polish` 执行仅 HiFi 的 Racon 轮次并保留成对前后证据。结果采用/保留共用持久门禁，人工或自动动作遵循[等待模式矩阵](review-and-resume.md#foreground-review-policy)。恢复只应用于绑定到被中断不可变 occurrence 的决策，不重写剩余计划、固定方法名单或已绑定 Assembly 选择。
 
 `stage_seeds` 是不可变的阶段范围 RunConfig 投影。每次重复 occurrence 都从同一阶段种子的全新副本及其独立复制的固定方法名单开始；Assembly 种子可不带名单，让 occurrence 在阶段入口依据冻结依赖绑定方法。它绝不复用前一个 occurrence 的完成游标。
 

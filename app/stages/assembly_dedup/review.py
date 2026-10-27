@@ -134,7 +134,14 @@ def validate_intent_request(
         raise ResumeValidationError("dedup review evidence changed")
     records = history(state)
     ForegroundReviewMetadataV1.model_validate(request.metadata)
-    if request.decided_by != "human" and (
+    if (
+        request.decided_by == "auto_rule"
+        and request.metadata.get("configured_seconds") == 0
+    ):
+        from app.review.automatic import validate_zero_wait_request
+
+        validate_zero_wait_request(request, record, data_dir=state["data_dir"])
+    elif request.decided_by != "human" and (
         request.decided_by != "auto_rule"
         or request.decision != "follow_recommendation"
         or request.metadata.get("source") != "foreground_countdown"

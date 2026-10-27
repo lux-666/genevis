@@ -253,12 +253,13 @@ class ForegroundGateLoopTests(unittest.TestCase):
             )
         return final, execute, collect, waiter
 
-    def test_zero_keeps_gate_without_resolver_on_manual_path(self):
+    def test_zero_stops_on_unverified_request_without_prompting(self):
         final, execute, collect, waiter = self._run_loop(0)
 
         self.assertEqual(final["supervision_state"], "blocked_human")
         waiter.assert_not_called()
-        collect.assert_called_once()
+        collect.assert_not_called()
+        self.assertTrue(final.get("last_error"))
         execute.assert_not_called()
 
     def test_empty_route_recommendation_prompts_without_starting_countdown(self):
@@ -298,7 +299,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
         self.assertIsInstance(call["projection_boundary"], ProjectionBoundary)
         self.assertIs(call["on_review_applied"], render_applied_review)
 
-    def test_zero_falls_back_to_manual_when_existing_resolver_fails(self):
+    def test_zero_stops_when_existing_resolver_fails(self):
         with patch(
             "app.control.resume.build_foreground_auto_resume_request",
             side_effect=ResumeValidationError("missing binding"),
@@ -310,7 +311,8 @@ class ForegroundGateLoopTests(unittest.TestCase):
 
         self.assertEqual(final["supervision_state"], "blocked_human")
         waiter.assert_not_called()
-        collect.assert_called_once()
+        collect.assert_not_called()
+        self.assertTrue(final.get("last_error"))
         execute.assert_not_called()
 
     def test_auto_builder_failure_does_not_prompt_after_integrity_drift(self):
@@ -343,8 +345,9 @@ class ForegroundGateLoopTests(unittest.TestCase):
             compaction_warning=None,
         )
         final, execute, collect, waiter = self._run_loop(
-            0,
-            summary=_route_summary(0),
+            1,
+            claim="expired",
+            summary=_route_summary(1),
             collected=(human, human.model_dump(mode="json")),
             execute_side_effect=[
                 ResumeTransactionError(
@@ -357,7 +360,7 @@ class ForegroundGateLoopTests(unittest.TestCase):
         )
 
         self.assertEqual(final["supervision_state"], "completed")
-        waiter.assert_not_called()
+        waiter.assert_called_once()
         collect.assert_called_once()
         self.assertEqual(execute.call_count, 2)
         self.assertEqual(

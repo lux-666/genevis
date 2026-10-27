@@ -1,5 +1,22 @@
 # Gene Agent
 
+Gene Agent is an alpha-stage workflow system for long-read genome assembly.
+It coordinates established bioinformatics tools with LangGraph and preserves
+run inputs, execution evidence, artifacts, human review decisions, and recovery
+state. It is designed for researchers running assembly workflows on Linux or
+HPC hosts. The repository is named `genevis`; the Python package and CLI are
+`gene-agent`.
+
+Start with the [offline verification walkthrough](docs/user_guide/offline-verification.md)
+to check input registration, durable review/resume, and artifact auditing without
+installing biological tools or configuring an LLM endpoint. These synthetic
+checks validate workflow behavior; they do not establish biological accuracy or
+real-tool compatibility. For real runs, follow the setup and operator guides below
+(currently primarily in Chinese). See [Contributing](CONTRIBUTING.md) for feedback
+and development instructions.
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 lux-666.
+
 Gene Agent 是面向长读长基因组组装的可恢复、可审计工作流系统。它用
 LangGraph 编排已批准的本地生信工具，把 manifest、参数推荐、人工决策、
 运行证据和阶段产物保存在同一个 session 边界内。
@@ -95,13 +112,16 @@ Mac 开发机负责编辑和代码测试；真实生信工具在 Linux 服务器
 ```bash
 conda create -n gene_agent python=3.11 -y
 conda activate gene_agent
-python -m pip install -e '.[dev]'
+python -m pip install -c constraints/ci.txt -e '.[dev]'
 bash scripts/server_test.sh
 ```
 
 Python 依赖的唯一权威是 [pyproject.toml](pyproject.toml)。`gene_agent` 是本文档
 约定的编排器环境名，不从 `config/envs.yaml` 读取；激活后所有操作命令都直接使用
 当前环境。生信工具的 Conda 环境才由 `config/envs.yaml` 解析。
+T2T 执行脚本使用编排器解释器内的 `pyspoa`；安装由上述项目依赖统一管理。
+没有对应平台 wheel 时需要本机 C++ 编译环境。更新代码后需重新安装依赖；
+仅更新工具 Conda 环境不能补齐该 Python 依赖。
 
 ### 2. Prepare and check the host
 

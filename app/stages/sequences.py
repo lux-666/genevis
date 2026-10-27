@@ -11,6 +11,15 @@ from typing import TextIO
 _BASES = frozenset("ACGTRYSWKMBDHVN")
 
 
+def validate_assembly_fasta(path: Path) -> None:
+    """Check format, alphabet, nonempty sequences and unique identifiers."""
+    seen: set[str] = set()
+    for name, _sequence in read_sequences(path, "fasta"):
+        if name in seen:
+            raise ValueError(f"duplicate scaffold identifier: {name}")
+        seen.add(name)
+
+
 def _sequence(parts: list[str]) -> str:
     sequence = "".join(parts).upper()
     if not sequence or not set(sequence) <= _BASES:

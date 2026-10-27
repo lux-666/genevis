@@ -15,6 +15,7 @@ from app.review.application import (
     ReviewIntentV1,
     VerifiedReviewApplication,
 )
+from app.review.automatic import validate_zero_wait_request
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request, persist_review_decision
 from app.schemas.artifacts import ArtifactRef
@@ -65,6 +66,8 @@ def validate_intent_request(
     stage = request.stage
     if stage not in STAGES:
         raise ResumeValidationError("unsupported finishing stage")
+    if request.decided_by != "human":
+        validate_zero_wait_request(request, record, data_dir=state["data_dir"])
     interrupt: Mapping[str, Any] = state.get("active_interrupt") or {}
     ref = ArtifactRef.model_validate(interrupt.get("request_ref"))
     verified = load_review_request(
@@ -84,7 +87,6 @@ def validate_intent_request(
         or interrupt.get("workflow_step_id") != current_workflow_step_id(state)
         or request.decision not in record["payload"]["decisions_allowed"]
         or loop(state, stage).get("phase") != "blocked"
-        or request.decided_by != "human"
     ):
         raise ResumeValidationError("finishing human review identity/decision mismatch")
     if record["payload"]["candidate_comparison_context"] != context(state, stage):
@@ -110,11 +112,9 @@ def validate_intent_request(
         request.candidate_ids
         or request.method_name
         or request.rejected_candidates
-        or request.metadata
+        or (request.metadata and request.decided_by == "human")
     ):
-        raise ResumeValidationError(
-            "finishing does not accept overrides or automatic decisions"
-        )
+        raise ResumeValidationError("finishing does not accept decision overrides")
     return request
 
 
@@ -293,7 +293,7 @@ def approved_proposal(
     approved_context = request["payload"]["candidate_comparison_context"]
     if (
         decision["decision"]["decision"] != "follow_recommendation"
-        or decision["decision"]["decided_by"] != "human"
+        or decision["decision"]["decided_by"] not in {"human", "auto_rule"}
         or decision["gate_id"] != GATE
         or decision["stage"] != stage
         or decision["workflow_step_id"]
@@ -307,7 +307,7 @@ def approved_proposal(
         or approved_context["recommendation_ref"] != f["recommendation_ref"]
         or proposal.parameters.model_dump(mode="json") != f["parameters"]
     ):
-        raise ValueError("finishing execution differs from its human approval")
+        raise ValueError("finishing execution differs from its recorded approval")
     if before_execution:
         records = history(state, stage)
         validate_proposal(stage, proposal, records, maximum_attempts(state, stage))

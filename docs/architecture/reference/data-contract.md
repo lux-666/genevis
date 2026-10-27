@@ -34,7 +34,7 @@ Gene Agent 运行带参数推荐、人工评审、重试、大型工具输出和
 
 `finishing_recommendation` 复用持久评审请求和 intent/application，但其效应为 `finishing.recommendation.v1`，不创建 schema-3 ParameterAttempt。审批精确绑定设置、源、历次 assessment、推荐与 QUAST；执行前重验 occurrence、参数、预算和来源。同源的新参数尝试目录隔离；恢复复用已发布响应与执行证据；早先候选的交付与最终 T2T 报告使用所选轮次证据。
 
-T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行。补丁候选表继续只包含进入支持分组的行；其中 supporting_reads 去重后的支持数汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。
+T2T `alignment_observations.tsv` 保存过滤前每条 PAF 两端的测量、全部拒绝原因及冻结尝试/执行/PAF 引用。请求汇总遍历完整表，仅示例限 100 行；完整输出字符串及 CIGAR 留在不可变产物，不复制到模型示例上下文。执行命令摘要仅记录冻结脚本的解释器调用，源码快照通过 frozen_attempt_ref 追溯，不复制进模型上下文。补丁候选表继续只包含进入支持分组的行；其中 JSON supporting_read_ids 是无歧义身份列表，supporting_reads 仅作兼容展示；独立来源数单独记录，数值汇总覆盖全部行。没有比对或没有通过阈值的候选必须可区分。 `reconstruction.json` 保存候选、构建计划、实现 profile 和版本；回贴验证表绑定完整候选 SHA-256。Collector 在发布成功事件前校验三者的一致性，并把 JSON 产物投影为有限的顾问摘要，避免把完整序列或 CIGAR 复制到模型上下文。代表输入与构建输出分别保留，不把同源一致性统计标成独立准确性证据。空候选仍提供结构完整的元数据和有表头的验证表。
 
 T2T 的 deterministic_baseline 使用单轮 schema-3 策略请求与批准记录，要求已提供基序，以目录 L0、空 L2 和不可变策略审批冻结；不调用基序/阈值模型，不建立交互式 `parameter_approval` 门，补丁采纳仍走 `t2t_review`。默认 T2T advisor 使用 finishing 共同任务记录，设置、请求/响应、assessment/history 和每轮 `frozen.json` 按 finishing 证据链保存。模式与交接边界见[阶段契约](stage-contracts.md#9-t2t-finishing)。
 
@@ -432,7 +432,9 @@ Checkpoint `active_interrupt` 只含有界控制数据：
 
 `payload.max_blocked_seconds` 是有效冻结策略值。运行全局 `ReviewPolicyConfig.max_blocked_seconds` 默认 300；唯一覆盖为 `review_policy.stages[stage].max_blocked_seconds`，只允许注册的评审阶段。有效值冻结到每个请求的评审所属阶段。一次阶段覆盖作用于该阶段全部门，包括 Assembly 参数审批与路线选择，没有门专属超时配置。Assembly Review 除非通过 `review_policy.stages.assembly_review` 显式覆盖，否则沿用全局值。
 
-值表示前台行为，不是持久截止时间。新运行冻结前验证 stdin/stdout TTY 后进入同一附着执行器。`-1` 无限等，`0` 立即触发注册合格 resolver，正数是回车认领倒计时，到期触发同一 resolver。前台循环共享，决策保持门专属，由注册表声明。
+值表示前台行为，不是持久截止时间。新运行进入同一附着执行器；结构化运行全部阶段为零等待时不要求 TTY，其余情况冻结前验证 stdin/stdout TTY；TUI 交互入口仍要求 TTY。`-1` 无限等，`0` 按[零等待策略](../topics/review-and-resume.md)立即采用可用产物、执行有效参数或沿用输入，正数是回车认领倒计时，到期触发既有合格 resolver。前台循环共享，决策保持门专属，由注册表声明。
+
+`auto_decidable` 表示 LLM resolver 的资格；零等待是否有规则由注册表 `zero_wait_policy` 决定，inspect 将两者分别投影，不能将 false 解读为禁止所有自动动作。`recommendation_error` 保存解析及阶段语义校验错误，属于不可变请求内容；零等待拒绝该错误，不按合法保留建议处理。
 
 不可变请求存在后才计时。参数门超时只批准请求绑定的精确推荐，不生成、编辑、合并、替换值。Resolver 资格、请求/推荐绑定、理由产物、类型化意图/应用生命周期仍权威。自动决策还须内部恢复事务来源和绑定倒计时 metadata 指明当前 `foreground_countdown`；决策来源仍由 resolver 拥有（`llm_provisional` 或 `auto_rule`），请求 metadata 不能自授权。
 

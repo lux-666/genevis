@@ -14,8 +14,9 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
         f"# {title}",
         "",
         (
-            "No automatic biological thresholds are applied. This report informs "
-            "the human decision only."
+            "No automatic biological thresholds are applied. "
+            "This report records quality observations; adoption follows the "
+            "configured review policy."
         ),
         "",
         "## Candidate Metrics",

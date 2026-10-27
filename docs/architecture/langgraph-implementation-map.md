@@ -49,6 +49,7 @@
 | Base Polish 采纳边界 | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对证据、持久采纳/保留/停止；`app/stages/base_polish/`；`tests/test_base_polish.py` |
 | SQLite/memory checkpoint 选择和持久恢复 | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`、`app/control/inspection.py`、`app/control/terminal.py`、`app/control/resume.py`；`tests/test_checkpointer.py`、`tests/test_durable_resume.py` |
 | 前台评审倒计时 | `wired` | `implemented-no-process` | `tested` | `none` | 冻结策略与注册 resolver 进入人工决策共用的类型化意图、持久准备、已验证应用和恢复协议。倒计时仅存在于原附着执行器，后续 review/resume 人工恢复。值与绑定由运行数据契约拥有。`app/review/application.py`、`app/control/resume_transaction.py`、`app/review/approval.py`；`tests/test_review_application.py`、`tests/test_foreground_review_countdown.py`、`tests/test_parameter_persistence_v2.py` |
+| 零等待明确推进 | `wired` | `implemented-no-process` | `tested` | `known-gap` | 无 TTY 的全零新运行、有效产物采用、无新结果沿用、参数错误拒绝、结果后不调用顾问；共用持久意图/应用协议。`app/review/automatic.py`、`tests/test_zero_wait_review.py`。完整父图跨阶段和真实服务器样本验收仍待补齐；恢复仍人工。见[等待矩阵](topics/review-and-resume.md#foreground-review-policy) |
 | 权威终结、报告、checkpoint 压缩 | `wired` | `implemented-no-process` | `tested` | `none` | `finalize_authoritative_terminal()` 先证明 checkpoint 再写 Ledger 终态单例，随后尽力压缩。报告经 `ProjectionBoundary`，不得改变生命周期权威；独立重建全部报告不在契约内。`app/control/inspection.py`、`app/control/terminal.py`、`app/control/resume.py`、`app/control/projections.py`、`app/graph/checkpoint_compaction.py`；`tests/test_terminal_finalizer.py`、`tests/test_projections.py`、`tests/test_checkpoint_compaction.py` |
 
 <a id="cross-cutting-implementation-boundaries"></a>
@@ -115,12 +116,12 @@
 | Hi-C `recommend_autohic_parameters` 与审批/重试 | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`；`tests/test_hic_scaffolding.py`、`tests/test_parameter_resolution_validation.py` |
 | Hi-C `autohic` 方法与收集 | `wired` | `executable` | `tested` | `none` | 真实 Runner 和 FASTA/.hic/.assembly/HTML 严格校验，含回放与后期发布失败覆盖。`app/stages/hic_scaffolding/method_application/`；`tests/test_hic_scaffolding.py` |
 | Hi-C `chromosome_assembly_review`、阻塞、采纳恢复 | `wired` | `implemented-no-process` | `tested` | `none` | 候选/当前资源替换声明 materialized 或 reused 交付，共享结算对照索引产物验证。`app/stages/hic_scaffolding/builder.py`、`nodes.py`；`tests/test_hic_scaffolding.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
-| GapCloser HiFi 执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser 无校正路线、原生坐标校验、持久人工采纳、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
+| GapCloser HiFi 执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser 无校正路线、原生坐标校验、持久门禁采纳（零等待自动）、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
 | T2T 输入/基序：`resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process`，条件模型调用 | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`；`tests/test_t2t_motif.py` |
 | T2T 单轮 schema-3 策略请求与批准、`prepare_parameters` | `wired` | `implemented-no-process` 策略/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |
-| T2T 扫描与 minimap2 比对 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py` |
-| T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`；`tests/test_t2t.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
-| Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、人工交接；`tests/test_base_polish.py` |
+| T2T 扫描、映射、POA 构建与回贴统计 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/{nodes,algorithms,reconstruction,script}.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py` |
+| T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物；顾问诊断、方法适用性和预期新证据进入 recommendation/assessment，但未接入方法切换。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`、`app/stages/finishing/advisor.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
+| Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、持久门禁交接；`tests/test_base_polish.py` |
 
 <a id="registered-method-inventory"></a>
 
@@ -148,9 +149,9 @@
 | `assembly_review.eval.quast` | 已注册 | `executable` | 已实现 | `tests/test_assembly_review.py` | 可复用 Review 评估器，包括请求时最终成对 Review；不等于独立 QV |
 | `assembly_review.eval.busco` | 已注册 | `executable` | 已实现 | `tests/test_assembly_review.py`、`tests/test_database_resolution.py` | manifest NCBI 学名选择兼容已装 lineage；RunConfig lineage 仅断言，路径/版本/来源取冻结主机注册表 |
 | `hic_scaffolding.candidate.autohic` | 已注册且有目录 | `executable` | 已实现 | `tests/test_hic_scaffolding.py` | 收集必须有全部四项评审产品 |
-| `gapcloser.tgs_gapcloser` | 已注册 | `executable` | 已实现 | `tests/test_gapcloser.py` | 仅 HiFi，人工采纳；坐标一致性不是 QV |
+| `gapcloser.tgs_gapcloser` | 已注册 | `executable` | 已实现 | `tests/test_gapcloser.py` | 仅 HiFi，采用遵循等待模式矩阵；坐标一致性不是 QV |
 | `base_polish.racon` | 已注册 | `executable` | 已实现 | `tests/test_base_polish.py` | 仅 HiFi；成对读段一致性不是独立 QV；采纳或保留源 |
-| `t2t.alignment.minimap2` | 已注册且有目录 | `executable` | 已实现 | `tests/test_t2t.py` | 无额外记录限制 |
+| `t2t.alignment.minimap2` | 已注册且有目录 | `executable` | 已实现 | `tests/test_t2t.py`、`tests/test_t2t_output_contract.py` | 单次冻结脚本覆盖构建与回贴，完整候选绑定；未做真实工具或样本验收 |
 
 `tests/test_registry_executable_invariant.py` 从导入 `MethodExecutionLifecycle` 绑定导出本地 ID，证明覆盖每个本地方法，并验证共享 freeze/run/collect 与外层路线。从生产规划目录导出 planner-only 集合，沿 `read_qc.length_filter.skip` 到 raw 提交，证明不创建过滤冻结尝试、Runner 调用或方法尝试事件。两集合互斥，并集等于完整注册表。
 
@@ -165,21 +166,21 @@
 
 参数能力不是布尔值。目录、推荐、审批、冻结绑定、重试和生物学知识覆盖是独立事实。
 
-| 范围 | 静态目录 | 推荐与不可变证据 | 人工审批 | 冻结尝试绑定 | 重试 | 当前限制 |
+| 范围 | 静态目录 | 推荐与不可变证据 | 门禁审批 | 冻结尝试绑定 | 重试 | 当前限制 |
 |---|---|---|---|---|---|---|
-| Assembly：Flye | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 可消费原生/跨方法案例；实际覆盖和收益未测 |
-| Assembly：Hifiasm | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 机制指导较丰富，但不能代替代表样本验收 |
-| Assembly：Hifiasm-ONT | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 必须保持 ONT 模式、读段状态与案例绑定差异 |
-| Assembly：NextDenovo | 已实现 | 已实现，共享案例消费者 | 顾问模式必需 | 已实现 | 已实现 | 有原生来源设置；不能机械翻译外部工具参数 |
-| AutoHiC | 已实现 | 已实现 | 顾问模式必需 | 已实现 | 已实现 | 缺声明产品时收集拒绝；终态收集失败无自动重试 |
-| T2T/minimap2 阈值 | 已实现 | 基序、源端部测量、过滤前分布/拒绝原因及全部候选支持数 | 逐动作人工批准 | 独立尝试与冻结输入 | 有界顾问循环；另有初始 schema-3 基线 | 实际补丁/保留源；无独立 QV |
-| GapCloser | 已实现 | 缺口与 QUAST/填补证据顾问 | 逐动作人工批准 | 每轮独立冻结 | max_attempts 有界参数尝试 | HiFi-only TGS-GapCloser；另有单轮基线 |
-| Base Polish | 已实现 | QUAST、成对 PAF/FASTA/版本证据顾问 | 逐动作人工批准 | 每轮从原组装独立冻结 | max_attempts 有界配置尝试 | 每候选一轮 HiFi Racon；无独立 QV |
-| Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`；合格前台倒计时可自动 follow `run`/`accept`/`keep_source`，人工也可显式选择 | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |
+| Assembly：Flye | 已实现 | 已实现，共享案例消费者 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 可消费原生/跨方法案例；实际覆盖和收益未测 |
+| Assembly：Hifiasm | 已实现 | 已实现，共享案例消费者 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 机制指导较丰富，但不能代替代表样本验收 |
+| Assembly：Hifiasm-ONT | 已实现 | 已实现，共享案例消费者 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 必须保持 ONT 模式、读段状态与案例绑定差异 |
+| Assembly：NextDenovo | 已实现 | 已实现，共享案例消费者 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 有原生来源设置；不能机械翻译外部工具参数 |
+| AutoHiC | 已实现 | 已实现 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 缺声明产品时收集拒绝；终态收集失败无自动重试 |
+| T2T/minimap2 阈值 | 已实现 | 输入测量、过滤前分布/拒绝原因、来源去重支持数与回贴指标 | 持久门禁批准，遵循等待模式矩阵 | 独立尝试与冻结输入 | 有界顾问循环；另有初始 schema-3 基线 | 实际补丁/保留源；无独立 QV |
+| GapCloser | 已实现 | 缺口与 QUAST/填补证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮独立冻结 | max_attempts 有界参数尝试 | HiFi-only TGS-GapCloser；另有单轮基线 |
+| Base Polish | 已实现 | QUAST、成对 PAF/FASTA/版本证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮从原组装独立冻结 | max_attempts 有界配置尝试 | 每候选一轮 HiFi Racon；无独立 QV |
+| Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`；正数倒计时可自动 follow 有效建议，零等待执行明确推进策略；人工也可显式选择 | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |
 | Read QC、Survey、Review | 注册表默认方法与静态/操作者参数 | 无 schema-3 参数推荐；Review 可另有决策推荐 | 按各阶段门禁 | 可执行方法使用共享尝试冻结 | 按阶段契约 | 默认方法内部拥有，不暴露为用户方法选择字段 |
 | Inventory | 不需要 | 不需要 | 仅输入歧义评审 | 不适用 | 不适用 | 不应推断存在推荐器 |
 
-Assembly 路线选择也使用共享 StructuredRecommender 调用/解析边界，仍保留 schema-v1 路线记录。Assembly/AutoHiC advisor 使用 schema-3 模型请求、响应、解析和人工参数审批；Assembly/AutoHiC baseline 保存精确渲染请求与空 L2 策略响应，不调用模型。T2T baseline 同样保留 schema-3 manifest/approval，但只写纯策略请求与响应，不渲染阈值 prompt；默认 T2T advisor 进入 finishing。Dedup 顾问支持合格前台倒计时自动 follow `run`/`accept`/`keep_source`，人工显式选择仍可用。三个 finishing 顾问使用独立类型化任务输出并保留全部尝试。剩余缺口是独立准确率证据、方法范围与代表样本验证。
+Assembly 路线选择也使用共享 StructuredRecommender 调用/解析边界，仍保留 schema-v1 路线记录。Assembly/AutoHiC advisor 使用 schema-3 模型请求、响应、解析和持久参数审批，人工或自动批准遵循[等待模式矩阵](topics/review-and-resume.md#foreground-review-policy)；Assembly/AutoHiC baseline 保存精确渲染请求与空 L2 策略响应，不调用模型。T2T baseline 同样保留 schema-3 manifest/approval，但只写纯策略请求与响应，不渲染阈值 prompt；默认 T2T advisor 进入 finishing。Dedup 顾问在正数倒计时下可自动 follow 有效 `run`/`accept`/`keep_source`；零等待遵循明确推进策略，已有候选时不再调用结果顾问。人工显式选择仍可用。三个 finishing 顾问使用独立类型化任务输出并保留全部尝试。剩余缺口是独立准确率证据、方法范围与代表样本验证。
 
 <a id="assembly-dedup-validation-map"></a>
 

@@ -59,6 +59,7 @@ from app.storage.artifacts import (
     record_registered_artifacts,
 )
 from app.storage.ledger import Ledger
+from app.storage.paths import DataLayoutError
 
 BUSCO_METHOD = "assembly_review.eval.busco"
 FROZEN_STATUS = "busco_frozen"
@@ -334,7 +335,7 @@ def collect_busco_artifacts(state: TopLevelState) -> StateUpdate:
                         "short_summary_ref": str(short_summary),
                         "lineage": busco_provenance(attempt),
                         "metrics": metrics,
-                        "notes": ["thresholds_not_applied_without_human_approval"],
+                        "notes": ["quality_metrics_are_advisory"],
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -380,7 +381,7 @@ def collect_busco_artifacts(state: TopLevelState) -> StateUpdate:
                 status="available",
                 metric_refs=metric_refs,
                 notes=[
-                    "thresholds_not_applied_without_human_approval",
+                    "quality_metrics_are_advisory",
                     "busco_executed",
                 ],
                 metadata=metadata,
@@ -434,7 +435,11 @@ def parse_busco_short_summary(path: Path) -> dict[str, Any]:
         "missing buscos (m)": "missing_buscos",
         "total busco groups searched": "total_busco_groups_searched",
     }
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeError as exc:
+        raise DataLayoutError("BUSCO report is not valid UTF-8 text") from exc
+    for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -449,11 +454,39 @@ def parse_busco_short_summary(path: Path) -> dict[str, Any]:
                         "F": "fragmented_percent",
                         "M": "missing_percent",
                     }[key]
-                ] = float(value)
+                ] = _busco_percentage(value)
         elif match := re.match(r"^(\d+)\s+(.+)$", stripped):
             if out_key := key_map.get(match.group(2).strip().lower()):
                 metrics[out_key] = int(match.group(1))
+    required_counts = set(key_map.values())
+    required_percentages = {
+        "complete_percent",
+        "single_copy_percent",
+        "duplicated_percent",
+        "fragmented_percent",
+        "missing_percent",
+    }
+    if not required_counts | required_percentages <= metrics.keys():
+        raise DataLayoutError("BUSCO report lacks required counts or percentages")
+    if any(not 0 <= metrics[key] <= 100 for key in required_percentages):
+        raise DataLayoutError("BUSCO percentages must be finite and between 0 and 100")
+    if (
+        metrics["complete_buscos"]
+        != metrics["single_copy_buscos"] + metrics["duplicated_buscos"]
+        or metrics["total_busco_groups_searched"]
+        != metrics["complete_buscos"]
+        + metrics["fragmented_buscos"]
+        + metrics["missing_buscos"]
+    ):
+        raise DataLayoutError("BUSCO counts are inconsistent")
     return metrics
+
+
+def _busco_percentage(value: str) -> float:
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise DataLayoutError(f"invalid BUSCO percentage: {value}") from exc
 
 
 def busco_provenance(attempt: FrozenAttemptSpec) -> dict[str, Any]:

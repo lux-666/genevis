@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import shlex
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
+from app.configuration import load_descriptor_registry
 from app.control.workflow_plan import current_workflow_step_id
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
@@ -24,6 +26,7 @@ from app.execution.lifecycle import (
 from app.execution.method_outcomes import MethodOutcome
 from app.execution.method_runner import build_frozen_attempt
 from app.llm.finishing import PARAMETERS, FinishingRecommendation, FinishingRecommender
+from app.review.automatic import completed_attempt_proposal
 from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
@@ -186,6 +189,22 @@ def validate_proposal(
     records: list[dict[str, Any]],
     maximum: int,
 ) -> None:
+    registry = load_descriptor_registry()
+    registered_methods = set(registry.by_stage.get(stage, ()))
+    for choice in proposal.methods:
+        descriptor = registry.methods.get(choice.method_id)
+        if descriptor is None or choice.method_id not in registered_methods:
+            raise ValueError(
+                f"method choice is not registered for stage {stage}: {choice.method_id}"
+            )
+        if choice.applicable and descriptor.planner.execution_kind != "local":
+            raise ValueError(
+                f"method choice is not locally executable: {choice.method_id}"
+            )
+    if any(item.next_action == "switch_method" for item in proposal.diagnostics):
+        raise ValueError("switch_method has no other applicable executable method")
+    if any(item.next_action == "next_cluster" for item in proposal.diagnostics):
+        raise ValueError("next cluster execution is not implemented")
     if proposal.action == "run":
         if not isinstance(proposal.parameters, PARAMETERS[stage]):
             raise ValueError("wrong stage parameter shape")
@@ -195,6 +214,8 @@ def validate_proposal(
             row["parameters"] == proposal.parameters.model_dump() for row in records
         ):
             raise ValueError("finishing proposal repeats an executed configuration")
+        if records and not proposal.expected_new_evidence:
+            raise ValueError("retry must name expected new evidence")
     if proposal.action == "accept" and not any(
         row["attempt"] == proposal.selected_attempt and row["materialized"]
         for row in records
@@ -404,13 +425,24 @@ def table_summary(path: Path) -> dict[str, Any]:
         for row in csv.DictReader(handle, delimiter="\t"):
             n += 1
             if "supporting_reads" in row:
+                support_ids = (
+                    json.loads(row["supporting_read_ids"])
+                    if row.get("supporting_read_ids")
+                    else row["supporting_reads"].split(",")
+                )
                 row["supporting_read_count"] = str(
-                    len(
-                        {value for value in row["supporting_reads"].split(",") if value}
-                    )
+                    len({value for value in support_ids if value})
                 )
             if len(examples) < 100:
-                examples.append(row)
+                # Full payloads remain in immutable artifacts, not model context.
+                examples.append(
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if key
+                        not in {"consensus_sequence", "baseline_sequence", "cigar"}
+                    }
+                )
             for key in (
                 "length",
                 "mapq",
@@ -421,9 +453,23 @@ def table_summary(path: Path) -> dict[str, Any]:
                 "right_motif_copies",
                 "supporting_read_count",
                 "tail_motif_copies",
+                "supporting_molecules",
+                "construction_reads",
+                "readback_reads",
+                "junction_spanning_reads",
+                "junction_spanning_molecules",
+                "competing_reads",
+                "extension_covered_bp",
+                "extension_coverage_fraction",
+                "extension_mean_depth",
+                "extension_min_depth",
+                "alignment_identity",
             ):
-                if key in row and str(row[key]).isdigit():
+                try:
                     val = float(row[key])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if math.isfinite(val) and val >= 0:
                     item = numeric.setdefault(
                         key, {"min": val, "max": val, "sum": 0.0, "count": 0.0}
                     )
@@ -432,7 +478,9 @@ def table_summary(path: Path) -> dict[str, Any]:
                     item["sum"] += val
                     item["count"] += 1
                     integer = int(val)
-                    if key == "mapq" or integer == 0:
+                    if not val.is_integer():
+                        bucket_label = "fractional"
+                    elif key == "mapq" or integer == 0:
                         bucket_label = str(integer)
                     else:
                         lower = 10 ** (len(str(integer)) - 1)
@@ -445,6 +493,8 @@ def table_summary(path: Path) -> dict[str, Any]:
                 "status",
                 "left_has_signal",
                 "right_has_signal",
+                "quality_status",
+                "evidence_scope",
             ):
                 if key in row:
                     bucket = counts.setdefault(key, {})
@@ -452,6 +502,10 @@ def table_summary(path: Path) -> dict[str, Any]:
             for reason in row.get("rejection_reasons", "").split(";"):
                 if reason:
                     bucket = counts.setdefault("rejection_reasons", {})
+                    bucket[reason] = bucket.get(reason, 0) + 1
+            for reason in row.get("quality_reasons", "").split(";"):
+                if reason:
+                    bucket = counts.setdefault("quality_reasons", {})
                     bucket[reason] = bucket.get(reason, 0) + 1
     return {
         "rows": n,
@@ -465,12 +519,57 @@ def table_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def reconstruction_summary(path: Path) -> dict[str, Any]:
+    """Project JSON reconstruction evidence into a small advisor-safe summary."""
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if record.get("schema_version") != "t2t.reconstruction.v1":
+        raise ValueError("unsupported reconstruction schema_version")
+    candidates = record.get("candidates") or []
+    observations = record.get("observations") or []
+    plans = record.get("plans") or []
+    decision_counts: dict[str, int] = {}
+    quality_counts: dict[str, int] = {}
+    for row in candidates:
+        decision = str(row.get("decision") or "")
+        if decision:
+            decision_counts[decision] = decision_counts.get(decision, 0) + 1
+    for row in observations:
+        decision = str(row.get("decision") or "")
+        if decision:
+            quality_counts[decision] = quality_counts.get(decision, 0) + 1
+    return {
+        "schema_version": record["schema_version"],
+        "profile": record.get("profile", {}),
+        "clustering": record.get("clustering", {}),
+        "versions": record.get("versions", {}),
+        "candidate_rows": len(candidates),
+        "observation_rows": len(observations),
+        "plan_count": len(plans),
+        "candidate_decisions": decision_counts,
+        "observation_decisions": quality_counts,
+    }
+
+
+def recommendation_summary(state: TopLevelState, ref: str) -> dict[str, Any]:
+    """Keep advisor diagnostics durable without copying raw model output."""
+    proposal = load_json(state, ref).get("proposal") or {}
+    return {
+        "action": proposal.get("action"),
+        "reason": proposal.get("reason"),
+        "evidence_gaps": list(proposal.get("evidence_gaps") or []),
+        "expected_new_evidence": proposal.get("expected_new_evidence", ""),
+        "diagnostics": list(proposal.get("diagnostics") or []),
+        "methods": list(proposal.get("methods") or []),
+    }
+
+
 def record_attempt(state: TopLevelState, stage: str) -> StateUpdate:
     f, cursor = loop(state, stage), output(state, stage)
     records = history(state, stage)
     if len(records) != f["attempt"]:
         raise ValueError("finishing attempt history is not contiguous")
     original = source(state, stage)
+    recommendation = recommendation_summary(state, f["recommendation_ref"])
     refs: list[Any] = []
     if stage == "gapcloser":
         refs = [cursor[k] for k in ("output_ref", "details_ref", "validation_ref")]
@@ -507,6 +606,8 @@ def record_attempt(state: TopLevelState, stage: str) -> StateUpdate:
             "reads_telomere_scan_ref",
             "telomere_extension_candidates_ref",
             "alignment_observations_ref",
+            "readback_validation_ref",
+            "patch_records_ref",
             "patched_telomere_scan_ref",
             "telomere_status_summary_ref",
         ):
@@ -516,6 +617,30 @@ def record_attempt(state: TopLevelState, stage: str) -> StateUpdate:
                     raise ValueError("T2T evidence must be a persisted artifact")
                 refs.append(dep.artifact_ref.model_dump(mode="json"))
                 evidence[key] = table_summary(Path(cursor[key]))
+        if cursor.get("reconstruction_ref"):
+            reconstruction_path = Path(cursor["reconstruction_ref"])
+            reconstruction_dependency = _assembly_input_dependency(
+                state, str(reconstruction_path)
+            )
+            if reconstruction_dependency.kind != "artifact":
+                raise ValueError(
+                    "T2T reconstruction evidence must be a persisted artifact"
+                )
+            refs.append(reconstruction_dependency.artifact_ref.model_dump(mode="json"))
+            evidence["reconstruction"] = reconstruction_summary(reconstruction_path)
+        for key in (
+            "reconstructed_assembly_ref",
+            "readback_paf_ref",
+            "representative_baseline_ref",
+            "consensus_extensions_ref",
+        ):
+            if cursor.get(key):
+                dep = _assembly_input_dependency(state, cursor[key])
+                if dep.kind != "artifact":
+                    raise ValueError(
+                        "T2T derived evidence must be a persisted artifact"
+                    )
+                refs.append(dep.artifact_ref.model_dump(mode="json"))
         candidate = original
         if cursor.get("patched_assembly_ref"):
             dep = _assembly_input_dependency(state, cursor["patched_assembly_ref"])
@@ -539,7 +664,13 @@ def record_attempt(state: TopLevelState, stage: str) -> StateUpdate:
     commands = []
     for item in executions:
         frozen = load_json(state, item["frozen_attempt_ref"])
-        commands.append(Path(frozen["attempt"]["script_path"]).read_text())
+        attempt = frozen["attempt"]
+        # The T2T script embeds a worker snapshot; keep it out of model context.
+        commands.append(
+            shlex.join([attempt["interpreter"], attempt["script_path"]])
+            if stage == "t2t"
+            else Path(attempt["script_path"]).read_text()
+        )
         for key in ("frozen_attempt_ref", "execution_ref"):
             if item.get(key):
                 refs.append(item[key])
@@ -556,6 +687,7 @@ def record_attempt(state: TopLevelState, stage: str) -> StateUpdate:
         "evidence": evidence,
         "evidence_refs": refs,
         "commands": commands,
+        "recommendation": recommendation,
         "execution_context": {
             k: f[k]
             for k in (
@@ -625,6 +757,7 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
                     "materialized",
                     "evidence",
                     "commands",
+                    "recommendation",
                 )
             }
             for row in records
@@ -635,9 +768,29 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
             "kmer_completeness": None,
         },
     }
+    if (cursor.get("review_policy") or {}).get("max_blocked_seconds") == 0:
+        evidence["execution_policy"] = "run_valid_outputs"
     recommender = FinishingRecommender(
         stage, cast(Any, cursor.get("recommendation_output_method", "json_schema"))
     )
+    policy_proposal = (
+        completed_attempt_proposal(
+            completed_attempts=len(records),
+            candidate_attempts=[r["attempt"] for r in records if r["materialized"]],
+            maximum=maximum,
+        )
+        if evidence.get("execution_policy") == "run_valid_outputs"
+        else None
+    )
+    if policy_proposal is not None:
+        policy_proposal.update(
+            {
+                "diagnostics": [],
+                "methods": [],
+                "expected_new_evidence": "",
+            }
+        )
+    output_method = "policy" if policy_proposal else recommender.method
     deps = [
         f["config_ref"],
         original.ref.model_dump(mode="json"),
@@ -662,16 +815,16 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
             or request.get("workflow_step_id") != current_workflow_step_id(state)
             or request.get("dependency_refs") != deps
             or request.get("evidence") != evidence
-            or request.get("output_method") != recommender.method
+            or request.get("output_method") != output_method
         ):
             raise ValueError("finishing persisted request binding mismatch")
     else:
         request = {
             "stage": stage,
             "workflow_step_id": current_workflow_step_id(state),
-            "messages": recommender.messages(evidence),
+            "messages": [] if policy_proposal else recommender.messages(evidence),
             "evidence": evidence,
-            "output_method": recommender.method,
+            "output_method": output_method,
             "dependency_refs": deps,
         }
         request_ref = publish_json(
@@ -694,18 +847,26 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
     if recovered:
         response_ref, response = recovered.ref, load_json(state, recovered.ref)
     else:
-        result = recommender.invoke(request["messages"])
-        response = {
-            "request_ref": request_ref.model_dump(mode="json"),
-            "proposal": result.parsed.model_dump(mode="json")
-            if result.parsed
-            else None,
-            "error": result.error,
-            "raw_response": result.raw_response,
-            "raw_message": result.raw_message,
-            "model_id": result.model_id,
-            "model_call": result.model_call.model_dump(mode="json"),
-        }
+        if policy_proposal:
+            response = {
+                "request_ref": request_ref.model_dump(mode="json"),
+                "proposal": policy_proposal,
+                "error": None,
+                "source": "policy",
+            }
+        else:
+            result = recommender.invoke(request["messages"])
+            response = {
+                "request_ref": request_ref.model_dump(mode="json"),
+                "proposal": result.parsed.model_dump(mode="json")
+                if result.parsed
+                else None,
+                "error": result.error,
+                "raw_response": result.raw_response,
+                "raw_message": result.raw_message,
+                "model_id": result.model_id,
+                "model_call": result.model_call.model_dump(mode="json"),
+            }
         response_ref = publish_json(
             state, stage, name, response, [request_ref.model_dump(mode="json")]
         )
@@ -722,7 +883,7 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
     decisions = ["keep_prior_assembly", "stop_human_review"]
     if any(row["materialized"] for row in records):
         decisions.insert(0, "accept_candidate")
-    if proposal and proposal.action != "human_review":
+    if proposal and proposal.action != "human_review" and not policy_proposal:
         decisions.insert(0, "follow_recommendation")
     context = {
         "config_ref": f["config_ref"],
@@ -737,6 +898,7 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
         reason="finishing_recommendation_ready",
         decisions_allowed=decisions,
         auto_decidable=False,
+        recommendation_error=error,
         candidates=[
             {
                 "candidate_id": f"attempt_{r['attempt']}",

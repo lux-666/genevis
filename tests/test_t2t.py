@@ -188,7 +188,9 @@ class T2TStageTests(unittest.TestCase):
 
             self.assertEqual(canonical.candidate_ids, ["chr1:left", "chr2:right"])
             self.assertEqual(canonical.notes, ["first note", "second note"])
-            with self.assertRaisesRegex(ResumeValidationError, "requires a human"):
+            with self.assertRaisesRegex(
+                ResumeValidationError, "requires a bound zero-wait rule"
+            ):
                 validate_t2t_intent_request(
                     {},
                     request.model_copy(update={"decided_by": "auto_rule"}),
@@ -425,12 +427,14 @@ class T2TStageTests(unittest.TestCase):
             else "for name, seq in records[:" + repr(support_count) + "]:\n"
             "    print(f'{name}\\t{len(seq)}\\t0\\t{target_len}\\t+\\t"
             "{target}\\t{target_len}\\t0\\t{target_len}\\t{target_len}\\t"
-            "{target_len}\\t60')\n"
+            "{target_len}\\t60\\tcg:Z:{target_len}M')\n"
         )
         script.write_text(
             (
                 "#!/usr/bin/env python3\n"
                 "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('fixture-minimap2'); sys.exit(0)\n"
                 "assembly = sys.argv[-2]\n"
                 "reads = sys.argv[-1]\n"
                 "target = None\n"
@@ -1387,7 +1391,7 @@ class T2TStageTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ResumeValidationError,
-                "requires a human review decision",
+                "requires a bound zero-wait rule",
             ):
                 self._apply_t2t_review(
                     blocked,
@@ -1525,7 +1529,7 @@ class T2TStageTests(unittest.TestCase):
             )
             self.assertIsNone(result.get("active_interrupt"))
 
-    def test_alignment_uses_filtered_telomeric_reads_fasta(self):
+    def test_alignment_recruits_all_reads_including_without_motifs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             with reads.open("a", encoding="utf-8") as handle:
@@ -1555,10 +1559,10 @@ class T2TStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 attempt.metadata["reads_refs"],
-                t2t["telomeric_reads_fasta_refs"],
+                t2t["alignment_reads_fasta_refs"],
             )
-            for reads_ref in t2t["telomeric_reads_fasta_refs"].values():
-                self.assertNotIn(
+            for reads_ref in t2t["alignment_reads_fasta_refs"].values():
+                self.assertIn(
                     "not_telomeric",
                     Path(reads_ref).read_text(encoding="utf-8"),
                 )
@@ -1607,7 +1611,7 @@ class T2TStageTests(unittest.TestCase):
                 list(platforms),
             )
             self.assertEqual(
-                set(t2t["telomeric_reads_fasta_refs"]),
+                set(t2t["alignment_reads_fasta_refs"]),
                 {"map-ont", "map-hifi", "map-pb"},
             )
             self.assertEqual(t2t["read_count"], 8)
@@ -1625,7 +1629,7 @@ class T2TStageTests(unittest.TestCase):
             script = Path(t2t["work_dir"]) / "run_minimap2_t2t.sh"
             script_text = script.read_text(encoding="utf-8")
             for preset in ("map-ont", "map-hifi", "map-pb"):
-                self.assertEqual(script_text.count(f"minimap2 -x {preset} "), 1)
+                self.assertEqual(script_text.count(f"minimap2 -c -x {preset} "), 2)
 
     def test_scan_read_telomeres_streams_outputs_without_bulk_tsv_writes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1687,10 +1691,10 @@ class T2TStageTests(unittest.TestCase):
             self.assertTrue(Path(t2t["reads_telomere_scan_ref"]).exists())
             self.assertTrue(Path(t2t["telomeric_reads_ref"]).exists())
             self.assertEqual(
-                set(t2t["telomeric_reads_fasta_refs"]),
+                set(t2t["alignment_reads_fasta_refs"]),
                 {"map-ont"},
             )
-            self.assertTrue(Path(t2t["telomeric_reads_fasta_refs"]["map-ont"]).exists())
+            self.assertTrue(Path(t2t["alignment_reads_fasta_refs"]["map-ont"]).exists())
 
     def test_all_clean_read_files_are_scanned_before_raw_and_ids_are_namespaced(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1980,7 +1984,7 @@ class T2TStageTests(unittest.TestCase):
             out = {
                 "work_dir": str(work),
                 "input_assembly_ref": str(assembly),
-                "telomeric_reads_fasta_refs": {"map-ont": str(reads)},
+                "alignment_reads_fasta_refs": {"map-ont": str(reads)},
                 "telomere_extension_candidates_ref": str(candidates),
             }
             execution_inputs = T2TFrozenExecutionInputs(
@@ -2079,7 +2083,7 @@ class T2TStageTests(unittest.TestCase):
                 {
                     "work_dir": str(conflict_work),
                     "input_assembly_ref": str(assembly),
-                    "telomeric_reads_fasta_refs": {"map-ont": str(reads)},
+                    "alignment_reads_fasta_refs": {"map-ont": str(reads)},
                     "telomere_extension_candidates_ref": str(conflict_candidates),
                 },
                 execution_inputs=execution_inputs.model_copy(

@@ -335,7 +335,7 @@ def test_final_quast_error_metrics_keep_missing_distinct_from_zero(
 
     report = tmp_path / "report.tsv"
     report.write_text(
-        "Assembly\tassembly\n# misassemblies\t0\n"
+        "Assembly\tassembly\n# contigs\t1\nTotal length\t1000\n# misassemblies\t0\n"
         "# mismatches per 100 kbp\t2.5\n# indels per 100 kbp\t-\n"
         "Genome fraction (%)\t97.6\nDuplication ratio\t1.02\nNGA50\t1,000\n"
     )

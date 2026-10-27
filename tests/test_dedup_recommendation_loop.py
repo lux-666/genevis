@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -188,7 +189,7 @@ printf '%s\\n' "$labels" | awk -F, 'BEGIN {OFS="\\t"} {
         "recommendation_mode": "advisor",
         "recommendation_output_method": "json_schema",
         "max_attempts": 2,
-        "review_policy": {"max_blocked_seconds": 0},
+        "review_policy": {"max_blocked_seconds": 1},
         "env": {"PATH": f"{bins}{os.pathsep}{os.environ['PATH']}"},
     }
     return state, source
@@ -206,15 +207,19 @@ def _approve(state, *, automatic=False):
         decided_by="auto_rule" if automatic else "human",
         metadata={
             "source": "foreground_countdown",
-            "configured_seconds": 0,
-            "elapsed_seconds": 0,
+            "configured_seconds": 1,
+            "elapsed_seconds": 1,
         }
         if automatic
         else {},
         rationale_artifact_ref=active["request_ref"] if automatic else None,
     )
     kwargs = (
-        {"blocked_timeout_seconds": 0, "decision_source": "foreground_countdown"}
+        {
+            "blocked_timeout_seconds": 1,
+            "decision_source": "foreground_countdown",
+            "now": datetime.now(timezone.utc) + timedelta(seconds=1),
+        }
         if automatic
         else {}
     )
@@ -485,11 +490,13 @@ def test_incomplete_quast_report_stops_before_candidate_advice(tmp_path, report)
     }
 
 
-def test_invalid_model_response_requires_human_result_selection(tmp_path):
+def test_invalid_model_response_stops_zero_wait_without_retaining_source(tmp_path):
     from app.control.errors import ResumeValidationError
-    from app.stages.assembly_dedup.review import normalize_timeout_request
 
     state, _ = _state(tmp_path)
+    state["stage_outputs"]["assembly_dedup"]["review_policy"] = {
+        "max_blocked_seconds": 0
+    }
     model = Model([AIMessage(content="not JSON")])
     with patch("app.llm.recommender.build_chat_model", return_value=model):
         result = build_stage().invoke(state)
@@ -497,23 +504,15 @@ def test_invalid_model_response_requires_human_result_selection(tmp_path):
     record = load_json(result, active["request_ref"])
     assert "follow_recommendation" not in record["payload"]["decisions_allowed"]
     assert "keep_prior_assembly" in record["payload"]["decisions_allowed"]
-    assert foreground_automatic_decision_label(inspect_state(result)) is None
-    request = ResumeReviewRequest(
-        session_id="s1",
-        stage="assembly_dedup",
-        gate_id="dedup_recommendation",
-        decision="keep_prior_assembly",
-        decided_by="auto_rule",
-        rationale_artifact_ref=active["request_ref"],
-        metadata={
-            "source": "foreground_countdown",
-            "configured_seconds": 0,
-            "elapsed_seconds": 0,
-        },
-    )
-    with pytest.raises(ResumeValidationError, match="expired countdown"):
-        normalize_timeout_request(
-            result, request, {"configured_seconds": 0, "expired": True}
+    assert foreground_automatic_decision_label(inspect_state(result)) is not None
+    from app.control.resume import build_foreground_auto_resume_request
+
+    with pytest.raises(ResumeValidationError, match="recommendation failed"):
+        build_foreground_auto_resume_request(
+            inspect_state(result),
+            configured_seconds=0,
+            elapsed_seconds=0,
+            data_dir=result["data_dir"],
         )
 
 

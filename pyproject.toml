@@ -6,11 +6,13 @@ build-backend = "hatchling.build"
 name = "gene-agent"
 dynamic = ["version"]
 description = "LangGraph-driven multiplatform long-read genome assembly agent for ONT, HiFi, CLR, and CycloneSEQ"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -33,6 +35,7 @@ dependencies = [
     "numpy>=1.26",
     "matplotlib>=3.9",
     "nbformat>=5.9",
+    "pyspoa>=0.3.2,<0.4",
 ]
 
 [project.scripts]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shlex
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ from app.stages.assembly_review.method_application.support import (
 )
 from app.stages.assembly_review.state import AssemblyReviewCursor
 from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
+from app.stages.quast import read_quast_table
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import QUAST_REFERENCE_SPEC
 from app.storage.artifacts import (
@@ -56,6 +58,7 @@ from app.storage.artifacts import (
     record_registered_artifacts,
 )
 from app.storage.ledger import Ledger
+from app.storage.paths import DataLayoutError
 
 QUAST_METHOD = "assembly_review.eval.quast"
 FROZEN_STATUS = "quast_frozen"
@@ -353,7 +356,7 @@ def collect_quast_artifacts(state: TopLevelState) -> StateUpdate:
         candidate_id = str(attempt.metadata.get("candidate_id"))
         artifacts: list[ArtifactMeta] = []
         metric_refs: list[str] = []
-        notes = ["thresholds_not_applied_without_human_approval"]
+        notes = ["quality_metrics_are_advisory"]
         metadata: dict[str, Any] = {
             "attempt_id": attempt.attempt_id,
             "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"),
@@ -516,6 +519,9 @@ def quast_threads(output: AssemblyReviewCursor) -> tuple[int, str | None]:
 
 
 def parse_quast_report_tsv(path: Path) -> dict[str, Any]:
+    rows = read_quast_table(path)
+    if len(rows[0]) != 2:
+        raise DataLayoutError("final QUAST report must contain exactly one assembly")
     metrics: dict[str, Any] = {}
     key_map = {
         "# contigs": "contig_count",
@@ -532,13 +538,30 @@ def parse_quast_report_tsv(path: Path) -> dict[str, Any]:
         "duplication ratio": "duplication_ratio",
         "nga50": "nga50",
     }
-    for line in path.read_text(encoding="utf-8").splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2 or (out_key := key_map.get(parts[0].strip().lower())) is None:
+    for parts in rows[1:]:
+        if (out_key := key_map.get(parts[0].strip().lower())) is None:
             continue
         raw = parts[1].strip().replace(",", "")
-        try:
-            metrics[out_key] = float(raw) if "." in raw else int(raw)
-        except ValueError:
+        if raw in {"-", "NA", "N/A"}:
             metrics[f"{out_key}_raw"] = parts[1].strip()
+            continue
+        try:
+            number = float(raw)
+        except ValueError as exc:
+            raise DataLayoutError(f"invalid QUAST metric {parts[0]}: {raw}") from exc
+        if not math.isfinite(number) or number < 0:
+            raise DataLayoutError(f"invalid QUAST metric {parts[0]}: {raw}")
+        metrics[out_key] = int(number) if number.is_integer() else number
+    if not {"contig_count", "total_length"} <= metrics.keys():
+        raise DataLayoutError("QUAST report lacks basic assembly metrics")
+    for key in (
+        "contig_count",
+        "total_length",
+        "largest_contig",
+        "n50",
+        "l50",
+        "nga50",
+    ):
+        if key in metrics and not isinstance(metrics[key], int):
+            raise DataLayoutError(f"QUAST {key} must be an integer")
     return metrics

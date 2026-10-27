@@ -53,6 +53,7 @@ from app.stages.base import (
 from app.stages.read_resolution import RuntimeReadMember, resolve_long_read_members
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
+from app.stages.sequences import validate_assembly_fasta
 from app.storage.artifacts import (
     publish_artifact_record,
     record_registered_artifacts,
@@ -63,6 +64,7 @@ from app.storage.assembly_candidates import (
     load_executed_candidate_bundle,
 )
 from app.storage.ledger import Ledger
+from app.storage.paths import DataLayoutError
 from app.storage.publish import shell_publish_file
 
 ASSEMBLY_DEDUP_METHOD = "assembly_dedup.purge_dups"
@@ -720,7 +722,11 @@ def _collect_purge_dups_result(
     session_id = state["session_id"]
     output_assembly_ref = Path(str(dedup_out["output_assembly_ref"]))
     if not output_assembly_ref.is_file() or output_assembly_ref.stat().st_size <= 0:
-        raise ValueError("purge_dups primary assembly output is missing or empty")
+        raise DataLayoutError("purge_dups primary assembly output is missing or empty")
+    try:
+        validate_assembly_fasta(output_assembly_ref)
+    except ValueError as exc:
+        raise DataLayoutError(f"invalid purge_dups FASTA: {exc}") from exc
 
     artifacts: list[ArtifactMeta] = []
     artifacts.append(

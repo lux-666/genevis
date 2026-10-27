@@ -40,7 +40,10 @@ class ReviewPayload(BaseModel):
     signals: list[ReviewSignal] = Field(default_factory=list)
     decisions_allowed: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # Eligibility for the LLM resolver; zero-wait rules have separate eligibility.
     auto_decidable: bool = True
+    # Parsing and stage-semantic validation, bound to this immutable request.
+    recommendation_error: str | None = None
     report_refs: dict[str, str] = Field(default_factory=dict)
     candidate_comparison_context: dict[str, Any] = Field(default_factory=dict)
     related_species_evidence_pack: dict[str, Any] = Field(default_factory=dict)

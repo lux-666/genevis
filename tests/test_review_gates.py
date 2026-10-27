@@ -407,7 +407,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                             },
                         )
 
-    def test_foreground_auto_request_requires_a_registered_resolver(self):
+    def test_zero_wait_requires_a_verified_request_even_for_registered_policy(self):
         """The wait is only a trigger; template defaults are never an accept rule."""
         base = {
             "session_id": "s1",
@@ -439,7 +439,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     },
                 }
                 with self.assertRaisesRegex(
-                    ResumeValidationError, "no eligible automatic resolver"
+                    ResumeValidationError, "zero-wait action failed"
                 ):
                     build_foreground_auto_resume_request(
                         summary,
@@ -512,7 +512,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     "request-1/request.json"
                 ),
                 "request_ref": request_ref.model_dump(mode="json"),
-                "max_blocked_seconds": 0,
+                "max_blocked_seconds": 1,
                 "auto_decidable": True,
             },
         }
@@ -534,8 +534,8 @@ class ReviewGateRegistryTests(unittest.TestCase):
         ) as recommend:
             request = build_foreground_auto_resume_request(
                 summary,
-                configured_seconds=0,
-                elapsed_seconds=0,
+                configured_seconds=1,
+                elapsed_seconds=1,
                 data_dir="/tmp/run",
             )
 

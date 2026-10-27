@@ -430,7 +430,7 @@ def rewrite_eval_bundle(
         signals=eval_signals,
         available_inputs=previous_bundle.get("available_inputs", []),
         missing_inputs=previous_bundle.get("missing_inputs", []),
-        notes=["thresholds_not_applied_without_human_approval"],
+        notes=["quality_metrics_are_advisory"],
     )
     payload = eval_bundle.model_dump(mode="json")
     ref = write_json_artifact(

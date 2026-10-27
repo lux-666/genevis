@@ -55,6 +55,9 @@ def proposal(stage, index=0, action="run", selected=None):
         "selected_attempt": selected,
         "reason": "Test a distinct configuration using supplied observations.",
         "evidence_gaps": ["Independent accuracy unavailable"],
+        "expected_new_evidence": (
+            "a new execution with the changed configuration" if index else ""
+        ),
     }
 
 
@@ -312,6 +315,8 @@ def test_t2t_supported_patch_adoption_uses_selected_attempt_evidence(
             blocked = build_stage("t2t").invoke(approve(blocked))
         records = history(blocked, "t2t")
         assert all(r["materialized"] for r in records)
+        assert all("run_minimap2_t2t.sh" in r["commands"][0] for r in records)
+        assert all("def reconstruct(" not in r["commands"][0] for r in records)
         evidence = json.loads(model.messages[-1][-1]["content"])
         assert (
             evidence["attempts"][0]["evidence"]["telomere_extension_candidates_ref"][
@@ -371,9 +376,14 @@ def test_t2t_filtered_placements_reach_next_advisor_request(
         fixture._fake_minimap2(str(tmp_path))
         mm = tmp_path / "bin" / "minimap2"
         mm.write_text(
-            mm.read_text().replace(
+            mm.read_text()
+            .replace(
                 "\\t{target_len}\\t{target_len}\\t",
-                "\\t{target_len - 1}\\t{target_len}\\t",
+                "\\t{target_len - 1}\\t{target_len - 1}\\t",
+            )
+            .replace(
+                "cg:Z:{target_len}M",
+                "cg:Z:{target_len - 1}M1I",
             )
         )
     else:
@@ -584,13 +594,12 @@ def test_tool_failure_settles_roster_without_delivery(tmp_path, stage):
 
 
 @pytest.mark.parametrize("fail_evaluation", [False, True])
-def test_t2t_without_telomeric_reads_records_alignment_skip(tmp_path, fail_evaluation):
+def test_t2t_without_telomeric_reads_still_reconstructs(tmp_path, fail_evaluation):
     from app.control.occurrence_settlement import settle_workflow_step_outcome
     from app.storage.ledger import Ledger
 
     state = state_for("t2t", tmp_path)
-    # A higher supported motif threshold gives no matching reads, without
-    # mutating any registered biological input after publication.
+    # A motif threshold cannot prevent recruitment by terminal anchors.
     first = proposal("t2t")
     first["parameters"]["min_motif_copies"] = 100
     model = Model(
@@ -609,7 +618,7 @@ def test_t2t_without_telomeric_reads_records_alignment_skip(tmp_path, fail_evalu
         )
     settle_workflow_step_outcome(final, data_dir=final["data_dir"])
     rows = Ledger(final["data_dir"]).read_event_rows(final["session_id"])
-    assert not any(
+    assert any(
         r["event_type"] == "attempt_started"
         and r["summary"].get("method_name") == "t2t.alignment.minimap2"
         for r in rows
@@ -617,7 +626,7 @@ def test_t2t_without_telomeric_reads_records_alignment_skip(tmp_path, fail_evalu
     assert any(
         r["event_type"] == "method_disposition_recorded"
         and r["summary"].get("method_name") == "t2t.alignment.minimap2"
-        and r["summary"].get("disposition") == "skipped"
+        and r["summary"].get("disposition") == "completed"
         for r in rows
     )
     if fail_evaluation:
@@ -1042,3 +1051,67 @@ def test_reentry_restores_exact_request_before_rendering(tmp_path):
         replay["stage_outputs"]["gapcloser"]["finishing"]["recommendation_ref"]
         == expected
     )
+
+
+def test_retry_without_new_evidence_is_rejected():
+    from app.llm.finishing import FinishingRecommendation, T2TThresholds
+
+    proposal = FinishingRecommendation(
+        action="run",
+        parameters=T2TThresholds(
+            min_motif_copies=4,
+            terminal_window_bp=10000,
+            min_mapq=30,
+            max_target_terminal_distance_bp=1000,
+            min_overlap_bp=500,
+            min_supporting_reads=1,
+        ),
+        reason="retry",
+        evidence_gaps=[],
+    )
+    records = [{"parameters": {"min_mapq": 20}, "attempt": 0, "materialized": False}]
+    with pytest.raises(ValueError, match="expected new evidence"):
+        validate_proposal("t2t", proposal, records, 3)
+
+
+def test_switch_method_without_another_method_is_rejected():
+    from app.llm.finishing import (
+        FinishingRecommendation,
+        MethodChoice,
+        T2TThresholds,
+        TargetDiagnostic,
+    )
+
+    proposal = FinishingRecommendation(
+        action="run",
+        parameters=T2TThresholds(
+            min_motif_copies=4,
+            terminal_window_bp=10000,
+            min_mapq=30,
+            max_target_terminal_distance_bp=1000,
+            min_overlap_bp=500,
+            min_supporting_reads=1,
+        ),
+        reason="switch",
+        evidence_gaps=[],
+        expected_new_evidence="a different method output",
+        diagnostics=[
+            TargetDiagnostic(
+                target_id="chr1:right", artifact_refs=[], next_action="switch_method"
+            )
+        ],
+        methods=[
+            MethodChoice(
+                method_id="t2t.alignment.minimap2",
+                applicable=True,
+                reason="only registered method",
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="no other applicable"):
+        validate_proposal(
+            "t2t",
+            proposal,
+            [{"parameters": {}, "attempt": 0, "materialized": False}],
+            3,
+        )

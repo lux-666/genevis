@@ -20,7 +20,7 @@ from app.execution.input_integrity import (
     artifact_input_dependency,
     verify_input_dependencies,
 )
-from app.integrity import SHA256_PATTERN
+from app.integrity import SHA256_PATTERN, sha256_file
 from app.review.application import (
     PreparedReviewApplication,
     ReviewIntentV1,
@@ -34,13 +34,13 @@ from app.review.persistence import (
     persist_review_decision,
 )
 from app.schemas.artifacts import (
+    T2T_ALIGNMENT_READS,
     T2T_ASSEMBLY_TELOMERE_SCAN,
     T2T_EXTENSION_CANDIDATES,
     T2T_FINISHING_REPORT,
     T2T_PATCH_RECORDS,
     T2T_PATCHED_ASSEMBLY,
     T2T_STATUS_SUMMARY,
-    T2T_TELOMERIC_READS,
     ArtifactRef,
     T2TReviewDecisionArtifact,
     canonical_artifact_refs,
@@ -202,10 +202,6 @@ def prepare_t2t_review_application(
     if decision == "accept_selected_candidates" and not accepted_candidate_ids:
         raise ResumeValidationError(
             "t2t accept_selected_candidates requires candidate_ids"
-        )
-    if decision == "accept_selected_candidates" and request.decided_by != "human":
-        raise ResumeValidationError(
-            "t2t candidate adoption requires a human review decision"
         )
 
     if decision == "stop_pipeline":
@@ -523,8 +519,10 @@ def validate_t2t_intent_request(
     if decision != "accept_selected_candidates":
         return request.model_copy(update={"candidate_ids": []})
     if request.decided_by != "human":
-        raise ResumeValidationError(
-            "t2t candidate adoption requires a human review decision"
+        from app.review.automatic import validate_zero_wait_request
+
+        validate_zero_wait_request(
+            request, request_record, data_dir=state.get("data_dir", "")
         )
     candidate_ids = sorted(set(request.candidate_ids))
     if not candidate_ids:
@@ -666,12 +664,19 @@ def _prepare_t2t_selected_output(
         review_evidence = [
             (out["telomere_extension_candidates_ref"], T2T_EXTENSION_CANDIDATES),
             *[
-                (path, T2T_TELOMERIC_READS)
+                (path, T2T_ALIGNMENT_READS)
                 for path in sorted(
-                    (out.get("telomeric_reads_fasta_refs") or {}).values()
+                    (out.get("alignment_reads_fasta_refs") or {}).values()
                 )
             ],
         ]
+        for key in (
+            "readback_validation_ref",
+            "reconstruction_ref",
+            "reconstructed_assembly_ref",
+        ):
+            if out.get(key):
+                review_dependencies.append(_assembly_input_dependency(state, out[key]))
         for path_value, artifact_type in review_evidence:
             artifact_ref = artifact_ref_for_path(
                 data_dir,
@@ -701,6 +706,14 @@ def _prepare_t2t_selected_output(
     unknown = sorted(set(accepted_candidate_ids).difference(selectable))
     if unknown:
         raise ResumeValidationError(f"unknown t2t candidate_ids: {', '.join(unknown)}")
+    if any(
+        row.get("reconstruction_method") == "poa_consensus"
+        for row in selectable.values()
+    ) and set(accepted_candidate_ids) != set(selectable):
+        raise ResumeValidationError(
+            "T2T read-back validation binds the complete reconstructed assembly; "
+            "adopt the complete candidate or retain the source"
+        )
     if execution_inputs.mode == "auto_patch":
         if set(accepted_candidate_ids) != set(selectable):
             raise ResumeValidationError(
@@ -765,6 +778,10 @@ def _prepare_t2t_selected_output(
         )
     patched_assembly_ref = materialized["patched_assembly_ref"]
     try:
+        if out.get("reconstructed_assembly_ref") and sha256_file(
+            Path(patched_assembly_ref)
+        ) != sha256_file(Path(out["reconstructed_assembly_ref"])):
+            raise ValueError("materialized assembly differs from read-back candidate")
         scan_rows = list(
             _scan_fasta_ends(
                 Path(patched_assembly_ref),

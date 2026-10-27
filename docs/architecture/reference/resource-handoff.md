@@ -96,17 +96,17 @@ Genome Survey 和 Read QC 不得把父母读段当作子代读段。
 | `assembly_dedup` | `assembly`；`read_depth` 策略还需 `long_reads` | `assembly` |
 | `assembly_review` | `assembly` | `assembly` |
 | `hic_scaffolding` | `assembly`、`hic_reads` | 已采纳染色体级 `assembly` |
-| `gapcloser` | 当前采纳 `assembly`；存在内部缺口时需完整 HiFi-only `long_reads` | 人工采纳或复用的 `assembly` |
+| `gapcloser` | 当前采纳 `assembly`；存在内部缺口时需完整 HiFi-only `long_reads` | 经门禁采纳或复用的 `assembly` |
 | `t2t` | 当前采纳 `assembly`、`long_reads` | `assembly` |
-| `base_polish` | 当前 `assembly`、完整 HiFi-only `long_reads` | 人工采纳或复用的 `assembly`，以及供最终 Review 的成对替代候选 |
+| `base_polish` | 当前 `assembly`、完整 HiFi-only `long_reads` | 经门禁采纳或复用的 `assembly`，以及供最终 Review 的成对替代候选 |
 
 运行时适配器强制这些直接依赖。Genome Survey 已允许只有短读段的运行，两族均存在时优先短 DNA 读段。`resource_specs.py` 仅拥有规范资源解析；阶段不共享第二份声明式规划表。
 
 冻结前与读取冻结输入时，`frozen_inputs.py` 使用同一检查验证 manifest 与字面阶段顺序：组装消费阶段必须有已登记组装或前置本地 Assembly；后置 Assembly 不能满足前面的输入。未授权本地执行的 Assembly 也不能被当作交付者。QC 至少有一个可用读段族，选中的 fastp 和 Hi-C scaffolding 要有显式配对输入；Trio 父母读段不计入子代输入。Assembly 所需基因组大小来自 manifest 或此前配置完整的本地 Survey。没有读段但有显式大小的 Survey 仍可按原契约跳过。
 
-进入 Dedup、Review、Hi-C 或 finishing occurrence 前，控制器从冻结顺序推导最近组装交接步骤，核对中央 `ResourceRef` 的生产阶段与 `workflow_step_id`。它与 Review 的 `review_target` 使用同一顺序分析，不新增计划字段或路线列表。来源缺失或不匹配即停止，不能静默使用更早的组装；Review 继续执行下述 Ledger 交付证明校验。QC 清洗结果仍按实际交付更新资源，不把每个计划中的 QC 当作必定产出清洗读段。文件内容、方法适用性、条件执行和人工采纳仍由阶段内检查决定。
+进入 Dedup、Review、Hi-C 或 finishing occurrence 前，控制器从冻结顺序推导最近组装交接步骤，核对中央 `ResourceRef` 的生产阶段与 `workflow_step_id`。它与 Review 的 `review_target` 使用同一顺序分析，不新增计划字段或路线列表。来源缺失或不匹配即停止，不能静默使用更早的组装；Review 继续执行下述 Ledger 交付证明校验。QC 清洗结果仍按实际交付更新资源，不把每个计划中的 QC 当作必定产出清洗读段。文件内容、方法适用性、条件执行和采纳仍由阶段内检查决定；人工或自动采用遵循[等待模式矩阵](../topics/review-and-resume.md#foreground-review-policy)。
 
-Hi-C 读段止于 `hic_scaffolding`。人工采纳后，该 occurrence 替换中央 `assembly`。GapCloser 消费该组装和完整当前 HiFi 集合；采纳则替换，保留旧组装或没有内部缺口则声明复用交付。后续 T2T 解析当时的组装和长读段，不直接消费 `hic_reads` 或 contact map。Base Polish 同样使用当前组装和 HiFi 集合。交接 metadata 携带 `comparison_candidate_bundle_ref`、`comparison_primary_output_ref`、`polish_comparison_ref`。最终 Review 依据不可变来源绑定比较验证两个候选，再用相同 QUAST/BUSCO 设置评估。这些引用描述替代项，不构成第二个当前组装。
+Hi-C 读段止于 `hic_scaffolding`。经门禁采纳后，该 occurrence 替换中央 `assembly`。GapCloser 消费该组装和完整当前 HiFi 集合；采纳则替换，保留旧组装或没有内部缺口则声明复用交付。后续 T2T 解析当时的组装和长读段，不直接消费 `hic_reads` 或 contact map。Base Polish 同样使用当前组装和 HiFi 集合。交接 metadata 携带 `comparison_candidate_bundle_ref`、`comparison_primary_output_ref`、`polish_comparison_ref`。最终 Review 依据不可变来源绑定比较验证两个候选，再用相同 QUAST/BUSCO 设置评估。这些引用描述替代项，不构成第二个当前组装。
 
 候选包、评审决策、执行证据、报告和指标仍是产物。资源 metadata 可引用它们，但不形成第二跨阶段文件表。
 
