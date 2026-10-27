@@ -15,6 +15,7 @@ from app.domains.parameter_recommendation.resolution import (
     render_config_keys,
     resolve_parameters,
 )
+from app.execution import autohic_runtime
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.input_integrity import (
@@ -807,11 +808,17 @@ def _script(
                 shlex.quote(value)
                 for value in [
                     python_command,
+                    "-",
                     str(autohic_entry),
+                    "--output",
+                    str(result_root.parent),
                     "-c",
                     str(config_path),
                 ]
-            ),
+            )
+            + " <<'GENE_AGENT_AUTOHIC_RUNTIME'",
+            Path(autohic_runtime.__file__).read_text(encoding="utf-8").rstrip(),
+            "GENE_AGENT_AUTOHIC_RUNTIME",
             "candidate=''",
             "for value in "
             + " ".join(

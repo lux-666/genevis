@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.execution import autohic_runtime
 from scripts.autohic.device import DevicePolicy
 from scripts.autohic.recover import main
 from scripts.autohic.validation import assembly_info, available_disk, validate_images
@@ -163,6 +164,50 @@ def test_cpu_retry_failure_propagates(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="CPU failed"):
         chosen.inference_detector(model, "first")
     assert chosen.completed == 0
+
+
+@pytest.mark.parametrize("failure", ["init", "inference"])
+def test_formal_launcher_adapts_both_models_without_source_changes(
+    tmp_path, monkeypatch, failure
+):
+    entry = tmp_path / "autohic.py"
+    entry.write_text("# external AutoHiC source\n")
+    config = tmp_path / "config.txt"
+    config.write_text("JOB_NAME=test\n")
+    api = API(
+        init_error=RuntimeError("CUDA out of memory") if failure == "init" else None,
+        inference_error=RuntimeError("CUDA out of memory")
+        if failure == "inference"
+        else None,
+    )
+    chosen = policy(tmp_path / "output", monkeypatch, api=api)
+    monkeypatch.setattr(autohic_runtime, "DevicePolicy", lambda *a: chosen)
+    modules = []
+    for name in ("src.common.error_pd", "src.utils.get_chr_data"):
+        module = types.ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, module)
+        modules.append(module)
+
+    def run(path, run_name):
+        assert path == str(entry) and run_name == "__main__"
+        assert sys.argv == [str(entry), "-c", str(config)]
+        for module in modules:
+            model = module.init_detector("config", "weights", device="cuda:0")
+            module.inference_detector(model, "same image")
+
+    monkeypatch.setattr(autohic_runtime.runpy, "run_path", run)
+    monkeypatch.setattr(sys, "argv", sys.argv.copy())
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    autohic_runtime.main(
+        [str(entry), "-c", str(config), "--output", str(tmp_path / "output")]
+    )
+    assert chosen.completed == 2
+    assert chosen.force_cpu
+    assert api.initialized == (
+        ["cuda:0", "cpu", "cpu"] if failure == "init" else ["cuda:0", "cpu"]
+    )
+    assert entry.read_text() == "# external AutoHiC source\n"
 
 
 @pytest.mark.parametrize(
@@ -389,7 +434,10 @@ def fake_upstream(tmp_path, monkeypatch, child_code=0):
         calls.append(("post_review", command))
         (cwd / "source.final.assembly").write_text(">a 1 10\n1\n")
         # Official gapped FINAL layout may place the same synthetic gap repeatedly.
-        (cwd / "source.FINAL.assembly").write_text(">a 1 10\n>hic_gap_2 2 500\n1 2 2\n")
+        gapped = cwd / "source.FINAL.assembly"
+        # These names alias on a case-insensitive filesystem; retain the layout.
+        if not gapped.exists():
+            gapped.write_text(">a 1 10\n>hic_gap_2 2 500\n1 2 2\n")
         (cwd / "source.FINAL.fasta").write_text(">a\nAAAAAAAAAA\n")
         (cwd / "source.final.hic").write_bytes(b"contact map")
         return SimpleNamespace(pid=123, wait=lambda: child_code)

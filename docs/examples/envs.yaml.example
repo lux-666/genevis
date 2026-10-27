@@ -209,7 +209,7 @@ methods:
     required_tools:
       - busco
   hic_scaffolding.candidate.autohic:
-    conda_env: autohic                     # AutoHiC 专属 Conda 环境
+    conda_env: autohic                     # AutoHiC 专属环境；GPU 主机可填 autohic_gpu
     required_tools:
       - python3.9
       - bwa

@@ -115,7 +115,7 @@ CUDA_VISIBLE_DEVICES='' conda run --no-capture-output -n autohic_gpu python \
   --output /data/checks/autohic-cpu --device auto
 ```
 
-检查 `environment.json` 中两个模型的实际 device 和版本，第二条必须为 CPU。`--device cuda` 失败退出，不会隐式退回；`auto` 的精确边界见[AutoHiC 设备策略](../architecture/topics/autohic.md#resource-failure-and-external-recovery)。这些工具必须从源码检出运行，当前应用 wheel 只包含 `app`。
+检查 `environment.json` 中两个模型的实际 device 和版本，第二条必须为 CPU。`--device cuda` 失败退出，不会隐式退回；`auto` 的精确边界见[AutoHiC 设备策略](../architecture/topics/autohic.md#resource-failure-and-external-recovery)。这些独立检查工具必须从源码检出运行。正式入口使用应用包内的共享设备策略，随 wheel 提供，并嵌入每次新尝试的冻结脚本，无需在 AutoHiC 环境安装 Gene Agent 编排器。
 
 如果旧 PyTorch 在新系统上导入时报精确错误 `libtorch_cpu.so: cannot enable executable stack as shared object requires: Invalid argument`，先确认该共享库的 ELF GNU_STACK 标志。仅对此错误，可在保留备份后，用支持 `--clear-execstack` 的 patchelf 修复新 GPU 环境中的私有副本。Conda 文件可能与包缓存硬链接，不能原地修改共享 inode：
 
@@ -129,7 +129,7 @@ patchelf --clear-execstack "$autohic_lib.private"
 mv -- "$autohic_lib.private" "$autohic_lib"
 ```
 
-仅在确认该兼容性问题时执行，不批量修改其他库，也不修改 CPU 环境或 Conda 包缓存。然后重跑上述 GPU 与 CPU 模型检查。活动 `config/envs.yaml` 中 `methods.hic_scaffolding.candidate.autohic.conda_env` 改为 `autohic_gpu`，其余包根和 Python 路径保持目标主机实际配置；若声明 `conda_prefix`，须同步指向同一个环境。不要修改已冻结会话的环境快照。`gpu_required: false` 保持不变，表示无 GPU 的机器仍可用 CPU。
+仅在确认该兼容性问题时执行，不批量修改其他库，也不修改 CPU 环境或 Conda 包缓存。然后重跑上述 GPU 与 CPU 模型检查。活动 `config/envs.yaml` 中 `methods.hic_scaffolding.candidate.autohic.conda_env` 改为 `autohic_gpu`，或用 `conda_prefix` 指向该环境的绝对路径；两者互斥，只保留其中一项。其余包根和 Python 路径保持目标主机实际配置。无需替换其他方法或编排器环境。不要修改已冻结会话的环境快照；旧尝试仍执行原冻结脚本，新尝试才包含设备适配。`gpu_required: false` 保持不变，表示无 GPU 的机器仍可用 CPU。
 
 <a id="autohic-chromosome-boundary-patch"></a>
 

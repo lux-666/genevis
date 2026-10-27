@@ -12,7 +12,7 @@
 >
 > **依赖契约：** [阶段契约](../reference/stage-contracts.md)、[描述符](../reference/descriptors.md)、[参数推荐](../reference/parameter-recommendation.md)、[方法执行生命周期](../reference/execution-lifecycle.md)、[执行证据](../reference/execution-evidence.md)、[资源交接](../reference/resource-handoff.md)。
 >
-> **代码依据：** `app/stages/hic_scaffolding/builder.py`、`app/stages/hic_scaffolding/routing.py`、`app/stages/hic_scaffolding/nodes.py`、`app/stages/hic_scaffolding/parameters/workflow.py`、`app/stages/hic_scaffolding/method_application/autohic.py`、`app/stages/hic_scaffolding/method_application/support.py`、`tests/test_hic_scaffolding.py`、`scripts/autohic/`、`tests/test_autohic_recovery_tools.py`。
+> **代码依据：** `app/stages/hic_scaffolding/builder.py`、`app/stages/hic_scaffolding/routing.py`、`app/stages/hic_scaffolding/nodes.py`、`app/stages/hic_scaffolding/parameters/workflow.py`、`app/stages/hic_scaffolding/method_application/autohic.py`、`app/execution/autohic_runtime.py`、`app/stages/hic_scaffolding/method_application/support.py`、`tests/test_hic_scaffolding.py`、`scripts/autohic/`、`tests/test_autohic_recovery_tools.py`。
 
 <a id="stage-boundary"></a>
 
@@ -60,13 +60,13 @@ AutoHiC 适配器只加载已验证的已批准 schema-3 参数链。它解析�
 
 ## GPU 优先与 CPU 兼容
 
-`resource_defaults.gpu_required: false` 和方法 `resource_hints.gpu_required: false` 表示 GPU 不是必需条件，不会强制使用 CPU。正式 wrapper 直接调用 AutoHiC；AutoHiC 自己以 `torch.cuda.is_available()` 选择 `cuda:0` 或 `cpu`。因此 CPU 版 PyTorch 会始终走 CPU，即使主机有 GPU。
+`resource_defaults.gpu_required: false` 和方法 `resource_hints.gpu_required: false` 表示 GPU 不是必需条件，不会强制使用 CPU。正式 wrapper 将 `app/execution/autohic_runtime.py` 源码嵌入冻结脚本，在方法映射选定的 AutoHiC Python 环境中运行，再启动官方 `autohic.py`。策略执行实际 CUDA/MMCV NMS 探测后优先 GPU；CPU 版 PyTorch 会走 CPU，即使主机有 GPU。
 
 有 GPU 的主机应在专用 AutoHiC 环境中安装相互兼容的 CUDA 版 PyTorch、torchvision、MMCV 算子，并在活动 `config/envs.yaml` 的 `methods.hic_scaffolding.candidate.autohic.conda_env` 或 `conda_prefix` 指向该环境。未配置 GPU 的主机可以继续映射原 CPU 环境；无需把 GPU 改成必需资源，也无需修改参数推荐 schema。
 
 验证应包含实际模型推理：先检查 PyTorch CUDA 状态，再运行 CUDA MMCV 算子和错误/染色体两个模型各一张图。`nvidia-smi` 能看到设备不能证明 AutoHiC 环境支持 GPU。CUDA 版环境还应在 `CUDA_VISIBLE_DEVICES=''` 下测试 CPU 推理。
 
-上游的自动设备选择只处理启动时 CUDA 不可用，不保证推理中 CUDA OOM 会自动退回 CPU。若需要这种运行中退化，应在 AutoHiC 推理适配边界按 CUDA 错误类型处理、将同一模型移回 CPU 并重试当前图片，同时记录实际设备与原因。普通输入/程序错误必须原样失败；不能通过捕获所有异常、重启整个流程来实现退化。当前 Gene Agent 正式入口尚未增加该运行中重试封装，外部恢复脚本的设备策略不等于正式入口已经具备此能力。
+适配器在启动官方入口前，仅在当前进程中替换 `src.common.error_pd` 和 `src.utils.get_chr_data` 的模型初始化、推理函数引用，覆盖错误检测与染色体识别，不写入已安装 AutoHiC 源码。识别到 CUDA 初始化/推理故障时，在异常处理块退出后释放残留；推理失败将模型移到 CPU、重试当前图片，后续模型调用保持 CPU。普通输入/程序错误原样失败。设备事件和进度位于尝试工作目录，并打印到正式执行日志。源码随冻结脚本固定；已冻结尝试继续执行其原脚本，不因应用升级自动获得新策略。真实 GPU 和完整正式运行仍需目标主机验收。
 
 <a id="resource-failure-and-external-recovery"></a>
 
@@ -78,7 +78,7 @@ AutoHiC 适配器只加载已验证的已批准 schema-3 参数链。它解析�
 
 `scripts/autohic/` 是 Linux/Python 3.9 的独立运维工具，使用 AutoHiC 自身环境，从仓库根以 `python -m scripts.autohic.…` 调用，不依赖编排器的 PyTorch，也不修改已安装 AutoHiC 源码：
 
-- `device.py`：`auto` 探测实际 CUDA/MMCV NMS 后优先 GPU；启动不可用或识别到的 CUDA 初始化/推理错误时退回 CPU。推理失败只重试当前图片，之后保持 CPU。`cpu` 强制 CPU；`cuda` 要求 GPU，失败直接退出。只在退出异常处理块后释放初始化残留，记录设备事件和已处理图片数。设备上下文严重损坏导致模型无法移回 CPU 时仍会失败，不保证恢复所有 CUDA 错误。
+- `device.py`：兼容导出应用包 `app/execution/autohic_runtime.py` 的共享设备策略。`auto` 探测实际 CUDA/MMCV NMS 后优先 GPU；启动不可用或识别到的 CUDA 初始化/推理错误时退回 CPU。推理失败只重试当前图片，之后保持 CPU。`cpu` 强制 CPU；`cuda` 要求 GPU，失败直接退出。只在退出异常处理块后释放初始化残留，记录设备事件和已处理图片数。设备上下文严重损坏导致模型无法移回 CPU 时仍会失败，不保证恢复所有 CUDA 错误。
 - `check_environment.py`：实际运行 CPU NMS、所选设备的探针及错误/染色体两个模型各一张图片，输出版本和实际设备。必须在无 GPU 可见的条件下单独验证 CPU 路径。
 - `recover.py`：复用操作者确认来源的 `.hic/.assembly` 配对或图片集，执行与官方 `onehic.py` 对应的单轮错误检测/调整，可选调用官方 3D-DNA post-review。检查磁盘预留、配对来源记录、推理范围、assembly 长度/placement、图片文件、子进程退出码和输出；图片数量或坐标覆盖与官方窗口不匹配时仅提示，继续处理索引中的图片。使用目录锁、全新输出目录和持久状态防止重复写入。磁盘预留是操作者设置的运行余量，不是完整峰值空间预测，也不约束 RAM。
 
@@ -86,7 +86,7 @@ AutoHiC 适配器只加载已验证的已批准 schema-3 参数链。它解析�
 
 AutoHiC 上游 `src/utils/get_chr_data.py::divide_chr` 将 inclusive 染色体末端加一作为切点，但对片段末端/已有连接处仍调用切割，会生成零长度 fragment；末尾还用跨两碱基查询选择下一组起点。`scripts/autohic/patches/chromosome-boundaries.patch` 是针对上游 `4dc5ad9eba62bba569d7934261df2b3ea630faa2` 的独立补丁：保留官方 cut/re-cut 操作，只在片段内部切割，再按累计末端分组；支持反向 placement、重复切割和 map/assembly 比例换算，保留推理范围外的未分配片段。它不改变模型、阈值或预测边界，也不靠删除零长度结果掩盖错误。补丁需要在目标 AutoHiC 检出显式应用；Gene Agent 不会自动修改外部软件。安装和显式回归见[部署指南](../../deployment/migration.md#autohic-chromosome-boundary-patch)。
 
-独立恢复不执行完整 AutoHiC 的候选轮次选择、迭代纠错、染色体分配或 HTML 报告生成；其默认关闭 debris 调整，正式 `onehic.py` 默认值不同，操作者必须核对参数。它不导入 Gene Agent attempt、不改 Ledger/checkpoint，也不能替代正式四项产物的成功/采纳。正式 wrapper 尚未接入这里的推理中 CPU 退回；清理、子阶段恢复和错误传播的待办见[一致性缺口](../reference/conformance.md#autohic-resource-recovery-gap)。操作命令见[运行与恢复](../../user_guide/run-and-recovery.md#autohic-external-recovery)，GPU 环境迁移见[新主机配置](../../deployment/migration.md#autohic-gpu-environment)。
+独立恢复不执行完整 AutoHiC 的候选轮次选择、迭代纠错、染色体分配或 HTML 报告生成；其默认关闭 debris 调整，正式 `onehic.py` 默认值不同，操作者必须核对参数。它不导入 Gene Agent attempt、不改 Ledger/checkpoint，也不能替代正式四项产物的成功/采纳。正式 wrapper 与独立工具共用设备策略；清理、子阶段恢复和错误传播的待办见[一致性缺口](../reference/conformance.md#autohic-resource-recovery-gap)。操作命令见[运行与恢复](../../user_guide/run-and-recovery.md#autohic-external-recovery)，GPU 环境迁移见[新主机配置](../../deployment/migration.md#autohic-gpu-environment)。
 
 <a id="adoption-and-retries"></a>
 

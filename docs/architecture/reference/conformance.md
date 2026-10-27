@@ -92,11 +92,11 @@
 
 ### AutoHiC 资源失败传播与子阶段恢复
 
-正式 wrapper 调用完整上游入口，尚无 Juicer/3D-DNA 子阶段 checkpoint/import、依赖校验后的自动中间文件回收或峰值磁盘预算。嵌套脚本吞掉失败时，仅靠外层退出码不能判成功；磁盘耗尽还可能截断 Ledger，已有记录不能靠手工补一条成功来恢复。`scripts/autohic/` 提供独立恢复和设备策略，未接入正式 wrapper 的运行中 CUDA→CPU 退回，也未实现冻结尝试的合法产物导入。染色体分配已有可显式应用的上游边界补丁和真实函数回归，见[部署指南](../../deployment/migration.md#autohic-chromosome-boundary-patch)；尚未在正式主机就绪检查中强制验证其修复版本。不能只凭上游退出零放行无效布局。
+正式 wrapper 调用完整上游入口，尚无 Juicer/3D-DNA 子阶段 checkpoint/import、依赖校验后的自动中间文件回收或峰值磁盘预算。嵌套脚本吞掉失败时，仅靠外层退出码不能判成功；磁盘耗尽还可能截断 Ledger，已有记录不能靠手工补一条成功来恢复。`scripts/autohic/` 提供独立恢复；正式 wrapper 已通过冻结的 `app/execution/autohic_runtime.py` 接入共享 CUDA→CPU 设备策略，尚待目标主机实际验收，也未实现冻结尝试的合法产物导入。染色体分配已有可显式应用的上游边界补丁和真实函数回归，见[部署指南](../../deployment/migration.md#autohic-chromosome-boundary-patch)；尚未在正式主机就绪检查中强制验证其修复版本。不能只凭上游退出零放行无效布局。
 
 - 当前证据：`app/stages/hic_scaffolding/method_application/autohic.py`、`app/execution/method_runner.py`、`app/storage/ledger.py`、`scripts/autohic/`、`tests/test_autohic_recovery_tools.py`。外部依赖的检查位置是 AutoHiC `autohic.py` 的 subprocess 返回值和 `src/common/run.sh` 的嵌套命令。
 - 契约所有者：[AutoHiC](../topics/autohic.md#resource-failure-and-external-recovery)、[方法执行生命周期](execution-lifecycle.md)、[运行数据](data-contract.md)。
-- 关闭条件：在执行边界传播并测试嵌套工具失败；加入有依赖证明的磁盘预算/回收；定义并验证子阶段恢复和外部产物导入的尝试身份、来源与完整性；接入实际 CUDA 算子探测和逐图 CPU 退回；验证 ENOSPC 时持久记录完整或明确拒绝损坏记录。以上必须通过正式 Gene Agent 路径验收，外部脚本完成不关闭缺口。
+- 关闭条件：在执行边界传播并测试嵌套工具失败；加入有依赖证明的磁盘预算/回收；定义并验证子阶段恢复和外部产物导入的尝试身份、来源与完整性；在目标主机通过正式入口验收 CUDA 算子探测和逐图 CPU 退回；验证 ENOSPC 时持久记录完整或明确拒绝损坏记录。以上必须通过正式 Gene Agent 路径验收，外部脚本完成不关闭缺口。
 
 <a id="update-rule"></a>
 

@@ -373,15 +373,42 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         (autohic_root / "src" / "models" / "cfgs" / "error_model.py").write_text(
             "# fake model cfg\n", encoding="utf-8"
         )
+        (autohic_root / "torch.py").write_text(
+            "from types import SimpleNamespace\n"
+            "cuda = SimpleNamespace(is_available=lambda: False, "
+            "empty_cache=lambda: None)\n"
+        )
+        (autohic_root / "mmdet").mkdir(exist_ok=True)
+        (autohic_root / "mmdet" / "apis.py").write_text(
+            "from types import SimpleNamespace\n"
+            "class Model:\n"
+            "    def parameters(self):\n"
+            "        yield SimpleNamespace(device=SimpleNamespace(type='cpu'))\n"
+            "def init_detector(*args, device):\n"
+            "    assert device == 'cpu'\n"
+            "    return Model()\n"
+            "def inference_detector(model, image):\n"
+            "    return image\n"
+        )
+        (autohic_root / "src" / "utils").mkdir(exist_ok=True)
+        for relative in ("common/error_pd.py", "utils/get_chr_data.py"):
+            (autohic_root / "src" / relative).write_text(
+                "from mmdet.apis import init_detector, inference_detector\n"
+            )
         entry = autohic_root / "autohic.py"
         entry.write_text(
             "import pathlib, sys\n"
+            "from src.common import error_pd\n"
+            "from src.utils import get_chr_data\n"
             "cfg_path = pathlib.Path(sys.argv[sys.argv.index('-c') + 1])\n"
             "cfg = dict(line.strip().split('=', 1) for line in "
             "cfg_path.read_text().splitlines() if line.strip())\n"
             "if " + repr(fail) + ":\n"
             "    print('fake AutoHiC failed', file=sys.stderr)\n"
             "    raise SystemExit(17)\n"
+            "for module in (error_pd, get_chr_data):\n"
+            "    model = module.init_detector('cfg', 'weights', device='cuda:0')\n"
+            "    assert module.inference_detector(model, 'image') == 'image'\n"
             "assert pathlib.Path(cfg['REFERENCE_GENOME']).is_file()\n"
             "fastqs = sorted(path.name for path in "
             "(pathlib.Path(cfg['FASTQ_DIR']) / 'fastq').iterdir())\n"
@@ -1174,6 +1201,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(frozen_parameters["restriction_enzyme"], "MboI")
             self.assertEqual(frozen_parameters["threads"], 2)
             self.assertEqual(frozen_parameters["python_command"], "python")
+            script_text = frozen_attempt.script_path.read_text()
+            self.assertIn("class DevicePolicy:", script_text)
+            self.assertIn(
+                '"src.common.error_pd", "src.utils.get_chr_data"', script_text
+            )
+            self.assertIn("runpy.run_path", script_text)
 
     def test_ran_checkpoint_replays_collect_without_reexecuting_autohic(self):
         with tempfile.TemporaryDirectory() as tmpdir:
