@@ -455,12 +455,12 @@ def readback_evidence(config: dict[str, Any]) -> None:
             for record in records:
                 if record.target != plan["target"]:
                     continue
+                if record.target_end <= start or record.target_start >= stop:
+                    continue
                 if has_competing_placement(record, records):
                     competing.add(query)
                     continue
                 if record.mapq < config["thresholds"]["min_mapq"] or record.mapq == 255:
-                    continue
-                if record.target_end <= start or record.target_start >= stop:
                     continue
                 aligned.add(query)
                 matches += record.matches
