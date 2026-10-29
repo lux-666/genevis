@@ -1,0 +1,239 @@
+{
+  "captured_at": "2026-10-29T17:02:50.421664+08:00",
+  "source_repository_commit": "bdf67db318aec8537cd75447060485c868a0808d",
+  "scope": "Historical host-specific handoff; not a portable checkpoint or turnkey execution package.",
+  "status_snapshot": {
+    "3": {
+      "stage": "base_polish",
+      "racon_tool_exit_code": 0,
+      "polish_advisor_assessment_present": false,
+      "controller_status_file": "group3/status.json",
+      "note": "Tool execution succeeded; enclosing Python resume process remains alive. Controller status is last invocation state, not evidence of current substep. Post-tool processing not diagnosed in this upload."
+    },
+    "4": {
+      "stage": "base_polish",
+      "racon_tool_exit_code": 0,
+      "polish_advisor_assessment_present": false,
+      "controller_status_file": "group4/status.json",
+      "note": "Tool execution succeeded; enclosing Python resume process remains alive. Controller status is last invocation state, not evidence of current substep. Post-tool processing not diagnosed in this upload."
+    }
+  },
+  "files": [
+    {
+      "file": "gapcloser/provenance.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/provenance.json",
+      "size_bytes": 3995,
+      "sha256": "3335a4a1bad7ae07b3140e221f571d1ba64e34fd44ad64be366b9e1cdb062f1d"
+    },
+    {
+      "file": "gapcloser/results_index.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/results_index.json",
+      "size_bytes": 2457,
+      "sha256": "052a6df8f7f4f054ed38283d419f430f0c61618fdefc8986cf22ad5e49bcf3c8"
+    },
+    {
+      "file": "gapcloser/failure_evidence.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/failure_evidence.json",
+      "size_bytes": 449,
+      "sha256": "03a884e49b7e08b4f1790ab7120479c1c204e67ec7dd85f0bdd1045e4e1b460c"
+    },
+    {
+      "file": "gapcloser/controller.py.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/controller.py",
+      "size_bytes": 3881,
+      "sha256": "9ea6d34610d942ed6f3e31c7d3401ace38300010caaf1cbb4907ee07ae4595d4"
+    },
+    {
+      "file": "gapcloser/evaluate-available.sh.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/evaluate-available.sh",
+      "size_bytes": 949,
+      "sha256": "575c06691f952c692d1af900b835d984abca7f80bd99a574e78a22e6a33d8d0a"
+    },
+    {
+      "file": "gapcloser/asm20-default-thresholds.run.sh.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/asm20-default-thresholds/run.sh",
+      "size_bytes": 559,
+      "sha256": "2255878762946a0d83dcefb36122ce3ad94dd5620631e0a713c158ffc6d59705"
+    },
+    {
+      "file": "gapcloser/pb-upstream-defaults.run.sh.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/pb-upstream-defaults/run.sh",
+      "size_bytes": 380,
+      "sha256": "c7329cf7b0ab70994eee0f0ffff334e24e583fc61102d188274ec22a6f1bc147"
+    },
+    {
+      "file": "gapcloser/group4-validation.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/asm20-default-thresholds/validation.json",
+      "size_bytes": 478,
+      "sha256": "4444189cda16b02d522f0b0b7b83d2c70ee1e270a49aadb77667326533cb35a2"
+    },
+    {
+      "file": "gapcloser/pre-polish-quast.tsv",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/available-results-quast/report.tsv",
+      "size_bytes": 1560,
+      "sha256": "6caa4cf15b352efad9e4cd31e917ff82b6e1c3643e2f998235ed7fe4d77cacb6"
+    },
+    {
+      "file": "reference-terminal-repeat-evidence.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/reference-terminal-repeat-evidence.json",
+      "size_bytes": 2987,
+      "sha256": "6620194c83dff5535fa11616e3ec9699d9bb5ebe6325dedcf54b352e52b09b85"
+    },
+    {
+      "file": "group3/manifest.yaml",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/manifest.yaml",
+      "size_bytes": 1853,
+      "sha256": "ec46a361f576960e92208a55f64f436d7823ab07e03a0c504322f119d47c15b3"
+    },
+    {
+      "file": "group3/run_config.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/run_config.json",
+      "size_bytes": 850,
+      "sha256": "b09655f2771bca3c370776823621f98361888987dc56cd2a1645c729e2e6643e"
+    },
+    {
+      "file": "group3/preparation.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/preparation.json",
+      "size_bytes": 2138,
+      "sha256": "b2c1afecb9ef3fd0ad6d28bf2a2fe94d8f8b807e9f9cfc8cd985d737c8f5b876"
+    },
+    {
+      "file": "group3/status.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/status.json",
+      "size_bytes": 522,
+      "sha256": "702b8729ad5a7d4db377ac6000fefedeb7e7e584e776c9b6bb201cf991be803c"
+    },
+    {
+      "file": "group3/controller.py.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/controller.py",
+      "size_bytes": 5142,
+      "sha256": "4787401569a1e06f8c9e5107da2a77cdf247521947380c2ac4e7f38428ec9a05"
+    },
+    {
+      "file": "group3/delegated_decisions/review_117ecde36753680da824bd07.audit.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/delegated_decisions/review_117ecde36753680da824bd07.audit.json",
+      "size_bytes": 2042,
+      "sha256": "8887c8f9a926700648c9758f5ab388a68ba0252f3f655fd907feb64252fcd182"
+    },
+    {
+      "file": "group3/delegated_decisions/review_117ecde36753680da824bd07.follow_recommendation.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/delegated_decisions/review_117ecde36753680da824bd07.follow_recommendation.json",
+      "size_bytes": 810,
+      "sha256": "bf6d2fe867441d05b25ea3943e1bdd0e2fd077ffcfac5d8717d975afb3e0440b"
+    },
+    {
+      "file": "group3/delegated_decisions/review_6f2d30613f19b3b1828a0e54.audit.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/delegated_decisions/review_6f2d30613f19b3b1828a0e54.audit.json",
+      "size_bytes": 2382,
+      "sha256": "d09d4beeeb9489d01f7f5eacd1f3232808239d756de9c68fb9c187384bd43ab9"
+    },
+    {
+      "file": "group3/delegated_decisions/review_6f2d30613f19b3b1828a0e54.follow_recommendation.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/delegated_decisions/review_6f2d30613f19b3b1828a0e54.follow_recommendation.json",
+      "size_bytes": 810,
+      "sha256": "875acf55709f1678f51e85759ba4bba065f99f80001f1ae068f8ac7d244579e7"
+    },
+    {
+      "file": "group3/delegated_decisions/review_de7b5bf51fd37968c0320fc8.audit.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/delegated_decisions/review_de7b5bf51fd37968c0320fc8.audit.json",
+      "size_bytes": 2429,
+      "sha256": "ad5f1457227087dabe84d38745c46e64f904b0cba3ed917d05c17356a4621c9b"
+    },
+    {
+      "file": "group3/delegated_decisions/review_de7b5bf51fd37968c0320fc8.follow_recommendation.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/delegated_decisions/review_de7b5bf51fd37968c0320fc8.follow_recommendation.json",
+      "size_bytes": 802,
+      "sha256": "e3d0efbbbebd852745a67ba97d272ae211f4c351a5c12c82132af3d0660c4ac2"
+    },
+    {
+      "file": "group3/racon-execution.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/data/runs/cc1-post-gap3-motif/artifacts/steps/step-002-base_polish/base_polish/attempts/cc1-post-gap3-motif-step-002-base_polish-racon-0/execution.3c6ecdf9dbbba817d5843fc9a21ccc69daff01223cd7f5e29e827d621c87c0d4.json",
+      "size_bytes": 1733,
+      "sha256": "3c6ecdf9dbbba817d5843fc9a21ccc69daff01223cd7f5e29e827d621c87c0d4"
+    },
+    {
+      "file": "group3/polish-advisor-response.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/data/runs/cc1-post-gap3-motif/artifacts/steps/step-002-base_polish/base_polish/advisor/recommendations/000/response.json",
+      "size_bytes": 4306,
+      "sha256": "ca14d21f3294e901c37425b7360beb48b29c4d4bf529ffbc6b4619cb2edb2709"
+    },
+    {
+      "file": "group3/racon.run.sh.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/data/runs/cc1-post-gap3-motif/work/steps/step-002-base_polish/base_polish/attempts/000/racon/run.sh",
+      "size_bytes": 794,
+      "sha256": "4d6c4d8288ae12ba2f9d3d5c764ac2b3254da4ec308f36c91df8f7fc72483f32"
+    },
+    {
+      "file": "group4/manifest.yaml",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/manifest.yaml",
+      "size_bytes": 1771,
+      "sha256": "640448d63bdfa654ae2c4f753552d43f5f56f249f6221af5c4a1bae52abed445"
+    },
+    {
+      "file": "group4/run_config.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/run_config.json",
+      "size_bytes": 850,
+      "sha256": "b09655f2771bca3c370776823621f98361888987dc56cd2a1645c729e2e6643e"
+    },
+    {
+      "file": "group4/preparation.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/preparation.json",
+      "size_bytes": 2089,
+      "sha256": "86211846563217563bec63801d7fddeadb5dff662327f124e3046358b950d77e"
+    },
+    {
+      "file": "group4/status.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/status.json",
+      "size_bytes": 522,
+      "sha256": "638ba2c5b1aca4dfb6214b6bea5c8c629d50b3be9e2fb698257268e5287e9168"
+    },
+    {
+      "file": "group4/controller.py.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/controller.py",
+      "size_bytes": 5350,
+      "sha256": "d4d3ea6c1719049867693627480625cd9fbd5b60f8f81a37fa6d0f862e26552e"
+    },
+    {
+      "file": "group4/delegated_decisions/review_16305230b1b444e09ce5ca7f.keep_prior_assembly.audit.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/delegated_decisions/review_16305230b1b444e09ce5ca7f.keep_prior_assembly.audit.json",
+      "size_bytes": 671,
+      "sha256": "2b595ee7add842b89712ee5bcae4e1a88564165d2f627d3f83f3801c97f3d2c9"
+    },
+    {
+      "file": "group4/delegated_decisions/review_16305230b1b444e09ce5ca7f.keep_prior_assembly.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/delegated_decisions/review_16305230b1b444e09ce5ca7f.keep_prior_assembly.json",
+      "size_bytes": 791,
+      "sha256": "92857fe0a9c9240975988794d8ba9efe515bea3dfea2c06980412328c5ae9cbe"
+    },
+    {
+      "file": "group4/delegated_decisions/review_dbad79da6843d3604a8ebdd8.audit.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/delegated_decisions/review_dbad79da6843d3604a8ebdd8.audit.json",
+      "size_bytes": 2138,
+      "sha256": "0d46546d3179de0ac3f3c11badfdf35a45652bfb98be0dea58d6cb273b54420a"
+    },
+    {
+      "file": "group4/delegated_decisions/review_dbad79da6843d3604a8ebdd8.follow_recommendation.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/delegated_decisions/review_dbad79da6843d3604a8ebdd8.follow_recommendation.json",
+      "size_bytes": 810,
+      "sha256": "fd159660a0b963192258864753f6c21b8d91793badd2bb3b9ffb46fdf4574462"
+    },
+    {
+      "file": "group4/racon-execution.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/data/runs/cc1-post-gap4-motif/artifacts/steps/step-002-base_polish/base_polish/attempts/cc1-post-gap4-motif-step-002-base_polish-racon-0/execution.7c2c97c474dc85e44cae8eea266ece14a7a1d9d4d2f6ef3b18e98753f439d484.json",
+      "size_bytes": 1733,
+      "sha256": "7c2c97c474dc85e44cae8eea266ece14a7a1d9d4d2f6ef3b18e98753f439d484"
+    },
+    {
+      "file": "group4/polish-advisor-response.json",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/data/runs/cc1-post-gap4-motif/artifacts/steps/step-002-base_polish/base_polish/advisor/recommendations/000/response.json",
+      "size_bytes": 4594,
+      "sha256": "1134fcd34f0dcc478760a7ba64f0bb38e28b125b0eb435f2f6fecbc0957438b9"
+    },
+    {
+      "file": "group4/racon.run.sh.txt",
+      "source": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap4/data/runs/cc1-post-gap4-motif/work/steps/step-002-base_polish/base_polish/attempts/000/racon/run.sh",
+      "size_bytes": 794,
+      "sha256": "e89568262a3634d80ca3d4c31cfb320e11da7874eaa1c086adb0f834680f8604"
+    }
+  ]
+}

@@ -224,6 +224,43 @@ def test_feedback_budget_history_and_fresh_graph_resume(tmp_path, stage):
         assert len(model.messages) == 3
 
 
+@pytest.mark.parametrize("stage", ["gapcloser", "base_polish"])
+@pytest.mark.parametrize(
+    "decision", ["follow_recommendation", "accept_candidate", "keep_prior_assembly"]
+)
+def test_post_attempt_interactive_decision_passes_resume_validation(
+    tmp_path, stage, decision
+):
+    from app.control.inspection import inspect_state
+    from app.control.resume import normalize_resume_review_request
+    from app.entrypoints.review_interactive import collect_gate_decision
+
+    state = state_for(stage, tmp_path)
+    model = Model(
+        [AIMessage(content=json.dumps(proposal(stage, index))) for index in range(2)]
+    )
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        blocked = build_stage(stage).invoke(state)
+        blocked = build_stage(stage).invoke(approve(blocked))
+    assert len(history(blocked, stage)) == 1
+    summary = inspect_state(blocked)
+    requirements = summary["decision_requirements"]
+    assert requirements["candidate_ids"] == ["attempt_0"]
+    selection = str(requirements["decisions_allowed"].index(decision) + 1)
+    with patch("builtins.input", side_effect=[selection, "reviewed"]):
+        collected = collect_gate_decision(
+            state["session_id"], state["data_dir"], summary=summary
+        )
+    assert collected is not None
+    request, _raw = collected
+    normalized = normalize_resume_review_request(blocked, request)
+    assert normalized.decision == decision
+    assert normalized.candidate_id == (
+        "attempt_0" if decision == "accept_candidate" else None
+    )
+    assert not normalized.rejected_candidates
+
+
 @pytest.mark.parametrize("stage", ["gapcloser", "base_polish", "t2t"])
 def test_no_execution_keep_source_and_invalid_budget(tmp_path, stage):
     state = state_for(stage, tmp_path)

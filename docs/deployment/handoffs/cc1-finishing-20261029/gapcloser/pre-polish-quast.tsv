@@ -1,0 +1,55 @@
+Assembly	source	asm20_default_thresholds
+# contigs (>= 0 bp)	13	13
+# contigs (>= 1000 bp)	13	13
+# contigs (>= 5000 bp)	13	13
+# contigs (>= 10000 bp)	13	13
+# contigs (>= 25000 bp)	13	13
+# contigs (>= 50000 bp)	13	13
+Total length (>= 0 bp)	448864847	448864723
+Total length (>= 1000 bp)	448864847	448864723
+Total length (>= 5000 bp)	448864847	448864723
+Total length (>= 10000 bp)	448864847	448864723
+Total length (>= 25000 bp)	448864847	448864723
+Total length (>= 50000 bp)	448864847	448864723
+# contigs	13	13
+Largest contig	71538262	71538262
+Total length	448864847	448864723
+Reference length	426888859	426888859
+GC (%)	38.16	38.16
+Reference GC (%)	37.62	37.62
+N50	38761150	38760948
+NG50	38761150	38760948
+N90	22746457	22746457
+NG90	24631691	24631691
+auN	42155090.5	42155126.6
+auNG	44325209.8	44325235.5
+L50	5	5
+LG50	5	5
+L90	11	11
+LG90	10	10
+# misassemblies	338	338
+# misassembled contigs	13	13
+Misassembled contigs length	448864847	448864723
+# local misassemblies	276	276
+# scaffold gap ext. mis.	2	2
+# scaffold gap loc. mis.	12	11
+# unaligned mis. contigs	0	0
+# unaligned contigs	0 + 6 part	0 + 6 part
+Unaligned length	18016576	18018183
+Genome fraction (%)	99.567	99.567
+Duplication ratio	1.012	1.012
+# N's per 100 kbp	24.62	24.28
+# mismatches per 100 kbp	9.48	9.43
+# indels per 100 kbp	2.00	2.00
+Largest alignment	39054006	39054006
+Total aligned length	430305330	430309300
+NA50	21604069	21604069
+NGA50	23786361	23786361
+NA90	5185032	5185032
+NGA90	8207960	8207960
+auNA	21330540.0	21330586.5
+auNGA	22428623.7	22428666.4
+LA50	9	9
+LGA50	8	8
+LA90	21	21
+LGA90	18	18

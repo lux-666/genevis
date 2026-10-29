@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH=/home/lux/miniconda3/envs/env_finishing_exec/bin:/usr/local/bin:/usr/bin:/bin
+cd /home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/pb-upstream-defaults/tool_run
+/home/lux/miniconda3/envs/env_finishing_exec/bin/tgsgapcloser --scaff assembly.fasta --reads hifi.fasta --output result --ne --tgstype pb --thread 16

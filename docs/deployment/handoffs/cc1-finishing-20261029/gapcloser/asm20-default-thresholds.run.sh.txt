@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH=/home/lux/miniconda3/envs/env_finishing_exec/bin:/usr/local/bin:/usr/bin:/bin
+cd /home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/asm20-default-thresholds/tool_run
+/home/lux/miniconda3/envs/env_finishing_exec/bin/tgsgapcloserbin/tgsgapcloser --ont_reads_a hifi.fasta --contig2ont_paf result.fill.filter.paf --min_match=200 --min_idy=0.2 --prefix result > result.fill.log 2>&1
+/home/lux/miniconda3/envs/env_finishing_exec/bin/tgsgapcloserbin/tgsseqgen --prefix result > result.i2s.log 2>&1

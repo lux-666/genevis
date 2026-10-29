@@ -1,0 +1,42 @@
+session_id: cc1-post-gap3-motif
+sample_id: CC1
+assets:
+- asset_type: assembly_fasta_registered
+  paths:
+  - /home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/002/tgs_gapcloser/tool_run/result.scaff_seqs
+  format: fasta
+  compression: none
+  metadata:
+    source_group: 3
+    source_session: cc1-post-hic
+    source_sha256: b9073563c310003fc8cfa5961d5c6ac0ac09309ed6d74e361b809c92743e0a49
+    source_validation: /home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/002/tgs_gapcloser/validation.json
+    sequence_scope: all 13 scaffolds, including unassigned sequences
+- asset_type: raw_long_reads
+  paths:
+  - /home/lux/brassica_CC1/fastq/SRR35013599.fastq.gz
+  platform: pacbio_hifi
+  layout: single
+  format: fastq
+  compression: gzip
+  metadata:
+    sra_run: SRR35013599
+    library_name: CC1_HiFi-1
+    source_manifest: /home/lux/brassica_CC1/gene_agent_baseline/runs/cc1-llm-012/control/input_manifest.yaml
+- asset_type: reference_genome_fasta
+  paths:
+  - /home/lux/brassica_CC1/reference/ncbi_dataset/data/GCA_052186835.1/GCA_052186835.1_ASM5218683v1_genomic.fna
+  format: fasta
+  compression: none
+  metadata:
+    source_manifest: /home/lux/brassica_CC1/gene_agent_baseline/runs/cc1-llm-012/control/input_manifest.yaml
+    role: evaluation reference only
+user_metadata:
+  target_species: Brassica rapa subsp. pekinensis
+  source_session: cc1-post-hic
+  source_recovery: /home/lux/brassica_CC1/hic-kb/recovery
+  requested_work: Compare independent group 3 and group 4 GapCloser outputs through
+    T2T, base polish, and final assembly review.
+  source_group: 3
+  telomere_motif_evidence: /home/lux/brassica_CC1/hic-kb/finishing/reference-terminal-repeat-evidence.json
+genome_size_estimate: 426890000

@@ -582,9 +582,9 @@ class ReviewGateRegistryTests(unittest.TestCase):
 
     def test_generic_prompt_collects_candidate_and_notes(self):
         requirements = {
-            "stage": "unit_review_gate",
-            "gate_id": "unit_review_gate",
-            "decisions_allowed": ["accept", "stop_human_review"],
+            "stage": "gapcloser",
+            "gate_id": "finishing_recommendation",
+            "decisions_allowed": ["accept_candidate", "stop_human_review"],
             "candidate_ids": ["candidate-a", "candidate-b"],
         }
         inputs = iter(["1", "2", "reviewed evidence"])
@@ -592,11 +592,11 @@ class ReviewGateRegistryTests(unittest.TestCase):
             decision = prompt_generic_gate_decision(requirements)
 
         self.assertIsNotNone(decision)
-        self.assertEqual(decision["stage"], "unit_review_gate")
-        self.assertEqual(decision["gate_id"], "unit_review_gate")
-        self.assertEqual(decision["decision"], "accept")
+        self.assertEqual(decision["stage"], "gapcloser")
+        self.assertEqual(decision["gate_id"], "finishing_recommendation")
+        self.assertEqual(decision["decision"], "accept_candidate")
         self.assertEqual(decision["candidate_id"], "candidate-b")
-        self.assertEqual(decision["rejected_candidates"], ["candidate-a"])
+        self.assertNotIn("rejected_candidates", decision)
         self.assertEqual(decision["notes"], ["reviewed evidence"])
 
 

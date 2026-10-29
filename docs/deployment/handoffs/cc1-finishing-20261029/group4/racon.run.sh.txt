@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+mkdir tool_run
+cd tool_run
+ln -s /home/lux/brassica_CC1/hic-kb/finishing/post-gap4/data/runs/cc1-post-gap4-motif/artifacts/steps/step-002-base_polish/base_polish/outputs/attempts/000/racon/source.fasta source.fasta
+ln -s /home/lux/brassica_CC1/hic-kb/finishing/post-gap4/data/runs/cc1-post-gap4-motif/artifacts/steps/step-002-base_polish/base_polish/outputs/attempts/000/racon/hifi.fasta reads.fasta
+minimap2 --version > minimap2.version
+racon --version > racon.version
+minimap2 -x map-hifi -c --eqx --secondary=no -t 16 source.fasta reads.fasta > before.paf
+racon -u --no-trimming -t 16 -w 500 -e 0.3 -m 3 -x -4 -g -4 reads.fasta before.paf source.fasta > candidate.fasta
+minimap2 -x map-hifi -c --eqx --secondary=no -t 16 candidate.fasta reads.fasta > after.paf

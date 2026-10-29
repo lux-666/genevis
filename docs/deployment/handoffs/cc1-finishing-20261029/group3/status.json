@@ -1,0 +1,17 @@
+{
+  "state": "executing",
+  "updated_at": "2026-10-28T11:59:02.527390+08:00",
+  "command": [
+    "/home/lux/miniconda3/envs/gene_agent/bin/gene-agent",
+    "resume",
+    "--session-id",
+    "cc1-post-gap3-motif",
+    "--data-dir",
+    "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/data",
+    "--decision-file",
+    "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/delegated_decisions/review_117ecde36753680da824bd07.follow_recommendation.json",
+    "--checkpointer",
+    "sqlite"
+  ],
+  "controller_pid": 1736610
+}

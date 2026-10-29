@@ -377,7 +377,9 @@ def prompt_generic_gate_decision(
 
     candidate_id = None
     method_name = None
-    if candidate_ids and decision not in {"skip", "stop_human_review"}:
+    gate = find_review_gate(stage, requirements.get("gate_id"))
+    required_fields = gate.required_resume_fields_for(decision) if gate else ()
+    if candidate_ids and "candidate_id" in required_fields:
         if len(candidate_ids) == 1:
             candidate_id = candidate_ids[0]
             print(f"  using candidate: {candidate_id}")
@@ -408,9 +410,6 @@ def prompt_generic_gate_decision(
         result["metadata"] = dict(resume_metadata)
     if candidate_id:
         result["candidate_id"] = candidate_id
-        result["rejected_candidates"] = [
-            candidate for candidate in candidate_ids if candidate != candidate_id
-        ]
     if method_name:
         result["method_name"] = method_name
     return result

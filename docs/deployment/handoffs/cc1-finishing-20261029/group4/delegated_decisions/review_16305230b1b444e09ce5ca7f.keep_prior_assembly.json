@@ -1,0 +1,18 @@
+{
+  "session_id": "cc1-post-gap4-motif",
+  "stage": "t2t",
+  "gate_id": "finishing_recommendation",
+  "review_request_id": "review_16305230b1b444e09ce5ca7f",
+  "review_request_hash": "4e1e2510069cf78a0599b84619ba4db4dd415555288dafdccbcb0bdb3e8c2fcf",
+  "decision": "keep_prior_assembly",
+  "notes": [
+    "User explicitly instructed: 四号直接往前推进吧。 Submitted by Codex on behalf of the user.",
+    "The current verified gate allows only keep_prior_assembly or stop_human_review. Retain the group 4 GapCloser assembly, perform no T2T extension, and continue to base_polish and final evaluation under the frozen plan."
+  ],
+  "metadata": {},
+  "decided_by": "human",
+  "rationale_artifact_ref": null,
+  "candidate_id": null,
+  "candidate_ids": [],
+  "rejected_candidates": []
+}

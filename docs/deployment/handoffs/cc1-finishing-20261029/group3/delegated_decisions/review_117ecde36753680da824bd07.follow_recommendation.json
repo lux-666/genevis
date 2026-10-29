@@ -1,0 +1,18 @@
+{
+  "session_id": "cc1-post-gap3-motif",
+  "stage": "base_polish",
+  "gate_id": "finishing_recommendation",
+  "review_request_id": "review_117ecde36753680da824bd07",
+  "review_request_hash": "dd6576ff3884258a33439a14aa6734d6eb0e64695af969d31841312737c8ce9d",
+  "decision": "follow_recommendation",
+  "notes": [
+    "Executed by the Codex assistant on behalf of the user under explicit authorization to run both groups through subsequent workflow stages. This is a delegated operator submission through the human-only CLI schema, not an individual user review.",
+    "Follow the verified source-bound advisor proposal without parameter overrides: run"
+  ],
+  "metadata": {},
+  "decided_by": "human",
+  "rationale_artifact_ref": null,
+  "candidate_id": null,
+  "candidate_ids": [],
+  "rejected_candidates": []
+}

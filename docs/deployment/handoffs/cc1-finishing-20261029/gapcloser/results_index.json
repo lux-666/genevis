@@ -1,0 +1,60 @@
+{
+  "checked_at": "2026-10-28T09:04:52.766561+08:00",
+  "groups": [
+    {
+      "group": 1,
+      "parameters": {
+        "minimap": "asm20",
+        "min_identity": 0.95,
+        "min_match": 1000
+      },
+      "state": "completed",
+      "assembly": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/000/tgs_gapcloser/tool_run/result.scaff_seqs",
+      "validation": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/000/tgs_gapcloser/validation.json"
+    },
+    {
+      "group": 2,
+      "parameters": {
+        "minimap": "asm20",
+        "min_identity": 0.95,
+        "min_match": 500
+      },
+      "state": "completed",
+      "assembly": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/001/tgs_gapcloser/tool_run/result.scaff_seqs",
+      "validation": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/001/tgs_gapcloser/validation.json"
+    },
+    {
+      "group": 3,
+      "parameters": {
+        "minimap": "asm20",
+        "min_identity": 0.95,
+        "min_match": 250
+      },
+      "state": "completed",
+      "assembly": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/002/tgs_gapcloser/tool_run/result.scaff_seqs",
+      "validation": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/002/tgs_gapcloser/validation.json"
+    },
+    {
+      "group": 4,
+      "parameters": {
+        "min_identity": 0.2,
+        "min_match": 200,
+        "minimap_preset": "asm20"
+      },
+      "state": "completed",
+      "assembly": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/asm20-default-thresholds/tool_run/result.scaff_seqs",
+      "directory": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/asm20-default-thresholds"
+    },
+    {
+      "group": 5,
+      "parameters": {
+        "min_identity": 0.2,
+        "min_match": 200,
+        "minimap_preset": "ava-pb"
+      },
+      "state": "failed",
+      "assembly": null,
+      "directory": "/home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/pb-upstream-defaults"
+    }
+  ]
+}

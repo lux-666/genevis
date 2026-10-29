@@ -1,0 +1,33 @@
+{
+  "submitted_by": "codex_assistant",
+  "authorization_file": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/preparation.json",
+  "request_ref": {
+    "schema_version": 2,
+    "artifact_id": "art_c037f2eedc705d348ca498e7694818b4",
+    "path_ref": "artifacts/steps/step-001-t2t/t2t/reviews/review_6f2d30613f19b3b1828a0e54/request.json",
+    "sha256": "d996192c365798d44ac5b5084182b095347694b54065db015c6d005f00d41dca",
+    "size_bytes": 3640,
+    "artifact_type": "t2t.review_request"
+  },
+  "recommendation_ref": {
+    "artifact_id": "art_0e02839205d35f45997e3ea2f16f08a3",
+    "artifact_type": "t2t.advisor.response",
+    "path_ref": "artifacts/steps/step-001-t2t/t2t/advisor/recommendations/001/response.json",
+    "schema_version": 2,
+    "sha256": "fde5de5590ed2567285d4f43812e320ac19cfbc52024c60255eb84dc9f7ff361",
+    "size_bytes": 5521
+  },
+  "proposal": {
+    "action": "keep_source",
+    "evidence_gaps": [
+      "No read alignment reaches within 1,000 bp of a scaffold end; the closest reported junction is 280,118 bp away. There is no supported terminal patch candidate.",
+      "No independent validation of chromosome-end structure or patch accuracy is supplied.",
+      "No BUSCO, QV, or k-mer completeness evidence is supplied."
+    ],
+    "parameters": null,
+    "reason": "Attempt 0 produced zero extension candidates and was not materialized. All 7,322 assessed alignments failed the terminal-distance threshold; many also lacked sufficient tail motif copies (5,150), MAPQ (1,692), or overlap (1,144). Each of the 13 source scaffolds has at most one TTTAGGG copy per end in the 10-kb scan, below the three-copy signal threshold. Some reads have stronger motifs, but the reported junctions are far from scaffold ends, so widening the terminal-distance threshold would not justify a compatible-tail patch. Source and attempt 0 have identical QUAST results, and a telomere signal alone would not establish chromosome completeness. Retain the source assembly, subject to required human approval; do not spend the two remaining attempts by lowering support thresholds merely to obtain extensions.",
+    "selected_attempt": null
+  },
+  "submitted_at": "2026-10-28T11:45:34.592947+08:00",
+  "schema_origin_explanation": "Existing finishing gate accepts decided_by=human only. Notes explicitly identify assistant delegation; no individual human review is claimed."
+}

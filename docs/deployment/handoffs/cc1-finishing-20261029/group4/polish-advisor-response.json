@@ -1,0 +1,79 @@
+{
+  "error": null,
+  "model_call": {
+    "client_implementation": "langchain_openai.chat_models.base.ChatOpenAI",
+    "configured_model": "gpt-6-sol",
+    "output_method": "json_schema",
+    "returned_model": "gpt-6-sol",
+    "sampling": {
+      "max_tokens": 4096,
+      "temperature": 0.2
+    },
+    "schema_version": 1
+  },
+  "model_id": "gpt-6-sol",
+  "proposal": {
+    "action": "run",
+    "evidence_gaps": [
+      "No independent QV, BUSCO, or k-mer completeness measurement is supplied.",
+      "The suitability of the QUAST reference for judging this assembly is not established.",
+      "No post-polish reference-based comparison is available yet."
+    ],
+    "parameters": {
+      "error_threshold": 0.3,
+      "gap": -4,
+      "match": 3,
+      "mismatch": -4,
+      "window_length": 500
+    },
+    "reason": "The reference-based QUAST report identifies 9.43 mismatches and 2.00 indels per 100 kbp, giving a specific hypothesis for one HiFi Racon correction round starting from the original source. This is a first configuration, not a repeat. The 338 reported misassemblies also require separate review; polishing is not evidence that they will be resolved. Human approval is required before running, and improved alignment to the correction reads alone must not justify accepting the result or another attempt.",
+    "selected_attempt": null
+  },
+  "raw_message": {
+    "additional_kwargs": {
+      "parsed": null,
+      "refusal": null
+    },
+    "content": "{\"action\":\"run\",\"evidence_gaps\":[\"No independent QV, BUSCO, or k-mer completeness measurement is supplied.\",\"The suitability of the QUAST reference for judging this assembly is not established.\",\"No post-polish reference-based comparison is available yet.\"],\"parameters\":{\"error_threshold\":0.3,\"gap\":-4,\"match\":3,\"mismatch\":-4,\"window_length\":500},\"reason\":\"The reference-based QUAST report identifies 9.43 mismatches and 2.00 indels per 100 kbp, giving a specific hypothesis for one HiFi Racon correction round starting from the original source. This is a first configuration, not a repeat. The 338 reported misassemblies also require separate review; polishing is not evidence that they will be resolved. Human approval is required before running, and improved alignment to the correction reads alone must not justify accepting the result or another attempt.\",\"selected_attempt\":null}",
+    "id": "lc_run--01a18099-cc22-7372-8f29-1c1dc5154a08-0",
+    "invalid_tool_calls": [],
+    "name": null,
+    "response_metadata": {
+      "finish_reason": "stop",
+      "id": "chatcmpl-01ee93d2",
+      "logprobs": null,
+      "model_name": "gpt-6-sol",
+      "model_provider": "openai",
+      "service_tier": "default",
+      "system_fingerprint": null,
+      "token_usage": {
+        "completion_tokens": 354,
+        "completion_tokens_details": null,
+        "input_tokens": 6736,
+        "output_tokens": 354,
+        "prompt_tokens": 6736,
+        "prompt_tokens_details": null,
+        "reasoning_tokens": 154,
+        "total_tokens": 7090
+      }
+    },
+    "tool_calls": [],
+    "type": "ai",
+    "usage_metadata": {
+      "input_token_details": {},
+      "input_tokens": 6736,
+      "output_token_details": {},
+      "output_tokens": 354,
+      "total_tokens": 7090
+    }
+  },
+  "raw_response": "{\"action\":\"run\",\"evidence_gaps\":[\"No independent QV, BUSCO, or k-mer completeness measurement is supplied.\",\"The suitability of the QUAST reference for judging this assembly is not established.\",\"No post-polish reference-based comparison is available yet.\"],\"parameters\":{\"error_threshold\":0.3,\"gap\":-4,\"match\":3,\"mismatch\":-4,\"window_length\":500},\"reason\":\"The reference-based QUAST report identifies 9.43 mismatches and 2.00 indels per 100 kbp, giving a specific hypothesis for one HiFi Racon correction round starting from the original source. This is a first configuration, not a repeat. The 338 reported misassemblies also require separate review; polishing is not evidence that they will be resolved. Human approval is required before running, and improved alignment to the correction reads alone must not justify accepting the result or another attempt.\",\"selected_attempt\":null}",
+  "request_ref": {
+    "artifact_id": "art_e86ba388d4a859c0acfff8c85b384ac7",
+    "artifact_type": "base_polish.advisor.request",
+    "path_ref": "artifacts/steps/step-002-base_polish/base_polish/advisor/recommendations/000/request.json",
+    "schema_version": 2,
+    "sha256": "b1cfa36ba40db5c0e9f55133e8650f18946a3f9a864885f0a1d7a887bd2bbaa6",
+    "size_bytes": 10737
+  }
+}

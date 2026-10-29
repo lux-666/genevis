@@ -1,0 +1,79 @@
+{
+  "error": null,
+  "model_call": {
+    "client_implementation": "langchain_openai.chat_models.base.ChatOpenAI",
+    "configured_model": "gpt-6-sol",
+    "output_method": "json_schema",
+    "returned_model": "gpt-6-sol",
+    "sampling": {
+      "max_tokens": 4096,
+      "temperature": 0.2
+    },
+    "schema_version": 1
+  },
+  "model_id": "gpt-6-sol",
+  "proposal": {
+    "action": "run",
+    "evidence_gaps": [
+      "No independent QV, BUSCO, or k-mer completeness assessment is supplied.",
+      "It is unknown which reference differences are assembly errors rather than biological differences.",
+      "No read-level evidence identifies the reported mismatches or indels as correctable errors."
+    ],
+    "parameters": {
+      "error_threshold": 0.3,
+      "gap": -4,
+      "match": 3,
+      "mismatch": -5,
+      "window_length": 500
+    },
+    "reason": "The reference-based QUAST report identifies 9.48 mismatches and 2.00 indels per 100 kbp, providing a specific hypothesis for one HiFi Racon round starting from the source. The reported misassemblies are not a rationale for base polishing. This run requires human approval; improved agreement with the correction reads alone would not justify accepting its output.",
+    "selected_attempt": null
+  },
+  "raw_message": {
+    "additional_kwargs": {
+      "parsed": null,
+      "refusal": null
+    },
+    "content": "{\"action\":\"run\",\"evidence_gaps\":[\"No independent QV, BUSCO, or k-mer completeness assessment is supplied.\",\"It is unknown which reference differences are assembly errors rather than biological differences.\",\"No read-level evidence identifies the reported mismatches or indels as correctable errors.\"],\"parameters\":{\"error_threshold\":0.3,\"gap\":-4,\"match\":3,\"mismatch\":-5,\"window_length\":500},\"reason\":\"The reference-based QUAST report identifies 9.48 mismatches and 2.00 indels per 100 kbp, providing a specific hypothesis for one HiFi Racon round starting from the source. The reported misassemblies are not a rationale for base polishing. This run requires human approval; improved agreement with the correction reads alone would not justify accepting its output.\",\"selected_attempt\":null}",
+    "id": "lc_run--01a180a9-1df5-7f12-a986-ee1a3bed4715-0",
+    "invalid_tool_calls": [],
+    "name": null,
+    "response_metadata": {
+      "finish_reason": "stop",
+      "id": "chatcmpl-7a7caac2",
+      "logprobs": null,
+      "model_name": "gpt-6-sol",
+      "model_provider": "openai",
+      "service_tier": "default",
+      "system_fingerprint": null,
+      "token_usage": {
+        "completion_tokens": 480,
+        "completion_tokens_details": null,
+        "input_tokens": 2362,
+        "output_tokens": 480,
+        "prompt_tokens": 2362,
+        "prompt_tokens_details": null,
+        "reasoning_tokens": 301,
+        "total_tokens": 2842
+      }
+    },
+    "tool_calls": [],
+    "type": "ai",
+    "usage_metadata": {
+      "input_token_details": {},
+      "input_tokens": 2362,
+      "output_token_details": {},
+      "output_tokens": 480,
+      "total_tokens": 2842
+    }
+  },
+  "raw_response": "{\"action\":\"run\",\"evidence_gaps\":[\"No independent QV, BUSCO, or k-mer completeness assessment is supplied.\",\"It is unknown which reference differences are assembly errors rather than biological differences.\",\"No read-level evidence identifies the reported mismatches or indels as correctable errors.\"],\"parameters\":{\"error_threshold\":0.3,\"gap\":-4,\"match\":3,\"mismatch\":-5,\"window_length\":500},\"reason\":\"The reference-based QUAST report identifies 9.48 mismatches and 2.00 indels per 100 kbp, providing a specific hypothesis for one HiFi Racon round starting from the source. The reported misassemblies are not a rationale for base polishing. This run requires human approval; improved agreement with the correction reads alone would not justify accepting its output.\",\"selected_attempt\":null}",
+  "request_ref": {
+    "artifact_id": "art_5aa32f93ec2452058d6135369945d463",
+    "artifact_type": "base_polish.advisor.request",
+    "path_ref": "artifacts/steps/step-002-base_polish/base_polish/advisor/recommendations/000/request.json",
+    "schema_version": 2,
+    "sha256": "97fb6f28573afe885b5197f21646d6a9001eb65d75cf852cd2b0c34e3b66b261",
+    "size_bytes": 10737
+  }
+}

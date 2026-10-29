@@ -1,0 +1,40 @@
+{
+  "submitted_by": "codex_assistant",
+  "authorization_file": "/home/lux/brassica_CC1/hic-kb/finishing/post-gap3/preparation.json",
+  "request_ref": {
+    "schema_version": 2,
+    "artifact_id": "art_36b8451c32f95290a8afa02e96849897",
+    "path_ref": "artifacts/steps/step-001-t2t/t2t/reviews/review_de7b5bf51fd37968c0320fc8/request.json",
+    "sha256": "535eb4e6a961da8508844031d2deef739bad1ac4a0bc01a61892bddab5f262fd",
+    "size_bytes": 3144,
+    "artifact_type": "t2t.review_request"
+  },
+  "recommendation_ref": {
+    "artifact_id": "art_1fb73c657e4b563ea00f17563ebd10fc",
+    "artifact_type": "t2t.advisor.response",
+    "path_ref": "artifacts/steps/step-001-t2t/t2t/advisor/recommendations/000/response.json",
+    "schema_version": 2,
+    "sha256": "441e8909a6f9bc66446fd75cbdb3cc7e9650484546cd09a097911f588f03f054",
+    "size_bytes": 5575
+  },
+  "proposal": {
+    "action": "run",
+    "evidence_gaps": [
+      "No minimap2 alignments, read-support counts, MAPQ values, overlap lengths, or junction distances have been supplied.",
+      "No independent QV, BUSCO, or k-mer completeness evidence is available.",
+      "The source has 221 internal gaps; terminal extension would not resolve them."
+    ],
+    "parameters": {
+      "max_target_terminal_distance_bp": 1000,
+      "min_mapq": 30,
+      "min_motif_copies": 3,
+      "min_overlap_bp": 1000,
+      "min_supporting_reads": 3,
+      "terminal_window_bp": 10000
+    },
+    "reason": "Across all 13 scaffolds, the maximum observed TTTAGGG copy count at either end is only one within the measured 10 kb window. That is not a convincing terminal repeat signal or evidence of chromosome completeness. With no prior attempts and three remaining, one conservative compatible-tail patch attempt can test whether HiFi reads provide stronger terminal motif and junction evidence. Require at least three supporting reads; do not lower support merely to obtain extensions. Review candidate alignments and rejection reasons before accepting any patch. The reference-based QUAST report flags 338 misassemblies and does not independently validate a terminal extension. Human approval is required before running.",
+    "selected_attempt": null
+  },
+  "submitted_at": "2026-10-28T10:00:47.688828+08:00",
+  "schema_origin_explanation": "Existing finishing gate accepts decided_by=human only. Notes explicitly identify assistant delegation; no individual human review is claimed."
+}

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -uo pipefail
+export PATH=/home/lux/miniconda3/envs/env_geno_exec/bin:/usr/local/bin:/usr/bin:/bin
+export MPLBACKEND=Agg
+cd /home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison
+/home/lux/miniconda3/envs/env_geno_exec/bin/quast.py /home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-000-inventory/inventory/registered_assembly/asset_c3dcbbe8ae95514abcc0ad241fd0508e/primary_assembly.fasta /home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/asm20-default-thresholds/tool_run/result.scaff_seqs -r /home/lux/brassica_CC1/reference/ncbi_dataset/data/GCA_052186835.1/GCA_052186835.1_ASM5218683v1_genomic.fna --labels source,asm20_default_thresholds --threads 16 -o /home/lux/brassica_CC1/hic-kb/finishing/gapcloser-default-comparison/available-results-quast > available-results-quast.log 2>&1
+rc=$?
+printf "%s\n" "$rc" > available-results-quast.exit_code
+exit "$rc"

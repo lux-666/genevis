@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "input": {
+    "scaffolds": 13,
+    "total_bases": 448864847,
+    "n_bases": 110500,
+    "internal_gaps": 221
+  },
+  "output": {
+    "scaffolds": 13,
+    "total_bases": 448864723,
+    "n_bases": 109000,
+    "internal_gaps": 218
+  },
+  "filled_segments": 2,
+  "inserted_bases": 1410,
+  "copied_source_bases": 448754313,
+  "removed_source_non_n_bases": 34,
+  "sequence_changed": true,
+  "validation": "segment_consistency_only_not_consensus_accuracy"
+}
