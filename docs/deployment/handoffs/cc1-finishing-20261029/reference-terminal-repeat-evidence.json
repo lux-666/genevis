@@ -1,0 +1,127 @@
+{
+  "checked_at": "2026-10-28T09:43:25.980113+08:00",
+  "reference": "/home/lux/brassica_CC1/reference/ncbi_dataset/data/GCA_052186835.1/GCA_052186835.1_ASM5218683v1_genomic.fna",
+  "window_bp": 20000,
+  "hits": [
+    {
+      "reference_sequence": "CM125909.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2310
+    },
+    {
+      "reference_sequence": "CM125909.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2394
+    },
+    {
+      "reference_sequence": "CM125910.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2086
+    },
+    {
+      "reference_sequence": "CM125910.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 532
+    },
+    {
+      "reference_sequence": "CM125911.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2156
+    },
+    {
+      "reference_sequence": "CM125911.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2282
+    },
+    {
+      "reference_sequence": "CM125912.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2387
+    },
+    {
+      "reference_sequence": "CM125912.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2058
+    },
+    {
+      "reference_sequence": "CM125913.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 1939
+    },
+    {
+      "reference_sequence": "CM125913.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 1505
+    },
+    {
+      "reference_sequence": "CM125914.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 1281
+    },
+    {
+      "reference_sequence": "CM125914.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2415
+    },
+    {
+      "reference_sequence": "CM125915.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2289
+    },
+    {
+      "reference_sequence": "CM125915.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2135
+    },
+    {
+      "reference_sequence": "CM125916.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 1701
+    },
+    {
+      "reference_sequence": "CM125916.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 1876
+    },
+    {
+      "reference_sequence": "CM125917.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 1883
+    },
+    {
+      "reference_sequence": "CM125917.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2065
+    },
+    {
+      "reference_sequence": "CM125918.1",
+      "end": "left",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 749
+    },
+    {
+      "reference_sequence": "CM125918.1",
+      "end": "right",
+      "motif": "TTTAGGG",
+      "longest_tandem_run_bp": 2100
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+from pathlib import Path
+import concurrent.futures,datetime,fcntl,hashlib,json,os,subprocess,sys,traceback
+ROOT=Path(__file__).resolve().parent
+sys.path.insert(0,'/home/lux/project/genevis')
+from app.stages.gapcloser.validation import validate_gap_outputs
+M=json.loads((ROOT/'provenance.json').read_text())
+def now(): return datetime.datetime.now().astimezone().isoformat()
+def save(p,data):
+ tmp=p.with_suffix(p.suffix+'.tmp')
+ tmp.write_text(json.dumps(data,indent=2)+'\n')
+ tmp.replace(p)
+def sha(p):
+ h=hashlib.sha256()
+ with p.open('rb') as f:
+  for chunk in iter(lambda:f.read(8*1024*1024),b''):h.update(chunk)
+ return h.hexdigest()
+def log(s): print(now(),s,flush=True)
+def execute(exp):
+ name=exp['name']; d=ROOT/name; w=d/'tool_run'
+ s={'name':name,'state':'running','started_at':now(),'controller_pid':os.getpid(),'parameters':{'min_identity':exp['min_identity'],'min_match':exp['min_match'],'minimap_preset':exp['minimap_preset']}}
+ save(d/'status.json',s); log('START '+name)
+ try:
+  with (d/'run.log').open('w') as out:
+   p=subprocess.Popen(['/bin/bash',str(d/'run.sh')],stdout=out,stderr=subprocess.STDOUT)
+   s['wrapper_pid']=p.pid; save(d/'status.json',s)
+   rc=p.wait()
+  s['tool_exit_code']=rc
+  if rc: raise RuntimeError(f'tool exited {rc}; see {d}/run.log and tool_run/*.log')
+  s['state']='validating'; save(d/'status.json',s)
+  v=validate_gap_outputs(Path(M['source']['path']),w/'result.scaff_seqs',w/'result.gap_fill_detail')
+  save(d/'validation.json',v)
+  s.update({'state':'completed','finished_at':now(),'validation':v,'output':str(w/'result.scaff_seqs'),'output_sha256':sha(w/'result.scaff_seqs')})
+  log('DONE '+name+' '+json.dumps(v))
+ except BaseException as e:
+  s.update({'state':'failed','finished_at':now(),'error':str(e)})
+  log('FAILED '+name+' '+traceback.format_exc())
+ save(d/'status.json',s)
+ return s
+lock=(ROOT/'execution.lock').open('a')
+fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+save(ROOT/'status.json',{'state':'running','started_at':now(),'controller_pid':os.getpid()})
+try:
+ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+  results=list(pool.map(execute,M['experiments']))
+ summary={'schema_version':1,'source':M['source'],'experiments':results,'finished_at':now()}
+ save(ROOT/'comparison.json',summary)
+ if all(r['state']=='completed' for r in results):
+  if any(r['validation']['sequence_changed'] for r in results):
+   save(ROOT/'status.json',{'state':'quality_evaluation','controller_pid':os.getpid(),'started_at':now()})
+   cmd=['/home/lux/miniconda3/envs/env_geno_exec/bin/quast.py',M['source']['path']]+[r['output'] for r in results]+['-r',M['reference'],'--labels','source,'+','.join(r['name'] for r in results),'--threads','16','-o',str(ROOT/'quast')]
+   save(ROOT/'quast_command.json',{'command':cmd,'started_at':now()})
+   env=os.environ.copy();env['PATH']='/home/lux/miniconda3/envs/env_geno_exec/bin:/usr/local/bin:/usr/bin:/bin';env['MPLBACKEND']='Agg'
+   log('START joint QUAST')
+   with (ROOT/'quast.log').open('w') as out:
+    rc=subprocess.run(cmd,cwd=ROOT,env=env,stdout=out,stderr=subprocess.STDOUT).returncode
+   summary['quality_evaluation']={'exit_code':rc,'report':str(ROOT/'quast/report.tsv')}
+   if rc: raise RuntimeError(f'QUAST exited {rc}')
+  else:
+   summary['quality_evaluation']={'mode':'existing_source_baseline','report':M['baseline_quast_report'],'reason':'Both outputs are sequence-identical to source according to segment validation and per-scaffold comparison; rerunning QUAST would duplicate the same sequences.'}
+  summary['state']='completed'
+ else: summary['state']='failed'
+ save(ROOT/'comparison.json',summary)
+ save(ROOT/'status.json',{'state':summary['state'],'finished_at':now()})
+ log('CONTROLLER '+summary['state'])
+except BaseException as e:
+ save(ROOT/'status.json',{'state':'failed','finished_at':now(),'error':str(e)})
+ log(traceback.format_exc())
+ raise

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-10-28T00:18:20+08:00",
+  "parent_session": "cc1-post-hic",
+  "purpose": "Two independent gap-closing controls requested by user; no modification of frozen GeneAgent attempts.",
+  "source": {
+    "path": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-000-inventory/inventory/registered_assembly/asset_c3dcbbe8ae95514abcc0ad241fd0508e/primary_assembly.fasta",
+    "sha256": "a97f7889a53e290d55d927733b06a79f87f2a32479b0a7e522df1f3dd5af403a",
+    "size_bytes": 454475876
+  },
+  "reads": {
+    "path": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/artifacts/steps/step-001-gapcloser/gapcloser/outputs/attempts/000/tgs_gapcloser/hifi.fasta",
+    "size_bytes": 26455657722,
+    "sha256_recorded_previously": "e1362c14dd0fb0297ee7c566853629137e9a273ecf975fd65d325a6e99b3b362",
+    "reuse": "Shared normalized HiFi FASTA, symlinked without reconversion/copy"
+  },
+  "upstream": {
+    "version": "1.2.1",
+    "wrapper_path": "/home/lux/miniconda3/envs/env_finishing_exec/bin/tgsgapcloser",
+    "wrapper_sha256": "456eda7c039cf602204796c6e5a86739127bcb414dafe589994636c663ececf8"
+  },
+  "reference": "/home/lux/brassica_CC1/reference/ncbi_dataset/data/GCA_052186835.1/GCA_052186835.1_ASM5218683v1_genomic.fna",
+  "baseline_quast_report": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/work/steps/step-001-gapcloser/gapcloser/advisor/evaluations/003/quast/report.tsv",
+  "experiments": [
+    {
+      "name": "asm20-default-thresholds",
+      "min_match": 200,
+      "min_identity": 0.2,
+      "minimap_preset": "asm20",
+      "reuse": [
+        {
+          "path": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/work/steps/step-001-gapcloser/gapcloser/attempts/002/tgs_gapcloser/tool_run/result.contig",
+          "size_bytes": 453249077,
+          "sha256": "b9ff3e7ef49b907573b7666184679353b7885bfc3c5ce504ad835439af0ddfd9"
+        },
+        {
+          "path": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/work/steps/step-001-gapcloser/gapcloser/attempts/002/tgs_gapcloser/tool_run/result.name_map",
+          "size_bytes": 229,
+          "sha256": "0117f0aa6fb88e05658d00c4564a266bd51e0ee830836ed16948e911a0a17672"
+        },
+        {
+          "path": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/work/steps/step-001-gapcloser/gapcloser/attempts/002/tgs_gapcloser/tool_run/result.orignial_scaff_infos",
+          "size_bytes": 7002,
+          "sha256": "9ccdcbe14324d5a1dbb1e298eb95abf123de549bdc77c10ea34c48bd55899b57"
+        },
+        {
+          "path": "/home/lux/brassica_CC1/hic-kb/finishing/data/runs/cc1-post-hic/work/steps/step-001-gapcloser/gapcloser/attempts/002/tgs_gapcloser/tool_run/result.fill.filter.paf",
+          "size_bytes": 4347885,
+          "sha256": "1262ae9f3b156a970272d87d353a1746c41dcb3d59db978ca86943d68011e21c"
+        }
+      ],
+      "execution": "Re-run upstream gap filler and sequence generator on unchanged asm20 filtered PAF; this is a threshold-only control, not a fresh mapping run.",
+      "commands": [
+        "/home/lux/miniconda3/envs/env_finishing_exec/bin/tgsgapcloserbin/tgsgapcloser --ont_reads_a hifi.fasta --contig2ont_paf result.fill.filter.paf --min_match=200 --min_idy=0.2 --prefix result > result.fill.log 2>&1",
+        "/home/lux/miniconda3/envs/env_finishing_exec/bin/tgsgapcloserbin/tgsseqgen --prefix result > result.i2s.log 2>&1"
+      ]
+    },
+    {
+      "name": "pb-upstream-defaults",
+      "min_match": 200,
+      "min_identity": 0.2,
+      "minimap_preset": "ava-pb",
+      "reuse": [],
+      "execution": "Fresh upstream wrapper run. No --minmap_arg/--min_idy/--min_match supplied; PacBio defaults apply. HiFi --ne retained. No checkpoint tags copied.",
+      "commands": [
+        "/home/lux/miniconda3/envs/env_finishing_exec/bin/tgsgapcloser --scaff assembly.fasta --reads hifi.fasta --output result --ne --tgstype pb --thread 16"
+      ]
+    }
+  ]
+}

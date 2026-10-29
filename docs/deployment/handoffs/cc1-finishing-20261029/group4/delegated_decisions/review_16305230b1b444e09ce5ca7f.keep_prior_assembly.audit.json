@@ -1,0 +1,15 @@
+{
+  "submitted_at": "2026-10-28T11:27:53.215356+08:00",
+  "submitted_by": "codex_assistant",
+  "user_instruction": "四号直接往前推进吧。",
+  "decision": "keep_prior_assembly",
+  "request_ref": {
+    "schema_version": 2,
+    "artifact_id": "art_5225303cd52b5c9299514707fdfad798",
+    "path_ref": "artifacts/steps/step-001-t2t/t2t/reviews/review_16305230b1b444e09ce5ca7f/request.json",
+    "sha256": "4e1e2510069cf78a0599b84619ba4db4dd415555288dafdccbcb0bdb3e8c2fcf",
+    "size_bytes": 2816,
+    "artifact_type": "t2t.review_request"
+  },
+  "reason": "Continue frozen downstream plan without adding T2T extensions at this non-executable human_review proposal."
+}

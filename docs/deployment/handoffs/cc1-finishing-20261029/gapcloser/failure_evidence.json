@@ -1,0 +1,14 @@
+{
+  "checked_at": "2026-10-28T09:04:52.766561+08:00",
+  "type": "kernel_oom",
+  "kernel_event_at": "2026-10-28T00:48:52+08:00",
+  "systemd_scope_result": "oom-kill",
+  "systemd_scope": "tmux-spawn-79f5ab33-df97-4c89-a073-5b468da19673.scope",
+  "process": "minimap2",
+  "kernel_pid": 8670,
+  "anon_rss_kib": 485204964,
+  "scope_peak_memory": "465.7G",
+  "scope_peak_swap": "118.2G",
+  "output_exists": false,
+  "execution_processes_present": false
+}
