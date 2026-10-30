@@ -6,6 +6,27 @@
 
 Mac 检出用于编辑、审查、轻量验证、提交和推送；Linux/服务器检出用于环境验证和真实生物信息学执行。Git 是受支持的代码传输边界；Gene Agent 没有代理内 SSH Runner、远程调度后端或 Mac 端产物收集器。
 
+## 集成交付分支
+
+当前开发与测试机交付统一使用 `codex/oss-alpha`。功能分支通过审查与代码门禁后合入该分支，
+服务器从同名远端分支更新。`main`、历史 release 和单项修复分支不能凭名称视为包含最新功能。
+更新时同时核对分支和提交；本地合并完成但尚未推送，服务器仍无法取得改动。
+
+合并前检查工作树，并核对待交付分支的独有提交：
+
+```bash
+git status --short
+git fetch origin --prune
+git log --oneline origin/codex/oss-alpha..待交付分支
+git merge-base --is-ancestor 待交付分支 origin/codex/oss-alpha
+```
+
+最后一条命令退出码为零表示该分支已进入远端集成历史；非零时需审查独有改动。
+历史已合并只证明提交关系，仍需检查功能是否被后续替代、删除或回退。
+旧协议已被现行实现替代时，在合并提交中明确记录替代代码和保留决策，不能机械恢复旧模块。
+交付完成后记录远端提交号；测试机用 `git branch --show-current` 和 `git rev-parse HEAD`
+核对实际版本，再执行本页的服务器更新和验证流程。旧会话的冻结脚本不会随 Git 更新自动替换。
+
 <a id="source-boundary"></a>
 
 ## 源码边界
