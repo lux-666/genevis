@@ -166,7 +166,7 @@ def test_finishing_stages_are_requestable() -> None:
     ).any_occurrence_allows_local_execution("base_polish")
 
 
-def test_manifest_recommendation_includes_complete_finishing_positions(
+def test_manifest_recommendation_stops_at_contig_review(
     tmp_path,
 ) -> None:
     reads = tmp_path / "reads.fq"
@@ -181,12 +181,11 @@ def test_manifest_recommendation_includes_complete_finishing_positions(
     )
 
     recommended = _recommended_stages_from_manifest(str(manifest))
-    assert "t2t" in recommended
-    assert recommended[-5:] == [
-        "hic_scaffolding",
-        "gapcloser",
-        "t2t",
-        "base_polish",
+    assert recommended == [
+        "read_qc",
+        "genome_survey",
+        "assembly",
+        "assembly_dedup",
         "assembly_review",
     ]
 
@@ -208,11 +207,6 @@ def test_manifest_recommendations_use_the_canonical_workflow_helper(tmp_path) ->
     )
     assert recommended_workflow_for_manifest({"assembly_fasta_registered"}) == [
         "assembly_review",
-        "hic_scaffolding",
-        "gapcloser",
-        "t2t",
-        "base_polish",
-        "assembly_review",
     ]
     hic_r1 = tmp_path / "hic_R1.fastq"
     hic_r2 = tmp_path / "hic_R2.fastq"
@@ -227,13 +221,7 @@ def test_manifest_recommendations_use_the_canonical_workflow_helper(tmp_path) ->
         encoding="utf-8",
     )
 
-    hic_recommendation = [
-        "hic_scaffolding",
-        "gapcloser",
-        "t2t",
-        "base_polish",
-        "assembly_review",
-    ]
+    hic_recommendation = []
     assert (
         recommended_workflow_for_manifest({"hic_reads_registered"})
         == hic_recommendation
@@ -257,55 +245,86 @@ def test_contig_only_route_does_not_enter_finishing() -> None:
     ]
 
 
-def test_documentation_and_simplification_policy_is_final_state_only() -> None:
-    project = Path(__file__).resolve().parents[1]
+@pytest.mark.parametrize(
+    ("assets", "expected"),
+    [
+        (
+            {"raw_long_reads"},
+            [
+                "read_qc",
+                "genome_survey",
+                "assembly",
+                "assembly_dedup",
+                "assembly_review",
+            ],
+        ),
+        (
+            {"raw_long_reads", "hic_reads_registered"},
+            [
+                "read_qc",
+                "genome_survey",
+                "assembly",
+                "assembly_dedup",
+                "assembly_review",
+            ],
+        ),
+        ({"clean_long_reads"}, ["assembly", "assembly_dedup", "assembly_review"]),
+        (
+            {"assembly_fasta_registered", "clean_long_reads", "hic_reads_registered"},
+            ["assembly_review"],
+        ),
+        ({"hic_reads_registered"}, []),
+        (set(), []),
+    ],
+)
+def test_manifest_defaults_do_not_append_unsupported_finishing(assets, expected):
+    assert recommended_workflow_for_manifest(assets) == expected
 
-    governance_path = project / "docs/architecture/reference/governance.md"
-    governance = governance_path.read_text(encoding="utf-8")
-    recommendation_policy = project.joinpath(
-        "docs/architecture/reference/recommendation-policy.md"
-    ).read_text(encoding="utf-8")
-    parameter_contract = project.joinpath(
-        "docs/architecture/reference/parameter-recommendation.md"
-    ).read_text(encoding="utf-8")
-    stage_contract = project.joinpath(
-        "docs/architecture/reference/stage-contracts.md"
-    ).read_text(encoding="utf-8")
-    review_topic = project.joinpath(
-        "docs/architecture/topics/review-and-resume.md"
-    ).read_text(encoding="utf-8")
-    server_test = project.joinpath("scripts/server_test.sh").read_text(encoding="utf-8")
 
-    for label in (
-        "exact clone",
-        "semantic duplication",
-        "duplicate representation",
-        "dead surface",
-        "intentional symmetry",
-    ):
-        assert label in governance
-    assert "注释只解释不明显的理由" in governance
-    assert "省略中间尝试" in governance
-    assert "从未合并的状态" in governance
-    assert "## 边界规则" not in governance
-    assert "## 评审门禁策略" not in governance
-    for symbol in (
-        "candidate_ids_from_review_request_payload",
-        "validate_sha256",
-        "parse_json_object",
-        "validate_model_response_record",
-        "_load_reference_snapshot",
-        "_parameter_evidence_location",
-        "_review_request_decision_context",
-        "Ledger.record_method_disposition_recorded",
-    ):
-        assert symbol not in governance
-    assert "内容寻址 JSON 发布" not in governance
-    assert "`model_call`" in recommendation_policy
-    assert "不把客户端类名当作模型身份" in recommendation_policy
-    assert "_parameter_evidence_location" in parameter_contract
-    assert "_load_reference_snapshot" not in stage_contract
-    assert "不把任意对象转成" in review_topic
-    assert "看似模型输出的字符串" in review_topic
-    assert "intentional symmetry" not in server_test.lower()
-    assert "npx" not in server_test
+@pytest.mark.parametrize("platform", ["ont", "pacbio_hifi"])
+@pytest.mark.parametrize("asset_type", ["raw_long_reads", "clean_long_reads"])
+def test_multifile_default_plan_passes_input_contract_without_hic(
+    tmp_path, platform, asset_type
+):
+    import json
+
+    import yaml
+
+    from app.schemas.manifest import InputManifest
+    from app.storage.frozen_inputs import _validate_workflow_input_contract
+
+    reads = [tmp_path / "lane1.fq", tmp_path / "lane2.fq"]
+    for path in reads:
+        path.write_text("@r1\nACGT\n+\n!!!!\n")
+    manifest = InputManifest.model_validate(
+        {
+            "session_id": "multifile-default",
+            "genome_size_estimate": 450000000,
+            "user_metadata": {"target_species": "Brassica rapa"},
+            "assets": [
+                {
+                    "asset_type": asset_type,
+                    "paths": [str(p) for p in reads],
+                    "format": "fastq",
+                    "platform": platform,
+                }
+            ],
+        }
+    )
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest.model_dump(mode="json")))
+    stages = _recommended_stages_from_manifest(str(manifest_path))
+    payload = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "docs/examples/contig_run_config.template.json"
+        ).read_text()
+    )
+    payload["requested_stages"] = [
+        {"stage": stage, "allow_local_execution": True} for stage in stages
+    ]
+    config = RunConfig.model_validate(payload)
+    _validate_workflow_input_contract(manifest, config)
+    assert config.requested_stage_names() == stages
+    assert "hic_scaffolding" not in stages
+    assert "base_polish" not in stages

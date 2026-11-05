@@ -42,7 +42,7 @@ intake -> planning -> ready_to_confirm -> frozen
 
 输入解析可识别组装工具名，但仅作为临时资产角色提示，用于判断需要收集 HiFi、ONT 还是两者。它不是持久化 `WorkflowIntent` 字段，不得创建第二执行路径、预选 `assembly_selection` 或向计划草稿模型传递方法名。包含方法字段的持久化输入文档必须在 schema 校验时失败。
 
-Assembly Review 是推荐，不是完成条件。默认 Assembly 推荐可以追加 `assembly_dedup -> assembly_review`。规范的完整基因组/T2T occurrence 序列由[阶段契约](../reference/stage-contracts.md)拥有，并由 `app.workflow.recommended_workflow_template` 提供给规划器；本页不维护第二份字面数组。
+Assembly Review 是推荐，不是完成条件。没有显式阶段目标时，`app.workflow.recommended_workflow_for_manifest` 按[阶段契约](../reference/stage-contracts.md#shared-stage-shape)中的材料优先级提供最小主线，不因附带 Hi-C 或长读段而自动追加挂载和精修。显式意图仍拥有推荐范围；完整基因组/T2T 模板由 `app.workflow.recommended_workflow_template` 提供，所需材料由 intake 和冻结校验检查。模板不是 manifest 默认建议，也不是输入兼容性证明。
 
 最终 Review 是同一可复用阶段的第二次 occurrence。冻结将它绑定到最近的组装交接生产者 Base Polish；执行过 Base Polish 后，即使保留源组装，也评估源组装和所选抛光候选这对输入；若顾问在执行前保留源，则只评估源，验收报告标记 `not_executed_source_retained`，不计为 Racon 执行覆盖。操作者可在 occurrence 列表中删除、移动或重复 Review 及其他阶段。含 T2T 且之后没有 Review 的意图或已确认 RunConfig 仍合法；推荐不能变为校验策略。
 

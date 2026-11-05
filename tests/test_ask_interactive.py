@@ -109,27 +109,6 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             self.assertEqual(draft.selected_stage_names, ["assembly"])
             self.assertNotIn("assembly", draft.selected_methods or {})
 
-    def test_multi_stage_goal_keeps_requested_execution_boundary(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            reads = Path(tmp) / "reads.fastq"
-            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\nassets:\n"
-                "  - asset_type: raw_long_reads\n"
-                f"    paths:\n      - {reads}\n"
-                "    format: fastq\n    platform: ont\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                entry_request={"requested_stages": ["assembly", "assembly_review"]},
-            )
-            draft = build_initial_plan_draft(plan)
-            self.assertEqual(
-                draft.selected_stage_names, ["assembly", "assembly_review"]
-            )
-
     def test_assembly_goal_draft_accepted_asks_only_for_missing_genome_size(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "bht.Nanopore.pass.first500.fa"

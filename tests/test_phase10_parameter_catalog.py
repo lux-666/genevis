@@ -110,6 +110,10 @@ from app.stages.assembly_review.builder import (
     build_stage as build_assembly_review_stage,
 )
 from app.stages.assembly_review.nodes import (
+    _parameter_quality_diagnosis,
+    _phase10_review_metrics,
+)
+from app.stages.assembly_review.nodes import (
     parameter_quality_gate as assembly_review_parameter_quality_gate,
 )
 from app.stages.assembly_review.routing import route_after_parameter_quality_gate
@@ -1740,8 +1744,8 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 },
                 "assembly_review": {
                     "metrics": {
-                        "busco_complete": 0.94,
-                        "busco_duplicate": 0.21,
+                        "busco_complete_ratio": 0.94,
+                        "busco_duplicate_ratio": 0.21,
                         "assembly_size_ratio": 1.35,
                     }
                 },
@@ -2339,3 +2343,55 @@ def test_nextdenovo_frozen_config_integrity_before_local_runner(
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize(
+    ("metrics", "passed", "failure_mode"),
+    [
+        ({"busco_complete_percent": 98.0, "busco_duplicate_percent": 0.5}, True, None),
+        (
+            {"busco_complete_percent": 0.95, "busco_duplicate_percent": 0.0},
+            False,
+            "low_completeness",
+        ),
+        (
+            {"busco_complete_percent": 1.0, "busco_duplicate_percent": 0.0},
+            False,
+            "low_completeness",
+        ),
+        ({"busco_complete_percent": 98.0, "busco_duplicate_percent": 1.0}, True, None),
+        ({"busco_complete_ratio": 0.98, "busco_duplicate_ratio": 0.005}, True, None),
+        ({"busco_complete": 98.0, "busco_duplicate": 0.5}, True, None),
+        ({"busco_complete": 0.95, "busco_duplicate": 0.0}, False, "low_completeness"),
+        (
+            {"busco_complete_percent": 0.95, "busco_complete_ratio": 0.98},
+            False,
+            "low_completeness",
+        ),
+    ],
+)
+def test_review_busco_units_are_explicit(metrics, passed, failure_mode):
+    diagnosis = _parameter_quality_diagnosis({**metrics, "assembly_size_ratio": 1.21})
+    assert diagnosis["passed"] is passed
+    assert diagnosis["failure_mode"] == failure_mode
+
+
+def test_review_native_busco_metrics_keep_percentage_units():
+    metrics = _phase10_review_metrics(
+        {
+            "candidates": [{"candidate_id": "candidate-1"}],
+            "signals": [
+                {
+                    "candidate_id": "candidate-1",
+                    "signal_name": "busco",
+                    "status": "available",
+                    "metadata": {
+                        "metrics": {"complete_percent": 98.0, "duplicated_percent": 0.5}
+                    },
+                }
+            ],
+        },
+        {},
+    )
+    assert metrics == {"busco_complete_percent": 98.0, "busco_duplicate_percent": 0.5}
+    assert _parameter_quality_diagnosis(metrics)["passed"] is True

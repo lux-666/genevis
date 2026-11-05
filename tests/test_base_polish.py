@@ -281,7 +281,7 @@ def test_invalid_paf_is_not_quality_evidence(tmp_path: Path, bad: str) -> None:
     path = tmp_path / "alignment.paf"
     path.write_text("" if bad == "empty" else "\t".join(fields) + "\n")
     with pytest.raises(ValueError):
-        alignment_summary(path, {"chr1": "AAAACCCC"}, {"r1": 8})
+        alignment_summary(path, {"chr1": 8}, {"r1": 8})
 
 
 def test_paf_ambiguous_bases_are_not_counted_as_matches(tmp_path: Path) -> None:
@@ -290,9 +290,37 @@ def test_paf_ambiguous_bases_are_not_counted_as_matches(tmp_path: Path) -> None:
     # Minimap2 emits '=' for N/N while excluding those columns from mlen/blen.
     path = tmp_path / "alignment.paf"
     path.write_text("r1\t10\t0\t10\t+\tchr1\t10\t0\t10\t8\t8\t60\tnn:i:2\tcg:Z:10=\n")
-    report = alignment_summary(path, {"chr1": "AAAANNCCCC"}, {"r1": 10})
+    report = alignment_summary(path, {"chr1": 10}, {"r1": 10})
     assert report["matching_alignment_bases"] == 8
     assert report["alignment_block_bases"] == 8
+
+
+def test_alternating_paf_targets_only_read_each_scaffold_length_once(tmp_path):
+    from app.stages.base_polish.validation import alignment_summary
+    from app.stages.sequence_index import SequenceIndex
+
+    assembly = tmp_path / "assembly.fa"
+    assembly.write_text(">chr1\n" + "A" * 1000 + "\n>chr2\n" + "A" * 1000 + "\n")
+    paf = tmp_path / "reads.paf"
+    paf.write_text(
+        "".join(
+            f"r{i}\t10\t0\t10\t+\tchr{i % 2 + 1}\t1000\t0\t10\t10\t10\t60\tcg:Z:10=\n"
+            for i in range(100)
+        )
+    )
+    with SequenceIndex(assembly) as index:
+        queries = []
+        index._db.set_trace_callback(queries.append)
+        report = alignment_summary(
+            paf, index.lengths(), {f"r{i}": 10 for i in range(100)}
+        )
+        assert report["alignment_records"] == 100
+        assert report["mapped_reads"] == 100
+        assert report["base_identity"] == 1.0
+        assert report["target_coverage_fraction"] == 0.01
+        assert sum("WHERE name=" in sql for sql in queries) == 2
+        assert not any("SELECT sequence " in sql for sql in queries)
+        assert not any("length(sequence)" in sql for sql in queries)
 
 
 def test_inconsistent_paf_counts_cannot_reach_adoption(tmp_path: Path) -> None:

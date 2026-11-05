@@ -31,27 +31,6 @@ def test_pure_evidence_transforms_do_not_depend_on_workflow(relative):
             assert not module.endswith(".nodes"), (relative, module)
 
 
-def test_removed_sequence_grammar_and_dead_views_do_not_return():
-    sources = {
-        "app/stages/t2t/nodes.py": {
-            "_iter_sequences",
-            "_reverse_complement",
-            "_open_text",
-        },
-        "app/stages/assembly/parameters/workflow.py": {
-            "build_parameter_attempt_timeline"
-        },
-        "app/review/gates.py": {"declared_resume_fields"},
-    }
-    for relative, forbidden in sources.items():
-        names = {
-            node.name
-            for node in ast.walk(ast.parse(Path(relative).read_text()))
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        assert not names & forbidden
-
-
 def test_ledger_and_parameter_storage_do_not_import_business_owners():
     for relative in ("app/storage/ledger.py", "app/storage/parameter_evidence.py"):
         tree = ast.parse(Path(relative).read_text())

@@ -76,7 +76,7 @@ def _indexed_coverage(db: sqlite3.Connection, kind: str) -> tuple[int, int]:
 
 
 def alignment_summary(
-    path: Path, targets: Mapping[str, str], reads: Mapping[str, int]
+    path: Path, targets: Mapping[str, int], reads: Mapping[str, int]
 ) -> dict[str, Any]:
     with TemporaryDirectory(prefix="gene-paf-") as scratch:
         with closing(
@@ -86,12 +86,12 @@ def alignment_summary(
             intervals.execute(
                 "CREATE TABLE spans (kind TEXT, name TEXT, start INTEGER, stop INTEGER)"
             )
-            return _alignment_summary(path, targets, reads, intervals)
+            return _alignment_summary(path, dict(targets), reads, intervals)
 
 
 def _alignment_summary(
     path: Path,
-    targets: Mapping[str, str],
+    targets: Mapping[str, int],
     reads: Mapping[str, int],
     intervals: sqlite3.Connection,
 ) -> dict[str, Any]:
@@ -107,7 +107,7 @@ def _alignment_summary(
             if (
                 reads.get(query) != qlen
                 or target not in targets
-                or tlen != len(targets[target])
+                or tlen != targets[target]
                 or fields[4] not in {"+", "-"}
                 or not 0 <= qs < qe <= qlen
                 or not 0 <= ts < te <= tlen
@@ -166,7 +166,7 @@ def _alignment_summary(
         "alignment_block_bases": blocks,
         "base_identity": matches / blocks,
         "covered_target_bases": covered,
-        "target_coverage_fraction": covered / sum(map(len, targets.values())),
+        "target_coverage_fraction": covered / sum(targets.values()),
     }
 
 
@@ -181,8 +181,8 @@ def compare_outputs(
         if set(before) != set(after):
             raise ValueError("polishing must preserve every scaffold identity")
         lengths = read_index.lengths()
-        before_metrics = alignment_summary(before_paf, before, lengths)
-        after_metrics = alignment_summary(after_paf, after, lengths)
+        before_metrics = alignment_summary(before_paf, before.lengths(), lengths)
+        after_metrics = alignment_summary(after_paf, after.lengths(), lengths)
         return {
             "schema_version": 1,
             "before": {

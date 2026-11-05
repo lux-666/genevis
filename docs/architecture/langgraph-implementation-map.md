@@ -74,6 +74,7 @@
 | 描述符加载 | 注册表、包、方法、规划器、IO、条件需求、资源提示 YAML 全部拒绝未声明键；注册表是唯一方法清单，加载类型化记录。 | `app/schemas/descriptors.py`；`tests/test_configuration.py` | [描述符](reference/descriptors.md) |
 | 外部案例消费 | 唯一 v5 派生紧凑交换、实时目录、共享材料查询；跨方法证据进入方法选择与仅目标参数建议。不建立运行级案例副本；当前案例内容以 Assembly 为主，Hi-C/T2T 案例覆盖待扩展。 | `app/knowledge/assembly_cases.py`、`assembly_retrieval.py`、`assembly_runtime.py`、`v5_projection.py`；`tests/test_assembly_case_consumption.py`；[软件覆盖缺口](reference/conformance.md#assembly-software-explanation-coverage) | [案例](reference/casepack.md) |
 | 注册执行类别 | `local` 方法绑定导入的生命周期/图对象；`planner_only` 的真实路线证明无进程。 | `tests/test_registry_executable_invariant.py`、`descriptors/registry.yaml` | [描述符](reference/descriptors.md) |
+| Manifest 默认规划范围 | 无显式目标时按材料推荐最小主线；显式完整目标保留独立模板与输入校验，不改写冻结计划。 | `app/workflow.py`、`app/entrypoints/ask_planner.py`；`tests/test_finishing_plan.py`、`tests/test_ask_plan.py` | [阶段](reference/stage-contracts.md#shared-stage-shape)、[TUI](topics/tui-and-planning.md#intent-is-not-the-execution-plan) |
 | AutoHiC 输出收集 | 进程成功后、首次新发布前，要求四项冻结产品或匹配尝试的索引恢复记录。缺产物收集失败；后续发布失败可留下无成功语义事件的索引孤儿。 | `app/stages/hic_scaffolding/method_application/support.py`；`tests/test_hic_scaffolding.py` | [AutoHiC](topics/autohic.md)、[阶段](reference/stage-contracts.md) |
 
 <a id="stage-node-inventory"></a>
@@ -110,7 +111,7 @@
 | Assembly `execution_retry_gate`、`commit`、`fail`、`block` | `wired` | `implemented-no-process` | `tested` | `none` | 完成需 executed candidate 并声明物化交付；仅规划/非本地不能推进，拒绝/失败显式结算。`app/stages/assembly/parameters/workflow.py`、`app/stages/assembly/nodes.py`；`tests/test_assembly.py`、`tests/test_phase11_parameter_approval.py`、`tests/test_review_resume.py` |
 | Dedup 基线或 `QUAST -> recommend -> review -> purge_dups -> QUAST` 循环 | `wired` | `executable` | `tested` | `known-gap` | 本地执行加明确 purge 授权可物化交付；缺批准/授权则透传完成，purge 处置 skipped 并显式 reused 交付；无物化候选则 not_started/失败且无交付。顾问循环真实工具验收仍缺。`app/stages/assembly_dedup/`；`tests/test_assembly_dedup.py`、`tests/test_dedup_recommendation_loop.py` |
 | Assembly Review 可复用子图、候选解析、`quast -> busco` | `wired` | `executable` | `tested` | `none` | 评估前要求冻结生产者完成终态、唯一交付、当前引用、索引候选/主输出一致。`app/stages/assembly_review/`、`app/storage/assembly_candidates.py`；`tests/test_assembly_review.py`、`tests/test_assembly_candidate_bundle.py` |
-| Assembly Review 规则、参数质量、近缘物种、比较节点 | `wired` | `implemented-no-process` | `tested` | `none` | 参数质量诊断留在当前 Review，不写 Assembly 重试游标/参数证据，继续近缘物种/人工评审。`app/stages/assembly_review/nodes.py`；`tests/test_phase10_parameter_catalog.py`、`tests/test_related_species_evidence.py`、`tests/test_related_species_statistics.py`、`tests/test_assembly_review_statistics_integration.py` |
+| Assembly Review 规则、参数质量、近缘物种、比较节点 | `wired` | `implemented-no-process` | `tested` | `none` | BUSCO 诊断按字段单位转换，原生指标投影到显式百分数字段，不凭数值猜比例。诊断留在当前 Review，不写 Assembly 重试游标/参数证据，继续近缘物种/人工评审。`app/stages/assembly_review/nodes.py`；`tests/test_phase10_parameter_catalog.py`、`tests/test_related_species_evidence.py`、`tests/test_related_species_statistics.py`、`tests/test_assembly_review_statistics_integration.py` |
 | Assembly Review `human_gate` 与采纳/恢复事务 | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/assembly_review/builder.py`、`app/control/resume_transaction.py`；`tests/test_review_resume.py` |
 | Hi-C `resolve_hic_inputs` 与需求边界 | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/`；`tests/test_hic_scaffolding.py` |
 | Hi-C `recommend_autohic_parameters` 与审批/重试 | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`；`tests/test_hic_scaffolding.py`、`tests/test_parameter_resolution_validation.py` |
@@ -121,7 +122,7 @@
 | T2T 单轮 schema-3 策略请求与批准、`prepare_parameters` | `wired` | `implemented-no-process` 策略/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |
 | T2T 扫描、映射、POA 构建与回贴统计 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/{nodes,algorithms,reconstruction,script}.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py` |
 | T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物；顾问诊断、方法适用性和预期新证据进入 recommendation/assessment，但未接入方法切换。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`、`app/stages/finishing/advisor.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
-| Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、持久门禁交接；`tests/test_base_polish.py` |
+| Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、持久门禁交接；PAF 校验使用长度元数据及一次读取的 scaffold 长度表，实际序列仅用于汇总和修改比较；`tests/test_base_polish.py`、`tests/test_sequence_index.py`。真实样本耗时和独立准确性仍待验 |
 
 <a id="registered-method-inventory"></a>
 

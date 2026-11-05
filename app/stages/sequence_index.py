@@ -27,13 +27,15 @@ class SequenceIndex(Mapping[str, str]):
         try:
             self._db.execute("PRAGMA cache_size=-2048")
             self._db.execute(
-                "CREATE TABLE sequences (name TEXT PRIMARY KEY, sequence TEXT NOT NULL)"
+                "CREATE TABLE sequences (name TEXT PRIMARY KEY, "
+                "sequence TEXT NOT NULL, length INTEGER NOT NULL)"
             )
             with self._db:
                 for name, sequence in read_sequences(path, sequence_format):
                     try:
                         self._db.execute(
-                            "INSERT INTO sequences VALUES (?, ?)", (name, sequence)
+                            "INSERT INTO sequences VALUES (?, ?, ?)",
+                            (name, sequence, len(sequence)),
                         )
                     except sqlite3.IntegrityError as exc:
                         raise ValueError(
@@ -89,7 +91,7 @@ class SequenceLengths(Mapping[str, int]):
 
     def __getitem__(self, name: str) -> int:
         row = self.index._db.execute(
-            "SELECT length(sequence) FROM sequences WHERE name=?", (name,)
+            "SELECT length FROM sequences WHERE name=?", (name,)
         ).fetchone()
         if row is None:
             raise KeyError(name)

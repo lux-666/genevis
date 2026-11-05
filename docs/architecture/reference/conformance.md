@@ -20,7 +20,7 @@
 
 ## 未关闭缺口
 
-截至 2026-10-09，操作者确认本轮 finishing smoke 已完成；GapCloser、T2T、Base Polish 的独立阶段验收和串联验收均尚未执行，暂缓推进。本记录未附运行目录、工具版本或 smoke 日志，不将 smoke 扩大解释为这三个阶段的完整覆盖。Assembly 各方法及 Dedup 的代码覆盖与待验边界见[实现地图](../langgraph-implementation-map.md#assembly-dedup-validation-map)。新菌种实测与测试机操作仍未启动；操作者已有 PacBio、Illumina、Hi-C 数据，PacBio 的具体类型须在执行时确认。
+GapCloser、T2T、Base Polish 已有工程回归与操作者报告的 smoke/探索性实跑，但代表性样本的规范阶段验收、串联交付和最终质量证据仍需核实。工具退出成功、无候选保留源或局部结果不能关闭完整验收缺口。Assembly 各方法及 Dedup 的代码覆盖与待验边界见[实现地图](../langgraph-implementation-map.md#assembly-dedup-validation-map)。多文件、多平台和联合材料仍须按实际路线保留验收证据；PacBio 类型须在执行前确认。
 
 <a id="gapcloser-representative-sample-acceptance-and-noisy-read-routes"></a>
 

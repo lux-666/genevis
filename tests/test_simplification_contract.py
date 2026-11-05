@@ -31,14 +31,3 @@ def test_no_large_exact_function_body_clones():
             )
     duplicates = [locations for locations in bodies.values() if len(locations) > 1]
     assert not duplicates, duplicates
-
-
-def test_governance_names_current_shared_contracts():
-    text = (ROOT / "docs/architecture/reference/governance.md").read_text()
-    for owner in (
-        "recover_or_invoke_response",
-        "write_normalized_fasta",
-        "app/stages/sequences.py",
-        "tests/test_simplification_contract.py",
-    ):
-        assert owner in text

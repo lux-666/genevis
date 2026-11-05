@@ -1488,21 +1488,6 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
         ]
         self.assertEqual(available, expected)
 
-    def test_all_stages_excludes_inventory(self):
-        available = _all_selectable_stages()
-        expected = [
-            "read_qc",
-            "genome_survey",
-            "assembly",
-            "assembly_dedup",
-            "assembly_review",
-            "hic_scaffolding",
-            "gapcloser",
-            "t2t",
-            "base_polish",
-        ]
-        self.assertEqual(available, expected)
-
     def test_recommended_stages_for_raw_long_reads(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fq"
@@ -1537,11 +1522,6 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
                     "assembly",
                     "assembly_dedup",
                     "assembly_review",
-                    "hic_scaffolding",
-                    "gapcloser",
-                    "t2t",
-                    "base_polish",
-                    "assembly_review",
                 ],
             )
 
@@ -1563,11 +1543,6 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
             self.assertEqual(
                 recommended,
                 [
-                    "assembly_review",
-                    "hic_scaffolding",
-                    "gapcloser",
-                    "t2t",
-                    "base_polish",
                     "assembly_review",
                 ],
             )

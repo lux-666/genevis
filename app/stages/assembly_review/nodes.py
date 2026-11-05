@@ -597,21 +597,19 @@ def _phase10_review_metrics(
     if quast.get("contig_count") is not None:
         metrics["contig_count"] = quast.get("contig_count")
     if busco.get("complete_percent") is not None:
-        metrics["busco_complete"] = busco.get("complete_percent")
+        metrics["busco_complete_percent"] = busco.get("complete_percent")
     if busco.get("duplicated_percent") is not None:
-        metrics["busco_duplicate"] = busco.get("duplicated_percent")
+        metrics["busco_duplicate_percent"] = busco.get("duplicated_percent")
     return metrics
 
 
 def _parameter_quality_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:
     """Classify review signals without changing Assembly attempt evidence."""
-    complete = _float_metric(metrics, "busco_complete", "busco_complete_ratio")
-    duplicate = _float_metric(metrics, "busco_duplicate", "busco_duplicate_ratio")
     size_ratio = _float_or_none(metrics.get("assembly_size_ratio"))
     n50 = _float_metric(metrics, "contig_n50", "n50")
     contig_count = _float_or_none(metrics.get("contig_count"))
-    normalized_complete = _as_ratio(complete)
-    normalized_duplicate = _as_ratio(duplicate)
+    normalized_complete = _busco_ratio(metrics, "busco_complete")
+    normalized_duplicate = _busco_ratio(metrics, "busco_duplicate")
     passed = (
         normalized_complete is not None
         and normalized_complete >= 0.95
@@ -675,10 +673,17 @@ def _float_or_none(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _as_ratio(value: float | None) -> float | None:
-    if value is None:
-        return None
-    return value / 100.0 if value > 1 else value
+def _busco_ratio(metrics: dict[str, Any], name: str) -> float | None:
+    """Use field units; native and legacy unsuffixed BUSCO values are percent."""
+    for key, scale in (
+        (f"{name}_percent", 100.0),
+        (f"{name}_ratio", 1.0),
+        (name, 100.0),
+    ):
+        if key in metrics:
+            value = _float_or_none(metrics[key])
+            return value / scale if value is not None else None
+    return None
 
 
 def _assembly_review_accept_note(state: TopLevelState) -> str:

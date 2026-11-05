@@ -129,21 +129,17 @@ def recommended_workflow_template(endpoint: str) -> list[DomainStage]:
 def recommended_workflow_for_manifest(
     asset_types: Collection[str],
 ) -> list[DomainStage]:
-    """Return the canonical recommendation for manifest asset types.
+    """Recommend a minimal mainline when no explicit stage scope is supplied.
 
-    Manifest-aware planning has one precedence order: raw long reads imply the
-    complete-genome recommendation, an existing assembly starts at Review, and
-    Hi-C-only input starts at scaffolding.  The returned lists intentionally
-    preserve the historical literal occurrence sequences, including the
-    finishing positions and the final Review occurrence.
+    Complete-genome goals have a separate template and intake validation.
+    Asset presence alone never requests scaffolding or HiFi-only finishing.
     """
 
     available = set(asset_types)
-    complete = recommended_workflow_template("t2t")
     if "raw_long_reads" in available:
-        return complete
+        return recommended_workflow_template("assembly")
     if "assembly_fasta_registered" in available:
-        return complete[complete.index("assembly_review") :]
-    if "hic_reads_registered" in available:
-        return complete[complete.index("hic_scaffolding") :]
+        return ["assembly_review"]
+    if "clean_long_reads" in available:
+        return ["assembly", "assembly_dedup", "assembly_review"]
     return []

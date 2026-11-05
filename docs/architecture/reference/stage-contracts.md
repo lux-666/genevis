@@ -41,7 +41,9 @@ enter -> validate_inputs -> plan_methods -> method_subgraph
 
 Review 是可选可复用 occurrence。组装生产/精修阶段不建立强制 Review 边界。显式 `assembly_review` 带精确 `review_target`：`resource_type: "assembly"` 及最近前置交接生产者 `producer_step_id`；冻结不补入缺失 Review。因此 `assembly -> hic_scaffolding -> assembly_review` 评审 Hi-C 交付；`t2t` 可以直接结束或进入 Base Polish，无需 Review。
 
-规范完整基因组推荐如下：
+未明确请求完整基因组目标时，manifest 默认推荐按材料选取最小主线：原始长读段使用 QC、Survey、Assembly、Dedup 和 Review；clean 长读段从 Assembly 开始并接 Dedup、Review；只有已有组装（可另带读段）时推荐 Review。原始长读段优先于已有组装，已有组装优先于 clean 长读段。仅有 Hi-C 或其他材料不自动推荐组装消费链；缺少组装不能由 Hi-C reads 补足。附带 Hi-C 或 HiFi 不会自动追加挂载或精修。
+
+明确请求完整基因组/T2T 目标时的规范模板如下：
 
 ```text
 read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
@@ -49,7 +51,7 @@ read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
         -> assembly_review -> done
 ```
 
-该推荐定义预期生物学交接顺序，不强制整份列表。首个 Review 评估 Dedup 后保留的组装；最终 Review 绑定 Base Polish，用相同 QUAST/BUSCO 配置评估源和抛光候选，可保留任一个。`done` 是隐式父图终态，不是可请求阶段。
+该模板定义预期生物学交接顺序，不强制整份列表，也不证明所需材料已经具备。显式目标沿用材料采集、无 Hi-C 的明确降级确认及冻结前依赖检查，不因材料不足静默缩短。首个 Review 评估 Dedup 后保留的组装；最终 Review 绑定 Base Polish，用相同 QUAST/BUSCO 配置评估源和抛光候选，可保留任一个。`done` 是隐式父图终态，不是可请求阶段。推荐变更不修改操作者指定或已经冻结的 occurrence 顺序。
 
 未注册未来工具不是候选。新增时须在同一变更提供描述符、可执行适配器、路由、运行配置契约和测试。
 
@@ -245,6 +247,8 @@ NCBI 比较证据和统计验证解析精确相同的快照字节。依赖冻结
 
 BUSCO 重复、大小膨胀、异常深度、证据缺失/不一致等信号保留在评估报告中。非零等待仍按既有 LLM resolver 资格决定是否自动建议；零等待按[等待模式矩阵](../topics/review-and-resume.md#foreground-review-policy)采用当前有效交付，不以这些质量信号终止流程。工具执行失败或报告格式损坏仍报错。
 
+Review 的内部参数质量诊断按字段名确定 BUSCO 单位：`busco_complete_percent`、`busco_duplicate_percent` 为百分数，`busco_complete_ratio`、`busco_duplicate_ratio` 为比例。原生 `complete_percent`、`duplicated_percent` 投影到显式百分数字段。较早的无后缀 `busco_complete`、`busco_duplicate` 也按原生百分数解释，不按数值大小猜单位；同时存在时依次采用显式百分数、显式比例、无后缀字段。诊断仅写当前 Review，不改写原始指标、Assembly 尝试或候选序列。
+
 ## 7. Hi-C Scaffolding
 
 目的：生成并评审染色体级 AutoHiC 组装。
@@ -339,6 +343,8 @@ T2T 消费到达该冻结 occurrence 时的中央组装，不直接消费 `hic_r
 采纳前，同一读段以相同 minimap2 `map-hifi -c --eqx --secondary=no` 设置映射源和候选。两个 PAF、候选 FASTA、工具版本、源绑定比较报告必需。报告比对读段数、映射碱基、碱基一致性、目标覆盖、scaffold/缺口/长度变化，并明确独立 QV 缺失。PAF match/block 计数须与 eqx CIGAR 一致，计入 minimap2 从这些统计排除的歧义碱基 `nn`。它是样本内比对一致性，不是无偏错误估计；一致性或 N50 更高都不自动批准。缺失/畸形产物在门禁前收集失败。
 
 Advisor 使用 finishing_recommendation，单轮基线使用 base_polish_adoption；两者支持人工采纳、保留源、停止，advisor 还可批准新配置或选择早先候选；零等待则采用最新有效候选，无新结果沿用输入，并且不再调用结果顾问。采纳才改变资源；保留源发布 reused 交付。两个替代项与比较都是不可变产物。交接保留另一个候选，使后续 Review 即使在保留源之后，也用该 occurrence 相同 QUAST 设置/BUSCO lineage 评估两者；最终 Review 可选任一个。缺评估信号显式保留，不是质量通过。QUAST 参考相关错误、BUSCO 完整/单拷贝/重复/片段/缺失计数补充连续性；没有独立参考/读段真值则共识 QV 未测。
+
+前后 PAF 的逐条校验仅消费序列长度索引。临时磁盘索引在读入序列时同时保存长度；scaffold 长度表在比对校验前读取一次，读段长度通过磁盘视图查询。成员、长度、坐标和 CIGAR 检查不加载整条序列；实际序列仍用于 scaffold/缺口汇总和修改比较。该索引仅是调用期间的临时数据，不替代冻结证据。
 
 接受的位置/交接设计：
 
