@@ -20,7 +20,7 @@
 
 ## 未关闭缺口
 
-GapCloser、T2T、Base Polish 已有工程回归与操作者报告的 smoke/探索性实跑，但代表性样本的规范阶段验收、串联交付和最终质量证据仍需核实。工具退出成功、无候选保留源或局部结果不能关闭完整验收缺口。Assembly 各方法及 Dedup 的代码覆盖与待验边界见[实现地图](../langgraph-implementation-map.md#assembly-dedup-validation-map)。多文件、多平台和联合材料仍须按实际路线保留验收证据；PacBio 类型须在执行前确认。
+阶段工具、已实现能力与待实现设计集中维护在[阶段总表](../langgraph-implementation-map.md#stage-capabilities)。本页记录具体的能力缺口及关闭条件，不维护样本运行历史。GapCloser、T2T、Base Polish 的代码实现与真实工具适用边界分别说明；工具退出成功、无候选保留源不等于质量改善。Assembly 各方法及 Dedup 的方法覆盖见[实现地图](../langgraph-implementation-map.md#assembly-dedup-validation-map)。
 
 <a id="gapcloser-representative-sample-acceptance-and-noisy-read-routes"></a>
 
@@ -44,7 +44,7 @@ GapCloser、T2T、Base Polish 已有工程回归与操作者报告的 smoke/探�
 
 ### T2T 构建与验证的工程边界
 
-当前代码已把 POA 构建和完整候选回贴纳入同一个冻结方法生命周期，保存来源、计算预算、版本和哈希绑定。工程回归覆盖产物结构、错误传播、恢复与采纳；本次仅做软件检查，没有执行真实工具或样本验收。诊断记录、方法适用性和重试必须说明新增证据已经落地。方法切换在只有一种适用注册方法时拒绝。代表输入对照不是独立方法；部分候选重新验证和旧 checkpoint 迁移仍未实现。具体行为由[阶段契约](stage-contracts.md#9-t2t-finishing)拥有，不另建控制路径。
+当前代码已把 POA 构建和完整候选回贴纳入同一个冻结方法生命周期，保存来源、计算预算、版本和哈希绑定。工程回归覆盖产物结构、错误传播、恢复与采纳。诊断记录、方法适用性和重试必须说明新增证据已经落地。方法切换在只有一种适用注册方法时拒绝。代表输入对照不是独立方法；部分候选重新验证和旧 checkpoint 迁移仍未实现。具体行为由[阶段契约](stage-contracts.md#9-t2t-finishing)拥有，不另建控制路径。
 
 - 当前证据：`app/stages/t2t/{algorithms,reconstruction,script,nodes,review}.py`、`tests/test_t2t.py`、`tests/test_t2t_output_contract.py`。
 - 后续范围：另行明确方法切换及验证契约后再实现；不得把工程回归通过等同于结果质量已验证。
@@ -98,6 +98,8 @@ GapCloser、T2T、Base Polish 已有工程回归与操作者报告的 smoke/探�
 <a id="autohic-resource-recovery-gap"></a>
 
 ### AutoHiC 资源失败传播与子阶段恢复
+
+人工 FASTA 作为新候选在同一会话采用并接续下游已经实现，见[人工接续契约](stage-contracts.md#7-hi-c-scaffolding)。本项缺口指原 AutoHiC 工具尝试内部的恢复与资源管理。
 
 正式 wrapper 调用完整上游入口，尚无 Juicer/3D-DNA 子阶段 checkpoint/import、依赖校验后的自动中间文件回收或峰值磁盘预算。嵌套脚本吞掉失败时，仅靠外层退出码不能判成功；磁盘耗尽还可能截断 Ledger，已有记录不能靠手工补一条成功来恢复。`scripts/autohic/` 提供独立恢复；正式 wrapper 已通过冻结的 `app/execution/autohic_runtime.py` 接入共享 CUDA→CPU 设备策略，尚待目标主机实际验收，也未实现冻结尝试的合法产物导入。染色体分配已有可显式应用的上游边界补丁和真实函数回归，见[部署指南](../../deployment/migration.md#autohic-chromosome-boundary-patch)；尚未在正式主机就绪检查中强制验证其修复版本。不能只凭上游退出零放行无效布局。
 

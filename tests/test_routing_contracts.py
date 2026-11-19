@@ -27,6 +27,7 @@ from app.stages.genome_survey.routing import (
 from app.stages.hic_scaffolding.routing import (
     route_after_autohic,
     route_after_recommendation,
+    route_after_retry_gate,
     route_after_review,
 )
 from app.stages.hic_scaffolding.routing import (
@@ -119,7 +120,7 @@ class RoutingFailureContractTests(unittest.TestCase):
                 with self.subTest(status=status, router=router.__name__):
                     self.assertEqual(router(stage_state("t2t", status)), "fail")
 
-    def test_hic_routes_execution_failures_to_fail_and_requirements_to_gate(self):
+    def test_hic_failures_offer_manual_results_when_source_assembly_is_resolved(self):
         for status in BASE_FAILURES:
             for router in (route_after_recommendation, route_after_review):
                 with self.subTest(status=status, router=router.__name__):
@@ -128,11 +129,41 @@ class RoutingFailureContractTests(unittest.TestCase):
                     )
 
         for status in ("blocked_env", "missing_tool"):
-            for router in (route_after_hic_resolve, route_after_autohic):
+            self.assertEqual(
+                route_after_hic_resolve(stage_state("hic_scaffolding", status)),
+                "requirements",
+            )
+
+        for status in BASE_FAILURES:
+            for router in (
+                route_after_hic_resolve,
+                route_after_recommendation,
+                route_after_autohic,
+                route_after_retry_gate,
+            ):
                 with self.subTest(status=status, router=router.__name__):
                     self.assertEqual(
-                        router(stage_state("hic_scaffolding", status)), "requirements"
+                        router(
+                            stage_state(
+                                "hic_scaffolding",
+                                status,
+                                pre_hic_assembly_ref="/run/contigs.fa",
+                            )
+                        ),
+                        "review",
                     )
+        self.assertEqual(
+            route_after_retry_gate(
+                stage_state("hic_scaffolding", "execution_parameter_retries_exhausted")
+            ),
+            "review",
+        )
+        self.assertEqual(
+            route_after_autohic(
+                stage_state("hic_scaffolding", "failed", failure_kind="execution")
+            ),
+            "retry_gate",
+        )
 
     def test_read_qc_routes_shared_and_stage_specific_failures_to_fail(self):
         for status in (*BASE_FAILURES, "blocked_input"):

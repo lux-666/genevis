@@ -236,6 +236,7 @@ def execute_resume_transaction(
             )
             if request is not None:
                 _require_matching_committed_request(
+                    state,
                     paths,
                     identity,
                     request,
@@ -640,6 +641,7 @@ def _healthy_status(
 
 
 def _require_matching_committed_request(
+    state: TopLevelState,
     paths: SessionPaths,
     identity: ReviewApplicationIdentity,
     proposed: ResumeReviewRequest,
@@ -661,6 +663,17 @@ def _require_matching_committed_request(
             "submitted decision gate_id conflicts with committed intent"
         )
     canonical = proposed.model_copy(update={"gate_id": identity.gate_id})
+    gate = get_review_gate(identity.stage, identity.gate_id)
+    snapshot = gate.load_snapshot_intent_inputs()
+    if snapshot is not None:
+        canonical = snapshot(
+            state,
+            canonical,
+            {
+                "workflow_step_id": identity.workflow_step_id,
+                "payload": {"decisions_allowed": gate.decisions_allowed},
+            },
+        )
     portable = portable_resume_review_request(paths.run_dir, canonical)
     if portable != committed:
         raise ReviewIntentConflictError(

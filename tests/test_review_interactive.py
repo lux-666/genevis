@@ -506,6 +506,29 @@ class PromptHicScaffoldingTests(unittest.TestCase):
         self.assertIn("accept stage result [accept_candidate]", rendered)
         self.assertIn("operator note (optional, audit only)", rendered)
 
+    def test_manual_assembly_prompts_for_fasta_and_optional_contact_map(self):
+        requirements = {"decisions_allowed": ["use_manual_assembly"]}
+        for contact_map in ("", "/data/result.hic"):
+            with self.subTest(contact_map=contact_map):
+                with patch(
+                    "builtins.input",
+                    side_effect=["1", "/data/revised.fa", contact_map, ""],
+                ):
+                    result = prompt_hic_scaffolding_decision(requirements)
+                self.assertEqual(result["decision"], "use_manual_assembly")
+                self.assertEqual(
+                    result["metadata"]["assembly_fasta"], "/data/revised.fa"
+                )
+                self.assertEqual(result["metadata"].get("contact_map", ""), contact_map)
+
+    def test_manual_assembly_blank_path_leaves_review_pending(self):
+        with patch("builtins.input", side_effect=["1", ""]):
+            self.assertIsNone(
+                prompt_hic_scaffolding_decision(
+                    {"decisions_allowed": ["use_manual_assembly"]}
+                )
+            )
+
     def test_keep_prior_assembly_needs_no_method_selection(self):
         requirements = {
             "stage": "hic_scaffolding",
@@ -1225,6 +1248,11 @@ class DecisionBriefTests(unittest.TestCase):
                             "Hi-C reads available",
                             "Contact map review required",
                         ],
+                        "report_refs": {
+                            "pre_hic_assembly": "/data/contigs.fa",
+                            "scaffold_fasta": "/data/autohic.fa",
+                            "contact_map": "/data/autohic.hic",
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -1246,6 +1274,11 @@ class DecisionBriefTests(unittest.TestCase):
 
             self.assertIn("Hi-C reads available", brief["evidence"]["notes"])
             self.assertIn("Contact map review required", brief["evidence"]["notes"])
+            output = io.StringIO()
+            with patch("sys.stdout", output):
+                render_decision_brief(brief)
+            for path in ("/data/contigs.fa", "/data/autohic.fa", "/data/autohic.hic"):
+                self.assertIn(path, output.getvalue())
 
     def test_render_decision_brief_no_crash(self):
         brief = {

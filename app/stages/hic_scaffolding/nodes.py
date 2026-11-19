@@ -39,7 +39,16 @@ from app.schemas.artifacts import (
     ParameterAttempt,
 )
 from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
-from app.stages.base import absolute_data_dir, append_route_trace, session_paths
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    session_paths,
+    stage_work_dir,
+)
+from app.stages.hic_scaffolding.manual import (
+    MANUAL_ASSEMBLY_METHOD,
+    HiCAdoptionMetadataV1,
+)
 from app.stages.hic_scaffolding.method_application.support import (
     hic_output as _hic_output,
 )
@@ -147,6 +156,7 @@ class HiCScaffoldingReviewEffectV1(BaseModel):
     decision: Literal[
         "accept_candidate",
         "keep_prior_assembly",
+        "use_manual_assembly",
         "request_parameter_retry",
         "stop_human_review",
     ]
@@ -190,10 +200,15 @@ def resolve_hic_inputs(state: TopLevelState) -> StateUpdate:
     try:
         hic_assets = _hic_assets(state)
     except ValueError as exc:
-        return _fail_update(
+        return _update_hic_output(
             state,
-            f"Hi-C provenance is invalid: {exc}",
-            failure_kind="invalid_input",
+            {
+                "status": "failed",
+                "failure_kind": "invalid_input",
+                "reason": f"Hi-C provenance is invalid: {exc}",
+                "pre_hic_assembly_ref": final_assembly_ref,
+                "output_assembly_ref": final_assembly_ref,
+            },
         )
     hic_read_refs = [
         str(asset.get("asset_id")) for asset in hic_assets if asset.get("asset_id")
@@ -264,48 +279,81 @@ def prepare_autohic_adoption_review(state: TopLevelState) -> StateUpdate:
     """Open the separate final gate that adopts or rejects the AutoHiC result."""
 
     hic_out = _hic_output(state)
-    if hic_out.get("status") != "autohic_review_ready":
-        return {}
+    successful = hic_out.get("status") == "autohic_review_ready"
     candidate = dict((hic_out.get("method_candidates") or {}).get(AUTOHIC_METHOD) or {})
-    if candidate.get("status") != "executed" or not candidate.get("scaffold_fasta"):
+    if successful and (
+        candidate.get("status") != "executed" or not candidate.get("scaffold_fasta")
+    ):
         return _fail_update(
             state,
             "AutoHiC completed without a reviewable chromosome assembly",
             failure_kind="execution",
         )
 
+    if not hic_out.get("pre_hic_assembly_ref"):
+        return _fail_update(
+            state, "Hi-C review requires an input assembly", failure_kind="review"
+        )
+    reason = (
+        "autohic_adoption_review_required"
+        if successful
+        else "autohic_failed_manual_result_required"
+    )
+    settlement = _settle_terminal_autohic(state) if not successful else {}
     payload = ReviewPayload(
         stage="hic_scaffolding",
         gate_id="hic_scaffolding",
-        reason="autohic_adoption_review_required",
+        reason=reason,
         candidates=[
             {
                 "method_name": AUTOHIC_METHOD,
+                "status": "executed",
                 "scaffold_fasta": candidate.get("scaffold_fasta"),
                 "contact_map": candidate.get("contact_map"),
                 "assembly_file": candidate.get("assembly_file"),
                 "html_report": candidate.get("html_report"),
             }
-        ],
+        ]
+        if successful
+        else [],
         decisions_allowed=[
-            "accept_candidate",
+            *(["accept_candidate"] if successful else []),
             "keep_prior_assembly",
-            "request_parameter_retry",
+            "use_manual_assembly",
+            *(["request_parameter_retry"] if successful else []),
             "stop_human_review",
         ],
-        notes=list(hic_out.get("notes") or []),
+        notes=[
+            *list(hic_out.get("notes") or []),
+            *([] if successful else [str(hic_out.get("reason") or "AutoHiC failed")]),
+        ],
         auto_decidable=False,
         report_refs={
-            key: str(candidate[key])
-            for key in ("contact_map", "assembly_file", "html_report")
-            if candidate.get(key)
+            "pre_hic_assembly": str(hic_out["pre_hic_assembly_ref"]),
+            "autohic_work_dir": str(
+                stage_work_dir(state, "hic_scaffolding", "autohic")
+            ),
+            **{
+                f"hic_read_{index + 1}": path
+                for index, path in enumerate(hic_out.get("hic_read_paths") or [])
+            },
+            **{
+                key: str(candidate[key])
+                for key in (
+                    "scaffold_fasta",
+                    "contact_map",
+                    "assembly_file",
+                    "html_report",
+                )
+                if candidate.get(key)
+            },
         },
     )
     persisted = persist_review_request(
         state,
         stage="hic_scaffolding",
         gate_id="hic_scaffolding",
-        reason="autohic_adoption_review_required",
+        reason=reason,
         payload=payload,
         method_name=HIC_CONTRACT_METHOD,
         artifact_type="hic_scaffolding.adoption_review.request",
@@ -313,28 +361,31 @@ def prepare_autohic_adoption_review(state: TopLevelState) -> StateUpdate:
     interrupt = persisted.compact_interrupt(
         stage="hic_scaffolding",
         gate_id="hic_scaffolding",
-        reason="autohic_adoption_review_required",
+        reason=reason,
     )
     Ledger(absolute_data_dir(state)).record_review_requested(
         state["session_id"],
         "hic_scaffolding",
-        reason="autohic_adoption_review_required",
+        reason=reason,
         candidates=payload.candidates,
         review_request_artifact_ref=persisted.request_ref.path_ref,
         review_request_id=persisted.review_request_id,
         auto_decidable=False,
     )
-    return _update_hic_output(
-        state,
-        {
-            "status": "blocked_human",
-            "block_reason": "autohic_adoption_review_required",
-            "active_interrupt": interrupt,
-            "review_request_artifact_ref": persisted.request_ref.model_dump(
-                mode="json"
-            ),
-        },
-    )
+    return {
+        **settlement,
+        **_update_hic_output(
+            state,
+            {
+                "status": "blocked_human",
+                "block_reason": reason,
+                "active_interrupt": interrupt,
+                "review_request_artifact_ref": persisted.request_ref.model_dump(
+                    mode="json"
+                ),
+            },
+        ),
+    }
 
 
 def block_hic_scaffolding(state: TopLevelState) -> StateUpdate:
@@ -397,6 +448,18 @@ def prepare_hic_scaffolding_review_application(
     pre_hic_assembly_path = hic_out.get("pre_hic_assembly_ref")
     if request.decision == "accept_candidate":
         final_assembly_path = str(candidate["scaffold_fasta"])
+    elif request.decision == "use_manual_assembly":
+        from app.storage.artifacts import resolve_artifact_ref
+
+        manual_metadata = HiCAdoptionMetadataV1.model_validate(request.metadata)
+        assert manual_metadata.assembly_fasta_ref is not None
+        final_assembly_path = str(
+            resolve_artifact_ref(
+                absolute_data_dir(state),
+                state["session_id"],
+                manual_metadata.assembly_fasta_ref,
+            )
+        )
     else:
         final_assembly_path = str(pre_hic_assembly_path)
     try:
@@ -411,7 +474,7 @@ def prepare_hic_scaffolding_review_application(
         ) from exc
 
     adoption_resource_metadata: dict[str, Any] | None = None
-    if request.decision == "accept_candidate":
+    if request.decision in {"accept_candidate", "use_manual_assembly"}:
         try:
             current_assembly = resolve_stage_resource(
                 state,
@@ -439,6 +502,13 @@ def prepare_hic_scaffolding_review_application(
         if current_assembly.metadata.get("primary_output_ref") is not None:
             adoption_resource_metadata["input_primary_output_ref"] = (
                 current_assembly.metadata["primary_output_ref"]
+            )
+        if (
+            request.decision == "use_manual_assembly"
+            and manual_metadata.contact_map_ref
+        ):
+            adoption_resource_metadata["contact_map_ref"] = (
+                manual_metadata.contact_map_ref.model_dump(mode="json")
             )
 
     decision_metadata = {
@@ -469,6 +539,7 @@ def prepare_hic_scaffolding_review_application(
         Literal[
             "accept_candidate",
             "keep_prior_assembly",
+            "use_manual_assembly",
             "request_parameter_retry",
             "stop_human_review",
         ],
@@ -477,7 +548,9 @@ def prepare_hic_scaffolding_review_application(
     artifact_payload = HiCScaffoldDecisionArtifact(
         session_id=state["session_id"],
         decision=decision,
-        method_name=AUTOHIC_METHOD,
+        method_name=MANUAL_ASSEMBLY_METHOD
+        if request.decision == "use_manual_assembly"
+        else AUTOHIC_METHOD,
         pre_hic_assembly_ref=pre_hic_assembly_ref.path_ref,
         output_assembly_ref=output_assembly_ref.path_ref,
         hic_read_refs=list(hic_out.get("hic_read_refs") or []),
@@ -501,7 +574,7 @@ def prepare_hic_scaffolding_review_application(
         raise ResumeValidationError(
             "AutoHiC adoption decision could not be persisted"
         ) from exc
-    if request.decision == "accept_candidate":
+    if request.decision in {"accept_candidate", "use_manual_assembly"}:
         if adoption_resource_metadata is None:
             raise ResumeValidationError("AutoHiC adoption metadata is unavailable")
         try:
@@ -539,7 +612,9 @@ def prepare_hic_scaffolding_review_application(
                 source_candidate=source_candidate,
                 primary_output_ref=primary_output_ref,
                 stage="hic_scaffolding",
-                method_name=HIC_CONTRACT_METHOD,
+                method_name=MANUAL_ASSEMBLY_METHOD
+                if request.decision == "use_manual_assembly"
+                else HIC_CONTRACT_METHOD,
                 action_identity=decision_ref.artifact_id,
             )
         except (
@@ -635,7 +710,7 @@ def prepare_hic_scaffolding_review_application(
                 ),
             },
         )
-    elif request.decision == "accept_candidate":
+    elif request.decision in {"accept_candidate", "use_manual_assembly"}:
         if adoption_resource_metadata is None:
             raise ResumeValidationError("AutoHiC adoption metadata is unavailable")
         resource = HiCAssemblyResourceEffectV1(
@@ -738,7 +813,9 @@ def apply_hic_scaffolding_review_application(
                 else "completed"
             ),
             "decision": effect.decision,
-            "selected_method_name": AUTOHIC_METHOD,
+            "selected_method_name": MANUAL_ASSEMBLY_METHOD
+            if effect.decision == "use_manual_assembly"
+            else AUTOHIC_METHOD,
             "pre_hic_assembly_ref": pre_hic_assembly_path,
             "output_assembly_ref": output_assembly_path,
             "review_decision_artifact_ref": effect.decision_ref.model_dump(mode="json"),
@@ -790,7 +867,8 @@ def apply_hic_scaffolding_review_application(
                     delivery_primary_ref.model_dump(mode="json"),
                     delivery_mode=(
                         "materialized"
-                        if effect.decision == "accept_candidate"
+                        if effect.decision
+                        in {"accept_candidate", "use_manual_assembly"}
                         else "reused"
                     ),
                 ),
@@ -869,6 +947,7 @@ def validate_hic_scaffolding_review_intent_request(
     if request.decision not in {
         "accept_candidate",
         "keep_prior_assembly",
+        "use_manual_assembly",
         "request_parameter_retry",
         "stop_human_review",
     }:
@@ -881,6 +960,11 @@ def validate_hic_scaffolding_review_intent_request(
     pre_hic_assembly_ref = hic_out.get("pre_hic_assembly_ref")
     if not pre_hic_assembly_ref:
         raise ResumeValidationError("AutoHiC adoption requires pre_hic_assembly_ref")
+    if request.decision == "use_manual_assembly":
+        metadata = HiCAdoptionMetadataV1.model_validate(request.metadata)
+        if request.decided_by != "human" or metadata.assembly_fasta_ref is None:
+            raise ResumeValidationError("manual assembly requires a submitted FASTA")
+        return request
     if request.decision != "accept_candidate":
         return request
     if request.decided_by != "human":

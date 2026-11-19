@@ -11,6 +11,7 @@
 - [Contributing](../CONTRIBUTING.md)：外部贡献、错误报告和试用反馈入口。
 - [开发者指南](developer_guide/README.md)：按改动类型查找代码、测试、描述符、架构契约和实现证据。
 - [架构地图](architecture/README.md)：贡献者的主要设计入口；读者索引的拆分不改变或削弱任何架构权威。
+- [阶段能力总表与 v1.0 范围](architecture/langgraph-implementation-map.md#stage-capabilities)：已接入工具、已实现能力及待实现设计的维护入口。
 
 这两个读者索引只负责导航，链接到同一套操作规程与架构契约，不重复定义。
 

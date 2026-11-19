@@ -86,6 +86,7 @@ def build_stage() -> CompiledStateGraph[
         route_after_resolve,
         {
             "recommend": "recommend_autohic_parameters",
+            "review": "chromosome_assembly_review",
             "requirements": "settle_method_before_requirements_failure",
             "fail": "settle_method_before_failure",
         },
@@ -96,6 +97,7 @@ def build_stage() -> CompiledStateGraph[
         {
             "autohic": "autohic",
             "block": "block",
+            "review": "chromosome_assembly_review",
             "fail": "settle_method_before_failure",
         },
     )
@@ -114,6 +116,7 @@ def build_stage() -> CompiledStateGraph[
         route_after_retry_gate,
         {
             "recommend": "recommend_autohic_parameters",
+            "review": "chromosome_assembly_review",
             "fail": "settle_method_before_failure",
         },
     )

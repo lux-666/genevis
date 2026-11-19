@@ -37,6 +37,7 @@ Inventory 会在冻结计划时作为隐式第一步加入。完整的 stage 合
 [descriptor registry](descriptors/registry.yaml) 和
 [implementation map](docs/architecture/langgraph-implementation-map.md) 维护；
 README 不复制第二份方法表或完整工作流数组。
+已接入工具、阶段能力与待实现设计见[阶段总表](docs/architecture/langgraph-implementation-map.md#stage-capabilities)。
 
 ## Current Capabilities
 
@@ -47,6 +48,7 @@ README 不复制第二份方法表或完整工作流数组。
 - SQLite checkpoint、人工 gate、`inspect`、`review` 和 `resume`；
 - 完整五阶段 contig 路径，以及非默认后续路径中已接线的 Hi-C scaffolding
   与 T2T 能力；
+- Hi-C 成功或失败后可提交人工 FASTA，在同一 session 采用并接续计划中的下游阶段；`.hic` 为可选附件；
 - GapCloser 支持 HiFi + TGS-GapCloser，执行后人工采纳；Base Polish 支持 HiFi + Racon 单轮修正、前后比较和人工保留原稿。
 
 完整 HiFi + Hi-C 路线的配置、实跑及产物核验入口见

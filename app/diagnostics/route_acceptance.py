@@ -2,6 +2,7 @@
 
 Exit 0: full execution coverage; 2: incomplete/legitimately skipped coverage;
 1: inconsistent evidence. None of these is a biological improvement verdict.
+Workflow completion and manual Hi-C adoption are reported separately from coverage.
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ def verify_delivery(paths: SessionPaths, row: dict[str, Any]) -> dict[str, Any]:
         "stage": row["stage"],
         "delivery_mode": row["summary"]["delivery_mode"],
         "candidate_id": candidate.bundle.candidate_id,
+        "candidate_method": candidate.bundle.method_name,
         "candidate_bundle_ref": candidate.ref.model_dump(mode="json"),
         "primary_output_ref": candidate.primary_output_ref.model_dump(mode="json"),
         "path": str(candidate.primary_output_path),
@@ -359,6 +361,18 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
         if deliveries:
             previous_primary = deliveries[0]["primary_output_ref"]
     complete = snapshot["supervision_state"] == "completed"
+    manual_hic_adoptions = [
+        {
+            "step_id": occurrence["step_id"],
+            "candidate_id": delivery["candidate_id"],
+            "primary_output_ref": delivery["primary_output_ref"],
+        }
+        for occurrence in occurrences
+        if occurrence["stage"] == "hic_scaffolding"
+        for delivery in occurrence["deliveries"]
+        if delivery.get("candidate_method") == "hic_scaffolding.manual_assembly"
+        and delivery["delivery_mode"] == "materialized"
+    ]
     if complete and assembly_steps and not snapshot.get("final_assembly"):
         raise ValueError("completed session has no verified final assembly")
     quality = None
@@ -412,6 +426,12 @@ def audit_route(run_dir: Path) -> dict[str, Any]:
         if not gaps
         else "incomplete_execution_coverage",
         "session_state": snapshot["supervision_state"],
+        "workflow_status": (
+            "completed_with_manual_hic" if manual_hic_adoptions else "completed"
+        )
+        if complete
+        else "incomplete",
+        "manual_hic_adoptions": manual_hic_adoptions,
         "occurrences": occurrences,
         "coverage_gaps": gaps,
         "final_assembly": snapshot.get("final_assembly"),

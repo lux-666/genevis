@@ -22,7 +22,7 @@
 
 稳定方法 ID `hic_scaffolding.candidate.autohic` 标识描述符、目录、推荐、尝试、产物和 Ledger 事件，不意味着当前可选择其他 Hi-C 方法。
 
-阶段入口通过资源解析器解析当前采纳的组装，并以资产注册表身份解析配对 Hi-C 成员；同时要求已注册 AutoHiC 描述符和本地执行模式。缺失或无效的阶段要求产生阶段明确的 requirements/failure 结果，不改写成“未选择 Hi-C”。阶段游标为 `blocked_missing_requirements`，但顶层监督会终止运行，不开启可恢复人工评审阻塞。
+阶段入口通过资源解析器解析当前采纳的组装，并以资产注册表身份解析配对 Hi-C 成员；同时要求已注册 AutoHiC 描述符和本地执行模式。缺失或无效的阶段要求产生明确的诊断，不改写成“未选择 Hi-C”。已经解析出输入组装时，准备、执行或收集失败可进入人工结果门；缺少输入组装时仍终止运行。
 
 <a id="implemented-flow"></a>
 
@@ -37,8 +37,10 @@
   -> 共享本地运行并持久化执行证据
   -> 收集染色体 FASTA、contact map、assembly 文件和 HTML 报告
   -> 阻塞等待独立采纳评审
-  -> 采纳候选、保留旧组装、请求新重试或停止
+  -> 采纳候选、保留旧组装、提交人工 FASTA、请求新重试或停止
 ```
+
+输入组装就绪后的准备/执行/收集失败，在允许的自动重试结束后同样可进入人工结果门，提交自己的 FASTA 后继续原计划。
 
 参数审批和染色体组装采纳是两个不同的人工决策。批准稀疏映射只授权一次可执行尝试，不采纳该尝试的生物学输出；最终门禁读取已发布证据，决定下游应使用哪个组装。
 
@@ -52,9 +54,9 @@ AutoHiC 适配器只加载已验证的已批准 schema-3 参数链。它解析�
 
 执行使用[方法执行](execution.md)描述的生产本地子进程 Runner。生成的 wrapper 调用配置的 AutoHiC 入口；Gene Agent 不在图中重写 Juicer、3D-DNA、错误检测或染色体分配。不存在 AutoHiC 远程/调度器 Runner。
 
-就绪与产物校验是独立边界。冻结验证声明的可执行文件、模型、输入材料和输出路径，但不要求进程运行前输出已存在。进程报告成功后，收集会在首次发布前校验每个冻结 `expected_outputs` 成员。AutoHiC 要求染色体 FASTA、`.hic`、`.assembly` 和 HTML 报告。每项必须是文件，除非不可变索引已有可在崩溃回放中恢复的同一尝试本地产物。缺失或非文件且无该记录时，产生终态 `failure_kind: collect`，不打开评审候选或采纳门，也不发布四项评审产品、评审包或 QC 报告。
+就绪与产物校验是独立边界。冻结验证声明的可执行文件、模型、输入材料和输出路径，但不要求进程运行前输出已存在。进程报告成功后，收集会在首次发布前校验每个冻结 `expected_outputs` 成员。AutoHiC 要求染色体 FASTA、`.hic`、`.assembly` 和 HTML 报告。每项必须是文件，除非不可变索引已有可在崩溃回放中恢复的同一尝试本地产物。缺失或非文件且无该记录时，工具尝试以 `failure_kind: collect` 失败，不发布可采纳的 AutoHiC 候选、四项评审产品、评审包或 QC 报告；父阶段保留人工结果接续入口。
 
-正常 wrapper 成功后，收集发布染色体级 FASTA、`.hic`、`.assembly` 和 HTML 评审产物，以及紧凑评审/QC 包和规范执行引用。共享 Runner 已拥有 stdout、stderr 与进程证据；收集不重复登记日志。发布有意不具事务性：若后续发布在早先产品移动并索引后失败，早先产品保留为已索引孤儿；收集不记录 `attempt_succeeded` 或 `artifact_registered` 语义事件，不产生评审候选或门，也不重试或回滚。
+正常 wrapper 成功后，收集发布染色体级 FASTA、`.hic`、`.assembly` 和 HTML 评审产物，以及紧凑评审/QC 包和规范执行引用。共享 Runner 已拥有 stdout、stderr 与进程证据；收集不重复登记日志。发布有意不具事务性：若后续发布在早先产品移动并索引后失败，早先产品保留为已索引孤儿；收集不记录 `attempt_succeeded` 或 `artifact_registered` 语义事件，不产生可采纳的工具候选，不自动重试或回滚；父阶段仍可进入人工结果门。
 
 <a id="gpu-and-cpu"></a>
 
@@ -93,6 +95,12 @@ AutoHiC 上游 `src/utils/get_chr_data.py::divide_chr` 将 inclusive 染色体�
 ## 采纳与重试
 
 接受候选会验证已发布 FASTA，并将 `resource_refs["assembly"]` 替换为带来源的 Hi-C 组装。保留旧组装会保留其字节与候选关系，但在当前 Hi-C occurrence 下重新发布中央资源。请求参数重试会封存当前尝试，带不可变执行和评审证据返回推荐。
+
+同一采纳门还支持 `use_manual_assembly`：操作者提交自己的 FASTA 即表示采用，`.hic` 为可选附件。不要求 AGP 或 `.assembly`，不检查人工组装与原 contig 的结构对应关系。只检查 FASTA 基本可用性，染色体结构由操作者负责。提交文件先保存为不可变产物，再通过现有 intent/application 协议登记新候选，替换中央 `assembly` 并进入冻结计划的下一阶段；源装配、AutoHiC 产物及失败证据保留。
+
+已解析出输入组装后，AutoHiC 准备、执行或收集失败、执行重试耗尽，以及工具/模型缺失时，也打开此门。失败请求不提供 `accept_candidate` 或结果评审重试，只允许提交人工 FASTA、沿用输入或停止。已有自动执行重试策略仍先执行；无法继续自动重试时等待人工。AutoHiC 方法失败或未执行记录不会因人工接管而改写成成功。零等待也不自动沿用输入或伪造可采纳结果，保留人工门供后续 `review`/`resume`。
+
+交接信息列出 Hi-C 前 FASTA、配对 reads、AutoHiC 工作目录及可用输出。交互式 `gene-agent review` 选择“use your own assembly FASTA”后输入路径；暂未准备好可留空退出，原门继续等待。文件式 `resume` 使用当前请求 ID/hash，填写 `decision: use_manual_assembly` 及 `metadata.assembly_fasta`，可选 `metadata.contact_map`。详见[人工结果接续](../../user_guide/run-and-recovery.md#manual-hic-result)。
 
 执行失败重试由明确操作者策略和有界预算控制；评审触发的重试有自己的预算。两者都创建新的 schema-3 推荐和尝试专属工作区，不修改旧映射或覆盖其产物。
 

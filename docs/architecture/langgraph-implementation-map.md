@@ -16,6 +16,35 @@
 
 本页投影当前树中已接线、可执行、已验证、部分实现或缺失的能力。精确行为仍由链接的参考契约拥有。
 
+<a id="stage-capabilities"></a>
+
+## 阶段、工具与待实现设计
+
+此表是阶段能力的维护入口，只记录软件接入、实现范围和未完成设计；不记录样本历史、运行次数或测试机进度。变更阶段能力时同步更新对应行。下方详细映射保留代码与测试位置；精确输入、输出和决策由[阶段契约](reference/stage-contracts.md)拥有。
+
+| Stage | 已接入工具 | 当前已实现 | 未实现设计或后续扩展 |
+|---|---|---|---|
+| Inventory：输入登记 | 自有登记与校验逻辑 | reads、配对 Hi-C、参考及已有 FASTA 登记；输入冻结；从已有组装启动 | 暂无新增阶段设计；当前只维护一个主组装资源 |
+| Read QC：质控 | SeqKit、fastp | 长读段统计和获批长度过滤；短 DNA/Hi-C 配对质控及报告；Hi-C junction 保留 | 暂无新增阶段设计 |
+| Genome Survey：基因组调查 | Jellyfish、GenomeScope2 | k-mer 统计、模型拟合及基因组大小等估计；优先使用短 DNA 读段 | 暂无新增阶段设计；不提供自动染色体计数 |
+| Assembly：组装 | hifiasm、Flye、NextDenovo | hifiasm/HiFi、hifiasm/ONT、Flye、NextDenovo 四条方法；方法与参数推荐/审批；FASTA/GFA 交付；支持的联合材料与分相输入 | 外部参数与工具版本知识解释覆盖仍需补全；当前下游主资源使用一个单倍型，双单倍型并行下游尚未接入 |
+| Assembly Dedup：去冗余 | purge_dups、minimap2；QUAST 比较 | 深度/自比对策略；参数顾问循环；多候选比较；采纳或保留输入 | 暂无新增算法设计；推荐知识覆盖按方法继续补全 |
+| Assembly Review：组装评估 | QUAST、BUSCO | 可重复放置的评估阶段；候选比较；最终源稿/校正稿评估；人工采纳 | 独立共识 QV 方法未接入；不提供自动染色体结构认证 |
+| Hi-C Scaffolding：挂载 | AutoHiC，内部调用 Juicer、3D-DNA | 参数审批、执行、产物与输入展示；成功/失败后提交人工 FASTA；可选 `.hic`；同会话采用并恢复下游 | 绕过 AutoHiC 的独立准备模式、Juicer/3D-DNA 子阶段恢复、自动中间文件回收和磁盘预算尚未实现 |
+| GapCloser：补洞 | TGS-GapCloser、minimap2；QUAST 比较 | HiFi 填内部缺口；坐标与片段校验；顾问循环；采纳或保留输入；无缺口复用 | ONT/CLR/CycloneSEQ 读段路线未实现，需另行设计 |
+| T2T：端粒处理 | minimap2、pyspoa、自有扫描/重建逻辑 | 基序解析、端部扫描、支持读段筛选、POA 延伸候选构建、回贴与采纳；无候选保留输入 | 多方法切换、其他候选分组接续、部分补丁独立重新验证尚未接入；阶段名称不代表完整 T2T 质量 |
+| Base Polish：碱基校正 | minimap2、Racon；QUAST 比较 | HiFi 单轮校正；源/候选成对比较；顾问循环；人工采纳或保留；接最终 Review | 其他读段平台的校正路线未实现，需另行设计 |
+
+<a id="v1-scope"></a>
+
+## v1.0 收口范围
+
+v1.0 以现有已接入工具、单主组装资源、冻结阶段顺序和 Hi-C 人工接续为范围。GapCloser/Base Polish 的 HiFi 限制明确保留。人工提交即采用，不增加 AGP、`.assembly` 配套或染色体结构检查。上表后续扩展不自动成为 v1.0 必做项。
+
+当前开发收口重点是让能力表、可执行配置、人工交接界面和完成报告一致。Hi-C 人工接管后的流程完成与 AutoHiC 工具执行覆盖分别展示；参数错误、无增益、无候选、保留输入和人工提交的结果各自保留。配置复用[完整 HiFi/Hi-C 模板](../examples/hifi_complete_run_config.template.json)和[finishing 模板](../examples/finishing_run_config.template.json)，人工恢复按原冻结计划推进。
+
+后续设计集中在 AutoHiC 子阶段恢复与资源管理、Assembly 方法知识覆盖、T2T 多方法/部分补丁处理和其他读段平台的 finishing 路线。实现与契约的具体缺口仍由[架构一致性](reference/conformance.md)维护；运行及真实工具检查按[操作手册](../user_guide/run-and-recovery.md)执行。
+
 <a id="how-to-read-status"></a>
 
 ## 状态读法
@@ -116,7 +145,7 @@
 | Hi-C `resolve_hic_inputs` 与需求边界 | `wired` | `implemented-no-process` | `tested` | `none` | `app/stages/hic_scaffolding/`；`tests/test_hic_scaffolding.py` |
 | Hi-C `recommend_autohic_parameters` 与审批/重试 | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`；`tests/test_hic_scaffolding.py`、`tests/test_parameter_resolution_validation.py` |
 | Hi-C `autohic` 方法与收集 | `wired` | `executable` | `tested` | `none` | 真实 Runner 和 FASTA/.hic/.assembly/HTML 严格校验，含回放与后期发布失败覆盖。`app/stages/hic_scaffolding/method_application/`；`tests/test_hic_scaffolding.py` |
-| Hi-C `chromosome_assembly_review`、阻塞、采纳恢复 | `wired` | `implemented-no-process` | `tested` | `none` | 候选/当前资源替换声明 materialized 或 reused 交付，共享结算对照索引产物验证。`app/stages/hic_scaffolding/builder.py`、`nodes.py`；`tests/test_hic_scaffolding.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
+| Hi-C `chromosome_assembly_review`、阻塞、采纳恢复 | `wired` | `implemented-no-process` | `tested` | `none` | 工具成功/失败后均可提交人工 FASTA，`.hic` 可选；同会话登记新候选并继续，原失败事实保留。候选/当前资源替换声明 materialized 或 reused 交付。`app/stages/hic_scaffolding/{builder,nodes,manual}.py`；`tests/test_hic_scaffolding.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
 | GapCloser HiFi 执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser 无校正路线、原生坐标校验、持久门禁采纳（零等待自动）、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
 | T2T 输入/基序：`resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process`，条件模型调用 | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`；`tests/test_t2t_motif.py` |
 | T2T 单轮 schema-3 策略请求与批准、`prepare_parameters` | `wired` | `implemented-no-process` 策略/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |

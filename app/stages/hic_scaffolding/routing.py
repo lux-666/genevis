@@ -39,6 +39,10 @@ def route_after_resolve(state: TopLevelState) -> str:
     """Recommend the enzyme only after required run inputs resolve."""
 
     status = _output(state).get("status")
+    if (status in _REQUIREMENT_STATUSES or is_terminal_failure(status)) and _output(
+        state
+    ).get("pre_hic_assembly_ref"):
+        return "review"
     if status in _REQUIREMENT_STATUSES:
         return "requirements"
     if is_terminal_failure(status):
@@ -52,19 +56,17 @@ def route_after_recommendation(state: TopLevelState) -> str:
     status = _output(state).get("status")
     if status == "parameters_approved":
         return "autohic"
-    return "block" if status == "blocked_human" else "fail"
+    if status == "blocked_human":
+        return "block"
+    return "review" if _output(state).get("pre_hic_assembly_ref") else "fail"
 
 
 def route_after_autohic(state: TopLevelState) -> str:
-    """Keep missing runtime requirements separate from execution failure."""
+    """Retry execution failures when authorized; otherwise offer human results."""
 
     status = _output(state).get("status")
-    if status in _REQUIREMENT_STATUSES:
-        return "requirements"
     if status == "failed" and _output(state).get("failure_kind") == "execution":
         return "retry_gate"
-    if is_terminal_failure(status):
-        return "fail"
     return "review"
 
 
@@ -73,7 +75,7 @@ def route_after_retry_gate(state: TopLevelState) -> str:
 
     if _output(state).get("status") == "retry_parameters_after_execution_failure":
         return "recommend"
-    return "fail"
+    return "review"
 
 
 def route_after_review(state: TopLevelState) -> str:

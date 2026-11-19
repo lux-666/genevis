@@ -256,17 +256,21 @@ Review 的内部参数质量诊断按字段名确定 BUSCO 单位：`busco_compl
 输入/输出：
 
 - 进入时要求 `assembly`、`hic_reads`。
-- 采纳决策后重新发布中央 `assembly`，只有采纳 scaffold 才改变字节和候选关系。
+- 采纳决策后重新发布中央 `assembly`；采用 AutoHiC scaffold 或人工 FASTA 时登记新候选，沿用输入时保留原字节和候选关系。
 
 注册方法：
 
 - `hic_scaffolding.candidate.autohic`。
 
-只有到达冻结 occurrence 才运行。缺组装、配对 Hi-C 或配置时，私有游标为 `blocked_missing_requirements`，明确 occurrence 结果却是 `failed`，因此父结算到 `failed_terminal`，无 `active_interrupt`。游标只是诊断，不是可恢复或终态结果。AutoHiC 拥有 Juicer/3D-DNA 与模型辅助校正流水线。L2 可调整限制性内切酶、编辑轮次、校正开关、错误阈值。顾问模式每个结构有效稀疏推荐都需参数审批；显式确定性基线按[策略契约](recommendation-policy.md)批准初始尝试。执行成功再开采纳门。只有不可变参数审批/采纳门可将当前 occurrence 暂停为 `blocked_human`。操作者可采纳染色体组装、保留旧组装或请求新参数尝试；执行失败重试需明确策略和预算。
+只有到达冻结 occurrence 才运行。缺组装时仍以明确失败终止；已解析出输入组装后，缺配对 Hi-C/配置、参数准备失败、执行或收集失败均可进入人工结果门，不改写为自动跳过或 AutoHiC 成功。AutoHiC 拥有 Juicer/3D-DNA 与模型辅助校正流水线。L2 可调整限制性内切酶、编辑轮次、校正开关、错误阈值。顾问模式每个结构有效稀疏推荐都需参数审批；显式确定性基线按[策略契约](recommendation-policy.md)批准初始尝试。只有不可变参数审批/采纳门将当前 occurrence 暂停为 `blocked_human`。操作者可采纳工具结果、保留旧组装、提交自己的 FASTA，成功结果还可请求新参数尝试；执行失败自动重试仍遵循原策略和预算。
 
 采纳 scaffolding 时验证当前候选与主产物，在替换中央资源前于当前 occurrence 发布派生 executed candidate；不可变采纳决策标明该候选。保留旧组装保留字节和关系，但在当前 Hi-C occurrence 下重新发布中央引用。
 
-冻结就绪验证输入、本地工具、模型、声明输出位置，不预检尚未生成文件。进程成功且首次新发布前，收集要求所有冻结 `expected_outputs`（FASTA、`.hic`、`.assembly`、HTML）为文件，或已有匹配尝试的索引发布可恢复。缺任一且无恢复记录，则以 `failure_kind: collect` 终止，无评审候选、采纳门、评审包或产品发布。发布非事务：后续存储失败可留下早先已索引孤儿；孤儿无 `attempt_succeeded`、`artifact_registered` 语义事件，不开门、不自动重试或回滚。
+`use_manual_assembly` 将提交的 FASTA 和可选 `.hic` 先保存为不可变产物，再通过同一 review intent/application 协议登记人工候选；提交即采用并进入计划下一阶段。只验证 FASTA 基本可用性，不要求 AGP/`.assembly` 或片段映射，不检查染色体结构或 `.hic` 配套关系。输入及 AutoHiC 产物/失败证据保留，AutoHiC 方法失败或未执行的事实不变。零等待失败请求没有可自动采纳产品，保留人工等待，不静默沿用源。
+
+冻结就绪验证输入、本地工具、模型、声明输出位置，不预检尚未生成文件。进程成功且首次新发布前，收集要求所有冻结 `expected_outputs`（FASTA、`.hic`、`.assembly`、HTML）为文件，或已有匹配尝试的索引发布可恢复。缺任一且无恢复记录，则以 `failure_kind: collect` 结束工具尝试，不产生可采纳的 AutoHiC 候选、评审包或产品发布；父阶段仍可打开人工结果门。发布非事务：后续存储失败可留下早先已索引孤儿；孤儿不具有 `attempt_succeeded`、`artifact_registered` 语义，不自动重试或回滚。
+
+只读路线报告分别展示 `workflow_status` 和工具执行覆盖 `status`。已完成会话且 Hi-C 物化交付的候选方法为 `hic_scaffolding.manual_assembly` 时，`workflow_status` 为 `completed_with_manual_hic`，`manual_hic_adoptions` 列出对应交付；沿用较早的人工候选不记为本次新提交。AutoHiC 失败/未执行仍保留在覆盖缺口，报告退出码继续按工具执行覆盖判定，不因人工接管而冒充工具成功。
 
 ## Finishing 顾问共同契约
 
@@ -355,7 +359,7 @@ Advisor 使用 finishing_recommendation，单轮基线使用 base_polish_adoptio
 
 服务器验收路线显式授权全部请求 occurrence。验收区分真实进程证据、声明方法 skip、验证阶段交付、质量评估、人工决策。只有 FASTA 或完成会话不足以证明全路线执行。收集证据必须标明完整索引输出；早先成功尝试不能抹除方法最终失败/skip。
 
-同一只读诊断支持明确范围 `complete`（默认）、`contig`、`review`、`hic`、`dedup`、`gapcloser`、`t2t`、`base-polish`、`finishing`。各范围要求精确 occurrence 序列；切片不报告为完整路线覆盖。独立切片经 Inventory 注册源 FASTA，验证首个工具消费该候选主输出。终态 Review 要求每个候选均有 QUAST/BUSCO 执行与收集指标。Base Polish 执行后进入 Review 的范围要求同设置不可变源/所选抛光对；advisor 未执行便保留源时，仅评估源并标记 not_executed_source_retained，不算 Racon 执行覆盖。无 Review 范围明确无最终 QUAST/BUSCO 质量评估。合法 skip 仍使工具执行覆盖不完整。
+同一只读诊断按输入运行的冻结 RunConfig 审计精确 occurrence 序列，不另设范围参数。contig、Hi-C、finishing 等操作范围由对应 RunConfig 决定；切片不报告为完整路线覆盖。独立切片经 Inventory 注册源 FASTA，验证首个工具消费该候选主输出。终态 Review 要求每个候选均有 QUAST/BUSCO 执行与收集指标。Base Polish 执行后进入 Review 时要求同设置不可变源/所选抛光对；advisor 未执行便保留源时，仅评估源并标记 not_executed_source_retained，不算 Racon 执行覆盖。无 Review 时明确无最终 QUAST/BUSCO 质量评估。合法 skip 仍使工具执行覆盖不完整。
 
 单阶段 Hi-C 范围可比较执行后采纳门的只读审计与分离恢复后完成审计，绑定同一会话、冻结输入和请求，要求 attempt-start 事件、执行证据、收集输出哈希不变。它是执行回放检查，不是生物学验收，也不防御操作者故意伪造基线。参数重试是新执行，不能通过不重跑断言。
 

@@ -10,6 +10,7 @@
 
 | 任务 | 从这里开始 | 按需继续 |
 |---|---|---|
+| 查看已接入工具和待实现设计 | [阶段能力总表](../architecture/langgraph-implementation-map.md#stage-capabilities) | [v1.0 范围](../architecture/langgraph-implementation-map.md#v1-scope) |
 | 新主机或缺少工具环境 | [新主机安装](../deployment/migration.md) | 主机检查成功后阅读[运行与恢复](run-and-recovery.md) |
 | 从 Mac checkout 同步到服务器 | [Mac 开发与服务器执行](../deployment/mac_dev_server_pull.md) | 实际 session 操作见[运行与恢复](run-and-recovery.md) |
 | 从原始 reads 运行 contig 流程 | [运行与恢复](run-and-recovery.md) | [Contig manifest](../examples/contig_manifest.template.yaml) 与 [contig RunConfig](../examples/contig_run_config.template.json) |
@@ -18,6 +19,7 @@
 | 评价已有组装 | [已有组装 manifest](../examples/existing_assembly_manifest.template.yaml) | [组装评价 RunConfig](../examples/assembly_review_run_config.template.json)，然后阅读[运行与恢复](run-and-recovery.md) |
 | 理解或决定 LLM 参数 | [参数推荐](parameter_recommendation.md) | 需要精确字段或持久化规则时阅读[参数契约](../architecture/reference/parameter-recommendation.md) |
 | 恢复阻塞或中断的 session | [运行与恢复](run-and-recovery.md) | 使用其 `review` 或决策文件 `resume` 路径，不要手工启动第二套工作流 |
+| 提交人工整理的 Hi-C 组装并继续 | [人工 Hi-C 结果接续](run-and-recovery.md#manual-hic-result) | 提交 FASTA；`.hic` 可选；下游阶段须预先包含在 RunConfig 中 |
 | 使用重复阶段实例 | [重复阶段 RunConfig](../examples/repeated_stage_occurrences_run_config.template.json) | 检查与恢复见[运行与恢复](run-and-recovery.md) |
 
 <a id="recommended-reading-order"></a>

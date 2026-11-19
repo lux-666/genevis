@@ -144,12 +144,15 @@ def test_hic_resume_comparison_fails_closed():
             audit.compare_hic_execution(right, left)
 
 
-@pytest.mark.parametrize("decision", ["accept_candidate", "keep_prior_assembly"])
+@pytest.mark.parametrize(
+    "decision", ["accept_candidate", "keep_prior_assembly", "use_manual_assembly"]
+)
 def test_hic_comparison_uses_actual_collected_execution_across_adoption(
     tmp_path, decision
 ):
     from unittest.mock import patch
 
+    from app.control.occurrence_settlement import settle_workflow_step_outcome
     from app.review.base import ResumeReviewRequest
     from app.schemas.artifacts import ArtifactRef
     from app.stages.hic_scaffolding.builder import build_stage
@@ -207,6 +210,8 @@ def test_hic_comparison_uses_actual_collected_execution_across_adoption(
             }
 
         before = capture(blocked, "blocked_human")
+        manual = tmp_path / "manual.fa"
+        manual.write_text(">operator_chr\nTTTTAAAA\n")
         adopted = fixture._apply_hic_scaffolding_review(
             blocked,
             ResumeReviewRequest(
@@ -217,11 +222,28 @@ def test_hic_comparison_uses_actual_collected_execution_across_adoption(
                 review_request_id=gate["review_request_id"],
                 review_request_hash=gate["request_hash"],
                 rationale_artifact_ref=ArtifactRef.model_validate(gate["request_ref"]),
+                metadata={"assembly_fasta": str(manual)}
+                if decision == "use_manual_assembly"
+                else {},
             ),
         )
         # This fixture applies the real persisted adoption effect, not the
         # outer CLI terminal finalizer; compare its verified execution trace.
-        after = capture({**blocked, **adopted}, "completed")
+        result = {**blocked, **adopted}
+        settle_workflow_step_outcome(result, data_dir=result["data_dir"])
+        deliveries = [
+            audit.verify_delivery(
+                audit.SessionPaths.from_run_dir(result["data_dir"]), row
+            )
+            for row in Ledger(result["data_dir"]).read_event_rows("s1")
+            if row["workflow_step_id"] == gate["workflow_step_id"]
+            and row["event_type"] == "resource_delivered"
+        ]
+        assert len(deliveries) == 1
+        assert (
+            deliveries[0]["candidate_method"] == "hic_scaffolding.manual_assembly"
+        ) == (decision == "use_manual_assembly")
+        after = capture(result, "completed")
         assert audit.compare_hic_execution(after, before)["status"] == "unchanged"
 
 
@@ -677,9 +699,65 @@ def test_completed_scoped_audit_does_not_require_other_stages(completed_slice, r
     run, *_ = completed_slice(route)
     report = audit.audit_route(run)
     assert report["status"] == "complete_execution_coverage"
+    assert report["workflow_status"] == "completed"
+    assert report["manual_hic_adoptions"] == []
     assert (report["quality_evaluation_status"] == "verified") == (
         route in {"review", "base-polish", "finishing"}
     )
+
+
+@pytest.mark.parametrize("autohic_failed", [False, True])
+def test_manual_hic_completion_preserves_actual_execution_coverage(
+    completed_slice, monkeypatch, autohic_failed
+):
+    run, steps, _, deliveries, methods, _, _ = completed_slice("hic")
+    hic_step = steps[1]["step_id"]
+    deliveries[hic_step]["candidate_method"] = "hic_scaffolding.manual_assembly"
+    if autohic_failed:
+        methods[hic_step][0].update(disposition="failed", processes=[])
+    monkeypatch.setattr(
+        audit,
+        "execution_coverage",
+        lambda state, *_: (
+            methods[steps[state["workflow_step_index"]]["step_id"]],
+            ["AutoHiC failed"]
+            if autohic_failed and state["current_stage"] == "hic_scaffolding"
+            else [],
+        ),
+    )
+    report = audit.audit_route(run)
+    assert report["workflow_status"] == "completed_with_manual_hic"
+    assert report["manual_hic_adoptions"] == [
+        {
+            "step_id": hic_step,
+            "candidate_id": deliveries[hic_step]["candidate_id"],
+            "primary_output_ref": deliveries[hic_step]["primary_output_ref"],
+        }
+    ]
+    assert report["status"] == (
+        "incomplete_execution_coverage"
+        if autohic_failed
+        else "complete_execution_coverage"
+    )
+    if autohic_failed:
+        assert report["occurrences"][1]["methods"][0]["disposition"] == "failed"
+        assert any("AutoHiC failed" in gap for gap in report["coverage_gaps"])
+
+
+def test_reusing_prior_manual_candidate_is_not_a_new_manual_hic_adoption(
+    completed_slice,
+):
+    run, steps, _, deliveries, _, _, _ = completed_slice("hic")
+    prior = deliveries[steps[0]["step_id"]]
+    hic = deliveries[steps[1]["step_id"]]
+    hic.update(
+        candidate_method="hic_scaffolding.manual_assembly",
+        delivery_mode="reused",
+        primary_output_ref=prior["primary_output_ref"],
+    )
+    report = audit.audit_route(run)
+    assert report["workflow_status"] == "completed"
+    assert report["manual_hic_adoptions"] == []
 
 
 @pytest.mark.parametrize(

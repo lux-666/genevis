@@ -266,7 +266,7 @@ def canonicalize_review_intent_request(
     *,
     request_record: Mapping[str, Any] | None = None,
 ) -> ResumeReviewRequest:
-    """Apply the sole gate-specific, write-free durable intent contract."""
+    """Snapshot submitted files, then validate the run-portable intent."""
 
     paths, identity, request_ref = _identity_from_blocked_state(state, request)
     record = request_record
@@ -282,6 +282,10 @@ def canonicalize_review_intent_request(
     _require_request_record_identity(record, identity)
 
     gate = get_review_gate(identity.stage, identity.gate_id)
+    if getattr(gate, "snapshot_intent_inputs", None):
+        snapshot = gate.load_snapshot_intent_inputs()
+        assert snapshot is not None
+        request = snapshot(state, request, record)
     portable = portable_resume_review_request(paths.run_dir, request)
     canonical = _canonical_request_metadata(paths, gate, portable)
     validator = gate.load_validate_intent_request()

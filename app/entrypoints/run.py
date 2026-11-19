@@ -837,6 +837,16 @@ def _interactive_gate_loop(
         event_context: dict[str, Any] | None = None
         automatic_label = foreground_automatic_decision_label(summary)
         if wait_seconds == 0 and automatic_label is None:
+            if (
+                stage == "hic_scaffolding"
+                and gate_id == "hic_scaffolding"
+                and "use_manual_assembly" in requirements.get("decisions_allowed", [])
+            ):
+                print(
+                    "AutoHiC requires a human decision. Use gene-agent review "
+                    "to submit your FASTA or keep the input assembly."
+                )
+                break
             reason = f"no automatic action for {stage}/{gate_id}"
             print(f"error: {reason}", file=sys.stderr)
             result = {**result, "last_error": reason}

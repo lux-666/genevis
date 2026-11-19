@@ -711,7 +711,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             result = build_stage().invoke(state)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "blocked_missing_requirements")
+            self.assertEqual(hic["status"], "blocked_human")
             self.assertIn("paired hic_read_paths (R1/R2)", hic["missing_requirements"])
             self.assertNotIn("mode", hic)
             self.assertNotIn("skip_record_ref", hic)
@@ -969,7 +969,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 ],
             )
 
-    def test_invalid_llm_shape_fails_without_an_approval_gate(self):
+    def test_invalid_llm_shape_offers_manual_result_without_an_approval_gate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, _, _ = self._inputs(tmpdir)
             state = self._configured_state(tmpdir, assembly, reads)
@@ -985,7 +985,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 return_value=model,
             ):
                 result = build_stage().invoke(state)
-            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(result["active_interrupt"]["gate_id"], "hic_scaffolding")
             self.assertEqual(
                 result["stage_outputs"]["hic_scaffolding"]["failure_kind"],
                 "parameter_recommendation",
@@ -1303,14 +1304,16 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     result = build_stage().invoke(case_ran)
 
                     hic = result["stage_outputs"]["hic_scaffolding"]
-                    self.assertEqual(result["supervision_state"], "failed_terminal")
-                    self.assertEqual(hic["status"], "failed")
+                    self.assertEqual(result["supervision_state"], "blocked_human")
+                    self.assertEqual(hic["status"], "blocked_human")
                     self.assertEqual(hic["failure_kind"], "collect")
                     self.assertIn(str(case_path), hic["reason"])
                     self.assertNotIn("method_candidates", hic)
                     self.assertNotIn("hic_review_bundle_ref", hic)
                     self.assertNotIn("hic_qc_report_ref", hic)
-                    self.assertIsNone(result.get("active_interrupt"))
+                    self.assertEqual(
+                        result["active_interrupt"]["gate_id"], "hic_scaffolding"
+                    )
                     self.assertEqual(len(hic["parameter_attempts"]), 1)
 
                     records_after = read_artifact_records(result["data_dir"], "s1")
@@ -1358,13 +1361,13 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(publish_calls, 2)
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertEqual(hic["status"], "failed")
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(hic["status"], "blocked_human")
             self.assertEqual(hic["failure_kind"], "collect")
             self.assertNotIn("method_candidates", hic)
             self.assertNotIn("hic_review_bundle_ref", hic)
             self.assertNotIn("hic_qc_report_ref", hic)
-            self.assertIsNone(result.get("active_interrupt"))
+            self.assertEqual(result["active_interrupt"]["gate_id"], "hic_scaffolding")
             dispositions = [
                 event["summary"]
                 for event in Ledger(result["data_dir"]).read_event_rows("s1")
@@ -1379,7 +1382,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             new_records = records_after[len(records_before) :]
             self.assertEqual(
                 [record["artifact_type"] for record in new_records],
-                [HIC_SCAFFOLDED_ASSEMBLY],
+                [HIC_SCAFFOLDED_ASSEMBLY, "hic_scaffolding.adoption_review.request"],
             )
             events_after = Ledger(result["data_dir"]).read_events("s1")
             new_event_types = {
@@ -2051,7 +2054,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
                 result = build_stage().invoke(approved)
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "blocked_missing_requirements")
+            self.assertEqual(hic["status"], "blocked_human")
             self.assertIn("chromosome", hic["reason"])
             self.assertNotIn("method_candidates", hic)
 
@@ -2079,7 +2082,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 ],
             )
 
-    def test_autohic_execution_failure_is_terminal_and_not_an_adoption_review(self):
+    def test_autohic_execution_failure_waits_for_manual_result(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
             envs_yaml = self._fake_autohic_environment(
@@ -2096,8 +2099,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
                 result = build_stage().invoke(approved)
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertEqual(hic["status"], "failed")
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(hic["status"], "blocked_human")
             self.assertEqual(hic["failure_kind"], "execution")
             self.assertEqual(
                 hic["output_assembly_ref"],
@@ -2112,7 +2115,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "pre_hic_assembly_preserved_as_fallback",
                 hic.get("notes") or [],
             )
-            self.assertIsNone(result.get("active_interrupt"))
+            self.assertEqual(result["active_interrupt"]["gate_id"], "hic_scaffolding")
             dispositions = [
                 event["summary"]
                 for event in Ledger(result["data_dir"]).read_event_rows("s1")
@@ -2121,6 +2124,283 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(len(dispositions), 1)
             self.assertEqual(dispositions[0]["method_name"], AUTOHIC_METHOD)
             self.assertEqual(dispositions[0]["disposition"], "failed")
+
+    def test_manual_assembly_after_success_or_failure_delivers_new_version(self):
+        from app.control.inspection import inspect_state
+        from app.control.occurrence_settlement import settle_workflow_step_outcome
+        from app.control.resume import foreground_automatic_decision_label
+        from app.stages.hic_scaffolding.manual import MANUAL_ASSEMBLY_METHOD
+
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmpdir:
+                assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+                envs = self._fake_autohic_environment(
+                    tmpdir, error_model, chromosome_model, fail=fail
+                )
+                source = self._configured_state(tmpdir, assembly, reads)
+                source["stage_outputs"]["hic_scaffolding"]["review_policy"] = {
+                    "max_blocked_seconds": 0
+                }
+                approved = self._approve_parameters(self._run_to_parameter_gate(source))
+                with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}):
+                    blocked = build_stage().invoke(approved)
+                record = load_review_request(
+                    blocked["data_dir"], blocked["active_interrupt"]["request_ref"]
+                )
+                self.assertIn(
+                    "use_manual_assembly", record["payload"]["decisions_allowed"]
+                )
+                self.assertIn("pre_hic_assembly", record["payload"]["report_refs"])
+                if fail:
+                    self.assertNotIn(
+                        "accept_candidate", record["payload"]["decisions_allowed"]
+                    )
+                    self.assertIsNone(
+                        foreground_automatic_decision_label(inspect_state(blocked))
+                    )
+                manual = Path(tmpdir) / "my revised assembly.fa"
+                content = ">new_chromosome\nTTTTNNNNAAAA\n>unplaced\nCCCC\n"
+                manual.write_text(content)
+                contact_map = Path(tmpdir) / "unmatched.hic"
+                contact_map.write_bytes(b"operator map, no pairing check")
+                metadata = {"assembly_fasta": str(manual)}
+                if not fail:
+                    metadata["contact_map"] = str(contact_map)
+                interrupt = blocked["active_interrupt"]
+                request = ResumeReviewRequest(
+                    session_id="s1",
+                    stage="hic_scaffolding",
+                    gate_id="hic_scaffolding",
+                    review_request_id=interrupt["review_request_id"],
+                    review_request_hash=interrupt["request_hash"],
+                    decision="use_manual_assembly",
+                    metadata=metadata,
+                )
+                intent = persist_review_intent(blocked, request, source="test")
+                self.assertEqual(
+                    persist_review_intent(blocked, request, source="test").ref,
+                    intent.ref,
+                )
+                self.assertNotIn("assembly_fasta", intent.intent.request.metadata)
+                # The committed decision survives deletion of the uploaded files.
+                manual.unlink()
+                contact_map.unlink()
+                prepared = prepare_hic_scaffolding_review_application(
+                    blocked, intent.intent
+                )
+                application_ref = persist_review_application(
+                    blocked, intent=intent, prepared=prepared
+                )
+                verified = load_verified_review_application(
+                    blocked["data_dir"],
+                    application_ref,
+                    expected_identity=ReviewApplicationIdentity.from_intent(
+                        intent.intent
+                    ),
+                )
+                update = apply_hic_scaffolding_review_application(blocked, verified)
+                adopted = {**blocked, **update}
+                resource = adopted["resource_refs"]["assembly"]
+                self.assertEqual(Path(resource["paths"][0]).read_text(), content)
+                self.assertNotEqual(
+                    resource["paths"], blocked["resource_refs"]["assembly"]["paths"]
+                )
+                self.assertEqual(
+                    Path(blocked["resource_refs"]["assembly"]["paths"][0]).read_text(),
+                    assembly.read_text(),
+                )
+                self.assertEqual(
+                    adopted["workflow_step_index"], blocked["workflow_step_index"] + 1
+                )
+                self.assertIsNone(adopted["active_interrupt"])
+                self.assertEqual(
+                    adopted["stage_outputs"]["hic_scaffolding"]["selected_method_name"],
+                    MANUAL_ASSEMBLY_METHOD,
+                )
+                candidate = load_executed_candidate_bundle(
+                    adopted["data_dir"],
+                    "s1",
+                    resource["metadata"]["candidate_bundle_ref"],
+                )
+                self.assertEqual(candidate.bundle.method_name, MANUAL_ASSEMBLY_METHOD)
+                self.assertEqual("contact_map_ref" in resource["metadata"], not fail)
+                settle_workflow_step_outcome(adopted, data_dir=adopted["data_dir"])
+                dispositions = [
+                    e["summary"]
+                    for e in Ledger(adopted["data_dir"]).read_event_rows("s1")
+                    if e["event_type"] == "method_disposition_recorded"
+                ]
+                self.assertEqual(
+                    dispositions[0]["disposition"], "failed" if fail else "completed"
+                )
+
+    def test_manual_result_resumes_sqlite_session_into_gapcloser(self):
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        from app.control.resume_transaction import (
+            ResumeTransactionError,
+            execute_resume_transaction,
+        )
+        from app.execution.method_outcomes import MethodOutcome, settle_method_outcomes
+        from app.graph.builder import build_graph
+        from app.storage.frozen_inputs import FrozenExecutionLease
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs = self._fake_autohic_environment(
+                tmpdir, error_model, chromosome_model, fail=True
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads)
+                )
+            )
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs)}):
+                blocked = build_stage().invoke(approved)
+            blocked["workflow_steps"][3] = {
+                "step_id": "step-003-gapcloser",
+                "stage": "gapcloser",
+                "allow_local_execution": True,
+                "selected_method_names": ["gapcloser.tgs_gapcloser"],
+            }
+            blocked["stage_seeds"] = {
+                "gapcloser": {"recommendation_mode": "deterministic_baseline"}
+            }
+            # The fixture starts after Inventory/Review; settle that prefix.
+            ledger = Ledger(blocked["data_dir"])
+            for index, step in enumerate(blocked["workflow_steps"][:2]):
+                prefix = {
+                    **blocked,
+                    "workflow_step_index": index,
+                    "current_stage": step["stage"],
+                }
+                ledger.record_stage_entered(
+                    "s1", step["stage"], workflow_step_id=step["step_id"]
+                )
+                settle_method_outcomes(
+                    prefix,
+                    stage=step["stage"],
+                    outcomes=[
+                        MethodOutcome(method, "skipped", reason="fixture_prefix")
+                        for method in step["selected_method_names"]
+                    ],
+                )
+                ledger.record_stage_completed(
+                    "s1",
+                    step["stage"],
+                    workflow_step_id=step["step_id"],
+                    selected_method_names=step["selected_method_names"],
+                )
+            config = {"configurable": {"thread_id": "s1"}}
+            database = str(Path(tmpdir) / "resume.sqlite")
+            with SqliteSaver.from_conn_string(database) as saver:
+                graph = build_graph(checkpointer=saver, data_dir=blocked["data_dir"])
+                graph.update_state(config, blocked, as_node="hic_scaffolding_stage")
+            manual = Path(tmpdir) / "manual.fa"
+            manual.write_text(">manual_chr\nAAAACCCC\n")
+            interrupt = blocked["active_interrupt"]
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="hic_scaffolding",
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+                decision="use_manual_assembly",
+                metadata={"assembly_fasta": str(manual)},
+            )
+            with SqliteSaver.from_conn_string(database) as saver:
+                graph = build_graph(checkpointer=saver, data_dir=blocked["data_dir"])
+                with (
+                    patch(
+                        "app.stages.hic_scaffolding.nodes.prepare_hic_scaffolding_review_application",
+                        side_effect=RuntimeError("interrupted after intent commit"),
+                    ),
+                    self.assertRaises(ResumeTransactionError) as error,
+                ):
+                    execute_resume_transaction(
+                        graph=graph,
+                        config=config,
+                        session_id="s1",
+                        data_dir=blocked["data_dir"],
+                        request=request,
+                        source="test",
+                        checkpointer="sqlite",
+                        lease=FrozenExecutionLease(
+                            session_id="s1",
+                            run_dir=Path(blocked["data_dir"]),
+                            active=True,
+                        ),
+                    )
+                self.assertEqual(error.exception.phase, "application_prepare")
+            with SqliteSaver.from_conn_string(database) as saver:
+                graph = build_graph(checkpointer=saver, data_dir=blocked["data_dir"])
+                result = execute_resume_transaction(
+                    graph=graph,
+                    config=config,
+                    session_id="s1",
+                    data_dir=blocked["data_dir"],
+                    request=request,
+                    source="test",
+                    checkpointer="sqlite",
+                    lease=FrozenExecutionLease(
+                        session_id="s1", run_dir=Path(blocked["data_dir"]), active=True
+                    ),
+                )
+            self.assertEqual(result.review_status, "applied")
+            self.assertEqual(result.state["supervision_state"], "completed")
+            gap = result.state["stage_outputs"]["gapcloser"]
+            self.assertEqual(gap["reason"], "no_internal_N_gaps")
+            candidate = load_executed_candidate_bundle(
+                result.state["data_dir"], "s1", gap["source_candidate_ref"]
+            )
+            self.assertEqual(
+                candidate.primary_output_path.read_text(), manual.read_text()
+            )
+            self.assertEqual(result.state["workflow_step_index"], 4)
+
+    def test_manual_assembly_invalid_submission_keeps_gate_open(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ran, _ = self._ran_autohic_state(tmpdir)
+            blocked = build_stage().invoke(ran)
+            interrupt = blocked["active_interrupt"]
+            intents_before = [
+                r
+                for r in read_artifact_records(blocked["data_dir"], "s1")
+                if r["artifact_type"] == "review.intent.v1"
+            ]
+            malformed = Path(tmpdir) / "invalid.fa"
+            malformed.write_text("not a FASTA\n")
+            for metadata in (
+                {},
+                {"assembly_fasta": str(malformed)},
+                {"assembly_fasta": str(malformed.with_name("missing.fa"))},
+            ):
+                with (
+                    self.subTest(metadata=metadata),
+                    self.assertRaises(ResumeValidationError),
+                ):
+                    persist_review_intent(
+                        blocked,
+                        ResumeReviewRequest(
+                            session_id="s1",
+                            stage="hic_scaffolding",
+                            gate_id="hic_scaffolding",
+                            review_request_id=interrupt["review_request_id"],
+                            review_request_hash=interrupt["request_hash"],
+                            decision="use_manual_assembly",
+                            metadata=metadata,
+                        ),
+                        source="test",
+                    )
+            self.assertEqual(blocked["active_interrupt"], interrupt)
+            self.assertEqual(
+                intents_before,
+                [
+                    r
+                    for r in read_artifact_records(blocked["data_dir"], "s1")
+                    if r["artifact_type"] == "review.intent.v1"
+                ],
+            )
 
     def test_empty_sparse_mapping_reaches_approval_and_uses_l1_enzyme(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2659,7 +2939,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 result = build_stage().invoke(approved)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "failed")
+            self.assertEqual(hic["status"], "blocked_human")
             self.assertEqual(hic["failure_kind"], "collect")
             self.assertIn("scaffold output disappeared", hic["reason"])
             self.assertEqual(hic["parameter_attempts"][0]["status"], "executed")

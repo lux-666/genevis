@@ -253,6 +253,26 @@ class ForegroundGateLoopTests(unittest.TestCase):
             )
         return final, execute, collect, waiter
 
+    def test_zero_wait_hic_failure_remains_pending_without_automatic_fallback(self):
+        summary = _summary(0)
+        summary["decision_requirements"].update(
+            {
+                "stage": "hic_scaffolding",
+                "gate_id": "hic_scaffolding",
+                "decisions_allowed": [
+                    "use_manual_assembly",
+                    "keep_prior_assembly",
+                    "stop_human_review",
+                ],
+            }
+        )
+        final, execute, collect, waiter = self._run_loop(0, summary=summary)
+        self.assertEqual(final["supervision_state"], "blocked_human")
+        self.assertIsNone(final.get("last_error"))
+        execute.assert_not_called()
+        collect.assert_not_called()
+        waiter.assert_not_called()
+
     def test_zero_stops_on_unverified_request_without_prompting(self):
         final, execute, collect, waiter = self._run_loop(0)
 

@@ -576,6 +576,7 @@ class HiCScaffoldDecisionArtifact(BaseModel):
     decision: Literal[
         "accept_candidate",
         "keep_prior_assembly",
+        "use_manual_assembly",
         "request_parameter_retry",
         "stop_human_review",
     ]

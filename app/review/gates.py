@@ -71,6 +71,7 @@ class ReviewGateDeclaration:
     parameter_recommendation_notes: tuple[str, ...] = field(default_factory=tuple)
     plan_order: int = 100
     interrupt_context_builder: str | None = None
+    snapshot_intent_inputs: str | None = None
 
     @property
     def key(self) -> tuple[DomainStage, str]:
@@ -99,6 +100,13 @@ class ReviewGateDeclaration:
         return cast(
             IntentRequestValidator,
             self._load_callable(self.validate_intent_request),
+        )
+
+    def load_snapshot_intent_inputs(self) -> IntentRequestValidator | None:
+        if not self.snapshot_intent_inputs:
+            return None
+        return cast(
+            IntentRequestValidator, self._load_callable(self.snapshot_intent_inputs)
         )
 
     def load_apply_application(self) -> ApplyApplication:
@@ -453,10 +461,16 @@ register_review_gate(
         decisions_allowed=(
             "accept_candidate",
             "keep_prior_assembly",
+            "use_manual_assembly",
             "request_parameter_retry",
             "stop_human_review",
         ),
-        intent_metadata_model=("app.review.application:ForegroundReviewMetadataV1"),
+        intent_metadata_model=(
+            "app.stages.hic_scaffolding.manual:HiCAdoptionMetadataV1"
+        ),
+        snapshot_intent_inputs=(
+            "app.stages.hic_scaffolding.manual:snapshot_manual_assembly_inputs"
+        ),
         validate_intent_request=(
             "app.stages.hic_scaffolding.nodes:"
             "validate_hic_scaffolding_review_intent_request"

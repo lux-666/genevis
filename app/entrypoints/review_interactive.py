@@ -88,6 +88,7 @@ DECISION_LABELS = {
     "select_clr": "use PacBio CLR route",
     "accept_candidate": "accept stage result",
     "keep_prior_assembly": "keep stage input assembly",
+    "use_manual_assembly": "use your own assembly FASTA",
     "request_parameter_retry": "request a new parameter recommendation",
     "select_method": "choose result/method",
     "skip": "skip this stage",
@@ -116,6 +117,10 @@ DECISION_HELP = {
     ),
     "request_parameter_retry": (
         "seal this AutoHiC attempt and request a fresh sparse parameter recommendation."
+    ),
+    "use_manual_assembly": (
+        "submit your assembly FASTA and continue to the next planned stage. "
+        "A .hic contact map is optional; chromosome structure is your responsibility."
     ),
     "select_method": "choose one available method/result for this gate.",
     "skip": "do not use this stage's result; continue with the previous assembly.",
@@ -352,12 +357,28 @@ def prompt_hic_scaffolding_decision(
     if decision is None:
         return None
 
+    metadata: dict[str, str] = {}
+    if decision == "use_manual_assembly":
+        try:
+            fasta = input(
+                "assembly FASTA path (blank to wait and submit later): "
+            ).strip()
+            if not fasta:
+                return None
+            metadata["assembly_fasta"] = fasta
+            contact_map = input(".hic path (optional): ").strip()
+            if contact_map:
+                metadata["contact_map"] = contact_map
+        except (KeyboardInterrupt, EOFError):
+            return None
+
     notes_raw = _prompt_notes()
 
     return {
         "stage": "hic_scaffolding",
         "decision": decision,
         "notes": [notes_raw] if notes_raw else ["interactive review"],
+        **({"metadata": metadata} if metadata else {}),
         "decided_by": "human",
     }
 
@@ -904,6 +925,8 @@ def _brief_hic_evidence(
     notes = payload.get("notes") or []
     if notes:
         evidence["notes"] = notes
+    if payload.get("report_refs"):
+        evidence["report_refs"] = dict(payload["report_refs"])
 
     interrupt_payload = (summary.get("latest_review_request") or {}).get("payload", {})
     refs: dict[str, str] = {}
@@ -912,7 +935,7 @@ def _brief_hic_evidence(
         if val:
             refs[key] = val
     if refs:
-        evidence["report_refs"] = refs
+        evidence.setdefault("report_refs", {}).update(refs)
 
     return evidence
 

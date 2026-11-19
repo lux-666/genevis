@@ -331,6 +331,11 @@ def foreground_automatic_decision_label(
     if gate is None:
         return None
     if requirements.get("max_blocked_seconds") == 0 and gate.zero_wait_policy:
+        if (
+            gate.zero_wait_policy == "adopt_result"
+            and "accept_candidate" not in requirements.get("decisions_allowed", [])
+        ):
+            return None
         return f"zero-wait {gate.zero_wait_policy}"
     if gate.normalize_timeout_request:
         return _foreground_rule_decision(gate, requirements)

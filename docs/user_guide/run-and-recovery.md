@@ -478,6 +478,47 @@ gene-agent resume \
 
 恢复在改状态前验证会话、occurrence/门绑定、不可变证据、决策结构和 checkpoint 可用性。
 
+<a id="manual-hic-result"></a>
+
+## 在同一会话采用人工 Hi-C 结果
+
+AutoHiC 成功后，采纳界面支持接受工具结果、沿用输入、提供自己的 FASTA，以及原有的重新推荐参数/停止。AutoHiC 执行或收集失败后同样可提供自己的 FASTA；失败事实保留。
+
+后续阶段在启动时写入 RunConfig，人工提交只替换当前组装并恢复原计划。需要完整接续时复用[完整 HiFi/Hi-C 模板](../examples/hifi_complete_run_config.template.json)，其中已有 `hic_scaffolding → gapcloser → t2t → base_polish → assembly_review`。从已有 contig 开始时保留这段阶段顺序，manifest 登记已有 FASTA、Hi-C R1/R2、完整 HiFi 集合和物种信息。单独的 `hic_run_config` 只配置 Hi-C，采纳后会结束；冻结后修改 config 不会追加阶段。已经完成染色体整理、无需再运行 AutoHiC 时，已有 FASTA 可直接配合[finishing 模板](../examples/finishing_run_config.template.json)新建运行。
+
+```bash
+gene-agent review --session-id YOUR_SESSION --data-dir /ABS/PATH/TO/RUN
+```
+
+选择 `use_manual_assembly`，输入人工整理后的 FASTA 路径；`.hic` 路径可留空。FASTA 路径也留空则退出界面、保持等待，之后运行同一条命令继续。显式提交即表示采用，不增加一次结果审批。程序保存新版本，直接进入当前计划的下一阶段，不重跑 AutoHiC。
+
+也可从 `inspect --json` 获取当前 `review_request_id` 和 `request_hash`，创建决策文件：
+
+```json
+{
+  "session_id": "YOUR_SESSION",
+  "stage": "hic_scaffolding",
+  "gate_id": "hic_scaffolding",
+  "review_request_id": "COPY_FROM_CURRENT_INSPECT",
+  "review_request_hash": "COPY_FROM_CURRENT_INSPECT",
+  "decision": "use_manual_assembly",
+  "metadata": {
+    "assembly_fasta": "/ABS/PATH/TO/revised.fasta",
+    "contact_map": "/ABS/PATH/TO/revised.hic"
+  }
+}
+```
+
+`.hic` 不提供时删除 `contact_map` 字段。随后执行：
+
+```bash
+gene-agent resume --session-id YOUR_SESSION --data-dir /ABS/PATH/TO/RUN --decision-file /ABS/PATH/TO/decision.json
+```
+
+仅检查文件可读、FASTA 基本格式和下游必要条件；不要求 AGP/`.assembly`，不检查 `.hic` 与 FASTA 配套性或染色体结构。下游仍执行自己的输入要求。接管入口用于本版产生的 Hi-C 等待门，不能把已经终止的历史会话原地改成等待；历史终态运行仍可登记 FASTA 后新建会话。
+
+路线诊断报告的 `workflow_status: completed_with_manual_hic` 表示流程采用人工 Hi-C 组装完成，`manual_hic_adoptions` 列出对应阶段与主产物。`status` 和退出码仍反映工具执行覆盖：AutoHiC 失败或未执行时可以同时出现 `incomplete_execution_coverage`（退出 2）。这不撤销人工组装的采用，也不把 AutoHiC 改记成功。
+
 <a id="autohic-external-recovery"></a>
 
 ## AutoHiC 已有中间结果的独立恢复
