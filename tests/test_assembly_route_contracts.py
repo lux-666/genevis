@@ -28,7 +28,7 @@ from app.stages.assembly.nodes import (
     select_route,
 )
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
-from tests.test_phase8_slice1 import InputProfilerTests
+from tests import test_phase8_slice1 as route_fixtures
 from tests.test_route_selection_timeout import (
     _apply_route_review,
     _auto_request,
@@ -56,7 +56,7 @@ READ_TYPES = [
 def test_cyclone_review_accepts_flye_or_selects_another_method(
     tmp_path, capsys, answers, method, label
 ):
-    state = InputProfilerTests()._state(str(tmp_path))
+    state = route_fixtures.InputProfilerTests()._state(str(tmp_path))
     state["stage_outputs"] = {
         "assembly": {
             "status": "profile_ready",
@@ -89,7 +89,7 @@ def test_cyclone_review_accepts_flye_or_selects_another_method(
 def test_zero_qc_quality_reaches_method_advisor_and_countdown(tmp_path, method):
     reads = tmp_path / "clr.fastq"
     reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
-    state = InputProfilerTests()._state(
+    state = route_fixtures.InputProfilerTests()._state(
         str(tmp_path),
         assets=[
             {
@@ -175,7 +175,7 @@ def test_zero_qc_quality_reaches_method_advisor_and_countdown(tmp_path, method):
 def test_request_failure_is_visible_without_loading_unverified_artifact(
     tmp_path, capsys
 ):
-    state = InputProfilerTests()._state(str(tmp_path))
+    state = route_fixtures.InputProfilerTests()._state(str(tmp_path))
     error = (
         "assembly method request recovery failed: "
         "read_qc.summary.avg_qual must be positive"
@@ -219,7 +219,7 @@ def test_input_type_survives_method_choice_countdown_and_parameter_context(
 ):
     route = route_from_read_type(read_type)
     method = default_primary_method(read_type)
-    state = InputProfilerTests()._state(str(tmp_path))
+    state = route_fixtures.InputProfilerTests()._state(str(tmp_path))
     state["shared_parameters"] = {"read_type": read_type}
     state["stage_seeds"] = {"assembly": {"method_route_advisor": policy}}
     cursor = {
@@ -301,7 +301,7 @@ def test_recommendation_cannot_fall_back_or_borrow_an_unavailable_input_type(raw
 
 
 def test_existing_clr_request_can_resume_without_rewriting_its_frozen_menu(tmp_path):
-    state = InputProfilerTests()._state(str(tmp_path))
+    state = route_fixtures.InputProfilerTests()._state(str(tmp_path))
     state["stage_outputs"] = {
         "assembly": {
             "status": "profile_ready",

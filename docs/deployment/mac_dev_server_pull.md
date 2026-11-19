@@ -50,10 +50,11 @@ git status --short --ignored -- config/envs.yaml
 
 ## Mac 工作流
 
+本地选跑覆盖本次改动的测试文件。下面以 Assembly 方法审查为例。
+
 ```bash
 git status --short
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache \
-  python -m pytest -q
+python -m pytest -q tests/test_assembly_route_contracts.py
 git diff --check
 git add ...
 git commit -m "..."

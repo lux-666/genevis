@@ -28,16 +28,23 @@ python -m pip install -c constraints/ci.txt -e '.[dev,tui]'
 ```
 
 The [offline walkthrough](docs/user_guide/offline-verification.md) is a small
-first check. Before submitting a code change, run the repository gate:
+first check. During local development, run the pytest files or test cases that
+cover the affected behavior. For example, a change to Assembly method review
+can be checked with the following command.
+
+```bash
+python -m pytest -q tests/test_assembly_route_contracts.py
+```
+
+CI and release verification run the full repository gate.
 
 ```bash
 bash scripts/server_test.sh
 ```
 
-This runs format, lint, type, regression, compilation, and diff checks. It excludes
-tests marked `real_tool`. Real tool installation and acceptance follow the
-[operator guide](docs/user_guide/run-and-recovery.md); state which of those checks
-you actually ran. A code test pass does not prove an assembly result is valid.
+The gate checks formatting, lint, types, offline regression, compilation, and
+the diff. Report which checks you ran. Real tool installation and acceptance
+follow the [operator guide](docs/user_guide/run-and-recovery.md).
 
 ## Submit a change
 

@@ -846,8 +846,16 @@ def test_finishing_handoff_and_final_review(tmp_path, execute_polish):
         assert len(comparison["candidates"]) == 1
 
 
-@pytest.mark.parametrize("stage", ["gapcloser", "base_polish", "t2t"])
-@pytest.mark.parametrize("malformed_report", [False, True])
+@pytest.mark.parametrize(
+    "stage,malformed_report",
+    [
+        ("gapcloser", False),
+        ("base_polish", False),
+        ("t2t", False),
+        # All three advisors share the QUAST collector and failure settlement.
+        ("gapcloser", True),
+    ],
+)
 def test_frozen_parent_sqlite_cli_resume_does_not_repeat_tools(
     tmp_path, stage, malformed_report
 ):

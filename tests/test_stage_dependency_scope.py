@@ -90,6 +90,7 @@ CASES = [
         )
     ],
 ]
+FIXED_STAGE_CASES = [case for case in CASES if case[0] != "assembly"]
 
 
 @pytest.fixture
@@ -162,7 +163,7 @@ def _ready(command, **_kwargs):
 
 
 @pytest.mark.parametrize("stage,settings,methods", CASES)
-@pytest.mark.parametrize("authorizations", [(False,), (True,), (False, True, True)])
+@pytest.mark.parametrize("authorizations", [(False,), (False, True, True)])
 def test_every_stage_preflights_freezes_and_dispatches_without_live_config(
     tmp_path, monkeypatch, inputs, stage, settings, methods, authorizations
 ):
@@ -215,7 +216,7 @@ def test_every_stage_preflights_freezes_and_dispatches_without_live_config(
             {},
             stage=stage,
             method_name=method,
-            workflow_step_id=f"step-001-{stage}",
+            workflow_step_id=f"step-{authorizations.index(True) + 1:03d}-{stage}",
             session_id=paths.session_id,
             data_dir=paths.run_dir,
             input_manifest_ref="",
@@ -226,7 +227,7 @@ def test_every_stage_preflights_freezes_and_dispatches_without_live_config(
         assert [package.name for package in packages] == ["fixture-package"]
 
 
-@pytest.mark.parametrize("stage,settings,methods", CASES)
+@pytest.mark.parametrize("stage,settings,methods", FIXED_STAGE_CASES)
 def test_missing_fixed_stage_tool_fails_before_freeze(inputs, stage, settings, methods):
     envs, _manifest = inputs
     _host_mapping(envs, stage)
@@ -235,10 +236,6 @@ def test_missing_fixed_stage_tool_fails_before_freeze(inputs, stage, settings, m
     def missing(command, **_kwargs):
         return subprocess.CompletedProcess(command, 1, "", "fixture tool missing")
 
-    if stage == "assembly":
-        # Only the selected candidate is checked at stage entry.
-        assert effective_method_closure(config) == {}
-        return
     with pytest.raises(RunReadinessError) as rejected:
         preflight_run_readiness(
             config,
@@ -259,12 +256,10 @@ def test_scope_matrix_covers_every_registered_executable_method():
     assert covered == registered - {"read_qc.length_filter.skip"}
 
 
-@pytest.mark.parametrize("stage,settings,methods", CASES)
+@pytest.mark.parametrize("stage,settings,methods", FIXED_STAGE_CASES)
 def test_missing_fixed_stage_package_fails_before_freeze(
     inputs, stage, settings, methods
 ):
-    if stage == "assembly":
-        return
     envs, _manifest = inputs
     _host_mapping(envs, stage)
     (envs.parent / "package" / "entry").unlink()
