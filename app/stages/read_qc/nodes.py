@@ -516,6 +516,7 @@ def commit_read_qc(state: TopLevelState) -> StateUpdate:
         "raw_summary",
         "raw_summary_artifact_ref",
         "reason",
+        "reuse",
         "skip_reason",
         "stats_artifact_ref",
         "substeps",

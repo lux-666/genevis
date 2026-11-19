@@ -36,6 +36,7 @@ from app.stages.read_qc.nodes import (
     plan_seqkit_stats,
     resolve_raw_long_reads,
 )
+from app.stages.read_qc.reuse import import_completed_read_qc
 from app.stages.read_qc.routing import (
     route_after_fastp,
     route_after_length_filter,
@@ -55,6 +56,7 @@ def build_stage() -> CompiledStateGraph[
     graph = StateGraph(TopLevelState)
 
     graph.add_node("enter", enter_read_qc)
+    graph.add_node("reuse_completed_qc", import_completed_read_qc)
     graph.add_node("resolve_raw_long_reads", resolve_raw_long_reads)
     graph.add_node("plan_seqkit_stats", plan_seqkit_stats)
     graph.add_node("seqkit_stats", build_seqkit_stats_graph())
@@ -114,7 +116,18 @@ def build_stage() -> CompiledStateGraph[
     )
 
     graph.add_edge(START, "enter")
-    graph.add_edge("enter", "resolve_raw_long_reads")
+    graph.add_conditional_edges(
+        "enter",
+        lambda state: "reuse" if read_qc_output(state).get("reuse") else "resolve",
+        {"reuse": "reuse_completed_qc", "resolve": "resolve_raw_long_reads"},
+    )
+    graph.add_conditional_edges(
+        "reuse_completed_qc",
+        lambda state: (
+            "fail" if read_qc_output(state).get("status") == "failed" else "commit"
+        ),
+        {"commit": "commit", "fail": "fail"},
+    )
     graph.add_conditional_edges(
         "resolve_raw_long_reads",
         route_after_resolve,

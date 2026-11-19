@@ -52,7 +52,11 @@ from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
-    from app.storage.frozen_inputs import FrozenExecutionLease, FrozenInputBundle
+    from app.storage.frozen_inputs import (
+        FrozenExecutionLease,
+        FrozenInputBundle,
+        PreparedSessionInputs,
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -65,7 +69,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{run,tui,bootstrap,inspect,storage-audit,resume,review}",
+        metavar="{run,rerun-assembly,tui,bootstrap,inspect,storage-audit,resume,review}",
     )
 
     run_parser = subparsers.add_parser(
@@ -87,6 +91,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-dir",
         required=True,
         help="Workflow data-layout root; outputs land below <root>/runs/<session_id>",
+    )
+    rerun_parser = subparsers.add_parser(
+        "rerun-assembly", help="Start a new Assembly session using completed QC"
+    )
+    rerun_parser.add_argument(
+        "--from-session", required=True, help="Source QC session ID"
+    )
+    rerun_parser.add_argument(
+        "--data-dir", required=True, help="Shared workflow data root"
+    )
+    rerun_parser.add_argument(
+        "--run-config", help="Optional new run config; defaults to the source workflow"
     )
     inspect_parser = subparsers.add_parser(
         "inspect", help="Inspect a workflow session from durable records"
@@ -320,11 +336,17 @@ def _run(args: argparse.Namespace) -> int:
     try:
         if not str(args.data_dir).strip():
             raise FrozenInputValidationError("--data-dir must not be blank")
-        prepared = prepare_session_inputs(
-            manifest_draft=args.manifest,
-            run_config_draft=args.run_config,
-        )
         data_dir = _resolve_data_dir(args.data_dir)
+        source_session = getattr(args, "from_session", None)
+        if source_session is None:
+            prepared = prepare_session_inputs(
+                manifest_draft=args.manifest,
+                run_config_draft=args.run_config,
+            )
+        else:
+            prepared = _prepare_assembly_rerun(
+                data_dir, source_session, args.run_config
+            )
         paths = SessionPaths(data_dir, prepared.manifest.session_id)
         from app.review.gates import registered_review_stages
 
@@ -362,11 +384,21 @@ def _run(args: argparse.Namespace) -> int:
             paths,
             prepared_inputs=prepared,
             selected_methods=effective_methods,
+            **(
+                {"parent_session_id": source_session}
+                if source_session is not None
+                else {}
+            ),
         )
     except (DataLayoutError, FrozenInputError, OSError, ValueError) as exc:
         print(f"error: run preflight failed: {exc}", file=sys.stderr)
         return 1
 
+    if source_session is not None:
+        print(
+            f"Starting {paths.session_id} with read QC from {source_session}",
+            flush=True,
+        )
     try:
         return execute_frozen_session(
             paths.session_id,
@@ -377,6 +409,41 @@ def _run(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"error: run execution failed: {exc}", file=sys.stderr)
         return 1
+
+
+def _prepare_assembly_rerun(
+    data_dir: str, source_session: str, config_path: str | None
+) -> PreparedSessionInputs:
+    from app.schemas.run_config import load_run_config
+    from app.stages.read_qc.reuse import read_completed_qc_source
+    from app.storage.frozen_inputs import prepare_session_inputs, validate_frozen_inputs
+
+    source_paths = SessionPaths(data_dir, source_session)
+    source = validate_frozen_inputs(source_paths)
+    _, qc_step = read_completed_qc_source(source_paths)
+    config = load_run_config(config_path) if config_path else source.run_config
+    if "assembly" not in config.requested_stage_names():
+        raise ValueError(
+            "rerun-assembly requires an Assembly occurrence in the run config"
+        )
+    manifest = source.manifest.model_copy(
+        update={"session_id": generate_session_id(data_dir)}
+    )
+    config_payload = config.model_dump(mode="json")
+    config_payload["requested_stages"] = [
+        {"stage": "read_qc", "allow_local_execution": False},
+        *(
+            request.model_dump(mode="json")
+            for request in config.requested_stages
+            if request.stage != "read_qc"
+        ),
+    ]
+    config_payload["read_qc"] = {
+        "reuse": {"session_id": source_session, "workflow_step_id": qc_step}
+    }
+    return prepare_session_inputs(
+        manifest_draft=manifest, run_config_draft=config_payload
+    )
 
 
 def execute_frozen_session(
@@ -1874,7 +1941,7 @@ def main(argv: list[str] | None = None) -> int:
         _load_dotenv_without_override([project_root_for_config(config_path) / ".env"])
     else:
         _load_dotenv_without_override()
-    if args.command == "run":
+    if args.command in {"run", "rerun-assembly"}:
         return _run(args)
     if args.command == "inspect":
         return _run_inspect(args)

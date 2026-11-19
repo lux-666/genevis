@@ -94,6 +94,8 @@ def _selected_method_names_for_request(
                 name for name in stage_methods if name != f"{request.stage}.eval.quast"
             )
     if request.stage == "read_qc":
+        if run_config.read_qc is not None and run_config.read_qc.reuse is not None:
+            return ()
         length_filter = (
             run_config.read_qc.length_filter if run_config.read_qc is not None else None
         )

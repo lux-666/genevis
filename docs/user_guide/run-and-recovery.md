@@ -453,6 +453,16 @@ gene-agent review \
 
 命令验证当前请求，写决策证据，再应用恢复事务。
 
+## 从已完成的 QC 开新组装会话
+
+源会话用 SQLite 保存了完成的 Read QC 后，即使还停在 Assembly 审查门，或已经拒绝推荐并结束，也可以在同一数据根启动新的组装会话。
+
+```bash
+gene-agent rerun-assembly --from-session SESSION_A --data-dir /server/path/data
+```
+
+在 TUI 主界面也可输入 `/rerun-assembly SESSION_A`。新会话沿用源会话登记的样本输入和非 QC 阶段，也可用命令行 `--run-config` 指定新流程。新会话核对 reads 身份和校验和，导入已完成的 QC 统计与清洁 reads（如有），再进入后续阶段。Assembly 方法审查时可直接选择兼容的替代方法。源会话的决策和 Assembly 结果留在原运行，Genome Survey 若在新流程中则正常执行。
+
 <a id="resume-from-a-decision-file"></a>
 
 ## 从决策文件恢复

@@ -30,9 +30,7 @@ def run_tui(data_dir: str, *, resume_session: str | None = None) -> int:
 def _tui_main(data_dir: str) -> int:
     """Run the persistent top-level TUI prompt.
 
-    Completing or resuming one session returns here.  The only command handled
-    at this level is ``/resume``; every other non-empty input starts a new
-    immutable-run draft.
+    Completing or resuming one session returns here.
     """
 
     print("\n=== gene-agent interactive ===\n")
@@ -45,6 +43,7 @@ def _tui_main(data_dir: str) -> int:
             "目标物种必须使用完整拉丁学名）。"
         )
         print("输入 /resume 可继续草稿、处理 review gate 或创建重跑草稿。")
+        print("输入 /rerun-assembly SESSION_ID 可沿用已有 QC 开一个新的组装会话。")
         try:
             request_text = input("> ").strip()
         except EOFError:
@@ -65,8 +64,25 @@ def _tui_main(data_dir: str) -> int:
             _resume_tui_session(data_dir, session_id)
             print()
             continue
+        command = request_text.split(maxsplit=1)
+        if command[0] == "/rerun-assembly":
+            from app.entrypoints.run import main
+
+            if len(command) == 1:
+                print("用法：/rerun-assembly SESSION_ID\n")
+                continue
+            handled_session = True
+            main(
+                [
+                    "rerun-assembly",
+                    f"--from-session={command[1]}",
+                    f"--data-dir={data_dir}",
+                ]
+            )
+            print()
+            continue
         if request_text.startswith("/"):
-            print("未知命令；当前只支持 /resume。\n")
+            print("未知命令；可用命令为 /resume 和 /rerun-assembly。\n")
             continue
         handled_session = True
         _start_tui_session(data_dir, request_text)

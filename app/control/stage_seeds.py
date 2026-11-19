@@ -30,6 +30,8 @@ def stage_seeds_from_run_config(
 
     if "read_qc" in requested and run_config.read_qc:
         read_qc_seed: dict[str, Any] = {}
+        if run_config.read_qc.reuse:
+            read_qc_seed["reuse"] = run_config.read_qc.reuse.model_dump(mode="json")
         if run_config.read_qc.length_filter:
             filter_config = run_config.read_qc.length_filter
             filter_request = filter_config.model_dump(mode="json")

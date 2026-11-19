@@ -112,11 +112,17 @@ class LengthFilterRequestJson(TypedDict, total=False):
     thresholds: LengthThresholdsJson
 
 
+class ReadQCReuseSourceJson(TypedDict):
+    session_id: str
+    workflow_step_id: str
+
+
 @with_config(ConfigDict(extra="forbid"))
 class ReadQCStageCursor(TypedDict, total=False):
     """All JSON-only fields owned by ``stage_outputs.read_qc``."""
 
     execution_mode: Literal["local"]
+    reuse: ReadQCReuseSourceJson
     env: dict[str, str]
     status: str
     reason: str

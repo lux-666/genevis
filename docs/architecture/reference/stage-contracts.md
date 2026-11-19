@@ -104,6 +104,8 @@ read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review
 
 SeqKit 统计始终描述选定长读段资源。只有冻结阶段请求已有正 `min_len` 和明确批准标志时才过滤；平台独立阈值可在同一请求中按成员解析。不存在阶段局部 Read QC 评审门或已实现的过量读段损失自动阈值；阈值缺失或未批准选择注册 skip。FOFN 是内部产物，下游消费规范路径列表。输入缺失/不可用或执行失败终止阶段，不打开 Read QC 评审门。
 
+`read_qc.reuse` 在 RunConfig 中绑定源会话与已完成的 QC occurrence。新会话首个请求阶段验证来源 checkpoint、Ledger 和读段注册表，重新登记 QC 产物并生成绑定新会话的 read-set manifest。该 occurrence 以 completed 交付，Ledger 中记录 `read_qc_reused`，方法清单为空。
+
 接受的 Read QC 事实包闭合且可重算：
 
 - 执行前将有序读段成员冻结为依赖；注册成员保留资产 ID 与注册表引用，运行内成员保留完整 `ArtifactRef`。

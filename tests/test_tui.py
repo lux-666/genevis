@@ -236,6 +236,18 @@ class TuiWorkflowTests(unittest.TestCase):
             self.assertEqual(code, 0)
             resume.assert_called_once_with(str(data_dir), "s1")
 
+    def test_top_level_rerun_assembly_uses_shared_cli(self):
+        with (
+            patch("builtins.input", side_effect=["/rerun-assembly s1", EOFError]),
+            patch("app.entrypoints.run.main", return_value=0) as rerun,
+        ):
+            code = _tui_main("/test/data")
+
+        self.assertEqual(code, 0)
+        rerun.assert_called_once_with(
+            ["rerun-assembly", "--from-session=s1", "--data-dir=/test/data"]
+        )
+
     def test_resume_continues_same_unfrozen_intake_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -304,6 +304,15 @@ class ReadQCLengthFilterConfig(BaseModel):
         return self
 
 
+class ReadQCReuseSource(BaseModel):
+    """The completed QC occurrence to import from another session in this data root."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    session_id: str = Field(min_length=1)
+    workflow_step_id: str = Field(min_length=1)
+
+
 class ReadQCRunConfig(BaseModel):
     """Run-config block for read_qc choices."""
 
@@ -312,6 +321,7 @@ class ReadQCRunConfig(BaseModel):
     length_filter: ReadQCLengthFilterConfig | None = None
     short_reads: FastpReadQCConfig | None = None
     hic_reads: FastpReadQCConfig | None = None
+    reuse: ReadQCReuseSource | None = None
 
 
 class GenomeSurveyRunParameters(BaseModel):
@@ -505,6 +515,26 @@ class RunConfig(BaseModel):
             raise ValueError(
                 "run_config.requested_stages allow_local_execution is unsupported "
                 "for manual-only/non-local stage(s): " + ", ".join(invalid_local)
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_read_qc_reuse(self) -> "RunConfig":
+        config = self.read_qc
+        if config is None or config.reuse is None:
+            return self
+        occurrences = [
+            request for request in self.requested_stages if request.stage == "read_qc"
+        ]
+        if (
+            len(occurrences) != 1
+            or self.requested_stages[0].stage != "read_qc"
+            or occurrences[0].allow_local_execution
+            or any((config.length_filter, config.short_reads, config.hic_reads))
+        ):
+            raise ValueError(
+                "read_qc.reuse requires a single first read_qc occurrence with "
+                "allow_local_execution=false and no QC execution settings"
             )
         return self
 
