@@ -13,7 +13,10 @@ from app.domains.assembly.selection import (
     default_primary_method,
     route_from_read_type,
 )
-from app.entrypoints.review_interactive import build_decision_brief
+from app.entrypoints.review_interactive import (
+    build_decision_brief,
+    collect_gate_decision,
+)
 from app.entrypoints.run import _print_inspect_text
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.run_config import RunConfig
@@ -40,6 +43,46 @@ READ_TYPES = [
     ("pacbio_clr", "clr"),
     ("pacbio_hifi", "pacbio_hifi"),
 ]
+
+
+@pytest.mark.parametrize(
+    "answers, method, label",
+    [
+        (["1", ""], "flye", "accept recommendation"),
+        (["2", "nextdenovo (cyclone)", ""], "nextdenovo", "choose another method"),
+        (["2", "hifiasm_ont (cyclone)", ""], "hifiasm_ont", "choose another method"),
+    ],
+)
+def test_cyclone_review_accepts_flye_or_selects_another_method(
+    tmp_path, capsys, answers, method, label
+):
+    state = InputProfilerTests()._state(str(tmp_path))
+    state["stage_outputs"] = {
+        "assembly": {
+            "status": "profile_ready",
+            "normalized_read_type": "cyclone",
+            "input_profile": {"recommended_route": "cyclone"},
+            "recommended_assembly_selection": {
+                "read_type": "cyclone",
+                "primary_method": "assembly.candidate.flye",
+            },
+        }
+    }
+    state.update(select_route(state))
+    state.update(block_assembly_for_human(state))
+    with patch("builtins.input", side_effect=answers):
+        request, _ = collect_gate_decision(
+            state["session_id"], state["data_dir"], summary=inspect_state(state)
+        )
+    assert label in capsys.readouterr().out
+    assert request.decision == "select_cyclone"
+    assert request.method_name == f"assembly.candidate.{method}"
+    assert request.metadata["read_type"] == "cyclone"
+    state.update(_apply_route_review(state, request))
+    assert (
+        state["stage_outputs"]["assembly"]["assembly_selection"]["primary_method"]
+        == request.method_name
+    )
 
 
 @pytest.mark.parametrize("method", ["flye", "nextdenovo"])

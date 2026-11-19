@@ -1778,6 +1778,8 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
     recommended_selection: Mapping[str, object] = (
         recommended_selection_value if recommended_selection_value is not None else {}
     )
+    observed_read_types = sorted(_assembly_observed_read_types(assembly_out))
+    available_methods = set(_assembly_method_candidates(assembly_out))
 
     payload = ReviewPayload(
         stage="assembly",
@@ -1804,19 +1806,14 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> StateUpdate:
         "recommendation_reasoning": profile.get("recommendation_reasoning"),
         "uncertainty_notes": profile.get("uncertainty_notes", []),
         "available_routes": _available_routes(assembly_out),
-        "available_read_types": sorted(_assembly_observed_read_types(assembly_out)),
+        "available_read_types": observed_read_types,
         "compatible_methods": {
-            read_type: compatible_methods(read_type)
-            for read_type in cast(
-                list[NormalizedReadType],
-                [
-                    "cyclone",
-                    "ont_raw",
-                    "ont_hq",
-                    "pacbio_clr",
-                    "pacbio_hifi",
-                ],
-            )
+            read_type: [
+                method
+                for method in compatible_methods(read_type)
+                if method in available_methods
+            ]
+            for read_type in observed_read_types
         },
     }
     persisted_request = persist_review_request(
@@ -1980,7 +1977,9 @@ def _requested_method(
                 else:
                     method = default_primary_method(read_type)
         candidates = _assembly_method_candidates(assembly_out)
-        if candidates and method not in candidates:
+        if method not in candidates or not is_method_read_type_compatible(
+            method, read_type
+        ):
             raise ResumeValidationError(
                 f"assembly method {method!r} is not available for current inputs"
             )

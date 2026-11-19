@@ -412,7 +412,7 @@ register_review_gate(
         normalize_timeout_request=(
             "app.stages.assembly.nodes:normalize_selection_timeout_request"
         ),
-        prompt_adapter="generic",
+        prompt_adapter="assembly_route_selection",
         template_preferred_decision="select_ont",
         plan_order=10,
     )

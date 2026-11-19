@@ -7,10 +7,13 @@
 | HiFi | Hifiasm 是可推荐路线，最终方法在 Assembly 确认 |
 | HiFi＋明确的超长 ONT | Hifiasm `--ul` 联合输入；普通 ONT 不自动认定为超长读段 |
 | ONT-only | Hifiasm `--ont`、Flye 或 NextDenovo 中推荐一条兼容路线 |
+| CycloneSEQ | Hifiasm `--ont`、Flye 或 NextDenovo 中推荐一条兼容路线 |
 | HiFi＋Hi-C | 显式选择 Hifiasm Hi-C 分相，或在组装后独立执行 AutoHiC scaffolding |
 | HiFi＋父本和母本 reads | Trio：分别构建父母 yak 数据库，再交给 Hifiasm；可同时提供超长 ONT |
 | Illumina DNA paired reads | 独立 fastp QC 和 Genome Survey，或作为长读组装的调查材料；当前没有短读段组装器 |
 | clean 长读段／已有组装 | 可从 TUI 中途入口或文件 manifest 开始 |
+
+Assembly 方法审查时，可选 **accept recommendation** 接受推荐，或选 **choose another method** 从当前输入兼容的方法里手动指定。比如 CycloneSEQ 推荐 Flye 时，可直接改选 NextDenovo 或 Hifiasm `--ont`。所选方法随后进入自己的参数推荐和审批。
 
 `--ont` 不是“给 HiFi 添加 ONT”的开关。用户必须明确超长 ONT 的材料身份，再将其放入 `ultralong_ont_reads_ref`。Trio 与 Hi-C 分相是当前互斥的 Assembly 输入模式；Trio 之后仍可独立执行 AutoHiC。
 

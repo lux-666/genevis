@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, TextIO, cast
 
 from langchain_core.runnables import RunnableConfig
 
+from app.domains.assembly.selection import route_from_read_type
 from app.review.gates import find_review_gate, registered_review_stage_label
 from app.schemas.state import ActiveInterrupt, validate_top_level_state
 from app.storage.artifacts import read_artifact_records
@@ -436,6 +437,64 @@ def prompt_generic_gate_decision(
     return result
 
 
+def prompt_assembly_route_selection(
+    requirements: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Choose a method and its input type using the existing route decision contract."""
+    allowed = requirements["decisions_allowed"]
+    recommendation = requirements.get("recommended_assembly_selection") or {}
+    recommended = (
+        recommendation.get("read_type"),
+        recommendation.get("primary_method"),
+    )
+    methods_by_type = requirements.get("compatible_methods") or {}
+    selections: dict[str, tuple[str, str, str]] = {}
+    recommended_option = None
+    for read_type in requirements.get("available_read_types") or []:
+        decision = f"select_{route_from_read_type(read_type)}"
+        if decision not in allowed:
+            continue
+        for method in methods_by_type.get(read_type, []):
+            method_label = method.rsplit(".", 1)[-1]
+            option = f"{method_label} ({read_type})"
+            selections[option] = (decision, read_type, method)
+            if (read_type, method) == recommended:
+                recommended_option = option
+    if not selections:
+        return prompt_generic_gate_decision(requirements)
+    actions: list[str] = []
+    descriptions = dict(DECISION_HELP)
+    if recommended_option is not None:
+        actions.append("accept recommendation")
+        descriptions["accept recommendation"] = recommended_option
+    manual_options = [option for option in selections if option != recommended_option]
+    if manual_options:
+        actions.append("choose another method" if actions else "choose assembly method")
+    if "stop_human_review" in allowed:
+        actions.append("stop_human_review")
+    action = _prompt_choice("decision", actions, descriptions)
+    if action is None:
+        return None
+    result: dict[str, Any] = {"stage": "assembly", "decision": "stop_human_review"}
+    if action != "stop_human_review":
+        selected_option = (
+            recommended_option
+            if action == "accept recommendation"
+            else _prompt_choice("method", manual_options)
+        )
+        if selected_option is None:
+            return None
+        decision, read_type, method = selections[selected_option]
+        result.update(
+            decision=decision, method_name=method, metadata={"read_type": read_type}
+        )
+    return {
+        **result,
+        "notes": [_prompt_notes() or "interactive review"],
+        "decided_by": "human",
+    }
+
+
 def prompt_t2t_review_decision(
     requirements: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -664,10 +723,11 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
     print(f"Stage:    {brief.get('stage')}")
     print(f"Gate:     {brief.get('gate_id') or 'unknown'}")
     print(f"State:    {brief.get('supervision_state')}")
-    choices = ", ".join(
-        _choice_display(decision) for decision in brief.get("decisions_allowed", [])
-    )
-    print(f"Choices:  {choices}")
+    if brief.get("gate_id") != "route_selection":
+        choices = ", ".join(
+            _choice_display(decision) for decision in brief.get("decisions_allowed", [])
+        )
+        print(f"Choices:  {choices}")
 
     if brief.get("review_request_ref"):
         print(f"Request:  {brief['review_request_ref']}")
@@ -1036,6 +1096,8 @@ def collect_gate_decision(
 
     if gate.prompt_adapter == "assembly_review":
         raw_decision = prompt_assembly_review_decision(requirements)
+    elif gate.prompt_adapter == "assembly_route_selection":
+        raw_decision = prompt_assembly_route_selection(requirements)
     elif gate.prompt_adapter == "hic_scaffolding":
         raw_decision = prompt_hic_scaffolding_decision(requirements)
     elif gate.prompt_adapter == "t2t":
