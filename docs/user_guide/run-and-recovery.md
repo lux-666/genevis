@@ -83,6 +83,19 @@ GapCloser 与 Racon 切片读取活动环境注册表（默认 `config/envs.yaml
 
 验证每个下游冻结尝试消费前阶段预期产物，不是手替路径。要求目标方法真实执行证据、收集指标、结算 occurrence、请求绑定决策、分离检查后哈希验证最终组装。合法 skip 要报告覆盖缺口并单测执行分支。失败时检查日志，证明受支持恢复或明确新会话，不重写冻结证据制造完成。见[五阶段缺口](../architecture/reference/conformance.md#five-stage-real-tool-contig-acceptance-is-not-automated)。
 
+#### 测试版验收到 Assembly Dedup
+
+用下方 contig 模板，保留到 `assembly_dedup` 为止，删除 `assembly_review` occurrence 及其配置。需要隔离长读组装时，可从计划移除 `genome_survey` 并在 manifest 填写有依据的 `genome_size_estimate`。将审查等待设为 `-1`，以便操作员手选方法和审批参数。
+
+| 样本长读段 | 优先抽测的 Assembly 方法 | Dedup 验证 |
+|---|---|---|
+| CycloneSEQ | Hifiasm `--ont`、Flye、NextDenovo 中选择尚未实测的方法 | 使用 read-depth 时检查 `map-ont` 及上游 reads 绑定 |
+| ONT raw／HQ | NextDenovo、Flye、Hifiasm `--ont`。仅在已有 HQ 依据时声明 `ont_hq` | 检查 `map-ont`，并单测一次未授权 purge 时保留原 FASTA |
+| PacBio HiFi | Hifiasm、Flye 或 NextDenovo | 使用 read-depth 时检查 `map-hifi`。预期保留双单倍型时按实际目标决定是否授权 purge |
+| PacBio CLR | Flye 或 NextDenovo | 有 CLR 样本时检查 `map-pb` |
+
+对同一样本试多个方法，可用 TUI 的 `/rerun-assembly SESSION_ID`，或用 `gene-agent rerun-assembly --from-session SESSION_ID --data-dir DATA_ROOT --run-config RUN_CONFIG` 从同一份 QC 开新会话并将计划截到 Dedup。每轮记录 QC 产物来源、Assembly 方法和参数决策、Dedup 决策及最终 FASTA。用 `python -m app.diagnostics.route_acceptance --run-dir RUN_DIR` 核对阶段、实际执行及交接。Dedup 有意保留源时，记录为保留分支验证，另用适合 purge 的样本验证真实执行。
+
 <a id="4-validate-hi-c-as-an-independent-e2e-slice"></a>
 
 ### 4. 独立验证 Hi-C 端到端切片
