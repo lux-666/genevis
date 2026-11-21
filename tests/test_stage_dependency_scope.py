@@ -18,6 +18,7 @@ from app.schemas.run_config import RunConfig
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.paths import SessionPaths
 from tests.busco_fixture import ensure_test_host_envs
+from tests.conda_fixture import write_fake_conda
 
 # Expected executable identities are independent of the plan projection under test.
 CASES = [
@@ -142,6 +143,7 @@ def _config(stage, settings, authorizations):
 
 def _host_mapping(envs, stage):
     payload = json.loads(envs.read_text())
+    payload["default"]["conda_bin"] = str(write_fake_conda(envs.parent))
     # Stage inheritance must capture exact method identities even without overrides.
     payload["stages"][stage] = {
         "conda_env": f"{stage}-env",

@@ -77,6 +77,7 @@ from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 from app.storage.paths import SessionPaths
+from tests.conda_fixture import write_fake_conda
 from tests.data_v2 import v2_run_dir
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
@@ -450,9 +451,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             (three_d_dna_root / relative).write_text("stub\n", encoding="utf-8")
 
         envs_yaml = root / "envs.yaml"
+        conda = write_fake_conda(root)
         envs_yaml.write_text(
             "default:\n"
-            "  conda_bin: conda\n"
+            f"  conda_bin: {json.dumps(str(conda))}\n"
             "  fallback_env: base\n"
             "packages:\n"
             "  autohic:\n"
