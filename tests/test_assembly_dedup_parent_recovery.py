@@ -455,12 +455,16 @@ def test_assembly_modes_parent_cli_recovery(
         blocked = checkpoint(paths, frozen, initial)
         assert blocked["active_interrupt"]["gate_id"] == "route_selection"
         assert not marker.exists()
-        expected_reads = reads[1:] if hifi_override else reads
+        expected_reads = reads
+        excluded_read = None
         decision = f"select_{route}"
         if contig:
             qc_members = resolve_long_read_members(blocked)
             assert len(qc_members) == len(reads)
             assert all(member.read_artifact_ref for member in qc_members)
+            if hifi_override:
+                excluded_read = qc_members[0].path
+                qc_members = qc_members[1:]
             expected_reads = [Path(member.path) for member in qc_members]
             with patch("builtins.input", side_effect=["2", menu_index, ""]):
                 request, _ = collect_gate_decision(
@@ -514,7 +518,7 @@ def test_assembly_modes_parent_cli_recovery(
             execution = load_json(evaluated, attempt["execution_ref"])
             contract = load_json(evaluated, execution["frozen_attempt_ref"])["attempt"]
             assert contract["metadata"]["read_mapping_presets"] == [depth_preset] * len(
-                reads
+                qc_members
             )
             deps = [d["artifact_ref"] for d in contract["input_dependencies"]]
             assert source_ref in deps
@@ -607,8 +611,8 @@ def test_assembly_modes_parent_cli_recovery(
     else:
         argv = command["argv"]
         assert all(str(p) in argv for p in expected_reads)
-        if hifi_override:
-            assert str(reads[0]) not in argv
+        if excluded_read:
+            assert excluded_read not in argv
         if method == "flye":
             assert f"--{native_mode}" in argv
         else:
