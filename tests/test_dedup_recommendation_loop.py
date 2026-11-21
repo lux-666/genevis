@@ -149,9 +149,25 @@ def _state(tmp_path):
         workflow_step_id="step-001-assembly",
     )
     bins = tmp_path / "bin"
-    bins.mkdir()
+    _write_dedup_tools(bins)
+    state["stage_outputs"]["assembly_dedup"] = {
+        "execution_mode": "local",
+        "automatic_purge_approved": True,
+        "recommendation_mode": "advisor",
+        "recommendation_output_method": "json_schema",
+        "max_attempts": 2,
+        "review_policy": {"max_blocked_seconds": 1},
+        "env": {"PATH": f"{bins}{os.pathsep}{os.environ['PATH']}"},
+    }
+    return state, source
+
+
+def _write_dedup_tools(bins):
+    bins.mkdir(exist_ok=True)
     scripts = {
         "minimap2": "printf 'alignment\\n'\n",
+        "pbcstat": "printf 'stats\\n' > PB.stat\nprintf 'cov\\n' > PB.base.cov\n",
+        "calcuts": "printf '1 2 3 4 5 6\\n'\n",
         "split_fa": 'cat "$1"\n',
         "purge_dups": ": # Empty BED is a valid no-duplication result.\n",
         "get_seqs": """prefix=''
@@ -183,16 +199,6 @@ printf '%s\\n' "$labels" | awk -F, 'BEGIN {OFS="\\t"} {
         path = bins / name
         path.write_text("#!/bin/sh\nset -eu\n" + script)
         path.chmod(0o755)
-    state["stage_outputs"]["assembly_dedup"] = {
-        "execution_mode": "local",
-        "automatic_purge_approved": True,
-        "recommendation_mode": "advisor",
-        "recommendation_output_method": "json_schema",
-        "max_attempts": 2,
-        "review_policy": {"max_blocked_seconds": 1},
-        "env": {"PATH": f"{bins}{os.pathsep}{os.environ['PATH']}"},
-    }
-    return state, source
 
 
 def _approve(state, *, automatic=False):

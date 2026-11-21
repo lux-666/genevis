@@ -3,36 +3,43 @@
 import argparse
 import json
 import shlex
+import shutil
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
 
+from app.control.inspection import inspect_state
 from app.control.stage_seeds import stage_seeds_from_run_config
 from app.control.workflow_plan import workflow_steps_from_run_config
+from app.diagnostics.route_acceptance import audit_route
+from app.entrypoints.review_interactive import collect_gate_decision
 from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
 from app.integrity import sha256_file
+from app.schemas.artifacts import READ_QC_FILTERED_LONG_READS
 from app.schemas.state import initial_state
 from app.stages.assembly_dedup.advisor import history, load_json
 from app.stages.assembly_dedup.nodes import _registered_assembly_read_members
+from app.stages.read_resolution import resolve_long_read_members
 from app.storage.frozen_inputs import freeze_session_inputs
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests import test_assembly as fixtures
-from tests.test_dedup_recommendation_loop import Model, _approve, _state, proposal
+from tests import test_read_qc as qc_fixtures
+from tests.conda_fixture import write_fake_conda
+from tests.test_dedup_recommendation_loop import (
+    Model,
+    _approve,
+    _state,
+    _write_dedup_tools,
+    proposal,
+)
 
 
 def freeze_parent(tmp_path, assets, run_config, methods):
-    conda = tmp_path / "conda"
-    conda.write_text(
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n"
-        'case "$1" in run|--live-stream|--no-capture-output) shift;; '
-        "-p|-n) shift 2;; *) break;; esac\ndone\n"
-        + f'export PATH={shlex.quote(str(tmp_path / "bin"))}:"$PATH"\nexec "$@"\n'
-    )
-    conda.chmod(0o755)
+    conda = write_fake_conda(tmp_path)
     envs = tmp_path / "envs.yaml"
     envs.write_text(
         json.dumps(
@@ -136,6 +143,17 @@ ASSEMBLY_MODES = [
     ("hifiasm_ont", "ont", "ont_hq", "ont"),
     ("hifiasm_ont", "cycloneseq", "cyclone", "ont"),
 ]
+
+# Model recommendation, manual menu index, and expected Dedup depth preset.
+CONTIG_HANDOFFS = {
+    ("hifiasm_ont", "cyclone"): ("flye", "2", "map-ont"),
+    ("nextdenovo", "ont_raw"): ("flye", "1", "map-ont"),
+    ("flye", "ont_hq"): ("nextdenovo", "1", None),
+    ("hifiasm", "pacbio_hifi"): ("flye", "2", "map-hifi"),
+    ("flye", "pacbio_clr"): ("nextdenovo", "1", "map-pb"),
+}
+
+DEDUP_TOOLS = ["minimap2", "split_fa", "purge_dups", "get_seqs", "pbcstat", "calcuts"]
 
 
 @pytest.mark.parametrize("platform", [None, "unknown", "pacbio_hifi", "clr", "ont"])
@@ -335,6 +353,34 @@ def test_assembly_modes_parent_cli_recovery(
     for path in reads:
         path.write_text("@r1\nACGT\n+\n!!!!\n")
     method_id = f"assembly.candidate.{method}"
+    contig = CONTIG_HANDOFFS.get((method, read_type))
+    recommended, menu_index, depth_preset = contig or (method, None, None)
+    stages = ["assembly"]
+    settings = {}
+    methods = {method_id: [tool]}
+    if contig:
+        stages = ["read_qc", "assembly", "assembly_dedup"]
+        settings = {
+            "read_qc": {
+                "length_filter": {"approved": True, "thresholds": {"min_len": 2}}
+            },
+            "assembly_dedup": {
+                "automatic_purge_approved": depth_preset is not None,
+                "recommendation_mode": "advisor",
+                "max_attempts": 1,
+                "threads": 1,
+            },
+        }
+        qc_home = tmp_path / "qc-fixtures"
+        qc_home.mkdir()
+        seqkit = qc_fixtures.ReadQCSeqKitStageTests()._fake_seqkit_bin(str(qc_home))
+        shutil.copy2(seqkit / "seqkit", executable.parent / "seqkit")
+        methods["read_qc.long_read_stats.seqkit_stats"] = ["seqkit"]
+        methods["read_qc.length_filter.seqkit_seq"] = ["seqkit"]
+        if depth_preset:
+            _write_dedup_tools(executable.parent)
+            methods["assembly_dedup.purge_dups"] = DEDUP_TOOLS
+            methods["assembly_dedup.eval.quast"] = ["quast.py"]
     paths, frozen, initial = freeze_parent(
         tmp_path,
         [
@@ -347,15 +393,18 @@ def test_assembly_modes_parent_cli_recovery(
             },
         ],
         {
-            "requested_stages": [{"stage": "assembly", "allow_local_execution": True}],
+            "requested_stages": [
+                {"stage": stage, "allow_local_execution": True} for stage in stages
+            ],
             "shared_parameters": {"read_type": read_type},
             "assembly": {
                 "threads": 1,
                 **({"hifi_reads_ref": str(reads[1])} if hifi_override else {}),
             },
             "review_policy": {"max_blocked_seconds": -1},
+            **settings,
         },
-        {method_id: [tool]},
+        methods,
     )
     route = {
         "pacbio_hifi": "hifi",
@@ -370,39 +419,73 @@ def test_assembly_modes_parent_cli_recovery(
 
         def invoke(self, messages):
             self.calls += 1
-            assert method_id in json.loads(messages[1]["content"])["allowed_methods"]
+            payload = json.loads(messages[1]["content"])
+            assert method_id in payload["allowed_methods"]
+            if contig:
+                assert payload["evidence_status"]["read_qc"] == "available"
             return json.dumps(
                 {
                     "recommended_route": route,
                     "recommended_read_type": read_type,
-                    "recommended_method": method_id,
+                    "recommended_method": f"assembly.candidate.{recommended}",
                     "reasoning": "fixture selection",
                     "uncertainty_notes": [],
                 }
             )
 
     model = MethodModel()
+    parameter_model = Mock(wraps=fixtures._ParameterModel())
     with (
         patch("app.stages.assembly.decision.build_chat_model", return_value=model),
         patch(
             "app.llm.parameters.assembly.recommender.build_chat_model",
-            return_value=fixtures._ParameterModel(),
+            return_value=parameter_model,
         ),
+        patch("app.llm.recommender.build_chat_model") as dedup_factory,
     ):
+        if depth_preset:
+            run = proposal()
+            run["parameters"]["coverage_mode"] = "read_depth"
+            dedup_factory.return_value = Model(
+                [
+                    AIMessage(content=json.dumps(run)),
+                    AIMessage(content=json.dumps(proposal("accept", selected=0))),
+                ]
+            )
         blocked = checkpoint(paths, frozen, initial)
         assert blocked["active_interrupt"]["gate_id"] == "route_selection"
         assert not marker.exists()
+        expected_reads = reads[1:] if hifi_override else reads
+        decision = f"select_{route}"
+        if contig:
+            qc_members = resolve_long_read_members(blocked)
+            assert len(qc_members) == len(reads)
+            assert all(member.read_artifact_ref for member in qc_members)
+            expected_reads = [Path(member.path) for member in qc_members]
+            with patch("builtins.input", side_effect=["2", menu_index, ""]):
+                request, _ = collect_gate_decision(
+                    paths.session_id, str(paths.run_dir), summary=inspect_state(blocked)
+                )
+            assert request.method_name == method_id
+            assert request.metadata["read_type"] == read_type
+            decision = request.decision
         resume_cli(
             tmp_path,
             paths,
             blocked,
-            f"select_{route}",
+            decision,
             method_name=method_id,
             metadata={"read_type": read_type},
         )
         blocked = checkpoint(paths, frozen)
         gate = blocked["active_interrupt"]
         assert gate["gate_id"] == "parameter_approval"
+        parameter_request = json.loads(
+            parameter_model.invoke.call_args.args[0][1]["content"]
+        )
+        assert parameter_request["method_id"] == method_id
+        if contig:
+            assert parameter_request["facts"]["reads"]["total_bases"]["value"] == 8
         assert blocked["stage_outputs"]["assembly"]["assembly_route"] == "auto"
         assert not marker.exists()
         resume_cli(
@@ -420,27 +503,86 @@ def test_assembly_modes_parent_cli_recovery(
                 )
             },
         )
-    final = checkpoint(paths, frozen)
+        assembled = checkpoint(paths, frozen)
+        resource = assembled["resource_refs"]["assembly"]
+        if depth_preset:
+            assert assembled["active_interrupt"]["gate_id"] == "dedup_recommendation"
+            source_ref = resource["metadata"]["primary_output_ref"]
+            resume_cli(tmp_path, paths, assembled, "follow_recommendation")
+            evaluated = checkpoint(paths, frozen)
+            [attempt] = history(evaluated)
+            execution = load_json(evaluated, attempt["execution_ref"])
+            contract = load_json(evaluated, execution["frozen_attempt_ref"])["attempt"]
+            assert contract["metadata"]["read_mapping_presets"] == [depth_preset] * len(
+                reads
+            )
+            deps = [d["artifact_ref"] for d in contract["input_dependencies"]]
+            assert source_ref in deps
+            assert [
+                ref
+                for ref in deps
+                if ref["artifact_type"] == READ_QC_FILTERED_LONG_READS
+            ] == [m.read_artifact_ref.model_dump(mode="json") for m in qc_members]
+            starts = sum(
+                event["event_type"] == "attempt_started"
+                for event in Ledger(paths.run_dir).read_event_rows(paths.session_id)
+            )
+            resume_cli(tmp_path, paths, evaluated, "follow_recommendation")
+            final = checkpoint(paths, frozen)
+            assert (
+                final["resource_refs"]["assembly"]["metadata"]["candidate_bundle_ref"]
+                == attempt["candidate_ref"]
+            )
+            assert (
+                sum(
+                    event["event_type"] == "attempt_started"
+                    for event in Ledger(paths.run_dir).read_event_rows(paths.session_id)
+                )
+                == starts
+            )
+        else:
+            final = assembled
+            dedup_factory.assert_not_called()
     assert final["supervision_state"] == "completed"
     assert model.calls == 1 and marker.read_text().splitlines() == ["called"]
-    resource = final["resource_refs"]["assembly"]
-    bundle = json.loads(
-        paths.resolve_ref(
-            resource["metadata"]["candidate_bundle_ref"]["path_ref"]
-        ).read_text()
+    assembly_step = next(
+        step["step_id"]
+        for step in initial["workflow_steps"]
+        if step["stage"] == "assembly"
     )
+    assembly_bundle_ref = resource["metadata"]["candidate_bundle_ref"]
+    assembly_path = resource["paths"][0]
+    if contig:
+        report = audit_route(paths.run_dir)
+        assembly_delivery = report["occurrences"][-2]["deliveries"][0]
+        dedup = report["occurrences"][-1]
+        if depth_preset:
+            assert report["status"] == "complete_execution_coverage", report
+            assert dedup["deliveries"][0]["delivery_mode"] == "materialized"
+        else:
+            assert not dedup["attempt_starts"]
+            assert dedup["deliveries"][0]["delivery_mode"] == "reused"
+            assert (
+                dedup["deliveries"][0]["primary_output_ref"]
+                == assembly_delivery["primary_output_ref"]
+            )
+            assembly_bundle_ref = assembly_delivery["candidate_bundle_ref"]
+    bundle = json.loads(paths.resolve_ref(assembly_bundle_ref["path_ref"]).read_text())
     assert bundle["method_name"] == method_id
-    expected_reads = reads[1:] if hifi_override else reads
     assert len(bundle["input_member_ids"]["primary"]) == len(expected_reads)
-    assert Path(resource["paths"][0]).read_text().startswith(">")
+    assert Path(assembly_path).read_text().startswith(">")
     command = json.loads(
         paths.workflow_step_artifact_path(
-            "step-001-assembly", "assembly", "attempts", "000", "command.json"
+            assembly_step,
+            "assembly",
+            "attempts",
+            "000",
+            "command.json",
         ).read_text()
     )
     if method == "nextdenovo":
         cfg = paths.workflow_step_artifact_path(
-            "step-001-assembly",
+            assembly_step,
             "assembly",
             "attempts",
             "000",
@@ -489,13 +631,6 @@ def test_explicit_hifi_override_survives_parent_reentry(tmp_path):
 def test_dedup_parent_multiround_cli_recovery(tmp_path, coverage_mode, selection):
     _, source = _state(tmp_path)
     bins = tmp_path / "bin"
-    for tool, script in {
-        "pbcstat": "printf 'stats\\n' > PB.stat\nprintf 'cov\\n' > PB.base.cov\n",
-        "calcuts": "printf '1 2 3 4 5 6\\n'\n",
-    }.items():
-        path = bins / tool
-        path.write_text("#!/bin/sh\nset -eu\n" + script)
-        path.chmod(0o755)
     calls = tmp_path / "tool_calls"
     for path in bins.iterdir():
         path.write_text(
@@ -538,14 +673,7 @@ def test_dedup_parent_multiround_cli_recovery(tmp_path, coverage_mode, selection
             "review_policy": {"max_blocked_seconds": -1},
         },
         {
-            "assembly_dedup.purge_dups": [
-                "minimap2",
-                "split_fa",
-                "purge_dups",
-                "get_seqs",
-                "pbcstat",
-                "calcuts",
-            ],
+            "assembly_dedup.purge_dups": DEDUP_TOOLS,
             "assembly_dedup.eval.quast": ["quast.py"],
         },
     )
