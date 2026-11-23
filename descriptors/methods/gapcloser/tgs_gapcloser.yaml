@@ -1,14 +1,14 @@
 method_name: gapcloser.tgs_gapcloser
 stage: gapcloser
 package_ref: tgsgapcloser
-goal: "Fill scaffold N-gaps with HiFi reads and expose a candidate for manual adoption."
+goal: "Fill scaffold N-gaps with a selected HiFi or ONT read set and expose a candidate for adoption."
 required_inputs:
   - name: assembly
     type: assembly
     description: "Current verified assembly candidate."
   - name: long_reads
     type: raw_or_clean_long_reads
-    description: "Complete current read set, explicitly classified pacbio_hifi."
+    description: "Registered HiFi or ONT read members for the configured route."
 expected_outputs:
   - name: gap_closed_assembly
     type: gapcloser.assembly

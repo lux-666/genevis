@@ -49,7 +49,7 @@ README 不复制第二份方法表或完整工作流数组。
 - 完整五阶段 contig 路径，以及非默认后续路径中已接线的 Hi-C scaffolding
   与 T2T 能力；
 - Hi-C 成功或失败后可提交人工 FASTA，在同一 session 采用并接续计划中的下游阶段；`.hic` 为可选附件；
-- GapCloser 支持 HiFi + TGS-GapCloser，执行后人工采纳；Base Polish 支持 HiFi + Racon 单轮修正、前后比较和人工保留原稿。
+- GapCloser 支持显式 `hifi_no_error_correction`（PacBio HiFi）或 `ont_racon`（ONT + Racon）路线，执行后人工采纳；Base Polish 支持显式 `pacbio_hifi` 或 `ont` 读段子集的 minimap2/Racon 单轮修正、前后比较和人工保留原稿。省略这些字段保持旧的完整纯 HiFi 约束；内部没有 `N` 时 GapCloser 合法跳过工具并复用输入。
 
 完整 HiFi + Hi-C 路线的配置、实跑及产物核验入口见
 [服务器验收说明](docs/user_guide/run-and-recovery.md#complete-hifihic-server-acceptance)。
@@ -194,9 +194,9 @@ gene-agent inspect \
 
 - 本地进程执行必须由对应 occurrence 显式授权；
 - 大型 FASTQ/FASTA/BAM、日志和结果表不进入 LangGraph state；
-- `gapcloser` 目前仅支持 HiFi 无纠错路线，产物须人工采纳；参见
+- `gapcloser.route` 可选 `hifi_no_error_correction` 或 `ont_racon`；前者使用 PacBio HiFi，后者使用 ONT 并要求 GapCloser 方法环境提供 Racon。省略时保持旧的完整纯 HiFi 约束；产物须人工采纳，内部无 `N` 时跳过工具并复用输入。参见
   [单产物运行示例](docs/user_guide/run-and-recovery.md#hifi-gap-closing-from-an-existing-assembly)；
-- `base_polish` 运行 HiFi + Racon，人工决定采纳或保留原稿，最终 Review 比较两者；
+- `base_polish.read_platform` 可选 `pacbio_hifi` 或 `ont`，分别使用 minimap2 `map-hifi` 或 `map-ont` 与 Racon；省略时保持旧的完整纯 HiFi 约束。人工决定采纳或保留原稿，最终 Review 比较两者；
 - 当前版本没有 checkpoint migration。更新含活动 session 的服务器 checkout 前，先
   完成运行或保留旧 checkout 与对应环境；
 - 本机缺少真实生信工具只说明本机不是已配置执行主机，不等同于产品回归失败。

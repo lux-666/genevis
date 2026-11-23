@@ -114,6 +114,25 @@ def test_standalone_and_repeated_routes_preserve_literal_order(
     assert prepared.run_config.requested_stage_names() == list(stages)
 
 
+@pytest.mark.parametrize(
+    "stage,settings",
+    [("gapcloser", {"route": "ont_racon"}), ("base_polish", {"read_platform": "ont"})],
+)
+def test_configured_ont_finishing_requires_registered_ont_reads(
+    tmp_path, stage, settings
+):
+    manifest = _manifest(tmp_path, assembly=True)
+    config = {**_config(stage), stage: settings}
+    with pytest.raises(
+        FrozenInputValidationError, match=f"step-001-{stage}.*registered ont long reads"
+    ):
+        prepare_session_inputs(manifest_draft=manifest, run_config_draft=config)
+
+    manifest["assets"][0]["platform"] = "ont"
+    prepared = prepare_session_inputs(manifest_draft=manifest, run_config_draft=config)
+    assert getattr(prepared.run_config, stage).read_platform == "ont"
+
+
 def test_nonexecuted_assembly_cannot_supply_a_later_consumer(tmp_path):
     with pytest.raises(
         FrozenInputValidationError, match="step-002-t2t.*input assembly"

@@ -135,6 +135,8 @@ methods:
   gapcloser.tgs_gapcloser:
     conda_env: your_tool_env
     # TGS-GapCloser 1.2.1；getopt 必须为 GNU 实现。
+    # `gapcloser.route=ont_racon` 还要求同一环境提供 racon；
+    # 该项由选定 ONT 路线的条件预检检查，HiFi 无纠错路线不额外要求。
     required_tools:
       - tgsgapcloser
       - minimap2

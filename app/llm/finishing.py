@@ -86,8 +86,9 @@ class FinishingRecommender(StructuredRecommender[FinishingRecommendation]):
 
     def messages(self, evidence: dict[str, Any]) -> list[dict[str, str]]:
         instructions = {
-            "gapcloser": "Only TGS-GapCloser HiFi --ne is implemented. Use "
-            "actual gap sizes, "
+            "gapcloser": "Use the fixed TGS-GapCloser route and bound reads. "
+            "The HiFi route runs without error correction and the ONT route "
+            "uses Racon. Use actual gap sizes, "
             "fill details and validation. Fewer Ns do not establish correct sequence; "
             "segment consistency is structural evidence only.",
             "t2t": "The implemented method maps all manifest-declared long reads, "
@@ -104,8 +105,8 @@ class FinishingRecommender(StructuredRecommender[FinishingRecommendation]):
             "expected_new_evidence. switch_method is unavailable until another "
             "registered method is applicable. Quality status does not change "
             "the zero-wait adoption action.",
-            "base_polish": "Only a single HiFi Racon round per candidate is "
-            "implemented. "
+            "base_polish": "Each candidate uses one Racon round with the bound "
+            "HiFi or ONT reads. "
             "All configurations start from the original source, never serially polish "
             "an earlier candidate. Before/after alignment uses the correction reads; "
             "this is in-sample agreement, not independent QV. It alone cannot justify "
@@ -116,7 +117,7 @@ class FinishingRecommender(StructuredRecommender[FinishingRecommendation]):
         zero_wait = evidence.get("execution_policy") == "run_valid_outputs"
         if zero_wait and self.stage == "base_polish":
             instructions["base_polish"] = (
-                "Only a single HiFi Racon round per candidate is implemented. "
+                "Each candidate uses one Racon round with the bound HiFi or ONT reads. "
                 "All configurations start from the original source. Before/after "
                 "alignment uses correction reads and is not independent QV. "
                 "Report that limitation without using it as an execution veto."

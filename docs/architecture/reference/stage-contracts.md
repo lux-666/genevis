@@ -288,9 +288,9 @@ T2T 顾问要求 auto_patch，结果经持久门禁采用；零等待采用有�
 
 ## 8. GapCloser
 
-目的：用明确分类的 PacBio HiFi 通过 TGS-GapCloser 填内部 N 缺口。首个实现仅支持无错误校正路线 `--ne --tgstype pb --minmap_arg '-x asm20'`。ONT、CLR、CycloneSEQ、未知、混合平台集合均拒绝，不重新分类；长度过滤后的含噪读段不推断为已校正读段。
+目的：用明确分类的长读段通过 TGS-GapCloser 填内部 N 缺口。`gapcloser.route=hifi_no_error_correction` 选择 PacBio HiFi，并使用无错误校正路线 `--ne --tgstype pb --minmap_arg '-x asm20'`；`gapcloser.route=ont_racon` 选择 ONT，使用 `--tgstype ont` 的路线并以 Racon 做错误校正。未知平台、未声明平台和 route 与读段不匹配都拒绝，不重新分类；长度过滤后的含噪读段不推断为已校正读段。省略 route 时保持旧的完整当前纯 HiFi 约束。
 
-注册方法 `gapcloser.tgs_gapcloser` 通过现有解析器消费当前已验证候选与完整当前 HiFi 集合。验证 plain/gzip FASTA/FASTQ 并规范化为运行内 FASTA，索引输入记录保留源身份。原组装和读段不覆盖。每 occurrence 独立工具目录，因为上游工具使用固定 checkpoint 标签。
+注册方法 `gapcloser.tgs_gapcloser` 通过现有解析器消费当前已验证候选与 route 选定的平台集合。验证 plain/gzip FASTA/FASTQ 并规范化为运行内 FASTA，索引输入记录保留源身份。原组装和读段不覆盖。`ont_racon` 的方法环境在条件预检中额外要求 Racon；HiFi 无纠错路线不因该条件额外要求 Racon。每 occurrence 独立工具目录，因为上游工具使用固定 checkpoint 标签。
 
 默认 advisor 根据源缺口、QUAST 和历次填补/校验报告推荐完整参数；显式 deterministic_baseline 使用 RunConfig 操作者设置，单轮无 LLM。执行用共享 freeze/run/collect。原生 1.2.1 两项产品 `.scaff_seqs`、`.gap_fill_detail` 必需；上游 README 后缀不同，适配器遵循[已核验上游源码](https://github.com/BGI-Qingdao/TGS-GapCloser/tree/e1a7e01c6259e6651a8007e4e4c3b887bef38b19)。收集校验 scaffold 身份、片段坐标、复制源序列与 N 段，发布输入/输出缺口数和长度报告。这证明结构一致，不证明共识准确或生物学改善。无内部缺口 scaffold 必须不变；未填 N 段消费相同源 N，不能丢弃源前后缀。插入序列和重叠闭合（含无 F 段的相邻 S 段）必须在保留锚点间恰好桥接一个内部源缺口。只可修剪该缺口侧翼，并报告移除碱基。
 
@@ -344,9 +344,9 @@ T2T 消费到达该冻结 occurrence 时的中央组装，不直接消费 `hic_r
 
 ## 10. Base Polish
 
-使用一轮仅 HiFi 的 minimap2/Racon 校正当前已验证组装的替换和小 indel。固定方法 `base_polish.racon`，完整当前集合必须明确为 `pacbio_hifi`。规范化以唯一 ID 保留每条读段。Racon 使用 `--include-unpolished --no-trimming`，scaffold ID 必须不变。Advisor 推荐 window/error/scoring 配置，每个候选从相同源开始执行一轮；deterministic_baseline 使用操作者参数单轮。两者都不声称必能改善高质量 HiFi 组装。
+使用一轮 minimap2/Racon 校正当前已验证组装的替换和小 indel。`base_polish.read_platform` 选择 `pacbio_hifi` 或 `ont` 子集，分别使用 `map-hifi` 或 `map-ont`；字段省略时保持旧的完整当前纯 HiFi 约束。固定方法 `base_polish.racon`，规范化以唯一 ID 保留每条读段。Racon 使用 `--include-unpolished --no-trimming`，scaffold ID 必须不变。Advisor 推荐 window/error/scoring 配置，每个候选从相同源开始执行一轮；deterministic_baseline 使用操作者参数单轮。两者都不声称必能改善高质量组装。
 
-采纳前，同一读段以相同 minimap2 `map-hifi -c --eqx --secondary=no` 设置映射源和候选。两个 PAF、候选 FASTA、工具版本、源绑定比较报告必需。报告比对读段数、映射碱基、碱基一致性、目标覆盖、scaffold/缺口/长度变化，并明确独立 QV 缺失。PAF match/block 计数须与 eqx CIGAR 一致，计入 minimap2 从这些统计排除的歧义碱基 `nn`。它是样本内比对一致性，不是无偏错误估计；一致性或 N50 更高都不自动批准。缺失/畸形产物在门禁前收集失败。
+采纳前，同一选定平台读段以相同 minimap2 `map-hifi` 或 `map-ont`（均带 `-c --eqx --secondary=no`）设置映射源和候选。两个 PAF、候选 FASTA、工具版本、源绑定比较报告必需。报告比对读段数、映射碱基、碱基一致性、目标覆盖、scaffold/缺口/长度变化，并明确独立 QV 缺失。PAF match/block 计数须与 eqx CIGAR 一致，计入 minimap2 从这些统计排除的歧义碱基 `nn`。它是样本内比对一致性，不是无偏错误估计；一致性或 N50 更高都不自动批准。缺失/畸形产物在门禁前收集失败。
 
 Advisor 使用 finishing_recommendation，单轮基线使用 base_polish_adoption；两者支持人工采纳、保留源、停止，advisor 还可批准新配置或选择早先候选；零等待则采用最新有效候选，无新结果沿用输入，并且不再调用结果顾问。采纳才改变资源；保留源发布 reused 交付。两个替代项与比较都是不可变产物。交接保留另一个候选，使后续 Review 即使在保留源之后，也用该 occurrence 相同 QUAST 设置/BUSCO lineage 评估两者；最终 Review 可选任一个。缺评估信号显式保留，不是质量通过。QUAST 参考相关错误、BUSCO 完整/单拷贝/重复/片段/缺失计数补充连续性；没有独立参考/读段真值则共识 QV 未测。
 

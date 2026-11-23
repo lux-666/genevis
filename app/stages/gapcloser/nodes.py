@@ -1,4 +1,4 @@
-"""HiFi-only TGS-GapCloser adapter using the shared method lifecycle."""
+"""TGS-GapCloser adapter using the shared method lifecycle."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def method_outcome(state: TopLevelState) -> MethodOutcome | None:
 
 LIFECYCLE = MethodExecutionLifecycle(
     stage="gapcloser",
-    name="TGS-GapCloser HiFi",
+    name="TGS-GapCloser",
     method_name=METHOD,
     frozen_status="gap_frozen",
     ran_status="gap_ran",
@@ -132,7 +132,7 @@ def enter_gapcloser(state: TopLevelState) -> StateUpdate:
         summary = sequence_summary(fasta_records(candidate.primary_output_path))
         status = "ready" if summary["internal_gaps"] else "no_gaps"
         if status == "ready":
-            _hifi_members(state)
+            resolve_gapcloser_read_members(state)
         return update(
             state,
             {
@@ -144,12 +144,23 @@ def enter_gapcloser(state: TopLevelState) -> StateUpdate:
         return update(state, {"status": "failed", "reason": str(exc)})
 
 
-def _hifi_members(state: TopLevelState) -> list[RuntimeReadMember]:
+def resolve_gapcloser_read_members(state: TopLevelState) -> list[RuntimeReadMember]:
+    """Select the configured platform or require the legacy HiFi-only set."""
+    route = output(state).get("route")
     members = resolve_long_read_members(state)
-    if not members or any(member.platform != "pacbio_hifi" for member in members):
-        raise ValueError(
-            "GapCloser first slice requires an exclusively pacbio_hifi read set"
-        )
+    if route is None:
+        if not members or any(member.platform != "pacbio_hifi" for member in members):
+            raise ValueError(
+                "GapCloser first slice requires an exclusively pacbio_hifi read set"
+            )
+    else:
+        platform = GapCloserRunConfig(route=route).read_platform
+        members = [member for member in members if member.platform == platform]
+        if not members:
+            raise ValueError(
+                f"GapCloser route {route!r} requires at least one "
+                f"{platform} read member"
+            )
     if any(member.format not in {"fasta", "fastq"} for member in members):
         raise ValueError("GapCloser reads require explicit fasta/fastq format")
     return members
@@ -177,13 +188,20 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
         if loop(state, "gapcloser"):
             approved_proposal(state, "gapcloser")
         candidate = source_candidate(state)
-        members = _hifi_members(state)
+        members = resolve_gapcloser_read_members(state)
         parameters = GapCloserRunConfig.model_validate(
             {
                 key: dict(cursor)[key]
                 for key in GapCloserRunConfig.model_fields
                 if key in cursor
             }
+        )
+        route = parameters.route or "hifi_no_error_correction"
+        is_ont = route == "ont_racon"
+        route_metadata = (
+            {"route": route, "read_platform": parameters.read_platform}
+            if parameters.route is not None
+            else {}
         )
         env, _, blocked = resolve_method_env(
             dict(cursor),
@@ -233,14 +251,16 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
             state, "gapcloser", *work_parts(state, "gapcloser"), "tgs_gapcloser"
         )
         work.mkdir(parents=True, exist_ok=True)
-        normalized = work / "hifi.fasta"
+        read_name = "ont.fasta" if is_ont else "hifi.fasta"
+        normalized = work / read_name
         write_normalized_fasta(normalized, members)
         verify_input_dependencies(state, dependencies)
         normalized_artifact = _publish(
             state,
             normalized,
-            "gapcloser.hifi_reads",
+            "gapcloser.ont_reads" if is_ont else "gapcloser.hifi_reads",
             source_members=[member.model_dump(mode="json") for member in members],
+            **route_metadata,
         )
         record = work / "inputs.json"
         record.write_text(
@@ -255,8 +275,8 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
                     "normalized_reads_ref": normalized_artifact.ref.model_dump(
                         mode="json"
                     ),
-                    "parameters": parameters.model_dump(mode="json"),
-                    "route": "hifi_no_error_correction",
+                    "parameters": parameters.model_dump(mode="json", exclude_none=True),
+                    "route": route,
                 },
                 sort_keys=True,
                 indent=2,
@@ -286,39 +306,52 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
             "--scaff",
             assembly_name,
             "--reads",
-            "hifi.fasta",
+            read_name,
             "--output",
             "result",
-            "--ne",
-            "--tgstype",
-            "pb",
-            "--minmap_arg",
-            "-x asm20",
-            "--thread",
-            str(parameters.threads),
-            "--min_idy",
-            str(parameters.min_identity),
-            "--min_match",
-            str(parameters.min_match),
         ]
+        if is_ont:
+            argv.extend(["--racon", "./racon"])
+        else:
+            argv.append("--ne")
+        argv.extend(
+            [
+                "--tgstype",
+                "ont" if is_ont else "pb",
+                "--minmap_arg",
+                "-x ava-ont" if is_ont else "-x asm20",
+                "--thread",
+                str(parameters.threads),
+                "--min_idy",
+                str(parameters.min_identity),
+                "--min_match",
+                str(parameters.min_match),
+            ]
+        )
         if parameters.gap_size_check:
             argv.append("--g_check")
         script = work / "run.sh"
-        script.write_text(
-            "\n".join(
+        command = shlex.join(argv)
+        script_lines = [
+            "#!/bin/bash",
+            "set -euo pipefail",
+            # Never reuse upstream's tags after an uncertain process crash.
+            "mkdir tool_run",
+            "cd tool_run",
+            f"ln -s {shlex.quote(str(candidate.primary_output_path))} {assembly_name}",
+            f"ln -s {shlex.quote(str(normalized_artifact.path))} {read_name}",
+        ]
+        if is_ont:
+            script_lines.extend(
                 [
-                    "#!/bin/bash",
-                    "set -euo pipefail",
-                    # Never reuse upstream's tags after an uncertain process crash.
-                    "mkdir tool_run",
-                    "cd tool_run",
-                    f"ln -s {shlex.quote(str(candidate.primary_output_path))} "
-                    f"{assembly_name}",
-                    f"ln -s {shlex.quote(str(normalized_artifact.path))} hifi.fasta",
-                    shlex.join(argv),
-                    "",
+                    'RACON_PATH="$(command -v racon)"',
+                    'test -x "$RACON_PATH"',
+                    'ln -s "$RACON_PATH" racon',
                 ]
-            ),
+            )
+        script_lines.extend([command, ""])
+        script.write_text(
+            "\n".join(script_lines),
             encoding="utf-8",
         )
         attempt = build_frozen_attempt(
@@ -338,7 +371,10 @@ def freeze_gapcloser(state: TopLevelState) -> StateUpdate:
             env=cursor.get("env"),
             env_spec=env,
             input_dependencies=dependencies,
-            metadata={"input_record_ref": input_record.ref.model_dump(mode="json")},
+            metadata={
+                "input_record_ref": input_record.ref.model_dump(mode="json"),
+                **route_metadata,
+            },
         )
         return freeze_method_attempts(
             state,

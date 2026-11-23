@@ -6,6 +6,7 @@
     }
   ],
   "gapcloser": {
+    "route": "hifi_no_error_correction",
     "threads": 16,
     "recommendation_mode": "advisor",
     "recommendation_output_method": "json_schema",

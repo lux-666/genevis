@@ -291,7 +291,7 @@ def test_multifile_default_plan_passes_input_contract_without_hic(
     import yaml
 
     from app.schemas.manifest import InputManifest
-    from app.storage.frozen_inputs import _validate_workflow_input_contract
+    from app.storage.frozen_inputs import prepare_session_inputs
 
     reads = [tmp_path / "lane1.fq", tmp_path / "lane2.fq"]
     for path in reads:
@@ -324,7 +324,7 @@ def test_multifile_default_plan_passes_input_contract_without_hic(
         {"stage": stage, "allow_local_execution": True} for stage in stages
     ]
     config = RunConfig.model_validate(payload)
-    _validate_workflow_input_contract(manifest, config)
+    prepare_session_inputs(manifest_draft=manifest, run_config_draft=config)
     assert config.requested_stage_names() == stages
     assert "hic_scaffolding" not in stages
     assert "base_polish" not in stages

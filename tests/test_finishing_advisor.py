@@ -16,7 +16,7 @@ from app.review.application import (
     persist_review_intent,
 )
 from app.review.base import ResumeReviewRequest
-from app.stages.finishing.advisor import history, loop, validate_proposal
+from app.stages.finishing.advisor import history, load_json, loop, validate_proposal
 from app.stages.finishing.review import apply_application, prepare_application
 from app.stages.finishing.workflow import build_stage
 from tests.test_dedup_recommendation_loop import Model
@@ -93,16 +93,16 @@ labels=args[args.index('--labels')+1].split(',')
     tool.chmod(0o755)
 
 
-def state_for(stage, tmp_path):
+def state_for(stage, tmp_path, **read_inputs):
     if stage == "gapcloser":
         from tests.test_gapcloser import _fake_tool, _state
 
-        state = _state(tmp_path)
+        state = _state(tmp_path, **read_inputs)
         path = _fake_tool(tmp_path)
     elif stage == "base_polish":
         from tests.test_base_polish import fake_tools, state_for_polish
 
-        state = state_for_polish(tmp_path)
+        state = state_for_polish(tmp_path, **read_inputs)
         path = fake_tools(tmp_path)
     else:
         from tests.test_t2t import T2TStageTests
@@ -138,6 +138,25 @@ def state_for(stage, tmp_path):
         }
     }
     return state
+
+
+@pytest.mark.parametrize(
+    "stage,settings,selection",
+    [
+        ("gapcloser", {"route": "ont_racon"}, {"route": "ont_racon"}),
+        ("base_polish", {"read_platform": "ont"}, {"platform": "ont"}),
+    ],
+)
+def test_advisor_sees_only_the_reads_bound_to_ont(tmp_path, stage, settings, selection):
+    state = state_for(stage, tmp_path, second_platform="ont")
+    state["stage_outputs"][stage].update(settings)
+    model = Model([AIMessage(content=json.dumps(proposal(stage)))])
+    with patch("app.llm.recommender.build_chat_model", return_value=model):
+        blocked = build_stage(stage).invoke(state)
+    response = load_json(blocked, loop(blocked, stage)["recommendation_ref"])
+    evidence = load_json(blocked, response["request_ref"])["evidence"]
+    assert evidence["read_selection"] == selection
+    assert [member["platform"] for member in evidence["read_inputs"]] == ["ont"]
 
 
 def approve(state, decision="follow_recommendation", candidate_id=None):

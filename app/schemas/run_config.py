@@ -53,6 +53,8 @@ RequestableStage = Literal[
 
 AssemblyRoute = Literal[SelectedAssemblyRoute, "auto"]
 RecommendationMode = Literal["advisor", "deterministic_baseline"]
+GapCloserRoute = Literal["hifi_no_error_correction", "ont_racon"]
+FinishingReadPlatform = Literal["pacbio_hifi", "ont"]
 ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
@@ -134,10 +136,11 @@ class FinishingAdvisorConfig(BaseModel):
 
 
 class BasePolishRunConfig(FinishingAdvisorConfig):
-    """HiFi Racon resources and explicit baseline settings."""
+    """Racon read selection and baseline settings."""
 
     model_config = ConfigDict(extra="forbid")
 
+    read_platform: FinishingReadPlatform | None = None
     threads: int = Field(default=16, ge=1, le=1024)
     window_length: int = Field(default=500, ge=1, le=10000)
     error_threshold: float = Field(default=0.3, gt=0, le=1)
@@ -147,14 +150,28 @@ class BasePolishRunConfig(FinishingAdvisorConfig):
 
 
 class GapCloserRunConfig(FinishingAdvisorConfig):
-    """HiFi TGS-GapCloser resources and explicit baseline settings."""
+    """TGS-GapCloser route and baseline settings."""
 
     model_config = ConfigDict(extra="forbid")
 
+    route: GapCloserRoute | None = None
     threads: int = Field(default=16, ge=1, le=1024)
     min_identity: float = Field(default=0.2, gt=0, le=1)
     min_match: int = Field(default=200, ge=1)
     gap_size_check: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ont_defaults(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and value.get("route") == "ont_racon":
+            return {"min_identity": 0.3, "min_match": 300, **value}
+        return value
+
+    @property
+    def read_platform(self) -> FinishingReadPlatform | None:
+        if self.route is None:
+            return None
+        return "ont" if self.route == "ont_racon" else "pacbio_hifi"
 
 
 class T2TReadInput(BaseModel):

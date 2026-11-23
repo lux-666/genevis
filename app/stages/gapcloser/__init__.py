@@ -1,1 +1,1 @@
-"""TGS-GapCloser HiFi gap filling and manual candidate adoption."""
+"""TGS-GapCloser gap filling and candidate adoption."""

@@ -1,4 +1,4 @@
-"""Strict compact cursor for the HiFi polishing lifecycle."""
+"""Strict compact cursor for the long-read polishing lifecycle."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -33,6 +33,7 @@ class BasePolishStageCursor(TypedDict, total=False):
     mismatch: int
     gap: int
     threads: int
+    read_platform: str | None
     review_policy: dict[str, Any]
     execution_attempts: list[dict[str, Any]]
     input_record_ref: ArtifactRefJson

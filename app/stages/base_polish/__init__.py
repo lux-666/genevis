@@ -1,1 +1,1 @@
-"""HiFi polishing, paired evaluation evidence, and manual adoption."""
+"""Long-read polishing, paired evaluation evidence, and candidate adoption."""

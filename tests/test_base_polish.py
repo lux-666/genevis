@@ -384,6 +384,93 @@ def test_noisy_platform_not_reclassified(tmp_path: Path, platform: str) -> None:
     assert "execution_attempts" not in result["stage_outputs"]["base_polish"]
 
 
+@pytest.mark.parametrize(
+    ("requested", "second_platform", "expected_member", "preset"),
+    [
+        ("pacbio_hifi", "ont", "hifi", "map-hifi"),
+        ("ont", "ont", "second", "map-ont"),
+    ],
+)
+def test_explicit_platform_freezes_matching_subset_and_preset(
+    tmp_path: Path,
+    requested: str,
+    second_platform: str,
+    expected_member: str,
+    preset: str,
+) -> None:
+    from app.stages.base_polish.builder import build_stage
+
+    state = state_for_polish(tmp_path, "pacbio_hifi", second_platform=second_platform)
+    state["stage_outputs"] = {
+        "base_polish": {
+            "read_platform": requested,
+            "env": {"PATH": fake_tools(tmp_path)},
+        }
+    }
+    result = build_stage().invoke(state)
+    assert result["supervision_state"] == "blocked_human", result
+    cursor = result["stage_outputs"]["base_polish"]
+    record_path = Path(state["data_dir"]) / cursor["input_record_ref"]["path_ref"]
+    record = json.loads(record_path.read_text())
+    assert record["read_platform"] == requested
+    expected_route = (
+        "ont_single_round_racon" if requested == "ont" else "hifi_single_round_racon"
+    )
+    assert record["route"] == expected_route
+    assert [member["member_id"] for member in record["reads"]] == [expected_member]
+    # The frozen record is published under artifacts; the executable script is
+    # retained in the corresponding work directory.
+    script = next(Path(state["data_dir"]).glob("work/steps/**/run.sh"))
+    script_text = script.read_text()
+    assert script_text.count(f"-x {preset}") == 2
+    assert f"-x {'map-ont' if preset == 'map-hifi' else 'map-hifi'}" not in script_text
+    comparison = json.loads(
+        (Path(state["data_dir"]) / cursor["comparison_ref"]["path_ref"]).read_text()
+    )
+    assert comparison["alignment_settings"].startswith(f"-x {preset} ")
+
+
+def test_explicit_ont_route_accepts_ont_only_reads(tmp_path: Path) -> None:
+    from app.stages.base_polish.builder import build_stage
+
+    state = state_for_polish(tmp_path, "ont")
+    state["stage_outputs"] = {
+        "base_polish": {
+            "read_platform": "ont",
+            "env": {"PATH": fake_tools(tmp_path)},
+        }
+    }
+    result = build_stage().invoke(state)
+    assert result["supervision_state"] == "blocked_human", result
+    cursor = result["stage_outputs"]["base_polish"]
+    record = json.loads(
+        (Path(state["data_dir"]) / cursor["input_record_ref"]["path_ref"]).read_text()
+    )
+    assert record["route"] == "ont_single_round_racon"
+    assert {member["platform"] for member in record["reads"]} == {"ont"}
+
+
+@pytest.mark.parametrize(
+    ("reads_platform", "requested"),
+    [("ont", "pacbio_hifi"), ("pacbio_hifi", "clr")],
+)
+def test_explicit_platform_without_matching_route_fails_before_execution(
+    tmp_path: Path, reads_platform: str, requested: str
+) -> None:
+    from app.stages.base_polish.builder import build_stage
+
+    state = state_for_polish(tmp_path, reads_platform)
+    state["stage_outputs"] = {
+        "base_polish": {
+            "read_platform": requested,
+            "env": {"PATH": fake_tools(tmp_path)},
+        }
+    }
+    result = build_stage().invoke(state)
+    assert result["supervision_state"] == "failed_terminal"
+    assert "execution_attempts" not in result["stage_outputs"]["base_polish"]
+
+
 def test_collect_replay_recovers_all_products_without_running(tmp_path: Path) -> None:
     from app.stages.base_polish.builder import build_stage
     from app.stages.base_polish.nodes import collect_base_polish

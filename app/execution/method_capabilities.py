@@ -10,6 +10,8 @@ from app.schemas.run_config import RunConfig
 
 _TRIO_HIFIASM_METHOD = "assembly.candidate.hifiasm"
 _AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
+_TGS_GAPCLOSER_METHOD = "gapcloser.tgs_gapcloser"
+_BASE_POLISH_METHOD = "base_polish.racon"
 
 
 def trio_enabled(run_config: RunConfig) -> bool:
@@ -31,6 +33,14 @@ def conditional_required_tools(
         hic = run_config.hic_scaffolding
         parameters = hic.autohic_parameters if hic else None
         return (parameters.python_command,) if parameters else ()
+    if method_name == _TGS_GAPCLOSER_METHOD:
+        gapcloser = run_config.gapcloser
+        if gapcloser and gapcloser.route == "ont_racon":
+            return ("tgsgapcloser", "minimap2", "getopt", "racon")
+    if method_name == _BASE_POLISH_METHOD:
+        base_polish = run_config.base_polish
+        if base_polish and base_polish.read_platform is not None:
+            return ("minimap2", "racon")
     if method_name != _TRIO_HIFIASM_METHOD or not trio_enabled(run_config):
         return ()
     registry = load_descriptor_registry()

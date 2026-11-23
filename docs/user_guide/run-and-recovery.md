@@ -49,7 +49,7 @@ fastp 参数即可按每个 lane 的 R1/R2 执行，不要求 long reads。Hi-C 
 
 使用有界且符合工具要求的输入，实际调用适用的 SeqKit、Jellyfish/GenomeScope2、Flye 或所选兼容组装器、purge_dups、QUAST、BUSCO、AutoHiC、TGS-GapCloser、Racon/minimap2。检查冻结命令/输入身份、退出状态、必需原生产物、收集、索引、Ledger 结果、失败/恢复。版本/help 探测不够。记录版本、数据来源/校验和、资源限制；不要求冒烟数据产生优秀生物学组装。
 
-已有真实入口包括显式选择 SeqKit、[可选 TGS-GapCloser 冒烟](#hifi-gap-closing-from-an-existing-assembly)、可选 Racon/minimap2 合成 HiFi 切片：
+已有真实入口包括显式选择 SeqKit、[可选 TGS-GapCloser 冒烟](#hifi-gap-closing-from-an-existing-assembly)、可选 Racon/minimap2 合成 HiFi 切片；ONT 路线沿用同一直接 CLI 和 route 字段：
 
 ```bash
 python -m pytest -q -m real_tool \
@@ -184,7 +184,7 @@ occurrence 仍检查前一交付的输入和自身交接。最终 Review 按冻�
 
 <a id="hifi-gap-closing-from-an-existing-assembly"></a>
 
-## 从已有组装进行 HiFi 补缺口
+## 从已有组装进行 GapCloser（HiFi 或 ONT）
 
 使用 [manifest](../examples/gapcloser_manifest.template.yaml) 和 [RunConfig](../examples/gapcloser_run_config.template.json) 完成独立 GapCloser，不重跑 Assembly、Hi-C、T2T：
 
@@ -193,13 +193,63 @@ cp docs/examples/gapcloser_manifest.template.yaml /server/path/manifest.yaml
 cp docs/examples/gapcloser_run_config.template.json /server/path/run_config.json
 ```
 
-替换组装/读段路径、会话 ID，提供完整当前 HiFi 集。活动主机配置（默认 `config/envs.yaml`）须把 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser 1.2.1、minimap2、GNU getopt（不是 macOS BSD）的环境。默认 advisor 模板还需 `gapcloser.eval.quast` 环境和 LLM 端点，通过缺口/填补报告与 QUAST 反馈推荐参数；不需 BUSCO 数据库。显式 `deterministic_baseline` 才使用操作者设置执行单轮，不调用 LLM 或 QUAST，不称最优 HiFi 推荐。
+替换组装/读段路径、会话 ID，并让 manifest 的长读段平台与 RunConfig 路由一致：`gapcloser.route=hifi_no_error_correction` 选择完整当前 PacBio HiFi 集，`gapcloser.route=ont_racon` 选择 ONT 集。活动主机配置（默认 `config/envs.yaml`）须把 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser 1.2.1、minimap2、GNU getopt（不是 macOS BSD）的环境；选择 `ont_racon` 时同一方法环境还须提供 Racon，条件预检会检查它。默认 advisor 模板还需 `gapcloser.eval.quast` 环境和 LLM 端点，通过缺口/填补报告与 QUAST 反馈推荐参数；不需 BUSCO 数据库。显式 `deterministic_baseline` 才使用操作者设置执行单轮，不调用 LLM 或 QUAST，不称最优推荐。
 
 工具生成候选 FASTA、原生片段细节、索引校验报告，测量缺口/长度变化与复制片段一致性，不是 QV 或改善。用 review 或请求绑定文件执行 accept_candidate、keep_prior_assembly、stop_human_review。本节人工验收配置不自动采纳；完成后 inspect 报告最终采纳/复用组装。无内部 N 缺口则不调用工具，复用输入。
 
-此处不支持 ONT/CLR/CycloneSEQ/未知/混合读段。完整工作流推荐不保证输入兼容，应明确省略不支持 occurrence；Base Polish 当前也要求 HiFi。独立质量评估需显式追加 Review 并配置工具、数据库、物种。精确范围见[GapCloser 契约](../architecture/reference/stage-contracts.md#8-gapcloser)。
+字段省略时保持旧行为：GapCloser 要求完整当前集合为纯 HiFi，Base Polish 要求完整当前集合为纯 HiFi。显式路由只消费选定平台子集；不存在所选平台、平台混用或未知平台时在冻结/预检阶段失败，不静默重分类。GapCloser 输入没有内部 `N` 时合法跳过工具并复用输入。独立质量评估需显式追加 Review 并配置工具、数据库、物种。精确范围见[GapCloser 契约](../architecture/reference/stage-contracts.md#8-gapcloser)。
 
-配置主机可显式运行真实工具合成冒烟：冻结示例、运行 Inventory/GapCloser、关闭 SQLite，再经 CLI 恢复和最终 inspect。活动环境注册表需将 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser/minimap2/GNU getopt 的 Conda 环境；Racon 切片对应 `base_polish.racon`，需 minimap2/Racon。沿用正式运行的注册表和冻结解析，不使用 pytest 解释器的环境前缀：
+下面是一个 ONT-only 的已有 scaffold 样例。它仍由操作者为每个样本分别写 `manifest.yaml` 和 `run_config.json`，然后用同一个 CLI 启动；这里不要求 TUI，也不重跑 Assembly：
+
+`manifest.yaml`
+
+```yaml
+session_id: ont-finishing-YYYYMMDD-a
+sample_id: ont_sample
+assets:
+  - asset_type: assembly_fasta_registered
+    paths: [/server/path/verified_assembly.fasta]
+    format: fasta
+    compression: none
+    metadata:
+      source: replace-with-assembler-or-accession
+  - asset_type: raw_long_reads
+    paths: [/server/path/sample.ont.fastq.gz]
+    format: fastq
+    compression: gzip
+    platform: ont
+```
+
+`run_config.json`
+
+```json
+{
+  "requested_stages": [
+    {"stage": "gapcloser", "allow_local_execution": true},
+    {"stage": "base_polish", "allow_local_execution": true}
+  ],
+  "gapcloser": {
+    "route": "ont_racon",
+    "threads": 16,
+    "recommendation_mode": "deterministic_baseline"
+  },
+  "base_polish": {
+    "read_platform": "ont",
+    "threads": 16,
+    "recommendation_mode": "deterministic_baseline"
+  },
+  "review_policy": {"max_blocked_seconds": -1}
+}
+```
+
+```bash
+gene-agent run --manifest /server/path/manifest.yaml \
+  --run-config /server/path/run_config.json --data-dir /server/path/data
+```
+
+如果用户同时提供 HiFi 和 ONT，则显式路由负责分配读段；不要把 ONT 读段伪装成 HiFi。若不写 `route` 或 `read_platform`，不要把混合集合交给旧的省略字段行为。
+
+配置主机可显式运行真实工具合成冒烟：冻结示例、运行 Inventory/GapCloser、关闭 SQLite，再经 CLI 恢复和最终 inspect。活动环境注册表需将 `gapcloser.tgs_gapcloser` 映射到含 TGS-GapCloser/minimap2/GNU getopt 的 Conda 环境；`ont_racon` 路线还需该方法环境提供 Racon。Racon 切片对应 `base_polish.racon`，需 minimap2/Racon。沿用正式运行的注册表和冻结解析，不使用 pytest 解释器的环境前缀：
 
 ```bash
 python -m pytest -q -m real_tool tests/test_gapcloser.py -k real_tgs
@@ -217,8 +267,8 @@ python -m pytest -q -m real_tool tests/test_gapcloser.py -k real_tgs
 |---|---|---|---|
 | `hic` | [hic](../examples/hic_run_config.template.json) | [hic](../examples/hic_manifest.template.yaml) | AutoHiC、收集、采纳、分离恢复 |
 | `dedup` | [dedup](../examples/dedup_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | purge_dups 顾问多轮、早先候选采纳、保留源 |
-| `gapcloser` | [gapcloser](../examples/gapcloser_run_config.template.json) | [gapcloser](../examples/gapcloser_manifest.template.yaml) | TGS 与采纳/无缺口复用 |
-| `base-polish` | [base_polish](../examples/base_polish_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | Racon 与成对最终 QUAST/BUSCO |
+| `gapcloser` | [gapcloser](../examples/gapcloser_run_config.template.json) | [gapcloser](../examples/gapcloser_manifest.template.yaml) | HiFi 无纠错或 ONT+Racon 路由、采纳/无缺口复用 |
+| `base-polish` | [base_polish](../examples/base_polish_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | HiFi/ONT 子集 Racon 与成对最终 QUAST/BUSCO |
 | `t2t` | [t2t](../examples/t2t_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | 端部延长证据、补丁采纳/保留 |
 | `finishing` | [finishing](../examples/finishing_run_config.template.json) | [hifi_finishing](../examples/hifi_finishing_manifest.template.yaml) | GapCloser → T2T → Base Polish → Review，不重跑上游 |
 | `review` | [assembly_review](../examples/assembly_review_run_config.template.json) | [existing_assembly](../examples/existing_assembly_manifest.template.yaml) | 已有组装仅 QUAST/BUSCO |
@@ -251,7 +301,7 @@ cp -n "docs/examples/${config_stem}_run_config.template.json" "$acceptance_work/
 **先停下编辑两个文件，再执行下一段。** 替换唯一 session_id、sample ID、真实物种、全部绝对输入路径。来源用 `sha256sum /absolute/source/assembly.fasta` 并将摘要/源会话记入资产 metadata；只是注记，不绕过 Inventory 字节验证。format、compression、平台必须匹配文件。保留所选数据集全部所需读段，不只列首文件隐藏其他成员。使用有效小数据，不任意截断 FASTQ。
 
 - Hi-C 需同样本 R1/R2、AutoHiC 包/模型及完整工具闭包。已知时设置真实的 `hic_scaffolding.autohic_parameters.restriction_enzyme`，否则参数门解析；本切片无评估数据库。
-- Base Polish/finishing 需 HiFi、真实物种、minimap2/Racon、QUAST/BUSCO 与主机 BUSCO/NCBI。两模板含最终 Review，不能删掉再声称质量验收。
+- Base Polish/finishing 需选定的 `pacbio_hifi` 或 `ont` 读段、真实物种、对应 minimap2/Racon、QUAST/BUSCO 与主机 BUSCO/NCBI；省略 `read_platform` 时仍需完整纯 HiFi 集。两模板含最终 Review，不能删掉再声称质量验收。
 - T2T 需读段和验证的物种/基序。已知时填 `shared_parameters.species_facts.telomere_motif`（及适当 ploidy），否则用持久 resolver；顾问根据端部测量与历次结果推荐阈值。auto_patch 不代表自动采纳。此切片无最终 QUAST/BUSCO，需要时另用 review。
 - GapCloser 无缺口复用合法，但没执行 TGS；T2T 无支持延长也不是 bug 或成功延长证明。真实工具执行后保留源仍算执行覆盖。
 - 保持人工门 `max_blocked_seconds: -1`；配置的 LLM resolver 仍需端点，server_check.sh 不检查它。
@@ -361,11 +411,11 @@ Base-polish/finishing：执行过 polishing 后，最终 Review 检查源与所�
 
 这是**最后一层**。先完成上述代码、小工具、小 contig、独立切片；模板存在不证明前置已通过。
 
-复制[完整 manifest](../examples/hifi_complete_manifest.template.yaml)和[RunConfig](../examples/hifi_complete_run_config.template.json)到服务器本地。路线含 Base Polish 后最终 Review。编辑全部路径、样本身份、大小先验、物种，提供完整当前 HiFi 与明确 Hi-C R1/R2。不把 ONT/CLR/CycloneSEQ 重标 HiFi。
+复制[完整 manifest](../examples/hifi_complete_manifest.template.yaml)和[RunConfig](../examples/hifi_complete_run_config.template.json)到服务器本地。该模板显式使用 `gapcloser.route=hifi_no_error_correction` 和 `base_polish.read_platform=pacbio_hifi`，路线含 Base Polish 后最终 Review。编辑全部路径、样本身份、大小先验、物种，提供完整当前 HiFi 与明确 Hi-C R1/R2。不把 ONT/CLR/CycloneSEQ 重标 HiFi；ONT-only 或混合材料请按上面的显式 ONT 路由单独写本样本 manifest/RunConfig。
 
 模板等待人工决策（`max_blocked_seconds: -1`）。只有真实样本和目标单倍型表示适合 purge 时，才把 `assembly_dedup.automatic_purge_approved` 设为 `true`，否则 Dedup 保留源，验收报告执行覆盖不完整。已知时在 `hic_scaffolding.autohic_parameters.restriction_enzyme` 中设置真实 Hi-C 酶，在 `shared_parameters.species_facts` 中设置实际倍性和端粒基序，否则用既有批准 resolver 门，不猜事实消除暂停。Assembly 仍阶段选择方法/参数；`assembly.case_source` 可指向服务器活动的 v5 导出案例目录。
 
-按部署指南准备环境、AutoHiC、BUSCO/NCBI。Base Polish 增加 Racon 1.5.x 与 minimap2，GapCloser 需 TGS/GNU getopt。然后：
+按部署指南准备环境、AutoHiC、BUSCO/NCBI。Base Polish 增加 Racon 1.5.x 与 minimap2，GapCloser 需 TGS/GNU getopt；若改用 `gapcloser.route=ont_racon`，GapCloser 方法环境也增加 Racon。然后：
 
 ```bash
 bash scripts/server_check.sh /server/path/run_config.json

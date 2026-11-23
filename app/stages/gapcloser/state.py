@@ -1,4 +1,4 @@
-"""Strict compact cursor for the HiFi gap-closing lifecycle."""
+"""Strict compact cursor for the TGS-GapCloser lifecycle."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -7,6 +7,7 @@ from pydantic import ConfigDict, TypeAdapter, with_config
 from typing_extensions import TypedDict
 
 from app.schemas.artifacts import ArtifactRefJson
+from app.schemas.run_config import GapCloserRoute
 from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import update_validated_stage_output, validated_stage_output
 from app.stages.finishing.state import FinishingCursor
@@ -27,6 +28,7 @@ class GapCloserStageCursor(TypedDict, total=False):
     env_target: str
     missing_tools: list[str]
     method_name: str
+    route: GapCloserRoute | None
     threads: int
     min_identity: float
     min_match: int

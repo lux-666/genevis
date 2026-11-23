@@ -26,21 +26,21 @@
 
 ### GapCloser 代表性样本验收与含噪读段路线
 
-已实现的 TGS-GapCloser 切片只接受明确分类的 HiFi 读段，校验原生产物，并要求持久门禁采纳（人工或零等待自动，遵循[等待模式矩阵](../topics/review-and-resume.md#foreground-review-policy)）。测试使用 fixture 可执行文件覆盖共享生命周期，并提供可选真实二进制合成缺口检查；两者都不是代表性生物样本，也不能证明共识准确性改善。没有声明 ONT/CLR/CycloneSEQ 校正路线。Base Polish 在下方有独立 HiFi-only 契约。
+GapCloser 通过 `gapcloser.route` 选择 `hifi_no_error_correction`（PacBio HiFi）或 `ont_racon`（ONT + Racon），只消费所选平台的读段子集并校验原生产物；字段省略时保持旧的完整纯 HiFi 约束。所有路线都要求持久门禁采纳（人工或零等待自动，遵循[等待模式矩阵](../topics/review-and-resume.md#foreground-review-policy)）。选定 ONT 路线时，GapCloser 方法环境的条件预检还必须找到 Racon。测试使用 fixture 可执行文件覆盖共享生命周期，并提供可选真实二进制合成缺口检查；两者都不是代表性生物样本，也不能证明共识准确性改善。Base Polish 在下方有独立的平台选择契约。
 
 - 当前证据：`app/stages/gapcloser/`、`tests/test_gapcloser.py`。
 - 契约所有者：[GapCloser](stage-contracts.md#8-gapcloser)。
-- 关闭条件：在已配置主机上运行代表性 scaffold/HiFi 数据集，检查 gap-detail 报告，独立评估质量，并记录采用来源和决定。其他平台须另行接受一条路线。
+- 关闭条件：在已配置主机上分别运行代表性 scaffold/HiFi 与 scaffold/ONT 数据集，检查 gap-detail 报告，独立评估质量，并记录采用来源和决定。这里的 fixture 或合成缺口测试不代替真实工具/样本验收。
 
 <a id="base-polish-representative-sample-acceptance-and-independent-accuracy"></a>
 
 ### Base Polish 代表性样本验收与独立准确性
 
-仅 HiFi 的 minimap2/Racon 路线、成对前后比对证据、持久门禁采纳/源保留以及最终成对 QUAST/BUSCO 评估已实现。fixture 可执行测试证明进程契约，不证明生物学正确性。同一批用于校正的读段不能建立独立共识 QV。
+`base_polish.read_platform` 选择 `pacbio_hifi` 或 `ont` 子集，分别使用 minimap2 `map-hifi` 或 `map-ont` 与 Racon；字段省略时保持旧的完整纯 HiFi 约束。成对前后比对证据、持久门禁采纳/源保留以及最终成对 QUAST/BUSCO 评估已实现。fixture 可执行测试证明进程契约，不证明生物学正确性。同一批用于校正的读段不能建立独立共识 QV。
 
 - 当前证据：`app/stages/base_polish/`、`tests/test_base_polish.py`、`app/diagnostics/route_acceptance.py`。
 - 契约所有者：[Base Polish](stage-contracts.md#10-base-polish)。
-- 关闭条件：先运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整工作流。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
+- 关闭条件：先为每个选定平台运行真实 Racon/minimap2 冒烟和从已有组装开始的独立 Base Polish 切片，比较两个候选并记录采纳或保留；底层通过后，再按[验收顺序](../../user_guide/run-and-recovery.md#acceptance-order-code-tests-before-real-end-to-end-runs)执行完整工作流。若无独立真值数据支持，独立准确性仍未测量。开发主机缺少工具是部署前置条件，不是方法代码缺陷。
 
 ### T2T 构建与验证的工程边界
 

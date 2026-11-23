@@ -733,7 +733,19 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
     original = source(state, stage)
     maximum = maximum_attempts(state, stage)
     quast = ArtifactRef.model_validate(f["quast_ref"])
-    members = resolve_long_read_members(state) if stage != "t2t" else []
+    read_selection: dict[str, Any] = {}
+    if stage == "gapcloser" and cursor.get("route") is not None:
+        from app.stages.gapcloser.nodes import resolve_gapcloser_read_members
+
+        members = resolve_gapcloser_read_members(state)
+        read_selection = {"route": cursor["route"]}
+    elif stage == "base_polish" and cursor.get("read_platform") is not None:
+        from app.stages.base_polish.nodes import resolve_polish_read_members
+
+        members = resolve_polish_read_members(state)
+        read_selection = {"platform": cursor["read_platform"]}
+    else:
+        members = resolve_long_read_members(state) if stage != "t2t" else []
     evidence = {
         "stage": stage,
         "max_attempts": maximum,
@@ -768,6 +780,8 @@ def recommend(state: TopLevelState, stage: str) -> StateUpdate:
             "kmer_completeness": None,
         },
     }
+    if read_selection:
+        evidence["read_selection"] = read_selection
     if (cursor.get("review_policy") or {}).get("max_blocked_seconds") == 0:
         evidence["execution_policy"] = "run_valid_outputs"
     recommender = FinishingRecommender(

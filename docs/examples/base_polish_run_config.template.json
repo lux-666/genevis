@@ -13,6 +13,7 @@
     "max_blocked_seconds": -1
   },
   "base_polish": {
+    "read_platform": "pacbio_hifi",
     "threads": 16,
     "recommendation_mode": "advisor",
     "recommendation_output_method": "json_schema",

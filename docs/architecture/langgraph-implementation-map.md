@@ -31,15 +31,15 @@
 | Assembly Dedup：去冗余 | purge_dups、minimap2；QUAST 比较 | 深度/自比对策略；参数顾问循环；多候选比较；采纳或保留输入 | 暂无新增算法设计；推荐知识覆盖按方法继续补全 |
 | Assembly Review：组装评估 | QUAST、BUSCO | 可重复放置的评估阶段；候选比较；最终源稿/校正稿评估；人工采纳 | 独立共识 QV 方法未接入；不提供自动染色体结构认证 |
 | Hi-C Scaffolding：挂载 | AutoHiC，内部调用 Juicer、3D-DNA | 参数审批、执行、产物与输入展示；成功/失败后提交人工 FASTA；可选 `.hic`；同会话采用并恢复下游 | 绕过 AutoHiC 的独立准备模式、Juicer/3D-DNA 子阶段恢复、自动中间文件回收和磁盘预算尚未实现 |
-| GapCloser：补洞 | TGS-GapCloser、minimap2；QUAST 比较 | HiFi 填内部缺口；坐标与片段校验；顾问循环；采纳或保留输入；无缺口复用 | ONT/CLR/CycloneSEQ 读段路线未实现，需另行设计 |
+| GapCloser：补洞 | TGS-GapCloser、minimap2；ONT 路线额外使用 Racon；QUAST 比较 | `hifi_no_error_correction` 或 `ont_racon` 路由；坐标与片段校验；顾问循环；采纳或保留输入；无缺口复用 | CLR/CycloneSEQ/未知平台未接入；代表性样本验收仍需单独完成 |
 | T2T：端粒处理 | minimap2、pyspoa、自有扫描/重建逻辑 | 基序解析、端部扫描、支持读段筛选、POA 延伸候选构建、回贴与采纳；无候选保留输入 | 多方法切换、其他候选分组接续、部分补丁独立重新验证尚未接入；阶段名称不代表完整 T2T 质量 |
-| Base Polish：碱基校正 | minimap2、Racon；QUAST 比较 | HiFi 单轮校正；源/候选成对比较；顾问循环；人工采纳或保留；接最终 Review | 其他读段平台的校正路线未实现，需另行设计 |
+| Base Polish：碱基校正 | minimap2、Racon；QUAST 比较 | `pacbio_hifi` 或 `ont` 子集单轮校正；平台预设；源/候选成对比较；顾问循环；人工采纳或保留；接最终 Review | 其他读段平台未接入；代表性样本验收仍需单独完成 |
 
 <a id="v1-scope"></a>
 
 ## v1.0 收口范围
 
-v1.0 以现有已接入工具、单主组装资源、冻结阶段顺序和 Hi-C 人工接续为范围。GapCloser/Base Polish 的 HiFi 限制明确保留。人工提交即采用，不增加 AGP、`.assembly` 配套或染色体结构检查。上表后续扩展不自动成为 v1.0 必做项。
+v1.0 以现有已接入工具、单主组装资源、冻结阶段顺序和 Hi-C 人工接续为范围。GapCloser/Base Polish 的平台路由由 RunConfig 显式选择，字段省略仍保持完整纯 HiFi 兼容行为；ONT 路线要求条件预检验证 Racon。人工提交即采用，不增加 AGP、`.assembly` 配套或染色体结构检查。上表后续扩展不自动成为 v1.0 必做项。
 
 当前开发收口重点是让能力表、可执行配置、人工交接界面和完成报告一致。Hi-C 人工接管后的流程完成与 AutoHiC 工具执行覆盖分别展示；参数错误、无增益、无候选、保留输入和人工提交的结果各自保留。配置复用[完整 HiFi/Hi-C 模板](../examples/hifi_complete_run_config.template.json)和[finishing 模板](../examples/finishing_run_config.template.json)，人工恢复按原冻结计划推进。
 
@@ -75,7 +75,7 @@ v1.0 以现有已接入工具、单主组装资源、冻结阶段顺序和 Hi-C 
 | `route_controller`、`route_from_current_stage` | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/routing.py`；`tests/test_graph_routing.py`、`tests/test_routing_contracts.py` |
 | 冻结 occurrence 路由与结算 | `wired` | `implemented-no-process` | `tested` | `none` | 每条阶段终态路径返回冻结 occurrence 绑定的明确 `workflow_step_outcome`；控制器/恢复共享边界校验它，先记录不可变交付再写单例阶段终态，拒绝游标/路由标记推断。`app/schemas/state.py`、`app/control/workflow_plan.py`、`app/control/occurrence_settlement.py`、`app/graph/builder.py`、`app/graph/routing.py`；`tests/test_graph_routing.py`、`tests/test_routing_contracts.py`、`tests/test_state_schema.py`、`tests/test_terminal_finalizer.py` |
 | Review occurrence 位置策略 | `wired` | `implemented-no-process` | `tested` | `none` | RunConfig 保留可选字面 Review 位置，序列分析只绑定明确 occurrence。确定性、manifest 和 LLM 规划共用含 GapCloser、Base Polish、最终 Review 的可编辑完整推荐。`app/workflow.py`、`app/schemas/run_config.py`、`app/entrypoints/tui_intake.py`、`app/entrypoints/ask_planner.py`；`tests/test_run_config.py`、`tests/test_workflow_plan.py`、`tests/test_tui_intake.py`、`tests/test_ask_plan.py` |
-| Base Polish 采纳边界 | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对证据、持久采纳/保留/停止；`app/stages/base_polish/`；`tests/test_base_polish.py` |
+| Base Polish 采纳边界 | `wired` | `executable` | `tested` | `known-gap` | HiFi/ONT Racon 路由、成对证据、持久采纳/保留/停止；`app/stages/base_polish/`；`tests/test_base_polish.py`；代表性样本验收待完成 |
 | SQLite/memory checkpoint 选择和持久恢复 | `wired` | `implemented-no-process` | `tested` | `none` | `app/graph/checkpointer.py`、`app/control/inspection.py`、`app/control/terminal.py`、`app/control/resume.py`；`tests/test_checkpointer.py`、`tests/test_durable_resume.py` |
 | 前台评审倒计时 | `wired` | `implemented-no-process` | `tested` | `none` | 冻结策略与注册 resolver 进入人工决策共用的类型化意图、持久准备、已验证应用和恢复协议。倒计时仅存在于原附着执行器，后续 review/resume 人工恢复。值与绑定由运行数据契约拥有。`app/review/application.py`、`app/control/resume_transaction.py`、`app/review/approval.py`；`tests/test_review_application.py`、`tests/test_foreground_review_countdown.py`、`tests/test_parameter_persistence_v2.py` |
 | 零等待明确推进 | `wired` | `implemented-no-process` | `tested` | `known-gap` | 无 TTY 的全零新运行、有效产物采用、无新结果沿用、参数错误拒绝、结果后不调用顾问；共用持久意图/应用协议。`app/review/automatic.py`、`tests/test_zero_wait_review.py`。完整父图跨阶段和真实服务器样本验收仍待补齐；恢复仍人工。见[等待矩阵](topics/review-and-resume.md#foreground-review-policy) |
@@ -146,12 +146,12 @@ v1.0 以现有已接入工具、单主组装资源、冻结阶段顺序和 Hi-C 
 | Hi-C `recommend_autohic_parameters` 与审批/重试 | `wired` | `implemented-no-process` 模型/证据流程 | `tested` | `none` | `app/stages/hic_scaffolding/parameters/`；`tests/test_hic_scaffolding.py`、`tests/test_parameter_resolution_validation.py` |
 | Hi-C `autohic` 方法与收集 | `wired` | `executable` | `tested` | `none` | 真实 Runner 和 FASTA/.hic/.assembly/HTML 严格校验，含回放与后期发布失败覆盖。`app/stages/hic_scaffolding/method_application/`；`tests/test_hic_scaffolding.py` |
 | Hi-C `chromosome_assembly_review`、阻塞、采纳恢复 | `wired` | `implemented-no-process` | `tested` | `none` | 工具成功/失败后均可提交人工 FASTA，`.hic` 可选；同会话登记新候选并继续，原失败事实保留。候选/当前资源替换声明 materialized 或 reused 交付。`app/stages/hic_scaffolding/{builder,nodes,manual}.py`；`tests/test_hic_scaffolding.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
-| GapCloser HiFi 执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser 无校正路线、原生坐标校验、持久门禁采纳（零等待自动）、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
+| GapCloser 路由执行与采纳 | `wired` | `executable` | `tested` | `known-gap` | TGS-GapCloser HiFi 无校正/ONT+Racon 路由、原生坐标校验、持久门禁采纳（零等待自动）、materialized/reused 交付；代表样本验收待完成。`app/stages/gapcloser/`；`tests/test_gapcloser.py` |
 | T2T 输入/基序：`resolve_inputs -> resolve_telomere_motif` | `wired` | `implemented-no-process`，条件模型调用 | `tested` | `none` | `app/stages/t2t/parameters/workflow.py`；`tests/test_t2t_motif.py` |
 | T2T 单轮 schema-3 策略请求与批准、`prepare_parameters` | `wired` | `implemented-no-process` 策略/证据流程 | `tested` | `none` | `app/stages/t2t/parameters/`；`tests/test_t2t.py`、`tests/test_parameter_recommendation_v3_contract.py` |
 | T2T 扫描、映射、POA 构建与回贴统计 | `wired` | `executable` | `tested` | `none` | `scan_assembly`、`prepare_reads`、`scan_reads`、`alignment`；`app/stages/t2t/{nodes,algorithms,reconstruction,script}.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py` |
 | T2T 补丁、验证、报告、采纳门、commit/fail | `wired` | `implemented-no-process` | `tested` | `none` | 候选与当前资源替换声明 materialized/reused 交付，共享结算验证索引产物；顾问诊断、方法适用性和预期新证据进入 recommendation/assessment，但未接入方法切换。`apply_patches`、`validate_patched`、`report`、`gate_review`；`app/stages/t2t/nodes.py`、`app/stages/finishing/advisor.py`；`tests/test_t2t.py`、`tests/test_t2t_output_contract.py`、`tests/test_assembly_candidate_bundle.py`、`tests/test_review_resume.py` |
-| Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi Racon、成对 minimap2 证据、持久门禁交接；PAF 校验使用长度元数据及一次读取的 scaffold 长度表，实际序列仅用于汇总和修改比较；`tests/test_base_polish.py`、`tests/test_sequence_index.py`。真实样本耗时和独立准确性仍待验 |
+| Base Polish | `wired` | `executable` | `tested` | `known-gap` | HiFi/ONT Racon、平台预设、成对 minimap2 证据、持久门禁交接；PAF 校验使用长度元数据及一次读取的 scaffold 长度表，实际序列仅用于汇总和修改比较；`tests/test_base_polish.py`、`tests/test_sequence_index.py`。真实样本耗时和独立准确性仍待验 |
 
 <a id="registered-method-inventory"></a>
 
@@ -179,8 +179,8 @@ v1.0 以现有已接入工具、单主组装资源、冻结阶段顺序和 Hi-C 
 | `assembly_review.eval.quast` | 已注册 | `executable` | 已实现 | `tests/test_assembly_review.py` | 可复用 Review 评估器，包括请求时最终成对 Review；不等于独立 QV |
 | `assembly_review.eval.busco` | 已注册 | `executable` | 已实现 | `tests/test_assembly_review.py`、`tests/test_database_resolution.py` | manifest NCBI 学名选择兼容已装 lineage；RunConfig lineage 仅断言，路径/版本/来源取冻结主机注册表 |
 | `hic_scaffolding.candidate.autohic` | 已注册且有目录 | `executable` | 已实现 | `tests/test_hic_scaffolding.py` | 收集必须有全部四项评审产品 |
-| `gapcloser.tgs_gapcloser` | 已注册 | `executable` | 已实现 | `tests/test_gapcloser.py` | 仅 HiFi，采用遵循等待模式矩阵；坐标一致性不是 QV |
-| `base_polish.racon` | 已注册 | `executable` | 已实现 | `tests/test_base_polish.py` | 仅 HiFi；成对读段一致性不是独立 QV；采纳或保留源 |
+| `gapcloser.tgs_gapcloser` | 已注册 | `executable` | 已实现 | `tests/test_gapcloser.py` | HiFi 无纠错或 ONT+Racon 路由，采用遵循等待模式矩阵；坐标一致性不是 QV |
+| `base_polish.racon` | 已注册 | `executable` | 已实现 | `tests/test_base_polish.py` | HiFi 或 ONT 平台预设；成对读段一致性不是独立 QV；采纳或保留源 |
 | `t2t.alignment.minimap2` | 已注册且有目录 | `executable` | 已实现 | `tests/test_t2t.py`、`tests/test_t2t_output_contract.py` | 单次冻结脚本覆盖构建与回贴，完整候选绑定；未做真实工具或样本验收 |
 
 `tests/test_registry_executable_invariant.py` 从导入 `MethodExecutionLifecycle` 绑定导出本地 ID，证明覆盖每个本地方法，并验证共享 freeze/run/collect 与外层路线。从生产规划目录导出 planner-only 集合，沿 `read_qc.length_filter.skip` 到 raw 提交，证明不创建过滤冻结尝试、Runner 调用或方法尝试事件。两集合互斥，并集等于完整注册表。
@@ -204,8 +204,8 @@ v1.0 以现有已接入工具、单主组装资源、冻结阶段顺序和 Hi-C 
 | Assembly：NextDenovo | 已实现 | 已实现，共享案例消费者 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 有原生来源设置；不能机械翻译外部工具参数 |
 | AutoHiC | 已实现 | 已实现 | 顾问模式需持久批准，遵循等待模式矩阵 | 已实现 | 已实现 | 缺声明产品时收集拒绝；终态收集失败无自动重试 |
 | T2T/minimap2 阈值 | 已实现 | 输入测量、过滤前分布/拒绝原因、来源去重支持数与回贴指标 | 持久门禁批准，遵循等待模式矩阵 | 独立尝试与冻结输入 | 有界顾问循环；另有初始 schema-3 基线 | 实际补丁/保留源；无独立 QV |
-| GapCloser | 已实现 | 缺口与 QUAST/填补证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮独立冻结 | max_attempts 有界参数尝试 | HiFi-only TGS-GapCloser；另有单轮基线 |
-| Base Polish | 已实现 | QUAST、成对 PAF/FASTA/版本证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮从原组装独立冻结 | max_attempts 有界配置尝试 | 每候选一轮 HiFi Racon；无独立 QV |
+| GapCloser | 已实现 | 缺口与 QUAST/填补证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮独立冻结 | max_attempts 有界参数尝试 | HiFi 无纠错或 ONT+Racon 路由；另有单轮基线 |
+| Base Polish | 已实现 | QUAST、成对 PAF/FASTA/版本证据顾问 | 持久门禁批准，遵循等待模式矩阵 | 每轮从原组装独立冻结 | max_attempts 有界配置尝试 | 每候选一轮 HiFi 或 ONT Racon；无独立 QV |
 | Assembly Dedup | purge 策略、预设、`end_only` 有界配置 | 已实现结构化顾问与累积 QUAST 证据；另有确定性基线 | `dedup_recommendation`；正数倒计时可自动 follow 有效建议，零等待执行明确推进策略；人工也可显式选择 | 每次尝试独立冻结并从原始草稿执行 | `max_attempts` 有界循环 | 独立任务契约，非 schema-3 L2；真实工具验收待完成 |
 | Read QC、Survey、Review | 注册表默认方法与静态/操作者参数 | 无 schema-3 参数推荐；Review 可另有决策推荐 | 按各阶段门禁 | 可执行方法使用共享尝试冻结 | 按阶段契约 | 默认方法内部拥有，不暴露为用户方法选择字段 |
 | Inventory | 不需要 | 不需要 | 仅输入歧义评审 | 不适用 | 不适用 | 不应推断存在推荐器 |
@@ -229,7 +229,7 @@ Assembly 路线选择也使用共享 StructuredRecommender 调用/解析边界�
 
 contig 模板显式启用 Dedup advisor/json_schema/三次尝试上限；审核策略沿用既有配置。三轮循环、响应回放、预算/重复配置、源候选保护仍由 `tests/test_dedup_recommendation_loop.py` 覆盖。独立 QUAST/BUSCO、生物学质量及推荐收益计为待验，不能由 fixture 关闭。
 
-新菌种的 PacBio 必须先确定 HiFi/CLR，再复用规范 manifest、contig RunConfig 和 `gene-agent run`/`resume`。Illumina DNA 已进入 Read QC/Genome Survey，短读段存在时优先用于 k-mer 调查；没有新增短读段组装或 polish。Hi-C 可提供推荐上下文，仅明确批准的 hifiasm phasing 或独立 AutoHiC 阶段实际消费读对。ONT/CycloneSEQ 没有对应输入时单列待验，不能由 PacBio 菌种代验。模板中的大小、倍性、学名均是示例，执行时按材料替换。
+新菌种的 PacBio 必须先确定 HiFi/CLR，再复用规范 manifest、contig RunConfig 和 `gene-agent run`/`resume`。Illumina DNA 已进入 Read QC/Genome Survey，短读段存在时优先用于 k-mer 调查；没有新增短读段组装或 polish。Hi-C 可提供推荐上下文，仅明确批准的 hifiasm phasing 或独立 AutoHiC 阶段实际消费读对。ONT 可通过显式 GapCloser/Base Polish 路由消费，CycloneSEQ 仍没有对应 finishing 路线，需单列待验，不能由 PacBio 菌种代验。模板中的大小、倍性、学名均是示例，执行时按材料替换。
 
 GapCloser、T2T、Base Polish 的已报告 smoke 与阶段/串联验收欠账由[一致性记录](reference/conformance.md)维护。代表性样本验收须保留输入身份、工具版本、运行目录、实际命令、评估和采纳记录。
 
@@ -241,8 +241,8 @@ GapCloser、T2T、Base Polish 的已报告 smoke 与阶段/串联验收欠账由
 
 | 产品能力 | 接线 | 实现 | 验证 | 欠账 | 证据与所有者 |
 |---|---|---|---|---|---|
-| 染色体 scaffolding 后补缺口 | `wired` | `executable` | `tested` | `known-gap` | HiFi-only TGS-GapCloser；代表样本验收待完成；`tests/test_gapcloser.py`；[阶段](reference/stage-contracts.md#8-gapcloser) |
-| 自动碱基抛光 | `wired` | `executable` | `tested` | `known-gap` | 仅 HiFi，代表样本验收待完成；`tests/test_base_polish.py`；[阶段](reference/stage-contracts.md#10-base-polish) |
+| 染色体 scaffolding 后补缺口 | `wired` | `executable` | `tested` | `known-gap` | HiFi 无纠错或 ONT+Racon TGS-GapCloser；代表样本验收待完成；`tests/test_gapcloser.py`；[阶段](reference/stage-contracts.md#8-gapcloser) |
+| 自动碱基抛光 | `wired` | `executable` | `tested` | `known-gap` | HiFi/ONT 平台预设；代表样本验收待完成；`tests/test_base_polish.py`；[阶段](reference/stage-contracts.md#10-base-polish) |
 | Base Polish 后最终 Review | `wired` | `executable` | `tested` | `known-gap` | 源/抛光候选成对 QUAST/BUSCO；[阶段](reference/stage-contracts.md#10-base-polish) |
 | clean 读段/已有组装的 TUI 中途入口 | `wired` | `implemented-no-process` | `tested` | `none` | [TUI 中途入口](topics/tui-midstage-entry.md)；`tests/test_tui_midstage.py` 覆盖采集、冻结、Inventory 交付和恢复 |
 

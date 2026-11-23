@@ -522,7 +522,9 @@ def prepare_session_inputs(
             run_config,
             declarations.read_declarations,
         )
-        _validate_workflow_input_contract(manifest, run_config)
+        _validate_workflow_input_contract(
+            manifest, run_config, declarations.read_declarations
+        )
     except FrozenInputValidationError:
         raise
     except (ValidationError, ValueError) as exc:
@@ -723,7 +725,9 @@ def validate_frozen_inputs(paths: SessionPaths) -> FrozenInputBundle:
             run_config,
             declarations.read_declarations,
         )
-        _validate_workflow_input_contract(manifest, run_config)
+        _validate_workflow_input_contract(
+            manifest, run_config, declarations.read_declarations
+        )
     except (FrozenInputValidationError, ValueError) as exc:
         raise FrozenInputIntegrityError(
             f"frozen manifest/run-config biological validation is invalid: {exc}"
@@ -1064,7 +1068,9 @@ def _validate_review_input_contract(
 
 
 def _validate_workflow_input_contract(
-    manifest: InputManifest, run_config: RunConfig
+    manifest: InputManifest,
+    run_config: RunConfig,
+    read_declarations: Sequence[RegisteredReadDeclaration],
 ) -> None:
     """Reject impossible input chains, without predicting conditional outputs.
 
@@ -1091,6 +1097,12 @@ def _validate_workflow_input_contract(
         spec.resource_type: [a for a in assets if a.asset_type in spec.asset_types]
         for spec in (ASSEMBLY_SPEC, LONG_READS_SPEC, SHORT_READS_SPEC, HIC_READS_SPEC)
     }
+    long_read_platforms = {
+        declaration.platform
+        for declaration in read_declarations
+        if declaration.metadata.get("intake_role")
+        not in {"trio_maternal_reads", "trio_paternal_reads"}
+    }
     # Pair requirements apply to the family selected by the runtime resolver.
     for group in SHORT_READS_SPEC.asset_type_priority_groups:
         preferred = [a for a in available["short_reads"] if a.asset_type in group]
@@ -1101,6 +1113,14 @@ def _validate_workflow_input_contract(
     explicit_size = manifest.genome_size_estimate
     has_size = explicit_size is not None
     bindings = analyze_assembly_sequence(run_config.requested_stage_names())
+    finishing_platforms = {
+        "gapcloser": (
+            run_config.gapcloser.read_platform if run_config.gapcloser else None
+        ),
+        "base_polish": (
+            run_config.base_polish.read_platform if run_config.base_polish else None
+        ),
+    }
     for index, request in enumerate(run_config.requested_stages, start=1):
         stage = request.stage
 
@@ -1113,6 +1133,12 @@ def _validate_workflow_input_contract(
         if index in bindings:
             require(
                 has_assembly, "an input assembly or a prior locally executed Assembly"
+            )
+        selected_platform = finishing_platforms.get(stage)
+        if request.allow_local_execution and selected_platform is not None:
+            require(
+                selected_platform in long_read_platforms,
+                f"registered {selected_platform} long reads for its configured route",
             )
         if stage == "assembly":
             if request.allow_local_execution:
@@ -1162,7 +1188,11 @@ def _validate_workflow_input_contract(
                 and all(a.paired_reads for a in available["hic_reads"]),
                 "explicit paired Hi-C reads",
             )
-        elif stage == "base_polish" and request.allow_local_execution:
+        elif (
+            stage == "base_polish"
+            and request.allow_local_execution
+            and selected_platform is None
+        ):
             require(bool(available["long_reads"]), "offspring long reads for polishing")
 
 

@@ -118,12 +118,15 @@ def _fake_tool(tmp_path: Path) -> str:
     tool = binary / "tgsgapcloser"
     tool.write_text(
         "#!/bin/sh\n"
-        "test -s hifi.fasta || exit 3\n"
+        "test -s hifi.fasta || test -s ont.fasta || exit 3\n"
         "printf '>chr1\\nAAAATTCCCC\\n' > result.scaff_seqs\n"
         "printf '>chr1\\n1\\t4\\tS\\t1\\t4\\n5\\t6\\tF\\n"
         "7\\t10\\tS\\t9\\t12\\n' > result.gap_fill_detail\n"
     )
     tool.chmod(0o755)
+    racon = binary / "racon"
+    racon.write_text("#!/bin/sh\nexit 0\n")
+    racon.chmod(0o755)
     return str(binary) + os.pathsep + os.environ["PATH"]
 
 
@@ -275,6 +278,63 @@ def test_complete_read_set_normalization_or_rejection(
         "member_0_read_0": "AAAATTCCCC",
         "member_1_read_0": "AAAATTCCCC",
     }
+
+
+def test_ont_racon_route_selects_ont_members_and_native_args(tmp_path: Path) -> None:
+    from app.stages.gapcloser.builder import build_stage
+
+    state = _state(tmp_path, second_platform="ont")
+    state["stage_outputs"] = {
+        "gapcloser": {
+            "route": "ont_racon",
+            "env": {"PATH": _fake_tool(tmp_path)},
+        }
+    }
+    result = build_stage().invoke(state)
+    assert result["supervision_state"] == "blocked_human", result
+    cursor = result["stage_outputs"]["gapcloser"]
+    root = Path(state["data_dir"])
+    record = json.loads((root / cursor["input_record_ref"]["path_ref"]).read_text())
+    assert record["route"] == "ont_racon"
+    assert [member["member_id"] for member in record["reads"]] == ["second"]
+    assert record["reads"][0]["platform"] == "ont"
+    normalized = dict(
+        read_sequences(root / record["normalized_reads_ref"]["path_ref"], "fasta")
+    )
+    assert normalized == {"member_0_read_0": "AAAATTCCCC"}
+    scripts = list(root.rglob("run.sh"))
+    assert len(scripts) == 1
+    command = scripts[0].read_text()
+    assert "--tgstype ont" in command
+    assert "--minmap_arg '-x ava-ont'" in command
+    assert "--racon ./racon" in command
+    assert "--ne" not in command
+    assert 'RACON_PATH="$(command -v racon)"' in command
+    assert 'ln -s "$RACON_PATH" racon' in command
+
+
+def test_explicit_hifi_route_filters_mixed_manifest(tmp_path: Path) -> None:
+    from app.stages.gapcloser.builder import build_stage
+
+    state = _state(tmp_path, second_platform="ont")
+    state["stage_outputs"] = {
+        "gapcloser": {
+            "route": "hifi_no_error_correction",
+            "env": {"PATH": _fake_tool(tmp_path)},
+        }
+    }
+    result = build_stage().invoke(state)
+    assert result["supervision_state"] == "blocked_human", result
+    cursor = result["stage_outputs"]["gapcloser"]
+    root = Path(state["data_dir"])
+    record = json.loads((root / cursor["input_record_ref"]["path_ref"]).read_text())
+    assert [member["member_id"] for member in record["reads"]] == ["hifi"]
+    scripts = list(root.rglob("run.sh"))
+    assert len(scripts) == 1
+    command = scripts[0].read_text()
+    assert "--tgstype pb" in command
+    assert "--ne" in command
+    assert "ont.fasta" not in command
 
 
 @pytest.mark.parametrize("corruption", ["hash", "output", "occurrence"])

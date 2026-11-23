@@ -504,6 +504,45 @@ def test_trio_hifiasm_preflight_requires_yak_only_when_trio_enabled(
     assert all("yak" not in command for command in hifiasm_commands)
 
 
+@pytest.mark.parametrize("route", [None, "ont_racon"])
+def test_gapcloser_preflight_requires_racon_for_ont(
+    tmp_path: Path, route: str | None
+) -> None:
+    env_config = tmp_path / "envs.yaml"
+    env_config.write_text(
+        "default: {fallback_env: finishing}\n"
+        "methods:\n"
+        "  gapcloser.tgs_gapcloser:\n"
+        "    required_tools: [tgsgapcloser, minimap2, getopt]\n"
+    )
+    config = RunConfig.model_validate(
+        {
+            "requested_stages": [{"stage": "gapcloser", "allow_local_execution": True}],
+            "gapcloser": {
+                "route": route,
+                "recommendation_mode": "deterministic_baseline",
+            },
+        }
+    )
+
+    def runner(command, **_kwargs):
+        return subprocess.CompletedProcess(command, int(command[-1] == "racon"), "", "")
+
+    def preflight():
+        return preflight_run_readiness(
+            config,
+            effective_methods=effective_method_closure(config),
+            config_path=env_config,
+            runner=runner,
+        )
+
+    if route == "ont_racon":
+        with pytest.raises(RunReadinessError, match="racon"):
+            preflight()
+    else:
+        assert preflight() == ["gapcloser.tgs_gapcloser"]
+
+
 def test_odb12_2_rejects_busco_before_6_1(tmp_path: Path) -> None:
     llm_calls: list[str] = []
 

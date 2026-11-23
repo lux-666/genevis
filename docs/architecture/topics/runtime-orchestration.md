@@ -87,7 +87,7 @@ START -> route_controller -> selected stage subgraph
 
 父图中的每个域节点都是编译阶段子图。阶段可以解析逻辑资源、规划已注册方法、进入共享方法生命周期、发布生物学产物、打开评审门并提交新资源。这些是可用边界，不是十个阶段必须完全相同的序列。
 
-`app/graph/builder.py` 显式注册十个域阶段；子图可组合，但不存在动态插件注册表。`gapcloser` 执行仅 HiFi 的 TGS-GapCloser 路线；`base_polish` 执行仅 HiFi 的 Racon 轮次并保留成对前后证据。结果采用/保留共用持久门禁，人工或自动动作遵循[等待模式矩阵](review-and-resume.md#foreground-review-policy)。恢复只应用于绑定到被中断不可变 occurrence 的决策，不重写剩余计划、固定方法名单或已绑定 Assembly 选择。
+`app/graph/builder.py` 显式注册十个域阶段；子图可组合，但不存在动态插件注册表。`gapcloser` 按 `gapcloser.route` 执行 HiFi 无纠错或 ONT+Racon 的 TGS-GapCloser 路线；`base_polish` 按 `base_polish.read_platform` 执行 HiFi 或 ONT 的 minimap2/Racon 轮次并保留成对前后证据。字段省略时保留旧的完整纯 HiFi 约束。结果采用/保留共用持久门禁，人工或自动动作遵循[等待模式矩阵](review-and-resume.md#foreground-review-policy)。恢复只应用于绑定到被中断不可变 occurrence 的决策，不重写剩余计划、固定方法名单或已绑定 Assembly 选择。
 
 `stage_seeds` 是不可变的阶段范围 RunConfig 投影。每次重复 occurrence 都从同一阶段种子的全新副本及其独立复制的固定方法名单开始；Assembly 种子可不带名单，让 occurrence 在阶段入口依据冻结依赖绑定方法。它绝不复用前一个 occurrence 的完成游标。
 

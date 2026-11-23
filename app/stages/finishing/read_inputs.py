@@ -1,4 +1,4 @@
-"""Shared deterministic read normalization for HiFi finishing tools."""
+"""Shared deterministic read normalization for long-read finishing tools."""
 
 from pathlib import Path
 from typing import Protocol, Sequence

@@ -1,4 +1,4 @@
-"""HiFi Racon correction with paired evidence and explicit manual adoption."""
+"""Long-read Racon correction with paired evidence and explicit adoption."""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def method_outcome(state: TopLevelState) -> MethodOutcome | None:
 
 LIFECYCLE = MethodExecutionLifecycle(
     stage="base_polish",
-    name="HiFi Racon",
+    name="Long-read Racon",
     method_name=METHOD,
     frozen_status="polish_frozen",
     ran_status="polish_ran",
@@ -129,7 +129,7 @@ def enter_base_polish(state: TopLevelState) -> StateUpdate:
             raise ValueError("Base Polish local execution is not authorized")
         candidate = source_candidate(state)
         fasta_records(candidate.primary_output_path)
-        _hifi_members(state)
+        resolve_polish_read_members(state)
         return update(
             state,
             {
@@ -141,12 +141,23 @@ def enter_base_polish(state: TopLevelState) -> StateUpdate:
         return update(state, {"status": "failed", "reason": str(exc)})
 
 
-def _hifi_members(state: TopLevelState) -> list[RuntimeReadMember]:
+def resolve_polish_read_members(state: TopLevelState) -> list[RuntimeReadMember]:
+    """Select the configured platform or require the legacy HiFi-only set."""
     members = resolve_long_read_members(state)
-    if not members or any(member.platform != "pacbio_hifi" for member in members):
-        raise ValueError(
-            "Base Polish first slice requires an exclusively pacbio_hifi read set"
-        )
+    platform = output(state).get("read_platform")
+    if platform is None:
+        if not members or any(member.platform != "pacbio_hifi" for member in members):
+            raise ValueError(
+                "Base Polish first slice requires an exclusively pacbio_hifi read set"
+            )
+    else:
+        if platform not in {"pacbio_hifi", "ont"}:
+            raise ValueError(f"unsupported Base Polish read platform: {platform!r}")
+        members = [member for member in members if member.platform == platform]
+        if not members:
+            raise ValueError(
+                f"Base Polish requires at least one {platform} read member"
+            )
     if any(member.format not in {"fasta", "fastq"} for member in members):
         raise ValueError("Base Polish reads require explicit fasta/fastq format")
     return members
@@ -174,7 +185,7 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
         if loop(state, "base_polish"):
             approved_proposal(state, "base_polish")
         candidate = source_candidate(state)
-        members = _hifi_members(state)
+        members = resolve_polish_read_members(state)
         parameters = BasePolishRunConfig.model_validate(
             {
                 key: dict(cursor)[key]
@@ -182,6 +193,7 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
                 if key in cursor
             }
         )
+        read_platform = parameters.read_platform or "pacbio_hifi"
         env, _, blocked = resolve_method_env(
             dict(cursor),
             stage="base_polish",
@@ -230,13 +242,15 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
             state, "base_polish", *work_parts(state, "base_polish"), "racon"
         )
         work.mkdir(parents=True, exist_ok=True)
-        normalized = work / "hifi.fasta"
+        normalized = work / ("ont.fasta" if read_platform == "ont" else "hifi.fasta")
         write_normalized_fasta(normalized, members)
         verify_input_dependencies(state, dependencies)
         normalized_artifact = _publish(
             state,
             normalized,
-            "base_polish.hifi_reads",
+            "base_polish.ont_reads"
+            if read_platform == "ont"
+            else "base_polish.hifi_reads",
             source_members=[member.model_dump(mode="json") for member in members],
         )
         record = work / "inputs.json"
@@ -252,8 +266,19 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
                     "normalized_reads_ref": normalized_artifact.ref.model_dump(
                         mode="json"
                     ),
-                    "parameters": parameters.model_dump(mode="json"),
-                    "route": "hifi_single_round_racon",
+                    # Keep legacy records byte-compatible: the new optional
+                    # platform field is omitted unless explicitly requested.
+                    "parameters": parameters.model_dump(mode="json", exclude_none=True),
+                    "route": (
+                        "ont_single_round_racon"
+                        if read_platform == "ont"
+                        else "hifi_single_round_racon"
+                    ),
+                    **(
+                        {"read_platform": read_platform}
+                        if parameters.read_platform is not None
+                        else {}
+                    ),
                 },
                 sort_keys=True,
                 indent=2,
@@ -280,6 +305,7 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
             artifact_input_dependency(state, source_artifact.ref, source_artifact.path)
         )
         script = work / "run.sh"
+        minimap_preset = "map-ont" if read_platform == "ont" else "map-hifi"
         script.write_text(
             "\n".join(
                 [
@@ -291,7 +317,7 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
                     f"ln -s {shlex.quote(str(normalized_artifact.path))} reads.fasta",
                     "minimap2 --version > minimap2.version",
                     "racon --version > racon.version",
-                    "minimap2 -x map-hifi -c --eqx --secondary=no "
+                    f"minimap2 -x {minimap_preset} -c --eqx --secondary=no "
                     f"-t {parameters.threads} source.fasta reads.fasta > before.paf",
                     f"racon -u --no-trimming -t {parameters.threads} "
                     f"-w {parameters.window_length} "
@@ -299,7 +325,7 @@ def freeze_base_polish(state: TopLevelState) -> StateUpdate:
                     f"-m {parameters.match} -x {parameters.mismatch} "
                     f"-g {parameters.gap} "
                     "reads.fasta before.paf source.fasta > candidate.fasta",
-                    "minimap2 -x map-hifi -c --eqx --secondary=no "
+                    f"minimap2 -x {minimap_preset} -c --eqx --secondary=no "
                     f"-t {parameters.threads} candidate.fasta reads.fasta > after.paf",
                     "",
                 ]
@@ -362,6 +388,16 @@ def collect_base_polish(state: TopLevelState) -> StateUpdate:
         record = json.loads(record_path.read_text())
         if ArtifactRef.model_validate(record["source_candidate_ref"]) != candidate.ref:
             raise ValueError("Base Polish frozen source candidate mismatch")
+        record_route = record.get("route")
+        if record_route == "ont_single_round_racon":
+            bound_platform = "ont"
+        elif record_route == "hifi_single_round_racon":
+            bound_platform = "pacbio_hifi"
+        else:
+            raise ValueError("Base Polish frozen route is unsupported")
+        if record.get("read_platform") not in {None, bound_platform}:
+            raise ValueError("Base Polish frozen read platform differs from route")
+        bound_preset = "map-ont" if bound_platform == "ont" else "map-hifi"
         paths = SessionPaths.from_run_dir(state["data_dir"])
         available = []
         for path in attempt.expected_outputs:
@@ -428,7 +464,7 @@ def collect_base_polish(state: TopLevelState) -> StateUpdate:
                     item.ref.model_dump(mode="json") for item in products
                 ],
                 "versions": dict(zip(("minimap2", "racon"), versions, strict=True)),
-                "alignment_settings": "-x map-hifi -c --eqx --secondary=no",
+                "alignment_settings": (f"-x {bound_preset} -c --eqx --secondary=no"),
             }
         )
         report_path = attempt.working_dir / "comparison.json"
